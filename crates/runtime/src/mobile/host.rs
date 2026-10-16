@@ -261,6 +261,9 @@ use crate::mobile::{
 /// runtime); F3-05 adds the async `submit` that drives the orchestrator and
 /// resolves the permission gate.
 pub struct MobileRuntime {
+    /// Per-host owner for V2 installed-plugin archive materializations.
+    /// Plugin discovery and the manager retain clones of this same session.
+    pub(crate) plugin_archive_session: Arc<plugin::PluginArchiveSession>,
     /// Ready services used to create RAM-only lightweight conversations.
     pub side_chat_factory: Arc<dyn crate::side_chat::SideChatFactory>,
     /// Product region captured with the running model client.

@@ -18,6 +18,14 @@ use sha2::{Digest, Sha256};
 const MAX_FILES: usize = 10_000;
 /// Hard cap on total uncompressed bytes — zip-bomb guard.
 const MAX_TOTAL_BYTES: u64 = 1 << 30; // 1 GiB
+/// Native 2.1.295 V2 plugin-cache ZIP decoder limits (`mVe`/`ut` in
+/// `chunk-x9cpkaxf.js`). Keep these separate from the MCPB/network policy
+/// above: V2 local cache archives admit a larger entry count but also enforce
+/// per-file and aggregate compression-ratio limits.
+const NATIVE_PLUGIN_CACHE_MAX_FILES: usize = 100_000;
+const NATIVE_PLUGIN_CACHE_MAX_FILE_BYTES: u64 = 512 << 20; // 512 MiB
+const NATIVE_PLUGIN_CACHE_MAX_TOTAL_BYTES: u64 = 1 << 30; // 1 GiB
+const NATIVE_PLUGIN_CACHE_MAX_RATIO: u64 = 50;
 
 /// Group-write + other-write (`0o022`). claude-code's post-extraction sweep
 /// tests `mode & 18` and, when set, re-chmods to `mode & 0o755` — oracle
@@ -111,6 +119,26 @@ pub fn unpack_mcpb(bytes: &[u8], dest: &Path) -> Result<(), String> {
     unpack_mcpb_limited(bytes, dest, MAX_FILES, MAX_TOTAL_BYTES)
 }
 
+/// Extract a Native 2.1.295 V2 plugin-cache ZIP. This intentionally has a
+/// separate policy from `.mcpb`/network archives: the native cache decoder
+/// allows up to 100,000 entries, caps one entry at 512 MiB and the archive at
+/// 1 GiB expanded, and rejects a total-expanded/archive-size ratio over 50:1.
+/// The common guarded writer still enforces path containment and counts actual
+/// decompressed bytes, so malformed size claims cannot escape the destination.
+pub fn unpack_plugin_cache_zip(bytes: &[u8], dest: &Path) -> Result<(), String> {
+    unpack_zip_with_limits(
+        bytes,
+        dest,
+        ZipLimits {
+            max_files: NATIVE_PLUGIN_CACHE_MAX_FILES,
+            max_file_bytes: NATIVE_PLUGIN_CACHE_MAX_FILE_BYTES,
+            max_total_bytes: NATIVE_PLUGIN_CACHE_MAX_TOTAL_BYTES,
+            max_ratio: Some(NATIVE_PLUGIN_CACHE_MAX_RATIO),
+            native_methods_only: true,
+        },
+    )
+}
+
 /// [`unpack_mcpb`] with explicit limits (so tests can exercise the guards
 /// without building a multi-gigabyte archive).
 fn unpack_mcpb_limited(
@@ -119,24 +147,310 @@ fn unpack_mcpb_limited(
     max_files: usize,
     max_total: u64,
 ) -> Result<(), String> {
+    unpack_zip_with_limits(
+        bytes,
+        dest,
+        ZipLimits {
+            max_files,
+            max_file_bytes: u64::MAX,
+            max_total_bytes: max_total,
+            max_ratio: None,
+            native_methods_only: false,
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+struct ZipLimits {
+    max_files: usize,
+    max_file_bytes: u64,
+    max_total_bytes: u64,
+    max_ratio: Option<u64>,
+    native_methods_only: bool,
+}
+
+#[derive(Debug)]
+struct NativeZipEntryMetadata {
+    /// Ht's path name: UTF-8 flag means non-fatal UTF-8 with TextDecoder's
+    /// leading-BOM suppression; otherwise each byte becomes one Latin-1 code
+    /// point (`Ot`), not CP437.
+    path_name: String,
+    /// x4t indexes its mode object using Node Buffer.toString("utf8") on the
+    /// raw central-directory name, independently of Ht's filename decoding.
+    mode_key: String,
+    unix_mode: Option<u32>,
+}
+
+fn decode_native_zip_path_name(raw_name: &[u8], flags: u16) -> String {
+    if flags & (1 << 11) != 0 {
+        let decoded = String::from_utf8_lossy(raw_name);
+        decoded
+            .strip_prefix('\u{feff}')
+            .unwrap_or(decoded.as_ref())
+            .to_owned()
+    } else {
+        raw_name.iter().map(|byte| char::from(*byte)).collect()
+    }
+}
+
+/// Read the raw central-directory names, flags, and Unix creator/mode fields
+/// used by Native's Ht/x4t pair. `ZipFile::name()` cannot provide these exact
+/// semantics: it decodes unflagged names as CP437 and may apply Unicode path
+/// extra fields, whereas Ht uses the raw bytes and UTF-8 flag only.
+fn read_native_zip_entry_metadata(
+    bytes: &[u8],
+    expected_entries: usize,
+) -> Result<Vec<NativeZipEntryMetadata>, String> {
+    const EOCD: u32 = 0x0605_4b50;
+    const ZIP64_LOCATOR: u32 = 0x0706_4b50;
+    const ZIP64_EOCD: u32 = 0x0606_4b50;
+    const CENTRAL_HEADER: u32 = 0x0201_4b50;
+
+    fn u16_at(bytes: &[u8], offset: usize) -> Option<u16> {
+        Some(u16::from_le_bytes(
+            bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?,
+        ))
+    }
+    fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
+        Some(u32::from_le_bytes(
+            bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
+        ))
+    }
+
+    let mut end = bytes
+        .len()
+        .checked_sub(22)
+        .ok_or_else(|| "Invalid ZIP end-of-central-directory".to_string())?;
+    let min_end = bytes.len().saturating_sub(22 + 65_535);
+    loop {
+        if u32_at(bytes, end) == Some(EOCD) {
+            break;
+        }
+        if end <= min_end {
+            return Err("Invalid ZIP end-of-central-directory".to_string());
+        }
+        end -= 1;
+    }
+
+    // Native uses the entries-on-this-disk count and central offset, then
+    // follows the adjacent ZIP64 locator for sentinel values.
+    let mut count =
+        usize::from(u16_at(bytes, end + 8).ok_or_else(|| "Invalid ZIP entry count".to_string())?);
+    let mut central = usize::try_from(
+        u32_at(bytes, end + 16)
+            .ok_or_else(|| "Invalid ZIP central-directory offset".to_string())?,
+    )
+    .map_err(|_| "ZIP central-directory offset is not representable".to_string())?;
+    if count == usize::from(u16::MAX) || central == u32::MAX as usize {
+        let locator = end
+            .checked_sub(20)
+            .ok_or_else(|| "Invalid ZIP64 locator".to_string())?;
+        if u32_at(bytes, locator) != Some(ZIP64_LOCATOR) {
+            return Err("Invalid ZIP64 locator".to_string());
+        }
+        let zip64_end = usize::try_from(
+            u32_at(bytes, locator + 8).ok_or_else(|| "Invalid ZIP64 end record".to_string())?,
+        )
+        .map_err(|_| "ZIP64 end record offset is not representable".to_string())?;
+        let zip64_record_is_valid = zip64_end
+            .checked_add(56)
+            .is_some_and(|limit| limit <= bytes.len())
+            && u32_at(bytes, zip64_end) == Some(ZIP64_EOCD);
+        if !zip64_record_is_valid {
+            return Err("Invalid ZIP64 end record".to_string());
+        }
+        count = usize::try_from(
+            u32_at(bytes, zip64_end + 32).ok_or_else(|| "Invalid ZIP64 entry count".to_string())?,
+        )
+        .map_err(|_| "ZIP64 entry count is not representable".to_string())?;
+        central = usize::try_from(
+            u32_at(bytes, zip64_end + 48)
+                .ok_or_else(|| "Invalid ZIP64 central-directory offset".to_string())?,
+        )
+        .map_err(|_| "ZIP64 central-directory offset is not representable".to_string())?;
+    }
+    if count != expected_entries {
+        return Err("ZIP entry-count metadata mismatch".to_string());
+    }
+
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        if u32_at(bytes, central) != Some(CENTRAL_HEADER) {
+            return Err("Invalid ZIP central-directory entry".to_string());
+        }
+        let made_by =
+            u16_at(bytes, central + 4).ok_or_else(|| "Invalid ZIP creator field".to_string())?;
+        let flags = u16_at(bytes, central + 8).ok_or_else(|| "Invalid ZIP flags".to_string())?;
+        let name_len = usize::from(
+            u16_at(bytes, central + 28).ok_or_else(|| "Invalid ZIP filename length".to_string())?,
+        );
+        let extra_len = usize::from(
+            u16_at(bytes, central + 30).ok_or_else(|| "Invalid ZIP extra length".to_string())?,
+        );
+        let comment_len = usize::from(
+            u16_at(bytes, central + 32).ok_or_else(|| "Invalid ZIP comment length".to_string())?,
+        );
+        let external_attributes = u32_at(bytes, central + 38)
+            .ok_or_else(|| "Invalid ZIP external attributes".to_string())?;
+        let mode = if made_by >> 8 == 3 {
+            let mode = external_attributes >> 16;
+            (mode != 0).then_some(mode)
+        } else {
+            None
+        };
+        let name_start = central
+            .checked_add(46)
+            .ok_or_else(|| "ZIP filename offset overflow".to_string())?;
+        let name_end = name_start
+            .checked_add(name_len)
+            .ok_or_else(|| "ZIP filename offset overflow".to_string())?;
+        let raw_name = bytes
+            .get(name_start..name_end)
+            .ok_or_else(|| "Invalid ZIP filename bytes".to_string())?;
+        entries.push(NativeZipEntryMetadata {
+            path_name: decode_native_zip_path_name(raw_name, flags),
+            mode_key: String::from_utf8_lossy(raw_name).into_owned(),
+            unix_mode: mode,
+        });
+        central = central
+            .checked_add(46)
+            .and_then(|offset| offset.checked_add(name_len))
+            .and_then(|offset| offset.checked_add(extra_len))
+            .and_then(|offset| offset.checked_add(comment_len))
+            .ok_or_else(|| "ZIP central-directory offset overflow".to_string())?;
+    }
+    Ok(entries)
+}
+
+fn native_enclosed_name(name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('\0') || native_has_parent_like_segment(name) {
+        return None;
+    }
+    let path = Path::new(name);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir | Component::RootDir))
+    {
+        return None;
+    }
+    Some(path.to_path_buf())
+}
+
+fn native_has_parent_like_segment(name: &str) -> bool {
+    name.split(|ch| ch == '/' || ch == '\\').any(|segment| {
+        segment == ".."
+            || segment
+                .strip_prefix(".. ")
+                .is_some_and(|suffix| suffix.chars().all(|ch| ch == ' ' || ch == '.'))
+    })
+}
+
+#[cfg(unix)]
+fn apply_native_unix_mode(path: &Path, mode: Option<u32>) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(mode) = mode.filter(|mode| mode & 0o111 != 0) {
+        // Native's iH catches chmod failures and masks to 0o755. The archive
+        // entry has already been written as a regular file, so this never
+        // follows an archive-declared symlink.
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o755));
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_native_unix_mode(_path: &Path, _mode: Option<u32>) {}
+
+fn unpack_zip_with_limits(bytes: &[u8], dest: &Path, limits: ZipLimits) -> Result<(), String> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))
         .map_err(|e| format!("Failed to extract MCPB {}: {e}", dest.display()))?;
-    if zip.len() > max_files {
+    if zip.len() > limits.max_files {
         // Binary: `Archive contains too many files: ${fileCount} (max: ${MAX_FILE_COUNT})`.
         return Err(format!(
-            "Archive contains too many files: {} (max: {max_files})",
-            zip.len()
+            "Archive contains too many files: {} (max: {})",
+            zip.len(),
+            limits.max_files
         ));
     }
-    let mut total: u64 = 0;
+    let native_entries = if limits.native_methods_only {
+        Some(read_native_zip_entry_metadata(bytes, zip.len())?)
+    } else {
+        None
+    };
+    let native_modes_by_name = native_entries.as_ref().map(|entries| {
+        let mut modes = HashMap::new();
+        for entry in entries {
+            if let Some(mode) = entry.unix_mode {
+                // x4t assigns into an object by the Buffer-decoded name, so a
+                // later duplicate key replaces the earlier mode.
+                modes.insert(entry.mode_key.clone(), mode);
+            }
+        }
+        modes
+    });
+    let compressed_bytes = u64::try_from(bytes.len())
+        .map_err(|_| "ZIP archive length is not representable".to_string())?;
+    let mut total_claimed: u64 = 0;
+    let mut total_actual: u64 = 0;
     for i in 0..zip.len() {
         let mut entry = zip
             .by_index(i)
             .map_err(|e| format!("Failed to extract MCPB {}: {e}", dest.display()))?;
+        let native_metadata = native_entries.as_ref().and_then(|entries| entries.get(i));
+        let entry_name = native_metadata
+            .map(|metadata| metadata.path_name.clone())
+            .unwrap_or_else(|| entry.name().to_owned());
+        // Native x4t builds a name-keyed object from raw bytes decoded as
+        // UTF-8, then Ft looks up the Ht-decoded path name in that object.
+        // Do not substitute central-entry index matching here.
+        let native_unix_mode = native_modes_by_name
+            .as_ref()
+            .and_then(|modes| modes.get(&entry_name))
+            .copied();
+        let claimed_size = entry.size();
+        if limits.native_methods_only && claimed_size > limits.max_file_bytes {
+            return Err(format!(
+                "ZIP entry is too large: {} bytes (max: {})",
+                claimed_size, limits.max_file_bytes
+            ));
+        }
+        if limits.native_methods_only {
+            total_claimed = total_claimed
+                .checked_add(claimed_size)
+                .ok_or_else(|| "ZIP total uncompressed size overflow".to_string())?;
+            if total_claimed > limits.max_total_bytes {
+                return Err(format!(
+                    "Archive total size is too large: {} bytes (max: {})",
+                    total_claimed, limits.max_total_bytes
+                ));
+            }
+            if let Some(max_ratio) = limits.max_ratio {
+                let max_expanded = compressed_bytes
+                    .checked_mul(max_ratio)
+                    .ok_or_else(|| "ZIP compression-ratio limit overflow".to_string())?;
+                if total_claimed > max_expanded {
+                    return Err(format!(
+                        "Suspicious compression ratio detected (max: {max_ratio}:1)"
+                    ));
+                }
+            }
+        }
+        if limits.native_methods_only
+            && !matches!(
+                entry.compression(),
+                zip::CompressionMethod::Stored | zip::CompressionMethod::Deflated
+            )
+        {
+            return Err(format!(
+                "Unsupported compression method {:?}",
+                entry.compression()
+            ));
+        }
         // `enclosed_name` returns None for absolute paths / `..` traversal; the
         // explicit component + containment checks below are belt-and-suspenders.
-        let rel = entry
-            .enclosed_name()
+        let rel = native_metadata
+            .map(|_| native_enclosed_name(&entry_name))
+            .unwrap_or_else(|| entry.enclosed_name())
             .filter(|p| {
                 !p.components().any(|c| {
                     matches!(
@@ -145,44 +459,76 @@ fn unpack_mcpb_limited(
                     )
                 })
             })
-            .ok_or_else(|| format!("Path traversal attempt detected: {}", entry.name()))?;
+            .ok_or_else(|| format!("Path traversal attempt detected: {entry_name}"))?;
         let out = dest.join(&rel);
         if !out.starts_with(dest) {
-            return Err(format!("Path traversal attempt detected: {}", entry.name()));
+            return Err(format!("Path traversal attempt detected: {entry_name}"));
         }
-        if entry.is_dir() {
+        // Native's V2 ZIP decoder treats a name as a directory only when it
+        // ends in `/` (`iH`); zip-rs also treats a trailing `\\` as a
+        // directory. Keep that broader behavior for MCPB, but do not use it
+        // for the Native cache format.
+        let is_directory = if limits.native_methods_only {
+            entry_name.ends_with('/')
+        } else {
+            entry.is_dir()
+        };
+        if is_directory {
             std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-            drop_group_other_write(&out).map_err(|e| e.to_string())?;
+            if !limits.native_methods_only {
+                drop_group_other_write(&out).map_err(|e| e.to_string())?;
+            }
         } else {
             if let Some(parent) = out.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
-            // Zip-bomb guard on the ACTUAL decompressed bytes: `entry.size()` is
-            // the attacker-controlled central-directory claim and can lie (a 10-
-            // byte claim can deflate-expand to gigabytes), so DO NOT trust it.
-            // Read through a `take()` bounded at the remaining byte budget so
-            // decompression aborts mid-stream instead of materializing the whole
-            // payload, and count the real bytes produced.
-            let remaining = max_total.saturating_sub(total);
-            // Pre-allocate at most the smaller of the claim and the budget so a
-            // lying large claim cannot force a huge up-front allocation either.
-            let cap = usize::try_from(entry.size().min(remaining)).unwrap_or(0);
-            let mut buf = Vec::with_capacity(cap);
-            // `remaining + 1` so a payload exactly at the cap reads one extra
-            // byte and trips the check below (never silently truncates).
+            // Bound against both the remaining archive budget and this entry's
+            // declared size; then verify the actual output did not exceed its
+            // claim. Native's inflater similarly uses declared size as its
+            // maxOutputLength while the cache decoder enforces aggregate caps.
+            let remaining = limits.max_total_bytes.saturating_sub(total_actual);
+            let read_cap = if limits.native_methods_only {
+                remaining.min(claimed_size)
+            } else {
+                remaining
+            };
+            let cap = usize::try_from(read_cap).unwrap_or(usize::MAX);
+            let mut buf = Vec::with_capacity(cap.min(1 << 20));
             entry
                 .by_ref()
-                .take(remaining + 1)
+                .take(read_cap.saturating_add(1))
                 .read_to_end(&mut buf)
                 .map_err(|e| e.to_string())?;
-            if buf.len() as u64 > remaining {
+            if buf.len() as u64 > read_cap
+                || limits.native_methods_only && buf.len() as u64 > claimed_size
+            {
+                return Err(if limits.native_methods_only {
+                    format!(
+                        "ZIP entry expanded beyond its declared or allowed size: {}",
+                        entry_name
+                    )
+                } else {
+                    format!(
+                        "Archive total size is too large: more than {} bytes. This may be a zip bomb.",
+                        limits.max_total_bytes
+                    )
+                });
+            }
+            total_actual = total_actual
+                .checked_add(buf.len() as u64)
+                .ok_or_else(|| "ZIP actual expanded size overflow".to_string())?;
+            if total_actual > limits.max_total_bytes {
                 return Err(format!(
-                    "Archive total size is too large: more than {max_total} bytes. This may be a zip bomb."
+                    "Archive total size is too large: more than {} bytes",
+                    limits.max_total_bytes
                 ));
             }
-            total += buf.len() as u64;
             std::fs::write(&out, &buf).map_err(|e| e.to_string())?;
-            drop_group_other_write(&out).map_err(|e| e.to_string())?;
+            if limits.native_methods_only {
+                apply_native_unix_mode(&out, native_unix_mode);
+            } else {
+                drop_group_other_write(&out).map_err(|e| e.to_string())?;
+            }
         }
     }
     Ok(())
@@ -628,6 +974,84 @@ mod tests {
         buf
     }
 
+    fn set_central_unix_mode(zip: &mut [u8], name: &str, mode: u32) {
+        let mut central = zip
+            .windows(4)
+            .position(|bytes| bytes == b"PK\x01\x02")
+            .expect("central-directory file header");
+        loop {
+            assert_eq!(&zip[central..central + 4], b"PK\x01\x02");
+            let name_len = usize::from(u16::from_le_bytes([zip[central + 28], zip[central + 29]]));
+            let extra_len = usize::from(u16::from_le_bytes([zip[central + 30], zip[central + 31]]));
+            let comment_len =
+                usize::from(u16::from_le_bytes([zip[central + 32], zip[central + 33]]));
+            let name_start = central + 46;
+            let name_end = name_start + name_len;
+            if zip.get(name_start..name_end) == Some(name.as_bytes()) {
+                let made_by_unix = ((3_u16) << 8) | 20;
+                zip[central + 4..central + 6].copy_from_slice(&made_by_unix.to_le_bytes());
+                zip[central + 38..central + 42].copy_from_slice(&(mode << 16).to_le_bytes());
+                return;
+            }
+            central = central + 46 + name_len + extra_len + comment_len;
+            assert!(central + 4 <= zip.len(), "central entry `{name}` exists");
+        }
+    }
+
+    fn replace_zip_name_and_utf8_flag(
+        zip: &mut [u8],
+        old_name: &[u8],
+        new_name: &[u8],
+        utf8_flag: bool,
+    ) {
+        assert_eq!(old_name.len(), new_name.len());
+        let mut central = zip
+            .windows(4)
+            .position(|bytes| bytes == b"PK\x01\x02")
+            .expect("central-directory file header");
+        loop {
+            assert_eq!(&zip[central..central + 4], b"PK\x01\x02");
+            let flags = u16::from_le_bytes([zip[central + 8], zip[central + 9]]);
+            let name_len = usize::from(u16::from_le_bytes([zip[central + 28], zip[central + 29]]));
+            let extra_len = usize::from(u16::from_le_bytes([zip[central + 30], zip[central + 31]]));
+            let comment_len =
+                usize::from(u16::from_le_bytes([zip[central + 32], zip[central + 33]]));
+            let name_start = central + 46;
+            let name_end = name_start + name_len;
+            if zip.get(name_start..name_end) == Some(old_name) {
+                assert_eq!(name_len, new_name.len());
+                let flags = if utf8_flag {
+                    flags | (1 << 11)
+                } else {
+                    flags & !(1 << 11)
+                };
+                zip[central + 8..central + 10].copy_from_slice(&flags.to_le_bytes());
+                zip[name_start..name_end].copy_from_slice(new_name);
+
+                let local = usize::try_from(u32::from_le_bytes(
+                    zip[central + 42..central + 46].try_into().unwrap(),
+                ))
+                .unwrap();
+                assert_eq!(&zip[local..local + 4], b"PK\x03\x04");
+                let local_flags = u16::from_le_bytes([zip[local + 6], zip[local + 7]]);
+                let local_flags = if utf8_flag {
+                    local_flags | (1 << 11)
+                } else {
+                    local_flags & !(1 << 11)
+                };
+                zip[local + 6..local + 8].copy_from_slice(&local_flags.to_le_bytes());
+                let local_name_len =
+                    usize::from(u16::from_le_bytes([zip[local + 26], zip[local + 27]]));
+                assert_eq!(local_name_len, new_name.len());
+                let local_name_start = local + 30;
+                zip[local_name_start..local_name_start + local_name_len].copy_from_slice(new_name);
+                return;
+            }
+            central = central + 46 + name_len + extra_len + comment_len;
+            assert!(central + 4 <= zip.len(), "central entry exists");
+        }
+    }
+
     /// 2.1.269 — "plugin archives extracted for a session being readable by
     /// other local users". A permissive umask alone is enough to produce a
     /// group/other-writable plugin tree here, because `fs::write` uses
@@ -808,6 +1232,188 @@ mod tests {
             err.contains("Archive contains too many files"),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn native_cache_ratio_limit_is_separate_from_mcpb_limits() {
+        use std::io::Write;
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            writer
+                .start_file::<_, ()>(
+                    "payload.bin",
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Deflated),
+                )
+                .unwrap();
+            writer.write_all(&vec![0; 32 * 1024]).unwrap();
+            writer.finish().unwrap();
+        }
+        assert!(
+            32 * 1024 > buf.len() * NATIVE_PLUGIN_CACHE_MAX_RATIO as usize,
+            "fixture must exceed the native 50:1 aggregate ratio"
+        );
+
+        let cache_dest = tempfile::tempdir().unwrap();
+        let err = unpack_plugin_cache_zip(&buf, cache_dest.path()).unwrap_err();
+        assert!(err.contains("compression ratio"), "got: {err}");
+
+        // MCPB's own format policy remains the existing 10k/1 GiB guard; it
+        // does not inherit V2's cache-only ratio rule.
+        let mcpb_dest = tempfile::tempdir().unwrap();
+        unpack_mcpb(&buf, mcpb_dest.path()).unwrap();
+        assert_eq!(
+            std::fs::metadata(mcpb_dest.path().join("payload.bin"))
+                .unwrap()
+                .len(),
+            32 * 1024
+        );
+    }
+
+    #[test]
+    fn native_cache_policy_enforces_individual_entry_cap_before_extracting() {
+        let buf = zip_with(&[("payload.bin", b"0123456789abcdef")]);
+        let dest = tempfile::tempdir().unwrap();
+        let err = unpack_zip_with_limits(
+            &buf,
+            dest.path(),
+            ZipLimits {
+                max_files: 100_000,
+                max_file_bytes: 8,
+                max_total_bytes: 1024,
+                max_ratio: Some(50),
+                native_methods_only: true,
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("entry is too large"), "got: {err}");
+        assert!(!dest.path().join("payload.bin").exists());
+    }
+
+    #[test]
+    fn native_cache_decodes_unflagged_filename_as_latin1() {
+        let mut archive = zip_with(&[("cafe.txt", b"latin1 name")]);
+        replace_zip_name_and_utf8_flag(&mut archive, b"cafe.txt", b"caf\xe9.txt", false);
+
+        let dest = tempfile::tempdir().unwrap();
+        unpack_plugin_cache_zip(&archive, dest.path()).unwrap();
+        let native_name = dest.path().join("caf\u{e9}.txt");
+        assert_eq!(std::fs::read(&native_name).unwrap(), b"latin1 name");
+        assert!(!dest.path().join("caf\u{0398}.txt").exists());
+    }
+
+    #[test]
+    fn native_cache_rejects_parent_segments_using_both_separators_and_dot_space_guard() {
+        for name in ["a/../b.txt", r"a\..\b.txt", "a/.. /b.txt", r"a\.. .\b.txt"] {
+            let archive = zip_with(&[(name, b"must not be written")]);
+            let dest = tempfile::tempdir().unwrap();
+            let error = unpack_plugin_cache_zip(&archive, dest.path()).unwrap_err();
+            assert!(error.contains("Path traversal"), "name={name:?}: {error}");
+            assert!(std::fs::read_dir(dest.path()).unwrap().next().is_none());
+        }
+        assert!(native_enclosed_name(r"safe\relative.txt").is_some());
+        assert!(native_enclosed_name(".../relative.txt").is_some());
+    }
+
+    #[test]
+    fn native_cache_utf8_flag_uses_nonfatal_decode_and_suppresses_leading_bom() {
+        let mut archive = zip_with(&[("\u{feff}bom.txt", b"bom"), ("badx.txt", b"invalid")]);
+        replace_zip_name_and_utf8_flag(&mut archive, b"badx.txt", b"bad\xff.txt", true);
+
+        let dest = tempfile::tempdir().unwrap();
+        unpack_plugin_cache_zip(&archive, dest.path()).unwrap();
+        assert_eq!(std::fs::read(dest.path().join("bom.txt")).unwrap(), b"bom");
+        assert!(!dest.path().join("\u{feff}bom.txt").exists());
+        assert_eq!(
+            std::fs::read(dest.path().join("bad\u{fffd}.txt")).unwrap(),
+            b"invalid"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_cache_unflagged_latin1_name_does_not_match_utf8_mode_map_key() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut archive = zip_with(&[("rawxx.bin", b"mode lookup")]);
+        set_central_unix_mode(&mut archive, "rawxx.bin", 0o100755);
+        replace_zip_name_and_utf8_flag(&mut archive, b"rawxx.bin", b"raw\xc3\xa9.bin", false);
+
+        let metadata = read_native_zip_entry_metadata(&archive, 1).unwrap();
+        assert_eq!(metadata[0].path_name, "raw\u{c3}\u{a9}.bin");
+        assert_eq!(metadata[0].mode_key, "raw\u{e9}.bin");
+
+        let dest = tempfile::tempdir().unwrap();
+        unpack_plugin_cache_zip(&archive, dest.path()).unwrap();
+        let extracted = dest.path().join("raw\u{c3}\u{a9}.bin");
+        assert_eq!(std::fs::read(&extracted).unwrap(), b"mode lookup");
+        let mode = std::fs::metadata(extracted).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode & 0o111,
+            0,
+            "x4t's UTF-8 key does not match Ht's Latin-1 path name"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_cache_uses_forward_slash_directories_and_materializes_symlink_records_as_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let backslash_name = zip_with(&[("payload\\", b"regular bytes")]);
+        let backslash_dest = tempfile::tempdir().unwrap();
+        unpack_plugin_cache_zip(&backslash_name, backslash_dest.path()).unwrap();
+        let backslash_file = backslash_dest.path().join("payload\\");
+        assert!(backslash_file.is_file());
+        assert_eq!(std::fs::read(&backslash_file).unwrap(), b"regular bytes");
+
+        let mut unix_modes = zip_with(&[
+            ("executable", b"exec bytes"),
+            ("non-executable", b"plain bytes"),
+            ("linked-payload", b"still regular bytes"),
+        ]);
+        set_central_unix_mode(&mut unix_modes, "executable", 0o100755);
+        set_central_unix_mode(&mut unix_modes, "non-executable", 0o100640);
+        set_central_unix_mode(&mut unix_modes, "linked-payload", 0o120777);
+
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&unix_modes)).unwrap();
+        assert!(archive.by_index(2).unwrap().is_symlink());
+        drop(archive);
+
+        let modes_dest = tempfile::tempdir().unwrap();
+        let default_file = modes_dest.path().join("default-mode-probe");
+        std::fs::write(&default_file, b"baseline").unwrap();
+        let default_mode = {
+            std::fs::metadata(default_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777
+        };
+        unpack_plugin_cache_zip(&unix_modes, modes_dest.path()).unwrap();
+        let executable_mode = std::fs::metadata(modes_dest.path().join("executable"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(executable_mode, 0o755);
+        let non_executable_mode = std::fs::metadata(modes_dest.path().join("non-executable"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(non_executable_mode, default_mode);
+
+        let output = modes_dest.path().join("linked-payload");
+        assert!(std::fs::symlink_metadata(&output)
+            .unwrap()
+            .file_type()
+            .is_file());
+        assert_eq!(std::fs::read(&output).unwrap(), b"still regular bytes");
+        let symlink_mode = std::fs::metadata(&output).unwrap().permissions().mode() & 0o777;
+        assert_eq!(symlink_mode, 0o755);
     }
 
     fn manifest_from(json: serde_json::Value) -> McpbManifest {

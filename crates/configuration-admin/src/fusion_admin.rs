@@ -501,6 +501,7 @@ mod tests {
 
     fn context(root: &std::path::Path) -> SettingsContext {
         SettingsContext {
+            plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
             fusion_layers: None,
             paths: SettingsPaths {
                 lingxi_home: root.join("home"),

@@ -3,7 +3,7 @@
 //! plugin, 1:1 with claude-code 2.1.201 (probed against the real binary in an
 //! isolated `$CLAUDE_CONFIG_DIR`).
 //!
-//! A v2 `installed_plugins.json` record carries an `autoInstalled: true` marker
+//! A v2 `installed_plugins.json` record carries an `auto: true` marker
 //! ("True when pulled in as a dependency. Eligible for orphan sweep."). Prune
 //! computes, at the chosen scope, the set of `auto`-installed plugins that are
 //! NOT reachable — via the `manifest.dependencies` graph — from any
@@ -30,7 +30,6 @@
 //! An unknown `--scope` yields the install-family wording
 //! `Invalid scope: <s>. Must be one of: user, project, local.`
 //!
-//! Legacy `auto` and snake-case `auto_installed` markers remain readable.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, IsTerminal, Write};
@@ -188,9 +187,7 @@ fn scan(db: &Value, scope: WritableScope, project_path: &Option<String>) -> Scan
             Some(r) => r,
             None => continue,
         };
-        let auto_installed = ["autoInstalled", "auto_installed", "auto"]
-            .iter()
-            .any(|key| rec.get(*key).and_then(Value::as_bool) == Some(true));
+        let auto_installed = rec.get("auto").and_then(Value::as_bool) == Some(true);
         if auto_installed {
             auto.push(id.clone());
         } else {
@@ -711,22 +708,22 @@ mod tests {
         path.display().to_string()
     }
 
-    /// Write a v2 installed DB from `(id, version, installPath, auto)` records
-    /// (all at `user` scope).
+    /// Write a current V2 installed DB from `(id, version, installPath, auto)`
+    /// records (all at `user` scope).
     fn write_db(e: &Env, records: &[(&str, &str, &str, bool)]) {
         let mut plugins = serde_json::Map::new();
         for (id, version, install_path, auto) in records {
-            plugins.insert(
-                (*id).to_string(),
-                serde_json::json!([{
-                    "scope": "user",
-                    "installPath": install_path,
-                    "version": version,
-                    "installedAt": "2026-01-01T00:00:00.000Z",
-                    "lastUpdated": "2026-01-01T00:00:00.000Z",
-                    "auto": auto,
-                }]),
-            );
+            let mut record = serde_json::json!({
+                "scope": "user",
+                "installPath": install_path,
+                "version": version,
+                "installedAt": "2026-01-01T00:00:00.000Z",
+                "lastUpdated": "2026-01-01T00:00:00.000Z",
+            });
+            if *auto {
+                record["auto"] = Value::Bool(true);
+            }
+            plugins.insert((*id).to_string(), serde_json::json!([record]));
         }
         std::fs::write(
             installed_path(&e.plugins),
@@ -740,12 +737,10 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(installed_path(&e.plugins)).unwrap()).unwrap()
     }
 
-    fn write_legacy_only_db(e: &Env, doc: &Value) {
-        std::fs::write(
-            e.plugins.join("installed_plugins_v2.json"),
-            serde_json::to_string(doc).unwrap(),
-        )
-        .unwrap();
+    fn write_current_db_snapshot(e: &Env, doc: &Value) -> Vec<u8> {
+        let bytes = serde_json::to_vec(doc).unwrap();
+        std::fs::write(installed_path(&e.plugins), &bytes).unwrap();
+        bytes
     }
 
     fn never() -> bool {
@@ -863,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_dependency_and_auto_installed_marker_are_supported() {
+    fn typed_dependency_and_current_auto_marker_are_supported() {
         let e = env();
         let app_path = e.plugins.join("cache").join("app");
         std::fs::create_dir_all(app_path.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
@@ -879,7 +874,7 @@ mod tests {
             installed_path(&e.plugins),
             serde_json::to_vec(&serde_json::json!({"version":2,"plugins":{
                 "app@mkt":[{"scope":"user","installPath":app_path}],
-                "dep@mkt":[{"scope":"user","installPath":dep,"autoInstalled":true}]
+                "dep@mkt":[{"scope":"user","installPath":dep,"auto":true}]
             }}))
             .unwrap(),
         )
@@ -890,6 +885,33 @@ mod tests {
         )
         .unwrap();
         assert!(msg.contains("all still needed"), "{msg}");
+    }
+
+    #[test]
+    fn obsolete_auto_marker_aliases_do_not_classify_current_records() {
+        for obsolete_marker in ["autoInstalled", "auto_installed"] {
+            let mut record = serde_json::json!({
+                "scope": "user",
+                "installPath": "unused-before-auto-classification",
+                "version": "1.0.0",
+                "installedAt": "2026-01-01T00:00:00.000Z",
+                "lastUpdated": "2026-01-01T00:00:00.000Z"
+            });
+            record[obsolete_marker] = Value::Bool(true);
+            let registry = serde_json::json!({
+                "version": 2,
+                "plugins": { "dep@mkt": [record] }
+            });
+
+            let result = scan(&registry, WritableScope::User, &None);
+
+            assert_eq!(
+                result.auto_count, 0,
+                "{obsolete_marker} is not the V2 marker"
+            );
+            assert!(result.orphans.is_empty());
+            assert!(result.unloadable.is_empty());
+        }
     }
 
     #[test]
@@ -1052,10 +1074,10 @@ mod tests {
     }
 
     #[test]
-    fn prune_failure_restores_legacy_only_registry() {
+    fn prune_failure_restores_current_registry_bytes() {
         let e = env();
         let dep = materialize(&e, "dep@mkt", "1.0.0", &[]);
-        let legacy = serde_json::json!({
+        let current = serde_json::json!({
             "version": 2,
             "plugins": {
                 "dep@mkt": [{
@@ -1068,7 +1090,10 @@ mod tests {
                 }]
             }
         });
-        write_legacy_only_db(&e, &legacy);
+        let before = write_current_db_snapshot(&e, &current);
+        let data_dir = e.plugins.join("data").join("dep-mkt");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("sentinel"), "keep").unwrap();
         std::fs::create_dir_all(e.home.join("settings.json")).unwrap();
 
         let err = run_prune_inner(
@@ -1077,14 +1102,14 @@ mod tests {
         .unwrap_err();
 
         assert!(!err.is_empty());
-        assert!(!installed_path(&e.plugins).exists());
         assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(e.plugins.join("installed_plugins_v2.json")).unwrap()
-            )
-            .unwrap(),
-            legacy
+            std::fs::read(installed_path(&e.plugins)).unwrap(),
+            before,
+            "failed prune must restore the exact current registry bytes"
         );
+        assert!(db_json(&e)["plugins"].get("dep@mkt").is_some());
+        assert!(Path::new(&dep).exists());
+        assert_eq!(std::fs::read(data_dir.join("sentinel")).unwrap(), b"keep");
     }
 
     #[test]

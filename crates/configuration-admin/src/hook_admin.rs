@@ -243,6 +243,7 @@ mod tests {
         fs::create_dir_all(&project).expect("project");
         (
             SettingsContext {
+                plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
                 fusion_layers: None,
                 paths: SettingsPaths {
                     lingxi_home: home,

@@ -264,7 +264,7 @@ impl MarketplaceManager {
         Ok((index, clone_dir))
     }
 
-    fn normalize_index_plugin_root(mut index: MarketplaceIndex) -> MarketplaceIndex {
+    pub(crate) fn normalize_index_plugin_root(mut index: MarketplaceIndex) -> MarketplaceIndex {
         let Some(plugin_root) = index
             .metadata
             .as_ref()

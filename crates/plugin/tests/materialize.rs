@@ -27,7 +27,7 @@ use lingxi_core::types::McpConnectionId;
 use lsp::LspRegistry;
 use mcp::{McpConnectionState, McpRegistry, McpServerRole};
 use outputstyles::OutputStyleRegistry;
-use plugin::{PluginManager, StrictPluginOnlyPolicy};
+use plugin::{PluginArchiveSession, PluginManager, StrictPluginOnlyPolicy};
 use secret::CredentialManager;
 use skill::SkillRegistry;
 use std::sync::Mutex as StdMutex;
@@ -147,6 +147,7 @@ async fn enable_materializes_command_and_hook_into_live_registries() {
     ));
 
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         tmp.path().to_path_buf(),
         Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -251,6 +252,7 @@ async fn enable_and_disable_materialize_and_remove_mod_handlers() {
         Arc::new(PosixHttp::new()),
     ));
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         tmp.path().to_path_buf(),
         Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -299,6 +301,7 @@ async fn enable_and_disable_materialize_and_remove_mod_handlers() {
     for (trusted, mods_enabled) in [(false, true), (true, false)] {
         let gated_hooks = Arc::new(RwLock::new(HookRegistry::new()));
         let gated_manager = PluginManager::new(
+            Arc::new(PluginArchiveSession::new()),
             tmp.path().to_path_buf(),
             Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
             Arc::new(PosixHttp::new()),
@@ -388,6 +391,7 @@ async fn plugin_register_refusal_prevents_module_evaluation_and_command_material
         Arc::new(PosixHttp::new()),
     ));
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         tmp.path().to_path_buf(),
         Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -534,6 +538,7 @@ async fn managed_plugin_register_policy_refuses_declarative_user_plugin() {
         Arc::new(PosixHttp::new()),
     ));
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         tmp.path().to_path_buf(),
         Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -616,6 +621,7 @@ async fn managed_mod_seat_survives_managed_only_but_not_disable_all() {
             append: Vec::new(),
         };
         let manager = PluginManager::new(
+            Arc::new(PluginArchiveSession::new()),
             tmp.path().to_path_buf(),
             Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
             Arc::new(PosixHttp::new()),
@@ -678,6 +684,7 @@ async fn install_local_path_arm_materializes_and_returns_id() {
     ));
 
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         tmp.path().to_path_buf(),
         Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -784,6 +791,7 @@ async fn make_manager_with_agent_catalog(
         Arc::new(PosixHttp::new()),
     ));
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         install_dir.to_path_buf(),
         Arc::new(PosixFileSystem::new(install_dir.to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -1095,6 +1103,7 @@ async fn failed_precondition_leaves_no_orphan_command_registered() {
         Arc::new(PosixHttp::new()),
     ));
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         tmp.path().to_path_buf(),
         Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -1156,6 +1165,7 @@ async fn install_marketplace_arm_returns_typed_error_not_panic() {
         Arc::new(PosixHttp::new()),
     ));
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         tmp.path().to_path_buf(),
         Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -1352,6 +1362,7 @@ async fn enable_materializes_skill_outputstyle_mcp_lsp_into_live_registries() {
         Arc::new(PosixHttp::new()),
     ));
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         tmp.path().to_path_buf(),
         Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -1556,6 +1567,7 @@ async fn plugin_mcp_role_survives_parse_scope_connect_cache_and_tool_refresh() {
         Arc::new(PosixHttp::new()),
     ));
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         tmp.path().to_path_buf(),
         Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -1744,6 +1756,7 @@ async fn enable_materializes_declared_workflow_into_plugin_workflow_registry() {
     let plugin_workflows = Arc::new(workflow::PluginWorkflowRegistry::new());
 
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         tmp.path().to_path_buf(),
         Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -1855,6 +1868,7 @@ async fn enable_skips_workflow_scripts_with_no_meta_block_or_over_the_size_cap()
     ));
     let plugin_workflows = Arc::new(workflow::PluginWorkflowRegistry::new());
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         tmp.path().to_path_buf(),
         Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -1955,6 +1969,7 @@ async fn enable_materializes_declared_theme_into_plugin_theme_registry() {
     ));
 
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         tmp.path().to_path_buf(),
         Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -2195,6 +2210,7 @@ async fn make_manager_with_task_registry(
         Arc::new(PosixHttp::new()),
     ));
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         install_dir.to_path_buf(),
         Arc::new(PosixFileSystem::new(install_dir.to_path_buf())),
         Arc::new(PosixHttp::new()),
@@ -2334,6 +2350,7 @@ async fn enable_substitutes_user_config_into_scoped_mcp_env() {
         .unwrap();
 
     let manager = PluginManager::new(
+        Arc::new(PluginArchiveSession::new()),
         tmp.path().to_path_buf(),
         Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
         Arc::new(PosixHttp::new()),

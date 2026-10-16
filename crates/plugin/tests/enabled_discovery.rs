@@ -17,6 +17,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Materialize a versioned cache entry exactly as claude-code lays it out:
 /// `<root>/cache/{marketplace}/{plugin}/{version}/.lingxi-plugin/plugin.json`.
@@ -82,7 +83,11 @@ async fn resolves_enabled_entries_to_versioned_cache_paths() {
     enabled.insert("weather@acme".to_string(), true);
     enabled.insert("calc@acme".to_string(), false); // disabled → skipped
 
-    let context = plugin::PluginDiscoveryContext::new(root.to_path_buf(), root.to_path_buf());
+    let context = plugin::PluginDiscoveryContext::new(
+        root.to_path_buf(),
+        root.to_path_buf(),
+        Arc::new(plugin::PluginArchiveSession::new()),
+    );
     let discovered = plugin::discover_enabled_plugins(root, &enabled, &context).await;
 
     assert_eq!(
@@ -132,7 +137,11 @@ async fn resolves_the_recorded_version_when_multiple_cache_versions_exist() {
     .unwrap();
 
     let enabled = BTreeMap::from([("weather@acme".to_string(), true)]);
-    let context = plugin::PluginDiscoveryContext::new(root.to_path_buf(), root.to_path_buf());
+    let context = plugin::PluginDiscoveryContext::new(
+        root.to_path_buf(),
+        root.to_path_buf(),
+        Arc::new(plugin::PluginArchiveSession::new()),
+    );
     let discovered = plugin::discover_enabled_plugins(root, &enabled, &context).await;
 
     assert_eq!(discovered.len(), 1);
@@ -167,7 +176,11 @@ async fn an_authoritative_missing_record_does_not_probe_another_cache_version() 
     .unwrap();
 
     let enabled = BTreeMap::from([("weather@acme".to_string(), true)]);
-    let context = plugin::PluginDiscoveryContext::new(root.to_path_buf(), root.to_path_buf());
+    let context = plugin::PluginDiscoveryContext::new(
+        root.to_path_buf(),
+        root.to_path_buf(),
+        Arc::new(plugin::PluginArchiveSession::new()),
+    );
     assert!(
         plugin::discover_enabled_plugins(root, &enabled, &context)
             .await
@@ -202,7 +215,11 @@ async fn missing_version_dir_for_enabled_entry_is_skipped() {
     let mut enabled: BTreeMap<String, bool> = BTreeMap::new();
     enabled.insert("ghost@acme".to_string(), true);
 
-    let context = plugin::PluginDiscoveryContext::new(root.to_path_buf(), root.to_path_buf());
+    let context = plugin::PluginDiscoveryContext::new(
+        root.to_path_buf(),
+        root.to_path_buf(),
+        Arc::new(plugin::PluginArchiveSession::new()),
+    );
     let discovered = plugin::discover_enabled_plugins(root, &enabled, &context).await;
     assert!(
         discovered.is_empty(),

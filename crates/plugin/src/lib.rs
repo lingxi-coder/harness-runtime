@@ -77,7 +77,7 @@ pub use discovery::{
     cli_plugin_dir_collection_children, discover_cli_plugin_dirs, discover_effective_plugins,
     discover_enabled_plugins, discover_installed_plugins, discover_recorded_plugins,
     has_control_or_bidi_formatting, validate_marketplace_name, validate_plugin_name,
-    PluginDiscoveryContext,
+    PluginArchiveSession, PluginDiscoveryContext,
 };
 pub use git::{
     clone_plugin_git, clone_plugin_git_pinned, is_confusable_authority_url, is_suspicious_url,
@@ -98,6 +98,7 @@ pub use mcpb::sha256_hex as plugin_source_sha256;
 /// Guarded zip extraction used by both installed MCP bundles and session-only
 /// `--plugin-url` archives.
 pub use mcpb::unpack_mcpb as unpack_plugin_archive;
+pub(crate) use mcpb::unpack_plugin_cache_zip;
 pub use source::PluginSource;
 pub use strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
 pub use theme_registry::{PluginThemeEntry, PluginThemeRegistry};

@@ -62,7 +62,7 @@ pub async fn catalog_json(
         .snapshot()
         .map_err(|error| settings_error_message(&error))?;
     let plugins_dir = context.paths.lingxi_home.join("plugins");
-    let discovered = discover_recorded_plugins(&plugins_dir).await;
+    let discovered = discover_recorded_plugins(&plugins_dir, &context.plugin_archive_session).await;
     let mut installed_versions = BTreeMap::new();
     let mut installed = Vec::new();
     for (_runtime_id, manifest, path) in discovered {
@@ -473,7 +473,9 @@ async fn validate_config_payload(
     }
 
     let plugins_dir = context.paths.lingxi_home.join("plugins");
-    for (_runtime_id, manifest, path) in discover_recorded_plugins(&plugins_dir).await {
+    for (_runtime_id, manifest, path) in
+        discover_recorded_plugins(&plugins_dir, &context.plugin_archive_session).await
+    {
         let plugin_id = installed_plugin_identity(&manifest, &path);
         let Some(entry) = source_member(&configs, &plugin_id) else {
             continue;
@@ -837,6 +839,7 @@ mod tests {
         fs::create_dir_all(&project).expect("project");
         (
             SettingsContext {
+                plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
                 fusion_layers: None,
                 paths: SettingsPaths {
                     lingxi_home: home,

@@ -10610,6 +10610,7 @@ async fn plugin_runtime_refresh_swaps_enabled_set_live() {
         Arc::new(PosixHttp::new()),
     ));
     let manager = Arc::new(PluginManager::new(
+        Arc::new(plugin::PluginArchiveSession::new()),
         plugins_dir.clone(),
         Arc::new(PosixFileSystem::new(cwd.clone())),
         Arc::new(PosixHttp::new()),
@@ -10987,6 +10988,7 @@ async fn make_reload_test_manager_with_mcp_registry(
     ));
     let manager = Arc::new(
         PluginManager::new(
+            Arc::new(plugin::PluginArchiveSession::new()),
             plugins_dir.to_path_buf(),
             Arc::new(PosixFileSystem::new(cwd.to_path_buf())),
             Arc::new(PosixHttp::new()),
@@ -11812,6 +11814,7 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
     ));
     let manager = Arc::new(
         PluginManager::new(
+            Arc::new(plugin::PluginArchiveSession::new()),
             plugins_dir.clone(),
             Arc::new(PosixFileSystem::new(cwd.clone())),
             Arc::new(PosixHttp::new()),
@@ -12026,10 +12029,11 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
     let managed_policy_root = tempfile::tempdir().unwrap();
     let managed_snapshot =
         super::settings_watch::read_managed_settings_snapshot(managed_policy_root.path()).await;
-    let discovery_context = plugin::PluginDiscoveryContext {
-        cwd: cwd.clone(),
-        project_root: cwd.clone(),
-    };
+    let discovery_context = plugin::PluginDiscoveryContext::new(
+        cwd.clone(),
+        cwd.clone(),
+        Arc::new(plugin::PluginArchiveSession::new()),
+    );
     let discovered_at_boot = super::discover_plugin_set(
         true,
         false,

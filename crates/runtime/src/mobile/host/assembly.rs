@@ -1970,8 +1970,12 @@ pub(super) async fn build_mobile_inner_with_ask(
     let plugin_agent_catalog: Arc<tokio::sync::RwLock<Vec<agent::AgentDefinition>>> = Arc::new(
         tokio::sync::RwLock::new(agent::builtins::builtin_agent_definitions()),
     );
+    // Lazy until the first V2 ZIP plugin is materialized. The same session is
+    // retained by MobileRuntime and the manager for all loaded install paths.
+    let plugin_archive_session = Arc::new(plugin::PluginArchiveSession::new());
     let plugin_manager = Arc::new(
         plugin::PluginManager::new(
+            plugin_archive_session.clone(),
             cfg.lingxi_home.join("plugins"),
             fs.clone(),
             http.clone(),
@@ -2775,10 +2779,11 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Register after the command registry assignment so materialized commands
     // and skills remain visible to the live dispatcher. Discovery resolves
     // dependency order and manifest defaultEnabled, while explicit layer values win.
-    let plugin_discovery_context = plugin::PluginDiscoveryContext {
-        cwd: cwd.clone(),
-        project_root: orch.project_root(),
-    };
+    let plugin_discovery_context = plugin::PluginDiscoveryContext::new(
+        cwd.clone(),
+        orch.project_root(),
+        plugin_archive_session.clone(),
+    );
     for (id, manifest, install_dir) in plugin::discover_effective_plugins(
         &cfg.lingxi_home.join("plugins"),
         &enabled_plugins,
@@ -2943,6 +2948,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         commands: shared_command_registry.clone(),
     });
     Ok(MobileRuntime {
+        plugin_archive_session,
         side_chat_factory,
         provider_region,
         settings_active: mod_settings_active,
@@ -3768,6 +3774,7 @@ fn build_mobile_engine_on_worker(
         project_dir: std::path::PathBuf::from(&session_cwd),
     };
     let settings = Some(::configuration_admin::settings_bridge::SettingsContext {
+        plugin_archive_session: inner.plugin_archive_session.clone(),
         fusion_layers: None,
         paths: settings_paths,
         active: inner.settings_active.clone(),

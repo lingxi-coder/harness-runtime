@@ -710,6 +710,8 @@ pub fn layer_wire_name(layer: SettingsLayer) -> &'static str {
 /// root already loads (`harness_runtime::desktop::managed_settings_overlay`).
 /// bridge-server deliberately does not re-implement managed-layer loading.
 pub struct SettingsContext {
+    /// Shared V2 ZIP materialization cache for this host's plugin discovery.
+    pub plugin_archive_session: Arc<plugin::PluginArchiveSession>,
     /// Reload the exact runtime-admitted Fusion sources and CLI overrides.
     /// Standalone configuration tools omit this and read writable files.
     pub fusion_layers: Option<
@@ -1322,6 +1324,7 @@ mod tests {
 
         let active = active_settings_baseline(&paths, &managed).unwrap();
         let context = SettingsContext {
+            plugin_archive_session: Arc::new(plugin::PluginArchiveSession::new()),
             fusion_layers: None,
             paths,
             active: Arc::new(RwLock::new(active)),

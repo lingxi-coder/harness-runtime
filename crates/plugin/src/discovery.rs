@@ -5,7 +5,8 @@
 //! `loadPluginsFromMarketplaces({cacheOnly})` (`pluginLoader.ts:1887`). For
 //! each installed plugin it runs `createPluginFromPath()`
 //! (`pluginLoader.ts:1348`): read `<pluginPath>/.lingxi-plugin/plugin.json`
-//! (`loadPluginManifest`) and **auto-detect** the optional `commands/`,
+//! (`loadPluginManifest`) or canonicalize the matching marketplace entry when
+//! that file is absent, then **auto-detect** the optional `commands/`,
 //! `agents/`, `skills/`, `output-styles/` directories (Step 3,
 //! `pluginLoader.ts:1373-1385`), plus the standard `hooks/hooks.json`
 //! (`pluginLoader.ts:1618`).
@@ -27,19 +28,23 @@
 //!   passed by path, as with `--add-dir`) — NOT the real cache layout. Against
 //!   a real claude-code plugins dir it finds nothing, by design.
 //!
-//! Both share [`load_plugin_from_path`], which mirrors `createPluginFromPath`
-//! (`pluginLoader.ts:1348`): read the manifest (Step 1) and auto-detect the
+//! Recorded marketplace paths may omit `plugin.json`; that path uses the
+//! matching validated local marketplace entry as the manifest source. Direct
+//! directory/CLI discovery still requires a readable root `plugin.json`.
+//! `load_plugin_from_path` mirrors `createPluginFromPath` (`pluginLoader.ts:1348`)
+//! for those direct paths: read the manifest (Step 1) and auto-detect the
 //! optional component directories (Step 3).
 //!
 //! [`crate::manager::PluginManager::enable`] then materializes the discovered
 //! manifests' commands + hooks into the live registries.
 //!
-//! Residual (still NOT ported in either path): marketplace-catalog source
-//! resolution and enterprise allow/blocklist policy. Seed-cache fallback and
+//! Residual (still NOT ported): marketplace source fetching and enterprise
+//! allow/blocklist policy. Runtime fallback uses only a locally registered
+//! marketplace catalog; it does not fetch sources. Seed-cache fallback and
 //! source precedence are handled by the enabled/effective resolver. Enabled
-//! primary cache entries use the exact install path in
-//! `installed_plugins.json`; configured seed caches may still resolve one
-//! unambiguous version when no primary install record exists.
+//! primary cache entries use the exact install path in `installed_plugins.json`;
+//! configured seed caches may still resolve one unambiguous version when no
+//! primary install record exists.
 
 use crate::manifest::{
     BinaryPin, ComponentPath, HljsLanguageEntry, MonitorTrigger, PluginChannel, PluginComponents,
@@ -54,9 +59,11 @@ use indexmap::IndexMap;
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use lingxi_core::types::PluginId;
 use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use telemetry::tengu::plugin as plugin_telemetry;
 use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata, PiiTagged, Verified};
@@ -69,13 +76,215 @@ use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata, PiiTagged, Verif
 pub struct PluginDiscoveryContext {
     pub cwd: PathBuf,
     pub project_root: PathBuf,
+    pub archive_session: Arc<PluginArchiveSession>,
 }
 
 impl PluginDiscoveryContext {
     #[must_use]
-    pub fn new(cwd: PathBuf, project_root: PathBuf) -> Self {
-        Self { cwd, project_root }
+    pub fn new(
+        cwd: PathBuf,
+        project_root: PathBuf,
+        archive_session: Arc<PluginArchiveSession>,
+    ) -> Self {
+        Self {
+            cwd,
+            project_root,
+            archive_session,
+        }
     }
+}
+
+#[derive(Debug, Default)]
+struct PluginArchiveSessionState {
+    /// Lazily created so constructing a runtime with no ZIP-cache plugin has
+    /// no filesystem side effect. Dropping the final session owner removes it.
+    root: Option<tempfile::TempDir>,
+    archives: HashMap<String, String>,
+    /// The newest successfully published archive-read sequence for each
+    /// stable plugin-key destination. Failed and cache-hit reads do not
+    /// advance this, matching Native's `byDir` publish marker.
+    published_sequences: HashMap<String, u64>,
+    per_plugin_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    retained_backups: Vec<tempfile::TempDir>,
+}
+
+/// Owns the temporary extraction cache for one host session. The caller must
+/// share the same `Arc` with discovery, `PluginManager`, and any inventory
+/// operation whose returned install paths remain in use. No directory is
+/// created until a V2 ZIP `installPath` is first materialized; dropping the
+/// final owner removes the complete cache tree.
+#[derive(Debug, Default)]
+pub struct PluginArchiveSession {
+    state: tokio::sync::Mutex<PluginArchiveSessionState>,
+    /// Native allocates `nextSeq` before awaiting the archive read. Reserve the
+    /// same ticket at the H read boundary so a late older snapshot cannot
+    /// replace a newer publish merely because it acquired the per-key lock
+    /// later.
+    next_sequence: AtomicU64,
+}
+
+impl PluginArchiveSession {
+    /// Create an empty owner. Filesystem allocation is lazy and fallible at the
+    /// first archive materialization rather than at runtime construction.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn begin_archive_read(&self) -> Option<u64> {
+        self.next_sequence
+            .fetch_update(
+                AtomicOrdering::Relaxed,
+                AtomicOrdering::Relaxed,
+                |current| current.checked_add(1),
+            )
+            .ok()?
+            .checked_add(1)
+    }
+
+    async fn materialize(
+        &self,
+        plugin_key: &str,
+        archive_bytes: &[u8],
+        sequence: u64,
+    ) -> Option<PathBuf> {
+        let (root, plugin_lock) = {
+            let mut state = self.state.lock().await;
+            if state.root.is_none() {
+                state.root = Some(
+                    tempfile::Builder::new()
+                        .prefix("lingxi-plugin-session-")
+                        .tempdir()
+                        .ok()?,
+                );
+            }
+            let root = state.root.as_ref()?.path().to_path_buf();
+            let plugin_lock = state
+                .per_plugin_locks
+                .entry(plugin_key.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone();
+            (root, plugin_lock)
+        };
+        let _plugin_guard = plugin_lock.lock().await;
+
+        let destination = plugin_archive_session_path(&root, plugin_key)?;
+        let archive_hash = crate::plugin_source_sha256(archive_bytes);
+        let (cached_hash, published_sequence) = {
+            let state = self.state.lock().await;
+            (
+                state.archives.get(plugin_key).cloned(),
+                state
+                    .published_sequences
+                    .get(plugin_key)
+                    .copied()
+                    .unwrap_or_default(),
+            )
+        };
+        if cached_hash.as_deref() == Some(archive_hash.as_str())
+            && is_plain_directory(&destination).await
+        {
+            return Some(destination);
+        }
+        let parent = destination.parent()?;
+        tokio::fs::create_dir_all(parent).await.ok()?;
+        let staging = tempfile::Builder::new()
+            .prefix(".plugin-staging-")
+            .tempdir_in(parent)
+            .ok()?;
+        if let Err(error) = crate::unpack_plugin_cache_zip(archive_bytes, staging.path()) {
+            tracing::warn!(plugin = plugin_key, %error, "Failed to extract installed plugin ZIP cache");
+            return None;
+        }
+        if !is_plain_directory(staging.path()).await {
+            tracing::warn!(
+                plugin = plugin_key,
+                "Installed plugin ZIP cache has no root directory"
+            );
+            return None;
+        }
+
+        if sequence < published_sequence {
+            // Native extracts and validates the archive before its `y7e`
+            // sequence guard. A stale but malformed ZIP must still fail;
+            // only a successfully staged older snapshot is discarded here.
+            // The caller can then keep using the newer stable destination.
+            return is_plain_directory(&destination)
+                .await
+                .then_some(destination);
+        }
+
+        // Keep the stable destination path across archive updates. Same-key
+        // materializations are serialized above; staging and destination share
+        // a parent, so the new tree is atomically visible after the rename.
+        let backup = match tokio::fs::symlink_metadata(&destination).await {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                let backup_root = tempfile::Builder::new()
+                    .prefix(".plugin-previous-")
+                    .tempdir_in(parent)
+                    .ok()?;
+                let backup_path = backup_root.path().join("previous");
+                if let Err(error) = tokio::fs::rename(&destination, &backup_path).await {
+                    tracing::warn!(plugin = plugin_key, %error, "Could not stage the previous plugin ZIP cache tree");
+                    return None;
+                }
+                Some((backup_root, backup_path))
+            }
+            Ok(_) => {
+                tracing::warn!(
+                    plugin = plugin_key,
+                    "Refusing non-directory plugin ZIP cache destination"
+                );
+                return None;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                tracing::warn!(plugin = plugin_key, %error, "Could not inspect plugin ZIP cache destination");
+                return None;
+            }
+        };
+
+        if let Err(error) = tokio::fs::rename(staging.path(), &destination).await {
+            if let Some((backup_root, backup_path)) = backup {
+                if let Err(restore_error) = tokio::fs::rename(&backup_path, &destination).await {
+                    // Preserve the last-known-good tree under the session-owned
+                    // root if the rollback rename itself fails. The final
+                    // session owner still cleans this retained TempDir.
+                    self.state.lock().await.retained_backups.push(backup_root);
+                    tracing::error!(plugin = plugin_key, %error, %restore_error, backup = %backup_path.display(), "Plugin ZIP cache replacement and rollback both failed");
+                }
+            }
+            tracing::warn!(plugin = plugin_key, %error, "Could not publish staged plugin ZIP cache tree");
+            return None;
+        }
+
+        {
+            let mut state = self.state.lock().await;
+            state.archives.insert(plugin_key.to_string(), archive_hash);
+            state
+                .published_sequences
+                .insert(plugin_key.to_string(), sequence);
+        }
+        Some(destination)
+    }
+}
+
+fn plugin_archive_session_path(root: &Path, plugin_key: &str) -> Option<PathBuf> {
+    let (name, marketplace) = parse_plugin_identifier(plugin_key);
+    let marketplace = marketplace?;
+    let key_hash = crate::plugin_source_sha256(plugin_key.as_bytes());
+    Some(
+        root.join("cache")
+            .join(sanitize_segment(marketplace, false))
+            .join(sanitize_segment(name, false))
+            .join(format!("active-{}", &key_hash[..16])),
+    )
+}
+
+async fn is_plain_directory(path: &Path) -> bool {
+    tokio::fs::symlink_metadata(path)
+        .await
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
 }
 
 /// A leading UTF-8 byte-order mark, as some editors on Windows write it.
@@ -825,25 +1034,8 @@ pub(crate) fn sanitize_segment(s: &str, allow_dot: bool) -> String {
     }
 }
 
-/// Build the versioned cache path from the authoritative plugin identity and
-/// installed version.
-fn versioned_cache_path(
-    plugins_dir: &Path,
-    marketplace: &str,
-    name: &str,
-    version: &str,
-) -> PathBuf {
-    plugins_dir
-        .join("cache")
-        .join(sanitize_segment(marketplace, false))
-        .join(sanitize_segment(name, false))
-        .join(sanitize_segment(version, true))
-}
-
-/// Resolve a legacy or hand-written installPath relative to the plugins root.
-/// The production writer normally persists an absolute path; accepting a
-/// relative path keeps older records readable without changing the cache
-/// layout.
+/// Resolve an installed record's path relative to the plugins root when the
+/// record stores a relative path.
 fn recorded_install_path(plugins_dir: &Path, raw: &str) -> PathBuf {
     let path = PathBuf::from(raw);
     if path.is_absolute() {
@@ -982,6 +1174,9 @@ async fn select_active_install_path(plugins_dir: &Path, candidates: &[PathBuf]) 
                 if confined_plugin_install_dir(candidate, &[plugins_dir])
                     .await
                     .is_some()
+                    || confined_plugin_cache_archive(plugins_dir, candidate)
+                        .await
+                        .is_some()
                 {
                     return Some(candidate.clone());
                 }
@@ -1036,25 +1231,7 @@ fn exact_installed_paths(
         return Some(paths);
     }
 
-    // Older files keyed records by marketplace, then plugin name.
-    let Some(marketplace_records) = records.get(marketplace).and_then(Value::as_object) else {
-        return None;
-    };
-    let Some(record) = marketplace_records.get(name) else {
-        return None;
-    };
-    let version = record
-        .get("version")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let path = if !version.is_empty() {
-        versioned_cache_path(plugins_dir, marketplace, name, version)
-    } else if let Some(raw) = record.get("installPath").and_then(Value::as_str) {
-        recorded_install_path(plugins_dir, raw)
-    } else {
-        return Some(Vec::new());
-    };
-    Some(vec![path])
+    None
 }
 
 /// Oracle `yt` (2.1.251, `@~154669075`):
@@ -1345,10 +1522,12 @@ mod name_validation_tests {
 /// are skipped — never a flat walk. A selected cache miss may fall back to a
 /// configured seed cache; a key whose rows are all out of scope may not.
 ///
-/// What is still NOT ported (residual): marketplace-catalog source resolution
-/// and enterprise allow/blocklist policy (`getStrictKnownMarketplaces` /
-/// `getBlockedMarketplaces`). Seed-dir fallback is resolved before the primary
-/// cache is loaded, with the same source precedence used by the final merge.
+/// Marketplace source fetching and enterprise allow/blocklist policy
+/// (`getStrictKnownMarketplaces` / `getBlockedMarketplaces`) are not ported.
+/// A missing installed manifest may use a matching entry from the already
+/// registered local catalog; discovery performs no network fetch. Seed-dir
+/// fallback is resolved before the primary cache is loaded, with the same
+/// source precedence used by the final merge.
 pub async fn discover_enabled_plugins(
     plugins_dir: &Path,
     enabled: &BTreeMap<String, bool>,
@@ -1398,11 +1577,18 @@ async fn discover_enabled_plugins_impl(
             Some(paths) => select_active_install_path(plugins_dir, &paths).await,
             None => None,
         };
-        let mut candidates = selected_primary.into_iter().collect::<Vec<_>>();
+        let mut candidates = selected_primary.clone().into_iter().collect::<Vec<_>>();
         // Resolve only the selected active row. When a key has registry rows
         // but none belongs to this session, do not resurrect another
         // project's row through a seed cache.
-        let primary_exists = candidates.iter().any(|path| path_exists(path));
+        let primary_exists = if let Some(path) = candidates.first() {
+            path_exists(path)
+                || confined_plugin_cache_archive(plugins_dir, path)
+                    .await
+                    .is_some()
+        } else {
+            false
+        };
         let seed_candidates = if has_registry_rows && candidates.is_empty() {
             Vec::new()
         } else {
@@ -1416,21 +1602,43 @@ async fn discover_enabled_plugins_impl(
             }
         }
         for install_dir in candidates {
+            let is_primary_candidate = selected_primary.as_ref().is_some_and(|primary| {
+                primary == &install_dir
+                    || normalized_absolute_path(primary.clone())
+                        == normalized_absolute_path(install_dir.clone())
+            });
             let mut allowed_roots = Vec::with_capacity(seed_dirs.len() + 1);
             allowed_roots.push(plugins_dir);
             allowed_roots.extend(seed_dirs.iter().map(PathBuf::as_path));
-            let Some(install_dir) = confined_plugin_install_dir(&install_dir, &allowed_roots).await
+            let Some(install_dir) = load_recorded_plugin_root(
+                plugins_dir,
+                &install_dir,
+                &allowed_roots,
+                &context.archive_session,
+                entry_id,
+            )
+            .await
             else {
                 continue;
             };
-            if let Some((id, manifest)) = load_plugin_from_path_with_mcp_gate_and_bus(
-                &install_dir,
-                false,
-                Some(entry_id.as_str()),
-                analytics_bus,
-            )
-            .await
-            {
+            let loaded = if is_primary_candidate {
+                load_plugin_from_recorded_marketplace_with_bus(
+                    &install_dir,
+                    plugins_dir,
+                    entry_id.as_str(),
+                    analytics_bus,
+                )
+                .await
+            } else {
+                load_plugin_from_path_with_mcp_gate_and_bus(
+                    &install_dir,
+                    false,
+                    Some(entry_id.as_str()),
+                    analytics_bus,
+                )
+                .await
+            };
+            if let Some((id, manifest)) = loaded {
                 out.push((id, manifest, install_dir));
             }
         }
@@ -1557,90 +1765,60 @@ async fn seed_plugin_cache_candidates(
     out
 }
 
-/// Re-discover every plugin recorded in `installed_plugins.json`, resolving each
-/// to its exact versioned cache dir `cache/<marketplace>/<plugin>/<version>/`.
+/// Re-discover every current V2 plugin record in `installed_plugins.json`,
+/// resolving each recorded `installPath` directly.
 ///
 /// This is the durable counterpart to [`crate::manager::PluginManager`]'s
-/// record-on-install: the records carry the authoritative `(marketplace,
-/// plugin, version)` triple, so resolution is exact (no single-version probe).
-/// Each segment is sanitized identically to the install-time path so the read
-/// path matches the write path. A record whose cache dir is missing / has no
-/// manifest is skipped (resilient to a hand-deleted cache). Returned tuples are
-/// `(freshly-minted id, manifest, install dir)`, sorted by plugin name.
+/// record-on-install: V2 rows carry the authoritative installed path. A row
+/// whose cache is missing or whose plugin and marketplace manifests are both
+/// unavailable is skipped. Returned tuples are `(freshly-minted id, manifest,
+/// install dir)`, sorted by plugin name.
 async fn discover_recorded_plugins_identified(
     plugins_dir: &Path,
+    archive_session: &PluginArchiveSession,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
     resolve_collisions: bool,
 ) -> Vec<(String, PluginId, PluginManifest, PathBuf)> {
     let mut out = Vec::new();
 
-    // v2 schema (claude-code 2.1.201): `plugins["<plugin>@<market>"] = [ {scope,
-    // installPath, version, installedAt, lastUpdated} ]`. Each record carries the
-    // exact `installPath` cache dir, so resolution is direct. Read the raw JSON so
-    // the v2 array shape and the legacy `plugins[market][plugin]` object shape can
-    // coexist during migration.
+    // Current V2 schema: `plugins["<plugin>@<market>"] = [{scope,
+    // installPath, version, installedAt, lastUpdated}]`. Each row carries the
+    // exact `installPath` cache dir.
     if let Some(records) = crate::installed::load_normalized(plugins_dir)
         .and_then(|v| v.get("plugins").and_then(|p| p.as_object()).cloned())
     {
-        let cache_root = plugins_dir.join("cache");
         for (key, value) in &records {
-            match value {
-                // v2: array of per-scope records; the version is authoritative
-                // for the cache path. Fall back to installPath only for older
-                // records that did not persist a version.
-                serde_json::Value::Array(recs) => {
-                    let mut seen = HashSet::new();
-                    let candidate_dirs = recs
-                        .iter()
-                        .filter_map(|record| installed_record_path(plugins_dir, record))
-                        .filter(|dir| seen.insert(dir.clone()))
-                        .collect::<Vec<_>>();
-                    for dir in candidate_dirs {
-                        let Some(dir) = confined_plugin_install_dir(&dir, &[plugins_dir]).await
-                        else {
-                            continue;
-                        };
-                        if let Some((id, manifest)) = load_plugin_from_path_with_mcp_gate_and_bus(
-                            &dir,
-                            false,
-                            Some(key.as_str()),
-                            analytics_bus,
-                        )
-                        .await
-                        {
-                            out.push((key.clone(), id, manifest, dir));
-                        }
-                    }
+            let serde_json::Value::Array(recs) = value else {
+                continue;
+            };
+            let mut seen = HashSet::new();
+            let candidate_dirs = recs
+                .iter()
+                .filter_map(|record| installed_record_path(plugins_dir, record))
+                .filter(|dir| seen.insert(dir.clone()))
+                .collect::<Vec<_>>();
+            for dir in candidate_dirs {
+                let Some(dir) = load_recorded_plugin_root(
+                    plugins_dir,
+                    &dir,
+                    &[plugins_dir],
+                    archive_session,
+                    key,
+                )
+                .await
+                else {
+                    continue;
+                };
+                if let Some((id, manifest)) = load_plugin_from_recorded_marketplace_with_bus(
+                    &dir,
+                    plugins_dir,
+                    key,
+                    analytics_bus,
+                )
+                .await
+                {
+                    out.push((key.clone(), id, manifest, dir));
                 }
-                // Legacy: `{ "<plugin>": {version, added} }` under a marketplace key.
-                serde_json::Value::Object(plugins) => {
-                    for (name, record) in plugins {
-                        let version = record
-                            .get("version")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default();
-                        let dir = cache_root
-                            .join(sanitize_segment(key, false))
-                            .join(sanitize_segment(name, false))
-                            .join(sanitize_segment(version, true));
-                        let identifier = format!("{name}@{key}");
-                        let Some(dir) = confined_plugin_install_dir(&dir, &[plugins_dir]).await
-                        else {
-                            continue;
-                        };
-                        if let Some((id, manifest)) = load_plugin_from_path_with_mcp_gate_and_bus(
-                            &dir,
-                            false,
-                            Some(&identifier),
-                            analytics_bus,
-                        )
-                        .await
-                        {
-                            out.push((identifier, id, manifest, dir));
-                        }
-                    }
-                }
-                _ => {}
             }
         }
     }
@@ -1679,15 +1857,17 @@ async fn discover_recorded_plugins_identified(
 /// [`discover_effective_plugins`] instead.
 pub async fn discover_recorded_plugins(
     plugins_dir: &Path,
+    archive_session: &PluginArchiveSession,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
-    discover_recorded_plugins_with_bus(plugins_dir, None).await
+    discover_recorded_plugins_with_bus(plugins_dir, archive_session, None).await
 }
 
 pub async fn discover_recorded_plugins_with_bus(
     plugins_dir: &Path,
+    archive_session: &PluginArchiveSession,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
-    discover_recorded_plugins_identified(plugins_dir, analytics_bus, true)
+    discover_recorded_plugins_identified(plugins_dir, archive_session, analytics_bus, true)
         .await
         .into_iter()
         .map(|(_, id, manifest, path)| (id, manifest, path))
@@ -2176,6 +2356,157 @@ pub(crate) async fn load_plugin_from_path_with_mcp_gate_and_bus(
     install_source_id: Option<&str>,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> Option<(PluginId, PluginManifest)> {
+    load_plugin_from_path_internal(
+        plugin_dir,
+        sdk_skip_mcp_discovery,
+        install_source_id,
+        None,
+        analytics_bus,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct RawMarketplacePluginEntries {
+    #[serde(default)]
+    plugins: Vec<Box<RawValue>>,
+}
+
+/// Read a root plugin manifest while preserving the distinction between a
+/// genuinely absent file and an unsafe/unreadable path. Marketplace fallback
+/// is considered only for `Ok(None)`; a present malformed file never falls
+/// back to catalog metadata.
+async fn read_plugin_manifest(
+    plugin_dir: &Path,
+    manifest_path: &Path,
+) -> Result<Option<String>, ()> {
+    let Some(manifest_dir) = manifest_path.parent() else {
+        return Err(());
+    };
+    let canonical_root = std::fs::canonicalize(plugin_dir).map_err(|_| ())?;
+    match tokio::fs::symlink_metadata(manifest_dir).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+        Ok(_) => {
+            let canonical_dir = std::fs::canonicalize(manifest_dir).map_err(|_| ())?;
+            if !canonical_dir.starts_with(&canonical_root)
+                || !std::fs::metadata(&canonical_dir).map_err(|_| ())?.is_dir()
+            {
+                return Err(());
+            }
+        }
+    }
+    match tokio::fs::symlink_metadata(manifest_path).await {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => return Err(()),
+    }
+    let Some(canonical_path) = canonical_regular_path_under(plugin_dir, manifest_path) else {
+        return Err(());
+    };
+    tokio::fs::read_to_string(canonical_path)
+        .await
+        .map(Some)
+        .map_err(|_| ())
+}
+
+fn parse_raw_manifest(raw: &str) -> Result<RawManifest, serde_json::Error> {
+    let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
+    serde_json::from_str(raw)
+}
+
+/// Resolve the current marketplace row from local registered catalog state.
+/// The key and typed catalog row must agree exactly; the retained `RawValue`
+/// carries the marketplace entry's manifest fields directly into the same
+/// `RawManifest` parser used for `.lingxi-plugin/plugin.json`.
+async fn load_marketplace_manifest_fallback(
+    plugins_dir: &Path,
+    plugin_key: &str,
+) -> Option<RawManifest> {
+    let (plugin_name, marketplace_name) = parse_plugin_identifier(plugin_key);
+    let marketplace_name = marketplace_name?;
+    if plugin_name.is_empty() {
+        return None;
+    }
+
+    let registry_raw = tokio::fs::read_to_string(plugins_dir.join("known_marketplaces.json"))
+        .await
+        .ok()?;
+    let registry_raw = registry_raw.strip_prefix(UTF8_BOM).unwrap_or(&registry_raw);
+    let registry: Value = serde_json::from_str(registry_raw).ok()?;
+    let install_location = registry
+        .get(marketplace_name)?
+        .get("installLocation")?
+        .as_str()?;
+    let marketplace_root = tokio::fs::canonicalize(install_location).await.ok()?;
+    if !tokio::fs::metadata(&marketplace_root).await.ok()?.is_dir() {
+        return None;
+    }
+
+    let catalog_path = marketplace_root
+        .join(branding::PLUGIN_MANIFEST_DIR)
+        .join("marketplace.json");
+    let catalog_path = canonical_regular_path_under(&marketplace_root, &catalog_path)?;
+    let catalog_raw = tokio::fs::read_to_string(catalog_path).await.ok()?;
+    let catalog_raw = catalog_raw.strip_prefix(UTF8_BOM).unwrap_or(&catalog_raw);
+    let index = serde_json::from_str::<crate::marketplace::MarketplaceIndex>(catalog_raw)
+        .ok()
+        .map(crate::marketplace::MarketplaceManager::normalize_index_plugin_root)?;
+    let raw_index: RawMarketplacePluginEntries = serde_json::from_str(catalog_raw).ok()?;
+    if index.plugins.len() != raw_index.plugins.len() {
+        return None;
+    }
+
+    let (entry_index, entry) = index
+        .plugins
+        .iter()
+        .enumerate()
+        .find(|(_, entry)| entry.name == plugin_name)?;
+    validate_plugin_name(&entry.name).ok()?;
+    // Relative sources and source-less path entries must remain confined to
+    // the registered marketplace clone. A valid structured source can still
+    // describe an already-installed cache entry: this fallback only reads its
+    // registered catalog metadata and never resolves or fetches that source.
+    match entry.source.as_ref() {
+        Some(crate::marketplace::MarketplacePluginSource::Relative(_)) | None => {
+            crate::marketplace::MarketplaceManager::plugin_dir_in_clone(&marketplace_root, entry)
+                .ok()?;
+        }
+        Some(crate::marketplace::MarketplacePluginSource::Structured(
+            crate::marketplace::MarketplacePluginExternalSource::Unsupported { .. },
+        )) => return None,
+        Some(crate::marketplace::MarketplacePluginSource::Structured(_)) => {}
+    }
+
+    let raw_entry = raw_index.plugins.get(entry_index)?;
+    let manifest = parse_raw_manifest(raw_entry.get()).ok()?;
+    (manifest.name == entry.name && manifest.name == plugin_name).then_some(manifest)
+}
+
+async fn load_plugin_from_recorded_marketplace_with_bus(
+    plugin_dir: &Path,
+    plugins_dir: &Path,
+    install_source_id: &str,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Option<(PluginId, PluginManifest)> {
+    load_plugin_from_path_internal(
+        plugin_dir,
+        false,
+        Some(install_source_id),
+        Some((plugins_dir, install_source_id)),
+        analytics_bus,
+    )
+    .await
+}
+
+async fn load_plugin_from_path_internal(
+    plugin_dir: &Path,
+    sdk_skip_mcp_discovery: bool,
+    install_source_id: Option<&str>,
+    marketplace_fallback: Option<(&Path, &str)>,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Option<(PluginId, PluginManifest)> {
     // Resolve the root once and refuse a symlink-spelled plugin directory.
     // Every declared component is subsequently resolved relative to this
     // canonical root, preventing a manifest from escaping through a symlink
@@ -2185,28 +2516,50 @@ pub(crate) async fn load_plugin_from_path_with_mcp_gate_and_bus(
     let manifest_path = plugin_dir
         .join(branding::PLUGIN_MANIFEST_DIR)
         .join("plugin.json");
-    let manifest_path = canonical_regular_path_under(plugin_dir, &manifest_path)?;
-    let raw = tokio::fs::read_to_string(&manifest_path).await.ok()?;
-    let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw.as_str());
-    let mut parsed: RawManifest = match serde_json::from_str(raw) {
-        Ok(m) => m,
-        Err(e) => {
-            emit_plugin_load_failed(
-                analytics_bus,
-                plugin_dir.file_name().and_then(|name| name.to_str()),
-                install_source_id,
-                "malformed-plugin-json",
-                Some("manifest"),
-            )
-            .await;
+    let parsed = match read_plugin_manifest(plugin_dir, &manifest_path).await {
+        Ok(Some(raw)) => match parse_raw_manifest(&raw) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                emit_plugin_load_failed(
+                    analytics_bus,
+                    plugin_dir.file_name().and_then(|name| name.to_str()),
+                    install_source_id,
+                    "malformed-plugin-json",
+                    Some("manifest"),
+                )
+                .await;
+                tracing::warn!(
+                    error = %error,
+                    path = %manifest_path.display(),
+                    "skipping plugin with malformed plugin.json"
+                );
+                return None;
+            }
+        },
+        Ok(None) => {
+            let Some((plugins_dir, plugin_key)) = marketplace_fallback else {
+                return None;
+            };
+            let Some(manifest) = load_marketplace_manifest_fallback(plugins_dir, plugin_key).await
+            else {
+                tracing::warn!(
+                    plugin = plugin_key,
+                    path = %manifest_path.display(),
+                    "plugin manifest is absent and no valid installed marketplace entry supplies one"
+                );
+                return None;
+            };
+            manifest
+        }
+        Err(()) => {
             tracing::warn!(
-                error = %e,
                 path = %manifest_path.display(),
-                "skipping plugin with malformed plugin.json"
+                "skipping plugin with an unreadable or unsafe plugin manifest path"
             );
             return None;
         }
     };
+    let mut parsed = parsed;
     // §8: the name validator previously existed only on the authoring path
     // (`plugin tag`/`plugin init`); the actual LOAD path never called it, so a
     // manifest with an empty/space-containing/bidi-spoofed `name` was trusted
@@ -3426,6 +3779,131 @@ async fn confined_plugin_install_dir(path: &Path, roots: &[&Path]) -> Option<Pat
         }
     }
     None
+}
+
+/// Native's V2 ZIP-cache rows store a versioned archive path in `installPath`.
+/// Keep normal directory installs on their existing confinement path, and only
+/// materialize a ZIP that is a regular file canonically below the plugins root.
+async fn confined_plugin_cache_archive(plugins_dir: &Path, path: &Path) -> Option<PathBuf> {
+    if !path.file_name()?.to_str()?.ends_with(".zip") {
+        return None;
+    }
+    let archive_metadata = tokio::fs::symlink_metadata(path).await.ok()?;
+    if !archive_metadata.is_file() || archive_metadata.file_type().is_symlink() {
+        return None;
+    }
+    let root_metadata = tokio::fs::symlink_metadata(plugins_dir).await.ok()?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return None;
+    }
+    let canonical_root = tokio::fs::canonicalize(plugins_dir).await.ok()?;
+    let canonical_archive = tokio::fs::canonicalize(path).await.ok()?;
+    canonical_archive
+        .starts_with(canonical_root)
+        .then_some(canonical_archive)
+}
+
+/// Compare the opened archive handle with the canonical path entry before and
+/// after reading, so a path replacement cannot silently change the source.
+#[cfg(unix)]
+fn same_archive_snapshot(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+
+    left.dev() == right.dev()
+        && left.ino() == right.ino()
+        && left.len() == right.len()
+        && left.modified().ok() == right.modified().ok()
+}
+
+#[cfg(windows)]
+async fn open_plugin_cache_archive(path: &Path) -> Option<tokio::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    // Deny concurrent write/delete sharing while the handle is read; Windows
+    // does not expose stable file IDs on this crate's MSRV.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(path)
+        .ok()?;
+    Some(tokio::fs::File::from_std(file))
+}
+
+#[cfg(not(windows))]
+async fn open_plugin_cache_archive(path: &Path) -> Option<tokio::fs::File> {
+    tokio::fs::File::open(path).await.ok()
+}
+
+#[cfg(windows)]
+fn same_archive_snapshot(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    // The open handle denies concurrent write/delete sharing above.
+    left.len() == right.len() && left.modified().ok() == right.modified().ok()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_archive_snapshot(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// Resolve an installed record to a confined directory. Native V2 ZIP-cache
+/// rows are extracted into a process-private temporary directory before
+/// manifest and component loading, just as the native reader does before `Pbn`.
+async fn load_recorded_plugin_root(
+    plugins_dir: &Path,
+    path: &Path,
+    roots: &[&Path],
+    archive_session: &PluginArchiveSession,
+    plugin_key: &str,
+) -> Option<PathBuf> {
+    if let Some(directory) = confined_plugin_install_dir(path, roots).await {
+        return Some(directory);
+    }
+
+    let archive = confined_plugin_cache_archive(plugins_dir, path).await?;
+    let archive_sequence = archive_session.begin_archive_read()?;
+    use tokio::io::AsyncReadExt as _;
+
+    let mut file = open_plugin_cache_archive(&archive).await?;
+    let opened_metadata = file.metadata().await.ok()?;
+    if !opened_metadata.is_file() {
+        return None;
+    }
+    let path_metadata = tokio::fs::symlink_metadata(&archive).await.ok()?;
+    if path_metadata.file_type().is_symlink()
+        || !same_archive_snapshot(&opened_metadata, &path_metadata)
+    {
+        return None;
+    }
+
+    let expected_len = usize::try_from(opened_metadata.len()).ok()?;
+    let read_limit = opened_metadata.len().checked_add(1)?;
+    let allocation_len = expected_len.checked_add(1)?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(allocation_len).ok()?;
+    (&mut file)
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .await
+        .ok()?;
+
+    let after_read_metadata = file.metadata().await.ok()?;
+    let after_read_path_metadata = tokio::fs::symlink_metadata(&archive).await.ok()?;
+    if bytes.len() != expected_len
+        || !same_archive_snapshot(&opened_metadata, &after_read_metadata)
+        || after_read_path_metadata.file_type().is_symlink()
+        || !same_archive_snapshot(&opened_metadata, &after_read_path_metadata)
+    {
+        tracing::warn!(path = %archive.display(), "Installed plugin ZIP cache changed during read");
+        return None;
+    }
+
+    // Native's cache writer stores plugin-root-relative entries directly in
+    // the archive. Do not apply the separate `--plugin-dir` wrapper-unwrapping
+    // behavior here. The loader validates plugin.json or the matching current
+    // marketplace entry after extraction.
+    archive_session
+        .materialize(plugin_key, &bytes, archive_sequence)
+        .await
 }
 
 /// Resolve a declared component path and verify both lexical and canonical
@@ -5643,8 +6121,11 @@ mod tests {
         let bus = Arc::new(AnalyticsBus::new());
         bus.attach_sink(sink.clone()).await;
         let enabled = BTreeMap::from([(String::from("seeded@market"), true)]);
-        let context =
-            PluginDiscoveryContext::new(tmp.path().to_path_buf(), tmp.path().to_path_buf());
+        let context = PluginDiscoveryContext::new(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            Arc::new(PluginArchiveSession::new()),
+        );
         let discovered = discover_enabled_plugins_with_bus(
             tmp.path().join("plugins").as_path(),
             &enabled,
@@ -5702,14 +6183,271 @@ mod tests {
         fs::write(primary.join("commands/ping.md"), "# primary").unwrap();
 
         let enabled = BTreeMap::from([(String::from("unrecorded@market"), true)]);
-        let context =
-            PluginDiscoveryContext::new(tmp.path().to_path_buf(), tmp.path().to_path_buf());
+        let context = PluginDiscoveryContext::new(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            Arc::new(PluginArchiveSession::new()),
+        );
         let discovered = discover_enabled_plugins(&plugins_dir, &enabled, &context).await;
 
         assert!(
             discovered.is_empty(),
             "primary cache layout alone must not invent an installed_plugins.json record"
         );
+    }
+
+    #[tokio::test]
+    async fn v2_installed_zip_cache_is_extracted_before_plugin_loading() {
+        use std::io::Write as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        let archive = plugins_dir.join("cache/acme/weather/2.0.0.zip");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                format!("{}/plugin.json", branding::PLUGIN_MANIFEST_DIR),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer
+            .write_all(br#"{"name":"weather","version":"2.0.0","commands":"./commands","workflows":"./workflows"}"#)
+            .unwrap();
+        writer
+            .start_file("commands/ping.md", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"# from cached ZIP").unwrap();
+        writer
+            .start_file(
+                "workflows/deploy.js",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer.write_all(b"// workflow from cached ZIP").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+        fs::write(&archive, bytes).unwrap();
+
+        fs::write(
+            crate::installed::path(&plugins_dir),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "weather@acme": [{
+                        "scope": "user",
+                        "version": "2.0.0",
+                        "installPath": archive.display().to_string()
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let context = PluginDiscoveryContext::new(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            Arc::new(PluginArchiveSession::new()),
+        );
+        let enabled = BTreeMap::from([(String::from("weather@acme"), true)]);
+        let (bootstrapped, concurrent) = tokio::join!(
+            discover_enabled_plugins(&plugins_dir, &enabled, &context),
+            discover_enabled_plugins(&plugins_dir, &enabled, &context),
+        );
+        assert_eq!(bootstrapped.len(), 1);
+        assert_eq!(concurrent.len(), 1);
+        assert_eq!(bootstrapped[0].2, concurrent[0].2);
+        assert_eq!(bootstrapped[0].1.name, "weather");
+        assert_eq!(bootstrapped[0].1.version, "2.0.0");
+        assert_eq!(bootstrapped[0].1.components.workflows.len(), 1);
+        assert_ne!(bootstrapped[0].2, archive);
+        assert_eq!(
+            fs::read_to_string(bootstrapped[0].2.join("commands/ping.md")).unwrap(),
+            "# from cached ZIP"
+        );
+        assert_eq!(
+            fs::read_to_string(bootstrapped[0].2.join("workflows/deploy.js")).unwrap(),
+            "// workflow from cached ZIP"
+        );
+
+        // The installed-record inventory uses the same V2 source adapter.
+        let recorded = discover_recorded_plugins(&plugins_dir, &context.archive_session).await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].1.name, "weather");
+        assert_eq!(
+            recorded[0].2, bootstrapped[0].2,
+            "same session and key reuse the stable extraction root"
+        );
+        assert_ne!(recorded[0].2, archive);
+        assert_eq!(
+            fs::read_to_string(recorded[0].2.join("commands/ping.md")).unwrap(),
+            "# from cached ZIP"
+        );
+        let extracted_root = recorded[0].2.clone();
+        assert!(extracted_root.is_dir());
+
+        let mut replacement_writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        replacement_writer
+            .start_file(
+                format!("{}/plugin.json", branding::PLUGIN_MANIFEST_DIR),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        replacement_writer
+            .write_all(br#"{"name":"weather","version":"2.0.0","commands":"./commands","workflows":"./workflows"}"#)
+            .unwrap();
+        replacement_writer
+            .start_file("commands/ping.md", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        replacement_writer.write_all(b"# replacement ZIP").unwrap();
+        replacement_writer
+            .start_file(
+                "workflows/deploy.js",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        replacement_writer
+            .write_all(b"// replacement workflow")
+            .unwrap();
+        fs::write(&archive, replacement_writer.finish().unwrap().into_inner()).unwrap();
+
+        let refreshed = discover_enabled_plugins(&plugins_dir, &enabled, &context).await;
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(
+            refreshed[0].2, extracted_root,
+            "archive updates keep a stable plugin root"
+        );
+        assert_eq!(
+            fs::read_to_string(refreshed[0].2.join("commands/ping.md")).unwrap(),
+            "# replacement ZIP"
+        );
+
+        fs::write(&archive, b"not a ZIP archive").unwrap();
+        assert!(discover_enabled_plugins(&plugins_dir, &enabled, &context)
+            .await
+            .is_empty());
+        assert_eq!(
+            fs::read_to_string(extracted_root.join("commands/ping.md")).unwrap(),
+            "# replacement ZIP",
+            "a failed update leaves the previous valid plugin tree readable"
+        );
+        let extraction_parent = extracted_root.parent().unwrap();
+        assert!(fs::read_dir(extraction_parent).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".plugin-staging-")));
+        drop(context);
+        assert!(
+            !extracted_root.exists(),
+            "dropping the final host-session owner removes its ZIP materialization"
+        );
+    }
+
+    #[tokio::test]
+    async fn late_old_zip_snapshot_cannot_replace_newer_same_plugin_publish() {
+        use std::io::Write as _;
+
+        fn plugin_zip(version: &str, command_body: &str) -> Vec<u8> {
+            let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            writer
+                .start_file(
+                    format!("{}/plugin.json", branding::PLUGIN_MANIFEST_DIR),
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            writer
+                .write_all(format!(r#"{{"name":"weather","version":"{version}"}}"#).as_bytes())
+                .unwrap();
+            writer
+                .start_file("commands/ping.md", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(command_body.as_bytes()).unwrap();
+            writer.finish().unwrap().into_inner()
+        }
+
+        let session = Arc::new(PluginArchiveSession::new());
+        let old_archive = plugin_zip("1.0.0", "# old snapshot");
+        let new_archive = plugin_zip("2.0.0", "# new snapshot");
+        let old_sequence = session.begin_archive_read().unwrap();
+        let (release_old_read, old_read_gate) = tokio::sync::oneshot::channel();
+        let old_session = Arc::clone(&session);
+        let old_read = tokio::spawn(async move {
+            // The old invocation reserves its sequence before its archive read
+            // completes, then is deliberately released after the newer write.
+            old_read_gate.await.unwrap();
+            old_session
+                .materialize("weather@acme", &old_archive, old_sequence)
+                .await
+        });
+
+        let new_sequence = session.begin_archive_read().unwrap();
+        let new_path = session
+            .materialize("weather@acme", &new_archive, new_sequence)
+            .await
+            .unwrap();
+        release_old_read.send(()).unwrap();
+        let old_call_path = old_read.await.unwrap().unwrap();
+
+        assert_eq!(old_call_path, new_path);
+        assert_eq!(
+            fs::read_to_string(new_path.join("commands/ping.md")).unwrap(),
+            "# new snapshot",
+            "a late older read must return the stable root without replacing its newer contents"
+        );
+        let state = session.state.lock().await;
+        assert_eq!(
+            state.published_sequences.get("weather@acme"),
+            Some(&new_sequence)
+        );
+        let new_archive_hash = crate::plugin_source_sha256(&new_archive);
+        assert_eq!(state.archives.get("weather@acme"), Some(&new_archive_hash));
+    }
+
+    #[tokio::test]
+    async fn late_old_malformed_zip_is_rejected_after_newer_publish() {
+        use std::io::Write as _;
+
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                format!("{}/plugin.json", branding::PLUGIN_MANIFEST_DIR),
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer
+            .write_all(br#"{"name":"weather","version":"2.0.0"}"#)
+            .unwrap();
+        writer
+            .start_file("commands/ping.md", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"# current snapshot").unwrap();
+        let current_archive = writer.finish().unwrap().into_inner();
+
+        let session = PluginArchiveSession::new();
+        let stale_sequence = session.begin_archive_read().unwrap();
+        let current_sequence = session.begin_archive_read().unwrap();
+        let current_path = session
+            .materialize("weather@acme", &current_archive, current_sequence)
+            .await
+            .unwrap();
+        let current_hash = crate::plugin_source_sha256(&current_archive);
+
+        assert!(session
+            .materialize("weather@acme", b"not a ZIP archive", stale_sequence)
+            .await
+            .is_none());
+        assert_eq!(
+            fs::read_to_string(current_path.join("commands/ping.md")).unwrap(),
+            "# current snapshot"
+        );
+        let state = session.state.lock().await;
+        assert_eq!(
+            state.published_sequences.get("weather@acme"),
+            Some(&current_sequence)
+        );
+        assert_eq!(state.archives.get("weather@acme"), Some(&current_hash));
     }
 
     #[tokio::test]
@@ -6125,8 +6863,11 @@ mod tests {
         )
         .unwrap();
 
-        let context =
-            PluginDiscoveryContext::new(plugins_dir.to_path_buf(), plugins_dir.to_path_buf());
+        let context = PluginDiscoveryContext::new(
+            plugins_dir.to_path_buf(),
+            plugins_dir.to_path_buf(),
+            Arc::new(PluginArchiveSession::new()),
+        );
         let absent = discover_effective_plugins(plugins_dir, &BTreeMap::new(), &context).await;
         assert!(
             absent.is_empty(),
@@ -6211,7 +6952,8 @@ mod tests {
         )
         .unwrap();
 
-        let context = PluginDiscoveryContext::new(cwd, project_root);
+        let context =
+            PluginDiscoveryContext::new(cwd, project_root, Arc::new(PluginArchiveSession::new()));
         let enabled = BTreeMap::from([(String::from("same@acme"), true)]);
         let explicit = discover_enabled_plugins(&plugins_dir, &enabled, &context).await;
         assert_eq!(explicit.len(), 1);
@@ -6226,7 +6968,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn effective_discovery_reads_legacy_filename_and_persists_canonical_v2() {
+    async fn effective_discovery_reads_current_v2_filename_and_shape() {
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path();
         let cache_path = plugins_dir.join("cache/mkt/weather/1.0.0");
@@ -6239,34 +6981,34 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            plugins_dir.join("installed_plugins_v2.json"),
+            crate::installed::path(plugins_dir),
             serde_json::to_vec(&serde_json::json!({
+                "version": 2,
                 "plugins": {
-                    "mkt": {
-                        "weather": {
-                            "version": "1.0.0",
-                            "installPath": "cache/mkt/weather/1.0.0",
-                            "added": "2026-08-31T00:00:00.000Z"
-                        }
-                    }
+                    "weather@mkt": [{
+                        "scope": "user",
+                        "version": "1.0.0",
+                        "installPath": cache_path,
+                        "installedAt": "2026-08-31T00:00:00.000Z",
+                        "lastUpdated": "2026-08-31T00:00:00.000Z"
+                    }]
                 }
             }))
             .unwrap(),
         )
         .unwrap();
 
-        let context =
-            PluginDiscoveryContext::new(plugins_dir.to_path_buf(), plugins_dir.to_path_buf());
+        let context = PluginDiscoveryContext::new(
+            plugins_dir.to_path_buf(),
+            plugins_dir.to_path_buf(),
+            Arc::new(PluginArchiveSession::new()),
+        );
         let enabled = BTreeMap::from([(String::from("weather@mkt"), true)]);
         let discovered = discover_effective_plugins(plugins_dir, &enabled, &context).await;
 
-        assert_eq!(
-            discovered
-                .iter()
-                .map(|(_, manifest, _)| manifest.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["weather"]
-        );
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].1.name, "weather");
+        assert_eq!(discovered[0].2, cache_path);
         assert_eq!(
             serde_json::from_slice::<Value>(
                 &fs::read(crate::installed::path(plugins_dir)).unwrap()
@@ -6278,7 +7020,7 @@ mod tests {
                     "weather@mkt": [{
                         "scope": "user",
                         "version": "1.0.0",
-                        "installPath": "cache/mkt/weather/1.0.0",
+                        "installPath": cache_path,
                         "installedAt": "2026-08-31T00:00:00.000Z",
                         "lastUpdated": "2026-08-31T00:00:00.000Z"
                     }]
@@ -7824,5 +8566,309 @@ mod tests {
             "an MCPB manifest with no `server` must yield no server, got {:?}",
             manifest.components.mcp_servers
         );
+    }
+
+    #[test]
+    fn enabled_discovery_does_not_infer_paths_from_nested_legacy_registry_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        let context = PluginDiscoveryContext::new(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            Arc::new(PluginArchiveSession::new()),
+        );
+        let legacy_records = serde_json::json!({
+            "acme": {
+                "weather": {
+                    "version": "2.0.0",
+                    "installPath": "cache/acme/weather/2.0.0"
+                }
+            }
+        });
+
+        assert!(exact_installed_paths(
+            &plugins_dir,
+            "weather@acme",
+            Some(&legacy_records),
+            &context,
+        )
+        .is_none());
+    }
+
+    fn write_current_marketplace(
+        plugins_dir: &Path,
+        marketplace_root: &Path,
+        marketplace: &str,
+        entry: &serde_json::Value,
+    ) {
+        let mut marketplaces = serde_json::Map::new();
+        marketplaces.insert(
+            marketplace.to_string(),
+            serde_json::json!({"installLocation": marketplace_root}),
+        );
+        fs::create_dir_all(marketplace_root.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        if let Some(source) = entry.get("source").and_then(serde_json::Value::as_str) {
+            fs::create_dir_all(marketplace_root.join(source)).unwrap();
+        }
+        fs::write(
+            marketplace_root
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
+            serde_json::json!({"name": marketplace, "plugins": [entry]}).to_string(),
+        )
+        .unwrap();
+        fs::create_dir_all(plugins_dir).unwrap();
+        fs::write(
+            plugins_dir.join("known_marketplaces.json"),
+            serde_json::Value::Object(marketplaces).to_string(),
+        )
+        .unwrap();
+    }
+
+    fn write_v2_install_record(plugins_dir: &Path, plugin_key: &str, install_path: &Path) {
+        fs::create_dir_all(plugins_dir).unwrap();
+        let mut plugins = serde_json::Map::new();
+        plugins.insert(
+            plugin_key.to_string(),
+            serde_json::json!([{
+                "scope": "user",
+                "installPath": install_path,
+                "version": "2.0.0"
+            }]),
+        );
+        fs::write(
+            crate::installed::path(plugins_dir),
+            serde_json::json!({"version": 2, "plugins": plugins}).to_string(),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn recorded_zip_without_plugin_json_uses_the_matching_local_marketplace_entry() {
+        use std::io::Write as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        let marketplace_root = tmp.path().join("marketplaces/acme");
+        write_current_marketplace(
+            &plugins_dir,
+            &marketplace_root,
+            "acme",
+            &serde_json::json!({
+                "name": "weather",
+                "version": "2.0.0",
+                "source": "./weather",
+                "description": "Catalog description",
+                "skills": "./skills"
+            }),
+        );
+
+        let archive = plugins_dir.join("cache/acme/weather/2.0.0.zip");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "skills/weather/SKILL.md",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer
+            .write_all(b"---\nname: weather\ndescription: weather tool\n---\n")
+            .unwrap();
+        fs::write(&archive, writer.finish().unwrap().into_inner()).unwrap();
+        write_v2_install_record(&plugins_dir, "weather@acme", &archive);
+
+        let context = PluginDiscoveryContext::new(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            Arc::new(PluginArchiveSession::new()),
+        );
+        let enabled = BTreeMap::from([(String::from("weather@acme"), true)]);
+        let discovered = discover_enabled_plugins(&plugins_dir, &enabled, &context).await;
+
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].1.name, "weather");
+        assert_eq!(discovered[0].1.version, "2.0.0");
+        assert_eq!(discovered[0].1.description, "Catalog description");
+        assert_eq!(discovered[0].1.components.skills.len(), 1);
+        assert_ne!(discovered[0].2, archive);
+        assert!(!discovered[0]
+            .2
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json")
+            .is_file());
+
+        let recorded = discover_recorded_plugins(&plugins_dir, &context.archive_session).await;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].1.name, "weather");
+        assert_eq!(recorded[0].2, discovered[0].2);
+    }
+
+    #[tokio::test]
+    async fn recorded_zip_without_plugin_json_uses_cached_github_entry_without_fetching() {
+        use std::io::Write as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        let marketplace_root = tmp.path().join("marketplaces/acme");
+        write_current_marketplace(
+            &plugins_dir,
+            &marketplace_root,
+            "acme",
+            &serde_json::json!({
+                "name": "weather",
+                "version": "2.0.0",
+                "source": {"source": "github", "repo": "example/weather", "ref": "main"},
+                "external": true,
+                "description": "Cached catalog description",
+                "skills": "./skills"
+            }),
+        );
+
+        // The installed ZIP is already on disk. Discovery reads the local
+        // catalog metadata and does not clone or download the GitHub source.
+        let archive = plugins_dir.join("cache/acme/weather/2.0.0.zip");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "skills/weather/SKILL.md",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer
+            .write_all(b"---\nname: weather\ndescription: cached weather skill\n---\n")
+            .unwrap();
+        fs::write(&archive, writer.finish().unwrap().into_inner()).unwrap();
+        write_v2_install_record(&plugins_dir, "weather@acme", &archive);
+
+        let context = PluginDiscoveryContext::new(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            Arc::new(PluginArchiveSession::new()),
+        );
+        let enabled = BTreeMap::from([(String::from("weather@acme"), true)]);
+        let discovered = discover_enabled_plugins(&plugins_dir, &enabled, &context).await;
+
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].1.name, "weather");
+        assert_eq!(discovered[0].1.version, "2.0.0");
+        assert_eq!(discovered[0].1.description, "Cached catalog description");
+        assert_eq!(discovered[0].1.components.skills.len(), 1);
+        assert!(!discovered[0]
+            .2
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json")
+            .is_file());
+    }
+
+    #[tokio::test]
+    async fn marketplace_manifest_fallback_rejects_missing_or_invalid_catalog_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        let plugin_dir = plugins_dir.join("cache/acme/weather/2.0.0");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        write_v2_install_record(&plugins_dir, "weather@acme", &plugin_dir);
+
+        let context = PluginDiscoveryContext::new(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            Arc::new(PluginArchiveSession::new()),
+        );
+        let enabled = BTreeMap::from([(String::from("weather@acme"), true)]);
+        assert!(discover_enabled_plugins(&plugins_dir, &enabled, &context)
+            .await
+            .is_empty());
+        assert!(load_plugin_from_path(&plugin_dir).await.is_none());
+
+        let marketplace_root = tmp.path().join("marketplaces/acme");
+        write_current_marketplace(
+            &plugins_dir,
+            &marketplace_root,
+            "acme",
+            &serde_json::json!({
+                "name": "another-plugin",
+                "source": "./another-plugin"
+            }),
+        );
+        assert!(discover_enabled_plugins(&plugins_dir, &enabled, &context)
+            .await
+            .is_empty());
+
+        write_current_marketplace(
+            &plugins_dir,
+            &marketplace_root,
+            "acme",
+            &serde_json::json!({
+                "name": "weather",
+                "source": "./weather",
+                "skills": 42
+            }),
+        );
+        assert!(discover_enabled_plugins(&plugins_dir, &enabled, &context)
+            .await
+            .is_empty());
+
+        write_current_marketplace(
+            &plugins_dir,
+            &marketplace_root,
+            "acme",
+            &serde_json::json!({
+                "name": "weather",
+                "source": {"source": "unrecognized-source"}
+            }),
+        );
+        assert!(discover_enabled_plugins(&plugins_dir, &enabled, &context)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn present_malformed_plugin_json_does_not_fall_back_to_marketplace_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        let marketplace_root = tmp.path().join("marketplaces/acme");
+        write_current_marketplace(
+            &plugins_dir,
+            &marketplace_root,
+            "acme",
+            &serde_json::json!({"name": "weather", "source": "./weather"}),
+        );
+        let plugin_dir = plugins_dir.join("cache/acme/weather/2.0.0");
+        fs::create_dir_all(plugin_dir.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin_dir
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            "{ not valid json",
+        )
+        .unwrap();
+        write_v2_install_record(&plugins_dir, "weather@acme", &plugin_dir);
+
+        let context = PluginDiscoveryContext::new(
+            tmp.path().to_path_buf(),
+            tmp.path().to_path_buf(),
+            Arc::new(PluginArchiveSession::new()),
+        );
+        let enabled = BTreeMap::from([(String::from("weather@acme"), true)]);
+        assert!(discover_enabled_plugins(&plugins_dir, &enabled, &context)
+            .await
+            .is_empty());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            let manifest_path = plugin_dir
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json");
+            fs::remove_file(&manifest_path).unwrap();
+            let outside_manifest = tmp.path().join("outside-plugin.json");
+            fs::write(&outside_manifest, r#"{"name":"weather"}"#).unwrap();
+            symlink(&outside_manifest, &manifest_path).unwrap();
+            assert!(discover_enabled_plugins(&plugins_dir, &enabled, &context)
+                .await
+                .is_empty());
+        }
     }
 }

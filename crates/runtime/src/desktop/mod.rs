@@ -2404,6 +2404,9 @@ impl BuiltinCommandHandler for DesktopWorktreeCommandHandler {
 }
 
 pub struct DesktopRuntime {
+    /// Per-host owner for V2 installed-plugin archive materializations. The
+    /// same session is retained by the plugin manager and discovery contexts.
+    pub plugin_archive_session: Arc<plugin::PluginArchiveSession>,
     /// Ready lightweight child recipe; never calls the full host builder.
     pub side_chat_factory: Arc<dyn crate::side_chat::SideChatFactory>,
     /// Startup producers withheld until a cold-resume host has mounted history
@@ -5071,10 +5074,11 @@ impl PluginRuntime {
         // (1) The fresh target set from disk + settings.
         let additional_project_roots = self.additional_project_roots.read().await.clone();
         let (cwd, _) = self.session_cwd.snapshot();
-        let discovery_context = plugin::PluginDiscoveryContext {
-            cwd: cwd.clone(),
-            project_root: permission::set_cwd::project_root_of(&cwd).unwrap_or_else(|| cwd.clone()),
-        };
+        let discovery_context = plugin::PluginDiscoveryContext::new(
+            cwd.clone(),
+            permission::set_cwd::project_root_of(&cwd).unwrap_or_else(|| cwd.clone()),
+            self.manager.archive_session(),
+        );
         let target = discover_plugin_set(
             self.ambient,
             self.inline,

@@ -6426,13 +6426,17 @@ pub async fn build_with_credential_stack(
     // (`/reload-plugins`) The retained plugin subsystem — `None` when plugins are
     // entirely disabled (safe mode / `--bare` with no `--plugin-dir`), so the
     // interactive refresh reports "plugins disabled" rather than reloading.
+    // This is lazy: a host without V2 ZIP plugins creates no cache directory.
+    // The same session owns paths used by discovery, the manager, and refresh.
+    let plugin_archive_session = Arc::new(plugin::PluginArchiveSession::new());
     let mut plugin_runtime: Option<Arc<PluginRuntime>> = None;
     let plugin_discovery_cwd = session_cwd.cwd();
-    let plugin_discovery_context = plugin::PluginDiscoveryContext {
-        cwd: plugin_discovery_cwd.clone(),
-        project_root: permission::set_cwd::project_root_of(&plugin_discovery_cwd)
+    let plugin_discovery_context = plugin::PluginDiscoveryContext::new(
+        plugin_discovery_cwd.clone(),
+        permission::set_cwd::project_root_of(&plugin_discovery_cwd)
             .unwrap_or_else(|| plugin_discovery_cwd.clone()),
-    };
+        plugin_archive_session.clone(),
+    );
     if ambient_plugins || inline_plugins || restricted_policy_plugins {
         let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR")
             .map_or_else(|| cfg.lingxi_home.join("plugins"), std::path::PathBuf::from);
@@ -6492,6 +6496,7 @@ pub async fn build_with_credential_stack(
         let managed_mod_seats = managed_mod_seats_from_raw_tiers(managed_policy_layer.clone());
         let pm = Arc::new(
             plugin::PluginManager::new(
+                plugin_archive_session.clone(),
                 plugins_dir.clone(),
                 Arc::new(DesktopFileSystem::new(cwd_for_plugins.clone())),
                 http.clone(),
@@ -7225,6 +7230,7 @@ pub async fn build_with_credential_stack(
         availability: provider_availability.clone(),
     });
     Ok(DesktopRuntime {
+        plugin_archive_session,
         side_chat_factory,
         deferred_startup: tokio::sync::Mutex::new(deferred_startup),
         mcp_startup,

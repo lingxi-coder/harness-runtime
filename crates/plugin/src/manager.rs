@@ -29,6 +29,7 @@
 //!
 //! See spec §15.3.
 
+use crate::discovery::PluginArchiveSession;
 use crate::lifecycle::PluginState;
 use crate::loader::resolve_user_config;
 use crate::manifest::{ComponentPath, PluginManifest, PluginUserConfig};
@@ -275,6 +276,8 @@ struct ModWorkerRecoveryView {
 /// The `fs`, `http`, and `runtime` fields are reserved for Plan 16's
 /// install/fetch code; they are not used by the M1.21 stub.
 pub struct PluginManager {
+    /// Keeps V2 ZIP-cache materializations alive for this host session.
+    _archive_session: Arc<PluginArchiveSession>,
     plugins: Arc<RwLock<HashMap<PluginId, PluginState>>>,
     #[allow(dead_code)] // Used by Plan 16 install paths.
     install_dir: PathBuf,
@@ -537,6 +540,7 @@ impl PluginManager {
     #[must_use]
     #[allow(clippy::too_many_arguments)] // Wiring layer — every dep is required.
     pub fn new(
+        archive_session: Arc<PluginArchiveSession>,
         install_dir: PathBuf,
         fs: Arc<dyn FileSystem>,
         http: Arc<dyn HttpTransport>,
@@ -553,6 +557,7 @@ impl PluginManager {
     ) -> Self {
         let mod_store_root = install_dir.parent().unwrap_or(&install_dir).join("store");
         Self {
+            _archive_session: archive_session,
             plugins: Arc::new(RwLock::new(HashMap::new())),
             install_dir,
             fs,
@@ -597,6 +602,15 @@ impl PluginManager {
             project_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             plugin_monitor_tasks: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Return the exact host-session owner supplied to [`Self::new`]. Runtime
+    /// refresh and settings inventory must share this allocation with the
+    /// manager so extracted V2 ZIP paths remain live until the host session
+    /// ends.
+    #[must_use]
+    pub fn archive_session(&self) -> Arc<PluginArchiveSession> {
+        Arc::clone(&self._archive_session)
     }
 
     /// Share the host's live agent catalog with the plugin lifecycle.
@@ -2532,6 +2546,7 @@ mod plugin_workflow_context_tests {
             Arc::new(PosixHttp::new()),
         ));
         PluginManager::new(
+            Arc::new(PluginArchiveSession::new()),
             root.to_path_buf(),
             Arc::new(PosixFileSystem::new(root.to_path_buf())),
             Arc::new(PosixHttp::new()),
@@ -3958,6 +3973,7 @@ mod unload_tests {
             Arc::new(PosixHttp::new()),
         ));
         let manager = PluginManager::new(
+            Arc::new(PluginArchiveSession::new()),
             tmp.path().to_path_buf(),
             Arc::new(PosixFileSystem::new(tmp.path().to_path_buf())),
             Arc::new(PosixHttp::new()),
@@ -4249,6 +4265,7 @@ mod telemetry_tests {
             Arc::new(PosixHttp::new()),
         ));
         PluginManager::new(
+            Arc::new(PluginArchiveSession::new()),
             root.to_path_buf(),
             Arc::new(PosixFileSystem::new(root.to_path_buf())),
             Arc::new(PosixHttp::new()),
@@ -5065,6 +5082,7 @@ mod monitor_lifecycle_tests {
             Arc::new(PosixHttp::new()),
         ));
         PluginManager::new(
+            Arc::new(PluginArchiveSession::new()),
             root.to_path_buf(),
             Arc::new(PosixFileSystem::new(root.to_path_buf())),
             Arc::new(PosixHttp::new()),

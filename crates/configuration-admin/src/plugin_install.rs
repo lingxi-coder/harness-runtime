@@ -1895,7 +1895,6 @@ async fn run_install_inner(
     record.insert("lastUpdated".to_string(), Value::String(now));
     if auto_installed {
         record.insert("auto".to_string(), Value::Bool(true));
-        record.insert("autoInstalled".to_string(), Value::Bool(true));
     }
     if let Some(required_by) = required_by {
         record.insert(
@@ -2946,12 +2945,10 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(installed_path(&e.plugins)).unwrap()).unwrap()
     }
 
-    fn write_legacy_only_installed(e: &Env, doc: &Value) {
-        std::fs::write(
-            e.plugins.join("installed_plugins_v2.json"),
-            serde_json::to_string(doc).unwrap(),
-        )
-        .unwrap();
+    fn write_current_installed(e: &Env, doc: &Value) -> Vec<u8> {
+        let bytes = serde_json::to_vec(doc).unwrap();
+        std::fs::write(installed_path(&e.plugins), &bytes).unwrap();
+        bytes
     }
 
     fn string_field<'a>(metadata: &'a telemetry::LogEventMetadata, key: &str) -> &'a str {
@@ -3038,28 +3035,34 @@ mod tests {
     }
 
     #[test]
-    fn install_failure_restores_legacy_only_registry() {
+    fn install_failure_restores_current_registry_bytes() {
         let e = env();
-        let legacy = serde_json::json!({
-            "plugins": {
-                "oldmkt": {
-                    "weather": {
-                        "version": "1.0.0",
-                        "installPath": "cache/oldmkt/weather/1.0.0",
-                        "added": "2026-08-31T00:00:00.000Z"
-                    }
-                }
-            }
-        });
+        let weather_cache = e.plugins.join("cache/oldmkt/weather/1.0.0");
+        std::fs::create_dir_all(weather_cache.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
         std::fs::write(
-            e.plugins.join("installed_plugins_v2.json"),
-            serde_json::to_string(&legacy).unwrap(),
+            weather_cache
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"weather","version":"1.0.0"}"#,
         )
         .unwrap();
+        let current = serde_json::json!({
+            "version": 2,
+            "plugins": {
+                "weather@oldmkt": [{
+                    "scope": "user",
+                    "installPath": weather_cache.display().to_string(),
+                    "version": "1.0.0",
+                    "installedAt": "2026-08-31T00:00:00.000Z",
+                    "lastUpdated": "2026-08-31T00:00:00.000Z"
+                }]
+            }
+        });
+        let before = write_current_installed(&e, &current);
         std::fs::create_dir_all(e.home.join("settings.json")).unwrap();
 
         let err = run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
-            .expect_err("settings write failure must roll back the migrated registry");
+            .expect_err("settings write failure must roll back the current registry");
 
         assert!(
             err.contains("Failed to install plugin")
@@ -3067,14 +3070,15 @@ mod tests {
                 || err.contains("Not a directory"),
             "got: {err}"
         );
-        assert!(!installed_path(&e.plugins).exists());
         assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(e.plugins.join("installed_plugins_v2.json")).unwrap()
-            )
-            .unwrap(),
-            legacy
+            std::fs::read(installed_path(&e.plugins)).unwrap(),
+            before,
+            "failed install must restore the exact current registry bytes"
         );
+        assert!(installed_db(&e)["plugins"].get("weather@oldmkt").is_some());
+        assert!(installed_db(&e)["plugins"].get("hello@mymkt").is_none());
+        assert!(!e.plugins.join("cache/mymkt/hello/1.2.3").exists());
+        assert!(weather_cache.join(branding::PLUGIN_MANIFEST_DIR).exists());
     }
 
     #[test]
@@ -3162,44 +3166,48 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_install_and_migration_preserve_both_records() {
+    fn concurrent_install_and_discovery_preserve_both_records() {
         let e = env();
-        let legacy_cache = e.plugins.join("cache/oldmkt/weather/1.0.0");
-        std::fs::create_dir_all(legacy_cache.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        let weather_cache = e.plugins.join("cache/oldmkt/weather/1.0.0");
+        std::fs::create_dir_all(weather_cache.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
         std::fs::write(
-            legacy_cache
+            weather_cache
                 .join(branding::PLUGIN_MANIFEST_DIR)
                 .join("plugin.json"),
             r#"{"name":"weather","version":"1.0.0"}"#,
         )
         .unwrap();
-        std::fs::write(
-            e.plugins.join("installed_plugins_v2.json"),
-            serde_json::to_string(&serde_json::json!({
+        let _ = write_current_installed(
+            &e,
+            &serde_json::json!({
+                "version": 2,
                 "plugins": {
-                    "oldmkt": {
-                        "weather": {
-                            "version": "1.0.0",
-                            "installPath": "cache/oldmkt/weather/1.0.0",
-                            "added": "2026-08-31T00:00:00.000Z"
-                        }
-                    }
+                    "weather@oldmkt": [{
+                        "scope": "user",
+                        "installPath": weather_cache.display().to_string(),
+                        "version": "1.0.0",
+                        "installedAt": "2026-08-31T00:00:00.000Z",
+                        "lastUpdated": "2026-08-31T00:00:00.000Z"
+                    }]
                 }
-            }))
-            .unwrap(),
-        )
-        .unwrap();
+            }),
+        );
 
         let barrier = Arc::new(Barrier::new(2));
         let discover_plugins = e.plugins.clone();
         let discover_barrier = barrier.clone();
+        let archive_session = Arc::new(plugin::PluginArchiveSession::new());
+        let discover_archive_session = archive_session.clone();
         let discover = thread::spawn(move || {
             discover_barrier.wait();
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(plugin::discover_recorded_plugins(&discover_plugins))
+                .block_on(plugin::discover_recorded_plugins(
+                    &discover_plugins,
+                    &discover_archive_session,
+                ))
         });
 
         let install_plugins = e.plugins.clone();
@@ -3225,7 +3233,7 @@ mod tests {
             discovered
                 .iter()
                 .any(|(_, manifest, _)| manifest.name == "weather"),
-            "discovered plugin set must retain the legacy record"
+            "discovered plugin set must retain the current registry record"
         );
         assert_eq!(
             install_result,
@@ -3913,7 +3921,8 @@ mod tests {
         let installed = installed_db(&e);
         let dependency = &installed["plugins"]["shared@mymkt"][0];
         assert_eq!(dependency["auto"], Value::Bool(true));
-        assert_eq!(dependency["autoInstalled"], Value::Bool(true));
+        assert!(dependency.get("autoInstalled").is_none());
+        assert!(dependency.get("auto_installed").is_none());
         assert_eq!(dependency["requiredBy"], serde_json::json!(["hello@mymkt"]));
         assert_eq!(
             user_settings(&e)["enabledPlugins"]["shared@mymkt"],
@@ -4992,21 +5001,25 @@ mod tests {
     }
 
     #[test]
-    fn uninstall_failure_restores_legacy_only_registry() {
+    fn uninstall_failure_restores_current_registry_bytes() {
         let e = env();
-        let legacy = serde_json::json!({
+        let current = serde_json::json!({
             "version": 2,
             "plugins": {
                 "hello@mymkt": [{
                     "scope": "user",
-                    "installPath": e.plugins.join("cache/mymkt/hello/1.2.3").display().to_string(),
+                    "installPath": e
+                        .plugins
+                        .join("cache/mymkt/hello/1.2.3")
+                        .display()
+                        .to_string(),
                     "version": "1.2.3",
                     "installedAt": "2026-01-01T00:00:00.000Z",
                     "lastUpdated": "2026-01-01T00:00:00.000Z"
                 }]
             }
         });
-        write_legacy_only_installed(&e, &legacy);
+        let before = write_current_installed(&e, &current);
         std::fs::create_dir_all(e.home.join("settings.json")).unwrap();
 
         let err = run_uninstall(
@@ -5022,37 +5035,39 @@ mod tests {
         .unwrap_err();
 
         assert!(err.contains("Failed to uninstall plugin"), "{err}");
-        assert!(!installed_path(&e.plugins).exists());
         assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(e.plugins.join("installed_plugins_v2.json")).unwrap()
-            )
-            .unwrap(),
-            legacy
+            std::fs::read(installed_path(&e.plugins)).unwrap(),
+            before,
+            "failed uninstall must restore the exact current registry bytes"
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn update_symlinked_cache_root_restores_legacy_only_registry() {
+    fn update_symlinked_cache_root_restores_current_registry_bytes() {
         use std::os::unix::fs::symlink;
 
         let e = env();
-        let legacy = serde_json::json!({
+        let current = serde_json::json!({
             "version": 2,
             "plugins": {
                 "hello@mymkt": [{
                     "scope": "user",
-                    "installPath": "cache/mymkt/hello/1.2.3",
+                    "installPath": e
+                        .plugins
+                        .join("cache/mymkt/hello/1.2.3")
+                        .display()
+                        .to_string(),
                     "version": "1.2.3",
                     "installedAt": "2026-01-01T00:00:00.000Z",
                     "lastUpdated": "2026-01-01T00:00:00.000Z"
                 }]
             }
         });
-        write_legacy_only_installed(&e, &legacy);
+        let before = write_current_installed(&e, &current);
         let outside = e._tmp.path().join("outside-cache");
         std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("sentinel"), "must stay outside").unwrap();
         symlink(&outside, e.plugins.join("cache")).unwrap();
         bump_market_hello(&e, "2.0.0");
 
@@ -5062,14 +5077,16 @@ mod tests {
             err.contains("Refusing to use a symlinked plugin cache root"),
             "{err}"
         );
-        assert!(!installed_path(&e.plugins).exists());
         assert_eq!(
-            serde_json::from_str::<Value>(
-                &std::fs::read_to_string(e.plugins.join("installed_plugins_v2.json")).unwrap()
-            )
-            .unwrap(),
-            legacy
+            std::fs::read(installed_path(&e.plugins)).unwrap(),
+            before,
+            "rejected update must leave exact current registry bytes unchanged"
         );
+        assert_eq!(
+            std::fs::read(outside.join("sentinel")).unwrap(),
+            b"must stay outside"
+        );
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
     }
 
     #[test]
