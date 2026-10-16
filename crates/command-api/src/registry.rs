@@ -1537,7 +1537,7 @@ mod tests {
                 .iter()
                 .map(|name| name.string_at("").unwrap())
                 .collect::<Vec<_>>(),
-            []
+            Vec::<String>::new()
         );
         assert_eq!(
             registry

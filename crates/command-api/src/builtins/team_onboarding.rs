@@ -150,8 +150,7 @@ pub fn register_team_onboarding_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::builtin_support::SourceTextTestExt;
-    use crate::model::NativeCommandPolicyGate;
+    use crate::model::{NativeCommandPolicyGate, SourceTextTestExt};
     use std::sync::Mutex;
 
     struct FakeProvider {
