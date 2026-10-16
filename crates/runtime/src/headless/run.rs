@@ -2374,10 +2374,16 @@ async fn set_result_position(
         .as_ref()
         .and_then(|metrics| metrics.api_error_stop_reason.clone());
     let api_error = api_error_stop_reason.is_some();
+    let terminal_reason = api_error.then(|| {
+        metrics
+            .as_ref()
+            .and_then(|metrics| metrics.api_error_terminal_reason.clone())
+            .unwrap_or_else(|| "api_error".into())
+    });
     stream
         .set_result_metadata(crate::headless::stream_json::StreamJsonResultMetadata {
             is_error: api_error,
-            terminal_reason: api_error.then(|| "api_error".into()),
+            terminal_reason,
             queued_turn_count: u64::try_from(queued).unwrap_or(u64::MAX),
             result_index: index,
             num_turns: metrics.as_ref().map(|value| u64::from(value.num_turns)),
@@ -2448,6 +2454,65 @@ mod result_publication_tests {
         let errors = runtime.execution_errors.lock().unwrap();
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("HEADLESS_LOCAL_PROVIDER_ERROR"));
+    }
+
+    #[tokio::test]
+    async fn request_too_large_keeps_terminal_reason_separate_from_inner_stop_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let (output, receive) = tokio::io::duplex(128 * 1024);
+        let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(output)));
+        let mut runtime = super::tests::fixture_runtime(stream.clone(), root.path()).await;
+        let api = Arc::new(MockStreamingApiClient::with_open_error(
+            llm_runtime::LlmError::RequestTooLarge,
+            vec![],
+        ));
+        runtime.inner.orchestrator = orchestrator::ConversationOrchestrator::into_shared(
+            orchestrator::ConversationOrchestrator::new_with_streaming(
+                Default::default(),
+                Arc::new(MockApiClient::new(vec![])),
+                api,
+                Arc::new(tool_api::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                stream.clone(),
+                Arc::new(StaticMemoryProvider::empty()),
+                root.path().join("project"),
+            ),
+        );
+
+        let code = run_stream_json_print(
+            &Argv {
+                prompt: Some("go".into()),
+                ..Default::default()
+            },
+            &runtime,
+            stream.clone(),
+            permission::PermissionMode::Default,
+        )
+        .await;
+
+        assert_eq!(code, exit_codes::RUNTIME_ERROR);
+        stream.finish().await.unwrap();
+        let mut lines = tokio::io::BufReader::new(receive).lines();
+        let result = next_result(&mut lines, &mut Vec::new()).await;
+        assert_eq!(result["subtype"], "success");
+        assert_eq!(result["is_error"], true);
+        assert_eq!(result["terminal_reason"], "image_error");
+        assert_eq!(result["stop_reason"], "stop_sequence");
+        let metrics = runtime
+            .inner
+            .orchestrator
+            .completed_turn_metrics()
+            .expect("completed request-too-large turn metrics");
+        assert_eq!(metrics.stop_reason.as_deref(), Some("model_error"));
+        assert_eq!(
+            metrics.api_error_terminal_reason.as_deref(),
+            Some("image_error")
+        );
+        assert_eq!(
+            metrics.api_error_stop_reason.as_deref(),
+            Some("stop_sequence")
+        );
     }
 
     #[tokio::test]
