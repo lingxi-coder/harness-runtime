@@ -588,6 +588,12 @@ mod tests {
             assistant_message("The local project folder is the source of truth."),
         ];
         orchestrator.session.lock().await.history = original_history.clone();
+        // Main-turn preparation publishes the cache-safe request prefix before
+        // compaction. The forked summarizer requires that same snapshot.
+        orchestrator
+            .seed_compact_cache_safe_params(None)
+            .await
+            .expect("seed the main-request cache-safe snapshot");
         assert!(orchestrator.idle_compaction_enabled);
 
         orchestrator
@@ -662,6 +668,12 @@ mod tests {
             assistant_message("The second reply is settled."),
         ];
         orchestrator.session.lock().await.history = original_history.clone();
+        // Exercise the real forked summary path instead of returning early on
+        // the empty slot used only while assembling this fixture.
+        orchestrator
+            .seed_compact_cache_safe_params(None)
+            .await
+            .expect("seed the main-request cache-safe snapshot");
         let cancel = CancellationToken::new();
         let compact = orchestrator.maybe_compact_for_idle(&cancel);
         tokio::pin!(compact);
