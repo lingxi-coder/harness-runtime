@@ -800,6 +800,11 @@ pub trait BuiltinCommandHandler: Send + Sync {
     fn argument_hint(&self) -> Option<&str> {
         None
     }
+    /// Source aliases for this built-in command descriptor. Registration uses
+    /// the same values for both descriptor output and command resolution.
+    fn aliases(&self) -> Vec<Utf16JsonProjection> {
+        Vec::new()
+    }
     /// Native command object type for Headless command-pool admission. A
     /// producer without an exact Native command object returns `None`.
     fn native_type(&self) -> Option<NativeCommandType> {

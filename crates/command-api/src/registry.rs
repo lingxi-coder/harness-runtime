@@ -228,6 +228,7 @@ impl CommandRegistry {
             return;
         }
         let handler_native_type = h.native_type();
+        let handler_aliases = h.aliases();
         // A host extension explicitly supporting non-interactive execution
         // without a Native type owns its metadata. In particular, a local
         // `/cron` handler must not inherit its replaced prompt facade's type.
@@ -277,6 +278,7 @@ impl CommandRegistry {
             name: name.clone().into(),
             description: h.description().into(),
             argument_hint: h.argument_hint().map(Into::into),
+            aliases: handler_aliases.clone(),
             source: CommandSource::Builtin,
             kind: SlashCommandKind::Builtin {
                 handler_id: name.clone(),
@@ -304,6 +306,7 @@ impl CommandRegistry {
                 .or_else(|| existing_native.and_then(|command| command.policy_gate.clone())),
             ..SlashCommand::default()
         };
+        self.index_aliases(&name_units, &handler_aliases);
         self.insert_command(name_units.clone(), cmd);
         self.builtin_handlers.insert(name_units, h);
     }

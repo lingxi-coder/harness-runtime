@@ -175,6 +175,10 @@ impl BuiltinCommandHandler for ListAgentsHandler {
         "List subagents, teammates, and other LingXi sessions you can message"
     }
 
+    fn aliases(&self) -> Vec<Utf16JsonProjection> {
+        vec![LIST_AGENTS_ALIAS.into()]
+    }
+
     fn native_type(&self) -> Option<NativeCommandType> {
         Some(NativeCommandType::Local)
     }
@@ -558,7 +562,6 @@ pub fn register(
         "list-agents",
         super::register::native_builtin_catalog_order("list-agents"),
     );
-    registry.register_alias(LIST_AGENTS_ALIAS.into(), "list-agents".into());
     true
 }
 
@@ -825,6 +828,8 @@ mod tests {
                 .map(|handler| handler.name()),
             Some("list-agents")
         );
+        let descriptor = registry.resolve(&canonical).expect("canonical command");
+        assert_eq!(descriptor.aliases, vec![alias.clone()]);
         assert_eq!(
             registry
                 .resolve(&alias)

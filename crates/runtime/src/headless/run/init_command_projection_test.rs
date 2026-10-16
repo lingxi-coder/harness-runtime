@@ -242,6 +242,15 @@ async fn assembled_init_projection_applies_off_and_preserves_native_pools_and_or
         );
         assert_eq!(raw.string_units("/argumentHint"), Some(vec![0xdfff]));
         assert!(raw.at_pointer("/builtin").is_none());
+        let list_agents = descriptors
+            .iter()
+            .find(|command| command.string_at("/name") == Some("list-agents"))
+            .expect("enabled ListAgents command is present in headless init");
+        assert_eq!(
+            list_agents.string_at("/aliases/0"),
+            Some("peers"),
+            "the Native ListAgents alias is present in the control initialize DTO"
+        );
         assert!(descriptors.iter().all(|command| {
             command.string_units("/name") != Some(isolated_surrogate_skill_name())
         }));
