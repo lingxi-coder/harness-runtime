@@ -35,8 +35,10 @@ pub struct InsightsReport {
     pub auto_mode_recommendation: Option<Utf16JsonProjection>,
 }
 
-/// Host facts required before the Native `insights` prompt enters the command
-/// pool. `None` is unknown and therefore fails closed for this command.
+/// Host facts required to install and invoke the provider-backed `/insights`
+/// command. The Native command catalog uses its separate `allow_insights`
+/// policy gate; workspace availability remains required before report access.
+/// `None` is unknown and therefore fails closed for invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct InsightsCommandAvailability {
     /// The current workspace exists and satisfies the host's trust rule.
@@ -46,7 +48,8 @@ pub struct InsightsCommandAvailability {
 }
 
 impl InsightsCommandAvailability {
-    /// Native command availability: both independent facts must be true.
+    /// The provider-backed command may run only when both independent facts
+    /// are true. Native catalog counting evaluates the policy fact separately.
     #[must_use]
     pub const fn is_available(self) -> bool {
         matches!(self.workspace_available, Some(true)) && matches!(self.allow_insights, Some(true))
@@ -542,6 +545,34 @@ mod tests {
         assert!(matches!(
             handler.handle(&args("")).await,
             CommandResult::Done { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn workspace_requirement_still_blocks_invocation_when_policy_allows_insights() {
+        struct UntrustedWorkspaceProvider;
+
+        #[async_trait]
+        impl InsightsReportProvider for UntrustedWorkspaceProvider {
+            fn command_availability(&self) -> InsightsCommandAvailability {
+                InsightsCommandAvailability {
+                    workspace_available: Some(false),
+                    allow_insights: Some(true),
+                }
+            }
+
+            async fn generate_report(&self) -> Result<InsightsReport, Utf16JsonProjection> {
+                panic!("workspace admission must run before the report producer")
+            }
+        }
+
+        let handler = InsightsHandler::new(Arc::new(UntrustedWorkspaceProvider));
+        assert!(!handler.is_enabled());
+        assert!(matches!(
+            handler.handle(&args("")).await,
+            CommandResult::Done {
+                display: Some(message)
+            } if message.string_at("") == Some("Insights is unavailable for this workspace.")
         ));
     }
 }

@@ -374,6 +374,9 @@ pub struct TurnExecutionMetrics {
     pub model_stop_reason: Option<String>,
     /// HTTP status retained from the typed provider error, absent for local errors.
     pub api_error_status: Option<u16>,
+    /// Terminal reason emitted with the final API-error assistant, when the
+    /// classifier provides a more specific reason than the generic fallback.
+    pub api_error_terminal_reason: Option<String>,
     /// Inner stop reason of the final synthetic API-error assistant, if any.
     pub api_error_stop_reason: Option<String>,
 }
@@ -621,7 +624,21 @@ impl ConversationOrchestrator {
             active.api_error_stop_reason = reason.map(str::to_owned);
             if reason.is_none() {
                 active.api_error_status = None;
+                active.api_error_terminal_reason = None;
             }
+        }
+    }
+
+    pub(crate) fn note_turn_api_error_terminal_reason(&self, reason: &str) {
+        if let Some(active) = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+            .as_mut()
+        {
+            active.api_error_terminal_reason = Some(reason.to_owned());
         }
     }
 
@@ -2473,6 +2490,7 @@ mod api_error_metrics_tests {
         };
         orch.persist_api_error_message_to_jsonl(&error, ApiErrorEnvelope::default())
             .await;
+        orch.note_turn_api_error_terminal_reason("image_error");
         orch.note_turn_api_error_status(Some(400));
         {
             let state = orch.prompt_runtime.turn_execution_metrics.lock().unwrap();
@@ -2482,6 +2500,10 @@ mod api_error_metrics_tests {
                 Some("stop_sequence")
             );
             assert_eq!(active.api_error_status, Some(400));
+            assert_eq!(
+                active.api_error_terminal_reason.as_deref(),
+                Some("image_error")
+            );
         }
         let ordinary = ConversationMessage::Assistant {
             per_turn_effort: None,
@@ -2498,5 +2520,23 @@ mod api_error_metrics_tests {
         let metrics = orch.completed_turn_metrics().unwrap();
         assert_eq!(metrics.api_error_stop_reason, None);
         assert_eq!(metrics.api_error_status, None);
+        assert_eq!(metrics.api_error_terminal_reason, None);
+    }
+
+    #[test]
+    fn starting_a_new_turn_resets_api_error_terminal_reason() {
+        let mut state = TurnExecutionMetricsState::default();
+        state.begin_turn();
+        let active = state.active.as_mut().unwrap();
+        active.api_error_terminal_reason = Some("image_error".into());
+        active.api_error_stop_reason = Some("stop_sequence".into());
+        active.api_error_status = Some(413);
+        state.complete_turn();
+
+        state.begin_turn();
+        let active = state.active.as_ref().unwrap();
+        assert_eq!(active.api_error_terminal_reason, None);
+        assert_eq!(active.api_error_stop_reason, None);
+        assert_eq!(active.api_error_status, None);
     }
 }

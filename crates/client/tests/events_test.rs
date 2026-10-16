@@ -19,7 +19,33 @@ use client::protocol::listings::{SessionAgentMessageRowDto, SessionAgentSummaryD
 use client::protocol::message::{MessageBlockDto, MessageDto};
 use client::protocol::permission::PermissionResolutionDto;
 use client::protocol::text::ClientTextDto;
-use client::protocol::tool_display::{ToolHeaderDto, ToolVerbDto};
+use client::protocol::tool_display::{ToolHeaderDto, ToolResultDisplayDto, ToolVerbDto};
+
+fn test_tool_header(label: &str) -> ToolHeaderDto {
+    ToolHeaderDto {
+        verb: ToolVerbDto::Generic,
+        icon: None,
+        label: label.to_string(),
+        primary: None,
+        qualifier: None,
+        count: None,
+        sub_line: None,
+        title: label.to_string(),
+    }
+}
+
+fn test_tool_display() -> ToolResultDisplayDto {
+    ToolResultDisplayDto {
+        headline: None,
+        headline_kind: None,
+        headline_args: Vec::new(),
+        diff: None,
+        body: None,
+        body_lines: 0,
+        body_truncated: false,
+        collapsed: false,
+    }
+}
 
 #[test]
 fn permission_request_resolution_is_authoritative_event() {
@@ -34,13 +60,14 @@ fn permission_request_resolution_is_authoritative_event() {
 }
 
 #[test]
-fn tool_header_icon_is_optional_for_older_wire_payloads() {
+fn tool_header_icon_can_be_absent_for_current_renderers() {
     let old = serde_json::json!({
         "verb": "read",
         "label": "Read",
         "title": "Read(file.txt)"
     });
-    let header: ToolHeaderDto = serde_json::from_value(old).expect("old header remains readable");
+    let header: ToolHeaderDto =
+        serde_json::from_value(old).expect("header without an icon is valid");
     assert_eq!(header.verb, ToolVerbDto::Read);
     assert_eq!(header.icon, None);
 }
@@ -301,12 +328,19 @@ fn tool_use_started_round_trips() {
         id: "tu_01".to_string(),
         tool: "Read".to_string(),
         input_json: r#"{"file_path":"/tmp/x"}"#.to_string(),
-        header: None,
+        header: test_tool_header("Read"),
     };
     let json = serde_json::to_value(&ev).expect("serialize ToolUseStarted");
     assert_eq!(json["type"], "tool_use_started");
     assert_eq!(json["id"], "tu_01");
     assert_eq!(json["tool"], "Read");
+    assert!(json["header"].is_object());
+    let mut missing_header = json.clone();
+    missing_header
+        .as_object_mut()
+        .expect("tool-use event object")
+        .remove("header");
+    assert!(serde_json::from_value::<ClientEvent>(missing_header).is_err());
     // The payload is a JSON String on the wire, NOT a nested object.
     assert!(
         json["input_json"].is_string(),
@@ -325,7 +359,7 @@ fn tool_use_result_round_trips() {
         tool: "Read".to_string(),
         result_json: r#"{"content":"ok"}"#.to_string(),
         is_error: false,
-        display: None,
+        display: test_tool_display(),
     };
     let json = serde_json::to_value(&ev).expect("serialize ToolUseResult");
     assert_eq!(json["type"], "tool_use_result");
@@ -336,6 +370,14 @@ fn tool_use_result_round_trips() {
         "result_json must be a String"
     );
     assert_eq!(json["is_error"], false);
+    assert!(json["display"].is_object());
+    assert!(json["display"].get("diff").is_none());
+    let mut missing_display = json.clone();
+    missing_display
+        .as_object_mut()
+        .expect("tool-use-result event object")
+        .remove("display");
+    assert!(serde_json::from_value::<ClientEvent>(missing_display).is_err());
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize ToolUseResult");
     assert_eq!(back, ev);
 }
@@ -359,7 +401,7 @@ fn message_complete_round_trips() {
                     id: "tu_01".to_string(),
                     tool: "Read".to_string(),
                     input_json: "{}".to_string(),
-                    header: None,
+                    header: test_tool_header("Read"),
                 },
             ],
             images: Vec::new(),

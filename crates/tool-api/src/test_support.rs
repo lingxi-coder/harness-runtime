@@ -890,9 +890,9 @@ pub fn ctx_for_file_tools(
         computer_control: None,
         read_file_state: crate::read_file_state::new_read_file_state_map(),
         read_deny_exclude_globs: vec![],
-        android_shell: None,
-        android_git: None,
-        android_git_secret: None,
+        mobile_shell: None,
+        mobile_git: None,
+        mobile_git_secret: None,
         task_lifecycle_hooks: None,
     }
 }
@@ -968,9 +968,9 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         computer_control: None,
         read_file_state: crate::read_file_state::new_read_file_state_map(),
         read_deny_exclude_globs: vec![],
-        android_shell: None,
-        android_git: None,
-        android_git_secret: None,
+        mobile_shell: None,
+        mobile_git: None,
+        mobile_git_secret: None,
         task_lifecycle_hooks: None,
     }
 }

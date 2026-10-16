@@ -152,13 +152,6 @@ impl CostCalculator {
         }
     }
 
-    /// Legacy alias kept so existing callers compile — delegates to
-    /// [`Self::fast_tier_override`] after checking the `opus-4-6` model id.
-    #[cfg(test)]
-    fn opus_4_6_fast_override(usage: &Usage, pricing: &ModelPricing) -> Option<ModelPricing> {
-        Self::fast_tier_override(usage, pricing)
-    }
-
     /// Estimated cache-read savings in nano-USD: the difference between the
     /// (counterfactual) input-rate cost of the cache-read tokens and what was
     /// actually paid at the cache-read rate. Returns `0` when either rate is

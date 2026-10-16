@@ -847,7 +847,8 @@ pub struct StreamJsonResultMetadata {
     pub ttft_ms: Option<u64>,
     /// Milliseconds from query start to the first response message start.
     pub ttft_stream_ms: Option<u64>,
-    /// Milliseconds from query start to dispatch of the first SDK request.
+    /// Milliseconds from query start to the dispatch timestamp carried by the
+    /// first observed response message-start. Failed dispatches alone do not qualify.
     pub time_to_request_ms: Option<u64>,
     /// Milliseconds from query start to the first response content frame.
     pub first_content_frame_ms: Option<u64>,
@@ -877,6 +878,7 @@ pub struct StreamJsonResultMetadata {
 struct QueryResponseTiming {
     started: Option<std::time::Instant>,
     first_request: Option<std::time::Instant>,
+    first_confirmed_request: Option<std::time::Instant>,
     first_request_wall_ms: Option<i64>,
     first_request_input_tokens: Option<u64>,
     current_request: Option<std::time::Instant>,
@@ -908,6 +910,9 @@ impl QueryResponseTiming {
                 self.current_message_start = None;
             }
             ResponseTimingEvent::MessageStart => {
+                if self.first_confirmed_request.is_none() {
+                    self.first_confirmed_request = self.current_request;
+                }
                 self.first_message_start.get_or_insert(at);
                 self.current_message_start = Some(at);
             }
@@ -929,9 +934,10 @@ impl QueryResponseTiming {
             self.first_message_start
                 .map(|at| rounded_elapsed_ms(start, at))
         });
-        metadata.time_to_request_ms = metadata
-            .time_to_request_ms
-            .or_else(|| self.first_request.map(|at| rounded_elapsed_ms(start, at)));
+        metadata.time_to_request_ms = metadata.time_to_request_ms.or_else(|| {
+            self.first_confirmed_request
+                .map(|at| rounded_elapsed_ms(start, at))
+        });
         metadata.first_content_frame_ms = metadata
             .first_content_frame_ms
             .or_else(|| self.first_content.map(|at| rounded_elapsed_ms(start, at)));
@@ -2428,19 +2434,22 @@ impl StreamJsonStream {
                 json_value_from_projection(&value).unwrap_or(Value::Null),
             );
         }
-        if let Some(value) = metadata.ttft_ms {
+        if let Some(value) = metadata.ttft_ms.filter(|_| !metadata.is_error) {
             obj.insert("ttft_ms".into(), json!(value));
         }
         obj.insert("type".into(), json!("result"));
         obj.insert("duration_ms".into(), json!(duration_ms));
         obj.insert("uuid".into(), json!(uuid));
-        if let Some(value) = metadata.ttft_stream_ms {
+        if let Some(value) = metadata.ttft_stream_ms.filter(|_| !metadata.is_error) {
             obj.insert("ttft_stream_ms".into(), json!(value));
         }
-        if let Some(value) = metadata.time_to_request_ms {
+        if let Some(value) = metadata.time_to_request_ms.filter(|_| !metadata.is_error) {
             obj.insert("time_to_request_ms".into(), json!(value));
         }
-        if let Some(value) = metadata.first_content_frame_ms {
+        if let Some(value) = metadata
+            .first_content_frame_ms
+            .filter(|_| !metadata.is_error)
+        {
             obj.insert("first_content_frame_ms".into(), json!(value));
         }
         self.append_success_request_metrics(&mut obj);
@@ -4089,6 +4098,148 @@ mod tests {
             .unwrap()
             .fill_metadata(&mut reset);
         assert!(reset.ttft_ms.is_none() && reset.time_to_request_ms.is_none());
+    }
+
+    #[tokio::test]
+    async fn time_to_request_requires_message_start_and_non_error_result() {
+        let stream = StreamJsonStream::new_placeholder(Output::new(tokio::io::sink()));
+        let epoch = std::time::Instant::now();
+        stream.response_timing.lock().unwrap().started = Some(epoch);
+        stream.note_response_timing(
+            ResponseTimingEvent::RequestStarted,
+            epoch + std::time::Duration::from_millis(10),
+        );
+
+        let dispatch_only = stream
+            .build_result_success_frame(
+                "failed request",
+                "end_turn",
+                &CostSnapshot::default(),
+                "model",
+                "off",
+                None,
+                &[],
+            )
+            .await;
+        assert!(
+            dispatch_only.get("time_to_request_ms").is_none(),
+            "dispatch alone does not prove SDK message creation succeeded"
+        );
+
+        stream
+            .set_result_metadata(StreamJsonResultMetadata {
+                is_error: true,
+                ..Default::default()
+            })
+            .await;
+        let dispatch_error = stream
+            .build_result_success_frame(
+                "HTTP error",
+                "end_turn",
+                &CostSnapshot::default(),
+                "model",
+                "off",
+                None,
+                &[],
+            )
+            .await;
+        assert!(dispatch_error.get("time_to_request_ms").is_none());
+
+        stream.note_response_timing(
+            ResponseTimingEvent::MessageStart,
+            epoch + std::time::Duration::from_millis(20),
+        );
+        stream.note_response_timing(
+            ResponseTimingEvent::ContentFrame,
+            epoch + std::time::Duration::from_millis(21),
+        );
+        stream.note_response_timing(
+            ResponseTimingEvent::AssistantMessage,
+            epoch + std::time::Duration::from_millis(22),
+        );
+        let mut observed = StreamJsonResultMetadata::default();
+        stream
+            .response_timing
+            .lock()
+            .unwrap()
+            .fill_metadata(&mut observed);
+        assert!(observed.time_to_request_ms.is_some());
+        assert!(observed.ttft_stream_ms.is_some());
+        assert!(observed.first_content_frame_ms.is_some());
+        assert!(observed.ttft_ms.is_some());
+
+        let response_error = stream
+            .build_result_success_frame(
+                "error after message start",
+                "end_turn",
+                &CostSnapshot::default(),
+                "model",
+                "off",
+                None,
+                &[],
+            )
+            .await;
+        assert!(
+            response_error.get("time_to_request_ms").is_none()
+                && response_error.get("ttft_ms").is_none()
+                && response_error.get("ttft_stream_ms").is_none()
+                && response_error.get("first_content_frame_ms").is_none(),
+            "an error result omits every success-only timing"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_dispatch_then_message_start_uses_the_confirmed_retry_request() {
+        let stream = StreamJsonStream::new_placeholder(Output::new(tokio::io::sink()));
+        let epoch = std::time::Instant::now();
+        stream.response_timing.lock().unwrap().started = Some(epoch);
+        stream.note_response_timing(
+            ResponseTimingEvent::RequestStarted,
+            epoch + std::time::Duration::from_millis(12),
+        );
+        // The first dispatch fails before the SDK emits message_start.
+        stream.note_response_timing(
+            ResponseTimingEvent::RequestStarted,
+            epoch + std::time::Duration::from_millis(80),
+        );
+        stream.note_response_timing(
+            ResponseTimingEvent::MessageStart,
+            epoch + std::time::Duration::from_millis(96),
+        );
+        stream.note_response_timing(
+            ResponseTimingEvent::ContentFrame,
+            epoch + std::time::Duration::from_millis(101),
+        );
+        stream.note_response_timing(
+            ResponseTimingEvent::AssistantMessage,
+            epoch + std::time::Duration::from_millis(103),
+        );
+
+        let frame = stream
+            .build_result_success_frame(
+                "done",
+                "end_turn",
+                &CostSnapshot::default(),
+                "model",
+                "off",
+                None,
+                &[],
+            )
+            .await;
+
+        assert_eq!(frame["time_to_request_ms"], 80);
+        assert_eq!(frame["ttft_ms"], 103);
+        assert_eq!(frame["ttft_stream_ms"], 96);
+        assert_eq!(frame["first_content_frame_ms"], 101);
+        assert_eq!(
+            stream
+                .response_timing
+                .lock()
+                .unwrap()
+                .partial_ttft_ms(epoch + std::time::Duration::from_millis(104)),
+            Some(16),
+            "partial TTFT remains relative to the current physical request"
+        );
     }
 
     #[tokio::test]

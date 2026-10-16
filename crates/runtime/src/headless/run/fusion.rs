@@ -142,11 +142,12 @@ pub(super) fn fusion_result_exit_code(outcome: Option<&FusionPrintOutcome>) -> i
 
 /// Whether `state` is DONE for print mode's purposes — terminal, AND (for a
 /// `Completed` run specifically) its publication attempt has a terminal typed
-/// receipt. `finish_fusion_terminal` flips the task to a terminal state before the
-/// handler awaits `FusionCompletionSink::publish`, so a waiter must remain on
-/// `Pending`; `Published`, durable `Queued`, and explicit publication failures
-/// are all ready to report with their distinct exit semantics. A failed run
-/// with a retained answer also waits; computation failures and kills do not.
+/// receipt. The per-session recorder returns its typed receipt before
+/// `finish_fusion_terminal` exposes terminal state, so a waiter remains on
+/// `Pending` until publication reaches a terminal result. `Published`, durable
+/// `Queued`, and explicit publication failures are all ready to report with
+/// their distinct exit semantics. A failed run with a retained answer also
+/// waits; computation failures and kills do not.
 pub(super) fn fusion_result_ready(state: &tasks::state::TaskState) -> bool {
     let tasks::state::TaskState::LocalFusion(fusion) = state else {
         return state.base().status.is_terminal();

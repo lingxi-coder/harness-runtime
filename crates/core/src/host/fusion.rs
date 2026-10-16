@@ -1349,8 +1349,7 @@ pub trait FusionRunRecorder: Send + Sync {
 /// Pure host factory for a recorder pinned to one already-hydrated session
 /// authority. Entrypoints call this during preparation, so a hot A→B switch
 /// cannot leave a future run holding A's recorder. Returning `None` means the
-/// trusted session is not currently mounted and the caller must fail closed or
-/// use its explicitly configured legacy adapter.
+/// trusted session is not currently mounted and the caller must fail closed.
 pub trait FusionRunRecorderFactory: Send + Sync {
     /// Resolve a recorder without I/O or permit acquisition.
     fn recorder_for(
@@ -3001,7 +3000,7 @@ impl FusionPublicationStatus {
     }
 }
 
-/// Typed acknowledgement returned by a [`FusionCompletionSink`].
+/// Typed acknowledgement returned by a [`FusionRunRecorder`].
 ///
 /// The optional error is sanitized, host-owned context. It is retained on the
 /// task state so callers can report a storage/outbox failure without dropping
@@ -3134,11 +3133,6 @@ pub struct DurableFusionTerminalRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outbox: Option<DurableFusionOutboxRecord>,
 }
-
-/// Compatibility alias used by callers that describe the field as a state
-/// rather than a status. Keep both spellings available while the durable
-/// outbox work remains a later package.
-pub type FusionPublicationState = FusionPublicationStatus;
 
 /// Progress stage names shared by Agent / slash / TUI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3767,7 +3761,7 @@ impl ImplementConfirmation {
     }
 }
 
-/// Build a prepared run around a single async body that produces the whole
+/// Build a test prepared run around a single async body that produces the whole
 /// result at once.
 ///
 /// Preparation for such an executor has nothing to resolve, so the body is
@@ -3777,9 +3771,10 @@ impl ImplementConfirmation {
 /// The prepared identity is authoritative, so a body that mints its own run id
 /// does not get to keep it.
 ///
-/// This exists for test doubles and other executors with no routing of their
-/// own. A production executor resolves a route and owns its own supervisor,
-/// and builds its [`PreparedFusionRun`] directly.
+/// This helper is available only to crate tests and the explicit `test-support`
+/// feature. Production executors resolve a route and own their supervisor,
+/// building their [`PreparedFusionRun`] directly.
+#[cfg(any(test, feature = "test-support"))]
 pub fn prepared_from_oneshot<F, Fut>(
     submission: FusionSubmission,
     effective_timeout_ms: Option<u64>,
@@ -3900,7 +3895,7 @@ pub trait FusionExecutor: Send + Sync + 'static {
     /// route and mints the run's control and facts without dispatching, and
     /// the returned handle is what actually starts work. A test double with
     /// nothing to prepare can build its handle with
-    /// [`prepared_from_oneshot`].
+    /// the test-support `prepared_from_oneshot` adapter.
     ///
     /// An analyst failure is carried as a completed
     /// [`FusionStatus::Unanalyzed`] outcome, not as an error.
@@ -3965,39 +3960,6 @@ pub trait FusionExecutor: Send + Sync + 'static {
     /// limit; a run it cannot price always asks.
     fn implement_confirmation(&self, _request: &FusionRequest) -> ImplementConfirmation {
         ImplementConfirmation::ask()
-    }
-}
-
-/// Parent-conversation sink for a finished Fusion run.
-///
-/// Failures here must not rewrite the Fusion task's terminal status.
-#[async_trait]
-pub trait FusionCompletionSink: Send + Sync {
-    /// Publish one sanitized Fusion result. Implementations must be idempotent
-    /// on `(conversation_id, run_id)` and return a truthful receipt. In
-    /// particular, a sink must return [`FusionPublicationStatus::Published`]
-    /// only after the append is durable; failures must not be represented as
-    /// an empty successful response.
-    async fn publish(
-        &self,
-        conversation_id: &str,
-        result: &FusionResult,
-    ) -> FusionPublicationReceipt;
-}
-
-/// Test / unwired sink.
-pub struct NoopFusionCompletionSink;
-
-#[async_trait]
-impl FusionCompletionSink for NoopFusionCompletionSink {
-    async fn publish(
-        &self,
-        _conversation_id: &str,
-        _result: &FusionResult,
-    ) -> FusionPublicationReceipt {
-        // A no-op sink is useful in standalone/unit-test hosts, but it never
-        // proves that a parent transcript was written.
-        FusionPublicationReceipt::not_required()
     }
 }
 
@@ -4426,20 +4388,6 @@ mod tests {
                 back.status == FusionPublicationStatus::Published
             );
         }
-    }
-
-    #[tokio::test]
-    async fn noop_completion_sink_never_claims_published() {
-        let result: FusionResult = serde_json::from_value(serde_json::json!({
-            "run_id": "fu_noop",
-            "status": "analyzed"
-        }))
-        .unwrap();
-        let receipt = NoopFusionCompletionSink
-            .publish("conversation", &result)
-            .await;
-        assert_eq!(receipt.status, FusionPublicationStatus::NotRequired);
-        assert!(!receipt.is_published());
     }
 
     /// G011: `PanelOutcome::error_detail` is additive — a result serialized
@@ -5648,7 +5596,7 @@ RunningPanels{{completed:0,..}}"
             submission: crate::host::FusionSubmission,
         ) -> Result<crate::host::PreparedFusionRun, crate::host::FusionError> {
             let timeout = self.effective_timeout_ms();
-            crate::host::prepared_from_oneshot(
+            crate::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, _progress| async move {
@@ -5675,7 +5623,7 @@ RunningPanels{{completed:0,..}}"
                 submission: crate::host::FusionSubmission,
             ) -> Result<crate::host::PreparedFusionRun, crate::host::FusionError> {
                 let timeout = self.effective_timeout_ms();
-                crate::host::prepared_from_oneshot(
+                crate::host::test_support::prepared_from_oneshot(
                     submission,
                     timeout,
                     move |_request, _inherit, _progress| async move {

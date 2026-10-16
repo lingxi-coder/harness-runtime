@@ -42,12 +42,17 @@ fn golden_starts_with_locked_header() {
 }
 
 #[test]
-fn golden_has_76_lines() {
-    // 1 header + 79 VISIBLE commands = 80 lines (each `\n`-terminated).
-    // The hidden/disabled commands (is_palette_hidden) are filtered out,
-    // The fixed 2.1.295 catalog and its checked-in help golden contain
-    // 76 visible, enabled entries; older 2.1.269 counts are not this oracle.
-    assert_eq!(GOLDEN.matches('\n').count(), 76);
+fn golden_has_77_lines_and_native_team_onboarding() {
+    // 1 header + 76 visible commands = 77 newline-terminated lines.
+    // The fixed 2.1.295 catalog has 83 builtins, 8 hidden/disabled entries,
+    // and the separately registered bundled `/doctor` row.
+    assert!(
+        GOLDEN
+            .lines()
+            .any(|line| line.starts_with("  /team-onboarding ")),
+        "the source-visible Native team-onboarding row must be in the golden"
+    );
+    assert_eq!(GOLDEN.matches('\n').count(), 77);
 }
 
 #[test]

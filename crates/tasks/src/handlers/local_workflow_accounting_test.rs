@@ -135,7 +135,6 @@ async fn output_accounting_failure_blocks_peer_after_awaited_listing() {
         Arc::new(AnalyticsBus::new()),
         None,
         None,
-        None,
         Some(scope),
     );
     let release = async {

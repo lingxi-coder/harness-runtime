@@ -77,10 +77,16 @@ mod tests {
                 // policy-only `/heapdump` object is absent from recognition.
                 assert!(!s.contains("  /heapdump "));
                 assert!(!s.contains("  /ant-trace "));
-                // 76 newlines total (1 header + 75 visible commands) at the
-                // Native 2.1.295 default gates: `/doctor` is one bundled row;
+                // 77 newline-terminated lines: one header plus 76 visible command
+                // rows (83 builtins minus 8 hidden commands, plus bundled `/doctor`).
                 // `/commit` is omitted while `tengu_cinder_relay` defaults off.
-                assert_eq!(s.string_at("").unwrap().matches('\n').count(), 76);
+                let text = s.string_at("").unwrap();
+                assert!(
+                    text.lines()
+                        .any(|line| line.starts_with("  /team-onboarding ")),
+                    "the source-visible Native team-onboarding command must appear"
+                );
+                assert_eq!(text.matches('\n').count(), 77);
                 assert!(s.contains("  /bug "));
                 assert!(s.contains("  /powerup "));
                 assert!(s.contains("  /output-style "));

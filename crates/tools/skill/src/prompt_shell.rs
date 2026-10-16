@@ -2553,7 +2553,7 @@ mod tests {
         let sandbox = Arc::new(RecordingSandbox::default());
         ctx.sandbox = sandbox.clone();
         ctx.process = Arc::new(RecordingProcessRunner);
-        ctx.android_shell = Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
+        ctx.mobile_shell = Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
             true,
             vec!["sh".into()],
             None,
@@ -2584,7 +2584,7 @@ mod tests {
         let sandbox = Arc::new(RecordingSandbox::default());
         ctx.sandbox = sandbox.clone();
         ctx.process = Arc::new(RecordingProcessRunner);
-        ctx.android_shell = Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
+        ctx.mobile_shell = Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
             true,
             vec!["sh".into()],
             None,
@@ -2620,7 +2620,7 @@ mod tests {
     async fn disabled_mobile_carrier_never_falls_back_to_desktop_shell() {
         let mut ctx = test_ctx();
         ctx.process = Arc::new(RecordingProcessRunner);
-        ctx.android_shell = Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
+        ctx.mobile_shell = Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
             false,
             vec!["sh".into()],
             None,
@@ -2679,7 +2679,7 @@ mod tests {
         let mut ctx = test_ctx();
         let gate = Arc::new(RecordingGate(Mutex::new(Vec::new())));
         ctx.permission_gate = Some(gate.clone());
-        ctx.android_shell = Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
+        ctx.mobile_shell = Some(tool_api::MobileShellToolCtx::mobile_linux_guest(
             true,
             vec!["sh".into()],
             None,

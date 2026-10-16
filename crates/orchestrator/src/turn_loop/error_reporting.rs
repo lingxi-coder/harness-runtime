@@ -813,6 +813,7 @@ pub(crate) async fn surface_model_error(
     let status = env.api_error_status;
     let reason = env.terminal_reason.unwrap_or("api_error");
     let id = surface_api_error_notice(orch, error_text, env).await;
+    orch.note_turn_api_error_terminal_reason(reason);
     orch.output
         .emit_terminal_api_error(status, reason, "stop_sequence")
         .await;

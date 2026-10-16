@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
-use futures::StreamExt as _;
+use futures::{future::BoxFuture, StreamExt as _};
 use lingxi_core::types::{
     utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, MessageId,
 };
@@ -1020,7 +1020,27 @@ impl StreamingTurnDriver<'_> {
         }))
     }
 
-    async fn open_iteration<'a>(
+    fn open_iteration<'orch: 'call, 'call>(
+        orch: &'orch ConversationOrchestrator,
+        prepared: PreparedStreamingIteration,
+        system_prompt: &'call Option<
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
+        user_cancel: &'call Option<CancellationToken>,
+        loop_state: &'call mut TurnLoopState,
+        retry_scope: &'call ModelCallRetryScope,
+    ) -> BoxFuture<'call, Result<OpenStreamingOutcome<'orch>, OrchestratorError>> {
+        Box::pin(StreamingTurnDriver::<'orch>::open_iteration_inner(
+            orch,
+            prepared,
+            system_prompt,
+            user_cancel,
+            loop_state,
+            retry_scope,
+        ))
+    }
+
+    async fn open_iteration_inner<'a>(
         orch: &'a ConversationOrchestrator,
         prepared: PreparedStreamingIteration,
         system_prompt: &Option<
@@ -2035,7 +2055,25 @@ impl StreamingTurnDriver<'_> {
         })
     }
 
-    async fn pump_iteration<'a>(
+    fn pump_iteration<'orch: 'call, 'call>(
+        orch: &'orch ConversationOrchestrator,
+        prepared: PreparedStreamingIteration,
+        system_prompt: &'call Option<
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
+        user_cancel: &'call Option<CancellationToken>,
+        loop_state: &'call mut TurnLoopState,
+    ) -> BoxFuture<'call, Result<PumpStreamingOutcome<'orch>, OrchestratorError>> {
+        Box::pin(StreamingTurnDriver::<'orch>::pump_iteration_inner(
+            orch,
+            prepared,
+            system_prompt,
+            user_cancel,
+            loop_state,
+        ))
+    }
+
+    async fn pump_iteration_inner<'a>(
         orch: &'a ConversationOrchestrator,
         prepared: PreparedStreamingIteration,
         system_prompt: &Option<
@@ -3502,8 +3540,7 @@ impl StreamingTurnDriver<'_> {
             );
             let window = orch
                 .api
-                .input_context_budget(&route.model, route.profile.as_deref())
-                .unwrap_or(0);
+                .context_window_tokens(&route.model, route.profile.as_deref());
             (label, window)
         };
         let (from_label, from_window) = facts(&current);
@@ -3553,7 +3590,7 @@ impl StreamingTurnDriver<'_> {
                 crate::turn_loop::execute_one_turn_with_recovery_tracked(
                     orch,
                     system_prompt.as_ref(),
-                    Some(&mut loop_state.recovery),
+                    &mut loop_state.recovery,
                     Some((
                         &loop_state.mod_turn_id,
                         loop_state.turn_count.saturating_sub(1),

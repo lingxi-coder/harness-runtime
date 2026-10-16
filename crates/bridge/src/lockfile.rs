@@ -310,40 +310,13 @@ impl IdeLockfile {
         Ok(())
     }
 
-    /// Parse a lockfile from disk. Returns the body plus the port encoded in
-    /// the filename.
-    ///
-    /// # Errors
-    /// Returns `InvalidData` if the file is not well-formed JSON matching
-    /// [`LockfileBody`], `InvalidInput` if the filename isn't `<port>.lock`,
-    /// or the underlying I/O error from reading the file.
-    pub fn read(path: &Path) -> std::io::Result<(LockfileBody, u16)> {
-        let raw = std::fs::read_to_string(path)?;
-        let body: LockfileBody = serde_json::from_str(&raw)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        let port = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.strip_suffix(".lock"))
-            .and_then(|s| s.parse::<u16>().ok())
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "lockfile name not <port>.lock",
-                )
-            })?;
-        Ok((body, port))
-    }
-
     /// Parse and validate a lockfile before using it as a local endpoint.
     ///
     /// Discovery is an authority boundary: a symlink, group/world-readable
     /// file, or lockfile owned by another user must never be allowed to supply
     /// an auth token to a client connection. The file is opened with
     /// `O_NOFOLLOW` on Unix after the metadata checks, closing the usual
-    /// check-then-open symlink race. `read` remains the intentionally lenient
-    /// parser used by compatibility callers and tests; all endpoint discovery
-    /// goes through this method.
+    /// check-then-open symlink race. Endpoint discovery must use this method.
     pub fn read_secure(path: &Path) -> std::io::Result<(LockfileBody, u16)> {
         Self::read_secure_with(path, is_process_alive)
     }
@@ -625,14 +598,14 @@ mod tests {
             vec![PathBuf::from("/w")],
         );
         lf.write().unwrap();
-        let (body, port) = IdeLockfile::read(&lf.path()).unwrap();
+        let (body, port) = IdeLockfile::read_secure(&lf.path()).unwrap();
         assert_eq!(port, 54321);
         assert_eq!(body.transport, "ws");
         assert_eq!(body.ide_name, "LingXi");
     }
 
     #[test]
-    fn read_rejects_filename_without_dot_lock() {
+    fn secure_read_rejects_filename_without_dot_lock() {
         let tmp = TempDir::new().unwrap();
         let bogus = tmp.path().join("40729.json");
         std::fs::write(
@@ -640,8 +613,8 @@ mod tests {
             r#"{"pid":1,"workspaceFolders":[],"ideName":"x","transport":"ws","runningInWindows":false,"authToken":"a"}"#,
         )
         .unwrap();
-        let err = IdeLockfile::read(&bogus).unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        let err = IdeLockfile::read_secure_with(&bogus, |_| true).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

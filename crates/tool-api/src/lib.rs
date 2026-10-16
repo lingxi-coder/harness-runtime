@@ -49,9 +49,9 @@ pub mod worktree_session;
 pub mod test_support;
 
 pub use builtin_context::{
-    AndroidGitSecret, AndroidGitToolCtx, AndroidShellToolCtx, BashEditDiffSetup,
-    BuiltinToolContext, GitCredentialProvider, LiveCwdCell, MainLoopModelProfileProvider,
-    MobileGitSecret, MobileGitToolCtx, MobileShellToolCtx, TaskLifecycleHookFirer,
+    BashEditDiffSetup, BuiltinToolContext, GitCredentialProvider, LiveCwdCell,
+    MainLoopModelProfileProvider, MobileGitSecret, MobileGitToolCtx, MobileShellToolCtx,
+    TaskLifecycleHookFirer,
 };
 pub use content_replacement::ContentReplacementState;
 pub use context::{ToolUseContext, ToolUseOptions};

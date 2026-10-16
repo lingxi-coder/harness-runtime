@@ -19,8 +19,8 @@ use lingxi_core::host::task_delivery::{
 };
 use lingxi_core::host::team_spawn::{TeamSpawnError, TeamSpawnSeam};
 use lingxi_core::host::{
-    BackgroundTaskHandle, BudgetEnforcerHandle, FileSystem, FusionActivation, FusionCompletionSink,
-    FusionExecutor, ProcessRunner, RuntimeSpawner, Sandbox, SubagentSpawner, ToolInvoker,
+    BackgroundTaskHandle, BudgetEnforcerHandle, FileSystem, FusionActivation, FusionExecutor,
+    ProcessRunner, RuntimeSpawner, Sandbox, SubagentSpawner, ToolInvoker,
 };
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::collections::{HashMap, HashSet};
@@ -6536,77 +6536,25 @@ pub fn register_dream_handler(
     );
 }
 
-/// Register [`TaskType::LocalFusion`]. Call before wrapping the registry in an
-/// [`Arc`].
-pub fn register_fusion_handler(
-    reg: &mut TaskRegistry,
-    executor: Arc<dyn FusionExecutor>,
-    sink: Arc<dyn FusionCompletionSink>,
-    tool_invoker: Arc<dyn ToolInvoker>,
-    budget: Arc<dyn BudgetEnforcerHandle>,
-    status_sink: Arc<dyn crate::handlers::TaskStatusSink>,
-) {
-    register_fusion_handler_with_recorder(
-        reg,
-        executor,
-        sink,
-        tool_invoker,
-        budget,
-        status_sink,
-        None,
-    );
-}
-
-/// Register Fusion with the common host-owned terminal recorder. The legacy
-/// helper above remains for mobile/tests that intentionally have no durable
-/// session capability.
-pub fn register_fusion_handler_with_recorder(
-    reg: &mut TaskRegistry,
-    executor: Arc<dyn FusionExecutor>,
-    sink: Arc<dyn FusionCompletionSink>,
-    tool_invoker: Arc<dyn ToolInvoker>,
-    budget: Arc<dyn BudgetEnforcerHandle>,
-    status_sink: Arc<dyn crate::handlers::TaskStatusSink>,
-    terminal_recorder: Option<Arc<dyn lingxi_core::host::FusionRunRecorder>>,
-) {
-    register_fusion_handler_with_recorder_factory(
-        reg,
-        executor,
-        sink,
-        tool_invoker,
-        budget,
-        status_sink,
-        terminal_recorder,
-        None,
-    );
-}
-
-/// Register Fusion with both a compatibility recorder and a pure per-session
-/// factory. The factory wins for production preparation so hot session
-/// switches cannot bind a new run to the boot session's coordinator.
+/// Register [`TaskType::LocalFusion`] with the current per-session terminal
+/// recorder contract. Call before wrapping the registry in an [`Arc`].
 pub fn register_fusion_handler_with_recorder_factory(
     reg: &mut TaskRegistry,
     executor: Arc<dyn FusionExecutor>,
-    sink: Arc<dyn FusionCompletionSink>,
     tool_invoker: Arc<dyn ToolInvoker>,
     budget: Arc<dyn BudgetEnforcerHandle>,
     status_sink: Arc<dyn crate::handlers::TaskStatusSink>,
-    terminal_recorder: Option<Arc<dyn lingxi_core::host::FusionRunRecorder>>,
-    terminal_recorder_factory: Option<Arc<dyn lingxi_core::host::FusionRunRecorderFactory>>,
+    terminal_recorder_factory: Arc<dyn lingxi_core::host::FusionRunRecorderFactory>,
 ) {
     let output_manager = reg.output_manager.clone();
-    let handler = LocalFusionHandler::new(executor, sink, tool_invoker, budget, output_manager)
-        .with_status_sink(status_sink);
-    let handler = if let Some(recorder) = terminal_recorder {
-        handler.with_terminal_recorder(recorder)
-    } else {
-        handler
-    };
-    let handler = if let Some(factory) = terminal_recorder_factory {
-        handler.with_terminal_recorder_factory(factory)
-    } else {
-        handler
-    };
+    let handler = LocalFusionHandler::new(
+        executor,
+        tool_invoker,
+        budget,
+        output_manager,
+        terminal_recorder_factory,
+    )
+    .with_status_sink(status_sink);
     reg.register_handler(TaskType::LocalFusion, Arc::new(handler));
 }
 

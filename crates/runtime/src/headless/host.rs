@@ -157,6 +157,9 @@ pub(crate) async fn configure_native_command_catalog(
         // Native rate-limit-status helper is also a source-bound null, so it
         // cannot enable this command independently.
         .unwrap_or(false);
+    // Workspace trust remains an invocation requirement for `/insights`. The
+    // Native headless catalog's `allow_insights` policy verdict is passed
+    // separately below and must not be derived from this workspace fact.
     let workspace_available =
         runtime.session_cwd.cwd().is_dir() && runtime.orchestrator.workspace_trusted().await;
     let context = command_api::NativeHeadlessCatalogContext {
@@ -181,6 +184,7 @@ pub(crate) async fn configure_native_command_catalog(
         // Bridge hosts supply the Product's local allowInsights setting; the
         // local CLI fallback is sourced from its existing workspace-trust rule.
         insights_policy_gate: runtime.native_insights_policy_gate,
+        team_onboarding_policy_gate: runtime.native_team_onboarding_policy_gate,
         usage_credits_enabled: Some(usage_credits_enabled),
         // The Headless host has no first-party advisor eligibility or enabled
         // Statsig fact producer. Native's absent `gv()` prerequisites and

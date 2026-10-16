@@ -1,4 +1,4 @@
-//! Locked constant tables of the 82 builtin command names + the 18 core names.
+//! Locked constant tables of the 83 builtin command names + the 18 core names.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 0 step 2 (name list) + Task 0 step 3 (18 core list).
@@ -88,7 +88,7 @@
 //!   it never reaches the command table at all.
 
 /// Every native built-in slash command's runtime name (without leading `/`),
-/// ASCII-sorted. Locked at length **82** for the 2.1.295 source surface. The
+/// ASCII-sorted. Locked at length **83** for the 2.1.295 source surface. The
 /// reachable bundled prompts `/commit` and `/doctor` live in the bundled skill
 /// catalog; `/commit-push-pr`, `/files`, and `/init-verifiers` have no reachable
 /// default command producer in the pinned source and are not registered here.
@@ -97,7 +97,7 @@
 /// `crates/test-harness/src/parity/fixtures/parity_slash_commands_102.json`
 /// (fixture filename retained for git-history continuity; the counts inside
 /// reflect the current membership lock).
-pub const BUILTIN_COMMAND_NAMES: &[&str; 82] = &[
+pub const BUILTIN_COMMAND_NAMES: &[&str; 83] = &[
     "add-dir",
     "advisor",
     "agents",
@@ -185,6 +185,7 @@ pub const BUILTIN_COMMAND_NAMES: &[&str; 82] = &[
     "stop",
     "subtask",
     "tasks",
+    "team-onboarding",
     "teleport",
     "terminal-setup",
     "theme",
@@ -502,7 +503,7 @@ pub fn command_aliases(name: &str) -> &'static [&'static str] {
 /// - [`STATICALLY_DISABLED_COMMANDS`] — the 1 command (`version`) whose every
 ///   upstream twin is `isEnabled:()=>!1` (SLASH-14).
 ///
-/// Total = 3 + 3 + 1 + 1 = **8** filtered builtin names, leaving 82 − 8 = 74
+/// Total = 3 + 3 + 1 + 1 = **8** filtered builtin names, leaving 83 − 8 = 75
 /// visible builtins in `/help`. Native's separately registered bundled
 /// `/doctor` prompt adds one default-visible row; `/commit` adds a row only
 /// when its default-off GrowthBook gate is enabled. The host-bound `btw` command and the implemented
@@ -698,6 +699,7 @@ pub fn core_description(name: &str) -> &'static str {
         "ide" => "Manage IDE integrations and show status",
         "init-verifiers" => "Create verifier skill(s) for automated verification of code changes",
         "insights" => "Generate a report analyzing your LingXi sessions",
+        "team-onboarding" => "Help teammates ramp on Claude Code with a guide from your usage",
         "install" => "Install LingXi native build",
         "install-github-app" => "Set up Claude GitHub Actions for a repository",
         "install-slack-app" => "Install the Claude Slack app",
@@ -766,7 +768,7 @@ pub fn core_description(name: &str) -> &'static str {
 /// in-process and in parallel, so without ONE shared lock a mutation here can
 /// race a concurrent render in another module and intermittently drop a command
 /// (e.g. `/login`) — the latent flake behind `every_visible_command_appears_once`
-/// / `output_has_exactly_76_lines_at_default_native_factory_gates`. `pub(crate)` so
+/// / `output_has_exactly_77_lines_at_default_native_factory_gates`. `pub(crate)` so
 /// help_render can lock it too.
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -776,8 +778,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn total_count_locked_at_82() {
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 82);
+    fn total_count_locked_at_83() {
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 83);
     }
 
     #[test]
@@ -1280,7 +1282,7 @@ mod tests {
         // subset of the locked name list and therefore cannot change the
         // total count, membership, or ordering that the parity fixture locks.
         assert!(INTENTIONALLY_DISABLED_COMMANDS.len() < BUILTIN_COMMAND_NAMES.len());
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 82);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 83);
     }
 
     // ========================================================================
@@ -1385,7 +1387,7 @@ mod tests {
             INTENTIONALLY_DISABLED_COMMANDS.len(),
             "all disabled commands are correct-by-design"
         );
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 82);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 83);
     }
 
     #[test]

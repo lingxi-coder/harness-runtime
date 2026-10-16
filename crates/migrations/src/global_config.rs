@@ -27,6 +27,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use serde_json::{Map, Value};
 
 /// In-memory session trust flag — `bootstrap/state.ts:153,363,1317-1322`
@@ -267,6 +268,265 @@ pub fn save_map(
     remove_project_history(&mut next);
     write_atomic(&target, &next)?;
     Ok(true)
+}
+
+/// Persist Claude 2.1.295's local `/team-onboarding` invocation marker while
+/// retaining the source config's complete UTF-16 JSON representation.
+///
+/// This is the source-preserving counterpart to the one-field
+/// `saveGlobalConfig` update made immediately before the onboarding usage
+/// scan. `serde_json::Value` cannot round-trip escaped lone surrogates, so this
+/// narrow writer uses the canonical global-config lock, backup, and atomic
+/// publication path without routing the existing document through serde.
+pub fn set_team_onboarding_last_used_at(
+    path: &Path,
+    timestamp_ms: u64,
+) -> Result<bool, GlobalConfigError> {
+    let target = resolve_write_target(path);
+    let _lock = ConfigLockGuard::acquire(&target)?;
+    let current = read_source_projection(&target)?;
+    if current
+        .get_property("teamOnboardingLastUsedAt")
+        .and_then(|value| value.as_number())
+        == Some(timestamp_ms as f64)
+    {
+        return Ok(false);
+    }
+
+    let timestamp = Utf16JsonProjection::parse(&timestamp_ms.to_string())
+        .map_err(|error| GlobalConfigError::Broken(error.to_string()))?;
+    let mut next = current;
+    next.set_field("teamOnboardingLastUsedAt", timestamp)
+        .map_err(|error| GlobalConfigError::Broken(error.to_string()))?;
+    let next = remove_project_history_source(&next)?;
+    let next = filter_global_defaults_source(&next)?;
+    write_atomic_source(&target, &next)?;
+    Ok(true)
+}
+
+fn read_source_projection(path: &Path) -> Result<Utf16JsonProjection, GlobalConfigError> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "{}".to_owned(),
+        Err(error) => return Err(GlobalConfigError::Io(error)),
+    };
+    let source = Utf16JsonProjection::parse(&contents)
+        .map_err(|error| GlobalConfigError::Broken(error.to_string()))?;
+    if source.object_entries().is_none() {
+        return Err(GlobalConfigError::Broken(
+            "expected a JSON object at the global config root".to_owned(),
+        ));
+    }
+    Ok(source)
+}
+
+fn remove_project_history_source(
+    source: &Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, GlobalConfigError> {
+    let entries = source.object_entries().ok_or_else(|| {
+        GlobalConfigError::Broken("expected a JSON object at the global config root".to_owned())
+    })?;
+    let projects_key: Vec<u16> = "projects".encode_utf16().collect();
+    let history_key: Vec<u16> = "history".encode_utf16().collect();
+    let mut retained = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let mut value = source
+            .subprojection_property_units(entry.code_units)
+            .map_err(|error| GlobalConfigError::Broken(error.to_string()))?;
+        if entry.code_units == projects_key.as_slice() {
+            let cleaned_projects = if let Some(projects) = value.object_entries() {
+                let mut project_values = Vec::with_capacity(projects.len());
+                for project in projects {
+                    let project_value = value
+                        .subprojection_property_units(project.code_units)
+                        .map_err(|error| GlobalConfigError::Broken(error.to_string()))?;
+                    let cleaned_project = if let Some(fields) = project_value.object_entries() {
+                        let mut retained_fields = Vec::with_capacity(fields.len());
+                        for field in fields {
+                            if field.code_units == history_key.as_slice() {
+                                continue;
+                            }
+                            retained_fields.push((
+                                field.code_units.to_vec(),
+                                project_value
+                                    .subprojection_property_units(field.code_units)
+                                    .map_err(|error| {
+                                        GlobalConfigError::Broken(error.to_string())
+                                    })?,
+                            ));
+                        }
+                        Utf16JsonProjection::object_units(retained_fields)
+                            .map_err(|error| GlobalConfigError::Broken(error.to_string()))?
+                    } else {
+                        project_value.clone()
+                    };
+                    project_values.push((project.code_units.to_vec(), cleaned_project));
+                }
+                Some(
+                    Utf16JsonProjection::object_units(project_values)
+                        .map_err(|error| GlobalConfigError::Broken(error.to_string()))?,
+                )
+            } else {
+                None
+            };
+            if let Some(cleaned_projects) = cleaned_projects {
+                value = cleaned_projects;
+            }
+        }
+        retained.push((entry.code_units.to_vec(), value));
+    }
+    Utf16JsonProjection::object_units(retained)
+        .map_err(|error| GlobalConfigError::Broken(error.to_string()))
+}
+
+fn filter_global_defaults_source(
+    source: &Utf16JsonProjection,
+) -> Result<Utf16JsonProjection, GlobalConfigError> {
+    let entries = source.object_entries().ok_or_else(|| {
+        GlobalConfigError::Broken("expected a JSON object at the global config root".to_owned())
+    })?;
+    let mut retained = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if source_value_equals_global_default(entry.code_units, entry.value) {
+            continue;
+        }
+        retained.push((
+            entry.code_units.to_vec(),
+            source
+                .subprojection_property_units(entry.code_units)
+                .map_err(|error| GlobalConfigError::Broken(error.to_string()))?,
+        ));
+    }
+    Utf16JsonProjection::object_units(retained)
+        .map_err(|error| GlobalConfigError::Broken(error.to_string()))
+}
+
+fn source_value_equals_global_default(key: &[u16], value: JsonValueView<'_>) -> bool {
+    let number = value.as_number();
+    if [
+        "numStartups",
+        "queuedCommandUpHintCount",
+        "memoryUsageCount",
+        "promptQueueUseCount",
+        "btwUseCount",
+    ]
+    .iter()
+    .any(|name| source_key_is(key, name))
+    {
+        return number == Some(0.0);
+    }
+    if source_key_is(key, "messageIdleNotifThresholdMs") {
+        return number == Some(60_000.0);
+    }
+    for (name, expected) in [
+        ("theme", "dark"),
+        ("preferredNotifChannel", "auto"),
+        ("editorMode", "normal"),
+        ("diffTool", "auto"),
+    ] {
+        if source_key_is(key, name) {
+            return value
+                .code_units()
+                .is_some_and(|units| units.iter().copied().eq(expected.encode_utf16()));
+        }
+    }
+    if [
+        "verbose",
+        "externalEditorContext",
+        "showMessageTimestamps",
+        "hasSeenTasksHint",
+        "hasUsedStash",
+        "hasUsedBackgroundTask",
+        "showExpandedTodos",
+        "briefTranscript",
+        "autoConnectIde",
+        "copyFullResponse",
+        "unpinOpus47LaunchEffort",
+        "unpinOpus48LaunchEffort",
+        "unpinFable5LaunchEffort",
+    ]
+    .iter()
+    .any(|name| source_key_is(key, name))
+    {
+        return value.as_bool() == Some(false);
+    }
+    if [
+        "autoCompactEnabled",
+        "autoScrollEnabled",
+        "showTurnDuration",
+        "todoFeatureEnabled",
+        "autoInstallIdeExtension",
+        "fileCheckpointingEnabled",
+        "terminalProgressBarEnabled",
+        "respectGitignore",
+    ]
+    .iter()
+    .any(|name| source_key_is(key, name))
+    {
+        return value.as_bool() == Some(true);
+    }
+    if [
+        "env",
+        "tipsHistory",
+        "cachedDynamicConfigs",
+        "cachedGrowthBookFeatures",
+    ]
+    .iter()
+    .any(|name| source_key_is(key, name))
+    {
+        return value
+            .object_entries()
+            .is_some_and(|entries| entries.is_empty());
+    }
+    if source_key_is(key, "customApiKeyResponses") {
+        let Some(entries) = value.object_entries() else {
+            return false;
+        };
+        return entries.len() == 2
+            && value
+                .get_property("approved")
+                .and_then(|value| value.array_len())
+                == Some(0)
+            && value
+                .get_property("rejected")
+                .and_then(|value| value.array_len())
+                == Some(0);
+    }
+    false
+}
+
+fn source_key_is(key: &[u16], name: &str) -> bool {
+    key.iter().copied().eq(name.encode_utf16())
+}
+
+fn write_atomic_source(path: &Path, source: &Utf16JsonProjection) -> Result<(), GlobalConfigError> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(dir).map_err(GlobalConfigError::Io)?;
+    let serialized = source
+        .to_pretty_json_string()
+        .map_err(|error| GlobalConfigError::Broken(error.to_string()))?;
+    let target = resolve_write_target(path);
+    if target.is_file() {
+        if let Err(error) = backup_config_if_due(&target) {
+            tracing::warn!(%error, path = %target.display(), "global config backup failed");
+        }
+    }
+    let tmp = target
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(
+            ".{}.tmp-{}-{}",
+            target
+                .file_name()
+                .map(|name| name.to_string_lossy())
+                .unwrap_or_default(),
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+    write_tmp_and_rename(&tmp, &target, &serialized).map_err(|error| {
+        let _ = std::fs::remove_file(&tmp);
+        GlobalConfigError::Io(error)
+    })
 }
 
 /// `removeProjectHistory` (`config.ts:966-989`): drop the legacy `history`
@@ -1531,6 +1791,44 @@ mod tests {
         let back = read_map(&t.global).unwrap();
         assert!(back["projects"]["/p"].get("history").is_none());
         assert!(back["projects"]["/p"].get("allowedTools").is_some());
+    }
+
+    #[test]
+    fn onboarding_marker_preserves_source_utf16_order_and_global_config_cleanup() {
+        let t = temp_config();
+        std::fs::write(
+            &t.global,
+            r#"{"first":"kept","lone":"\ud800","numStartups":0,"theme":"dark","projects":{"/p":{"history":["old"],"allowedTools":["Edit"]}},"teamOnboardingLastUsedAt":1}"#,
+        )
+        .unwrap();
+
+        assert!(set_team_onboarding_last_used_at(&t.global, 1_765_432_100_987).unwrap());
+
+        let source = std::fs::read_to_string(&t.global).unwrap();
+        assert!(!source.ends_with('\n'));
+        assert!(source.contains(r#""lone": "\ud800""#));
+        assert!(!source.contains("numStartups"));
+        assert!(!source.contains("\"theme\""));
+        assert!(!source.contains("\"history\""));
+        let first = source.find("\"first\"").unwrap();
+        let lone = source.find("\"lone\"").unwrap();
+        let projects = source.find("\"projects\"").unwrap();
+        let marker = source.find("\"teamOnboardingLastUsedAt\"").unwrap();
+        assert!(first < lone && lone < projects && projects < marker);
+
+        let projected = Utf16JsonProjection::parse(&source).unwrap();
+        assert_eq!(
+            projected.number_at("/teamOnboardingLastUsedAt"),
+            Some(1_765_432_100_987.0)
+        );
+        assert_eq!(
+            projected
+                .get_property("lone")
+                .and_then(|value| value.code_units())
+                .unwrap(),
+            &[0xD800]
+        );
+        assert!(!set_team_onboarding_last_used_at(&t.global, 1_765_432_100_987).unwrap());
     }
 
     #[test]

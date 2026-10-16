@@ -190,12 +190,6 @@ pub(crate) fn partition_key_for_era(
     sha256_hex(material.as_bytes())[..32].to_string()
 }
 
-/// Backward-compatible legacy partition vector.  Callers that have not
-/// negotiated a protocol continue to produce the original bytes.
-pub(crate) fn partition_key(logical_cache_key: &str, fingerprint: &str) -> String {
-    partition_key_for_era(logical_cache_key, fingerprint, "legacy")
-}
-
 fn canonicalize_logical_key_value(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
@@ -1272,27 +1266,6 @@ impl DiscoveryCacheStore {
         Self { root: root.into() }
     }
 
-    /// Legacy helper for older tests: a stable SHA-256 over `{name, transport
-    /// kind, url, headers}`. Production discovery-cache partitioning now uses
-    /// [`logical_cache_key`] instead.
-    #[must_use]
-    pub fn cache_key(name: &str, spec: &McpTransportSpec) -> String {
-        use sha2::{Digest, Sha256};
-        let (kind, url, headers_json) = match spec {
-            McpTransportSpec::Sse { url, headers, .. }
-            | McpTransportSpec::Http { url, headers, .. } => (
-                spec.kind(),
-                url.as_str(),
-                serde_json::to_string(headers).unwrap_or_default(),
-            ),
-            other => (other.kind(), "", String::new()),
-        };
-        let material = format!("{name}\0{kind}\0{url}\0{headers_json}");
-        let mut hasher = Sha256::new();
-        hasher.update(material.as_bytes());
-        format!("{:x}", hasher.finalize())
-    }
-
     fn entry_path(&self, key: &str) -> std::path::PathBuf {
         self.root.join(format!("{key}.json"))
     }
@@ -2284,16 +2257,18 @@ mod tests {
         // 2.1.252 -> 2.1.267; if they move without the constant moving, the
         // partition scheme itself changed and that is the bug to look for.
         assert_eq!(
-            partition_key(
+            partition_key_for_era(
                 "logical-cache-key",
-                "856f0d2375be22a510e79662f22d30c51c14dc3394b9d610af33a7116d81cda6"
+                "856f0d2375be22a510e79662f22d30c51c14dc3394b9d610af33a7116d81cda6",
+                "legacy",
             ),
             "c27ba42c0c0386de3ae9674d93fa4765"
         );
         assert_eq!(
-            partition_key(
+            partition_key_for_era(
                 "logical-cache-key",
-                "991e0dadd79d2d72abf31cf52d2cbd1d4f1e0c49b62b4d5e820b2e78cd12f971"
+                "991e0dadd79d2d72abf31cf52d2cbd1d4f1e0c49b62b4d5e820b2e78cd12f971",
+                "legacy",
             ),
             "f4e85c666c0b09ee1f312608556a4f5c"
         );
@@ -2805,15 +2780,6 @@ mod tests {
 
         assert_eq!(root_mode, 0o700);
         assert_eq!(entry_mode, 0o600);
-    }
-
-    #[test]
-    fn cache_key_is_stable_and_distinguishes_url() {
-        let a = DiscoveryCacheStore::cache_key("srv", &http_spec("https://a.example", None));
-        let b = DiscoveryCacheStore::cache_key("srv", &http_spec("https://b.example", None));
-        let a_again = DiscoveryCacheStore::cache_key("srv", &http_spec("https://a.example", None));
-        assert_eq!(a, a_again);
-        assert_ne!(a, b);
     }
 
     #[test]

@@ -540,6 +540,30 @@ impl OrchestratorApiClient for ProviderApiAdapter {
         self.service.resolve_context(model, profile).map(Some)
     }
 
+    fn context_window_tokens(&self, model: &str, profile: Option<&str>) -> Option<u64> {
+        let context = self.service.resolve_context(model, profile).ok()?;
+        if let Some(window) = context.context_window_tokens {
+            // A configured/provider window is a raw route fact. Keep it even
+            // when an application input-budget policy is narrower.
+            return Some(window);
+        }
+        // Native Claude's selected model policy supplies its own window only
+        // when the exact SDK route is first-party. Other providers with no
+        // published window remain unknown rather than inheriting a Claude
+        // default.
+        if !self.is_first_party_route(model, profile)
+            || !llm_runtime::model::context_window::is_claude_family(model)
+        {
+            return None;
+        }
+        Some(
+            llm_runtime::model::context_window::context_window_for_model(
+                model,
+                self.service.active_custom_betas(),
+            ),
+        )
+    }
+
     fn active_betas(&self) -> Vec<String> {
         self.service.active_custom_betas().to_vec()
     }
@@ -2547,7 +2571,7 @@ mod tests {
                 false,
                 Vec::new(),
                 Vec::new(),
-                None,
+                Some(4096),
                 Vec::new(),
                 Default::default(),
                 Default::default(),
@@ -2563,7 +2587,9 @@ mod tests {
             model_source.string_units(""),
             "scheduled API input must keep the exact source until SDK finalization"
         );
-        let _ = crate::scheduled_turn::SETTINGS
+        // The malformed source has no catalog row during SDK preflight, so
+        // supply the required Messages output budget explicitly.
+        let stream_error = crate::scheduled_turn::SETTINGS
             .scope(
                 settings,
                 StreamingApiClient::stream_with_effort_override(
@@ -2573,7 +2599,7 @@ mod tests {
                     None,
                     Vec::new(),
                     Vec::new(),
-                    None,
+                    Some(4096),
                     None,
                     Vec::new(),
                     "sdk",
@@ -2586,7 +2612,17 @@ mod tests {
                     Some(model_source),
                 ),
             )
-            .await;
+            .await
+            .err()
+            .expect("the fake transport records the request before returning its sentinel error");
+        assert!(
+            matches!(
+                &stream_error,
+                LlmError::InvalidRequest { message }
+                    if message == "open_stream not scripted (FakeTransport)"
+            ),
+            "expected the fake transport sentinel after capture, got {stream_error:?}"
+        );
         let request = transport.seen.lock().unwrap()[0].body_json.clone();
         // Native PGn/t1e sanitizes only the outgoing generation payload.
         // The API-input assertion above protects the distinct original source.
@@ -4452,6 +4488,123 @@ mod tests {
             assert_eq!(result.results.iter().any(|entry| matches!(entry, tool_api::hosted_search::SearchResultEntry::Text(text) if text.string_at("").is_some_and(|text| text.contains("incomplete")))), interrupted);
             assert!(result.results.iter().any(|entry|matches!(entry,tool_api::hosted_search::SearchResultEntry::Hit(value) if value.as_json_source().contains("rust-lang.org"))));
         }
+    }
+
+    fn make_context_window_adapter() -> ProviderApiAdapter {
+        let config: ClientConfig = serde_json::from_value(serde_json::json!({
+        "providers": [{
+            "provider_id":"anthropic_first_party",
+            "profile_name":"anthropic",
+            "base_url":"https://api.anthropic.com",
+            "protocol":"anthropic_messages",
+            "auth":"none",
+            "credential":{"type":"none"},
+            "models":[
+                {
+                    "display_model":"claude-sonnet-4-6",
+                    "request_model":"claude-sonnet-4-6",
+                    "billing_model":"claude-sonnet-4-6",
+                    "metadata":{
+                        "contextWindowTokens":1000000,
+                        "maxInputTokens":200000,
+                        "maxOutputTokens":32000,
+                        "context":{
+                            "sharedWindow":true,
+                            "application":{"mode":"custom","input_tokens":200000}
+                        }
+                    },
+                    "capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":false,"structured_output":false}
+                },
+                {
+                    "display_model":"claude-opus-4-7",
+                    "request_model":"claude-opus-4-7",
+                    "billing_model":"claude-opus-4-7",
+                    "metadata":{
+                        "contextWindowTokens":200000,
+                        "maxInputTokens":120000,
+                        "maxOutputTokens":32000,
+                        "context":{
+                            "sharedWindow":true,
+                            "application":{"mode":"custom","input_tokens":120000}
+                        }
+                    },
+                    "capabilities":{"streaming":true,"tools":true,"vision":false,"documents":false,"reasoning":false,"structured_output":false}
+                }
+            ]
+        }]
+    }))
+    .expect("valid raw-window and effective-budget context fixture");
+        let client = Arc::new(ModelRuntime::from_config(config).expect("client"));
+        let service = ApiService::new(
+            client,
+            owned_request_capture(),
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        );
+        ProviderApiAdapter::new(Arc::new(service))
+    }
+
+    #[test]
+    fn native_window_fallback_is_route_scoped_and_keeps_profile_window() {
+        let sonnet = make_adapter_with_session_tool_choice(
+            owned_request_capture(),
+            None,
+            "claude-sonnet-4-6",
+        );
+        assert_eq!(
+            sonnet.context_window_tokens("claude-sonnet-4-6", Some("anthropic")),
+            Some(200_000),
+            "a route without a published window uses the Native Claude policy"
+        );
+        let opus =
+            make_adapter_with_session_tool_choice(owned_request_capture(), None, "claude-opus-4-7");
+        assert_eq!(
+            opus.context_window_tokens("claude-opus-4-7", Some("anthropic")),
+            Some(1_000_000)
+        );
+        let codex = make_codex_search_adapter(owned_request_capture());
+        assert_eq!(
+            codex.context_window_tokens("gpt-search", Some("codex")),
+            None,
+            "a non-Claude provider with unknown window stays unknown"
+        );
+    }
+
+    #[test]
+    fn server_fallback_notice_uses_raw_window_not_effective_input_budget() {
+        let adapter = make_context_window_adapter();
+        let from = adapter
+            .context_budget("claude-sonnet-4-6", Some("anthropic"))
+            .unwrap()
+            .unwrap();
+        let to = adapter
+            .context_budget("claude-opus-4-7", Some("anthropic"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(from.context_window_tokens, Some(1_000_000));
+        assert_eq!(from.effective_input_budget, Some(200_000));
+        assert_eq!(to.context_window_tokens, Some(200_000));
+        assert_eq!(to.effective_input_budget, Some(120_000));
+        assert_eq!(
+            adapter.context_window_tokens("claude-sonnet-4-6", Some("anthropic")),
+            Some(1_000_000)
+        );
+        assert_eq!(
+            adapter.context_window_tokens("claude-opus-4-7", Some("anthropic")),
+            Some(200_000)
+        );
+        assert_eq!(
+        crate::query_model::server_error_notice(
+            "Sonnet 4.6",
+            "Opus 4.7",
+            adapter.context_window_tokens("claude-sonnet-4-6", Some("anthropic")),
+            adapter.context_window_tokens("claude-opus-4-7", Some("anthropic")),
+        ),
+        "Switched to Opus 4.7 due to high demand for Sonnet 4.6 · context window 1M → 200K tokens"
+    );
     }
 }
 

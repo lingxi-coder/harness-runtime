@@ -315,6 +315,10 @@ pub struct DesktopConfig {
     /// Local host verdict for the `/insights` policy gate. `None` remains
     /// unavailable and is not inferred from permission mode or account policy.
     pub insights_policy_gate: Option<bool>,
+    /// Local host verdict for `/team-onboarding`. The desktop assembly applies
+    /// its explicit local-CLI default only for CLI compositions; external
+    /// transports must supply a verdict or remain unavailable.
+    pub team_onboarding_policy_gate: Option<bool>,
     /// The live client surface attached to this session, if one is known.
     pub mod_render_surface: Option<orchestrator::config::ModRenderSurface>,
     /// The attached client renders inline visualizations (Electron through
@@ -974,6 +978,10 @@ impl std::fmt::Debug for DesktopConfig {
             )
             .field("host_workspace_trusted", &self.host_workspace_trusted)
             .field("insights_policy_gate", &self.insights_policy_gate)
+            .field(
+                "team_onboarding_policy_gate",
+                &self.team_onboarding_policy_gate,
+            )
             .field("mod_render_surface", &self.mod_render_surface)
             .field("inline_visualization", &self.inline_visualization)
             .field("local_apps", &self.local_apps)
@@ -1161,6 +1169,7 @@ impl Default for DesktopConfig {
             connect_mcp_in_background: false,
             host_workspace_trusted: None,
             insights_policy_gate: None,
+            team_onboarding_policy_gate: None,
             mod_render_surface: None,
             inline_visualization: false,
             native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext::Main,

@@ -51,7 +51,32 @@ async fn resolves_enabled_entries_to_versioned_cache_paths() {
 
     // Real claude-code top-level junk that must NOT be mistaken for a plugin.
     fs::create_dir_all(root.join("npm-cache")).unwrap();
-    fs::write(root.join("installed_plugins.json"), "{}").unwrap();
+    // Enabled-cache resolution requires the current V2 install records to
+    // establish which primary cache versions are actually installed.
+    let installed = serde_json::json!({
+        "version": 2,
+        "plugins": {
+            "weather@acme": [{
+                "scope": "user",
+                "installPath": root.join("cache/acme/weather/1.0.0"),
+                "version": "1.0.0",
+                "installedAt": "2026-08-31T00:00:00.000Z",
+                "lastUpdated": "2026-08-31T00:00:00.000Z"
+            }],
+            "calc@acme": [{
+                "scope": "user",
+                "installPath": root.join("cache/acme/calc/2.3.1"),
+                "version": "2.3.1",
+                "installedAt": "2026-08-31T00:00:00.000Z",
+                "lastUpdated": "2026-08-31T00:00:00.000Z"
+            }]
+        }
+    });
+    fs::write(
+        root.join("installed_plugins.json"),
+        serde_json::to_string(&installed).unwrap(),
+    )
+    .unwrap();
 
     let mut enabled: BTreeMap<String, bool> = BTreeMap::new();
     enabled.insert("weather@acme".to_string(), true);

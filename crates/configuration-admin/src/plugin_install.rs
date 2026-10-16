@@ -160,7 +160,7 @@ async fn marketplace_entry_source_path_with_bus(
     analytics_bus: Option<&Arc<AnalyticsBus>>,
     yes: bool,
 ) -> Result<Option<PathBuf>, String> {
-    use plugin::marketplace::{MarketplaceExternalSource, MarketplacePluginSource};
+    use plugin::marketplace::{MarketplacePluginExternalSource, MarketplacePluginSource};
 
     let Some(raw_entry) = marketplace_entry(market_root, name) else {
         return Ok(None);
@@ -174,13 +174,12 @@ async fn marketplace_entry_source_path_with_bus(
         .map_err(|reason| format!("Invalid marketplace entry for \"{name}\": {reason}"))?;
     if let Some(MarketplacePluginSource::Structured(source)) = entry.source.as_ref() {
         match source {
-            MarketplaceExternalSource::Github { .. }
-            | MarketplaceExternalSource::Git { .. }
-            | MarketplaceExternalSource::Url { .. }
-            | MarketplaceExternalSource::GitSubdir { .. }
-            | MarketplaceExternalSource::Archive { .. }
-            | MarketplaceExternalSource::Npm { .. }
-            | MarketplaceExternalSource::Command { .. } => {
+            MarketplacePluginExternalSource::Github { .. }
+            | MarketplacePluginExternalSource::Url { .. }
+            | MarketplacePluginExternalSource::GitSubdir { .. }
+            | MarketplacePluginExternalSource::Archive { .. }
+            | MarketplacePluginExternalSource::Npm { .. }
+            | MarketplacePluginExternalSource::Command { .. } => {
                 return materialize_external_plugin_source_with_bus(
                     plugins_dir,
                     marketplace,
@@ -192,9 +191,7 @@ async fn marketplace_entry_source_path_with_bus(
                 .await
                 .map(Some);
             }
-            MarketplaceExternalSource::File { .. }
-            | MarketplaceExternalSource::Directory { .. } => {}
-            MarketplaceExternalSource::Unsupported { error } => {
+            MarketplacePluginExternalSource::Unsupported { error } => {
                 return Err(format!(
                     "This plugin's marketplace entry is invalid: '{name}'{}",
                     error
@@ -227,7 +224,9 @@ async fn marketplace_entry_source_path_with_bus(
     }
 }
 
-fn external_source_cache_key(source: &plugin::marketplace::MarketplaceExternalSource) -> String {
+fn external_source_cache_key(
+    source: &plugin::marketplace::MarketplacePluginExternalSource,
+) -> String {
     let encoded = serde_json::to_vec(source).unwrap_or_default();
     plugin::plugin_source_sha256(&encoded)[..20].to_string()
 }
@@ -325,34 +324,30 @@ fn command_source_is_consented(yes: bool, command: &str) -> bool {
 }
 
 fn remote_fetch_source_kind(
-    source: &plugin::marketplace::MarketplaceExternalSource,
+    source: &plugin::marketplace::MarketplacePluginExternalSource,
 ) -> Option<&'static str> {
-    use plugin::marketplace::MarketplaceExternalSource;
+    use plugin::marketplace::MarketplacePluginExternalSource;
 
     match source {
-        MarketplaceExternalSource::Github { .. } => Some("github"),
-        MarketplaceExternalSource::Git { .. } => Some("git"),
-        MarketplaceExternalSource::Url { .. } => Some("url"),
-        MarketplaceExternalSource::GitSubdir { .. } => Some("git-subdir"),
-        MarketplaceExternalSource::Archive { .. } => Some("archive"),
-        MarketplaceExternalSource::Npm { .. } => Some("npm"),
-        MarketplaceExternalSource::Command { .. } => Some("command"),
-        MarketplaceExternalSource::File { .. }
-        | MarketplaceExternalSource::Directory { .. }
-        | MarketplaceExternalSource::Unsupported { .. } => None,
+        MarketplacePluginExternalSource::Github { .. } => Some("github"),
+        MarketplacePluginExternalSource::Url { .. } => Some("url"),
+        MarketplacePluginExternalSource::GitSubdir { .. } => Some("git-subdir"),
+        MarketplacePluginExternalSource::Archive { .. } => Some("archive"),
+        MarketplacePluginExternalSource::Npm { .. } => Some("npm"),
+        MarketplacePluginExternalSource::Command { .. } => Some("command"),
+        MarketplacePluginExternalSource::Unsupported { .. } => None,
     }
 }
 
-fn remote_fetch_host(source: &plugin::marketplace::MarketplaceExternalSource) -> String {
-    use plugin::marketplace::MarketplaceExternalSource;
+fn remote_fetch_host(source: &plugin::marketplace::MarketplacePluginExternalSource) -> String {
+    use plugin::marketplace::MarketplacePluginExternalSource;
 
     let url_like = match source {
-        MarketplaceExternalSource::Github { .. } => return "github.com".to_string(),
-        MarketplaceExternalSource::Git { url, .. }
-        | MarketplaceExternalSource::Url { url, .. }
-        | MarketplaceExternalSource::GitSubdir { url, .. }
-        | MarketplaceExternalSource::Archive { url, .. } => url.as_str(),
-        MarketplaceExternalSource::Npm { registry, .. } => {
+        MarketplacePluginExternalSource::Github { .. } => return "github.com".to_string(),
+        MarketplacePluginExternalSource::Url { url, .. }
+        | MarketplacePluginExternalSource::GitSubdir { url, .. }
+        | MarketplacePluginExternalSource::Archive { url, .. } => url.as_str(),
+        MarketplacePluginExternalSource::Npm { registry, .. } => {
             return registry
                 .as_deref()
                 .and_then(|registry| registry.split("://").nth(1).or(Some(registry)))
@@ -362,10 +357,8 @@ fn remote_fetch_host(source: &plugin::marketplace::MarketplaceExternalSource) ->
                 .trim_end_matches(':')
                 .to_string();
         }
-        MarketplaceExternalSource::Command { .. }
-        | MarketplaceExternalSource::File { .. }
-        | MarketplaceExternalSource::Directory { .. }
-        | MarketplaceExternalSource::Unsupported { .. } => return String::new(),
+        MarketplacePluginExternalSource::Command { .. }
+        | MarketplacePluginExternalSource::Unsupported { .. } => return String::new(),
     };
 
     if url_like.starts_with("file://") {
@@ -403,7 +396,7 @@ fn remote_fetch_error_kind(error: &str) -> &'static str {
 }
 
 fn remote_fetch_metadata(
-    source: &plugin::marketplace::MarketplaceExternalSource,
+    source: &plugin::marketplace::MarketplacePluginExternalSource,
     started: Instant,
     result: &Result<PathBuf, String>,
 ) -> Option<LogEventMetadata> {
@@ -441,7 +434,7 @@ fn remote_fetch_metadata(
 
 async fn emit_remote_fetch(
     analytics_bus: Option<&Arc<AnalyticsBus>>,
-    source: &plugin::marketplace::MarketplaceExternalSource,
+    source: &plugin::marketplace::MarketplacePluginExternalSource,
     started: Instant,
     result: &Result<PathBuf, String>,
 ) {
@@ -601,7 +594,7 @@ async fn emit_installed_event(bus: Arc<AnalyticsBus>, arg: &str, plugins_dir: &P
 /// Fetch/clone one external plugin-entry `source` into a scratch subdirectory
 /// of `work` and return the resolved plugin-root directory to copy from.
 fn resolve_external_plugin_source(
-    source: &plugin::marketplace::MarketplaceExternalSource,
+    source: &plugin::marketplace::MarketplacePluginExternalSource,
     work: &Path,
 ) -> Result<PathBuf, String> {
     current_thread_runtime().block_on(resolve_external_plugin_source_with_bus(
@@ -610,22 +603,17 @@ fn resolve_external_plugin_source(
 }
 
 async fn resolve_external_plugin_source_with_bus(
-    source: &plugin::marketplace::MarketplaceExternalSource,
+    source: &plugin::marketplace::MarketplacePluginExternalSource,
     work: &Path,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
     yes: bool,
 ) -> Result<PathBuf, String> {
-    use plugin::marketplace::MarketplaceExternalSource;
+    use plugin::marketplace::MarketplacePluginExternalSource;
 
     let started = Instant::now();
     let result = (|| -> Result<PathBuf, String> {
         match source {
-            MarketplaceExternalSource::Github {
-                repo,
-                git_ref,
-                path,
-                sha,
-            } => {
+            MarketplacePluginExternalSource::Github { repo, git_ref, sha } => {
                 let checkout = work.join("checkout");
                 let head = plugin::clone_plugin_git_pinned(
                     &format!("https://github.com/{repo}.git"),
@@ -634,29 +622,13 @@ async fn resolve_external_plugin_source_with_bus(
                     &checkout,
                 )?;
                 verify_sha_pin(sha.as_deref(), &head)?;
-                confined_source_subdir(&checkout, path.as_deref())
-            }
-            MarketplaceExternalSource::Git {
-                url,
-                git_ref,
-                path,
-                sha,
-            } => {
-                let checkout = work.join("checkout");
-                let head = plugin::clone_plugin_git_pinned(
-                    url,
-                    git_ref.as_deref().unwrap_or_default(),
-                    sha.as_deref(),
-                    &checkout,
-                )?;
-                verify_sha_pin(sha.as_deref(), &head)?;
-                confined_source_subdir(&checkout, path.as_deref())
+                Ok(checkout)
             }
             // Oracle: `source:"url"` on a plugin entry names a GIT REPOSITORY
             // ("Full git repository URL (https:// or git@)"), not an archive —
             // that is the separate `archive` arm below. The whole checkout is
             // the plugin root (this arm has no `path`).
-            MarketplaceExternalSource::Url { url, git_ref, sha } => {
+            MarketplacePluginExternalSource::Url { url, git_ref, sha } => {
                 let checkout = work.join("checkout");
                 let head = plugin::clone_plugin_git_pinned(
                     url,
@@ -671,7 +643,7 @@ async fn resolve_external_plugin_source_with_bus(
             // partial-clones (`--filter=tree:0`); this port does a full clone
             // and confines to `path` (same result, more bandwidth — see the
             // `GitSubdir` doc comment).
-            MarketplaceExternalSource::GitSubdir {
+            MarketplacePluginExternalSource::GitSubdir {
                 url,
                 path,
                 git_ref,
@@ -687,23 +659,19 @@ async fn resolve_external_plugin_source_with_bus(
                 verify_sha_pin(sha.as_deref(), &head)?;
                 confined_source_subdir(&checkout, Some(path.as_str()))
             }
-            MarketplaceExternalSource::Archive { url, sha256 } => {
+            MarketplacePluginExternalSource::Archive { url, sha256 } => {
                 download_external_plugin_archive(url, sha256.as_deref(), work)
             }
-            MarketplaceExternalSource::Npm {
+            MarketplacePluginExternalSource::Npm {
                 package,
                 version,
                 registry,
             } => materialize_npm_source(package, version.as_deref(), registry.as_deref(), work),
-            MarketplaceExternalSource::Command { command, .. } => {
+            MarketplacePluginExternalSource::Command { command, .. } => {
                 let consented = command_source_is_consented(yes, command);
                 plugin::materialize_command_plugin_source(source, work, consented)
             }
-            MarketplaceExternalSource::File { .. }
-            | MarketplaceExternalSource::Directory { .. } => {
-                Err("local marketplace source must stay inside its catalog root".to_string())
-            }
-            MarketplaceExternalSource::Unsupported { error } => Err(format!(
+            MarketplacePluginExternalSource::Unsupported { error } => Err(format!(
                 "plugin source type unsupported{}",
                 error
                     .as_deref()
@@ -720,7 +688,7 @@ fn materialize_external_plugin_source(
     plugins_dir: &Path,
     marketplace: &str,
     name: &str,
-    source: &plugin::marketplace::MarketplaceExternalSource,
+    source: &plugin::marketplace::MarketplacePluginExternalSource,
 ) -> Result<PathBuf, String> {
     current_thread_runtime().block_on(materialize_external_plugin_source_with_bus(
         plugins_dir,
@@ -736,7 +704,7 @@ async fn materialize_external_plugin_source_with_bus(
     plugins_dir: &Path,
     marketplace: &str,
     name: &str,
-    source: &plugin::marketplace::MarketplaceExternalSource,
+    source: &plugin::marketplace::MarketplacePluginExternalSource,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
     yes: bool,
 ) -> Result<PathBuf, String> {
@@ -2035,6 +2003,9 @@ async fn install_declared_dependencies(
     let enabled_scope = parse_scope(scope)?;
     for (dependency, requirements) in dependencies {
         let dependency_id = dependency.resolved_id(owner_marketplace);
+        // Native preserves dependency `sha` metadata but its current dependency
+        // selector reads the version constraint only. Git checkout pins remain
+        // attached to the dependency's resolved plugin source, not this field.
         let dependency_marketplace = marketplace_of(&dependency_id).unwrap_or(owner_marketplace);
         if dependency_marketplace != owner_marketplace
             && !cross_market_allow
@@ -3265,13 +3236,13 @@ mod tests {
     }
 
     #[test]
-    fn install_accepts_typed_directory_source_inside_catalog() {
+    fn install_accepts_relative_source_inside_catalog() {
         let e = env();
         std::fs::write(
             e.market
                 .join(branding::PLUGIN_MANIFEST_DIR)
                 .join("marketplace.json"),
-            r#"{"name":"mymkt","owner":{"name":"me"},"plugins":[{"name":"hello","source":{"source":"directory","path":"./plugins/hello"}}]}"#,
+            r#"{"name":"mymkt","owner":{"name":"me"},"plugins":[{"name":"hello","source":"./plugins/hello"}]}"#,
         )
         .unwrap();
 
@@ -3407,10 +3378,10 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        let source = plugin::marketplace::MarketplaceExternalSource::Git {
+        let source = plugin::marketplace::MarketplacePluginExternalSource::GitSubdir {
             url: format!("file://{}", repository.display()),
             git_ref: None,
-            path: Some("nested/plugin".to_string()),
+            path: "nested/plugin".to_string(),
             sha: None,
         };
 
@@ -3483,7 +3454,7 @@ mod tests {
         let (repository, _head) = init_git_plugin_fixture(&repository);
         let (runtime, bus, sink) = runtime_bus();
 
-        let source = plugin::marketplace::MarketplaceExternalSource::Url {
+        let source = plugin::marketplace::MarketplacePluginExternalSource::Url {
             url: format!("file://{}", repository.display()),
             git_ref: None,
             sha: None,
@@ -3541,7 +3512,7 @@ mod tests {
             "f".repeat(40)
         };
 
-        let source = plugin::marketplace::MarketplaceExternalSource::Url {
+        let source = plugin::marketplace::MarketplacePluginExternalSource::Url {
             url: format!("file://{}", repository.display()),
             git_ref: None,
             sha: Some(wrong_sha),
@@ -3574,11 +3545,11 @@ mod tests {
     }
 
     #[test]
-    fn local_external_source_does_not_emit_remote_fetch() {
+    fn unsupported_entry_source_does_not_emit_remote_fetch() {
         let e = env();
         let (runtime, bus, sink) = runtime_bus();
-        let source = plugin::marketplace::MarketplaceExternalSource::Directory {
-            path: "./plugins/hello".to_string(),
+        let source = plugin::marketplace::MarketplacePluginExternalSource::Unsupported {
+            error: Some("registration source used as a plugin entry".to_string()),
         };
 
         let error = runtime
@@ -3590,8 +3561,8 @@ mod tests {
                 Some(&bus),
                 false,
             ))
-            .expect_err("directory sources should not route through remote fetch");
-        assert!(error.contains("local marketplace source"));
+            .expect_err("unsupported entry source should not route through remote fetch");
+        assert!(error.contains("plugin source type unsupported"));
         assert!(
             runtime.block_on(sink.events()).is_empty(),
             "local source must not emit remote fetch"
@@ -3671,7 +3642,7 @@ mod tests {
         .to_string();
         assert_ne!(first, tip, "the fixture must have moved the tip");
 
-        let source = plugin::marketplace::MarketplaceExternalSource::Url {
+        let source = plugin::marketplace::MarketplacePluginExternalSource::Url {
             url: format!("file://{}", repository.display()),
             git_ref: None,
             sha: Some(first.clone()),
@@ -3953,8 +3924,18 @@ mod tests {
     #[test]
     fn install_rejects_dependency_cycles_before_materializing_root() {
         let e = env();
-        add_market_plugin(&e, "shared", "1.0.0", serde_json::json!(["hello"]));
-        set_dependencies(&e, "hello", "1.2.3", serde_json::json!(["shared"]));
+        add_market_plugin(
+            &e,
+            "shared",
+            "1.0.0",
+            serde_json::json!([{"name":"hello","version":"*"}]),
+        );
+        set_dependencies(
+            &e,
+            "hello",
+            "1.2.3",
+            serde_json::json!([{"name":"shared","version":"*"}]),
+        );
 
         let error = run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
         assert!(error.contains(

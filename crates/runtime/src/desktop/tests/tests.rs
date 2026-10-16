@@ -5113,13 +5113,10 @@ async fn build_exposes_dispatcher_shared_command_registry() {
     );
 }
 
-/// GAP E (verification fix #1): a plugin laid out under the REAL claude-code
-/// cache layout `plugins/cache/{marketplace}/{plugin}/{version}/` and named
-/// in `settings.enabledPlugins` is discovered + materialised at bootstrap.
-/// The flat walk would find nothing here — only the allowlist-driven
-/// resolution does.
+/// A current installed-plugin registry row plus `settings.enabledPlugins`
+/// resolves the plugin from its exact versioned cache directory at bootstrap.
 #[tokio::test]
-async fn build_discovers_a_plugin_via_enabledplugins_cache_layout() {
+async fn build_discovers_an_installed_plugin_via_enabledplugins_cache_layout() {
     let (_tmp, cfg) = test_config(true);
     // Versioned cache dir, exactly as getVersionedCachePath lays it out.
     let versioned = cfg
@@ -5141,7 +5138,9 @@ async fn build_discovers_a_plugin_via_enabledplugins_cache_layout() {
         "---\ndescription: forecast\n---\nThe forecast is sunny.\n",
     )
     .unwrap();
-    // Enable it via user settings.json `enabledPlugins`.
+    // The current resolver does not infer installation from a primary cache
+    // directory; pin the exact installed version, then enable that identity.
+    write_installed_plugin_record(&cfg.lingxi_home.join("plugins"), "acme", "weather", "1.0.0");
     std::fs::write(
         cfg.lingxi_home.join("settings.json"),
         r#"{"enabledPlugins":{"weather@acme":true}}"#,
@@ -5581,9 +5580,9 @@ async fn build_with_providers_and_routing_merges_config_chains_availability() {
     let (_tmp, mut cfg) = test_config(true);
     cfg.provider_profiles = Some({
         let mut m = std::collections::BTreeMap::new();
-        // NB: `provider-config`'s `parse_user_providers` (the dialect `build()`
-        // now routes through via `assemble`) takes `models` as a STRING ARRAY
-        // of model ids — distinct from the legacy `apply_settings_providers`
+        // NB: `provider-config::assemble` calls `llm_runtime::parse_provider_profiles_lenient`
+        // with deferred-static credentials and optional models. It takes `models` as a
+        // STRING ARRAY of model ids — distinct from the legacy `apply_settings_providers`
         // dialect (`[{ "id": ... }]`) the surviving e2e tests below still use.
         m.insert(
             "groq".to_string(),
@@ -10448,9 +10447,9 @@ fn session_read_allowances_include_job_tmp_only_for_bg_jobs() {
 
 // ── `/reload-plugins` — `PluginRuntime::refresh` live reconcile ──────────
 
-/// Write a plugin into the versioned cache layout
-/// `plugins/cache/{marketplace}/{plugin}/{version}/` that
-/// `discover_enabled_plugins` resolves, shipping one namespaced command.
+/// Write an installed plugin into the versioned cache layout
+/// `plugins/cache/{marketplace}/{plugin}/{version}/` and record its exact
+/// version for `discover_enabled_plugins`, shipping one namespaced command.
 fn write_cached_plugin(
     plugins_dir: &std::path::Path,
     marketplace: &str,
@@ -10475,6 +10474,7 @@ fn write_cached_plugin(
         format!("---\ndescription: cmd {cmd}\n---\nBody of {cmd}.\n"),
     )
     .unwrap();
+    write_installed_plugin_record(plugins_dir, marketplace, name, version);
 }
 
 fn write_cached_plugin_with_stdio_mcp(
@@ -10498,6 +10498,41 @@ fn write_cached_plugin_with_stdio_mcp(
             ),
         )
         .unwrap();
+}
+
+/// Write a canonical V2 installed-plugin row for a plugin already materialized
+/// in the exact versioned cache path used by the runtime resolver.
+fn write_installed_plugin_record(
+    plugins_dir: &std::path::Path,
+    marketplace: &str,
+    name: &str,
+    version: &str,
+) {
+    let path = plugin::installed::path(plugins_dir);
+    let mut registry = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .unwrap_or_else(|| serde_json::json!({"version": 2, "plugins": {}}));
+    let install_path = plugins_dir
+        .join("cache")
+        .join(marketplace)
+        .join(name)
+        .join(version);
+    registry
+        .get_mut("plugins")
+        .and_then(serde_json::Value::as_object_mut)
+        .expect("canonical installed registry has a plugins object")
+        .insert(
+            format!("{name}@{marketplace}"),
+            serde_json::json!([{
+                "scope": "user",
+                "installPath": install_path.display().to_string(),
+                "version": version,
+                "installedAt": "2026-01-01T00:00:00.000Z",
+                "lastUpdated": "2026-01-01T00:00:00.000Z"
+            }]),
+        );
+    std::fs::write(path, serde_json::to_vec_pretty(&registry).unwrap()).unwrap();
 }
 
 /// Write `home/settings.json` with the given `enabledPlugins` allowlist.
@@ -10546,7 +10581,7 @@ async fn plugin_runtime_refresh_swaps_enabled_set_live() {
     write_cached_plugin(&plugins_dir, "mkt", "plugina", "1.0.0", "acmd");
     write_cached_plugin(&plugins_dir, "mkt", "pluginb", "1.0.0", "bcmd");
     // Start with only A enabled.
-    write_enabled_plugins(&home, &[("plugina@mkt", true)]);
+    write_enabled_plugins(&home, &[("plugina@mkt", true), ("pluginb@mkt", false)]);
 
     let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
     let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
@@ -10641,7 +10676,7 @@ async fn plugin_runtime_refresh_aborts_enable_phase_after_disable_failure_then_r
     let plugins_dir = home.join("plugins");
     write_cached_plugin_with_stdio_mcp(&plugins_dir, "mkt", "plugina", "1.0.0", "acmd", "srv");
     write_cached_plugin(&plugins_dir, "mkt", "pluginb", "1.0.0", "bcmd");
-    write_enabled_plugins(&home, &[("plugina@mkt", true)]);
+    write_enabled_plugins(&home, &[("plugina@mkt", true), ("pluginb@mkt", false)]);
 
     let agent_catalog = Arc::new(RwLock::new(Vec::new()));
     let mcp_registry = Arc::new(mcp::McpRegistry::new(Arc::new(
@@ -11271,6 +11306,7 @@ async fn plugin_runtime_refresh_strips_agent_escalation_from_live_catalog() {
     .unwrap();
     std::fs::create_dir_all(pdir.join("agents")).unwrap();
     std::fs::write(pdir.join("agents").join("rogue.md"), ROGUE_AGENT_MD).unwrap();
+    write_installed_plugin_record(&plugins_dir, "mkt", "rogueplugin", "1.0.0");
     write_enabled_plugins(&home, &[("rogueplugin@mkt", true)]);
 
     // ── POSITIVE CONTROL ────────────────────────────────────────────────
@@ -11433,6 +11469,7 @@ async fn plugin_runtime_refresh_benign_agent_does_enter_catalog() {
         "---\nname: helper\ndescription: a benign helper\n---\nI help.\n",
     )
     .unwrap();
+    write_installed_plugin_record(&plugins_dir, "mkt", "goodplugin", "1.0.0");
     write_enabled_plugins(&home, &[("goodplugin@mkt", true)]);
 
     let agent_catalog = Arc::new(RwLock::new(Vec::new()));
@@ -11588,15 +11625,9 @@ fn write_full_component_third_party_plugin(
     // `PluginManifest::components.workflows` for this by default-
     // directory discovery, same as commands/agents/skills.
     //
-    // ⚠️ The file stem and the script's `meta.name` are deliberately
-    // DIFFERENT (`build.js` vs `assemble`). `plugin/src/workflow.rs`'s own
-    // module doc states the rule this pins: workflow namespacing is
-    // "`<plugin-name>:<meta.name>` … by the script's OWN claimed
-    // `meta.name`, not by its filename, unlike commands/agents/skills".
-    // With both spelled `build` the assertion below would be satisfied by
-    // a filename-derived stand-in name — exactly the fallback
-    // `WorkflowInventoryEntry`'s doc says must NOT exist — so the fixture
-    // must vary along the axis the code actually reads.
+    // The file stem and script's `meta.name` deliberately differ
+    // (`build.js` vs `assemble`). The live registry assertion below pins
+    // registration under the script-declared name, not the filename.
     std::fs::create_dir_all(dir.join("workflows")).unwrap();
     std::fs::write(
         dir.join("workflows").join("build.js"),
@@ -11728,6 +11759,7 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
     let plugins_dir = home.join("plugins");
     let plugin_dir =
         write_full_component_third_party_plugin(&plugins_dir, "mkt", "acmeplugin", "1.0.0");
+    write_installed_plugin_record(&plugins_dir, "mkt", "acmeplugin", "1.0.0");
     write_enabled_plugins(&home, &[("acmeplugin@mkt", true)]);
 
     // Every registry the composition root wires `PluginManager` to
@@ -11990,24 +12022,5 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
         1,
         "the manifest the composition root's bootstrap loop consumes must carry \
              the shipped workflow script"
-    );
-    let inventory = plugin::build_plugin_workflow_inventory(
-        &manifest_at_boot.name,
-        &manifest_at_boot.components.workflows,
-    )
-    .await;
-    // The fixture's file stem (`build`) and its `meta.name` (`assemble`)
-    // differ, so this equality is only satisfiable by reading the script's
-    // own declared name — the axis `plugin/src/workflow.rs` documents.
-    // A `None` fqn (extraction failed) collapses the vec to empty and also
-    // fails, as does a filename-derived `acmeplugin:build`.
-    assert_eq!(
-        inventory
-            .iter()
-            .filter_map(|e| e.fqn.as_deref())
-            .collect::<Vec<_>>(),
-        vec!["acmeplugin:assemble"],
-        "the discovered script's own meta.name must namespace to acmeplugin:assemble \
-             (NOT the file stem `build`); got {inventory:?}"
     );
 }

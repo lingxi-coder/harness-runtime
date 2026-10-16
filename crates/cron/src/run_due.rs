@@ -893,11 +893,17 @@ mod tests {
             session_id: "owned-chat".into(),
             summary: "result".into(),
         });
-        assert!(
-            crate::finish_automation_run(fs.as_ref(), root, &request, &result, NOW * 1000).await
+        assert_eq!(
+            crate::finish_automation_run_checked(fs.as_ref(), root, &request, &result, NOW * 1000)
+                .await
+                .unwrap(),
+            crate::AutomationFinishDisposition::Terminal,
         );
-        assert!(
-            !crate::finish_automation_run(fs.as_ref(), root, &request, &result, NOW * 1000).await
+        assert_eq!(
+            crate::finish_automation_run_checked(fs.as_ref(), root, &request, &result, NOW * 1000)
+                .await
+                .unwrap(),
+            crate::AutomationFinishDisposition::Superseded,
         );
         let task = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
             .tasks
@@ -950,8 +956,8 @@ mod tests {
         crate::bind_automation_run_session(fs.as_ref(), root, &request, "busy-session")
             .await
             .unwrap();
-        assert!(
-            !crate::finish_automation_run(
+        assert_eq!(
+            crate::finish_automation_run_checked(
                 fs.as_ref(),
                 root,
                 &request,
@@ -959,6 +965,8 @@ mod tests {
                 NOW * 1000
             )
             .await
+            .unwrap(),
+            crate::AutomationFinishDisposition::Queued,
         );
         let pending = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
             .tasks
@@ -972,8 +980,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(request.run_id, next.run_id);
-        assert!(
-            crate::finish_automation_run(
+        assert_eq!(
+            crate::finish_automation_run_checked(
                 fs.as_ref(),
                 root,
                 &next,
@@ -981,6 +989,8 @@ mod tests {
                 NOW * 1000
             )
             .await
+            .unwrap(),
+            crate::AutomationFinishDisposition::Terminal,
         );
         let task = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
             .tasks
@@ -1053,8 +1063,8 @@ mod tests {
                 .len(),
             2
         );
-        assert!(
-            !crate::finish_automation_run(
+        assert_eq!(
+            crate::finish_automation_run_checked(
                 fs.as_ref(),
                 root,
                 &first,
@@ -1062,6 +1072,8 @@ mod tests {
                 (NOW + 180) * 1000
             )
             .await
+            .unwrap(),
+            crate::AutomationFinishDisposition::Queued,
         );
         let config = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
             .tasks
@@ -1075,8 +1087,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(retry.run_id, first.run_id);
-        assert!(
-            crate::finish_automation_run(
+        assert_eq!(
+            crate::finish_automation_run_checked(
                 fs.as_ref(),
                 root,
                 &retry,
@@ -1087,6 +1099,8 @@ mod tests {
                 (NOW + 180) * 1000
             )
             .await
+            .unwrap(),
+            crate::AutomationFinishDisposition::Terminal,
         );
         assert!(
             crate::claim_automation_run(fs.as_ref(), root, "dv2", later, None)
@@ -1105,8 +1119,8 @@ mod tests {
                 let old = crate::claim_automation_run(fs.as_ref(), root, "dv2", now, None)
                     .await
                     .unwrap();
-                assert!(
-                    crate::finish_automation_run(
+                assert_eq!(
+                    crate::finish_automation_run_checked(
                         fs.as_ref(),
                         root,
                         &old,
@@ -1114,6 +1128,8 @@ mod tests {
                         NOW * 1000
                     )
                     .await
+                    .unwrap(),
+                    crate::AutomationFinishDisposition::Terminal,
                 );
             }
             let mut doc = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
@@ -1252,9 +1268,17 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(error.starts_with(crate::AUTOMATION_CANCELLED_PREFIX));
-            assert!(
-                !crate::finish_automation_run(fs.as_ref(), root, &request, &Err(error), NOW * 1000)
-                    .await
+            assert_eq!(
+                crate::finish_automation_run_checked(
+                    fs.as_ref(),
+                    root,
+                    &request,
+                    &Err(error),
+                    NOW * 1000
+                )
+                .await
+                .unwrap(),
+                crate::AutomationFinishDisposition::Superseded,
             );
             let a = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
                 .tasks
@@ -1292,8 +1316,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
-            crate::finish_automation_run(
+        assert_eq!(
+            crate::finish_automation_run_checked(
                 fs.as_ref(),
                 root,
                 &request,
@@ -1304,6 +1328,8 @@ mod tests {
                 NOW * 1000
             )
             .await
+            .unwrap(),
+            crate::AutomationFinishDisposition::Terminal,
         );
         let mut doc = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
         let a = doc.tasks[0].automation.as_mut().unwrap();
@@ -1367,8 +1393,8 @@ mod tests {
             task.automation.unwrap().runs[0].owner_pid,
             Some(std::process::id())
         );
-        assert!(
-            crate::finish_automation_run(
+        assert_eq!(
+            crate::finish_automation_run_checked(
                 fs.as_ref(),
                 root,
                 &request,
@@ -1376,6 +1402,8 @@ mod tests {
                 NOW * 1000
             )
             .await
+            .unwrap(),
+            crate::AutomationFinishDisposition::Terminal,
         );
         let a = parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap())
             .tasks

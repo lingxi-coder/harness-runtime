@@ -260,33 +260,39 @@ pub use filesystem::{
 };
 pub use fusion::{
     is_fusion_panel_type, normalize_dimensions, normalize_dimensions_for, panel_never_dispatched,
-    parse_fusion_model_ref, parse_fusion_models, prepared_from_oneshot, render_fusion_material,
-    truncate_at_char_boundary, truncate_tail, validate_panel_report, validate_verify_commands,
-    ClaimVerdict, DurableFusionOutboxRecord, DurableFusionTerminalRecord, EvidenceCheckCounts,
+    parse_fusion_model_ref, parse_fusion_models, render_fusion_material, truncate_at_char_boundary,
+    truncate_tail, validate_panel_report, validate_verify_commands, ClaimVerdict,
+    DurableFusionOutboxRecord, DurableFusionTerminalRecord, EvidenceCheckCounts,
     EvidenceCheckStatus, EvidenceKind, FusionActivation, FusionAgentSurface, FusionAnalysis,
-    FusionAttemptSettlementStatus, FusionCompletionSink, FusionContradiction, FusionCostClass,
-    FusionError, FusionExecutor, FusionImplementHost, FusionInheritance, FusionLatencyClass,
-    FusionModelChoice, FusionModelHints, FusionModelRef, FusionModelRole, FusionOrigin,
-    FusionPanelMode, FusionPreparedSummary, FusionPreset, FusionProgress, FusionPublicationReceipt,
-    FusionPublicationState, FusionPublicationStatus, FusionRequest, FusionResult, FusionRunControl,
-    FusionRunFacts, FusionRunFactsRecorder, FusionRunId, FusionRunIdentity, FusionRunOutcome,
-    FusionRunRecorder, FusionRunRecorderFactory, FusionSlashPublicationTarget, FusionStage,
-    FusionStatus, FusionStrategyMetadata, FusionSubmission, FusionTerminalCapability, FusionTiming,
+    FusionAttemptSettlementStatus, FusionContradiction, FusionCostClass, FusionError,
+    FusionExecutor, FusionImplementHost, FusionInheritance, FusionLatencyClass, FusionModelChoice,
+    FusionModelHints, FusionModelRef, FusionModelRole, FusionOrigin, FusionPanelMode,
+    FusionPreparedSummary, FusionPreset, FusionProgress, FusionPublicationReceipt,
+    FusionPublicationStatus, FusionRequest, FusionResult, FusionRunControl, FusionRunFacts,
+    FusionRunFactsRecorder, FusionRunId, FusionRunIdentity, FusionRunOutcome, FusionRunRecorder,
+    FusionRunRecorderFactory, FusionSlashPublicationTarget, FusionStage, FusionStatus,
+    FusionStrategyMetadata, FusionSubmission, FusionTerminalCapability, FusionTiming,
     FusionUniqueInsight, FusionUsage, ImplementConfirmation, MaterialClaim, MaterialEvidence,
-    NoopFusionCompletionSink, PanelClaim, PanelEvidence, PanelMaterial, PanelOutcome, PanelPatch,
-    PanelPosition, PanelReport, PanelRisk, PanelRunStatus, PanelVerification, PreparedFusionRun,
-    RiskSeverity, SupportedPoint, VerificationOutcome, VerificationRun, VerifiedClaim,
-    DEFAULT_FUSION_DIMENSIONS, DEFAULT_FUSION_DIMENSION_DESCRIPTIONS,
-    DEFAULT_IMPLEMENT_FUSION_DIMENSIONS, DEFAULT_IMPLEMENT_FUSION_DIMENSION_DESCRIPTIONS,
-    FUSION_ANALYST_TYPE, FUSION_IMPLEMENTER_TYPE, FUSION_MATERIAL_ANALYSIS_BYTE_CAP,
-    FUSION_MATERIAL_ANSWERS_BYTE_BUDGET, FUSION_MATERIAL_ANSWER_BYTE_CAP,
-    FUSION_MATERIAL_DIFF_BYTE_CAP, FUSION_MATERIAL_ITEM_BYTE_CAP, FUSION_MATERIAL_LOCATOR_BYTE_CAP,
-    FUSION_MATERIAL_MAX_CLAIM_EVIDENCE, FUSION_MATERIAL_MAX_ITEMS, FUSION_MATERIAL_MAX_PATCH_FILES,
-    FUSION_MATERIAL_SUMMARY_BYTE_CAP, FUSION_MATERIAL_TOTAL_BYTE_CAP, FUSION_MAX_PANEL,
-    FUSION_MAX_VERIFY_COMMANDS, FUSION_MAX_VERIFY_COMMAND_BYTES, FUSION_MIN_PANEL,
-    FUSION_PANEL_POOL_CAP, FUSION_PANEL_TYPE, FUSION_SCHEMA_VERSION,
-    FUSION_VERIFICATION_OUTPUT_BYTE_CAP,
+    PanelClaim, PanelEvidence, PanelMaterial, PanelOutcome, PanelPatch, PanelPosition, PanelReport,
+    PanelRisk, PanelRunStatus, PanelVerification, PreparedFusionRun, RiskSeverity, SupportedPoint,
+    VerificationOutcome, VerificationRun, VerifiedClaim, DEFAULT_FUSION_DIMENSIONS,
+    DEFAULT_FUSION_DIMENSION_DESCRIPTIONS, DEFAULT_IMPLEMENT_FUSION_DIMENSIONS,
+    DEFAULT_IMPLEMENT_FUSION_DIMENSION_DESCRIPTIONS, FUSION_ANALYST_TYPE, FUSION_IMPLEMENTER_TYPE,
+    FUSION_MATERIAL_ANALYSIS_BYTE_CAP, FUSION_MATERIAL_ANSWERS_BYTE_BUDGET,
+    FUSION_MATERIAL_ANSWER_BYTE_CAP, FUSION_MATERIAL_DIFF_BYTE_CAP, FUSION_MATERIAL_ITEM_BYTE_CAP,
+    FUSION_MATERIAL_LOCATOR_BYTE_CAP, FUSION_MATERIAL_MAX_CLAIM_EVIDENCE,
+    FUSION_MATERIAL_MAX_ITEMS, FUSION_MATERIAL_MAX_PATCH_FILES, FUSION_MATERIAL_SUMMARY_BYTE_CAP,
+    FUSION_MATERIAL_TOTAL_BYTE_CAP, FUSION_MAX_PANEL, FUSION_MAX_VERIFY_COMMANDS,
+    FUSION_MAX_VERIFY_COMMAND_BYTES, FUSION_MIN_PANEL, FUSION_PANEL_POOL_CAP, FUSION_PANEL_TYPE,
+    FUSION_SCHEMA_VERSION, FUSION_VERIFICATION_OUTPUT_BYTE_CAP,
 };
+
+/// Test-only adapters that exercise the current prepared-run contract.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    pub use super::fusion::prepared_from_oneshot;
+}
+
 pub use handback::{
     BeginHandbackRun, HandbackAdmissionError, HandbackAdmissionOutcome, HandbackConsumptionAck,
     HandbackDisposition, HandbackEnvelope, HandbackInstruction, HandbackPeerOrigin,

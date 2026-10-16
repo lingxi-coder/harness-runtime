@@ -54,7 +54,6 @@ pub mod source;
 pub mod strict_policy;
 pub mod theme_registry;
 pub mod trust;
-pub mod workflow;
 /// `${user_config.KEY}` substitution + plugin-option env helpers.
 ///
 /// Re-exported from the `hooks` crate, which owns the single source of truth
@@ -102,6 +101,3 @@ pub use source::PluginSource;
 pub use strict_policy::{PluginComponent, StrictPluginOnlyPolicy};
 pub use theme_registry::{PluginThemeEntry, PluginThemeRegistry};
 pub use trust::{default_trust_for_source, PluginTrustLevel};
-/// Legacy discovery assertion helper. Production workflow registration uses
-/// the shared `workflow::PluginWorkflowRegistry` instead.
-pub use workflow::{build_plugin_workflow_inventory, extract_meta_name, WorkflowInventoryEntry};

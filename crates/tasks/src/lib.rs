@@ -44,7 +44,7 @@ pub use handlers::{
 };
 pub use id::{generate_task_id, TaskType};
 pub use registry::{
-    register_agent_handlers, register_dream_handler, register_fusion_handler,
+    register_agent_handlers, register_dream_handler, register_fusion_handler_with_recorder_factory,
     register_self_contained_handlers,
 };
 pub use state::*;

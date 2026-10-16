@@ -646,7 +646,7 @@ pub(crate) async fn accumulate_code_change(
 /// ([`crate::streaming_executor::StreamingToolExecutor`]) calls
 /// `dispatch_tool_uses_tracked` per tool, so it DOES replay tool-injected
 /// `new_messages` (the Skill tool's expanded prompt) into history after the
-/// `tool_result` — mirroring the batched [`execute_one_turn`] path (SKILLEXEC.3).
+/// `tool_result` — mirroring the batched [`execute_one_turn_with_recovery_tracked`] path (SKILLEXEC.3).
 #[cfg(test)]
 pub(crate) async fn dispatch_tool_uses(
     orch: &ConversationOrchestrator,

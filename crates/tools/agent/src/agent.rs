@@ -29,7 +29,7 @@ use lingxi_core::host::fusion::{
     FusionActivation, FusionAgentSurface, FusionExecutor, FusionInheritance, FusionModelRef,
     FusionOrigin, FusionPanelMode, FusionPreparedSummary, FusionPreset, FusionProgress,
     FusionRequest, FusionRunControl, FusionRunFactsRecorder, FusionRunId, FusionRunIdentity,
-    FusionRunRecorder, FusionRunRecorderFactory, FusionStage, FusionStatus, FusionSubmission,
+    FusionRunRecorderFactory, FusionStage, FusionStatus, FusionSubmission,
     FusionTerminalCapability, PreparedFusionRun, FUSION_MAX_PANEL, FUSION_MIN_PANEL,
 };
 use lingxi_core::host::subagent_spawn::{
@@ -83,8 +83,8 @@ impl SubagentSpawnObserver for ModStartReceiptObserver {
 
 #[cfg(test)]
 impl AgentTool {
-    /// Bounded legacy fixture ingress for the existing test suite. Production
-    /// dispatch calls the Tool trait with the original flat source projection.
+    /// Test-only serde fixture adapter. Production dispatch calls the Tool
+    /// trait with the original flat source projection.
     async fn call(
         &self,
         input: Value,
@@ -1379,6 +1379,31 @@ const MAX_FUSION_PERMISSION_STRATEGIES: usize = 64;
 const FUSION_PERMISSION_REVIEW_MAX_AGE: std::time::Duration =
     std::time::Duration::from_secs(60 * 60);
 
+/// Current host wiring for Agent-origin Fusion runs.
+///
+/// A Fusion executor and the per-session terminal recorder are one capability:
+/// the executor must never be installed with an implicit current-session
+/// recorder or with no terminal receipt path.
+#[derive(Clone)]
+pub struct AgentFusionServices {
+    executor: Arc<dyn FusionExecutor>,
+    recorder_factory: Arc<dyn FusionRunRecorderFactory>,
+}
+
+impl AgentFusionServices {
+    /// Create a complete Fusion capability for one Agent registry.
+    #[must_use]
+    pub fn new(
+        executor: Arc<dyn FusionExecutor>,
+        recorder_factory: Arc<dyn FusionRunRecorderFactory>,
+    ) -> Self {
+        Self {
+            executor,
+            recorder_factory,
+        }
+    }
+}
+
 /// `AgentTool` — spawn a subagent (surface only; recursive dispatch lands
 /// in `lingxi-coordinator` post-M5).
 pub struct AgentTool {
@@ -1391,15 +1416,12 @@ pub struct AgentTool {
     /// `model` description suffix and the `SUBAGENT_MODEL_FORCE` omission,
     /// resolved on first use because both read live session state.
     projected_input_schema: std::sync::OnceLock<Utf16JsonProjection>,
-    /// Injected Fusion orchestrator. `None` on mobile and in `register_all`.
-    fusion: Option<Arc<dyn FusionExecutor>>,
+    /// Executor and per-session terminal receipt factory, configured together.
+    /// `None` keeps Fusion disabled on mobile and ordinary registries.
+    fusion_services: Option<AgentFusionServices>,
     /// Exact strategy quoted during implement permission review, consumed by execution.
     fusion_permission_strategies:
         std::sync::Mutex<std::collections::HashMap<String, FusionPermissionStrategy>>,
-    /// Host-owned common terminal recorder for Agent-origin Fusion runs.
-    terminal_recorder: Option<Arc<dyn FusionRunRecorder>>,
-    /// Pure per-session recorder factory for long-lived hot-switch hosts.
-    terminal_recorder_factory: Option<Arc<dyn FusionRunRecorderFactory>>,
 }
 
 /// Normalize a subagent `description` the way the binary does — `replace(/\s+/g,
@@ -2224,57 +2246,18 @@ impl AgentTool {
             ctx,
             advertise_run_in_background,
             projected_input_schema: std::sync::OnceLock::new(),
-            fusion: None,
+            fusion_services: None,
             fusion_permission_strategies: Default::default(),
-            terminal_recorder: None,
-            terminal_recorder_factory: None,
         }
     }
 
-    /// Attach a Fusion executor. Listing and `subagent_type: "fusion"` stay
-    /// inert until [`FusionExecutor::agent_surface`] reports enabled.
+    /// Attach the complete current Fusion capability. Listing and
+    /// `subagent_type: "fusion"` stay inert until
+    /// [`FusionExecutor::agent_surface`] reports enabled.
     #[must_use]
-    pub fn with_fusion(mut self, executor: Arc<dyn FusionExecutor>) -> Self {
-        self.fusion = Some(executor);
+    pub fn with_fusion_services(mut self, services: AgentFusionServices) -> Self {
+        self.fusion_services = Some(services);
         self
-    }
-
-    /// Attach the host-owned common terminal recorder. Agent receives no
-    /// Slash publication target, even when its trusted session is known.
-    #[must_use]
-    pub fn with_terminal_recorder(mut self, recorder: Arc<dyn FusionRunRecorder>) -> Self {
-        self.terminal_recorder = Some(recorder);
-        self
-    }
-
-    /// Attach a pure per-session recorder factory. Agent receives no Slash
-    /// publication target, but its terminal receipt remains pinned to the
-    /// trusted session authority selected before preparation.
-    #[must_use]
-    pub fn with_terminal_recorder_factory(
-        mut self,
-        factory: Arc<dyn FusionRunRecorderFactory>,
-    ) -> Self {
-        self.terminal_recorder_factory = Some(factory);
-        self
-    }
-
-    fn terminal_recorder_for(
-        &self,
-        session_id: Option<lingxi_core::types::SessionId>,
-    ) -> Option<Arc<dyn FusionRunRecorder>> {
-        if let Some(factory) = self.terminal_recorder_factory.as_ref() {
-            // A production task normally carries the trusted origin session.
-            // If a legacy standalone host has no session binding, retain its
-            // explicitly supplied compatibility recorder (the desktop no-
-            // persistence path supplies an explicit StorageFailure recorder)
-            // instead of inventing an id for a pure factory lookup.
-            return session_id.map_or_else(
-                || self.terminal_recorder.clone(),
-                |session_id| factory.recorder_for(session_id),
-            );
-        }
-        self.terminal_recorder.clone()
     }
 
     fn fresh_invocation_id() -> String {
@@ -2376,9 +2359,13 @@ impl AgentTool {
         // resolving again. A failed review may never leave usable authority.
         self.take_fusion_permission_strategy(&parsed, ctx);
         let captured = (|| {
-            let executor = self.fusion.as_ref().ok_or_else(|| {
-                ToolError::InvalidInput("Fusion is unavailable on this host".into())
-            })?;
+            let executor = self
+                .fusion_services
+                .as_ref()
+                .map(|services| &services.executor)
+                .ok_or_else(|| {
+                    ToolError::InvalidInput("Fusion is unavailable on this host".into())
+                })?;
             if let Some(error) = executor.preflight_error() {
                 return Err(fusion_tool_error(error));
             }
@@ -2460,9 +2447,11 @@ impl AgentTool {
     }
 
     fn fusion_surface(&self) -> FusionAgentSurface {
-        self.fusion
+        self.fusion_services
             .as_ref()
-            .map_or_else(FusionAgentSurface::default, |ex| ex.agent_surface())
+            .map_or_else(FusionAgentSurface::default, |services| {
+                services.executor.agent_surface()
+            })
     }
 
     fn append_fusion_listing(&self, agents: &mut Vec<SubagentListingEntry>) {
@@ -2630,8 +2619,8 @@ impl AgentTool {
             ));
         }
 
-        let executor = match self.fusion.as_ref() {
-            Some(ex) => Arc::clone(ex),
+        let fusion_services = match self.fusion_services.as_ref() {
+            Some(services) => services,
             None => {
                 let available = self.fusion_available_agents_display(is_coordinator).await;
                 Self::emit_failed(
@@ -2649,6 +2638,7 @@ impl AgentTool {
                 ));
             }
         };
+        let executor = Arc::clone(&fusion_services.executor);
         // F008: a boot-pinned rejection (an invalid `fusion.*` setting at
         // composition-root time — see `RejectedFusionExecutor`) is surfaced
         // AS ITSELF, before the `enabled` gate below — otherwise it always
@@ -2828,7 +2818,34 @@ impl AgentTool {
             FusionOrigin::Agent,
             Some(invocation_id.to_string()),
         );
-        let terminal_recorder = self.terminal_recorder_for(origin_session_id);
+        let Some(origin_session_id) = origin_session_id else {
+            Self::emit_failed(
+                bus,
+                invocation_id,
+                "fusion_terminal_recorder_unavailable",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(ToolError::Internal(
+                "AgentTool: Fusion requires a trusted origin session for its terminal recorder"
+                    .into(),
+            ));
+        };
+        let Some(terminal_recorder) = fusion_services
+            .recorder_factory
+            .recorder_for(origin_session_id)
+        else {
+            Self::emit_failed(
+                bus,
+                invocation_id,
+                "fusion_terminal_recorder_unavailable",
+                started.elapsed().as_millis() as u64,
+            )
+            .await;
+            return Err(ToolError::Internal(
+                "AgentTool: terminal recorder is unavailable for the trusted Fusion session".into(),
+            ));
+        };
         let strategy_metadata = request.strategy_metadata();
         let prepared = match executor.clone().prepare(FusionSubmission {
             request,
@@ -2850,12 +2867,9 @@ impl AgentTool {
                     planned_panels: None,
                 };
                 let prepared = PreparedFusionRun::failed(summary, control, error.clone());
-                let prepared = if let Some(recorder) = terminal_recorder.as_ref() {
-                    prepared
-                        .with_terminal_capability(FusionTerminalCapability::new(recorder.clone()))
-                } else {
-                    prepared
-                };
+                let prepared = prepared.with_terminal_capability(FusionTerminalCapability::new(
+                    terminal_recorder.clone(),
+                ));
                 let _ = prepared.activate(FusionActivation::now(), None).await;
                 Self::emit_failed(
                     bus,
@@ -2867,11 +2881,8 @@ impl AgentTool {
                 return Err(fusion_tool_error(error));
             }
         };
-        let prepared = if let Some(recorder) = terminal_recorder.as_ref() {
-            prepared.with_terminal_capability(FusionTerminalCapability::new(recorder.clone()))
-        } else {
-            prepared
-        };
+        let prepared = prepared
+            .with_terminal_capability(FusionTerminalCapability::new(terminal_recorder.clone()));
         let prepared_summary = prepared.summary().clone();
         let prepared_control = prepared.control();
         let panel_n = prepared_summary
@@ -4343,7 +4354,7 @@ impl Tool for AgentTool {
         issues
     }
     fn output_schema(&self) -> Option<&Utf16JsonProjection> {
-        Some(if self.fusion.is_some() {
+        Some(if self.fusion_services.is_some() {
             &AGENT_OUTPUT_SCHEMA_WITH_FUSION_SOURCE
         } else {
             &AGENT_OUTPUT_SCHEMA_SOURCE
@@ -4353,7 +4364,7 @@ impl Tool for AgentTool {
         &self,
         output: &Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ToolError> {
-        agent_output::parse(output, self.fusion.is_some())
+        agent_output::parse(output, self.fusion_services.is_some())
     }
     fn is_enabled(&self, _: &ToolStaticContext) -> bool {
         true

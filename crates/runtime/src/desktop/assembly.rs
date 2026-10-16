@@ -50,9 +50,9 @@ use super::{
     managed_mod_seats_from_raw_tiers, managed_only_sandbox_overrides, mcp_on_authorization_url,
     mcp_servers_inventory_payload, merge_agent_frontmatter_mcp_servers, merge_cli_flag_agents,
     new_desktop_mcp_transport, new_live_sandbox_runner_with_permission_gate, pane_teammate,
-    platform_in_enabled_list, plugin_dir_watch_enabled, policy_helpers,
-    register_desktop_tools_with_fusion_recorder, registry_skill_listing_provider_for_desktop,
-    resolve_bash_edit_diff, resolve_llm_stack_with_credentials, resolve_memory_feature_gates,
+    platform_in_enabled_list, plugin_dir_watch_enabled, policy_helpers, register_desktop_tools,
+    registry_skill_listing_provider_for_desktop, resolve_bash_edit_diff,
+    resolve_llm_stack_with_credentials, resolve_memory_feature_gates,
     resolve_workflow_session_enabled_from_effective,
     resolve_workflow_size_guideline_from_effective, ripgrep_override,
     sandbox_auto_allow_from_settings_tiers, sandbox_runtime_config_from_settings_tiers,
@@ -950,16 +950,35 @@ pub async fn build_with_credential_stack(
         &cwd,
         proxy_auth_global_config_path.as_deref(),
     );
-    // Local CLI hosts derive this local verdict from their existing workspace
-    // trust policy. Product/bridge hosts pass an explicit allowInsights value.
-    // Other hosts preserve unknown as None; permission mode is unrelated.
+    // Native 2.1.295's `allow_insights` policy defaults to allowed for a fresh
+    // third-party gateway without a HIPAA restriction. Workspace trust is a
+    // separate `requires.workspace` condition enforced before the report
+    // provider runs; it must not be used to rewrite the policy verdict. Product
+    // and bridge hosts may supply an explicit allowInsights value, including
+    // false. Other hosts preserve unknown as None.
+    //
+    // Source: `acceptance/source-alignment-295-r31/native-policy-source/
+    // src_194447854.js` (`Dbo`, policyGate `allow_insights`) and
+    // `skill-display-name-source/src_192325571.js` (`gjn` policy predicate).
     let native_insights_policy_gate = cfg.insights_policy_gate.or_else(|| {
         matches!(
             cfg.session_composition(),
             super::DesktopSessionComposition::InteractiveCli
                 | super::DesktopSessionComposition::HeadlessCli
         )
-        .then_some(workspace_trusted)
+        .then_some(true)
+    });
+    // Local CLI compositions use the source's ordinary local-default allow
+    // policy; external transports keep the fact unknown unless their host
+    // explicitly supplies it. Workspace trust remains a separate invocation
+    // requirement and never rewrites this policy fact.
+    let native_team_onboarding_policy_gate = cfg.team_onboarding_policy_gate.or_else(|| {
+        matches!(
+            cfg.session_composition(),
+            super::DesktopSessionComposition::InteractiveCli
+                | super::DesktopSessionComposition::HeadlessCli
+        )
+        .then_some(true)
     });
     let proxy_auth_workspace_trust_provider: Arc<dyn Fn() -> bool + Send + Sync> = {
         let host_trusted = cfg.host_workspace_trusted;
@@ -3802,21 +3821,18 @@ pub async fn build_with_credential_stack(
 
     // Fusion `/fusion` + Agent `subagent_type: "fusion"` share one orchestrator.
     // Register the LocalFusion handler before the registry is Arc-wrapped. The
-    // completion sink is bound after the orchestrator handle exists; the tool
-    // invoker is bound at (5.5a) once `tools` exists. `/fusion` is explicit
-    // per-run and works even when `fusion.enabled` is false.
-    let fusion_completion_sink = Arc::new(fusion_command::DeferredFusionCompletionSink::new());
+    // per-session recorder factory is resolved during each task preparation;
+    // the tool invoker is bound at (5.5a) once `tools` exists. `/fusion` is
+    // explicit per-run and works even when `fusion.enabled` is false.
     let fusion_invoker = Arc::new(DeferredToolInvoker::new());
     let fusion_status_sink = Arc::new(tasks::registry_status_sink::RegistryStatusSink::new());
     tasks::registry::register_fusion_handler_with_recorder_factory(
         &mut task_registry_inner,
         fusion_executor.clone(),
-        fusion_completion_sink.clone() as Arc<dyn lingxi_core::host::FusionCompletionSink>,
         fusion_invoker.clone() as Arc<dyn lingxi_core::host::tool_invoker::ToolInvoker>,
         budget_enforcer.clone(),
         fusion_status_sink.clone() as Arc<dyn tasks::handlers::TaskStatusSink>,
-        Some(fusion_recorder.clone()),
-        Some(fusion_recorder_factory.clone()),
+        fusion_recorder_factory.clone(),
     );
 
     task_registry_inner.set_team_member_activity_handle(Arc::new(
@@ -4532,9 +4548,9 @@ pub async fn build_with_credential_stack(
         calendar: None,
         contacts: None,
         computer_control: platform_macos_computer_control::new_if_supported(),
-        android_shell: None,
-        android_git: None,
-        android_git_secret: None,
+        mobile_shell: None,
+        mobile_git: None,
+        mobile_git_secret: None,
         // BLOCKING TaskCreated/TaskCompleted hooks for the V2 Task* tool path
         // (claude-code `executeTaskCreatedHooks` / `executeTaskCompletedHooks`).
         // Wraps the SAME `Arc<HookExecutorImpl>` + cwd the registry firers use
@@ -4928,7 +4944,7 @@ pub async fn build_with_credential_stack(
     };
     let insights_tool_context = Arc::new(tool_ctx.clone());
     let local_app_tool_ctx = cfg.local_apps.then(|| tool_ctx.clone());
-    let (wakeup_scheduler_cell, loop_wakeup_armed) = register_desktop_tools_with_fusion_recorder(
+    let (wakeup_scheduler_cell, loop_wakeup_armed) = register_desktop_tools(
         &mut tools_inner,
         tool_ctx,
         coordinator_wiring,
@@ -4944,9 +4960,10 @@ pub async fn build_with_credential_stack(
         // the single writer of the live cwd Read/Glob/Grep + LSP read.
         Some(current_cwd_cell.clone()),
         worktree_state_persister,
-        Some(fusion_executor.clone()),
-        Some(fusion_recorder.clone()),
-        Some(fusion_recorder_factory.clone()),
+        Some(tool_agent::AgentFusionServices::new(
+            fusion_executor.clone(),
+            fusion_recorder_factory.clone(),
+        )),
     );
     if let Some(ctx) = visualization_tool_ctx {
         let store = crate::inline_visualization::shared_store(ctx.fs.clone(), &cfg.lingxi_home);
@@ -5327,7 +5344,7 @@ pub async fn build_with_credential_stack(
     ));
 
     // Finding 22: this is the ONE invoker `LocalFusionHandler` uses for every
-    // `/fusion` background-task panel (`register_fusion_handler` above binds
+    // `/fusion` background-task panel (`register_fusion_handler_with_recorder_factory` above binds
     // this exact `fusion_invoker` cell, and `tasks::handlers::local_fusion`
     // clones it verbatim into `SubagentInheritance::tool_invoker` for each
     // panel spawn — no other caller reaches this `Arc`). A FOREGROUND
@@ -6173,6 +6190,26 @@ pub async fn build_with_credential_stack(
     } else {
         tracing::debug!(
             "Insights remains a metadata stub because workspace or local policy is unavailable"
+        );
+    }
+    let team_onboarding_availability = command_api::builtins::TeamOnboardingCommandAvailability {
+        workspace_available: Some(cfg.cwd.is_dir() && workspace_trusted),
+        allow_team_onboarding: native_team_onboarding_policy_gate,
+    };
+    if team_onboarding_availability.is_available() {
+        let provider: Arc<dyn command_api::builtins::TeamOnboardingPromptProvider> = Arc::new(
+            crate::team_onboarding::LocalTeamOnboardingPromptProvider::new(
+                cfg.lingxi_home.clone(),
+                cfg.cwd.clone(),
+                team_onboarding_availability,
+            ),
+        );
+        if !command_api::builtins::register_team_onboarding_command(&mut reg, provider) {
+            tracing::debug!("Team onboarding host facts changed before command registration");
+        }
+    } else {
+        tracing::debug!(
+            "Team onboarding remains unavailable because workspace or local policy is unavailable"
         );
     }
     if cfg.inline_visualization {
@@ -7194,6 +7231,7 @@ pub async fn build_with_credential_stack(
         // P1-08 runtime `/add-dir` live-effect handles (captured before the
         // orchestrator builder consumed the originals).
         native_insights_policy_gate,
+        native_team_onboarding_policy_gate,
         session_cwd: runtime_session_cwd,
         mcp_registry: runtime_mcp_registry,
         ide_handle,

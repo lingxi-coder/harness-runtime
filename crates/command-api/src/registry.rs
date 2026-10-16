@@ -50,6 +50,8 @@ pub struct NativeHeadlessCatalogContext {
     pub workspace_available: Option<bool>,
     /// Native `insights` policy verdict; absent host facts must stay `None`.
     pub insights_policy_gate: Option<bool>,
+    /// Native `/team-onboarding` local policy verdict; absence stays `None`.
+    pub team_onboarding_policy_gate: Option<bool>,
     /// Native `tP()` entitlement result for the Local `/usage-credits` twin.
     pub usage_credits_enabled: Option<bool>,
     /// Native `gv()` experimental gate for the Local `/advisor` twin.
@@ -586,17 +588,26 @@ impl CommandRegistry {
     }
 
     fn native_headless_command_available(&self, command: &SlashCommand) -> bool {
+        // Native 2.1.295 `Dbo` has no `isEnabled` predicate. Its Rust
+        // provider's workspace check controls invocation, not `pe` catalog
+        // admission, so don't use that handler-local state to suppress count.
+        let policy_prompt = is_native_policy_prompt_row(command);
+        let factory_enabled = policy_prompt || native_factory_enabled(command);
         if command.is_hidden
-            || !native_factory_enabled(command)
+            || !factory_enabled
             || !self.session_skill_allowed(command)
-            || !self.native_headless_factory_available(command)
+            || !self.native_headless_factory_available(command, !policy_prompt)
         {
             return false;
         }
         true
     }
 
-    fn native_headless_factory_available(&self, command: &SlashCommand) -> bool {
+    fn native_headless_factory_available(
+        &self,
+        command: &SlashCommand,
+        enforce_workspace_requirement: bool,
+    ) -> bool {
         // `kjs` counts rows in `pe` before applying the headless prompt-name
         // filter. `userInvocable` controls the slash UI and is not a `pe`
         // predicate.
@@ -617,11 +628,12 @@ impl CommandRegistry {
         if matches!(name, "version" | "extra-usage") || local_cron_extension {
             return false;
         }
-        if command
-            .requires
-            .as_ref()
-            .and_then(|requires| requires.workspace)
-            == Some(true)
+        if enforce_workspace_requirement
+            && command
+                .requires
+                .as_ref()
+                .and_then(|requires| requires.workspace)
+                == Some(true)
             && !self
                 .native_headless_context
                 .as_ref()
@@ -635,6 +647,10 @@ impl CommandRegistry {
                     .native_headless_context
                     .as_ref()
                     .is_some_and(|context| context.insights_policy_gate == Some(true)),
+                "allow_team_onboarding" => self
+                    .native_headless_context
+                    .as_ref()
+                    .is_some_and(|context| context.team_onboarding_policy_gate == Some(true)),
                 _ => false,
             };
             if !allowed {
@@ -675,7 +691,7 @@ impl CommandRegistry {
         self.native_source_ordered_commands()
             .into_iter()
             .filter(|c| native_factory_enabled(c))
-            .filter(|c| self.native_headless_factory_available(c))
+            .filter(|c| self.native_headless_factory_available(c, true))
             .filter(|c| !c.disable_model_invocation)
             .filter(|c| self.execution_allowed(c))
             .filter(|c| self.session_skill_allowed(c))
@@ -890,6 +906,24 @@ impl CommandRegistry {
         self.aliases.retain(|_, target| !names.contains(target));
         names.len()
     }
+}
+
+/// Native `/insights` and `/team-onboarding` are builtin prompts with policy
+/// gates and `disableModelInvocation`, but no `isEnabled` factory predicate.
+/// Their `requires.workspace` is also not read by Native's `pe` catalog filter.
+/// Provider-backed Rust handlers use workspace trust to protect invocation,
+/// while catalog counting follows the local policy fact.
+///
+/// Source: `acceptance/source-alignment-295-r31/native-policy-source/
+/// src_194447854.js` (2.1.295 `Dbo`, byte 1,638,509) and
+/// `skill-display-name-source/src_215528992.js` (`pe` filter).
+fn is_native_policy_prompt_row(command: &SlashCommand) -> bool {
+    command.source == CommandSource::Builtin
+        && command.native_type == Some(crate::model::NativeCommandType::Prompt)
+        && matches!(
+            projection_text(&command.name),
+            Some("insights" | "team-onboarding")
+        )
 }
 
 fn native_prompt_model_invocable(command: &&SlashCommand) -> bool {
@@ -1377,7 +1411,7 @@ mod tests {
     }
 
     #[test]
-    fn headless_factory_context_applies_add_dir_auto_mode_and_insights_gates() {
+    fn headless_factory_context_applies_add_dir_auto_mode_and_policy_prompt_gates() {
         let mut registry = CommandRegistry::new();
         registry.register_command(SlashCommand {
             name: "add-dir".into(),
@@ -1402,15 +1436,38 @@ mod tests {
         registry.register_command(SlashCommand {
             name: "insights".into(),
             source: CommandSource::Builtin,
+            native_source: Some("built-in".into()),
             kind: SlashCommandKind::Builtin {
                 handler_id: "insights".into(),
             },
+            is_enabled: false,
             native_type: Some(NativeCommandType::Prompt),
+            disable_model_invocation: true,
             requires: Some(crate::model::NativeCommandRequirements {
                 workspace: Some(true),
             }),
             policy_gate: Some(crate::model::NativeCommandPolicyGate {
                 policy: "allow_insights".into(),
+            }),
+            ..SlashCommand::default()
+        });
+        registry.register_command(SlashCommand {
+            name: "team-onboarding".into(),
+            source: CommandSource::Builtin,
+            native_source: Some("built-in".into()),
+            kind: SlashCommandKind::Builtin {
+                handler_id: "team-onboarding".into(),
+            },
+            // Native has no isEnabled predicate. Provider workspace checks
+            // guard invocation but do not alter `pe` catalog admission.
+            is_enabled: false,
+            native_type: Some(NativeCommandType::Prompt),
+            disable_model_invocation: true,
+            requires: Some(crate::model::NativeCommandRequirements {
+                workspace: Some(true),
+            }),
+            policy_gate: Some(crate::model::NativeCommandPolicyGate {
+                policy: "allow_team_onboarding".into(),
             }),
             ..SlashCommand::default()
         });
@@ -1440,6 +1497,7 @@ mod tests {
             selected_model: Some("claude-sonnet-4-5".into()),
             workspace_available: Some(true),
             insights_policy_gate: Some(false),
+            team_onboarding_policy_gate: Some(false),
             usage_credits_enabled: Some(false),
             advisor_enabled: Some(false),
         });
@@ -1467,18 +1525,19 @@ mod tests {
             selected_model: Some("claude-sonnet-4-5".into()),
             workspace_available: Some(true),
             insights_policy_gate: Some(true),
+            team_onboarding_policy_gate: Some(true),
             usage_credits_enabled: Some(true),
             advisor_enabled: Some(true),
         });
         let remote = registry.headless_command_catalog();
-        assert_eq!(remote.available_command_count, 4);
+        assert_eq!(remote.available_command_count, 5);
         assert_eq!(
             remote
                 .prompt_command_names
                 .iter()
                 .map(|name| name.string_at("").unwrap())
                 .collect::<Vec<_>>(),
-            ["insights"]
+            Vec::<String>::new()
         );
         assert_eq!(
             registry
@@ -1486,20 +1545,25 @@ mod tests {
                 .iter()
                 .map(|command| command.name.string_at("").unwrap())
                 .collect::<Vec<_>>(),
-            [
-                "add-dir",
-                "insights",
-                "usage-credits",
-                "advisor",
-                "rate-limit-options"
-            ]
+            ["add-dir", "usage-credits", "advisor", "rate-limit-options"]
         );
 
         registry.set_native_headless_context(NativeHeadlessCatalogContext {
+            entrypoint: Some("sdk-cli".into()),
+            is_remote: Some(false),
+            selected_model: Some("claude-sonnet-4-5".into()),
             workspace_available: Some(false),
             insights_policy_gate: Some(true),
+            team_onboarding_policy_gate: Some(true),
+            usage_credits_enabled: Some(false),
+            advisor_enabled: Some(false),
             ..NativeHeadlessCatalogContext::default()
         });
+        let untrusted_workspace = registry.headless_command_catalog();
+        // Native `pe` ignores `requires.workspace` for policy prompt rows, so
+        // both policy-allowed prompts remain counted even in this context.
+        assert_eq!(untrusted_workspace.available_command_count, 3);
+        assert!(untrusted_workspace.prompt_command_names.is_empty());
         assert!(!registry
             .model_invocable_commands()
             .iter()
@@ -1897,7 +1961,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_reminder_keeps_source_units_and_native_remainder_count() {
+    fn unknown_reminder_omits_unsafe_unknown_name_and_keeps_native_remainder_count() {
         let unknown = Utf16JsonProjection::root_string(
             "unknown�".into(),
             ["unknown".encode_utf16().collect::<Vec<_>>(), vec![0xd800]].concat(),
@@ -1908,33 +1972,113 @@ mod tests {
             available_command_count: 5,
         };
         let rendered = crate::model::render_unknown_command_reminder(&unknown, &catalog);
-        let expected_prefix =
-            "<system-reminder>\nThe user's message starts with the slash command /unknown"
-                .encode_utf16()
-                .collect::<Vec<_>>();
-        let rendered_units = rendered.string_units("").unwrap();
-        assert!(rendered_units.starts_with(&expected_prefix));
-        assert_eq!(
-            rendered_units[expected_prefix.len()],
-            0xd800,
-            "the unknown name's source unit is preserved"
-        );
-        assert!(rendered.string_at("").unwrap().contains("and 3 more."));
+        let text = rendered.string_at("").unwrap();
+        assert!(text.contains(
+            "The user's message starts with a slash command, but no command with that name is available"
+        ));
+        assert!(text.contains("/first, /second, and 3 more."));
+        assert!(!text.contains("unknown"));
+        assert!(!rendered.string_units("").unwrap().contains(&0xd800));
     }
 
     #[test]
-    fn unknown_reminder_lists_at_most_forty_names_in_source_order() {
+    fn unknown_reminder_filters_names_by_native_ascii_and_utf16_length() {
+        let max_length = "a".repeat(256);
+        let too_long = "b".repeat(257);
+        let lone_surrogate =
+            Utf16JsonProjection::root_string("b�".into(), vec![b'b' as u16, 0xd800]).unwrap();
+        let catalog = crate::model::HeadlessCommandCatalog {
+            prompt_command_names: vec![
+                "valid-name_1:2.test".into(),
+                "skill.alpha+beta".into(),
+                "skill-🧪-probe".into(),
+                max_length.clone().into(),
+                too_long.clone().into(),
+                lone_surrogate,
+            ],
+            available_command_count: 8,
+        };
+        let rendered = crate::model::render_unknown_command_reminder(&"missing".into(), &catalog);
+        let text = rendered.string_at("").unwrap();
+        assert!(text.contains("/valid-name_1:2.test"));
+        assert!(text.contains(&format!("/{max_length}")));
+        assert!(!text.contains("skill.alpha+beta"));
+        assert!(!text.contains("skill-🧪-probe"));
+        assert!(!text.contains(&format!("/{too_long}")));
+        assert!(text.contains("and 6 more."));
+        assert!(!rendered.string_units("").unwrap().contains(&0xd800));
+    }
+
+    #[test]
+    fn unknown_reminder_uses_native_empty_safe_name_messages() {
+        let invalid_names = vec!["skill.alpha+beta".into(), "skill-🧪-probe".into()];
+        let singular = crate::model::render_unknown_command_reminder(
+            &"missing".into(),
+            &crate::model::HeadlessCommandCatalog {
+                prompt_command_names: invalid_names.clone(),
+                available_command_count: 1,
+            },
+        );
+        assert!(singular
+            .string_at("")
+            .unwrap()
+            .contains("This session has 1 slash command, but none can be named here."));
+        let plural = crate::model::render_unknown_command_reminder(
+            &"missing".into(),
+            &crate::model::HeadlessCommandCatalog {
+                prompt_command_names: invalid_names,
+                available_command_count: 2,
+            },
+        );
+        assert!(plural
+            .string_at("")
+            .unwrap()
+            .contains("This session has 2 slash commands, but none can be named here."));
+        let empty = crate::model::render_unknown_command_reminder(
+            &"missing".into(),
+            &crate::model::HeadlessCommandCatalog::default(),
+        );
+        assert!(empty
+            .string_at("")
+            .unwrap()
+            .contains("No slash commands are available in this session."));
+    }
+
+    #[test]
+    fn unknown_reminder_accepts_command_name_at_256_utf16_units_only() {
+        let max_length = "a".repeat(256);
+        let too_long = "b".repeat(257);
+        let max_rendered = crate::model::render_unknown_command_reminder(
+            &max_length.clone().into(),
+            &crate::model::HeadlessCommandCatalog::default(),
+        );
+        let max_text = max_rendered.string_at("").unwrap();
+        assert!(max_text.contains(&format!("slash command /{max_length}, but no command")));
+
+        let too_long_rendered = crate::model::render_unknown_command_reminder(
+            &too_long.clone().into(),
+            &crate::model::HeadlessCommandCatalog::default(),
+        );
+        let too_long_text = too_long_rendered.string_at("").unwrap();
+        assert!(too_long_text.contains(
+            "The user's message starts with a slash command, but no command with that name is available"
+        ));
+        assert!(!too_long_text.contains(&too_long));
+    }
+
+    #[test]
+    fn unknown_reminder_lists_all_safe_names_in_source_order() {
         let catalog = crate::model::HeadlessCommandCatalog {
             prompt_command_names: (0..41)
                 .map(|index| format!("prompt-{index}").into())
                 .collect(),
-            available_command_count: 42,
+            available_command_count: 43,
         };
         let rendered = crate::model::render_unknown_command_reminder(&"missing".into(), &catalog);
         let text = rendered.string_at("").unwrap();
         assert!(text.contains("/prompt-0, /prompt-1"));
-        assert!(text.contains("/prompt-39, and 2 more."));
-        assert!(!text.contains("/prompt-40"));
+        assert!(text.contains("/prompt-39, /prompt-40, and 2 more."));
+        assert!(!text.contains("/prompt-41"));
     }
 
     #[test]

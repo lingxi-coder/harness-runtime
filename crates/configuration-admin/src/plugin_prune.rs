@@ -698,7 +698,10 @@ mod tests {
         let manifest = serde_json::json!({
             "name": name_of(id),
             "version": version,
-            "dependencies": deps,
+            "dependencies": deps
+                .iter()
+                .map(|name| serde_json::json!({"name": name, "version": "*"}))
+                .collect::<Vec<_>>(),
         });
         std::fs::write(
             path.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json"),

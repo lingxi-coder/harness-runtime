@@ -2,7 +2,7 @@
 //!
 //! The platform-agnostic command machinery: the [`CommandRegistry`],
 //! [`RegistrySlashDispatcher`], parser, argument substitution, data model, and
-//! the shared builtin scaffolding ([`builtin_support`] — the locked 82-name
+//! the shared builtin scaffolding ([`builtin_support`] — the locked 83-name
 //! table, the `/help` + list renderers, and the per-name unimplemented stub
 //! handler).
 //!

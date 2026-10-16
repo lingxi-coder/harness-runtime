@@ -1435,7 +1435,7 @@ mod tests {
                 "foundry",
                 ProviderId::FoundryClaude,
                 "claude-opus-4-6",
-                200_000,
+                1_000_000,
                 5.0,
             ),
         ] {

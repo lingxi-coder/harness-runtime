@@ -190,10 +190,7 @@ pub fn lower_content_block_with(
                 input_json: input
                     .to_json_string()
                     .expect("tool input is a validated flat JSON value"),
-                header: Some(crate::adapter::tool_display::lower_tool_header(
-                    name,
-                    &display_input,
-                )),
+                header: crate::adapter::tool_display::lower_tool_header(name, &display_input),
             })
         }
         ContentBlock::ToolResult {
@@ -212,10 +209,6 @@ pub fn lower_content_block_with(
             let tool = paired.map_or(String::new(), |(tool, _)| tool.to_string());
             let input = paired.map(|(_, input)| input);
             let display_input = input.map(display_value);
-            let (old_string, new_string, file_path) =
-                display_input.as_ref().map_or((None, None, None), |input| {
-                    crate::presentation::tool_display::diff_inputs_for(&tool, input)
-                });
             let model_content = content_blocks.as_ref().unwrap_or(content);
             let content_json = model_content
                 .to_json_string()
@@ -226,17 +219,12 @@ pub fn lower_content_block_with(
                 tool: tool.clone(),
                 result_json: content_json,
                 is_error: is_error.unwrap_or(false),
-                old_string,
-                new_string,
-                file_path,
-                display: Some(
-                    crate::adapter::tool_display::lower_tool_result_display_prepared(
-                        &tool,
-                        display_input.as_ref(),
-                        &result,
-                        is_error.unwrap_or(false),
-                        Some(&index.prepared),
-                    ),
+                display: crate::adapter::tool_display::lower_tool_result_display_prepared(
+                    &tool,
+                    display_input.as_ref(),
+                    &result,
+                    is_error.unwrap_or(false),
+                    Some(&index.prepared),
                 ),
             })
         }

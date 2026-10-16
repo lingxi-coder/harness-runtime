@@ -74,6 +74,7 @@ pub mod statusline;
 pub mod stickers;
 pub mod stop;
 pub mod subtask;
+pub mod team_onboarding;
 pub mod templates;
 pub mod usage;
 pub mod version;
@@ -138,6 +139,10 @@ pub use statusline::StatuslineHandler;
 pub use stickers::StickersHandler;
 pub use stop::StopHandler;
 pub use subtask::SubtaskHandler;
+pub use team_onboarding::{
+    register_team_onboarding_command, TeamOnboardingCommandAvailability, TeamOnboardingHandler,
+    TeamOnboardingPromptProvider,
+};
 pub use templates::INIT_PROMPT;
 pub use usage::UsageHandler;
 pub use version::{runtime_build_info, BuildInfo, VersionHandler};

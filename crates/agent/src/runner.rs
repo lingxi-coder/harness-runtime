@@ -3363,7 +3363,7 @@ fn apply_nested_tool_context_modifiers(
 
 /// Real multi-turn agentic loop.
 ///
-/// Imperative — mirrors `orchestrator::turn_loop::execute_one_turn`: call the
+/// Imperative — mirrors `orchestrator::turn_loop::execute_one_turn_with_recovery_tracked`: call the
 /// model, append the assistant turn, dispatch `tool_use` blocks through the
 /// inherited [`lingxi_core::host::ToolInvoker`], feed results back as a user message,
 /// and repeat. Each model round-trip goes over the streaming seam

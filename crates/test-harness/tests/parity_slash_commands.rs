@@ -1,11 +1,11 @@
-//! Parity: lock the 82 builtin slash-command names plus the per-command
+//! Parity: lock the 83 builtin slash-command names plus the per-command
 //! command/target status matrix across the full surface.
 //!
 //! See plan `docs/superpowers/plans/2026-05-25-m5-09-commands-surface.md`
 //! Task 6. Locks (2026-06-20 slash-parity pass #66/#67 re-locked from 99→94 —
 //! removed cost/stats as /usage aliases + deleted vim/pr-comments/output-style):
 //!
-//! - Total builtin name count = 82
+//! - Total builtin name count = 83
 //! - Core builtin name count = 18
 //! - Target implemented status is explicit per command
 //! - Stub literal template = "{name}: not implemented in v0.6.0 (M5)"
@@ -17,8 +17,9 @@ use command_api::builtin_support::names::{
 use command_api::builtins::{
     register_all_builtin_commands, register_bundled_skills, register_core_batch_1,
     register_core_batch_2, register_core_batch_4, register_core_batch_5, register_core_batch_8,
-    register_insights_command, InsightsCommandAvailability, InsightsReport, InsightsReportProvider,
-    INIT_PROMPT,
+    register_insights_command, register_team_onboarding_command, InsightsCommandAvailability,
+    InsightsReport, InsightsReportProvider, TeamOnboardingCommandAvailability,
+    TeamOnboardingPromptProvider, INIT_PROMPT,
 };
 use command_api::RegistrySlashDispatcher;
 use command_api::{
@@ -47,6 +48,8 @@ const PARITY_INSIGHTS_URL: &str = "file:///tmp/report-2026-10-12.html";
 const PARITY_INSIGHTS_HTML_PATH: &str = "/tmp/report-2026-10-12.html";
 const PARITY_INSIGHTS_FACETS: &str = "/tmp/usage-data/facets";
 const PARITY_INSIGHTS_RECOMMENDATION: &str = "Try Auto Mode for this project.";
+const PARITY_TEAM_ONBOARDING_BODY: &str =
+    "Generated onboarding prompt from the isolated Native-provider fixture.";
 
 struct ParityInsightsProvider;
 
@@ -69,6 +72,22 @@ impl InsightsReportProvider for ParityInsightsProvider {
             summary_text: "SUMMARY".into(),
             auto_mode_recommendation: Some(PARITY_INSIGHTS_RECOMMENDATION.into()),
         })
+    }
+}
+
+struct ParityTeamOnboardingProvider;
+
+#[async_trait::async_trait]
+impl TeamOnboardingPromptProvider for ParityTeamOnboardingProvider {
+    fn command_availability(&self) -> TeamOnboardingCommandAvailability {
+        TeamOnboardingCommandAvailability {
+            workspace_available: Some(true),
+            allow_team_onboarding: Some(true),
+        }
+    }
+
+    async fn generate_prompt(&self) -> Result<Utf16JsonProjection, Utf16JsonProjection> {
+        Ok(PARITY_TEAM_ONBOARDING_BODY.into())
     }
 }
 
@@ -245,6 +264,10 @@ fn fully_wired_registry(cwd: &std::path::Path) -> CommandRegistry {
         &mut reg,
         Arc::new(ParityInsightsProvider)
     ));
+    assert!(register_team_onboarding_command(
+        &mut reg,
+        Arc::new(ParityTeamOnboardingProvider)
+    ));
     reg
 }
 
@@ -362,6 +385,7 @@ const TARGET_IMPLEMENTED: &[&str] = &[
     "stop",
     "subtask",
     "tasks",
+    "team-onboarding",
     "terminal-setup",
     "theme",
     "tui",
@@ -373,7 +397,7 @@ const TARGET_IMPLEMENTED: &[&str] = &[
 
 fn fixture() -> ParityFile {
     // Fixture filename retained as `parity_slash_commands_102` for git-history
-    // continuity; the counts inside reflect the current 86-name lock.
+    // continuity; the counts inside reflect the current 83-name lock.
     load_fixture("parity_slash_commands_102")
 }
 
@@ -384,9 +408,9 @@ fn fixture_v2() -> ParityFileV2 {
 #[test]
 fn fixture_total_matches_constant() {
     let f = fixture();
-    assert_eq!(f.meta.total_count_lock, 82);
-    assert_eq!(f.commands.len(), 82);
-    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 82);
+    assert_eq!(f.meta.total_count_lock, 83);
+    assert_eq!(f.commands.len(), 83);
+    assert_eq!(BUILTIN_COMMAND_NAMES.len(), 83);
     assert_eq!(f.commands.len(), BUILTIN_COMMAND_NAMES.len());
 }
 
@@ -461,6 +485,9 @@ async fn every_fixture_command_dispatches_to_handled() {
             "insights" => expected_insights_body(),
             "statusline" => "Create an Agent with subagent_type \"statusline-setup\" and the prompt \"Configure my statusLine from my shell PS1 configuration\"".to_owned(),
             "security-review" => expected_security_review_body(),
+            // Native Rdo returns the provider-generated prompt as one text body;
+            // keep this deterministic fake output exact through dispatch.
+            "team-onboarding" => PARITY_TEAM_ONBOARDING_BODY.to_owned(),
             other => panic!("add an exact body expectation for Native prompt /{other}"),
         };
         expected_prompt_bodies.insert(entry.name.clone(), expected_body);
@@ -592,7 +619,7 @@ fn core_command_description_matches_fixture() {
 }
 
 // ============================================================================
-// T3 — M5-14: `implemented` field coverage (63 implemented / 19 unimplemented)
+// T3 — M5-14: `implemented` field coverage (64 implemented / 19 unimplemented)
 // ============================================================================
 
 #[test]

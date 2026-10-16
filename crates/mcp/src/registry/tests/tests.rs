@@ -5888,18 +5888,20 @@ fn stale_refresh_strikes_only_the_partition_that_served_the_hit() {
     let logical_key = crate::discovery_cache::logical_cache_key(&cfg);
     let old_partition = DiscoveryCachePartition {
         logical_key: logical_key.clone(),
-        partition_key: crate::discovery_cache::partition_key(
+        partition_key: crate::discovery_cache::partition_key_for_era(
             &logical_key,
             &crate::discovery_cache::fingerprint("grant:old"),
+            "legacy",
         ),
         expected_era: "legacy",
         negotiation_mode: crate::protocol_negotiation::NegotiationMode::Legacy,
     };
     let new_partition = DiscoveryCachePartition {
         logical_key: logical_key.clone(),
-        partition_key: crate::discovery_cache::partition_key(
+        partition_key: crate::discovery_cache::partition_key_for_era(
             &logical_key,
             &crate::discovery_cache::fingerprint("grant:new"),
+            "legacy",
         ),
         expected_era: "legacy",
         negotiation_mode: crate::protocol_negotiation::NegotiationMode::Legacy,
@@ -5951,9 +5953,10 @@ async fn stale_refresh_era_change_purges_hit_partition_without_replacement_or_st
     let logical_key = crate::discovery_cache::logical_cache_key(&cfg);
     let partition = DiscoveryCachePartition {
         logical_key: logical_key.clone(),
-        partition_key: crate::discovery_cache::partition_key(
+        partition_key: crate::discovery_cache::partition_key_for_era(
             &logical_key,
             &crate::discovery_cache::fingerprint("grant:none"),
+            "legacy",
         ),
         expected_era: "legacy",
         negotiation_mode: crate::protocol_negotiation::NegotiationMode::Legacy,
@@ -5970,9 +5973,10 @@ async fn stale_refresh_era_change_purges_hit_partition_without_replacement_or_st
     store
         .store_partitioned(&entry, &partition.partition_key)
         .expect("seed stale partition");
-    let other_partition_key = crate::discovery_cache::partition_key(
+    let other_partition_key = crate::discovery_cache::partition_key_for_era(
         &logical_key,
         &crate::discovery_cache::fingerprint("grant:other"),
+        "legacy",
     );
     store
         .store_partitioned(&entry, &other_partition_key)
@@ -6054,9 +6058,10 @@ async fn stale_refresh_expected_mode_change_purges_without_publish_strike_or_wri
     let logical_key = crate::discovery_cache::logical_cache_key(&cfg);
     let partition = DiscoveryCachePartition {
         logical_key: logical_key.clone(),
-        partition_key: crate::discovery_cache::partition_key(
+        partition_key: crate::discovery_cache::partition_key_for_era(
             &logical_key,
             &crate::discovery_cache::fingerprint("grant:none"),
+            "legacy",
         ),
         expected_era: "legacy",
         negotiation_mode: crate::protocol_negotiation::NegotiationMode::Legacy,

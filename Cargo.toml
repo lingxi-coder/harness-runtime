@@ -164,7 +164,7 @@ authors = ["LingXi Code Contributors"]
 repository = "https://github.com/lingxi-coder/harness-runtime"
 
 [workspace.dependencies]
-lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "24f49956b8130ee187c2d0b6ce011015bdbb7c29", default-features = false }
+lingxi-llm-client = { git = "https://github.com/lingxi-coder/llm-client.git", rev = "f4198e234226fb4c1c2329f2acd2205420500323", default-features = false }
 # Temporary local assembly; replaced by one immutable SDK Git revision before delivery.
 mobile-linux-api = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "6b033d41a2b6b736fda1e8f996f55a4b20bd885d" }
 mobile-linux-core = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git", rev = "6b033d41a2b6b736fda1e8f996f55a4b20bd885d" }

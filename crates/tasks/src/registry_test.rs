@@ -2303,8 +2303,8 @@ async fn spawn_invokes_handler_and_returns_handler_task_id() {
 }
 
 /// A Fusion row goes terminal BEFORE its `<fusion-result>` append resolves —
-/// `finish_fusion_terminal` flips the status, then the handler awaits
-/// `FusionCompletionSink::publish`. Print mode's waiter
+/// the per-session terminal recorder returns its receipt before status is
+/// flipped. Print mode's waiter
 /// (`apps/cli/src/run.rs::fusion_result_ready`) is built on exactly that: it
 /// keeps polling while `publication_status` is `Pending`.
 ///

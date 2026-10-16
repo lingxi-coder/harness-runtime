@@ -3,14 +3,40 @@
 //! `MessageDto` is the first-class block container reproduced by both
 //! `MessageComplete` (F1-03) and a resumed scrollback. It must carry the full
 //! block set the TUI scrollback renders so those surfaces are reproducible
-//! (plan F1-02). `input_json`/`result_json` are JSON **Strings** (§0.4); the
-//! diff fields (`old_string`/`new_string`/`file_path`) mirror `UserToolResult`
-//! at `tui/src/state.rs:73-89`.
+//! (plan F1-02). `input_json`/`result_json` are JSON **Strings** (§0.4), and
+//! `ToolResult.display` carries the structured current presentation.
 //!
 //! `serde_json` is a DEV-ONLY dep — the contract crate never depends on
 //! `serde_json::Value`.
 
 use client::protocol::message::{MessageBlockDto, MessageDto};
+use client::protocol::tool_display::{ToolHeaderDto, ToolResultDisplayDto, ToolVerbDto};
+
+fn test_tool_header(label: &str) -> ToolHeaderDto {
+    ToolHeaderDto {
+        verb: ToolVerbDto::Generic,
+        icon: None,
+        label: label.to_string(),
+        primary: None,
+        qualifier: None,
+        count: None,
+        sub_line: None,
+        title: label.to_string(),
+    }
+}
+
+fn test_tool_display() -> ToolResultDisplayDto {
+    ToolResultDisplayDto {
+        headline: None,
+        headline_kind: None,
+        headline_args: Vec::new(),
+        diff: None,
+        body: None,
+        body_lines: 0,
+        body_truncated: false,
+        collapsed: false,
+    }
+}
 
 /// A full multi-block assistant message round-trips byte-stable, one of each
 /// block kind.
@@ -41,17 +67,14 @@ fn message_dto_round_trips() {
                 id: "tu_01".to_string(),
                 tool: "Edit".to_string(),
                 input_json: r#"{"file_path":"/tmp/x"}"#.to_string(),
-                header: None,
+                header: test_tool_header("Edit"),
             },
             MessageBlockDto::ToolResult {
                 id: "tu_01".to_string(),
                 tool: "Edit".to_string(),
                 result_json: r#"{"ok":true}"#.to_string(),
                 is_error: false,
-                old_string: Some("before".to_string()),
-                new_string: Some("after".to_string()),
-                file_path: Some("/tmp/x".to_string()),
-                display: None,
+                display: test_tool_display(),
             },
         ],
         images: Vec::new(),
@@ -124,17 +147,14 @@ fn message_block_set_matches_tui_scrollback() {
             id: String::new(),
             tool: String::new(),
             input_json: "null".to_string(),
-            header: None,
+            header: test_tool_header(""),
         },
         MessageBlockDto::ToolResult {
             id: String::new(),
             tool: String::new(),
             result_json: "null".to_string(),
             is_error: false,
-            old_string: None,
-            new_string: None,
-            file_path: None,
-            display: None,
+            display: test_tool_display(),
         },
     ];
 
@@ -162,28 +182,45 @@ fn message_block_set_matches_tui_scrollback() {
     );
 }
 
-/// The diff fields on `ToolResult` are optional and skipped when `None`
-/// (forward-compat convention; non-diff tools omit them).
+/// ToolResult carries diff presentation only through its current structured display.
 #[test]
-fn tool_result_diff_fields_skip_when_none() {
+fn tool_result_omits_legacy_raw_diff_pair() {
     let block = MessageBlockDto::ToolResult {
         id: "tu_01".to_string(),
         tool: "Read".to_string(),
         result_json: "null".to_string(),
         is_error: false,
-        old_string: None,
-        new_string: None,
-        file_path: None,
-        display: None,
+        display: test_tool_display(),
     };
     let json = serde_json::to_value(&block).expect("serialize ToolResult");
-    assert!(json.get("old_string").is_none());
-    assert!(json.get("new_string").is_none());
-    assert!(json.get("file_path").is_none());
-    // is_error is NOT optional — it is always present.
+    assert_eq!(json["display"]["body_lines"], 0);
+    assert!(json["display"].get("diff").is_none());
+    for field in ["old_string", "new_string", "file_path"] {
+        assert!(
+            json.get(field).is_none(),
+            "legacy {field} remains on ToolResult"
+        );
+    }
     assert_eq!(json["is_error"], false);
+    let mut missing_display = json.clone();
+    missing_display
+        .as_object_mut()
+        .expect("tool result object")
+        .remove("display");
+    assert!(serde_json::from_value::<MessageBlockDto>(missing_display).is_err());
     let back: MessageBlockDto = serde_json::from_value(json).expect("deserialize ToolResult");
     assert_eq!(back, block);
+}
+
+#[test]
+fn message_tool_use_requires_its_host_header_projection() {
+    let missing_header = serde_json::json!({
+        "type": "tool_use",
+        "id": "tu_01",
+        "tool": "Read",
+        "input_json": "{}"
+    });
+    assert!(serde_json::from_value::<MessageBlockDto>(missing_header).is_err());
 }
 
 #[test]

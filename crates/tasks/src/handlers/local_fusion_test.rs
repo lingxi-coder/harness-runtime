@@ -5,7 +5,7 @@ use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGua
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use lingxi_core::host::{
     BudgetError, FusionOrigin, FusionPreset, FusionRequest, FusionRunOutcome, FusionRunRecorder,
-    FusionSlashPublicationTarget, FusionTiming, FusionUsage,
+    FusionRunRecorderFactory, FusionSlashPublicationTarget, FusionTiming, FusionUsage,
 };
 use std::any::Any;
 use std::collections::HashMap as StdHashMap;
@@ -173,7 +173,7 @@ impl FusionExecutor for CancelAwareExecutor {
     ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::lingxi_core::host::prepared_from_oneshot(
+        ::lingxi_core::host::test_support::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, inherit, _progress| async move {
@@ -206,7 +206,7 @@ impl FusionExecutor for ImmediateExecutor {
     ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::lingxi_core::host::prepared_from_oneshot(
+        ::lingxi_core::host::test_support::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, _progress| async move {
@@ -240,7 +240,7 @@ impl FusionExecutor for TimeoutSnapshotExecutor {
     ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::lingxi_core::host::prepared_from_oneshot(
+        ::lingxi_core::host::test_support::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, inherit, _progress| async move {
@@ -281,7 +281,7 @@ impl FusionExecutor for ProgressEmittingExecutor {
     ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::lingxi_core::host::prepared_from_oneshot(
+        ::lingxi_core::host::test_support::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, progress| async move {
@@ -357,7 +357,7 @@ impl FusionExecutor for NaturalAfterFinalizingExecutor {
     ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::lingxi_core::host::prepared_from_oneshot(
+        ::lingxi_core::host::test_support::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, _progress| async move {
@@ -381,7 +381,7 @@ impl FusionExecutor for BlockingCancelAwareExecutor {
     ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::lingxi_core::host::prepared_from_oneshot(
+        ::lingxi_core::host::test_support::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, inherit, _progress| async move {
@@ -426,7 +426,7 @@ impl FusionExecutor for RealizedProgressBlockingExecutor {
     ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::lingxi_core::host::prepared_from_oneshot(
+        ::lingxi_core::host::test_support::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, inherit, progress| async move {
@@ -453,26 +453,12 @@ impl FusionExecutor for RealizedProgressBlockingExecutor {
     }
 }
 
-#[derive(Default)]
-struct CountingCompletionSink(AtomicUsize);
-
-#[async_trait]
-impl FusionCompletionSink for CountingCompletionSink {
-    async fn publish(
-        &self,
-        _conversation_id: &str,
-        _result: &FusionResult,
-    ) -> lingxi_core::host::FusionPublicationReceipt {
-        self.0.fetch_add(1, Ordering::SeqCst);
-        lingxi_core::host::FusionPublicationReceipt::published()
-    }
-}
-
 /// Production-shaped terminal capability used to prove that the prepared
 /// supervisor records before the handler exposes a completed task and never
 /// invokes the legacy completion sink as a second publication path.
 struct RecordingTerminalRecorder {
     calls: AtomicUsize,
+    successful_outcomes: AtomicUsize,
     publication: lingxi_core::host::FusionPublicationReceipt,
 }
 
@@ -480,12 +466,47 @@ struct RecordingTerminalRecorder {
 impl FusionRunRecorder for RecordingTerminalRecorder {
     async fn record_terminal(
         &self,
-        _outcome: FusionRunOutcome,
+        outcome: FusionRunOutcome,
         _slash_target: Option<FusionSlashPublicationTarget>,
     ) -> lingxi_core::host::FusionPublicationReceipt {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if outcome.result.is_ok() {
+            self.successful_outcomes.fetch_add(1, Ordering::SeqCst);
+        }
         self.publication.clone()
     }
+}
+
+struct FixedTerminalRecorderFactory(Arc<dyn FusionRunRecorder>);
+
+impl FusionRunRecorderFactory for FixedTerminalRecorderFactory {
+    fn recorder_for(
+        &self,
+        _session_id: lingxi_core::types::SessionId,
+    ) -> Option<Arc<dyn FusionRunRecorder>> {
+        Some(self.0.clone())
+    }
+}
+
+struct MissingTerminalRecorderFactory;
+
+impl FusionRunRecorderFactory for MissingTerminalRecorderFactory {
+    fn recorder_for(
+        &self,
+        _session_id: lingxi_core::types::SessionId,
+    ) -> Option<Arc<dyn FusionRunRecorder>> {
+        None
+    }
+}
+
+fn recording_terminal_recorder(
+    publication: lingxi_core::host::FusionPublicationReceipt,
+) -> Arc<RecordingTerminalRecorder> {
+    Arc::new(RecordingTerminalRecorder {
+        calls: AtomicUsize::new(0),
+        successful_outcomes: AtomicUsize::new(0),
+        publication,
+    })
 }
 
 #[derive(Default)]
@@ -687,7 +708,7 @@ impl FusionExecutor for FailingExecutor {
     ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::lingxi_core::host::prepared_from_oneshot(
+        ::lingxi_core::host::test_support::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, _progress| async move { Err(this.error.clone()) },
@@ -717,10 +738,8 @@ impl RecordingStatusSink {
         self.events.lock().unwrap().clone()
     }
 
-    /// Shares this sink's event log with a [`PublishOrderCompletionSink`] so
-    /// a test can assert `publish` and `mark_fusion_result_published` land
-    /// in the SAME ordered timeline as `finish_fusion_terminal` / the other
-    /// status-sink calls, not just that both eventually happened.
+    /// Shares this sink's event log with a terminal recorder so a test can
+    /// assert the durable receipt and terminal task transition on one timeline.
     fn events_handle(&self) -> Arc<StdMutex<Vec<String>>> {
         self.events.clone()
     }
@@ -815,22 +834,26 @@ impl TaskStatusSink for RecordingStatusSink {
     }
 }
 
-/// Pushes `"publish"` into a [`RecordingStatusSink`]'s shared event log
-/// (via [`RecordingStatusSink::events_handle`]) so a test can assert the
-/// exact interleaving of `FusionCompletionSink::publish` against
-/// `TaskStatusSink` calls on the SAME timeline, not two separately-ordered
-/// logs a test would have to correlate by hand.
-struct PublishOrderCompletionSink(Arc<StdMutex<Vec<String>>>);
+/// Records the current terminal-recorder event in the same timeline as the
+/// task status sink, proving the durable receipt is projected before terminal
+/// task visibility.
+struct EventRecordingTerminalRecorder {
+    events: Arc<StdMutex<Vec<String>>>,
+    publication: lingxi_core::host::FusionPublicationReceipt,
+}
 
 #[async_trait]
-impl FusionCompletionSink for PublishOrderCompletionSink {
-    async fn publish(
+impl FusionRunRecorder for EventRecordingTerminalRecorder {
+    async fn record_terminal(
         &self,
-        _conversation_id: &str,
-        _result: &FusionResult,
+        _outcome: FusionRunOutcome,
+        _slash_target: Option<FusionSlashPublicationTarget>,
     ) -> lingxi_core::host::FusionPublicationReceipt {
-        self.0.lock().unwrap().push("publish".to_string());
-        lingxi_core::host::FusionPublicationReceipt::published()
+        self.events
+            .lock()
+            .unwrap()
+            .push("record_terminal".to_string());
+        self.publication.clone()
     }
 }
 
@@ -858,7 +881,7 @@ impl FusionExecutor for SingleProgressExecutor {
     ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::lingxi_core::host::prepared_from_oneshot(
+        ::lingxi_core::host::test_support::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, progress| async move {
@@ -905,7 +928,7 @@ impl FusionExecutor for PartialSpendThenFailExecutor {
     ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let this = ::std::sync::Arc::clone(&self);
         let timeout = self.effective_timeout_ms();
-        ::lingxi_core::host::prepared_from_oneshot(
+        ::lingxi_core::host::test_support::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, progress| async move {
@@ -1076,7 +1099,6 @@ async fn accounting_failure_retains_answer_but_does_not_report_success() {
     let path = output.allocate("accounting-failure").await.unwrap();
     let status = Arc::new(RecordingStatusSink::default());
     let status_trait: Arc<dyn TaskStatusSink> = status.clone();
-    let completion: Arc<dyn FusionCompletionSink> = Arc::new(CountingCompletionSink::default());
     let control = lingxi_core::host::FusionRunControl::new_with_billing_mode(
         FusionRunIdentity::new(FusionRunId::generated(), None, FusionOrigin::Agent, None),
         1_000,
@@ -1096,8 +1118,6 @@ async fn accounting_failure_retains_answer_but_does_not_report_success() {
         &path,
         "accounting-failure",
         &status_trait,
-        &completion,
-        TEST_CONVERSATION_ID,
         None,
         None,
     )
@@ -1117,16 +1137,64 @@ fn make_handler(
     executor: Arc<dyn FusionExecutor>,
     output_manager: Arc<TaskOutputManager>,
     status_sink: Arc<dyn TaskStatusSink>,
-    completion_sink: Arc<dyn FusionCompletionSink>,
+) -> LocalFusionHandler {
+    make_handler_with_recorder(
+        executor,
+        output_manager,
+        status_sink,
+        recording_terminal_recorder(lingxi_core::host::FusionPublicationReceipt::published()),
+    )
+}
+
+fn make_handler_with_recorder(
+    executor: Arc<dyn FusionExecutor>,
+    output_manager: Arc<TaskOutputManager>,
+    status_sink: Arc<dyn TaskStatusSink>,
+    recorder: Arc<dyn FusionRunRecorder>,
 ) -> LocalFusionHandler {
     LocalFusionHandler::new(
         executor,
-        completion_sink,
         Arc::new(MockInvoker),
         Arc::new(MockBudget),
         output_manager,
+        Arc::new(FixedTerminalRecorderFactory(recorder)),
     )
     .with_status_sink(status_sink)
+}
+
+#[tokio::test]
+async fn missing_session_recorder_fails_before_allocating_a_task_artifact() {
+    let fs = Arc::new(InMemoryFs::new());
+    let (_dir, output_manager) = make_output_manager(fs.clone());
+    let handler = LocalFusionHandler::new(
+        ImmediateExecutor::new(),
+        Arc::new(MockInvoker),
+        Arc::new(MockBudget),
+        output_manager,
+        Arc::new(MissingTerminalRecorderFactory),
+    );
+
+    let error = match handler
+        .spawn(
+            TaskSpawnInput::LocalFusion {
+                request: dummy_request(),
+                conversation_id: TEST_CONVERSATION_ID.into(),
+            },
+            make_ctx(fs.clone()),
+        )
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("a missing session recorder must fail closed"),
+    };
+
+    assert!(error
+        .to_string()
+        .contains("terminal recorder is unavailable"));
+    assert!(
+        fs.files.lock().await.is_empty(),
+        "no task spool is allocated"
+    );
 }
 
 #[tokio::test]
@@ -1134,13 +1202,14 @@ async fn handler_waits_for_activation_before_running_executor() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(ActivationSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let executor = ImmediateExecutor::new();
-    let handler = make_handler(
+    let recorder =
+        recording_terminal_recorder(lingxi_core::host::FusionPublicationReceipt::published());
+    let handler = make_handler_with_recorder(
         executor.clone(),
         output_manager,
         status_sink.clone(),
-        completion_sink.clone(),
+        recorder.clone(),
     );
 
     let mut handle = handler
@@ -1175,7 +1244,8 @@ async fn handler_waits_for_activation_before_running_executor() {
         vec![TaskStatus::Running, TaskStatus::Completed]
     );
     assert_eq!(executor.runs.load(Ordering::SeqCst), 1);
-    assert_eq!(completion_sink.0.load(Ordering::SeqCst), 1);
+    assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recorder.successful_outcomes.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1183,14 +1253,8 @@ async fn handler_uses_prepared_timeout_without_a_legacy_caller_override() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let executor = TimeoutSnapshotExecutor::new();
-    let handler = make_handler(
-        executor.clone(),
-        output_manager,
-        status_sink.clone(),
-        completion_sink,
-    );
+    let handler = make_handler(executor.clone(), output_manager, status_sink.clone());
 
     let handle = handler
         .spawn(
@@ -1236,14 +1300,8 @@ async fn spawn_forwards_fusion_progress_into_set_fusion_stage() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let executor = ProgressEmittingExecutor::new();
-    let handler = make_handler(
-        executor.clone(),
-        output_manager,
-        status_sink.clone(),
-        completion_sink,
-    );
+    let handler = make_handler(executor.clone(), output_manager, status_sink.clone());
 
     handler
         .spawn(
@@ -1283,70 +1341,20 @@ async fn spawn_forwards_fusion_progress_into_set_fusion_stage() {
 /// the same timeline as the terminal-status transition — never before it,
 /// since the notification drain still needs `finish_fusion_terminal` first.
 #[tokio::test]
-async fn the_publication_receipt_lands_after_the_completion_sink_publish() {
+async fn terminal_recorder_receipt_lands_before_task_completion() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingStatusSink::default());
-    let completion_sink = Arc::new(PublishOrderCompletionSink(status_sink.events_handle()));
-    let executor = ImmediateExecutor::new();
-    let handler = make_handler(
-        executor.clone(),
-        output_manager,
-        status_sink.clone(),
-        completion_sink,
-    );
-
-    handler
-        .spawn(
-            TaskSpawnInput::LocalFusion {
-                request: dummy_request(),
-                conversation_id: TEST_CONVERSATION_ID.into(),
-            },
-            make_ctx(fs),
-        )
-        .await
-        .expect("spawn succeeds");
-
-    for _ in 0..200 {
-        if status_sink.events().contains(&"published".to_string()) {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-
-    assert_eq!(
-        status_sink.events(),
-        vec![
-            "status:Running".to_string(),
-            "egress_and_usage:0:true".to_string(),
-            "outcome".to_string(),
-            "status:Completed".to_string(),
-            "publish".to_string(),
-            "receipt:Published".to_string(),
-        ],
-        "the Published receipt must land, and strictly after both \
-         finish_fusion_terminal (\"outcome\"/\"status:Completed\") and the \
-         completion sink's own publish — never before either"
-    );
-}
-
-#[tokio::test]
-async fn prepared_terminal_recorder_precedes_task_completion_without_legacy_publish() {
-    let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
-    let (_dir, output_manager) = make_output_manager(fs.clone());
-    let status_sink = Arc::new(RecordingStatusSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
-    let recorder = Arc::new(RecordingTerminalRecorder {
-        calls: AtomicUsize::new(0),
+    let recorder: Arc<dyn FusionRunRecorder> = Arc::new(EventRecordingTerminalRecorder {
+        events: status_sink.events_handle(),
         publication: lingxi_core::host::FusionPublicationReceipt::published(),
     });
-    let handler = make_handler(
+    let handler = make_handler_with_recorder(
         ImmediateExecutor::new(),
         output_manager,
         status_sink.clone(),
-        completion_sink.clone(),
-    )
-    .with_terminal_recorder(recorder.clone());
+        recorder,
+    );
 
     handler
         .spawn(
@@ -1365,9 +1373,19 @@ async fn prepared_terminal_recorder_precedes_task_completion_without_legacy_publ
         }
         tokio::task::yield_now().await;
     }
-    assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(completion_sink.0.load(Ordering::SeqCst), 0);
-    assert_eq!(status_sink.last_status(), Some(TaskStatus::Completed));
+
+    assert_eq!(
+        status_sink.events(),
+        vec![
+            "status:Running".to_string(),
+            "record_terminal".to_string(),
+            "egress_and_usage:0:true".to_string(),
+            "receipt:Published".to_string(),
+            "outcome".to_string(),
+            "status:Completed".to_string(),
+        ],
+        "the recorder must return its durable receipt before the task publishes terminal status"
+    );
 }
 
 #[tokio::test]
@@ -1377,12 +1395,10 @@ async fn kill_preserves_terminalizing_fusion_window() {
     let (started_tx, started_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let status_sink = Arc::new(BlockingFusionTerminalSink::new(started_tx, release_rx));
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let handler = make_handler(
         ImmediateExecutor::new(),
         output_manager,
         status_sink.clone(),
-        completion_sink,
     );
     let ctx = make_ctx(fs);
 
@@ -1429,12 +1445,10 @@ async fn drain_pending_kills_preserves_terminalizing_fusion_window() {
     let (started_tx, started_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let status_sink = Arc::new(BlockingFusionTerminalSink::new(started_tx, release_rx));
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let handler = make_handler(
         ImmediateExecutor::new(),
         output_manager,
         status_sink.clone(),
-        completion_sink,
     );
 
     let handle = handler
@@ -1478,12 +1492,13 @@ async fn kill_request_cancel_loses_to_an_atomic_finalizing_claim() {
     let (started_tx, started_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let status_sink = Arc::new(RecordingStatusSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
-    let handler = make_handler(
+    let recorder =
+        recording_terminal_recorder(lingxi_core::host::FusionPublicationReceipt::published());
+    let handler = make_handler_with_recorder(
         NaturalAfterFinalizingExecutor::new(started_tx, release_rx),
         output_manager,
         status_sink.clone(),
-        completion_sink.clone(),
+        recorder.clone(),
     );
     let ctx = make_ctx(fs);
     let handle = handler
@@ -1520,7 +1535,8 @@ async fn kill_request_cancel_loses_to_an_atomic_finalizing_claim() {
         tokio::task::yield_now().await;
     }
     assert_eq!(status_sink.last_status(), Some(TaskStatus::Completed));
-    assert_eq!(completion_sink.0.load(Ordering::SeqCst), 1);
+    assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recorder.successful_outcomes.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1530,12 +1546,13 @@ async fn drain_pending_kill_request_cancel_loses_to_an_atomic_finalizing_claim()
     let (started_tx, started_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let status_sink = Arc::new(RecordingStatusSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
-    let handler = make_handler(
+    let recorder =
+        recording_terminal_recorder(lingxi_core::host::FusionPublicationReceipt::published());
+    let handler = make_handler_with_recorder(
         NaturalAfterFinalizingExecutor::new(started_tx, release_rx),
         output_manager,
         status_sink.clone(),
-        completion_sink.clone(),
+        recorder.clone(),
     );
     let ctx = make_ctx(fs);
     let handle = handler
@@ -1570,7 +1587,8 @@ async fn drain_pending_kill_request_cancel_loses_to_an_atomic_finalizing_claim()
         tokio::task::yield_now().await;
     }
     assert_eq!(status_sink.last_status(), Some(TaskStatus::Completed));
-    assert_eq!(completion_sink.0.load(Ordering::SeqCst), 1);
+    assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recorder.successful_outcomes.load(Ordering::SeqCst), 1);
 }
 
 /// [Finding 18]: the branch inserted a genuine suspension point —
@@ -1589,13 +1607,14 @@ async fn kill_landing_during_the_progress_forwarder_await_does_not_discard_a_suc
     let (started_tx, started_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let status_sink = Arc::new(BlockingStageSink::new(started_tx, release_rx));
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let executor = SingleProgressExecutor::new();
-    let handler = make_handler(
+    let recorder =
+        recording_terminal_recorder(lingxi_core::host::FusionPublicationReceipt::published());
+    let handler = make_handler_with_recorder(
         executor.clone(),
         output_manager,
         status_sink.clone(),
-        completion_sink.clone(),
+        recorder.clone(),
     );
     let ctx = make_ctx(fs);
 
@@ -1641,12 +1660,8 @@ async fn kill_landing_during_the_progress_forwarder_await_does_not_discard_a_suc
         "a kill landing while the worker awaits the progress forwarder must \
          not discard an already-successful Ok(FusionResult) as Killed"
     );
-    assert_eq!(
-        completion_sink.0.load(Ordering::SeqCst),
-        1,
-        "the completed result must still be published even when kill lands \
-         inside the forwarder-await window"
-    );
+    assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recorder.successful_outcomes.load(Ordering::SeqCst), 1);
 }
 
 /// F012: `kill` on a run that is genuinely still executing (not already in
@@ -1660,14 +1675,8 @@ async fn kill_while_running_lets_executor_observe_cancellation_and_status_killed
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let executor = CancelAwareExecutor::new();
-    let handler = make_handler(
-        executor.clone(),
-        output_manager,
-        status_sink.clone(),
-        completion_sink,
-    );
+    let handler = make_handler(executor.clone(), output_manager, status_sink.clone());
     let ctx = make_ctx(fs);
 
     let handle = handler
@@ -1733,15 +1742,9 @@ async fn kill_discloses_realized_usage_the_progress_channel_already_reported() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingStatusSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let (started_tx, started_rx) = oneshot::channel();
     let executor = RealizedProgressBlockingExecutor::new(started_tx);
-    let handler = make_handler(
-        executor.clone(),
-        output_manager,
-        status_sink.clone(),
-        completion_sink,
-    );
+    let handler = make_handler(executor.clone(), output_manager, status_sink.clone());
     let ctx = make_ctx(fs);
 
     let handle = handler
@@ -1804,7 +1807,6 @@ async fn failing_executor_records_error_before_failed_status_and_spools_it() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingStatusSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let error = FusionError::TooFewModels {
         eligible: 1,
         required: 2,
@@ -1814,11 +1816,13 @@ async fn failing_executor_records_error_before_failed_status_and_spools_it() {
     let executor = Arc::new(FailingExecutor {
         error: error.clone(),
     });
-    let handler = make_handler(
+    let recorder =
+        recording_terminal_recorder(lingxi_core::host::FusionPublicationReceipt::published());
+    let handler = make_handler_with_recorder(
         executor,
         output_manager.clone(),
         status_sink.clone(),
-        completion_sink.clone(),
+        recorder.clone(),
     );
 
     let handle = handler
@@ -1855,13 +1859,13 @@ async fn failing_executor_records_error_before_failed_status_and_spools_it() {
         vec![
             "status:Running".to_string(),
             "egress_and_usage:0:true".to_string(),
-            "receipt:NotRequired".to_string(),
+            "receipt:Published".to_string(),
             format!("error:{error}"),
             "status:Failed".to_string(),
         ]
     );
-    // The Fusion run never published a completion (it failed).
-    assert_eq!(completion_sink.0.load(Ordering::SeqCst), 0);
+    assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recorder.successful_outcomes.load(Ordering::SeqCst), 0);
 
     // Spool contains the raw error text.
     let path = output_manager.path_for(&handle.task_id).unwrap();
@@ -1885,19 +1889,13 @@ async fn failing_executor_that_already_spent_tokens_discloses_partial_usage_befo
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingStatusSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let error = FusionError::AllPanelsFailed;
     let executor = Arc::new(PartialSpendThenFailExecutor {
         error: error.clone(),
         realized_output_tokens: 4_200,
         egress_profiles: Vec::new(),
     });
-    let handler = make_handler(
-        executor,
-        output_manager,
-        status_sink.clone(),
-        completion_sink.clone(),
-    );
+    let handler = make_handler(executor, output_manager, status_sink.clone());
 
     handler
         .spawn(
@@ -1943,7 +1941,7 @@ async fn failing_executor_that_already_spent_tokens_discloses_partial_usage_befo
         vec![
             "status:Running".to_string(),
             "egress_and_usage:0:true".to_string(),
-            "receipt:NotRequired".to_string(),
+            "receipt:Published".to_string(),
             format!("error:{error}"),
             "status:Failed".to_string(),
         ]
@@ -1967,19 +1965,13 @@ async fn failing_executor_that_already_egressed_discloses_nonempty_egress_profil
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingStatusSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let error = FusionError::PanelSetIncomplete;
     let executor = Arc::new(PartialSpendThenFailExecutor {
         error: error.clone(),
         realized_output_tokens: 4_200,
         egress_profiles: vec!["openai".to_string(), "google".to_string()],
     });
-    let handler = make_handler(
-        executor,
-        output_manager,
-        status_sink.clone(),
-        completion_sink.clone(),
-    );
+    let handler = make_handler(executor, output_manager, status_sink.clone());
 
     handler
         .spawn(
@@ -2029,14 +2021,8 @@ async fn ok_executor_records_egress_and_usage_before_completed_status() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingStatusSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let executor = ImmediateExecutor::new();
-    let handler = make_handler(
-        executor.clone(),
-        output_manager,
-        status_sink.clone(),
-        completion_sink.clone(),
-    );
+    let handler = make_handler(executor.clone(), output_manager, status_sink.clone());
 
     handler
         .spawn(
@@ -2073,22 +2059,17 @@ async fn ok_executor_records_egress_and_usage_before_completed_status() {
     assert_eq!(usage.subagent_tokens, 0);
     assert_eq!(usage.tool_uses, 0);
     assert_eq!(usage.duration_ms, 0);
-    // Ordering: egress/usage lands before the terminal `outcome` publish, and
-    // the publication receipt fires last — after the completion sink's own
-    // publish, which for `CountingCompletionSink` has already run by the time
-    // we observe a terminal status (there is no real await point between them
-    // here), so it is on this same log too.
+    // The durable terminal receipt is visible before the terminal task row.
     assert_eq!(
         status_sink.events(),
         vec![
             "status:Running".to_string(),
             "egress_and_usage:0:true".to_string(),
+            "receipt:Published".to_string(),
             "outcome".to_string(),
             "status:Completed".to_string(),
-            "receipt:Published".to_string(),
         ]
     );
-    assert_eq!(completion_sink.0.load(Ordering::SeqCst), 1);
 }
 
 // ---- WP6 item 7: kill-while-running and a sink that never gets to publish
@@ -2108,13 +2089,14 @@ async fn kill_while_running_ends_status_killed_exactly_once() {
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let (started_tx, started_rx) = oneshot::channel();
     let status_sink = Arc::new(RecordingStatusSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let executor = BlockingCancelAwareExecutor::new(started_tx);
-    let handler = make_handler(
+    let recorder =
+        recording_terminal_recorder(lingxi_core::host::FusionPublicationReceipt::published());
+    let handler = make_handler_with_recorder(
         executor.clone(),
         output_manager,
         status_sink.clone(),
-        completion_sink.clone(),
+        recorder.clone(),
     );
     let ctx = make_ctx(fs);
 
@@ -2158,10 +2140,11 @@ async fn kill_while_running_ends_status_killed_exactly_once() {
         "exactly one terminal transition: {:?}",
         status_sink.statuses.lock().unwrap()
     );
+    assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
     assert_eq!(
-        completion_sink.0.load(Ordering::SeqCst),
+        recorder.successful_outcomes.load(Ordering::SeqCst),
         0,
-        "a killed run must never publish a completion"
+        "a killed run records its failure outcome without publishing a completion"
     );
 
     // A second kill on the now-terminal task is a harmless no-op, not a
@@ -2184,51 +2167,20 @@ async fn kill_while_running_ends_status_killed_exactly_once() {
 }
 
 #[tokio::test]
-async fn a_sink_that_never_publishes_does_not_revert_a_completed_run_to_failed() {
-    // `LocalFusionHandler`'s own doc comment (top of this file) states the
-    // invariant: "Sink failures must not rewrite the task's terminal
-    // status." This pins it with a sink that captures the status AT THE
-    // MOMENT it is invoked (proving the terminal transition already
-    // happened) and then does nothing further — the run must still read
-    // back as Completed.
-    struct FailingCompletionSink {
-        calls: AtomicUsize,
-        status_at_publish: StdMutex<Option<TaskStatus>>,
-        status_sink: Arc<RecordingStatusSink>,
-    }
-
-    #[async_trait]
-    impl FusionCompletionSink for FailingCompletionSink {
-        async fn publish(
-            &self,
-            _conversation_id: &str,
-            _result: &FusionResult,
-        ) -> lingxi_core::host::FusionPublicationReceipt {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            *self.status_at_publish.lock().unwrap() = self.status_sink.last_status();
-            // Simulate a sink that fails to reach the client (e.g.
-            // `DesktopFusionCompletionSink::publish`'s real `append_meta_..`
-            // erroring) — it logs and returns, touching nothing else.
-            lingxi_core::host::FusionPublicationReceipt::storage_failure(
-                "test completion sink failure",
-            )
-        }
-    }
-
+async fn terminal_recording_failure_does_not_revert_a_completed_run_to_failed() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingStatusSink::default());
-    let completion_sink = Arc::new(FailingCompletionSink {
-        calls: AtomicUsize::new(0),
-        status_at_publish: StdMutex::new(None),
-        status_sink: status_sink.clone(),
-    });
-    let executor = ImmediateExecutor::new();
-    let handler = make_handler(
-        executor,
+    let recorder = recording_terminal_recorder(
+        lingxi_core::host::FusionPublicationReceipt::storage_failure(
+            "test terminal recorder failure",
+        ),
+    );
+    let handler = make_handler_with_recorder(
+        ImmediateExecutor::new(),
         output_manager,
         status_sink.clone(),
-        completion_sink.clone(),
+        recorder.clone(),
     );
 
     handler
@@ -2252,14 +2204,20 @@ async fn a_sink_that_never_publishes_does_not_revert_a_completed_run_to_failed()
         tokio::task::yield_now().await;
     }
 
-    assert_eq!(completion_sink.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        *completion_sink.status_at_publish.lock().unwrap(),
-        Some(TaskStatus::Completed),
-        "the terminal status must already be Completed by the time publish runs"
-    );
-    // The "failing" sink changed nothing: status stays Completed, not Failed.
+    assert_eq!(recorder.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recorder.successful_outcomes.load(Ordering::SeqCst), 1);
     assert_eq!(status_sink.last_status(), Some(TaskStatus::Completed));
+    assert_eq!(
+        status_sink.events(),
+        vec![
+            "status:Running".to_string(),
+            "egress_and_usage:0:true".to_string(),
+            "receipt:StorageFailure".to_string(),
+            "outcome".to_string(),
+            "status:Completed".to_string(),
+        ],
+        "a recording failure remains visible while computation stays completed"
+    );
 }
 
 // ---- Round-7 items 5 & 6: `<subagent_tokens>` must mean the same thing for
@@ -2277,7 +2235,7 @@ impl FusionExecutor for FullUsageExecutor {
         submission: ::lingxi_core::host::FusionSubmission,
     ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError> {
         let timeout = self.effective_timeout_ms();
-        ::lingxi_core::host::prepared_from_oneshot(
+        ::lingxi_core::host::test_support::prepared_from_oneshot(
             submission,
             timeout,
             move |_request, _inherit, _progress| async move {
@@ -2319,12 +2277,10 @@ async fn completed_fusion_reports_subagent_tokens_as_local_agents_four_bucket_to
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let (_dir, output_manager) = make_output_manager(fs.clone());
     let status_sink = Arc::new(RecordingStatusSink::default());
-    let completion_sink = Arc::new(CountingCompletionSink::default());
     let handler = make_handler(
         Arc::new(FullUsageExecutor),
         output_manager,
         status_sink.clone(),
-        completion_sink,
     );
 
     handler

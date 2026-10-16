@@ -15,7 +15,7 @@
 //! LingXi-specific / internal commands without one. The 8 hidden/disabled
 //! commands ([`is_palette_hidden`]) are filtered out to match claude-code's
 //! `commands.filter(c => !c.isHidden && !$te(c))` help/palette filter, so the
-//! default total is 1 header + 75 visible commands = 76 lines: 74 visible
+//! default total is 1 header + 76 visible commands = 77 lines: 75 visible
 //! builtin rows plus the Native bundled `/doctor` prompt. The `/commit` bundled
 //! prompt is omitted while `tengu_cinder_relay` is at its default-off value.
 
@@ -106,8 +106,8 @@ mod tests {
     }
 
     #[test]
-    fn output_has_exactly_76_lines_at_default_native_factory_gates() {
-        // 1 header + 75 visible commands = 76 lines. This is 82 builtins minus
+    fn output_has_exactly_77_lines_at_default_native_factory_gates() {
+        // 1 header + 76 visible commands = 77 lines. This is 83 builtins minus
         // 8 hidden/default-disabled rows, plus bundled `/doctor`; `/commit` is
         // absent while its GrowthBook gate is at the Native default false.
         // Serialize with the env-gate mutators (names::ENV_LOCK) so a concurrent
@@ -116,10 +116,15 @@ mod tests {
         telemetry::test_clear_flag("tengu_cinder_relay");
         std::env::remove_var("DISABLE_DOCTOR_COMMAND");
         let s = render_help_screen();
+        assert!(
+            s.lines()
+                .any(|line| line.starts_with("  /team-onboarding ")),
+            "the enabled Native team-onboarding prompt must remain visible in /help"
+        );
         let n = s.matches('\n').count();
         assert_eq!(
-            n, 76,
-            "expected 76 lines (1 header + 75 visible commands), got {n}"
+            n, 77,
+            "expected 77 lines (1 header + 76 visible commands), got {n}"
         );
     }
 

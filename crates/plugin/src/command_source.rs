@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::marketplace::{MarketplaceCommandMode, MarketplaceExternalSource};
+use crate::marketplace::{MarketplaceCommandMode, MarketplacePluginExternalSource};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const MAX_STDOUT_BYTES: usize = 64 * 1024;
@@ -25,11 +25,11 @@ const LINK_MODE_WINDOWS_ERROR: &str =
 /// `consented` must be true for the current command/mode; otherwise the
 /// command is not started (oracle `ht`).
 pub fn materialize_command_plugin_source(
-    source: &MarketplaceExternalSource,
+    source: &MarketplacePluginExternalSource,
     dest: &Path,
     consented: bool,
 ) -> Result<PathBuf, String> {
-    let MarketplaceExternalSource::Command {
+    let MarketplacePluginExternalSource::Command {
         command,
         timeout,
         mode,
@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn refuses_to_run_without_consent() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = MarketplaceExternalSource::Command {
+        let source = MarketplacePluginExternalSource::Command {
             command: "echo /tmp/plugin".into(),
             timeout: Some(5),
             mode: None,
@@ -363,7 +363,7 @@ mod tests {
         let producer = tmp.path().join("produced");
         write_plugin(&producer, "from-cmd");
         let command = format!("printf '%s\\n' '{}'", producer.display());
-        let source = MarketplaceExternalSource::Command {
+        let source = MarketplacePluginExternalSource::Command {
             command,
             timeout: Some(5),
             mode: None,
@@ -387,7 +387,7 @@ mod tests {
         fs::create_dir_all(producer.join("commands")).unwrap();
         fs::write(producer.join("commands").join("hi.md"), "hi").unwrap();
         let command = format!("printf '%s\\n' '{}'", producer.display());
-        let source = MarketplaceExternalSource::Command {
+        let source = MarketplacePluginExternalSource::Command {
             command,
             timeout: Some(5),
             mode: Some(MarketplaceCommandMode::Link),
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn relative_stdout_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
-        let source = MarketplaceExternalSource::Command {
+        let source = MarketplacePluginExternalSource::Command {
             command: "printf '%s\\n' relative/plugin".into(),
             timeout: Some(5),
             mode: None,

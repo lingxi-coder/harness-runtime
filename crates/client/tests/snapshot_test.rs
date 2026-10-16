@@ -347,10 +347,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 id: "toolu_01".to_string(),
                 tool: "Read".to_string(),
                 input_json: r#"{"file_path":"/tmp/example.txt"}"#.to_string(),
-                // Populated, not `None`: every new field is
-                // `skip_serializing_if`, so a `None` golden would leave the
-                // added wire shape completely unexercised.
-                header: Some(ToolHeaderDto {
+                header: ToolHeaderDto {
                     verb: ToolVerbDto::Read,
                     icon: Some(ToolIconDto::Read),
                     label: "Read".to_string(),
@@ -359,7 +356,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     count: None,
                     sub_line: None,
                     title: "Read(/tmp/example.txt)".to_string(),
-                }),
+                },
             },
         ),
         (
@@ -407,7 +404,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 is_error: false,
                 // Populated so the golden locks the full display shape,
                 // including one diff row and its segments.
-                display: Some(ToolResultDisplayDto {
+                display: ToolResultDisplayDto {
                     headline: Some("Added 1 line".to_string()),
                     headline_kind: Some(HeadlineKindDto::Added),
                     headline_args: vec![1],
@@ -438,7 +435,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     body_lines: 1,
                     body_truncated: false,
                     collapsed: false,
-                }),
+                },
             },
         ),
         (
@@ -2056,17 +2053,32 @@ fn canonical_message() -> MessageDto {
                 tool: "Edit".to_string(),
                 input_json: r#"{"file_path":"/tmp/x","old_string":"a","new_string":"b"}"#
                     .to_string(),
-                header: None,
+                header: ToolHeaderDto {
+                    verb: ToolVerbDto::Update,
+                    icon: None,
+                    label: "Edit".to_string(),
+                    primary: None,
+                    qualifier: None,
+                    count: None,
+                    sub_line: None,
+                    title: "Edit".to_string(),
+                },
             },
             MessageBlockDto::ToolResult {
                 id: "toolu_01".to_string(),
                 tool: "Edit".to_string(),
                 result_json: r#"{"ok":true}"#.to_string(),
                 is_error: false,
-                old_string: Some("a".to_string()),
-                new_string: Some("b".to_string()),
-                file_path: Some("/tmp/x".to_string()),
-                display: None,
+                display: ToolResultDisplayDto {
+                    headline: None,
+                    headline_kind: None,
+                    headline_args: Vec::new(),
+                    diff: None,
+                    body: None,
+                    body_lines: 0,
+                    body_truncated: false,
+                    collapsed: false,
+                },
             },
         ],
         images: Vec::new(),

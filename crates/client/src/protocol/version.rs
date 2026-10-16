@@ -167,4 +167,7 @@
 /// the protocol-25 frozen prefixes and preserve all existing native ordinals.
 /// Version 26 adds resolved context budgets and exact pricing intervals to
 /// model records. Generated native bindings must be rebuilt with the runtime.
-pub const CLIENT_PROTOCOL_VERSION: &str = "26.0.0";
+/// Version 27 removes the duplicated legacy raw diff fields from ToolResult and
+/// requires host-derived `header` / `display` projections on tool blocks and
+/// tool events. `ToolResultDisplayDto.diff` remains optional for non-diff tools.
+pub const CLIENT_PROTOCOL_VERSION: &str = "27.0.0";

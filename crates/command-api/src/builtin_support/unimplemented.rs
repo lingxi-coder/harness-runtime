@@ -70,6 +70,11 @@ impl UnimplementedCommandHandler {
 #[async_trait]
 impl BuiltinCommandHandler for UnimplementedCommandHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
+        if self.name == "team-onboarding" {
+            return CommandResult::Done {
+                display: Some("Team onboarding is unavailable for this workspace.".into()),
+            };
+        }
         CommandResult::Done {
             display: Some((Self::stub_literal(&self.name)).into()),
         }
@@ -96,31 +101,43 @@ impl BuiltinCommandHandler for UnimplementedCommandHandler {
     }
 
     fn is_enabled(&self) -> bool {
-        self.name != "insights"
+        !matches!(self.name.as_str(), "insights" | "team-onboarding")
     }
 
     fn disable_model_invocation(&self) -> bool {
-        self.name == "insights"
+        matches!(self.name.as_str(), "insights" | "team-onboarding")
     }
 
     fn content_length(&self) -> Option<usize> {
-        (self.name == "insights").then_some(0)
+        matches!(self.name.as_str(), "insights" | "team-onboarding").then_some(0)
     }
 
     fn progress_message(&self) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
-        (self.name == "insights").then(|| "analyzing your sessions".into())
+        match self.name.as_str() {
+            "insights" => Some("analyzing your sessions".into()),
+            "team-onboarding" => Some("scanning usage data".into()),
+            _ => None,
+        }
     }
 
     fn requires(&self) -> Option<NativeCommandRequirements> {
-        (self.name == "insights").then_some(NativeCommandRequirements {
-            workspace: Some(true),
-        })
+        matches!(self.name.as_str(), "insights" | "team-onboarding").then_some(
+            NativeCommandRequirements {
+                workspace: Some(true),
+            },
+        )
     }
 
     fn policy_gate(&self) -> Option<NativeCommandPolicyGate> {
-        (self.name == "insights").then(|| NativeCommandPolicyGate {
-            policy: "allow_insights".into(),
-        })
+        match self.name.as_str() {
+            "insights" => Some(NativeCommandPolicyGate {
+                policy: "allow_insights".into(),
+            }),
+            "team-onboarding" => Some(NativeCommandPolicyGate {
+                policy: "allow_team_onboarding".into(),
+            }),
+            _ => None,
+        }
     }
 }
 

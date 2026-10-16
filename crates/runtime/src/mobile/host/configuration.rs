@@ -68,17 +68,17 @@ pub struct MobileConfig {
     /// Stable compatibility carrier for the mobile `Shell` tool gate + prompt
     /// metadata. Existing Android call sites still populate this field; iOS can
     /// reuse the same carrier type once its runtime bridge enables shell/git.
-    pub android_shell: Option<tool_api::AndroidShellToolCtx>,
+    pub android_shell: Option<tool_api::MobileShellToolCtx>,
     /// Stable compatibility carrier for the mobile structured `Git` tool gate +
     /// workspace metadata. Existing Android call sites still populate this
     /// field; iOS can reuse the same carrier type once its runtime bridge
     /// enables git.
-    pub android_git: Option<tool_api::AndroidGitToolCtx>,
+    pub android_git: Option<tool_api::MobileGitToolCtx>,
     /// Mobile Git network secret (HTTPS token + CA dir, spec §G3, P4). Held
     /// separately from the public [`MobileConfig::android_git`] carrier so the
     /// token never enters the broadly-cloned public ctx. `tool-git-mobile`
     /// reads it at call time.
-    pub android_git_secret: Option<tool_api::AndroidGitSecret>,
+    pub android_git_secret: Option<tool_api::MobileGitSecret>,
     /// P0.2 (mobile LINGXI.md hierarchy): the memory hierarchy provider the
     /// orchestrator loads its instruction files from. The production FFI entry
     /// points (`ios-framework` / `android-aar`) inject
@@ -107,6 +107,9 @@ pub struct MobileConfig {
     pub insights_source_executor: Option<Arc<dyn crate::insights::InsightsSourceExecutor>>,
     /// Explicit local host policy verdict for Insights. Unknown remains unavailable.
     pub insights_policy_gate: Option<bool>,
+    /// Explicit local host policy verdict for `/team-onboarding`. Mobile applies
+    /// its local default only when this value is absent; explicit false denies.
+    pub team_onboarding_policy_gate: Option<bool>,
 }
 
 impl std::fmt::Debug for MobileConfig {
@@ -154,6 +157,10 @@ impl std::fmt::Debug for MobileConfig {
             .field("vision_delegation_enabled", &self.vision_delegation_enabled)
             .field("insights_policy_gate", &self.insights_policy_gate)
             .field(
+                "team_onboarding_policy_gate",
+                &self.team_onboarding_policy_gate,
+            )
+            .field(
                 "insights_source_executor",
                 if self.insights_source_executor.is_some() {
                     &"Some(<executor>)"
@@ -194,6 +201,7 @@ impl Default for MobileConfig {
             vision_delegation_enabled: true,
             insights_source_executor: None,
             insights_policy_gate: None,
+            team_onboarding_policy_gate: None,
         }
     }
 }

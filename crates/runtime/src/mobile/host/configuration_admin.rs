@@ -126,97 +126,6 @@ fn source_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProject
     Utf16JsonProjection::object(fields).expect("generated mobile skill objects have unique fields")
 }
 
-fn mobile_bundled_entries() -> Vec<Utf16JsonProjection> {
-    let mut registry = skill::SkillRegistry::new();
-    skill::builtin::register_mobile(&mut registry);
-    let mut names = registry.names();
-    names.sort_unstable();
-    names
-        .into_iter()
-        .filter_map(|name| {
-            registry.get(name).map(|skill| {
-                let body = skill
-                    .content
-                    .string_at("")
-                    .expect("bundled mobile skill body is generated from UTF-8 text");
-                source_object(vec![
-                    ("id".into(), source_string(format!("<bundled:{name}>"))),
-                    ("name".into(), source_string(name)),
-                    ("source".into(), source_string("bundled")),
-                    (
-                        "directory".into(),
-                        source_string(format!("<bundled:{name}>")),
-                    ),
-                    ("rootDir".into(), source_string("<bundled>")),
-                    (
-                        "writable".into(),
-                        Utf16JsonProjection::parse("false").expect("boolean JSON"),
-                    ),
-                    (
-                        "readonlyReason".into(),
-                        source_string("Bundled mobile skills are compiled into the app."),
-                    ),
-                    (
-                        "revision".into(),
-                        source_string(config_admin::sha256_hex(body.as_bytes())),
-                    ),
-                    ("description".into(), skill.description.clone()),
-                    (
-                        "whenToUse".into(),
-                        skill
-                            .frontmatter
-                            .when_to_use
-                            .as_deref()
-                            .map(source_string)
-                            .unwrap_or_else(|| {
-                                Utf16JsonProjection::parse("null").expect("null JSON")
-                            }),
-                    ),
-                ])
-            })
-        })
-        .collect()
-}
-
-fn mobile_bundled_document(target: &ClientTextDto) -> Result<String, String> {
-    let target_units = target.code_units.as_slice();
-    let name_units = strip_source_prefix(target_units, "<bundled:")
-        .and_then(|units| units.strip_suffix(&[b'>' as u16]))
-        .ok_or("invalid bundled skill identifier")?;
-    let name = String::from_utf16(name_units).map_err(|_| "invalid bundled skill identifier")?;
-    let mut registry = skill::SkillRegistry::new();
-    skill::builtin::register_mobile(&mut registry);
-    let skill = registry
-        .get(&name)
-        .ok_or_else(|| "This bundled skill is not available on mobile.".to_string())?;
-    let markdown = skill
-        .content
-        .string_at("")
-        .expect("bundled mobile skill body is generated from UTF-8 text");
-    source_object(vec![
-        ("id".into(), source_projection(target)),
-        ("name".into(), source_string(name)),
-        ("source".into(), source_string("bundled")),
-        ("rootDir".into(), source_string("<bundled>")),
-        ("directory".into(), source_projection(target)),
-        ("markdown".into(), skill.content.clone()),
-        (
-            "writable".into(),
-            Utf16JsonProjection::parse("false").expect("boolean JSON"),
-        ),
-        (
-            "revision".into(),
-            source_string(config_admin::sha256_hex(markdown.as_bytes())),
-        ),
-        (
-            "readonlyReason".into(),
-            source_string("Bundled mobile skills are compiled into the app."),
-        ),
-    ])
-    .to_json_string()
-    .map_err(|error| error.to_string())
-}
-
 impl MobileEngineHandle {
     fn skills_admin_context(&self) -> skills_admin::SkillsAdminContext {
         skills_admin::SkillsAdminContext {
@@ -243,7 +152,6 @@ impl MobileEngineHandle {
                     entries.push(entry);
                 }
             }
-            entries.extend(mobile_bundled_entries());
             catalog
                 .set_field(
                     "entries",
@@ -323,7 +231,7 @@ impl MobileEngineHandle {
     async fn emit_mobile_skill_document(&self, target: &ClientTextDto, sink: &dyn ClientEventSink) {
         let target_units = target.code_units.as_slice();
         let result = if has_source_prefix(target_units, "<bundled:") {
-            mobile_bundled_document(target)
+            Err("This bundled skill is not available on mobile.".to_string())
         } else if let Some(name_units) = strip_source_prefix(target_units, "command:") {
             let registry = self.inner.slash_registry.read().await;
             registry
@@ -738,21 +646,6 @@ mod tests {
             (1, "r", "{}")
         );
     }
-    #[test]
-    fn bundled_catalog_is_mobile_scoped_and_documents_are_readonly() {
-        for entry in mobile_bundled_entries() {
-            let id = entry
-                .string_at("/id")
-                .expect("bundled entry id is a string");
-            let document: Value =
-                serde_json::from_str(&mobile_bundled_document(&ClientTextDto::from(id)).unwrap())
-                    .unwrap();
-            assert_eq!(document["writable"], false);
-            assert_eq!(document["id"], id);
-            assert!(document["markdown"].is_string());
-        }
-    }
-
     #[test]
     fn mobile_skill_json_keeps_source_utf16_text() {
         let description = Utf16JsonProjection::root_string(

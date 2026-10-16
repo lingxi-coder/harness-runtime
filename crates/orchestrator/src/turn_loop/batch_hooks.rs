@@ -348,7 +348,7 @@ pub(crate) async fn append_tool_injected_messages(
 /// Fold a tool batch's modifiers over the live model/profile, then resolve the
 /// requested route before changing session state.
 ///
-/// Called POST-BATCH by BOTH drivers (the batched [`execute_one_turn`] and the
+/// Called POST-BATCH by BOTH drivers (the batched [`execute_one_turn_with_recovery_tracked`] and the
 /// streaming `try_run_turn_streaming`) at the same point they append injected
 /// `new_messages`. Applying after the whole batch — rather than per tool —
 /// gives the concurrent streaming dispatch a SINGLE application point, so there

@@ -88,8 +88,8 @@ impl SideChatFactory for MobileSideChatFactory {
         ctx.calendar = None;
         ctx.contacts = None;
         ctx.computer_control = None;
-        ctx.android_git = None;
-        ctx.android_git_secret = None;
+        ctx.mobile_git = None;
+        ctx.mobile_git_secret = None;
 
         let mut commands = CommandRegistry::new();
         commands.set_side_chat(true);

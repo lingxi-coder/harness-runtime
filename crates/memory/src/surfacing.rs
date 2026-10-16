@@ -17,7 +17,7 @@
 //! (v2.1.181 additionally gated the preamble on `&& !i`, where
 //! `i = r.path.startsWith("<synthesis:")`; v2.1.193 dropped that synthesis-path
 //! exception so the first memory ALWAYS gets the preamble. This port now matches
-//! v2.1.193+ — see [`render_surfacing_block`].)
+//! v2.1.193+ — see [`render_surfacing_messages`].)
 //!
 //! where the per-memory header `h6n(path, mtimeMs)` is:
 //!
@@ -47,7 +47,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 /// One memory selected for surfacing this turn, in the shape
-/// [`render_surfacing_block`] renders. Produced by the orchestrator from the
+/// [`render_surfacing_messages`] renders. Produced by the orchestrator from the
 /// prefetch/selector result (a `memory::file::MemoryFile` or a `lingxi_core::types::
 /// MemoryEntry` carries the same data; see
 /// [`crate::selector::memory_entry_to_memory_file`]).
@@ -91,20 +91,6 @@ fn header_for(memory: &SurfacedMemory) -> String {
     }
 }
 
-/// Compatibility helper that joins independently rendered memory bodies.
-///
-/// Each memory → `{idx0_preamble?}{header}\n\n{content}`; the blocks are joined
-/// by a blank line. Production callers use [`render_surfacing_messages`] so the
-/// provider observes the original per-memory message boundaries.
-///
-/// An empty input renders an empty-bodied reminder; the orchestrator never
-/// calls this with an empty slice (it returns `None` first), so this is only a
-/// defensive shape.
-#[must_use]
-pub fn render_surfacing_block(memories: &[SurfacedMemory]) -> String {
-    render_surfacing_messages(memories).join("\n\n")
-}
-
 /// Render one provider-facing meta-message body per surfaced memory.
 #[must_use]
 pub fn render_surfacing_messages(memories: &[SurfacedMemory]) -> Vec<String> {
@@ -138,9 +124,10 @@ mod tests {
 
     #[test]
     fn single_fresh_memory_has_idx0_preamble_and_bare_header() {
-        let out = render_surfacing_block(&[mem("/m/a.md", "USE FD NOT FIND", 0)]);
+        let out = render_surfacing_messages(&[mem("/m/a.md", "USE FD NOT FIND", 0)]);
+        assert_eq!(out.len(), 1);
         assert_eq!(
-            out,
+            out[0],
             "Retrieved for possible relevance \u{2014} use only if it actually applies to what the user asked.\n\n\
              Memory: /m/a.md:\n\n\
              USE FD NOT FIND"
@@ -150,42 +137,41 @@ mod tests {
     #[test]
     fn age_of_exactly_one_day_is_not_stale() {
         // r6r returns "" for t <= 1, so a 1-day memory carries the bare header.
-        let out = render_surfacing_block(&[mem("/m/a.md", "B", 1)]);
-        assert!(out.contains("Memory: /m/a.md:"));
+        let out = render_surfacing_messages(&[mem("/m/a.md", "B", 1)]);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("Memory: /m/a.md:"));
         assert!(
-            !out.contains("days old"),
-            "1-day memory must not be stale-prefixed: {out}"
+            !out[0].contains("days old"),
+            "1-day memory must not be stale-prefixed: {out:?}"
         );
     }
 
     #[test]
     fn stale_memory_carries_staleness_prefix_before_header() {
-        let out = render_surfacing_block(&[mem("/m/old.md", "BODY", 7)]);
+        let out = render_surfacing_messages(&[mem("/m/old.md", "BODY", 7)]);
+        assert_eq!(out.len(), 1);
         assert!(
-            out.contains(
+            out[0].contains(
                 "This memory is 7 days old. Memories are point-in-time observations, \
                  not live state \u{2014} claims about code behavior or file:line citations \
                  may be outdated. Verify against current code before asserting as fact.\n\n\
                  Memory: /m/old.md:"
             ),
-            "got: {out}"
+            "got: {out:?}"
         );
         // idx-0 preamble still precedes the staleness sentence on the first memory.
-        assert!(out.starts_with("Retrieved for possible relevance \u{2014}"));
+        assert!(out[0].starts_with("Retrieved for possible relevance \u{2014}"));
     }
 
     #[test]
     fn idx0_preamble_only_on_first_memory() {
-        let out = render_surfacing_block(&[mem("/m/a.md", "AAA", 0), mem("/m/b.md", "BBB", 0)]);
-        // Exactly one occurrence of the preamble.
-        assert_eq!(out.matches("Retrieved for possible relevance").count(), 1);
-        // Both memories present, joined by a blank line.
-        assert!(out.contains("Memory: /m/a.md:\n\nAAA"));
-        assert!(out.contains("Memory: /m/b.md:\n\nBBB"));
-        assert!(
-            out.contains("AAA\n\nMemory: /m/b.md:"),
-            "blocks joined by blank line: {out}"
-        );
+        let out = render_surfacing_messages(&[mem("/m/a.md", "AAA", 0), mem("/m/b.md", "BBB", 0)]);
+        assert_eq!(out.len(), 2);
+        // Exactly one occurrence of the preamble, on the first provider row.
+        assert!(out[0].contains("Retrieved for possible relevance"));
+        assert!(!out[1].contains("Retrieved for possible relevance"));
+        assert!(out[0].contains("Memory: /m/a.md:\n\nAAA"));
+        assert!(out[1].contains("Memory: /m/b.md:\n\nBBB"));
     }
 
     #[test]
@@ -193,12 +179,13 @@ mod tests {
         // v2.1.193 dropped the v2.1.181 `!i` synthesis exception: a
         // `<synthesis:...>` first memory now DOES get the em-dash preamble
         // (claude `o === 0` only).
-        let out = render_surfacing_block(&[mem("<synthesis:summary>", "SYNTH", 0)]);
+        let out = render_surfacing_messages(&[mem("<synthesis:summary>", "SYNTH", 0)]);
+        assert_eq!(out.len(), 1);
         assert!(
-            out.contains("Retrieved for possible relevance"),
-            "got: {out}"
+            out[0].contains("Retrieved for possible relevance"),
+            "got: {out:?}"
         );
-        assert!(out.contains("Memory: <synthesis:summary>:\n\nSYNTH"));
+        assert!(out[0].contains("Memory: <synthesis:summary>:\n\nSYNTH"));
     }
 
     #[test]

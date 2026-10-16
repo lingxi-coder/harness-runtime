@@ -1900,11 +1900,11 @@ pub(super) async fn build_mobile_inner_with_ask(
         // mobile-linux but the runtime is blocked or unlinked. In that state the
         // tools stay ABSENT rather than silently falling back to the Android
         // legacy path.
-        android_shell: gated_shell_ctx.clone(),
-        android_git: gated_git_ctx.clone(),
+        mobile_shell: gated_shell_ctx.clone(),
+        mobile_git: gated_git_ctx.clone(),
         // Secret carrier follows the same public-gate decision: if the public
         // git tool is gated off, keep the secret seam absent too.
-        android_git_secret: gated_git_ctx
+        mobile_git_secret: gated_git_ctx
             .as_ref()
             .and_then(|_| cfg.mobile_git_secret().cloned()),
         // Mobile uses the same blocking TaskCreated/TaskCompleted hook contract
@@ -2678,6 +2678,22 @@ pub(super) async fn build_mobile_inner_with_ask(
             command_api::builtins::register_insights_command(&mut reg, provider);
         }
     }
+    let team_onboarding_availability = command_api::builtins::TeamOnboardingCommandAvailability {
+        workspace_available: Some(cfg.cwd.is_dir() && cfg.workspace_trusted),
+        // Mobile is a local, app-private host. A missing fact uses its
+        // explicit local default; a supplied false verdict remains a deny.
+        allow_team_onboarding: cfg.team_onboarding_policy_gate.or(Some(true)),
+    };
+    if team_onboarding_availability.is_available() {
+        let provider: Arc<dyn command_api::builtins::TeamOnboardingPromptProvider> = Arc::new(
+            crate::team_onboarding::LocalTeamOnboardingPromptProvider::new(
+                cfg.lingxi_home.clone(),
+                cfg.cwd.clone(),
+                team_onboarding_availability,
+            ),
+        );
+        command_api::builtins::register_team_onboarding_command(&mut reg, provider);
+    }
     reg.register_builtin_handler(Arc::new(
         command_api::builtins::VersionHandler::with_build_info(cfg.build_info),
     ));
@@ -3069,7 +3085,7 @@ fn build_mobile_engine_on_worker(
     });
     let (session_lifecycle_tx, _) = tokio::sync::watch::channel(initial_session_key.clone());
 
-    let skill_count = crate::mobile::mobile_skill_registry().len();
+    let skill_count = 0;
     let message_queue = Arc::new(msgqueue::MessageQueueManager::new());
     let initial_session_uuid = inner
         .active_session_uuid

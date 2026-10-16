@@ -5,6 +5,45 @@ use super::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    struct TestFusionRecorder;
+
+    #[async_trait::async_trait]
+    impl lingxi_core::host::FusionRunRecorder for TestFusionRecorder {
+        async fn record_terminal(
+            &self,
+            _outcome: lingxi_core::host::FusionRunOutcome,
+            _slash_target: Option<lingxi_core::host::FusionSlashPublicationTarget>,
+        ) -> lingxi_core::host::FusionPublicationReceipt {
+            lingxi_core::host::FusionPublicationReceipt::not_required()
+        }
+    }
+
+    struct TestFusionRecorderFactory;
+
+    impl lingxi_core::host::FusionRunRecorderFactory for TestFusionRecorderFactory {
+        fn recorder_for(
+            &self,
+            _session_id: lingxi_core::types::SessionId,
+        ) -> Option<Arc<dyn lingxi_core::host::FusionRunRecorder>> {
+            Some(Arc::new(TestFusionRecorder))
+        }
+    }
+
+    trait TestFusionToolExt {
+        fn with_test_fusion(self, executor: Arc<dyn FusionExecutor>) -> Self;
+    }
+
+    impl TestFusionToolExt for AgentTool {
+        fn with_test_fusion(self, executor: Arc<dyn FusionExecutor>) -> Self {
+            self.with_fusion_services(AgentFusionServices::new(
+                executor,
+                Arc::new(TestFusionRecorderFactory),
+            ))
+        }
+    }
+
     fn checked_source(
         source: &lingxi_core::types::utf16_json::Utf16JsonProjection,
     ) -> (String, Vec<u16>) {
@@ -355,6 +394,12 @@ mod tests {
             file_history: None,
             native_query_depth: None,
         }
+    }
+
+    fn fresh_fusion_ctx_with_registry(registry: Arc<ToolRegistry>) -> ToolUseContext {
+        let mut ctx = fresh_ctx_with_registry(registry);
+        ctx.origin_session_id = Some(lingxi_core::types::SessionId::new());
+        ctx
     }
 
     /// Add a real per-session statistics owner to the existing task mock while
@@ -1331,7 +1376,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         {
             let this = ::std::sync::Arc::clone(&self);
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, _progress| async move {
@@ -1455,7 +1500,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         {
             let this = ::std::sync::Arc::clone(&self);
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, _progress| async move { Err(this.error.clone()) },
@@ -1500,7 +1545,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         {
             let this = ::std::sync::Arc::clone(&self);
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, _progress| async move { Err(this.error.clone()) },
@@ -1542,7 +1587,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(submission.identity.session_id);
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |request, _inherit, _progress| async move {
@@ -1638,8 +1683,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
-        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
+        let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
         ctx.options.model_profile = Some("openai".into());
         tool.call(serde_json::json!({"description":"review","prompt":"review this","subagent_type":"fusion","strategy":"project:fast"}), ctx, fresh_tx()).await.unwrap();
         assert_eq!(fusion.captures.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -1661,6 +1706,47 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
     }
 
     #[tokio::test]
+    async fn fusion_requires_a_trusted_session_for_the_recorder_factory() {
+        let fusion = Arc::new(CapturingFusion {
+            requests: Default::default(),
+            sessions: Default::default(),
+        });
+        let tool = AgentTool::new(wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ))
+        .with_test_fusion(fusion.clone());
+        let input = source_fixture(&serde_json::json!({
+            "description": "review",
+            "prompt": "review this",
+            "subagent_type": "fusion"
+        }));
+
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        // Keep the parent profile valid so only the trusted session is missing.
+        ctx.options.model_profile = Some("openai".into());
+        let error = <AgentTool as Tool>::call(&tool, input, ctx, fresh_tx())
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(&error, ToolError::Internal(message)
+                if message.contains("trusted origin session")),
+            "expected the missing trusted-session rejection, got {error:?}"
+        );
+        assert!(
+            fusion
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "the executor must not prepare a run without a session-pinned recorder"
+        );
+    }
+
+    #[tokio::test]
     async fn fusion_implement_permission_and_execution_share_one_snapshot() {
         let inner = Arc::new(CapturingFusion {
             requests: Default::default(),
@@ -1676,8 +1762,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
-        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
+        let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
         ctx.options.model_profile = Some("openai".into());
         ctx.tool_use_id = Some("fusion-reviewed-call".into());
         let input = serde_json::json!({"description":"review","prompt":"review this","subagent_type":"fusion","strategy":"project:fast","fusion_mode":"implement"});
@@ -1710,7 +1796,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError>
         {
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, progress| async move {
@@ -1779,7 +1865,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ProgressEmittingFusion));
+        let tool = AgentTool::new(bctx).with_test_fusion(Arc::new(ProgressEmittingFusion));
         let (progress_tx, mut progress_rx) = tool_api::progress::progress_channel();
         tool.call(
             serde_json::json!({
@@ -1787,7 +1873,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 "prompt": "review this",
                 "subagent_type": "fusion"
             }),
-            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
             progress_tx,
         )
         .await
@@ -1874,7 +1960,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             submission: lingxi_core::host::FusionSubmission,
         ) -> Result<lingxi_core::host::PreparedFusionRun, lingxi_core::host::FusionError> {
             let this = Arc::clone(&self);
-            lingxi_core::host::prepared_from_oneshot(
+            lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 None,
                 move |request, _inherit, _progress| async move {
@@ -1938,7 +2024,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        AgentTool::new(bctx).with_fusion(fusion)
+        AgentTool::new(bctx).with_test_fusion(fusion)
     }
 
     fn fusion_input_value(mode: Option<&str>) -> Value {
@@ -1971,7 +2057,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
 
     #[tokio::test]
     async fn a_model_started_implement_run_asks_the_user_unless_the_host_says_otherwise() {
-        let ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
         let asking = implement_tool(ImplementFusion::new(true, true));
         let PermissionResult::Ask { prompt, .. } = asking
             .check_permissions(&fusion_input(Some("implement")), &ctx)
@@ -2086,8 +2172,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 arc_mock_mailbox(),
                 arc_mock_budget(u64::MAX),
             ))
-            .with_fusion(fusion.clone());
-            let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            .with_test_fusion(fusion.clone());
+            let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
             ctx.tool_use_id = Some("failed-fusion-review".into());
             let input = fusion_input_value(Some("implement"));
             let source_input = source_fixture(&input);
@@ -2111,7 +2197,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         for expired in [false, true] {
             let fusion = ImplementFusion::new(true, true);
             let tool = implement_tool(fusion.clone());
-            let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
             ctx.tool_use_id = Some("stale-fusion-review".into());
             let cancel = tokio_util::sync::CancellationToken::new();
             ctx.cancel = Some(cancel.clone());
@@ -2152,7 +2238,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let input = fusion_input_value(Some("implement"));
         let source_input = source_fixture(&input);
         for index in 0..MAX_FUSION_PERMISSION_STRATEGIES + 3 {
-            let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
             ctx.tool_use_id = Some(format!("denied-fusion-{index}").into());
             assert!(matches!(
                 tool.check_permissions(&source_input, &ctx).await,
@@ -2164,7 +2250,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             tool.fusion_permission_strategies.lock().unwrap().len(),
             MAX_FUSION_PERMISSION_STRATEGIES
         );
-        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
         ctx.tool_use_id = Some("denied-fusion-0".into());
         let error = tool.call(input, ctx, fresh_tx()).await.unwrap_err();
         let message = match error {
@@ -2178,7 +2264,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
     #[tokio::test]
     async fn early_implement_execution_rejection_consumes_its_review() {
         let tool = implement_tool(ImplementFusion::new(true, true));
-        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
         ctx.tool_use_id = Some("rejected-fusion-review".into());
         let mut input = fusion_input_value(Some("implement"));
         input["run_in_background"] = serde_json::json!(true);
@@ -2284,7 +2370,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let result = tool
             .call(
                 input,
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -2304,7 +2390,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
 
     #[tokio::test]
     async fn implement_mode_is_rejected_without_host_support_or_with_an_unknown_mode() {
-        let ctx = || fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let ctx = || fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
         let fusion = ImplementFusion::new(false, true);
         let tool = implement_tool(fusion.clone());
         for mode in ["implement", "rewrite"] {
@@ -2330,7 +2416,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        // Kept as its own binding (not dropped into `.with_fusion(Arc::new(..))`
+        // Kept as its own binding (not dropped into `.with_test_fusion(Arc::new(..))`
         // inline) so `runs` can be read back AFTER the call below — the prior
         // version of this test built-and-dropped the `Arc`, which meant a
         // regression that made the disabled gate a no-op (and actually ran
@@ -2340,7 +2426,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             result: sample_fusion_result(lingxi_core::host::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
-        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         let prompt = prompt_display(
             tool.prompt(&tool_api::tool_trait::PromptOptions {
                 include_examples: false,
@@ -2362,7 +2448,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "prompt": "review this",
                     "subagent_type": "fusion"
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -2401,7 +2487,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_budget(u64::MAX),
         );
         bctx.permission_gate = Some(Arc::new(DenyExploreGate));
-        // No `.with_fusion(...)` — `self.fusion` is `None`, hitting the
+        // No `.with_test_fusion(...)` — Fusion services are absent, hitting the
         // executor-absent not-found branch that renders
         // `fusion_available_agents_display`.
         let tool = AgentTool::new(bctx);
@@ -2454,7 +2540,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             result: sample_fusion_result(lingxi_core::host::FusionStatus::Unanalyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
-        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         let prompt = prompt_display(
             tool.prompt(&tool_api::tool_trait::PromptOptions {
                 include_examples: false,
@@ -2481,7 +2567,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "prompt": "review this",
                     "subagent_type": "fusion"
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -2532,14 +2618,14 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             result: sample_fusion_result(lingxi_core::host::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
-        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         tool.call(
             serde_json::json!({
                 "description": "deliberate",
                 "prompt": "review this",
                 "subagent_type": "fusion"
             }),
-            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
             fresh_tx(),
         )
         .await
@@ -2589,13 +2675,13 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let bctx = wired_ctx_with_bus(arc_mock_spawner(), bus).await;
         let result = sample_fusion_result(lingxi_core::host::FusionStatus::Analyzed);
         let answer = "FUSION_FINAL".to_string();
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(PreparedAllocationFusion {
+        let tool = AgentTool::new(bctx).with_test_fusion(Arc::new(PreparedAllocationFusion {
             result,
             allocated_panels: 3,
             settlement_failure: Some("durable receipt rejected".into()),
         }));
         let output = tool.call(serde_json::json!({"description":"deliberate","prompt":"review this","subagent_type":"fusion"}),
-            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())), fresh_tx()).await.expect("computed answer remains available");
+            fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())), fresh_tx()).await.expect("computed answer remains available");
         assert!(output.is_error);
         assert_eq!(projection_value(&output.data)["status"], "failed");
         assert_eq!(
@@ -2668,14 +2754,14 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             result,
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
-        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         tool.call(
             serde_json::json!({
                 "description": "deliberate",
                 "prompt": "review this",
                 "subagent_type": "fusion"
             }),
-            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
             fresh_tx(),
         )
         .await
@@ -2727,14 +2813,14 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             result,
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
-        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         tool.call(
             serde_json::json!({
                 "description": "deliberate",
                 "prompt": "review this",
                 "subagent_type": "fusion"
             }),
-            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
             fresh_tx(),
         )
         .await
@@ -2769,7 +2855,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             error_detail: Some("panel timed out before allocation receipt".into()),
             usage: None,
         };
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(PreparedAllocationFusion {
+        let tool = AgentTool::new(bctx).with_test_fusion(Arc::new(PreparedAllocationFusion {
             result,
             allocated_panels: 2,
             settlement_failure: None,
@@ -2780,7 +2866,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 "prompt": "review this",
                 "subagent_type": "fusion"
             }),
-            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
             fresh_tx(),
         )
         .await
@@ -2895,7 +2981,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             result: sample_fusion_result(lingxi_core::host::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
-        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         let err = tool
             .call(
                 serde_json::json!({
@@ -2903,7 +2989,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "prompt": "review this",
                     "subagent_type": "fusion"
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -2936,7 +3022,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(PreflightRejectedFusion {
+        let tool = AgentTool::new(bctx).with_test_fusion(Arc::new(PreflightRejectedFusion {
             error: lingxi_core::host::FusionError::InvalidConfiguration(
                 "fusion.maxPanel must be between 1 and 12".into(),
             ),
@@ -2948,7 +3034,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "prompt": "review this",
                     "subagent_type": "fusion"
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -2993,7 +3079,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ErroringFusion {
+        let tool = AgentTool::new(bctx).with_test_fusion(Arc::new(ErroringFusion {
             error: lingxi_core::host::FusionError::MinPanelsNotMet,
         }));
         let err = tool
@@ -3003,7 +3089,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "prompt": "review this",
                     "subagent_type": "fusion"
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -3032,7 +3118,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ErroringFusion {
+        let tool = AgentTool::new(bctx).with_test_fusion(Arc::new(ErroringFusion {
             error: lingxi_core::host::FusionError::Cancelled,
         }));
         let err = tool
@@ -3042,7 +3128,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "prompt": "review this",
                     "subagent_type": "fusion"
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -3078,7 +3164,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError>
         {
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, progress| async move {
@@ -3143,7 +3229,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         ) -> Result<::lingxi_core::host::PreparedFusionRun, ::lingxi_core::host::FusionError>
         {
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, progress| async move {
@@ -3207,7 +3293,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ErroringFusion {
+        let tool = AgentTool::new(bctx).with_test_fusion(Arc::new(ErroringFusion {
             error: lingxi_core::host::FusionError::Cancelled,
         }));
         let err = tool
@@ -3217,7 +3303,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "prompt": "review this",
                     "subagent_type": "fusion"
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -3247,7 +3333,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_budget(u64::MAX),
         );
         let tool =
-            AgentTool::new(bctx).with_fusion(Arc::new(CancelledAfterPrespawnEventOnlyFusion));
+            AgentTool::new(bctx).with_test_fusion(Arc::new(CancelledAfterPrespawnEventOnlyFusion));
         let err = tool
             .call(
                 serde_json::json!({
@@ -3255,7 +3341,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "prompt": "review this",
                     "subagent_type": "fusion"
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -3283,7 +3369,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         );
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(CancelledAfterPanelSpawnFusion));
+        let tool = AgentTool::new(bctx).with_test_fusion(Arc::new(CancelledAfterPanelSpawnFusion));
         let err = tool
             .call(
                 serde_json::json!({
@@ -3291,7 +3377,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "prompt": "review this",
                     "subagent_type": "fusion"
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -3330,7 +3416,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         {
             let this = ::std::sync::Arc::clone(&self);
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, _progress| async move {
@@ -3465,12 +3551,12 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         );
         let (started_tx, started_rx) = oneshot::channel();
         let (settled_tx, settled_rx) = oneshot::channel();
-        let tool = AgentTool::new(bctx).with_fusion(PreparedKnownZeroNeverCompletesFusion::new(
-            started_tx, settled_tx,
-        ));
+        let tool = AgentTool::new(bctx).with_test_fusion(
+            PreparedKnownZeroNeverCompletesFusion::new(started_tx, settled_tx),
+        );
 
         let cancel = tokio_util::sync::CancellationToken::new();
-        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
         ctx.cancel = Some(cancel.clone());
 
         let cancel_for_task = cancel.clone();
@@ -3529,9 +3615,9 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_budget(u64::MAX),
         );
         let (started_tx, started_rx) = oneshot::channel();
-        let tool = AgentTool::new(bctx).with_fusion(NeverCompletesFusion::new(started_tx));
+        let tool = AgentTool::new(bctx).with_test_fusion(NeverCompletesFusion::new(started_tx));
         let cancel = tokio_util::sync::CancellationToken::new();
-        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
         ctx.cancel = Some(cancel.clone());
         let cancel_for_task = cancel.clone();
         tokio::spawn(async move {
@@ -3591,7 +3677,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         {
             let this = ::std::sync::Arc::clone(&self);
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, inherit, progress| async move {
@@ -3646,12 +3732,12 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_budget(u64::MAX),
         );
         let tool =
-            AgentTool::new(bctx).with_fusion(Arc::new(DispatchesFewerPanelsThenHangsFusion {
+            AgentTool::new(bctx).with_test_fusion(Arc::new(DispatchesFewerPanelsThenHangsFusion {
                 panels_allocated: None,
             }));
 
         let cancel = tokio_util::sync::CancellationToken::new();
-        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
         ctx.cancel = Some(cancel.clone());
         let cancel_for_task = cancel.clone();
         tokio::spawn(async move {
@@ -3711,12 +3797,12 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_budget(u64::MAX),
         );
         let tool =
-            AgentTool::new(bctx).with_fusion(Arc::new(DispatchesFewerPanelsThenHangsFusion {
+            AgentTool::new(bctx).with_test_fusion(Arc::new(DispatchesFewerPanelsThenHangsFusion {
                 panels_allocated: Some(1),
             }));
 
         let cancel = tokio_util::sync::CancellationToken::new();
-        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
         ctx.cancel = Some(cancel.clone());
         let cancel_for_task = cancel.clone();
         tokio::spawn(async move {
@@ -3779,7 +3865,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             result: sample_fusion_result(lingxi_core::host::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
-        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         let err = tool
             .call(
                 serde_json::json!({
@@ -3788,7 +3874,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "subagent_type": "fusion",
                     "run_in_background": true
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -3853,7 +3939,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         {
             let this = ::std::sync::Arc::clone(&self);
             let timeout = self.effective_timeout_ms();
-            ::lingxi_core::host::prepared_from_oneshot(
+            ::lingxi_core::host::test_support::prepared_from_oneshot(
                 submission,
                 timeout,
                 move |_request, _inherit, progress| async move {
@@ -3919,7 +4005,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_budget(u64::MAX),
         );
         let tool =
-            AgentTool::new(bctx).with_fusion(Arc::new(DispatchesFewerPanelsThenFailsFusion {
+            AgentTool::new(bctx).with_test_fusion(Arc::new(DispatchesFewerPanelsThenFailsFusion {
                 dispatched_total,
                 panels_allocated,
                 error,
@@ -3931,7 +4017,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "prompt": "review this",
                     "subagent_type": "fusion"
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -4014,7 +4100,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         // `error_category: "spawn"`.
         result.panels[2].status = lingxi_core::host::PanelRunStatus::Failed;
         result.panels[2].error_category = Some("spawn".into());
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ScriptedFusion {
+        let tool = AgentTool::new(bctx).with_test_fusion(Arc::new(ScriptedFusion {
             enabled: true,
             result,
             runs: std::sync::atomic::AtomicUsize::new(0),
@@ -4025,7 +4111,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 "prompt": "review this",
                 "subagent_type": "fusion"
             }),
-            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+            fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
             fresh_tx(),
         )
         .await
@@ -4255,7 +4341,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             result: sample_fusion_result(lingxi_core::host::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
-        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         let err = tool
             .call(
                 serde_json::json!({
@@ -4264,7 +4350,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "subagent_type": "fusion",
                     "cross_provider": true
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -4318,7 +4404,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             result: sample_fusion_result(lingxi_core::host::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),
         });
-        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         let err = tool
             .call(
                 serde_json::json!({
@@ -4326,7 +4412,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "prompt": "review this",
                     "subagent_type": "fusion"
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -4382,7 +4468,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             let bus = Arc::new(AnalyticsBus::new());
             bus.attach_sink(sink.clone()).await;
             let bctx = wired_ctx_with_bus(arc_mock_spawner(), bus).await;
-            let tool = AgentTool::new(bctx).with_fusion(Arc::new(ScriptedFusion {
+            let tool = AgentTool::new(bctx).with_test_fusion(Arc::new(ScriptedFusion {
                 enabled: true,
                 result: sample_fusion_result(lingxi_core::host::FusionStatus::Analyzed),
                 runs: std::sync::atomic::AtomicUsize::new(0),
@@ -4399,7 +4485,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             let _ = tool
                 .call(
                     input,
-                    fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                    fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                     fresh_tx(),
                 )
                 .await;
@@ -4496,8 +4582,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             requests: std::sync::Mutex::new(Vec::new()),
             sessions: std::sync::Mutex::new(Vec::new()),
         });
-        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
-        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
+        let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
         ctx.options.main_loop_model = "gpt-5.6-sol".into();
         ctx.options.model_profile = None;
 
@@ -4535,7 +4621,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             requests: std::sync::Mutex::new(Vec::new()),
             sessions: std::sync::Mutex::new(Vec::new()),
         });
-        let tool = AgentTool::new(bctx).with_fusion(fusion.clone());
+        let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         let previous_session = lingxi_core::types::SessionId::new();
         let switched_session = lingxi_core::types::SessionId::new();
         let session = Arc::new(tokio::sync::Mutex::new(lingxi_core::SessionState::empty(
@@ -4547,7 +4633,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         // captured by request construction.
         session.lock().await.session_id = switched_session;
 
-        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
         ctx.options.model_profile = Some("anthropic".into());
         ctx.session = Some(session);
         tool.call(
@@ -4592,7 +4678,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_mailbox(),
             arc_mock_budget(u64::MAX),
         ))
-        .with_fusion(fusion.clone());
+        .with_test_fusion(fusion.clone());
 
         let error = tool
             .call(
@@ -4602,7 +4688,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "subagent_type": "fusion",
                     "cross_provider": true
                 }),
-                fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
+                fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new())),
                 fresh_tx(),
             )
             .await
@@ -7662,7 +7748,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             arc_mock_budget(u64::MAX),
         );
         bctx.permission_gate = Some(Arc::new(DenyFusionGate));
-        let tool = AgentTool::new(bctx).with_fusion(Arc::new(ScriptedFusion {
+        let tool = AgentTool::new(bctx).with_test_fusion(Arc::new(ScriptedFusion {
             enabled: true,
             result: sample_fusion_result(lingxi_core::host::FusionStatus::Analyzed),
             runs: std::sync::atomic::AtomicUsize::new(0),

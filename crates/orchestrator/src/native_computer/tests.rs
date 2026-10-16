@@ -1158,9 +1158,15 @@ async fn ordinary_batch_images_use_the_existing_turn_driver_and_final_hook_outpu
             vec![request],
         )
         .await;
-        crate::turn_loop::execute_one_turn(&fixture.orch, None)
-            .await
-            .unwrap();
+        let _ = crate::turn_loop::execute_one_turn_with_recovery_tracked(
+            &fixture.orch,
+            None,
+            &mut crate::turn_loop::RecoveryState::default(),
+            None,
+            0,
+        )
+        .await
+        .unwrap();
         let history = fixture.orch.session.lock().await.history.clone();
         let (text, blocks) = history
             .iter()
@@ -2823,9 +2829,16 @@ async fn recovered_receipt_is_in_the_actual_turn_request_before_submission() {
                 journal: fixture.journal.clone(),
                 receipts: vec![saved.clone()],
             }));
-        let result = crate::turn_loop::execute_one_turn(&fixture.orch, None)
-            .await
-            .unwrap();
+        let result = crate::turn_loop::execute_one_turn_with_recovery_tracked(
+            &fixture.orch,
+            None,
+            &mut crate::turn_loop::RecoveryState::default(),
+            None,
+            0,
+        )
+        .await
+        .unwrap()
+        .0;
         assert!(matches!(
             result,
             crate::turn_loop::TurnStepOutcome::Ended { .. }
@@ -3151,9 +3164,16 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                         journal: fixture.journal.clone(),
                         receipts: vec![saved.clone()],
                     }));
-                let result = crate::turn_loop::execute_one_turn(&fixture.orch, None)
-                    .await
-                    .unwrap();
+                let result = crate::turn_loop::execute_one_turn_with_recovery_tracked(
+                    &fixture.orch,
+                    None,
+                    &mut crate::turn_loop::RecoveryState::default(),
+                    None,
+                    0,
+                )
+                .await
+                .unwrap()
+                .0;
                 assert!(matches!(
                     result,
                     crate::turn_loop::TurnStepOutcome::Ended { .. }

@@ -652,7 +652,7 @@ mod tests {
     use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
-    use tool_api::AndroidShellToolCtx;
+    use tool_api::MobileShellToolCtx;
 
     /// A `Sandbox` that records the policy handed to `prepare()` and admits the
     /// command (wrapped as `AndroidMinijail`) so the runner is reachable.
@@ -785,7 +785,7 @@ mod tests {
         }
     }
 
-    /// Build a ctx with `android_shell` enabled, swapping in the given mock
+    /// Build a ctx with `mobile_shell` enabled, swapping in the given mock
     /// sandbox + a runner that returns `out` and records its call count.
     fn enabled_ctx(
         out: ProcessOutput,
@@ -798,7 +798,7 @@ mod tests {
             out,
             calls: calls.clone(),
         });
-        ctx.android_shell = Some(AndroidShellToolCtx::android_legacy(
+        ctx.mobile_shell = Some(MobileShellToolCtx::android_legacy(
             true,
             vec!["grep".into(), "sed".into()],
             Some("@(#)MIRBSD KSH".into()),
@@ -818,7 +818,7 @@ mod tests {
             out,
             calls: calls.clone(),
         });
-        ctx.android_shell = Some(AndroidShellToolCtx::mobile_linux_guest(
+        ctx.mobile_shell = Some(MobileShellToolCtx::mobile_linux_guest(
             true,
             vec!["sh".into(), "apk".into(), "git".into()],
             Some("BusyBox v1.37.0".into()),
@@ -1209,7 +1209,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_reflects_bundled_locked_inventory_when_bundled() {
         let mut ctx = shell_test_ctx(ok_output(""));
-        ctx.android_shell = Some(AndroidShellToolCtx::android_legacy(
+        ctx.mobile_shell = Some(MobileShellToolCtx::android_legacy(
             true,
             vec!["grep".into(), "sed".into(), "find".into()],
             Some("@(#)MIRBSD KSH R59".into()),

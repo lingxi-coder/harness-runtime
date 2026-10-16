@@ -670,9 +670,9 @@ pub fn merge(repo: &git2::Repository, source: &str) -> Result<GitMergeResult, Gi
 /// on demand (never written to disk or a child-process env); `ca_dir` points
 /// libgit2's TLS backend at a CA-certificate directory (Android system cacerts).
 ///
-/// This rides a SEPARATE secret seam from the public `AndroidGitToolCtx` so the
+/// This rides a SEPARATE secret seam from the public `MobileGitToolCtx` so the
 /// secrets never enter the broadly-cloned public tool context — see
-/// `tool-api`'s `BuiltinToolContext.android_git_secret`.
+/// `tool-api`'s `BuiltinToolContext.mobile_git_secret`.
 #[derive(Clone, Default)]
 pub struct GitNetConfig {
     /// Per-op credential provider supplying the HTTPS token (used as the password
@@ -693,7 +693,7 @@ pub struct GitNetConfig {
 }
 
 // Manual redacting Debug — the `provider` (and the secrets it can yield) must
-// never reach a log line, mirroring `tool_api::AndroidGitSecret`. (`Arc<dyn T>`
+// never reach a log line, mirroring `tool_api::MobileGitSecret`. (`Arc<dyn T>`
 // is not `Debug` anyway; the struct derives only `Clone`, not `Debug`, so this
 // is the sole Debug path.)
 impl std::fmt::Debug for GitNetConfig {

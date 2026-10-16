@@ -290,6 +290,16 @@ pub trait OrchestratorApiClient: Send + Sync {
         Ok(None)
     }
 
+    /// Return the raw context-window size, distinct from the effective input
+    /// budget after policy limits, output reservations, and safety margins.
+    /// An unknown route or provider window remains unknown.
+    fn context_window_tokens(&self, model: &str, profile: Option<&str>) -> Option<u64> {
+        self.context_budget(model, profile)
+            .ok()
+            .flatten()
+            .and_then(|context| context.context_window_tokens)
+    }
+
     fn input_context_budget(&self, model: &str, profile: Option<&str>) -> Option<u64> {
         match self.context_budget(model, profile) {
             Ok(Some(context)) => context.effective_input_budget,

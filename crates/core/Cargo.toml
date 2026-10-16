@@ -8,6 +8,9 @@ license.workspace = true
 # Package name stays `core` (`cargo test -p core`). The rustc crate name
 # cannot be `core` — that shadows sysroot libcore and breaks `thiserror`
 # (`impl ::core::fmt::Display`) in every dependent.
+[features]
+test-support = []
+
 [lib]
 name = "lingxi_core"
 

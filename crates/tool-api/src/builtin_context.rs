@@ -305,26 +305,19 @@ pub struct BuiltinToolContext {
     pub read_deny_exclude_globs: Vec<String>,
 
     // ===== Mobile Linux shell / git seams =====
-    /// Stable compatibility carrier for the mobile `Shell` tool wiring. The
-    /// type is now [`MobileShellToolCtx`]; the field name stays
-    /// `android_shell` so existing Android call sites keep compiling while iOS
-    /// can reuse the same carrier via the new generic type alias surface.
-    pub android_shell: Option<MobileShellToolCtx>,
+    /// Mobile `Shell` tool wiring shared across mobile hosts.
+    pub mobile_shell: Option<MobileShellToolCtx>,
 
-    /// Stable compatibility carrier for the mobile structured `Git` tool
-    /// wiring. The type is now [`MobileGitToolCtx`]; the field name stays
-    /// `android_git` so existing Android call sites keep compiling while iOS
-    /// can reuse the same carrier via the generic type alias surface.
-    pub android_git: Option<MobileGitToolCtx>,
+    /// Mobile structured `Git` tool wiring shared across mobile hosts.
+    pub mobile_git: Option<MobileGitToolCtx>,
 
     /// Mobile Git **secret** seam (spec §G3 auth). Carries the HTTPS token +
     /// CA directory used by the network ops (clone/fetch/pull). Held
-    /// SEPARATELY from the public [`MobileGitToolCtx`] so the token never
+    /// separately from the public [`MobileGitToolCtx`] so the token never
     /// enters the broadly-cloned public carrier (which only exposes
-    /// `has_token: bool`). `None` on desktop / iOS and whenever no token /
-    /// CA dir is configured. Populated by `android-aar` (T10) and consumed by
-    /// `tool-git-mobile`'s network ops. Never logged or persisted.
-    pub android_git_secret: Option<MobileGitSecret>,
+    /// `has_token: bool`). `None` on desktop / hosts without configured
+    /// credentials. Never logged or persisted.
+    pub mobile_git_secret: Option<MobileGitSecret>,
 
     // ===== V2 task lifecycle BLOCKING hooks (TaskCreate/TaskUpdate tool path) =====
     /// BLOCKING `TaskCreated` / `TaskCompleted` lifecycle-hook firer for the V2
@@ -537,25 +530,22 @@ impl BuiltinToolContext {
         }
     }
 
-    /// Mobile shell carrier, independent of platform naming. The stable
-    /// backing field remains [`Self::android_shell`].
+    /// Mobile shell carrier shared across mobile hosts.
     #[must_use]
     pub fn mobile_shell(&self) -> Option<&MobileShellToolCtx> {
-        self.android_shell.as_ref()
+        self.mobile_shell.as_ref()
     }
 
-    /// Mobile git carrier, independent of platform naming. The stable backing
-    /// field remains [`Self::android_git`].
+    /// Mobile git carrier shared across mobile hosts.
     #[must_use]
     pub fn mobile_git(&self) -> Option<&MobileGitToolCtx> {
-        self.android_git.as_ref()
+        self.mobile_git.as_ref()
     }
 
-    /// Mobile git secret carrier, independent of platform naming. The stable
-    /// backing field remains [`Self::android_git_secret`].
+    /// Mobile git secret carrier.
     #[must_use]
     pub fn mobile_git_secret(&self) -> Option<&MobileGitSecret> {
-        self.android_git_secret.as_ref()
+        self.mobile_git_secret.as_ref()
     }
 }
 
@@ -749,13 +739,6 @@ impl std::fmt::Debug for MobileGitSecret {
             .finish()
     }
 }
-
-/// Stable compatibility alias for existing Android mobile-shell call sites.
-pub type AndroidShellToolCtx = MobileShellToolCtx;
-/// Stable compatibility alias for existing Android mobile-git call sites.
-pub type AndroidGitToolCtx = MobileGitToolCtx;
-/// Stable compatibility alias for existing Android mobile-git secret call sites.
-pub type AndroidGitSecret = MobileGitSecret;
 
 impl MobileShellToolCtx {
     /// Android legacy shell carrier.
@@ -954,7 +937,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::default_trait_access)] // prescribed test body uses Default::default()
-    fn android_git_secret_carries_provider_and_debug_has_no_secret() {
+    fn mobile_git_secret_carries_provider_and_debug_has_no_secret() {
         let provider: std::sync::Arc<dyn GitCredentialProvider> =
             std::sync::Arc::new(MockProvider {
                 token: Some("tok".into()),
@@ -962,7 +945,7 @@ mod tests {
                 token_calls: Default::default(),
                 pass_calls: Default::default(),
             });
-        let s = AndroidGitSecret {
+        let s = MobileGitSecret {
             credential_provider: Some(provider.clone()),
             ca_dir: Some("/system/etc/security/cacerts".into()),
             ssh_private_key_path: Some("/data/k".into()),
@@ -989,13 +972,13 @@ mod tests {
     /// TDD anchor for Task 7 (P4).
     ///
     /// Asserts:
-    /// 1. `AndroidGitToolCtx` constructs with all three fields.
-    /// 2. The test-builder `ctx_for_file_tools` defaults `android_git` to
+    /// 1. `MobileGitToolCtx` constructs with all three fields.
+    /// 2. The test-builder `ctx_for_file_tools` defaults `mobile_git` to
     ///    `None` (i.e. the field exists on `BuiltinToolContext`).
     #[test]
-    fn android_git_tool_ctx_constructs_and_defaults_to_none() {
+    fn mobile_git_tool_ctx_constructs_and_defaults_to_none() {
         // Construct the carrier type — enabled with token.
-        let carrier = AndroidGitToolCtx {
+        let carrier = MobileGitToolCtx {
             enabled: true,
             has_token: true,
             workspace_root: "/x".into(),
@@ -1005,7 +988,7 @@ mod tests {
         assert_eq!(carrier.workspace_root, "/x");
 
         // Disabled variant without token.
-        let disabled = AndroidGitToolCtx {
+        let disabled = MobileGitToolCtx {
             enabled: false,
             has_token: false,
             workspace_root: String::new(),
@@ -1013,28 +996,28 @@ mod tests {
         assert!(!disabled.enabled);
         assert!(!disabled.has_token);
 
-        // The test-support builder must produce a ctx with `android_git: None`.
+        // The test-support builder must produce a ctx with `mobile_git: None`.
         let ctx = ctx_for_file_tools(
             make_dummy_fs(),
             Arc::new(AnalyticsBus::new()),
             vec![std::path::PathBuf::from("/tmp")],
         );
         assert!(
-            ctx.android_git.is_none(),
-            "android_git must default to None in test builder"
+            ctx.mobile_git.is_none(),
+            "mobile_git must default to None in test builder"
         );
     }
 
     /// TDD anchor for Task 1 (P3).
     ///
     /// Asserts:
-    /// 1. `AndroidShellToolCtx` constructs with the legacy Android routing.
-    /// 2. The test-builder `ctx_for_file_tools` defaults `android_shell` to
+    /// 1. `MobileShellToolCtx` constructs with the legacy Android routing.
+    /// 2. The test-builder `ctx_for_file_tools` defaults `mobile_shell` to
     ///    `None` (i.e. the field exists on `BuiltinToolContext`).
     #[test]
-    fn android_shell_tool_ctx_constructs_and_defaults_to_none() {
+    fn mobile_shell_tool_ctx_constructs_and_defaults_to_none() {
         // Construct the carrier type — enabled.
-        let carrier = AndroidShellToolCtx {
+        let carrier = MobileShellToolCtx {
             enabled: true,
             applets: vec!["grep".into(), "ls".into()],
             shell_path: "/system/bin/sh".into(),
@@ -1048,7 +1031,7 @@ mod tests {
         assert!(carrier.sh_version.is_some());
 
         // Disabled variant.
-        let disabled = AndroidShellToolCtx {
+        let disabled = MobileShellToolCtx {
             enabled: false,
             applets: vec![],
             shell_path: "/system/bin/sh".into(),
@@ -1061,15 +1044,15 @@ mod tests {
         assert!(disabled.applets.is_empty());
         assert!(disabled.sh_version.is_none());
 
-        // The test-support builder must produce a ctx with `android_shell: None`.
+        // The test-support builder must produce a ctx with `mobile_shell: None`.
         let ctx = ctx_for_file_tools(
             make_dummy_fs(),
             Arc::new(AnalyticsBus::new()),
             vec![std::path::PathBuf::from("/tmp")],
         );
         assert!(
-            ctx.android_shell.is_none(),
-            "android_shell must default to None in test builder"
+            ctx.mobile_shell.is_none(),
+            "mobile_shell must default to None in test builder"
         );
     }
 

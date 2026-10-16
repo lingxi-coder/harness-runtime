@@ -469,7 +469,7 @@ impl ConversationOrchestrator {
 
         // 6. Append + persist the `tool_result` user message and any
         //    tool-injected follow-ups — mirroring the batched turn loop's
-        //    post-dispatch block (`execute_one_turn`), the `recordTranscript`
+        //    post-dispatch block (`execute_one_turn_with_recovery_tracked`), the `recordTranscript`
         //    per-result twin (queryHelpers.ts:328-332).
         let tool_results_msg = ConversationMessage::User {
             api_message_override: None,
@@ -575,7 +575,7 @@ impl ConversationOrchestrator {
     /// Build the wire `tools` array for a turn from the registry's enabled tool
     /// set, serialized via [`tool_api::wire::tools_to_wire`] to the
     /// `{name, description, input_schema}` shape claude-code sends
-    /// (`utils/api.ts:169-178`). Used by both the batched ([`execute_one_turn`])
+    /// (`utils/api.ts:169-178`). Used by both the batched ([`execute_one_turn_with_recovery_tracked`])
     /// and streaming ([`Self::run_turn_streaming`]) paths.
     ///
     /// `ToolStaticContext::default()` (no feature flags) mirrors the system
@@ -591,7 +591,7 @@ impl ConversationOrchestrator {
     /// which sort with `name.localeCompare`. `tools_to_wire` preserves that
     /// order. A session-level cache is a recommended follow-up.
     ///
-    /// [`execute_one_turn`]: crate::turn_loop::execute_one_turn
+    /// [`execute_one_turn_with_recovery_tracked`]: crate::turn_loop::execute_one_turn_with_recovery_tracked
     pub(crate) async fn build_wire_tools(
         &self,
     ) -> Result<

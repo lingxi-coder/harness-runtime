@@ -37,8 +37,9 @@
 //! Residual (still NOT ported in either path): marketplace-catalog source
 //! resolution and enterprise allow/blocklist policy. Seed-cache fallback and
 //! source precedence are handled by the enabled/effective resolver. Enabled
-//! cache entries use the exact version in `installed_plugins.json`; cache-only
-//! entries without a record retain the single-version compatibility probe.
+//! primary cache entries use the exact install path in
+//! `installed_plugins.json`; configured seed caches may still resolve one
+//! unambiguous version when no primary install record exists.
 
 use crate::manifest::{
     BinaryPin, ComponentPath, HljsLanguageEntry, MonitorTrigger, PluginChannel, PluginComponents,
@@ -837,9 +838,9 @@ fn recorded_install_path(plugins_dir: &Path, raw: &str) -> PathBuf {
 
 /// Return authoritative cache candidates for one enabledPlugins key. Some
 /// means the installed database contains a matching record, including when the
-/// record is malformed or points at a missing cache; callers must not fall back
-/// to probing in that case. None means this is an old cache-only installation
-/// with no record for the enabled key.
+/// record is malformed or points at a missing cache; callers must not infer a
+/// primary cache path in that case. `None` means there is no primary install
+/// record for the enabled key.
 fn exact_installed_paths(
     plugins_dir: &Path,
     entry_id: &str,
@@ -1198,9 +1199,9 @@ mod name_validation_tests {
 /// This port reads the `enabled` allowlist, skips disabled entries, and resolves
 /// each remaining `name@marketplace` from the matching `installed_plugins.json`
 /// record's exact version. Bare `name` entries (no marketplace) and
-/// uninstalled/missing entries are skipped — never a flat walk. For old
-/// cache-only installations with no matching record, the single-version probe
-/// remains as a compatibility fallback.
+/// uninstalled/missing entries are skipped — never a flat walk. When no
+/// primary install record exists, only configured seed-cache roots may provide
+/// a fallback candidate.
 ///
 /// What is still NOT ported (residual): marketplace-catalog source resolution
 /// and enterprise allow/blocklist policy (`getStrictKnownMarketplaces` /
@@ -1227,7 +1228,6 @@ async fn discover_enabled_plugins_impl(
     analytics_bus: Option<&Arc<AnalyticsBus>>,
     resolve_collisions: bool,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
-    let cache_root = plugins_dir.join("cache");
     let seed_dirs = plugin_seed_dirs();
     let installed_records = crate::installed::load_normalized(plugins_dir)
         .and_then(|value| value.get("plugins").cloned());
@@ -1246,24 +1246,12 @@ async fn discover_enabled_plugins_impl(
         if name.is_empty() {
             continue;
         }
-        let mut candidates = if let Some(exact) =
+        let mut candidates =
             exact_installed_paths(plugins_dir, entry_id, installed_records.as_ref())
-        {
-            exact
-        } else {
-            let plugin_cache_dir = cache_root
-                .join(sanitize_segment(marketplace, false))
-                .join(sanitize_segment(name, false));
-            resolve_installed_version_dir(&plugin_cache_dir)
-                .await
-                .into_iter()
-                .collect()
-        };
-        // Claude probes the primary cache first and only consults the
-        // configured seed cache when that exact cache entry is absent. Keep
-        // that distinction: a malformed primary plugin must not silently turn
-        // into a different seed plugin, while a missing primary version can
-        // still boot from the administrator-provided seed tree.
+                .unwrap_or_default();
+        // Resolve a recorded primary path first and consult the configured
+        // seed cache only when that authoritative path is absent. A primary
+        // directory without an install record is never inferred as installed.
         let primary_exists = candidates.iter().any(|path| path_exists(path));
         let seed_candidates = seed_plugin_cache_candidates(marketplace, name, &candidates).await;
         if !primary_exists {
@@ -1345,13 +1333,10 @@ async fn discover_enabled_plugins_impl(
     }
 }
 
-/// Probe `cache/{marketplace}/{plugin}/` for an installed version directory.
-///
-/// This is only used when no matching `installed_plugins.json` record exists.
-/// If the plugin dir holds exactly one version subdirectory with content, use
-/// it for compatibility with old cache-only installations. Zero or multiple
-/// versions are ambiguous and return `None`.
-async fn resolve_installed_version_dir(plugin_dir: &Path) -> Option<PathBuf> {
+/// Probe one configured seed root for a unique version directory. Native uses
+/// this only for seed-cache fallback; primary cache versions come from an
+/// `installed_plugins.json` record.
+async fn resolve_seed_version_dir(plugin_dir: &Path) -> Option<PathBuf> {
     let mut entries = tokio::fs::read_dir(plugin_dir).await.ok()?;
     let mut version_dirs = Vec::new();
     while let Ok(Some(entry)) = entries.next_entry().await {
@@ -1399,7 +1384,7 @@ async fn seed_plugin_cache_candidates(
             .join(sanitize_segment(name, false));
         let mut found = Vec::new();
         if versions.is_empty() {
-            if let Some(version) = resolve_installed_version_dir(&plugin_cache).await {
+            if let Some(version) = resolve_seed_version_dir(&plugin_cache).await {
                 found.push(version);
             }
         } else {
@@ -1575,9 +1560,9 @@ pub async fn discover_recorded_plugins_with_bus(
 ///
 /// Explicit `enabledPlugins` entries win. Installed plugins with no explicit
 /// setting fall back to their manifest's `defaultEnabled` value (defaulting to
-/// true), while explicitly disabled plugins remain unloaded. The explicit
-/// cache probe is retained for old/cache-only installations that have no
-/// `installed_plugins.json` record.
+/// true), while explicitly disabled plugins remain unloaded. An enabled key
+/// without a primary install record may resolve only from configured seed-cache
+/// roots; the primary cache is never scanned to infer an install record.
 pub async fn discover_effective_plugins(
     plugins_dir: &Path,
     enabled: &BTreeMap<String, bool>,
@@ -5306,7 +5291,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_cache_is_used_only_when_primary_is_missing_and_is_shadowed_otherwise() {
+    async fn seed_cache_fallback_keeps_recorded_primary_and_rejects_unrecorded_primary() {
         let _guard = crate::plugin_seed_env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -5316,6 +5301,7 @@ mod tests {
         std::env::remove_var("LINGXI_PLUGIN_SEED_DIR");
 
         let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
         let primary = tmp.path().join("plugins/cache/market/seeded/1.0.0");
         let seed = tmp.path().join("seed/cache/market/seeded/1.0.0");
         for (dir, body) in [(&primary, "# primary"), (&seed, "# seed")] {
@@ -5323,6 +5309,21 @@ mod tests {
             write_manifest(dir, &serde_json::json!({"name": "seeded"}));
             fs::write(dir.join("commands/ping.md"), body).unwrap();
         }
+        fs::write(
+            crate::installed::path(&plugins_dir),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "seeded@market": [{
+                        "scope": "user",
+                        "installPath": "cache/market/seeded/1.0.0",
+                        "version": "1.0.0"
+                    }]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         std::env::set_var("CLAUDE_CODE_PLUGIN_SEED_DIR", tmp.path().join("seed"));
 
         let sink = Arc::new(InMemorySink::new());
@@ -5351,14 +5352,44 @@ mod tests {
         assert_eq!(string_field(&shadows[0].metadata, "component"), "commands");
         assert_no_raw_path(&shadows[0].metadata, tmp.path());
 
+        // With no install record, an existing primary cache directory is not
+        // guessed as an installation; only the configured seed cache can
+        // satisfy the enabled key.
+        fs::remove_file(crate::installed::path(&plugins_dir)).unwrap();
+        let loaded_without_record =
+            discover_enabled_plugins_with_bus(plugins_dir.as_path(), &enabled, None).await;
+        assert_eq!(loaded_without_record.len(), 1);
+        assert_eq!(loaded_without_record[0].2, seed);
+        assert_eq!(
+            fs::read_to_string(loaded_without_record[0].2.join("commands/ping.md")).unwrap(),
+            "# seed"
+        );
+
         // Removing the primary cache causes the first configured seed root to
         // become the actual loaded source.
         fs::remove_dir_all(tmp.path().join("plugins/cache")).unwrap();
         let loaded_from_seed =
-            discover_enabled_plugins_with_bus(tmp.path().join("plugins").as_path(), &enabled, None)
-                .await;
+            discover_enabled_plugins_with_bus(plugins_dir.as_path(), &enabled, None).await;
         assert_eq!(loaded_from_seed.len(), 1);
         assert_eq!(loaded_from_seed[0].2, seed);
+    }
+
+    #[tokio::test]
+    async fn enabled_primary_cache_without_an_install_record_is_not_discovered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        let primary = plugins_dir.join("cache/market/unrecorded/1.0.0");
+        fs::create_dir_all(primary.join("commands")).unwrap();
+        write_manifest(&primary, &serde_json::json!({"name": "unrecorded"}));
+        fs::write(primary.join("commands/ping.md"), "# primary").unwrap();
+
+        let enabled = BTreeMap::from([(String::from("unrecorded@market"), true)]);
+        let discovered = discover_enabled_plugins(&plugins_dir, &enabled).await;
+
+        assert!(
+            discovered.is_empty(),
+            "primary cache layout alone must not invent an installed_plugins.json record"
+        );
     }
 
     #[tokio::test]

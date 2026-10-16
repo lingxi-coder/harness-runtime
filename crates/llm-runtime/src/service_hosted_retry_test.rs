@@ -1004,11 +1004,20 @@ fn durable_observations_are_removed_before_sdk_execution_classification() {
 }
 
 #[test]
-fn canonical_message_extensions_and_previous_response_id_disable_replay() {
+fn canonical_message_extensions_and_typed_continuations_disable_replay() {
     let mut request = request(false);
-    request.input.controls.responses.previous_response_id = Some("previous".into());
+    request.input.continuation = Some(wire::ContinuationRef {
+        protocol: wire::ProtocolFamily::OpenAiResponses,
+        response_id: wire::ResponseId::new("resp_previous"),
+        provider_id: wire::ProviderId::new("openai"),
+        profile_name: "openai".into(),
+        endpoint_fingerprint: "scope".into(),
+        account_scope: "account".into(),
+        request_model: "model".into(),
+        workspace_id: None,
+    });
     assert!(!allows_automatic_replay(&request));
-    request.input.controls.responses.previous_response_id = None;
+    request.input.continuation = None;
     request.input.messages[0].native_options.push(
         wire::NativeExtension::new(
             "future.message_state.v1",

@@ -426,12 +426,12 @@ impl AdapterOutputStream {
                     .to_json_string()
                     .expect("tool result source is valid JSON"),
                 is_error,
-                display: Some(crate::adapter::tool_display::lower_tool_result_display(
+                display: crate::adapter::tool_display::lower_tool_result_display(
                     tool,
                     display_input.as_ref(),
                     &display_result,
                     is_error,
-                )),
+                ),
             })
             .await;
     }
@@ -823,20 +823,14 @@ impl OutputStream for AdapterOutputStream {
                 id: id.to_string(),
                 tool: tool.to_string(),
                 input_json: input_json.clone(),
-                header: Some(crate::adapter::tool_display::lower_tool_header(
-                    tool,
-                    &display_input,
-                )),
+                header: crate::adapter::tool_display::lower_tool_header(tool, &display_input),
             });
         self.sink
             .emit(ClientEvent::ToolUseStarted {
                 id: id.to_string(),
                 tool: tool.to_string(),
                 input_json,
-                header: Some(crate::adapter::tool_display::lower_tool_header(
-                    tool,
-                    &display_input,
-                )),
+                header: crate::adapter::tool_display::lower_tool_header(tool, &display_input),
             })
             .await;
         // TodoWrite rewrites the whole plan. Emitted on the CALL, not the
@@ -2320,7 +2314,7 @@ mod tests {
             .await
             .into_iter()
             .find_map(|e| match e {
-                ClientEvent::ToolUseResult { display, .. } => display,
+                ClientEvent::ToolUseResult { display, .. } => Some(display),
                 _ => None,
             })
             .expect("a live display");
@@ -2362,7 +2356,7 @@ mod tests {
             .into_iter()
             .flat_map(|m| m.blocks)
             .find_map(|b| match b {
-                MessageBlockDto::ToolResult { display, .. } => display,
+                MessageBlockDto::ToolResult { display, .. } => Some(display),
                 _ => None,
             })
             .expect("a resumed display");

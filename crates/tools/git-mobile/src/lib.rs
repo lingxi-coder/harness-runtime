@@ -258,8 +258,8 @@ impl Tool for GitTool {
         let workspace_path = std::path::Path::new(&workspace_root);
 
         // Network ops (clone/fetch/pull/push) read the in-memory secret (token +
-        // CA dir) from the SEPARATE `android_git_secret` seam — never the public
-        // `android_git` carrier — and never touch disk/env.
+        // CA dir) from the SEPARATE `mobile_git_secret` seam — never the public
+        // `mobile_git` carrier — and never touch disk/env.
         let dispatch_result = if matches!(operation, "clone" | "fetch" | "pull" | "push") {
             let net = self.git_net_config();
             dispatch_network(&net, workspace_path, repo_rel, operation, &input)
@@ -499,7 +499,7 @@ mod tests {
     use super::*;
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::shell_test_ctx;
-    use tool_api::{AndroidGitToolCtx, ToolRegistry};
+    use tool_api::{MobileGitToolCtx, ToolRegistry};
 
     fn ok_output() -> ProcessOutput {
         ProcessOutput {
@@ -510,12 +510,12 @@ mod tests {
         }
     }
 
-    /// Build a ctx with `android_git` enabled and a token, anchored at a fresh
+    /// Build a ctx with `mobile_git` enabled and a token, anchored at a fresh
     /// tempdir workspace root.
     fn test_ctx_git_enabled() -> BuiltinToolContext {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut ctx = shell_test_ctx(ok_output());
-        ctx.android_git = Some(AndroidGitToolCtx {
+        ctx.mobile_git = Some(MobileGitToolCtx {
             enabled: true,
             has_token: true,
             workspace_root: dir.path().to_string_lossy().into_owned(),
@@ -531,7 +531,7 @@ mod tests {
     fn test_ctx_git_no_token() -> BuiltinToolContext {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut ctx = shell_test_ctx(ok_output());
-        ctx.android_git = Some(AndroidGitToolCtx {
+        ctx.mobile_git = Some(MobileGitToolCtx {
             enabled: true,
             has_token: false,
             workspace_root: dir.path().to_string_lossy().into_owned(),
@@ -560,21 +560,21 @@ mod tests {
     }
 
     #[test]
-    fn is_enabled_follows_android_git_flag() {
+    fn is_enabled_follows_mobile_git_flag() {
         let static_ctx = ToolStaticContext::default();
 
         let enabled = GitTool::new(test_ctx_git_enabled());
         assert!(enabled.is_enabled(&static_ctx));
 
-        // android_git: None -> disabled.
+        // mobile_git: None -> disabled.
         let mut none_ctx = shell_test_ctx(ok_output());
-        none_ctx.android_git = None;
+        none_ctx.mobile_git = None;
         let none = GitTool::new(none_ctx);
         assert!(!none.is_enabled(&static_ctx));
 
         // Some(enabled: false) -> disabled.
         let mut off_ctx = shell_test_ctx(ok_output());
-        off_ctx.android_git = Some(AndroidGitToolCtx {
+        off_ctx.mobile_git = Some(MobileGitToolCtx {
             enabled: false,
             has_token: true,
             workspace_root: "/tmp".into(),
@@ -654,7 +654,7 @@ mod tests {
         }
 
         let mut ctx = shell_test_ctx(ok_output());
-        ctx.android_git = Some(AndroidGitToolCtx {
+        ctx.mobile_git = Some(MobileGitToolCtx {
             enabled: true,
             has_token: true,
             workspace_root: ws.path().to_string_lossy().into_owned(),
@@ -710,7 +710,7 @@ mod tests {
         // ctx anchored at a fresh workspace.
         let ws = tempfile::tempdir().expect("tempdir");
         let mut ctx = shell_test_ctx(ok_output());
-        ctx.android_git = Some(AndroidGitToolCtx {
+        ctx.mobile_git = Some(MobileGitToolCtx {
             enabled: true,
             has_token: false,
             workspace_root: ws.path().to_string_lossy().into_owned(),
@@ -761,9 +761,9 @@ mod tests {
             .unwrap();
 
         // ctx anchored at the working repo root (SAME helper wiring the clone
-        // dispatch test uses: set `android_git.workspace_root` on a shell_test_ctx).
+        // dispatch test uses: set `mobile_git.workspace_root` on a shell_test_ctx).
         let mut ctx = shell_test_ctx(ok_output());
-        ctx.android_git = Some(AndroidGitToolCtx {
+        ctx.mobile_git = Some(MobileGitToolCtx {
             enabled: true,
             has_token: false,
             workspace_root: work.path().to_string_lossy().into_owned(),
@@ -829,10 +829,10 @@ mod tests {
             "enabled gate should register Git"
         );
 
-        // android_git: None -> Git absent (not erroring).
+        // mobile_git: None -> Git absent (not erroring).
         let mut reg = ToolRegistry::new();
         let mut none_ctx = shell_test_ctx(ok_output());
-        none_ctx.android_git = None;
+        none_ctx.mobile_git = None;
         register_all(&mut reg, none_ctx);
         assert!(
             reg.find_by_name("Git").is_none(),

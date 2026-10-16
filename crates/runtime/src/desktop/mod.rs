@@ -1423,13 +1423,14 @@ fn desktop_fusion_executor(
     pricing: Arc<cost::PricingCatalog>,
     implement_host: Option<Arc<dyn lingxi_core::host::FusionImplementHost>>,
 ) -> Arc<dyn lingxi_core::host::FusionExecutor> {
-    // Boot-time validation: surface the FIRST invalid `fusion.*` value
-    // through a log line, but always build the live orchestrator below —
-    // its `config_source` (and `DesktopFusionExecutor::preflight_error`)
-    // re-validate on every subsequent call, so a still-broken file keeps
-    // failing with an up-to-date message while a fixed-then-saved one
-    // recovers without a restart (finding [14]).
-    if let Err(error) = desktop_fusion_runtime_config(cfg) {
+    // Boot-time validation: surface malformed Fusion layers and a configured
+    // default strategy's merged runtime through a log line. A missing default
+    // is normal before the user selects a strategy; selection-specific
+    // validation belongs to capture_strategy and must not make a fresh,
+    // unconfigured CLI emit a startup warning. Always build the live
+    // orchestrator below — its config source and preflight revalidate on each
+    // call, so invalid settings still fail and recover after a saved fix.
+    if let Err(error) = desktop_fusion_boot_validation(cfg) {
         tracing::warn!(
             error = %error,
             "fusion.* settings failed boot-time validation; \
@@ -1452,15 +1453,48 @@ fn desktop_fusion_executor(
     })
 }
 
+fn desktop_fusion_boot_validation(
+    cfg: &DesktopConfig,
+) -> Result<(), lingxi_core::host::FusionError> {
+    let layers = desktop_fusion_layers(cfg)?;
+    desktop_fusion_boot_validation_for_layers(&layers)
+}
+
+fn desktop_fusion_boot_validation_for_layers(
+    layers: &[lingxi_core::host::fusion_strategy::FusionSettingsLayer],
+) -> Result<(), lingxi_core::host::FusionError> {
+    use lingxi_core::host::fusion_strategy::{
+        default_fusion_strategy, fusion_global_settings, resolve_fusion_strategy,
+    };
+    use lingxi_core::host::FusionError;
+
+    // Validate every admitted registry and the effective global settings even
+    // when no strategy has been selected. This keeps malformed layers visible
+    // without treating the absent default as a bad configuration.
+    fusion_global_settings(layers)
+        .map_err(|error| FusionError::InvalidConfiguration(error.to_string()))?;
+    let Some(default_strategy) = default_fusion_strategy(layers)
+        .map_err(|error| FusionError::InvalidConfiguration(error.to_string()))?
+    else {
+        return Ok(());
+    };
+
+    // Validate the same selected strategy Fusion will use, including merged
+    // runtime-only constraints, but only when a default actually exists.
+    let selection = resolve_fusion_strategy(layers, Some(&default_strategy))
+        .map_err(|error| FusionError::InvalidConfiguration(error.to_string()))?;
+    fusion::FusionRuntimeConfig::from_settings(&selection.config).map(|_| ())
+}
+
 #[cfg(test)]
 #[path = "tests/desktop_fusion_executor_boot_test.rs"]
 mod desktop_fusion_executor_boot_test;
 
 /// Assemble the desktop builtin tool set.
 ///
-/// `fusion` is the live Fusion orchestrator. The offline snapshot path passes
-/// `None` so the Agent listing stays inert and the locked tool-name snapshot
-/// is unchanged. Mobile never reaches this function.
+/// `fusion` is the complete executor/recorder-factory pair. The offline
+/// snapshot path passes `None` so the Agent listing stays inert and the locked
+/// tool-name snapshot is unchanged. Mobile never reaches this function.
 #[allow(clippy::too_many_arguments)]
 pub fn register_desktop_tools(
     reg: &mut ToolRegistry,
@@ -1477,50 +1511,7 @@ pub fn register_desktop_tools(
     web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
     live_cwd: Option<tool_api::LiveCwdCell>,
     worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
-    fusion: Option<Arc<dyn lingxi_core::host::FusionExecutor>>,
-) -> (
-    tool_cron::WakeupSchedulerCell,
-    std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
-    register_desktop_tools_with_fusion_recorder(
-        reg,
-        ctx,
-        coordinator,
-        ask_user_question_resolver,
-        advertise_ask_user_question,
-        computer_access_resolver,
-        cron_auth,
-        skill_loader,
-        cwd_changed_firer,
-        web_side_query,
-        live_cwd,
-        worktree_state_persister,
-        fusion,
-        None,
-        None,
-    )
-}
-
-/// Assemble the desktop tools with the optional host-owned Fusion recorder.
-#[allow(clippy::too_many_arguments)]
-pub fn register_desktop_tools_with_fusion_recorder(
-    reg: &mut ToolRegistry,
-    ctx: BuiltinToolContext,
-    coordinator: Option<CoordinatorWiring>,
-    ask_user_question_resolver: Option<
-        Arc<dyn tool_ui::ask_user_question::AskUserQuestionResolver>,
-    >,
-    advertise_ask_user_question: bool,
-    computer_access_resolver: Option<Arc<dyn tool_computer_use::ComputerAccessResolver>>,
-    cron_auth: Option<Arc<dyn tool_cron::ClaudeAiAuthProvider>>,
-    skill_loader: Option<Arc<dyn tool_skill::skill::SkillLoader>>,
-    cwd_changed_firer: hooks::OptionalCwdChangedFirer,
-    web_side_query: Option<Arc<dyn sidequery::SideQueryClient>>,
-    live_cwd: Option<tool_api::LiveCwdCell>,
-    worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>>,
-    fusion: Option<Arc<dyn lingxi_core::host::FusionExecutor>>,
-    fusion_recorder: Option<Arc<dyn lingxi_core::host::FusionRunRecorder>>,
-    fusion_recorder_factory: Option<Arc<dyn lingxi_core::host::FusionRunRecorderFactory>>,
+    fusion: Option<tool_agent::AgentFusionServices>,
 ) -> (
     tool_cron::WakeupSchedulerCell,
     std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -1634,13 +1625,7 @@ pub fn register_desktop_tools_with_fusion_recorder(
     // ----- desktop-only tool crates ----------------------------------------
     // Fusion is injected here (not inside `tool_agent::register_all`) so mobile
     // and snapshot tests keep an inert Agent tool.
-    tool_agent::register_with_fusion_and_recorder_factory(
-        reg,
-        ctx.clone(),
-        fusion,
-        fusion_recorder.clone(),
-        fusion_recorder_factory,
-    );
+    tool_agent::register_with_fusion_services(reg, ctx.clone(), fusion);
     if let Some(CoordinatorWiring { team, spawn_seam }) = coordinator {
         for tool in coordinator::internal_tools::coordinator_internal_tools(
             team,
@@ -2658,6 +2643,8 @@ pub struct DesktopRuntime {
     /// Read/Edit/Write/Glob/Grep/NotebookEdit without a reboot.
     /// Local policy verdict captured at assembly for the strict Insights gate.
     pub native_insights_policy_gate: Option<bool>,
+    /// Local policy verdict captured at assembly for `/team-onboarding`.
+    pub native_team_onboarding_policy_gate: Option<bool>,
     pub session_cwd: Arc<SessionCwd>,
     /// (P1-08 runtime `/add-dir`) The live MCP registry. The CLI `/add-dir`
     /// effect calls `add_root(...)` + `notify_roots_list_changed_all()` on it so
@@ -6351,6 +6338,8 @@ pub use credentials::LlmStack;
 pub use credentials::SharedCredentialStack;
 use fusion_services::desktop_fusion_attempts;
 use fusion_services::desktop_fusion_catalog_row;
+use fusion_services::desktop_fusion_layers;
+#[cfg(test)]
 use fusion_services::desktop_fusion_runtime_config;
 use fusion_services::filter_fusion_catalog;
 pub use fusion_services::fusion_credential_restart_required_message;

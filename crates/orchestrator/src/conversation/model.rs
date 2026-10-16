@@ -20,14 +20,14 @@ fn main_source_requires_model_carrier(
     request_matches_session_route: bool,
     resolved_source_route_is_claude: Option<bool>,
     resolved_source_matches_request_profile: Option<bool>,
-    resolved_source_matches_request: Option<bool>,
+    source_wire_model_matches_request: Option<bool>,
 ) -> bool {
     source_owner_is_current
         && request_route_is_claude
         && request_matches_session_route
         && resolved_source_route_is_claude != Some(false)
         && resolved_source_matches_request_profile != Some(false)
-        && resolved_source_matches_request != Some(true)
+        && source_wire_model_matches_request != Some(true)
 }
 
 impl ConversationOrchestrator {
@@ -42,31 +42,60 @@ impl ConversationOrchestrator {
         let source = crate::model_validation::TrimmedModelSource::from_projection(source)
             .map(|trimmed| trimmed.source().clone())
             .unwrap_or_else(|_| source.clone());
-        let resolved = source
+        let source_text = source
             .string_units("")
-            .and_then(|units| String::from_utf16(&units).ok())
-            .and_then(|source_text| {
-                let provider = provider?;
-                let context = provider
-                    .context_for_route(&fallback_anchor.model, fallback_anchor.profile.as_deref())
-                    .ok()?;
-                agent::model_resolution::resolve_user_model_selection(
-                    &source_text,
-                    None,
-                    &context,
-                    provider,
-                )
-                .ok()
-            });
+            .and_then(|units| String::from_utf16(&units).ok());
+        let resolved = source_text.as_deref().and_then(|source_text| {
+            let provider = provider?;
+            let context = provider
+                .context_for_route(&fallback_anchor.model, fallback_anchor.profile.as_deref())
+                .ok()?;
+            agent::model_resolution::resolve_user_model_selection(
+                &source_text,
+                None,
+                &context,
+                provider,
+            )
+            .ok()
+        });
         let (route_anchor, effective_source) = match resolved {
             Some(selection) => {
                 let effective_model = selection.model;
+                let source_is_native_model = matches!(
+                    selection.model_resolution_context.route.provider,
+                    Some(
+                        agent::model_resolution::ModelProviderKind::FirstParty
+                            | agent::model_resolution::ModelProviderKind::Bedrock
+                            | agent::model_resolution::ModelProviderKind::Vertex
+                            | agent::model_resolution::ModelProviderKind::Foundry
+                    )
+                );
+                let source_is_qualified_ref = source_text
+                    .as_deref()
+                    .and_then(|source_text| source_text.split_once('/'))
+                    .is_some_and(|(profile, _)| {
+                        selection.model_profile.as_deref() == Some(profile)
+                    });
+                let native_effective_model = source_text.as_deref().and_then(|source_text| {
+                    agent::model_resolution::resolve_user_specified_model(
+                        source_text,
+                        &selection.model_resolution_context,
+                    )
+                    .ok()
+                });
+                let effective_source = if source_is_native_model && !source_is_qualified_ref {
+                    Utf16JsonProjection::from(
+                        native_effective_model.unwrap_or_else(|| effective_model.clone()),
+                    )
+                } else {
+                    Utf16JsonProjection::from(effective_model.clone())
+                };
                 (
                     lingxi_core::host::ModelRouteAnchor {
                         model: effective_model.clone(),
                         profile: selection.model_profile,
                     },
-                    Utf16JsonProjection::from(effective_model),
+                    effective_source,
                 )
             }
             None => (fallback_anchor, source.clone()),
@@ -251,9 +280,14 @@ impl ConversationOrchestrator {
             route.main.provider_id == request_route.main.provider_id
                 && route.main.profile_name == request_route.main.profile_name
         });
-        let resolved_source_matches_request = resolved_source_route
-            .as_ref()
-            .map(|route| same_request_route(route, &request_route));
+        let source_wire_model_matches_request = source.string_units("").map(|units| {
+            units
+                == request_route
+                    .main
+                    .request_model
+                    .encode_utf16()
+                    .collect::<Vec<_>>()
+        });
         let resolved_source_route_is_claude = resolved_source_route
             .as_ref()
             .map(Self::route_uses_native_model_catalog);
@@ -263,15 +297,14 @@ impl ConversationOrchestrator {
             same_request_route(&request_route, &session_route),
             resolved_source_route_is_claude,
             resolved_source_matches_request_profile,
-            resolved_source_matches_request,
+            source_wire_model_matches_request,
         ) {
-            Some(native_effective_model.map_or(source, Utf16JsonProjection::from))
+            Some(source)
         } else {
-            // A valid alias or catalog id already represented by the selected
-            // Native route needs no additional `model_source` carrier. Keep the
-            // existing multi-provider request encoding and let this route carry
-            // the source. Scoped per-request routes are handled above; a
-            // scheduled lifecycle alone does not displace the current owner.
+            // Only an exact wire-id match needs no `model_source` carrier.
+            // Route equality alone cannot reproduce a Native id when the SDK
+            // routes that id through a dated profile model. Keep the existing
+            // multi-provider encoding; scoped request routes remain fenced above.
             None
         }
     }
@@ -1666,44 +1699,6 @@ impl ConversationOrchestrator {
         self.current_cwd
             .lock()
             .map_or_else(|_| self.cwd.clone(), |g| g.clone())
-    }
-
-    /// Retarget the shared transcript writer for a newly mounted session id
-    /// without relocating the previous session's file. Hot clear/resume uses
-    /// this after destination cost hydration succeeds and before publishing
-    /// the replacement conversation identity; ordinary `/cd` continues to use
-    /// [`Self::retarget_transcript_for_cwd`], which performs a relocation.
-    pub async fn retarget_transcript_for_session(
-        &self,
-        session_id: lingxi_core::types::SessionId,
-    ) -> Result<Option<std::path::PathBuf>, String> {
-        let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
-            return Ok(None);
-        };
-        let Some(config_home) = self.config_home.as_ref() else {
-            return Ok(Some(writer.active_path()));
-        };
-        let target = session::jsonl::path::session_path(
-            config_home,
-            &self.current_cwd().to_string_lossy(),
-            &session_id.as_uuid().to_string(),
-        );
-        // Compatibility helper for direct/legacy callers. Production hot
-        // clear/resume captures the destination authority first and uses
-        // `activate_session_target_with_durable_lock` inside its owned commit,
-        // alongside the prepared cost token and conversation identity.
-        if writer.durable_transcript_enabled() {
-            writer
-                .activate_session_target(session_id, target.clone(), self.current_cwd())
-                .map_err(|error| {
-                    format!("activate transcript for session {session_id}: {error}")
-                })?;
-        } else {
-            // Compatibility writers have no cross-process/session authority;
-            // retain their historical in-process retarget behavior.
-            writer.retarget(target.clone()).await;
-        }
-        Ok(Some(target))
     }
 
     /// Reflect a Fusion terminal that was already persisted by the host-owned
@@ -4599,6 +4594,47 @@ mod configured_model_source_tests {
 
     struct SourceRouteFixtureApi;
 
+    fn source_binding_context(
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<
+        agent::model_resolution::ModelResolutionContext,
+        agent::model_resolution::ModelResolutionError,
+    > {
+        use agent::model_resolution::{
+            FamilyModelDefaults, ModelProviderKind, ModelResolutionContext, ModelResolutionError,
+            ModelRouteFacts,
+        };
+
+        let route_model = match model {
+            "sonnet" | "claude-sonnet-4-5" | "claude-sonnet-4-5-20250929" => {
+                "claude-sonnet-4-5-20250929"
+            }
+            _ => model,
+        };
+        if route_model != "claude-sonnet-4-5-20250929" {
+            return Err(ModelResolutionError::RouteUnavailable {
+                model: model.into(),
+                profile: profile.map(str::to_owned),
+                reason: "fixture route unavailable".into(),
+            });
+        }
+        Ok(ModelResolutionContext {
+            route: ModelRouteFacts {
+                model: route_model.into(),
+                profile: profile.map(str::to_owned),
+                provider: Some(ModelProviderKind::FirstParty),
+                ..Default::default()
+            },
+            family_defaults: FamilyModelDefaults {
+                sonnet: Some("claude-sonnet-4-5".into()),
+                ..Default::default()
+            },
+            registered_model_ids: ["claude-sonnet-4-5".into()].into_iter().collect(),
+            ..Default::default()
+        })
+    }
+
     #[async_trait]
     impl OrchestratorApiClient for SourceRouteFixtureApi {
         async fn messages_create(
@@ -4615,16 +4651,20 @@ mod configured_model_source_tests {
         ) -> Result<MediaRoute, LlmError> {
             let provider_id = ProviderId::AnthropicFirstParty;
             let profile_name = profile.unwrap_or("configured-profile").to_owned();
+            let request_model = match model {
+                "claude-sonnet-4-5" => "claude-sonnet-4-5-20250929",
+                _ => model,
+            };
             Ok(MediaRoute {
                 main: ResolvedRoute {
                     provider_id: provider_id.clone(),
                     profile_name,
-                    request_model: model.to_owned(),
+                    request_model: request_model.to_owned(),
                     display_model: model.to_owned(),
                     pricing_model: PricingModelRef {
                         pricing_provider_id: provider_id,
-                        billing_model: model.to_owned(),
-                        request_model: model.to_owned(),
+                        billing_model: request_model.to_owned(),
+                        request_model: request_model.to_owned(),
                         display_model: model.to_owned(),
                     },
                     capabilities: llm_runtime::Capabilities::default(),
@@ -4643,6 +4683,35 @@ mod configured_model_source_tests {
             !main_source_owner_is_current(true),
             "a scoped explicit route owns its request even when route identities compare equal"
         );
+    }
+
+    #[test]
+    fn source_binding_keeps_native_effective_model_separate_from_route_model() {
+        let provider = source_binding_context;
+        let route_anchor = lingxi_core::host::ModelRouteAnchor {
+            model: "claude-sonnet-4-5-20250929".into(),
+            profile: Some("configured-profile".into()),
+        };
+
+        for (source_text, expected_effective) in [
+            ("claude-sonnet-4-5", "claude-sonnet-4-5"),
+            ("sonnet", "claude-sonnet-4-5"),
+        ] {
+            let binding = ConversationOrchestrator::bind_model_source(
+                &Utf16JsonProjection::from(source_text),
+                route_anchor.clone(),
+                Some(&provider),
+            );
+            assert_eq!(
+                binding.route_anchor.model, "claude-sonnet-4-5-20250929",
+                "SDK route identity remains the dated route for {source_text}"
+            );
+            assert_eq!(
+                binding.effective_source.string_at(""),
+                Some(expected_effective),
+                "Native effective model stays distinct for {source_text}"
+            );
+        }
     }
 
     #[test]
@@ -4715,7 +4784,7 @@ mod configured_model_source_tests {
                 Some(true),
                 Some(true),
             ),
-            "ordinary UTF-8 aliases already mapped to the selected Native route stay on the existing request path"
+            "an exact wire model already represented by the selected Native route stays on the existing request path"
         );
         assert!(
             !main_source_requires_model_carrier(false, true, true, None, None, None,),
@@ -4829,6 +4898,51 @@ mod configured_model_source_tests {
                 .await
                 .is_none(),
             "a valid selected source already represented by the same Native route stays on the ordinary route path"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_concrete_source_survives_same_route_wire_normalization() {
+        use lingxi_core::host::{ModelRouteAnchor, ModelSourceBinding};
+        use lingxi_core::session::SessionModelSettingSource;
+
+        let orchestrator = ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                model: "claude-sonnet-4-5-20250929".into(),
+                ..Default::default()
+            },
+            Arc::new(SourceRouteFixtureApi),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            crate::test_support::noop_hook_executor(),
+            Arc::new(crate::test_support::NoOpPermissionGate),
+            Arc::new(crate::test_support::MockOutputStream::new()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let native_source = Utf16JsonProjection::from("claude-sonnet-4-5");
+        {
+            let mut session = orchestrator.session.lock().await;
+            session.model = "claude-sonnet-4-5-20250929".into();
+            session.model_profile = Some("configured-profile".into());
+            session.user_model_setting = Some(ModelSourceBinding {
+                source: native_source.clone(),
+                effective_source: native_source.clone(),
+                route_anchor: ModelRouteAnchor {
+                    model: "claude-sonnet-4-5-20250929".into(),
+                    profile: Some("configured-profile".into()),
+                },
+            });
+            session.user_model_setting_source = SessionModelSettingSource::UserSelection;
+        }
+
+        let attached = orchestrator
+            .main_model_source_for_request("claude-sonnet-4-5-20250929", Some("configured-profile"))
+            .await
+            .expect("a same-route alias normalization still needs the exact Native wire id");
+        assert_eq!(
+            attached.string_units(""),
+            native_source.string_units(""),
+            "route equality must not replace Native's undated model id with the SDK route model"
         );
     }
 

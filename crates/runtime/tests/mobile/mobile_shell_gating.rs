@@ -1,7 +1,7 @@
 //! P3-T4 — assert the Shell tool registration gate:
-//!   - default ctx (`android_shell: None`) → Shell is ABSENT
-//!   - ctx with `android_shell: Some(enabled: true, ..)` → Shell is PRESENT
-//!   - ctx with `android_shell: Some(enabled: false, ..)` → Shell is ABSENT
+//!   - default ctx (`mobile_shell: None`) → Shell is ABSENT
+//!   - ctx with `mobile_shell: Some(enabled: true, ..)` → Shell is PRESENT
+//!   - ctx with `mobile_shell: Some(enabled: false, ..)` → Shell is ABSENT
 
 #![allow(clippy::unwrap_used)]
 
@@ -9,7 +9,7 @@ use harness_runtime::mobile::mobile_tool_registry;
 
 use mobile_linux_api::ProcessOutput;
 
-use tool_api::{AndroidShellToolCtx, BuiltinToolContext};
+use tool_api::{BuiltinToolContext, MobileShellToolCtx};
 
 fn base_ctx() -> BuiltinToolContext {
     tool_api::test_support::shell_test_ctx(ProcessOutput {
@@ -27,18 +27,18 @@ fn has_shell(ctx: BuiltinToolContext) -> bool {
 }
 
 #[test]
-fn shell_absent_when_android_shell_is_none() {
-    let ctx = base_ctx(); // android_shell defaults to None
+fn shell_absent_when_mobile_shell_is_none() {
+    let ctx = base_ctx(); // mobile_shell defaults to None
     assert!(
         !has_shell(ctx),
-        "Shell must NOT be registered when android_shell is None"
+        "Shell must NOT be registered when mobile_shell is None"
     );
 }
 
 #[test]
-fn shell_present_when_android_shell_enabled() {
+fn shell_present_when_mobile_shell_enabled() {
     let mut ctx = base_ctx();
-    ctx.android_shell = Some(AndroidShellToolCtx::android_legacy(
+    ctx.mobile_shell = Some(MobileShellToolCtx::android_legacy(
         true,
         vec!["ls".to_string(), "cat".to_string()],
         Some("mksh R59".to_string()),
@@ -46,14 +46,14 @@ fn shell_present_when_android_shell_enabled() {
     ));
     assert!(
         has_shell(ctx),
-        "Shell MUST be registered when android_shell.enabled == true"
+        "Shell MUST be registered when mobile_shell.enabled == true"
     );
 }
 
 #[test]
-fn shell_absent_when_android_shell_disabled() {
+fn shell_absent_when_mobile_shell_disabled() {
     let mut ctx = base_ctx();
-    ctx.android_shell = Some(AndroidShellToolCtx::android_legacy(
+    ctx.mobile_shell = Some(MobileShellToolCtx::android_legacy(
         false,
         vec![],
         None,
@@ -61,6 +61,6 @@ fn shell_absent_when_android_shell_disabled() {
     ));
     assert!(
         !has_shell(ctx),
-        "Shell must NOT be registered when android_shell.enabled == false"
+        "Shell must NOT be registered when mobile_shell.enabled == false"
     );
 }
