@@ -290,3 +290,88 @@ test('agent.spawn hooks can clear the model and profile before reaching host cor
   const [exitCode] = await once(worker, 'exit');
   assert.equal(exitCode, 0);
 });
+
+test('$.mcp.connect resolves the raw plugin server through the host API and returns its result', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mods-mcp-connect-'));
+  const modulePath = join(root, 'mcp-connect.mjs');
+  await writeFile(modulePath, `
+    export function register(on) {
+      on('tool.call', async $ => {
+        const result = await $.mcp.connect({ server: 'jira' });
+        if (JSON.stringify(result) !== JSON.stringify({
+          isConnected: true, server: 'plugin:demo:jira',
+        })) throw new Error('mcp.connect result projection changed');
+        return { result };
+      });
+    }
+  `);
+  t.after(() => rm(root, { recursive: true, force: true }));
+
+  const workerPath = fileURLToPath(new URL('./mods_worker.mjs', import.meta.url));
+  const worker = spawn(process.execPath, ['--experimental-vm-modules', workerPath], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  t.after(() => { if (!worker.killed) worker.kill(); });
+
+  const apiRequests = [];
+  const pending = new Map();
+  const lines = createInterface({ input: worker.stdout, crlfDelay: Infinity });
+  lines.on('line', line => {
+    const frame = decodeModsIpcFrame(line);
+    if (frame.kind === 'api.callers') {
+      worker.stdin.write(`${encodeModsIpcFrame({
+        id: frame.id, kind: 'api.callers.result', callId: frame.callId,
+      })}\n`);
+      return;
+    }
+    if (frame.kind === 'api') {
+      apiRequests.push(frame);
+      worker.stdin.write(`${encodeModsIpcFrame({
+        id: frame.id,
+        kind: 'api.result',
+        callId: frame.callId,
+        result: { isConnected: true, server: 'plugin:demo:jira' },
+      })}\n`);
+      return;
+    }
+    if (frame.id !== 0 && frame.kind !== 'progress') {
+      pending.get(frame.id)?.(frame);
+      pending.delete(frame.id);
+    }
+  });
+  worker.once('exit', () => {
+    for (const resolve of pending.values()) resolve({ kind: 'worker.exit' });
+    pending.clear();
+  });
+  const request = (id, message) => new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pending.delete(id);
+      reject(new Error(`worker request ${id} timed out`));
+    }, 3_000);
+    pending.set(id, frame => { clearTimeout(timeout); resolve(frame); });
+    worker.stdin.write(`${encodeModsIpcFrame({ id, ...message })}\n`);
+  });
+
+  const loaded = await loadPrepared(request, 1, {
+    plugin: 'demo', storageId: 'demo@marketplace', tier: 'user', root, module: modulePath,
+  });
+  assert.equal(loaded.kind, 'loaded', JSON.stringify(loaded));
+  const dispatched = await request(2, {
+    kind: 'dispatch', event: 'tool.call', input: { tool: 'ConnectMcp', input: {} },
+    apiContextTicket: 'host-opaque-origin-ticket',
+  });
+  assert.equal(dispatched.kind, 'result', JSON.stringify(dispatched));
+  assert.deepEqual(dispatched.result, {
+    result: { isConnected: true, server: 'plugin:demo:jira' },
+  });
+  assert.equal(apiRequests.length, 1);
+  assert.equal(apiRequests[0].method, 'mcp.connect');
+  assert.deepEqual(apiRequests[0].input, { server: 'jira' });
+  assert.equal(apiRequests[0].plugin, 'demo');
+  assert.equal(apiRequests[0].storageId, 'demo@marketplace');
+  assert.equal(apiRequests[0].apiContextTicket, 'host-opaque-origin-ticket');
+
+  worker.stdin.end();
+  const [exitCode] = await once(worker, 'exit');
+  assert.equal(exitCode, 0);
+});

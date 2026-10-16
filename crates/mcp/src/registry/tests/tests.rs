@@ -1022,6 +1022,207 @@ fn cfg(name: &str) -> McpServerConfig {
 
 /// [`cfg`] with a remote `http` spec, so the §20a per-server gate has a
 /// hostname to resolve.
+#[tokio::test]
+async fn plugin_server_owner_connect_and_last_unload_share_public_config_safely() {
+    let mock = Arc::new(BridgeMock::new(&[]));
+    let registry = McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock.clone() as Arc<dyn RawConnectionProvider>,
+    );
+    let name = "plugin:demo:jira";
+    let mut config = cfg(name);
+    config.scope = ConfigScope::Dynamic;
+    config.metadata.agent_source = Some(crate::connection::McpAgentSource::Plugin);
+    {
+        registry.connections.write().await.insert(
+            name.to_owned(),
+            McpConnectionState::Disconnected {
+                config: config.clone(),
+                last_error: None,
+            },
+        );
+    }
+
+    assert!(
+        registry
+            .register_plugin_server_owner("demo@market-a", "jira", &config)
+            .await
+    );
+    assert!(
+        registry
+            .register_plugin_server_owner("demo@market-b", "jira", &config)
+            .await
+    );
+    assert_eq!(
+        registry
+            .plugin_server_for_owner("demo@market-a", "jira")
+            .await
+            .unwrap()
+            .name,
+        name
+    );
+    let connected = registry
+        .connect_plugin_server("demo@market-a", "jira")
+        .await
+        .unwrap()
+        .expect("registered owner can connect its plugin-scoped server");
+    assert_eq!(connected.0, name);
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 1);
+
+    let first = registry
+        .remove_plugin_server_owner("demo@market-a", "jira", &config)
+        .await
+        .unwrap()
+        .expect("first owner removal");
+    assert!(!first.last_public_name_owner);
+    assert!(!first.removed_current_config);
+    assert!(registry.connections.read().await.contains_key(name));
+
+    let last = registry
+        .remove_plugin_server_owner("demo@market-b", "jira", &config)
+        .await
+        .unwrap()
+        .expect("last owner removal");
+    assert!(last.last_public_name_owner);
+    assert!(last.removed_current_config);
+    assert!(!registry.connections.read().await.contains_key(name));
+    assert_eq!(mock.disconnect_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failed_owner_disconnect_does_not_overwrite_a_rebound_owner_key() {
+    let mock = Arc::new(BridgeMock::new(&[]));
+    let registry = Arc::new(McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock.clone() as Arc<dyn RawConnectionProvider>,
+    ));
+    let mut old = cfg("plugin:demo:old");
+    old.scope = ConfigScope::Dynamic;
+    old.metadata.agent_source = Some(crate::connection::McpAgentSource::Plugin);
+    let mut replacement = cfg("plugin:demo:new");
+    replacement.scope = ConfigScope::Dynamic;
+    replacement.metadata.agent_source = Some(crate::connection::McpAgentSource::Plugin);
+
+    registry.connect(old.clone()).await.unwrap();
+    registry.connect(replacement.clone()).await.unwrap();
+    assert!(
+        registry
+            .register_plugin_server_owner("demo@market", "server", &old)
+            .await
+    );
+
+    mock.block_disconnect.store(true, Ordering::SeqCst);
+    mock.disconnect_failures_remaining
+        .store(1, Ordering::SeqCst);
+    let removing = {
+        let registry = Arc::clone(&registry);
+        let old = old.clone();
+        tokio::spawn(async move {
+            registry
+                .remove_plugin_server_owner("demo@market", "server", &old)
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), mock.disconnect_started.notified())
+        .await
+        .expect("old-owner disconnect reached the transport");
+
+    assert!(
+        registry
+            .register_plugin_server_owner("demo@market", "server", &replacement)
+            .await
+    );
+    mock.block_disconnect.store(false, Ordering::SeqCst);
+    mock.disconnect_release.notify_one();
+    assert!(removing.await.unwrap().is_err());
+
+    let resolved = registry
+        .plugin_server_for_owner("demo@market", "server")
+        .await
+        .expect("failed rollback must not clobber the concurrently rebound owner");
+    assert_eq!(resolved.name, replacement.name);
+
+    registry
+        .remove_plugin_server_owner("demo@market", "server", &replacement)
+        .await
+        .unwrap()
+        .expect("replacement owner cleanup");
+    registry.disconnect(&old.name).await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_plugin_owner_cannot_connect_or_remove_replacement_config() {
+    let mock = Arc::new(BridgeMock::new(&[]));
+    let registry = McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock.clone() as Arc<dyn RawConnectionProvider>,
+    );
+    let name = "plugin:demo:jira";
+    let mut old = cfg(name);
+    old.scope = ConfigScope::Dynamic;
+    old.metadata.agent_source = Some(crate::connection::McpAgentSource::Plugin);
+    let mut current = old.clone();
+    if let McpTransportSpec::Stdio { command, .. } = &mut current.spec {
+        *command = "replacement".into();
+    }
+
+    registry.connections.write().await.insert(
+        name.to_owned(),
+        McpConnectionState::Disconnected {
+            config: old.clone(),
+            last_error: None,
+        },
+    );
+    assert!(
+        registry
+            .register_plugin_server_owner("demo@market-a", "jira", &old)
+            .await
+    );
+    registry.connections.write().await.insert(
+        name.to_owned(),
+        McpConnectionState::Disconnected {
+            config: current.clone(),
+            last_error: None,
+        },
+    );
+    assert!(
+        registry
+            .register_plugin_server_owner("demo@market-b", "jira", &current)
+            .await
+    );
+
+    assert!(registry
+        .plugin_server_for_owner("demo@market-a", "jira")
+        .await
+        .is_none());
+    assert!(registry
+        .connect_plugin_server("demo@market-a", "jira")
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 0);
+
+    let stale = registry
+        .remove_plugin_server_owner("demo@market-a", "jira", &old)
+        .await
+        .unwrap()
+        .expect("stale owner can be retired");
+    assert!(!stale.last_public_name_owner);
+    assert!(!stale.removed_current_config);
+    assert_eq!(
+        serde_json::to_value(
+            registry
+                .get_config(&normalize_name_for_mcp(name))
+                .await
+                .unwrap()
+                .spec,
+        )
+        .unwrap(),
+        serde_json::to_value(current.spec).unwrap(),
+    );
+    assert_eq!(mock.disconnect_calls.load(Ordering::SeqCst), 0);
+}
+
 fn http_cfg(name: &str, url: &str) -> McpServerConfig {
     McpServerConfig {
         spec: McpTransportSpec::Http {

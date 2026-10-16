@@ -1672,6 +1672,14 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
         self.remote_mod_ui_operation(event, input, plugin).await
     }
 
+    async fn mcp_connect(
+        &self,
+        plugin_storage_id: &str,
+        input: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+        self.mod_mcp_connect(plugin_storage_id, input).await
+    }
+
     async fn model_fork(
         &self,
         input: Utf16JsonProjection,
@@ -2588,6 +2596,29 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
             self.inner
                 .remote_mod_ui_operation(event, input, plugin)
                 .await
+        }
+    }
+
+    async fn mcp_connect(
+        &self,
+        plugin_storage_id: &str,
+        input: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+        if !self.publication_guard.is_current() {
+            return Err(hooks::mods::ModError::Unavailable(
+                "MCP connect generation was discarded".into(),
+            ));
+        }
+        if let Some(cancellation) = self.publication_guard.generation_cancellation_token() {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => Err(hooks::mods::ModError::Unavailable(
+                    "MCP connect generation was discarded".into(),
+                )),
+                result = self.inner.mod_mcp_connect(plugin_storage_id, input) => result,
+            }
+        } else {
+            self.inner.mod_mcp_connect(plugin_storage_id, input).await
         }
     }
 

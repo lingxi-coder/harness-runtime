@@ -79,7 +79,7 @@ const supportedEvents = new Set([
 const supportedEventNamespaces = new Set(
   [...supportedEvents].map(event => event.slice(0, event.indexOf('.'))),
 );
-const operationEvents = new Set(['tool.check', 'tool.list', 'tool.register', 'command.list', 'command.register', 'settings.read', 'telemetry.log', 'telemetry.mark', 'ui.log', 'ui.toast', 'ui.notify', 'ui.status', 'ui.selection', 'clock.now', 'clock.sleep', 'clock.after', 'clock.every', 'process.run', 'fs.read', 'fs.write', 'fs.exists', 'fs.list', 'fs.stat', 'fs.ancestors', 'store.get', 'store.set', 'store.delete', 'store.keys', 'state.get', 'state.set', 'env.get', 'env.set', 'session.cwd', 'session.root', 'session.model', 'session.id', 'session.turns', 'session.repo', 'session.version', 'session.receive', 'session.messages', 'session.usage', 'session.surfaces', 'session.surface', 'model.fork', 'model.complete', 'model.classify']);
+const operationEvents = new Set(['tool.check', 'tool.list', 'tool.register', 'command.list', 'command.register', 'settings.read', 'telemetry.log', 'telemetry.mark', 'ui.log', 'ui.toast', 'ui.notify', 'ui.status', 'ui.selection', 'clock.now', 'clock.sleep', 'clock.after', 'clock.every', 'process.run', 'mcp.connect', 'fs.read', 'fs.write', 'fs.exists', 'fs.list', 'fs.stat', 'fs.ancestors', 'store.get', 'store.set', 'store.delete', 'store.keys', 'state.get', 'state.set', 'env.get', 'env.set', 'session.cwd', 'session.root', 'session.model', 'session.id', 'session.turns', 'session.repo', 'session.version', 'session.receive', 'session.messages', 'session.usage', 'session.surfaces', 'session.surface', 'model.fork', 'model.complete', 'model.classify']);
 const commandRunHeldEvents = new Set(['tool.call', 'prompt.context', 'prompt.section', 'prompt.compose', 'command.run']);
 const promptSubmitHeldEvents = new Set([
   'classic.PreToolUse', 'tool.call', 'agent.spawn', 'session.send', 'prompt.section',
@@ -2718,6 +2718,14 @@ function makeApi(plugin, storageId, tier, root, requestId, budget, hookId, heldE
   };
   return freeze({
     plugin: { name: plugin, root },
+    mcp: {
+      connect: args => {
+        if (typeof args?.server !== 'string' || args.server.length === 0) {
+          return Promise.reject(new Error(plugin + ': $.mcp.connect takes { server } (a non-empty string)'));
+        }
+        return call('mcp.connect', { server: args.server });
+      },
+    },
     session: {
       cwd: () => call('session.cwd', {}),
       root: () => call('session.root', {}),

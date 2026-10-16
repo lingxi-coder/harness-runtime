@@ -267,6 +267,13 @@ struct ModWorkerRecoveryView {
     managed_mods_only: bool,
 }
 
+#[derive(Clone)]
+struct PluginMcpServerOwner {
+    storage_id: String,
+    raw_server_key: String,
+    expected_config: McpServerConfig,
+}
+
 /// The plugin lifecycle coordinator.
 ///
 /// Holds a state map keyed by [`PluginId`], references to every engine
@@ -332,11 +339,11 @@ pub struct PluginManager {
     /// as every other plugin component.
     agent_catalog: Option<Arc<RwLock<Vec<agent::AgentDefinition>>>>,
     plugin_agent_names: RwLock<HashMap<PluginId, Vec<String>>>,
-    // Channel registry is part of mcp_registry's agent-scoped pool in M1.
-    /// Scoped MCP server names (`plugin:{plugin}:{server}`) each plugin seeded
-    /// into `mcp_registry.connections`, so [`Self::unload_plugin`] can remove
-    /// exactly those entries (the registry has no plugin-ownership index).
-    plugin_mcp_names: RwLock<HashMap<PluginId, Vec<String>>>,
+    /// Trusted plugin owner records for MCP servers materialized by this
+    /// manager. The registry resolves Mods calls by `(storage_id, raw key)`;
+    /// `expected_config.name` remains Native's public
+    /// `plugin:{manifest.name}:{server}` namespace.
+    plugin_mcp_owners: RwLock<HashMap<PluginId, Vec<PluginMcpServerOwner>>>,
     /// Optional live plugin-workflow registry shared with `tool-workflow`'s
     /// resolver and `tasks::handlers::local_workflow`'s nested `workflow()`
     /// resolver (see [`workflow::PluginWorkflowRegistry`]). `None` until a
@@ -591,7 +598,7 @@ impl PluginManager {
             tool_registry,
             agent_catalog: None,
             plugin_agent_names: RwLock::new(HashMap::new()),
-            plugin_mcp_names: RwLock::new(HashMap::new()),
+            plugin_mcp_owners: RwLock::new(HashMap::new()),
             plugin_workflows: None,
             plugin_themes: Arc::new(PluginThemeRegistry::new()),
             plugin_theme_slugs: RwLock::new(HashMap::new()),
@@ -1228,7 +1235,7 @@ impl PluginManager {
         install_dir: PathBuf,
     ) -> Result<(), PluginManagerError> {
         // `load_plugin` files every registry entry under `manifest.id`
-        // (`register_plugin_commands(manifest.id, ..)`, `plugin_mcp_names`,
+        // (`register_plugin_commands(manifest.id, ..)`, `plugin_mcp_owners`,
         // `plugin_agent_names`, …) while `disable`/`unload_plugin` remove
         // them by the `id` argument this state map is keyed by. Every
         // `install` arm gets both from `discovery::load_plugin_from_path`,
@@ -1877,11 +1884,11 @@ impl PluginManager {
             theme_paths.push((format!("{plugin_name}:{stem}"), abs));
         }
 
-        // (e) MCP servers — scope each `.mcp.json` entry as
-        //     `plugin:{plugin}:{server}` so it is keyed identically to a
-        //     normal configured server (`addPluginScopeToServers`,
-        //     `mcpPluginIntegration.ts:341-359`, uses scope `dynamic`; the
-        //     discovery loader already stamps `ConfigScope::Dynamic`). These
+        // (e) MCP servers — for marketplace plugins, keep the Native public
+        //     server namespace based on the manifest name, while retaining the
+        //     installed storage identity separately for trusted
+        //     `$.mcp.connect` owner resolution.
+        //     The discovery loader already stamps `ConfigScope::Dynamic`. These
         //     scoped configs are connected at enable time through the SAME
         //     `McpRegistry::connect_all` path the engine uses for configured
         //     `.mcp.json` servers (claude-code `getLingXiMcpConfigs`
@@ -1890,12 +1897,13 @@ impl PluginManager {
         // A strict-plugin-only MCP lock rejects non-plugin sources; this code is
         // the trusted plugin materialization path and therefore remains
         // eligible under the lock.
-        let mcp_scoped: Vec<McpServerConfig> = manifest
+        let mcp_scoped: Vec<PluginMcpServerOwner> = manifest
             .components
             .mcp_servers
             .values()
             .filter_map(|cfg| {
-                let scoped_name = format!("plugin:{plugin_name}:{}", cfg.name);
+                let raw_server_key = cfg.name.clone();
+                let scoped_name = format!("plugin:{plugin_name}:{raw_server_key}");
                 // Deferred-substitution-site gate (claude `mcp-config-invalid`):
                 // a stdio `command` (the shell-executed field) referencing
                 // `${user_config.*}` would pass the substituted value to a
@@ -1918,7 +1926,11 @@ impl PluginManager {
                 // / env, and remote url / headers) with the resolved values
                 // — the primary consumption path for a plugin's userConfig.
                 substitute_mcp_config(&mut scoped, &subst_ctx);
-                Some(scoped)
+                Some(PluginMcpServerOwner {
+                    storage_id: plugin_key.clone(),
+                    raw_server_key,
+                    expected_config: scoped,
+                })
             })
             .collect();
 
@@ -2179,18 +2191,22 @@ impl PluginManager {
         //    at bootstrap, transitioning Connecting→Connected, or to a
         //    loop-eligible `Disconnected{last_error}` on failure that the
         //    already-spawned reconnect loop retries). `connect_all` honors the
-        //    same `disabled` gating as configured servers. Remember the scoped
-        //    names FIRST so `unload_plugin` can remove exactly these entries
-        //    regardless of the state `connect_all` leaves them in.
+        //    same `disabled` gating as configured servers. Retain each trusted
+        //    owner, raw manifest key, and expected public config snapshot so
+        //    `unload_plugin` removes only its own live registration.
         if !mcp_scoped.is_empty() {
-            let names: Vec<String> = mcp_scoped.iter().map(|cfg| cfg.name.clone()).collect();
+            let names: Vec<String> = mcp_scoped
+                .iter()
+                .map(|owner| owner.expected_config.name.clone())
+                .collect();
             let managed_scopes = mcp_scoped
                 .iter()
-                .map(|cfg| {
+                .map(|owner| {
+                    let config = &owner.expected_config;
                     (
-                        cfg.name.clone(),
+                        config.name.clone(),
                         matches!(
-                            cfg.scope,
+                            config.scope,
                             mcp::ConfigScope::Enterprise
                                 | mcp::ConfigScope::Settings(
                                     lingxi_core::types::SettingsScope::Managed
@@ -2204,11 +2220,36 @@ impl PluginManager {
                     .set_headers_helper_plugin_root(name.clone(), install_dir.to_path_buf())
                     .await;
             }
-            self.plugin_mcp_names
+            self.plugin_mcp_owners
                 .write()
                 .await
-                .insert(manifest.id, names.clone());
-            self.mcp_registry.connect_all(mcp_scoped).await;
+                .insert(manifest.id, mcp_scoped.clone());
+            self.mcp_registry
+                .connect_all(
+                    mcp_scoped
+                        .iter()
+                        .map(|owner| owner.expected_config.clone())
+                        .collect(),
+                )
+                .await;
+            for owner in &mcp_scoped {
+                if !self
+                    .mcp_registry
+                    .register_plugin_server_owner(
+                        &owner.storage_id,
+                        &owner.raw_server_key,
+                        &owner.expected_config,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        plugin = %owner.storage_id,
+                        server_key = %owner.raw_server_key,
+                        public_server = %owner.expected_config.name,
+                        "plugin MCP owner was not registered because its public config changed"
+                    );
+                }
+            }
             // Scope by the connection's original server identity before
             // canonical command names sanitize it for the public catalog.
             let connected_prompts = self
@@ -2395,32 +2436,41 @@ impl PluginManager {
         // MCP teardown is the only fallible unload step. Run it first so a
         // transport-disconnect failure leaves every other materialized surface
         // intact and retryable.
-        let tracked_mcp_names = self.plugin_mcp_names.read().await.get(id).cloned();
-        if let Some(names) = tracked_mcp_names {
+        let tracked_mcp_owners = self.plugin_mcp_owners.read().await.get(id).cloned();
+        if let Some(owners) = tracked_mcp_owners {
             let mut remaining = Vec::new();
-            for (idx, name) in names.iter().enumerate() {
-                match self.mcp_registry.remove_without_revoking_auth(name).await {
-                    Ok(()) => {
-                        self.mcp_registry
-                            .remove_headers_helper_plugin_root(name)
-                            .await;
-                        self.command_registry
-                            .write()
-                            .await
-                            .unregister_mcp_server_prompts(&Utf16JsonProjection::from(
-                                name.as_str(),
-                            ));
+            for (idx, owner) in owners.iter().enumerate() {
+                let config = &owner.expected_config;
+                match self
+                    .mcp_registry
+                    .remove_plugin_server_owner(&owner.storage_id, &owner.raw_server_key, config)
+                    .await
+                {
+                    Ok(Some(removal)) => {
+                        if removal.last_public_name_owner || removal.removed_current_config {
+                            self.mcp_registry
+                                .remove_headers_helper_plugin_root(&config.name)
+                                .await;
+                            self.command_registry
+                                .write()
+                                .await
+                                .unregister_mcp_server_prompts(&Utf16JsonProjection::from(
+                                    config.name.as_str(),
+                                ));
+                        }
                     }
+                    Ok(None) => {}
                     Err(error) => {
-                        remaining.extend(names[idx..].iter().cloned());
-                        self.plugin_mcp_names.write().await.insert(*id, remaining);
+                        remaining.extend(owners[idx..].iter().cloned());
+                        self.plugin_mcp_owners.write().await.insert(*id, remaining);
                         return Err(PluginManagerError::Io(format!(
-                            "failed to unload plugin MCP server {name}: {error}"
+                            "failed to unload plugin MCP server {}: {error}",
+                            config.name
                         )));
                     }
                 }
             }
-            self.plugin_mcp_names.write().await.remove(id);
+            self.plugin_mcp_owners.write().await.remove(id);
         }
 
         let mod_name = { self.plugin_mod_names.read().await.get(id).cloned() };
@@ -3992,6 +4042,38 @@ mod unload_tests {
         let discovered = crate::discover_installed_plugins(tmp.path()).await;
         let (id, manifest, dir) = discovered.into_iter().next().unwrap();
         let scoped_names = ["plugin:plug:a", "plugin:plug:b", "plugin:plug:c"];
+        let storage_id = installed_plugin_identity(&manifest, &dir);
+        let test_config = |name: &str| {
+            let mut config = McpServerConfig {
+                name: name.into(),
+                spec: McpTransportSpec::Stdio {
+                    command: "echo".into(),
+                    args: vec![],
+                    env: HashMap::new(),
+                },
+                scope: mcp::ConfigScope::Dynamic,
+                disabled: false,
+                timeout_ms: None,
+                always_load: false,
+                discovery_cache: None,
+                tools: Vec::new(),
+                tool_permissions: std::collections::BTreeMap::new(),
+                config_error: None,
+                metadata: mcp::McpServerMetadata::default(),
+            };
+            stamp_plugin_mcp_metadata(&mut config);
+            config
+        };
+        let expected_configs: Vec<_> = scoped_names.iter().map(|name| test_config(name)).collect();
+        let owner_records: Vec<_> = expected_configs
+            .iter()
+            .zip(["a", "b", "c"])
+            .map(|(config, raw_server_key)| PluginMcpServerOwner {
+                storage_id: storage_id.clone(),
+                raw_server_key: raw_server_key.into(),
+                expected_config: config.clone(),
+            })
+            .collect();
         manager.plugins.write().await.insert(
             id,
             crate::lifecycle::PluginState::Loaded {
@@ -4000,13 +4082,11 @@ mod unload_tests {
                 loaded_at: std::time::SystemTime::now(),
             },
         );
-        manager.plugin_mcp_names.write().await.insert(
-            id,
-            scoped_names
-                .iter()
-                .map(|name| (*name).to_string())
-                .collect(),
-        );
+        manager
+            .plugin_mcp_owners
+            .write()
+            .await
+            .insert(id, owner_records.clone());
         command_registry.write().await.register_plugin_commands(
             id,
             vec![SlashCommand {
@@ -4019,27 +4099,12 @@ mod unload_tests {
                 ..SlashCommand::default()
             }],
         );
-        for scoped_name in scoped_names {
+        for config in &expected_configs {
+            let scoped_name = &config.name;
             mcp_registry.connections.write().await.insert(
-                scoped_name.into(),
+                scoped_name.clone(),
                 mcp::McpConnectionState::Connected {
-                    config: McpServerConfig {
-                        name: scoped_name.into(),
-                        spec: McpTransportSpec::Stdio {
-                            command: "echo".into(),
-                            args: vec![],
-                            env: HashMap::new(),
-                        },
-                        scope: mcp::ConfigScope::Dynamic,
-                        disabled: false,
-                        timeout_ms: None,
-                        always_load: false,
-                        discovery_cache: None,
-                        tools: Vec::new(),
-                        tool_permissions: std::collections::BTreeMap::new(),
-                        config_error: None,
-                        metadata: mcp::McpServerMetadata::default(),
-                    },
+                    config: config.clone(),
                     connection_id: McpConnectionId::new(),
                     capabilities: ServerCapabilitiesDto {
                         tools: true,
@@ -4064,6 +4129,30 @@ mod unload_tests {
                 },
             );
         }
+        for owner in &owner_records {
+            assert!(
+                mcp_registry
+                    .register_plugin_server_owner(
+                        &owner.storage_id,
+                        &owner.raw_server_key,
+                        &owner.expected_config,
+                    )
+                    .await
+            );
+        }
+        let resolved = mcp_registry
+            .plugin_server_for_owner(&owner_records[0].storage_id, "a")
+            .await
+            .expect("the trusted plugin identity resolves its raw server key");
+        assert_eq!(
+            resolved.name, "plugin:plug:a",
+            "owner identity must not leak into Native's public MCP tool namespace"
+        );
+        assert!(
+            mcp_registry
+                .register_plugin_server_owner("plug@other-marketplace", "a", &expected_configs[0])
+                .await
+        );
         let first = manager.disable(&id).await.expect_err("first disable fails");
         assert!(
             matches!(first, PluginManagerError::Io(ref message) if message.contains("failed to unload plugin MCP server")),
@@ -4074,24 +4163,54 @@ mod unload_tests {
                 .connections
                 .read()
                 .await
-                .contains_key("plugin:plug:b"),
-            "the failing MCP server must stay retryable"
+                .contains_key("plugin:plug:a"),
+            "unloading one owner must retain the public connection while another owner uses it"
         );
         assert!(
             !mcp_registry
                 .connections
                 .read()
                 .await
-                .contains_key("plugin:plug:a"),
+                .contains_key("plugin:plug:b"),
             "successful teardown before the failure point must stay removed"
         );
+        assert!(
+            mcp_registry
+                .connections
+                .read()
+                .await
+                .contains_key("plugin:plug:c"),
+            "the failing MCP server must stay retryable"
+        );
+        let remaining_names = manager
+            .plugin_mcp_owners
+            .read()
+            .await
+            .get(&id)
+            .map(|owners| {
+                owners
+                    .iter()
+                    .map(|owner| owner.expected_config.name.clone())
+                    .collect::<Vec<_>>()
+            });
         assert_eq!(
-            manager.plugin_mcp_names.read().await.get(&id),
-            Some(&vec![
-                "plugin:plug:b".to_string(),
-                "plugin:plug:c".to_string()
-            ]),
-            "failed unload must preserve only the remaining MCP tracking for retry"
+            remaining_names,
+            Some(vec!["plugin:plug:c".to_owned()]),
+            "failed unload must preserve only the remaining MCP snapshots for retry"
+        );
+        assert!(
+            mcp_registry
+                .plugin_server_for_owner("plug@other-marketplace", "a")
+                .await
+                .is_some(),
+            "a second owner retains access to its shared public server"
+        );
+        assert!(
+            mcp_registry
+                .plugin_server_for_owner(&storage_id, "a")
+                .await
+                .is_none(),
+            "the unloaded owner cannot reuse another plugin's registration"
         );
         assert!(
             command_registry
@@ -4110,7 +4229,7 @@ mod unload_tests {
                     error,
                 }) if failed_manifest.id == manifest.id
                     && install_dir == &dir
-                    && error.contains("failed to unload plugin MCP server plugin:plug:b")
+                    && error.contains("failed to unload plugin MCP server plugin:plug:c")
             ),
             "failed disable must record a retriable partial-unload state"
         );
@@ -4126,21 +4245,45 @@ mod unload_tests {
                 .connections
                 .read()
                 .await
-                .contains_key("plugin:plug:b"),
+                .contains_key("plugin:plug:c"),
             "successful retry removes the failing MCP state"
         );
         assert!(
-            !mcp_registry
+            mcp_registry
                 .connections
                 .read()
                 .await
-                .contains_key("plugin:plug:c"),
-            "successful retry also removes the untouched trailing MCP state"
+                .contains_key("plugin:plug:a"),
+            "a public server remains connected until its last owner unloads"
         );
         assert!(
-            manager.plugin_mcp_names.read().await.get(&id).is_none(),
+            manager.plugin_mcp_owners.read().await.get(&id).is_none(),
             "successful retry clears MCP tracking"
         );
+        for owner in &owner_records {
+            assert!(
+                mcp_registry
+                    .plugin_server_for_owner(&owner.storage_id, &owner.raw_server_key)
+                    .await
+                    .is_none(),
+                "successful unload removes every Mod owner mapping"
+            );
+        }
+        assert!(mcp_registry
+            .plugin_server_for_owner("plug@other-marketplace", "a")
+            .await
+            .is_some());
+        let removed = mcp_registry
+            .remove_plugin_server_owner("plug@other-marketplace", "a", &expected_configs[0])
+            .await
+            .expect("the final owner can remove the shared public server")
+            .expect("the other plugin owns the remaining entry");
+        assert!(removed.last_public_name_owner && removed.removed_current_config);
+        assert!(!mcp_registry
+            .connections
+            .read()
+            .await
+            .contains_key("plugin:plug:a"));
         assert!(
             command_registry
                 .read()

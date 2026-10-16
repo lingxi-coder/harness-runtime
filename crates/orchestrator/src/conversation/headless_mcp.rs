@@ -1,10 +1,97 @@
 //! SDK controls over the session's existing MCP registry and UI roster.
 use super::*;
-use lingxi_core::host::{McpActionState, McpToolAnnotationsDto, McpTransportSpec};
+use lingxi_core::host::{McpActionState, McpError, McpToolAnnotationsDto, McpTransportSpec};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::{json, Value};
 
 impl ConversationOrchestrator {
+    /// Resolve `session.mcp.connect({server})` only against this plugin's
+    /// already-registered dynamic MCP configuration. The storage identity is
+    /// host-minted by the successful Mod load handshake; no worker field can
+    /// choose another plugin's config.
+    /// Resolve the top-level Mods MCP operation through the registry's
+    /// host-registered plugin owner, never a worker-supplied identity.
+    pub(crate) async fn mod_mcp_connect(
+        &self,
+        plugin_storage_id: &str,
+        input: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+        let server_units = input
+            .string_units("/server")
+            .filter(|units| !units.is_empty())
+            .ok_or_else(|| {
+                hooks::mods::ModError::Hook("takes { server } (a non-empty string)".into())
+            })?;
+        let Ok(server_key) = String::from_utf16(&server_units) else {
+            return mcp_unlisted_result(&server_units);
+        };
+        let Some(registry) = self.mcp_registry.as_ref() else {
+            return mcp_unlisted_result(&server_units);
+        };
+
+        let Some(config) = registry
+            .plugin_server_for_owner(plugin_storage_id, &server_key)
+            .await
+        else {
+            return mcp_unlisted_result(&server_units);
+        };
+        if let Some(config_error) = config.config_error.as_deref() {
+            let message = format!(
+                "The MCP server \"{}\" cannot be resolved: {config_error}",
+                config.name
+            );
+            return mcp_connect_result(false, None, Some("failed"), Some(&message));
+        }
+        if config.disabled {
+            let message = format!(
+                "The MCP server \"{}\" is turned off; turn it on in /mcp.",
+                config.name
+            );
+            return mcp_connect_result(false, None, Some("disabled"), Some(&message));
+        }
+
+        match registry
+            .connect_plugin_server(plugin_storage_id, &server_key)
+            .await
+        {
+            Ok(Some((public_name, _connection_id))) => {
+                mcp_connect_result(true, Some(&public_name), None, None)
+            }
+            Ok(None) => {
+                let message = format!(
+                    "The MCP server \"{}\" was taken out: its plugin unloaded while it connected.",
+                    config.name
+                );
+                mcp_connect_result(false, None, Some("failed"), Some(&message))
+            }
+            Err(error) => {
+                let action_state = registry
+                    .action_states()
+                    .await
+                    .into_iter()
+                    .find(|(name, _)| name == &config.name)
+                    .map(|(_, state)| state);
+                if matches!(
+                    &error,
+                    McpError::HttpResponse {
+                        status: 401 | 403,
+                        ..
+                    } | McpError::OAuth(_)
+                ) || action_state == Some(McpActionState::NeedsAuth)
+                {
+                    let message = format!(
+                        "The MCP server \"{}\" needs you to sign in; run /mcp to authenticate.",
+                        config.name
+                    );
+                    mcp_connect_result(false, None, Some("auth"), Some(&message))
+                } else {
+                    let message = mcp_connect_failed_message(&config.name, &error);
+                    mcp_connect_result_with_message(false, None, Some("failed"), Some(message))
+                }
+            }
+        }
+    }
+
     /// Register SDK-hosted servers after the initialize reply has been queued.
     /// The registry publishes their ordinary catalog and connection events.
     pub async fn connect_sdk_mcp_servers(&self, configs: Vec<mcp::McpServerConfig>) {
@@ -403,6 +490,66 @@ fn native_resource_meta_projected(
     }
 }
 
+fn mcp_connect_result(
+    is_connected: bool,
+    server: Option<&str>,
+    reason: Option<&str>,
+    message: Option<&str>,
+) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+    mcp_connect_result_with_message(is_connected, server, reason, message.map(source_text))
+}
+
+fn mcp_connect_result_with_message(
+    is_connected: bool,
+    server: Option<&str>,
+    reason: Option<&str>,
+    message: Option<Utf16JsonProjection>,
+) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+    let mut fields = vec![(
+        "isConnected".to_owned(),
+        source_value(json!(is_connected)).map_err(hooks::mods::ModError::Protocol)?,
+    )];
+    if let Some(server) = server {
+        fields.push(("server".to_owned(), source_text(server)));
+    }
+    if let Some(reason) = reason {
+        fields.push(("reason".to_owned(), source_text(reason)));
+    }
+    if let Some(message) = message {
+        fields.push(("message".to_owned(), message));
+    }
+    source_object(fields).map_err(hooks::mods::ModError::Protocol)
+}
+
+fn mcp_unlisted_result(server_units: &[u16]) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+    let mut message_units = "This plugin's manifest lists no MCP server named \""
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    message_units.extend_from_slice(server_units);
+    message_units.extend("\"".encode_utf16());
+    message_units.extend(".".encode_utf16());
+    let message = source_text_units(message_units);
+    mcp_connect_result_with_message(false, None, Some("unlisted"), Some(message))
+}
+
+fn mcp_connect_failed_message(server_name: &str, error: &McpError) -> Utf16JsonProjection {
+    let mut message_units = format!("The MCP server \"{server_name}\" did not connect: ")
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    let detail_units = error
+        .source_diagnostic()
+        .and_then(|detail| detail.string_units("").map(|units| units.to_vec()))
+        .unwrap_or_else(|| error.to_string().encode_utf16().collect());
+    message_units.extend(detail_units);
+    message_units.push(u16::from(b'.'));
+    source_text_units(message_units)
+}
+
+fn source_text_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("the display form is the UTF-16 lossy decoding of its source units")
+}
+
 fn source_object(
     fields: Vec<(String, Utf16JsonProjection)>,
 ) -> Result<Utf16JsonProjection, String> {
@@ -430,6 +577,43 @@ fn projection_to_value(source: Utf16JsonProjection) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_connect_result_uses_native_success_and_refusal_fields() {
+        let success = mcp_connect_result(true, Some("plugin:demo:jira"), None, None).unwrap();
+        assert_eq!(
+            success.to_json_string().unwrap(),
+            r#"{"isConnected":true,"server":"plugin:demo:jira"}"#
+        );
+
+        let refusal = mcp_connect_result(
+            false,
+            None,
+            Some("unlisted"),
+            Some("This plugin's manifest lists no MCP server named \"jira\"."),
+        )
+        .unwrap();
+        assert_eq!(
+            refusal.to_json_string().unwrap(),
+            r#"{"isConnected":false,"reason":"unlisted","message":"This plugin's manifest lists no MCP server named \"jira\"."}"#
+        );
+    }
+
+    #[test]
+    fn mcp_connect_unlisted_message_preserves_raw_server_utf16() {
+        let server_units = [0xd800];
+        let result = mcp_unlisted_result(&server_units).unwrap();
+        assert_eq!(
+            result.to_json_string().unwrap(),
+            r#"{"isConnected":false,"reason":"unlisted","message":"This plugin's manifest lists no MCP server named \"\ud800\"."}"#
+        );
+        let expected_units = "This plugin's manifest lists no MCP server named \""
+            .encode_utf16()
+            .chain(server_units)
+            .chain("\".".encode_utf16())
+            .collect::<Vec<_>>();
+        assert_eq!(result.string_units("/message"), Some(expected_units));
+    }
 
     #[test]
     fn tool_ui_meta_matches_native_filter_and_preserves_unknown_ui_units() {

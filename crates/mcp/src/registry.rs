@@ -551,6 +551,21 @@ struct TestPauseHook {
     release: Notify,
 }
 
+#[derive(Clone)]
+struct PluginMcpServerOwner {
+    public_name: String,
+    config: McpServerConfig,
+}
+
+/// Outcome of removing one plugin's ownership of a scoped MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PluginMcpOwnerRemoval {
+    /// Whether no registered plugin owner remains for this public server name.
+    pub last_public_name_owner: bool,
+    /// Whether the current registry connection/config was removed.
+    pub removed_current_config: bool,
+}
+
 /// In-memory registry of every known MCP connection.
 pub struct McpRegistry {
     /// Map of server name to current state.
@@ -559,6 +574,8 @@ pub struct McpRegistry {
     /// `Disconnected` entries read from `.mcp.json` before the engine
     /// connects, and so engine-side tests can seed states directly.
     pub connections: Arc<RwLock<HashMap<String, McpConnectionState>>>,
+    /// Trusted plugin ownership sidecar for the existing public MCP slots.
+    plugin_server_owners: Arc<RwLock<HashMap<(String, String), PluginMcpServerOwner>>>,
     /// Synchronous mirror of claude-code 2.1.238's `eZf()`
     /// (`bdl(b7e()??[]).length>0`, `cc-238.js @229641619`) — "at least one MCP
     /// client is `type === "pending"`".
@@ -972,6 +989,7 @@ impl McpRegistry {
     fn clone_for_background(&self) -> Self {
         Self {
             connections: Arc::clone(&self.connections),
+            plugin_server_owners: Arc::clone(&self.plugin_server_owners),
             pending_servers: Arc::clone(&self.pending_servers),
             lifecycle_locks: Arc::clone(&self.lifecycle_locks),
             xaa_refresh_locks: Arc::clone(&self.xaa_refresh_locks),
@@ -1019,6 +1037,7 @@ impl McpRegistry {
         let (catalog_changes, _unused_rx) = broadcast::channel(64);
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
+            plugin_server_owners: Arc::new(RwLock::new(HashMap::new())),
             pending_servers: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             xaa_refresh_locks: Arc::new(StdMutex::new(HashMap::new())),
@@ -1790,6 +1809,192 @@ impl McpRegistry {
             .iter()
             .find(|(k, _)| normalize_name_for_mcp(k) == name)
             .map(|(_, v)| v.config().clone())
+    }
+
+    /// Register a host-trusted plugin identity against an already materialized
+    /// plugin-scoped config. The public server name is not changed.
+    pub async fn register_plugin_server_owner(
+        &self,
+        storage_id: &str,
+        raw_server_key: &str,
+        expected_config: &McpServerConfig,
+    ) -> bool {
+        if storage_id.is_empty()
+            || raw_server_key.is_empty()
+            || expected_config.scope != crate::connection::ConfigScope::Dynamic
+            || expected_config.metadata.agent_source
+                != Some(crate::connection::McpAgentSource::Plugin)
+        {
+            return false;
+        }
+        let lifecycle = self.lifecycle_lock(&expected_config.name);
+        let _guard = lifecycle.lock().await;
+        if !self
+            .connections
+            .read()
+            .await
+            .get(&expected_config.name)
+            .is_some_and(|state| Self::same_config_snapshot(state.config(), expected_config))
+        {
+            return false;
+        }
+        self.plugin_server_owners.write().await.insert(
+            (storage_id.to_owned(), raw_server_key.to_owned()),
+            PluginMcpServerOwner {
+                public_name: expected_config.name.clone(),
+                config: expected_config.clone(),
+            },
+        );
+        true
+    }
+
+    /// Return the config only when this trusted owner and its current snapshot match.
+    pub async fn plugin_server_for_owner(
+        &self,
+        storage_id: &str,
+        raw_server_key: &str,
+    ) -> Option<McpServerConfig> {
+        let owner = self
+            .plugin_server_owners
+            .read()
+            .await
+            .get(&(storage_id.to_owned(), raw_server_key.to_owned()))
+            .cloned()?;
+        let connections = self.connections.read().await;
+        let current = connections.get(&owner.public_name)?.config();
+        Self::same_config_snapshot(current, &owner.config).then(|| current.clone())
+    }
+
+    /// Connect an owned server while holding the same name lock as unload/replacement.
+    pub async fn connect_plugin_server(
+        &self,
+        storage_id: &str,
+        raw_server_key: &str,
+    ) -> Result<Option<(String, McpConnectionId)>, McpError> {
+        let owner_key = (storage_id.to_owned(), raw_server_key.to_owned());
+        loop {
+            let Some(initial) = self
+                .plugin_server_owners
+                .read()
+                .await
+                .get(&owner_key)
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            let lifecycle = self.lifecycle_lock(&initial.public_name);
+            let _guard = lifecycle.lock().await;
+            let Some(owner) = self
+                .plugin_server_owners
+                .read()
+                .await
+                .get(&owner_key)
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            if owner.public_name != initial.public_name {
+                drop(_guard);
+                continue;
+            }
+            let config = {
+                let connections = self.connections.read().await;
+                let Some(state) = connections.get(&owner.public_name) else {
+                    return Ok(None);
+                };
+                if !Self::same_config_snapshot(state.config(), &owner.config) {
+                    return Ok(None);
+                }
+                state.config().clone()
+            };
+            let connection_id = self.connect_locked(config.clone(), None).await?;
+            return Ok(Some((config.name, connection_id)));
+        }
+    }
+
+    /// Atomically unregister one owner and remove its config only when no owner
+    /// of that exact snapshot remains. Failed disconnects restore the owner row.
+    pub async fn remove_plugin_server_owner(
+        &self,
+        storage_id: &str,
+        raw_server_key: &str,
+        expected_config: &McpServerConfig,
+    ) -> Result<Option<PluginMcpOwnerRemoval>, McpError> {
+        let key = (storage_id.to_owned(), raw_server_key.to_owned());
+        loop {
+            let Some(initial) = self.plugin_server_owners.read().await.get(&key).cloned() else {
+                return Ok(None);
+            };
+            if initial.public_name != expected_config.name
+                || !Self::same_config_snapshot(&initial.config, expected_config)
+            {
+                return Ok(None);
+            }
+            let lifecycle = self.lifecycle_lock(&initial.public_name);
+            let _guard = lifecycle.lock().await;
+            let Some(owner) = self.plugin_server_owners.read().await.get(&key).cloned() else {
+                return Ok(None);
+            };
+            if owner.public_name != initial.public_name {
+                drop(_guard);
+                continue;
+            }
+            if !Self::same_config_snapshot(&owner.config, expected_config) {
+                return Ok(None);
+            }
+            let removed_owner = {
+                let mut owners = self.plugin_server_owners.write().await;
+                let Some(current) = owners.get(&key) else {
+                    return Ok(None);
+                };
+                if current.public_name != owner.public_name
+                    || !Self::same_config_snapshot(&current.config, expected_config)
+                {
+                    return Ok(None);
+                }
+                owners.remove(&key).expect("owner checked above")
+            };
+            let (matching_owner, same_name_owner) = {
+                let owners = self.plugin_server_owners.read().await;
+                let mut matching = false;
+                let mut same_name = false;
+                for remaining in owners.values() {
+                    if remaining.public_name == removed_owner.public_name {
+                        same_name = true;
+                        matching |=
+                            Self::same_config_snapshot(&remaining.config, &removed_owner.config);
+                    }
+                }
+                (matching, same_name)
+            };
+            let current_matches = self
+                .connections
+                .read()
+                .await
+                .get(&removed_owner.public_name)
+                .is_some_and(|state| {
+                    Self::same_config_snapshot(state.config(), &removed_owner.config)
+                });
+            let removed_current_config = if current_matches && !matching_owner {
+                if let Err(error) = self
+                    .disconnect_locked_inner(&removed_owner.public_name, false, true)
+                    .await
+                {
+                    let mut owners = self.plugin_server_owners.write().await;
+                    if let std::collections::hash_map::Entry::Vacant(entry) = owners.entry(key) {
+                        entry.insert(removed_owner);
+                    }
+                    return Err(error);
+                }
+                true
+            } else {
+                false
+            };
+            return Ok(Some(PluginMcpOwnerRemoval {
+                last_public_name_owner: !same_name_owner,
+                removed_current_config,
+            }));
+        }
     }
 
     /// Native Sbt(SS()): inspect this session's current client configs against

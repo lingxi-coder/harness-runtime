@@ -1228,6 +1228,16 @@ pub trait ModSessionContext: Send + Sync {
             "session.usage needs a session".into(),
         ))
     }
+    /// Connect an MCP server already owned by this loaded plugin.
+    async fn mcp_connect(
+        &self,
+        _plugin_storage_id: &str,
+        _input: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ModError> {
+        Err(ModError::Unavailable(
+            "mcp.connect needs an MCP-aware session".into(),
+        ))
+    }
     async fn model_fork(
         &self,
         _input: Utf16JsonProjection,
@@ -1581,6 +1591,18 @@ impl ModSessionContext for WeakModSessionContext {
             .upgrade()
             .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
         session.ui_selection().await
+    }
+
+    async fn mcp_connect(
+        &self,
+        plugin_storage_id: &str,
+        input: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, ModError> {
+        let session = self
+            .0
+            .upgrade()
+            .ok_or_else(|| ModError::Unavailable("Mod session ended".into()))?;
+        session.mcp_connect(plugin_storage_id, input).await
     }
 
     async fn remote_ui_operation(
@@ -6634,6 +6656,19 @@ impl ModHost {
                     session.agent_spawn_api(spawn_input, spawn_context).await?,
                 ));
             }
+            if event == "mcp.connect" {
+                let session = session.ok_or_else(|| {
+                    ModError::Unavailable("mcp.connect needs an MCP-aware session".into())
+                })?;
+                let input = input_projection
+                    .take()
+                    .ok_or_else(|| ModError::Hook("mcp.connect input is required".into()))?;
+                return Ok(HostApiValue::JsonProjection(
+                    session
+                        .mcp_connect(&api_context.caller.storage_id, input)
+                        .await?,
+                ));
+            }
             if event == "ui.invalidate"
                 && input.and_then(|input| input.string_at("/event")) == Some("ui.render")
             {
@@ -10756,6 +10791,102 @@ mod tests {
             ProjectsConsentFacts::default(),
             format!("resolved:{canonical_tool_name}"),
         )
+    }
+
+    #[derive(Default)]
+    struct DirectMcpConnectSession {
+        seen: StdMutex<Option<(String, Utf16JsonProjection)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModSessionContext for DirectMcpConnectSession {
+        fn cwd(&self) -> PathBuf {
+            PathBuf::from("/tmp/mcp-connect")
+        }
+
+        fn root(&self) -> PathBuf {
+            PathBuf::from("/tmp/mcp-connect")
+        }
+
+        async fn model(&self) -> String {
+            "test-model".into()
+        }
+
+        async fn id(&self) -> String {
+            "mcp-connect-fixture".into()
+        }
+
+        async fn turns(&self) -> u64 {
+            0
+        }
+
+        async fn mcp_connect(
+            &self,
+            plugin_storage_id: &str,
+            input: Utf16JsonProjection,
+        ) -> Result<Utf16JsonProjection, ModError> {
+            *self
+                .seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                Some((plugin_storage_id.to_owned(), input));
+            Ok(test_projection(json!({
+                "isConnected": true,
+                "server": "plugin:demo:jira"
+            })))
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_mcp_connect_uses_host_registered_storage_identity_and_result_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        let session = DirectMcpConnectSession::default();
+        let api_context = ResolvedModApiContext {
+            caller: crate::mod_api_context::ModApiCallerRegistration {
+                plugin: "demo".into(),
+                storage_id: "demo@marketplace".into(),
+                hook_id: 29,
+                event: "tool.call".into(),
+            },
+            hook_origin: lingxi_core::host::task_registry::FieldPresence::Value(json!([
+                "host-origin"
+            ])),
+        };
+        let result = host
+            .dispatch_host_api_with_projection(
+                "mcp.connect",
+                Some(test_projection(json!({"server":"jira"}))),
+                dir.path(),
+                Some(&session),
+                false,
+                0,
+                json!({"storageId":"worker-controlled"}),
+                api_context.clone(),
+                "demo@marketplace".into(),
+                Some(29),
+                1,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            HostApiValue::JsonProjection(value)
+                if value.semantically_eq(&test_projection(json!({
+                    "isConnected": true,
+                    "server": "plugin:demo:jira"
+                })))
+        ));
+        let (storage_id, input) = session
+            .seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("MCP host API reaches its bound session");
+        assert_eq!(storage_id, "demo@marketplace");
+        assert!(input.semantically_eq(&test_projection(json!({"server":"jira"}))));
     }
 
     #[derive(Default)]
