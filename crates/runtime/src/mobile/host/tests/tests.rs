@@ -2847,6 +2847,20 @@ fn build_submit_handle_with_platform(
 }
 
 #[test]
+fn foreign_small_stack_can_construct_engine() {
+    let root = tempfile::tempdir().expect("foreign constructor root");
+    std::thread::Builder::new()
+        .name("foreign-swift-build".into())
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            let (_handle, _listener) = build_submit_handle(root.path());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn foreign_small_stack_can_refresh_slash_command_catalog() {
     let root = tempfile::tempdir().expect("foreign caller root");
     let (handle, listener) = build_submit_handle(root.path());

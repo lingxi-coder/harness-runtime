@@ -5843,152 +5843,6 @@ impl MobileEngineHandle {
         })?
     }
 
-    async fn submit_on_runtime(&self, command: ClientCommand) -> Result<(), ClientError> {
-        // A questionnaire parks work that can itself be holding the transition
-        // lock (for example, a long-running workflow). Its answer is
-        // connection-scoped and only resolves the broker's oneshot, so waiting
-        // behind that lock turns the native sheet's submit spinner into a
-        // deadlock. Resolve these commands before serializing session state.
-        match command {
-            ClientCommand::Cancel { turn_id } => self.cancel_active_turn(turn_id).await,
-            ClientCommand::UpdatePromptSuggestionContext {
-                session_id,
-                focus,
-                input_empty,
-                pending_permission,
-                elicitation_active,
-            } => self
-                .inner
-                .orchestrator
-                .update_prompt_suggestion_context(
-                    lingxi_core::host::orchestrator::PromptSuggestionContext {
-                        session_id,
-                        focus,
-                        input_empty,
-                        pending_permission,
-                        elicitation_active,
-                    },
-                )
-                .await
-                .map_err(|error| ClientError::Internal {
-                    message: error.to_string(),
-                }),
-            ClientCommand::RecordPromptSuggestionSubmission { text } => self
-                .inner
-                .orchestrator
-                .record_prompt_suggestion_submission(&text)
-                .await
-                .map_err(|error| ClientError::Internal {
-                    message: error.to_string(),
-                }),
-            ClientCommand::PromptSuggestionFeedback {
-                session_id,
-                uuid,
-                action,
-            } => self
-                .inner
-                .orchestrator
-                .prompt_suggestion_feedback(&session_id, &uuid, &action)
-                .await
-                .map_err(|error| ClientError::Internal {
-                    message: error.to_string(),
-                }),
-            ClientCommand::AnswerAskUserQuestion {
-                request_id,
-                answers,
-            } => {
-                self.resolve_ask_user_question(request_id, Some(answers))
-                    .await
-            }
-            ClientCommand::CancelAskUserQuestion { request_id } => {
-                self.resolve_ask_user_question(request_id, None).await
-            }
-            ClientCommand::UiRender {
-                request_id,
-                request_json,
-            } => {
-                let request =
-                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_render");
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiClientModule { request_id, plugin } => {
-                self.emit_mod_ui_control_result(
-                    request_id,
-                    Ok(Utf16JsonProjection::object(vec![
-                        ("subtype".into(), "ui_client_module".into()),
-                        ("plugin".into(), plugin.into()),
-                    ])
-                    .expect("UI module request is a flat object")),
-                )
-                .await
-            }
-            ClientCommand::UiMessage {
-                request_id,
-                request_json,
-            } => {
-                let request = client::adapter::turn::parse_mod_ui_control_request(
-                    &request_json,
-                    "ui_message",
-                );
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiClientFault {
-                request_id,
-                request_json,
-            } => {
-                let request = client::adapter::turn::parse_mod_ui_control_request(
-                    &request_json,
-                    "ui_client_fault",
-                );
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiClientPress {
-                request_id,
-                request_json,
-            } => {
-                let request = client::adapter::turn::parse_mod_ui_control_request(
-                    &request_json,
-                    "ui_client_press",
-                );
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiPress {
-                request_id,
-                request_json,
-            } => {
-                let request =
-                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_press");
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiInput {
-                request_id,
-                request_json,
-            } => {
-                let request =
-                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_input");
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiSelect {
-                request_id,
-                request_json,
-            } => {
-                let request =
-                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_select");
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiClientOperation {
-                request_id,
-                operation_json,
-            } => {
-                let operation =
-                    client::adapter::turn::parse_mod_ui_client_operation(&operation_json);
-                self.emit_mod_ui_client_operation_result(request_id, operation)
-                    .await
-            }
-            command => Box::pin(self.submit_impl(command)).await,
-        }
-    }
-
     async fn resolve_ask_user_question(
         &self,
         request_id: u64,
@@ -7522,6 +7376,152 @@ impl MobileEngineHandle {
 }
 
 impl MobileEngineHandle {
+    async fn submit_on_runtime(&self, command: ClientCommand) -> Result<(), ClientError> {
+        // A questionnaire parks work that can itself be holding the transition
+        // lock (for example, a long-running workflow). Its answer is
+        // connection-scoped and only resolves the broker's oneshot, so waiting
+        // behind that lock turns the native sheet's submit spinner into a
+        // deadlock. Resolve these commands before serializing session state.
+        match command {
+            ClientCommand::Cancel { turn_id } => self.cancel_active_turn(turn_id).await,
+            ClientCommand::UpdatePromptSuggestionContext {
+                session_id,
+                focus,
+                input_empty,
+                pending_permission,
+                elicitation_active,
+            } => self
+                .inner
+                .orchestrator
+                .update_prompt_suggestion_context(
+                    lingxi_core::host::orchestrator::PromptSuggestionContext {
+                        session_id,
+                        focus,
+                        input_empty,
+                        pending_permission,
+                        elicitation_active,
+                    },
+                )
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: error.to_string(),
+                }),
+            ClientCommand::RecordPromptSuggestionSubmission { text } => self
+                .inner
+                .orchestrator
+                .record_prompt_suggestion_submission(&text)
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: error.to_string(),
+                }),
+            ClientCommand::PromptSuggestionFeedback {
+                session_id,
+                uuid,
+                action,
+            } => self
+                .inner
+                .orchestrator
+                .prompt_suggestion_feedback(&session_id, &uuid, &action)
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: error.to_string(),
+                }),
+            ClientCommand::AnswerAskUserQuestion {
+                request_id,
+                answers,
+            } => {
+                self.resolve_ask_user_question(request_id, Some(answers))
+                    .await
+            }
+            ClientCommand::CancelAskUserQuestion { request_id } => {
+                self.resolve_ask_user_question(request_id, None).await
+            }
+            ClientCommand::UiRender {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_render");
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiClientModule { request_id, plugin } => {
+                self.emit_mod_ui_control_result(
+                    request_id,
+                    Ok(Utf16JsonProjection::object(vec![
+                        ("subtype".into(), "ui_client_module".into()),
+                        ("plugin".into(), plugin.into()),
+                    ])
+                    .expect("UI module request is a flat object")),
+                )
+                .await
+            }
+            ClientCommand::UiMessage {
+                request_id,
+                request_json,
+            } => {
+                let request = client::adapter::turn::parse_mod_ui_control_request(
+                    &request_json,
+                    "ui_message",
+                );
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiClientFault {
+                request_id,
+                request_json,
+            } => {
+                let request = client::adapter::turn::parse_mod_ui_control_request(
+                    &request_json,
+                    "ui_client_fault",
+                );
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiClientPress {
+                request_id,
+                request_json,
+            } => {
+                let request = client::adapter::turn::parse_mod_ui_control_request(
+                    &request_json,
+                    "ui_client_press",
+                );
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiPress {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_press");
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiInput {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_input");
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiSelect {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_select");
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiClientOperation {
+                request_id,
+                operation_json,
+            } => {
+                let operation =
+                    client::adapter::turn::parse_mod_ui_client_operation(&operation_json);
+                self.emit_mod_ui_client_operation_result(request_id, operation)
+                    .await
+            }
+            command => Box::pin(self.submit_impl(command)).await,
+        }
+    }
+
     /// Dispatch one non-turn Mod UI query directly to the currently mounted
     /// session handle. These commands bypass the live-turn/transition gate and
     /// report a response on the connection sink with their original correlator.
