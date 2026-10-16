@@ -112,14 +112,18 @@ fn native_builtin_metadata(name: &str) -> (Option<crate::model::NativeCommandTyp
         }
         // Native local rows with `supportsNonInteractive: true`.
         "add-dir" | "advisor" | "agents" | "auto-mode-setup" | "autocompact" | "clear"
-        | "color" | "compact" | "config" | "context" | "effort" | "exit" | "extra-usage"
-        | "fast" | "focus" | "goal" | "mcp" | "model" | "output-style" | "recap"
-        | "reload-plugins" | "reload-skills" | "rename" | "skill-doctor" | "stop" | "usage"
-        | "usage-credits" | "version" => (Some(Local), false, true),
+        | "color" | "compact" | "config" | "context" | "effort" | "extra-usage" | "fast"
+        | "focus" | "goal" | "mcp" | "model" | "output-style" | "recap" | "reload-plugins"
+        | "reload-skills" | "rename" | "skill-doctor" | "usage" | "usage-credits" | "version" => {
+            (Some(Local), false, true)
+        }
         // Native prompt rows. `statusline` is the only mapped row with
         // `disableNonInteractive: true`; the other prompt properties omit it.
         "statusline" => (Some(Prompt), true, false),
         "init" | "insights" | "security-review" | "team-onboarding" => (Some(Prompt), false, false),
+        // MZo selects the JSX exit/stop rows. Their Local NI twins belong
+        // only to the control allowlist, not the ordinary command pool.
+        "exit" | "stop" => (Some(LocalJsx), false, false),
         // Native local-jsx objects are excluded by MPe regardless of their
         // other UI-only flags.
         "autofix-pr" | "background" | "branch" | "brief" | "btw" | "bug" | "cd" | "chrome"
@@ -615,6 +619,12 @@ mod registry_tests {
                 .supports_non_interactive
         );
         assert_eq!(native_type("branch"), Some(LocalJsx));
+        for name in ["exit", "stop"] {
+            let command = reg.resolve(&name.into()).unwrap();
+            assert_eq!(command.native_type, Some(LocalJsx), "{name}");
+            assert_eq!(command.native_non_interactive_admission(), Some(false));
+            assert!(reg.get_handler(&name.into()).is_some());
+        }
         assert_eq!(native_type("init"), Some(Prompt));
         assert_eq!(native_type("statusline"), Some(Prompt));
         assert!(

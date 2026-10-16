@@ -44,7 +44,6 @@ const NATIVE_UNKNOWN_COMMAND_NAMES: &[&str] = &[
     "security-review",
 ];
 const NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT: usize = 41;
-const LOCAL_POLICY_GATED_PROMPT_ROW_COUNT: usize = 2;
 const NATIVE_UNKNOWN_ATTACHMENT_ORDER: &[&str] = &[
     "environment",
     "model",
@@ -1134,8 +1133,8 @@ async fn native_295_commands_fixture_replay_body() {
             );
             assert_eq!(
                 current_catalog.available_command_count,
-                NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT + LOCAL_POLICY_GATED_PROMPT_ROW_COUNT,
-                "the local Host context sets insights_policy_gate/team_onboarding_policy_gate=Some(true); Native effective policy is not captured, so this is an allowed local-context difference, not Native byte parity"
+                NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT,
+                "the ordinary headless command pool must match Native, including the enabled local policy prompts"
             );
 
             let reminder_marker = "The user's message starts with the slash command";
@@ -1191,11 +1190,10 @@ async fn native_295_commands_fixture_replay_body() {
                 "The user's message starts with the slash command /__native_unknown_295__",
             )];
             assert_eq!(native_reminder.matches("and 28 more").count(), 1);
-            let expected_local_reminder = native_reminder.replacen("and 28 more", "and 30 more", 1);
             assert_eq!(
                 outbound_reminder,
-                expected_local_reminder,
-                "only the derived remainder count reflects the two explicit local policy rows; all other reminder bytes remain source-aligned"
+                *native_reminder,
+                "all unknown-command reminder bytes, including the available-command remainder, match Native"
             );
             let harness_prompt_index = transcript_prompt_index(&harness_jsonl, case.prompt)
                 .expect("Harness JSONL persists the exact unknown-command prompt");
