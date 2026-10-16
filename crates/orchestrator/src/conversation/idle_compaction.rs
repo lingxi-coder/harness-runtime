@@ -479,11 +479,13 @@ mod tests {
         let state = IdleCompactionState::default();
         let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
         let (stopped_tx, mut stopped_rx) = tokio::sync::mpsc::unbounded_channel();
+        let first_started = started_tx.clone();
+        let first_stopped = stopped_tx.clone();
         state
-            .replace(|cancel| async move {
-                started_tx.send(1).unwrap();
+            .replace(move |cancel| async move {
+                first_started.send(1).unwrap();
                 cancel.cancelled().await;
-                stopped_tx.send(1).unwrap();
+                first_stopped.send(1).unwrap();
             })
             .await;
         assert_eq!(started_rx.recv().await, Some(1));
@@ -532,7 +534,7 @@ mod tests {
         tokio::task::yield_now().await;
         assert_eq!(fired_rx.await, Ok(()));
 
-        let (cancelled_tx, mut cancelled_rx) = tokio::sync::oneshot::channel();
+        let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
         state
             .replace(move |cancel| async move {
                 tokio::select! {
