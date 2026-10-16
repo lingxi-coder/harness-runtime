@@ -5343,7 +5343,7 @@ pub async fn build_with_credential_stack(
     ));
 
     // Finding 22: this is the ONE invoker `LocalFusionHandler` uses for every
-    // `/fusion` background-task panel (`register_fusion_handler` above binds
+    // `/fusion` background-task panel (`register_fusion_handler_with_recorder_factory` above binds
     // this exact `fusion_invoker` cell, and `tasks::handlers::local_fusion`
     // clones it verbatim into `SubagentInheritance::tool_invoker` for each
     // panel spawn — no other caller reaches this `Arc`). A FOREGROUND
