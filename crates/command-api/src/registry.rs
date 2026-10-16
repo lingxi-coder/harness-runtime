@@ -1986,7 +1986,7 @@ mod tests {
         let max_length = "a".repeat(256);
         let too_long = "b".repeat(257);
         let lone_surrogate =
-            Utf16JsonProjection::root_string("bad�".into(), vec![b'b' as u16, 0xd800]).unwrap();
+            Utf16JsonProjection::root_string("b�".into(), vec![b'b' as u16, 0xd800]).unwrap();
         let catalog = crate::model::HeadlessCommandCatalog {
             prompt_command_names: vec![
                 "valid-name_1:2.test".into(),
