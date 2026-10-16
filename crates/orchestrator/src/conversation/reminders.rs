@@ -1250,15 +1250,19 @@ impl ConversationOrchestrator {
         // (mutated by /model + resume), not the frozen boot `config.model`, so a
         // switch across a 200k↔1M window boundary re-sizes the budget correctly
         // (mirrors `build_prompt_context`).
-        let model = self.session.lock().await.model.clone();
-        let window =
-            compaction::context_window::context_window_for_model(&model, &self.api.active_betas())
-                as usize;
+        let (model, profile) = {
+            let s = self.session.lock().await;
+            (s.model.clone(), s.model_profile.clone())
+        };
+        let window = self
+            .api
+            .input_context_budget(&model, profile.as_deref())
+            .and_then(|n| usize::try_from(n).ok());
         let chars_per_token = memory::native_skill_listing_chars_per_token(Some(&model)) as usize;
         let settings = listing_snapshot.budget_settings;
         let Some(rendered_source) = crate::prompt::skill_listing::render_reminder(
             &new_entries,
-            Some(window),
+            window,
             chars_per_token,
             settings,
         ) else {
@@ -1928,11 +1932,10 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
                 .load(std::sync::atomic::Ordering::Relaxed),
         )
         .unwrap_or(i64::MAX);
-        let context_window = i64::try_from(compaction::effective_context_window_size(
-            &model,
-            &self.api.active_betas(),
-        ))
-        .unwrap_or(i64::MAX);
+        let profile = self.session.lock().await.model_profile.clone();
+        let context_window =
+            i64::try_from(self.api.input_context_budget(&model, profile.as_deref())?)
+                .unwrap_or(i64::MAX);
         let budget = tt::resolve_budget(None);
         let body = {
             let mut ledger = self

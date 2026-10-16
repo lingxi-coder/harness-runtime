@@ -200,3 +200,5 @@ pub use history::{
     CacheControl, CacheEdit, CacheScope, ContentBlock, Message, ResponseFormat, SystemBlock,
     ToolChoice, ToolDeclaration,
 };
+
+pub use lingxi_llm_client::client::context::ResolvedContext;

@@ -60,9 +60,8 @@ pub(super) async fn handle_max_output_tokens(
 
         state.max_output_tokens_recovery_count =
             state.max_output_tokens_recovery_count.saturating_add(1);
-        // A clean nudge retry never carries an escalated override forward
-        // (TS sets `maxOutputTokensOverride: undefined` here).
-        state.max_output_tokens_override = None;
+        // The caller recomputes the continuation budget from this response's
+        // selected route and usage. No stale override is carried across routes.
         state.output_recovery_actions += 1;
         return Ok(TurnStepOutcome::Continue(
             super::NativeQueryTransition::InPlaceRetry,

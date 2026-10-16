@@ -5,8 +5,8 @@ use lingxi_core::host::OutputEvent;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 use llm_runtime::{ContentBlock as LlmContentBlock, HistoryResponse, LlmError};
 use orchestrator::test_support::{
-    mock_message_response, noop_hook_executor, MockOutputStream, NoOpPermissionGate,
-    StaticMemoryProvider,
+    mock_message_response, noop_hook_executor, MockOutputStream, MockStreamingApiClient,
+    NoOpPermissionGate, StaticMemoryProvider,
 };
 use orchestrator::{ConversationOrchestrator, OrchestratorApiClient, OrchestratorConfig};
 use std::collections::VecDeque;
@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 struct PtlMockApi {
     queue: Mutex<VecDeque<Result<HistoryResponse, LlmError>>>,
     captured_lens: Mutex<Vec<usize>>,
+    context: Option<llm_runtime::ResolvedContext>,
 }
 
 impl PtlMockApi {
@@ -26,6 +27,7 @@ impl PtlMockApi {
         Self {
             queue: Mutex::new(VecDeque::from(script)),
             captured_lens: Mutex::new(Vec::new()),
+            context: None,
         }
     }
     async fn call_lens(&self) -> Vec<usize> {
@@ -35,6 +37,14 @@ impl PtlMockApi {
 
 #[async_trait]
 impl OrchestratorApiClient for PtlMockApi {
+    fn context_budget(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Result<Option<llm_runtime::ResolvedContext>, LlmError> {
+        Ok(self.context.clone())
+    }
+
     async fn messages_create(
         &self,
         request: orchestrator::OrchestratorApiRequest,
@@ -104,17 +114,39 @@ fn make_orch(
     api: Arc<PtlMockApi>,
     summary: Option<Arc<SummaryClient>>,
 ) -> (Arc<ConversationOrchestrator>, Arc<MockOutputStream>) {
+    make_orch_with_streaming(api, summary, None)
+}
+
+fn make_orch_with_streaming(
+    api: Arc<PtlMockApi>,
+    summary: Option<Arc<SummaryClient>>,
+    streaming: Option<Arc<MockStreamingApiClient>>,
+) -> (Arc<ConversationOrchestrator>, Arc<MockOutputStream>) {
     let output = Arc::new(MockOutputStream::new());
-    let mut orch = ConversationOrchestrator::new(
-        OrchestratorConfig::default(),
-        api,
-        Arc::new(tool_api::registry::ToolRegistry::new()),
-        noop_hook_executor(),
-        Arc::new(NoOpPermissionGate),
-        output.clone(),
-        Arc::new(StaticMemoryProvider::empty()),
-        std::env::temp_dir(),
-    );
+    let mut orch = if let Some(streaming) = streaming {
+        ConversationOrchestrator::new_with_streaming(
+            OrchestratorConfig::default(),
+            api,
+            streaming,
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+    } else {
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api,
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            output.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        )
+    };
     if let Some(summary) = summary {
         let slot = Arc::new(sidequery::CacheSafeParamsSlot::new());
         let runner = Arc::new(
@@ -128,7 +160,7 @@ fn make_orch(
                 u64::MAX,
             )));
     }
-    (Arc::new(orch), output)
+    (ConversationOrchestrator::into_shared(orch), output)
 }
 
 /// Seed `rounds` API rounds (`user, assistant(distinct id)` pairs) so the head
@@ -236,6 +268,122 @@ async fn failed_reactive_summary_keeps_all_original_messages_and_does_not_retry(
     assert_eq!(api.call_lens().await.len(), 1);
     assert_eq!(orch.session().lock().await.history[..before.len()], before);
     assert!(output.snapshot().await.iter().any(|event| matches!(event, OutputEvent::Text { text } if text.string_at("") == Some("Prompt is too long · automatic compaction failed: summarization produced empty response"))));
+    assert!(!output
+        .snapshot()
+        .await
+        .iter()
+        .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. })));
+}
+
+fn input_budget_error() -> LlmError {
+    LlmError::InputBudgetExceeded {
+        input_tokens: 300000,
+        budget: 272000,
+        estimated: true,
+    }
+}
+
+#[tokio::test]
+async fn soft_input_budget_recovers_accumulated_history_in_both_drivers() {
+    for streaming in [false, true] {
+        let mut api = PtlMockApi::new(vec![Err(input_budget_error()), ok_text("recovered")]);
+        let profiles = lingxi_llm_client::builtin_providers().unwrap();
+        let profile = profiles
+            .iter()
+            .find(|p| p.profile_name == "openai")
+            .unwrap();
+        let model = profile
+            .models
+            .iter()
+            .find(|m| m.request_model == "gpt-6-astra")
+            .unwrap();
+        api.context = Some(
+            lingxi_llm_client::client::context::resolve_context(
+                profile,
+                model,
+                &Default::default(),
+                None,
+                &Default::default(),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            api.context.as_ref().unwrap().effective_input_budget,
+            Some(272000)
+        );
+        let api = Arc::new(api);
+        let summary = Arc::new(SummaryClient {
+            result: Ok("<summary>preserved work</summary>"),
+            requests: std::sync::Mutex::new(Vec::new()),
+        });
+        let stream_api = streaming.then(|| {
+            Arc::new(MockStreamingApiClient::with_open_error(
+                input_budget_error(),
+                vec![],
+            ))
+        });
+        let (orch, output) =
+            make_orch_with_streaming(api.clone(), Some(summary.clone()), stream_api.clone());
+        seed_rounds(&orch, 8).await;
+        {
+            let session = orch.session();
+            let mut session = session.lock().await;
+            for message in &mut session.history {
+                match message {
+                    ConversationMessage::User { content, .. }
+                    | ConversationMessage::Assistant { content, .. } => {
+                        *content = vec![ContentBlock::Text {
+                            text: "x".repeat(56250),
+                            citations: None,
+                        }];
+                    }
+                    _ => {}
+                }
+            }
+            let estimate = compaction::grouping::estimate_tokens_for_range(&session.history);
+            assert_eq!(estimate, 225008); // Each block rounds its half token upward.
+            assert!(estimate < compaction::thresholds::threshold_for_input_budget(272000));
+        }
+        let oldest = orch.session().lock().await.history[0].clone();
+        if streaming {
+            orch.run_turn_streaming("trigger").await.unwrap();
+        } else {
+            orch.run_turn("trigger").await.unwrap();
+        }
+        assert_eq!(
+            api.call_lens().await.len(),
+            2,
+            "one successful retry after summarization"
+        );
+        if let Some(stream_api) = stream_api {
+            assert_eq!(stream_api.captured_calls().await.len(), 1);
+        }
+        let requests = summary.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(
+            requests[0].messages.contains(&oldest),
+            "oldest request must reach the summarizer"
+        );
+        drop(requests);
+        assert!(output.snapshot().await.iter().any(|event| matches!(event, OutputEvent::Text { text } if text.string_at("") == Some("recovered"))));
+    }
+}
+
+#[tokio::test]
+async fn failed_soft_budget_recovery_keeps_history_and_the_local_policy_error() {
+    let api = Arc::new(PtlMockApi::new(vec![Err(input_budget_error())]));
+    let summary = Arc::new(SummaryClient {
+        result: Ok(""),
+        requests: std::sync::Mutex::new(Vec::new()),
+    });
+    let (orch, output) = make_orch(api.clone(), Some(summary.clone()));
+    seed_rounds(&orch, 8).await;
+    let before = orch.session().lock().await.history.clone();
+    orch.run_turn("trigger").await.unwrap();
+    assert_eq!(summary.requests.lock().unwrap().len(), 1);
+    assert_eq!(api.call_lens().await.len(), 1);
+    assert_eq!(orch.session().lock().await.history[..before.len()], before);
+    assert!(output.snapshot().await.iter().any(|event| matches!(event, OutputEvent::Text { text } if text.string_at("").is_some_and(|text| text.contains("Application input budget exceeded")))));
     assert!(!output
         .snapshot()
         .await

@@ -796,8 +796,10 @@ impl ConversationOrchestrator {
         // `DeferralState` is owned by the registry and restored on resume, so a
         // prior ToolSearch result remains available without exposing the rest
         // of the deferred catalog.
-        let context_window =
-            compaction::context_window::context_window_for_model(&model, &self.api.active_betas());
+        let context_window = self
+            .api
+            .input_context_budget(&model, model_profile.as_deref())
+            .unwrap_or(0);
         let exact_deferred_tokens = if self.tools.deferral().auto_percentage().is_some()
             && request_supported
             && has_deferred_candidates

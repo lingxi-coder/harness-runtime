@@ -27,34 +27,40 @@ pub trait OutputSink: Send + Sync {
     /// Emit free-form text. In plain mode goes straight to stdout; in JSON
     /// mode goes as a `{"event":"text",…}` line.
     async fn text(&self, s: &str);
+    /// Emit assistant text with exact source units in machine-readable sinks.
+    async fn source_text(&self, text: &Utf16JsonProjection) {
+        self.text(&display_projection(text)).await;
+    }
     /// Emit a `turn_start` marker. No-op in plain mode.
     async fn turn_start(&self);
     /// Emit a `turn_end` marker with stop reason + cost. No-op in plain
     /// mode except that it terminates emitted assistant text with one newline.
     async fn turn_end(&self, stop_reason: &str, total_usd: f64, in_tokens: u64, out_tokens: u64);
     /// Emit a tool-call announcement.
-    async fn tool_call(&self, tool: &str, input: &serde_json::Value);
+    async fn tool_call(&self, tool: &str, input: &Utf16JsonProjection);
     /// Emit a tool-result announcement.
-    async fn tool_result(&self, tool: &str, result: &serde_json::Value);
+    async fn tool_result(&self, tool: &str, result: &Utf16JsonProjection);
     /// Emit a coalescible liveness update for a still-running tool.
     async fn tool_heartbeat(&self, id: &str, tool: &str, elapsed_ms: u64);
     /// Emit the output of a slash command.
     async fn command_output(&self, name: &str, display: &str);
+    /// Emit command output without converting source units through a Rust string.
+    async fn command_output_source(&self, name: &str, display: &Utf16JsonProjection) {
+        self.command_output(name, &display_projection(display))
+            .await;
+    }
     /// Emit a Mod log line outside assistant/model text.
-    async fn mod_log(&self, plugin: &str, text: &str);
+    async fn mod_log(&self, plugin: &str, text: &Utf16JsonProjection);
     /// Transient notification. Plain output has no persistent toast surface.
-    async fn mod_toast(&self, _plugin: &str, _text: &str, _timeout_ms: u64) {}
+    async fn mod_toast(&self, _plugin: &str, _text: &Utf16JsonProjection, _timeout_ms: u64) {}
     /// Pinned status; plain output has no live status surface.
-    async fn mod_status(&self, _plugin: &str, _text: Option<&str>) {}
+    async fn mod_status(&self, _plugin: &str, _text: Option<&Utf16JsonProjection>) {}
     /// Emit an error. Plain mode goes to stderr; JSON mode goes to stdout.
     async fn error(&self, code: &str, message: &str);
     /// Emit a source-backed error. Human sinks use the projection's display
     /// text; machine-readable sinks preserve its exact UTF-16 string value.
     async fn source_error(&self, code: &str, message: &Utf16JsonProjection) {
-        let display = message
-            .string_at("")
-            .expect("source error message is a root string");
-        self.error(code, display).await;
+        self.error(code, &display_projection(message)).await;
     }
 }
 
@@ -109,10 +115,10 @@ impl OutputSink for PlainSink {
         }
         *state = PlainTextState::default();
     }
-    async fn tool_call(&self, tool: &str, _input: &serde_json::Value) {
+    async fn tool_call(&self, tool: &str, _input: &Utf16JsonProjection) {
         self.write_line(&format!("[tool: {tool}]")).await;
     }
-    async fn tool_result(&self, _tool: &str, _result: &serde_json::Value) {
+    async fn tool_result(&self, _tool: &str, _result: &Utf16JsonProjection) {
         if self.err.is_terminal() {
             let _ = self.err.write_record(b"\r\x1b[2K").await;
         }
@@ -129,8 +135,8 @@ impl OutputSink for PlainSink {
     async fn command_output(&self, _name: &str, display: &str) {
         self.write_line(display).await;
     }
-    async fn mod_log(&self, plugin: &str, text: &str) {
-        self.write_line(&format!("{plugin}: {text}")).await;
+    async fn mod_log(&self, plugin: &str, text: &Utf16JsonProjection) {
+        self.write_line(&format!("{plugin}: {}", display_projection(text))).await;
     }
     async fn error(&self, _code: &str, message: &str) {
         let _ = self.err.write_line(&format!("lingxi-cli: {message}")).await;
@@ -161,8 +167,22 @@ impl JsonSink {
 
     async fn emit_projected(&self, frame: &Utf16JsonProjection) {
         let line = crate::headless::stream_json::serialize_projected_ndjson_line(frame)
-            .expect("source error frame is valid JSON");
+            .expect("source output frame is valid JSON");
         let _ = self.out.write_record(line.as_bytes()).await;
+    }
+
+    async fn emit_source(
+        &self,
+        frame: serde_json::Value,
+        pointer: &str,
+        source: &Utf16JsonProjection,
+    ) {
+        let mut frame =
+            Utf16JsonProjection::from_serde_value(&frame).expect("machine frame is valid JSON");
+        frame
+            .replace_pointer_projection(pointer, source.clone())
+            .expect("source field exists");
+        self.emit_projected(&frame).await;
     }
 
     fn ts() -> String {
@@ -175,6 +195,14 @@ impl OutputSink for JsonSink {
     async fn text(&self, s: &str) {
         self.emit(json!({"event": "text", "ts": Self::ts(), "content": s}))
             .await;
+    }
+    async fn source_text(&self, text: &Utf16JsonProjection) {
+        self.emit_source(
+            json!({"event": "text", "ts": Self::ts(), "content": null}),
+            "/content",
+            text,
+        )
+        .await;
     }
     async fn turn_start(&self) {
         self.emit(json!({
@@ -193,22 +221,20 @@ impl OutputSink for JsonSink {
         }))
         .await;
     }
-    async fn tool_call(&self, tool: &str, input: &serde_json::Value) {
-        self.emit(json!({
-            "event": "tool_call",
-            "ts": Self::ts(),
-            "tool": tool,
-            "input": input,
-        }))
+    async fn tool_call(&self, tool: &str, input: &Utf16JsonProjection) {
+        self.emit_source(
+            json!({"event":"tool_call", "tool":tool, "ts":Self::ts(), "input":null}),
+            "/input",
+            input,
+        )
         .await;
     }
-    async fn tool_result(&self, tool: &str, result: &serde_json::Value) {
-        self.emit(json!({
-            "event": "tool_result",
-            "ts": Self::ts(),
-            "tool": tool,
-            "result": result,
-        }))
+    async fn tool_result(&self, tool: &str, result: &Utf16JsonProjection) {
+        self.emit_source(
+            json!({"event":"tool_result", "tool":tool, "ts":Self::ts(), "result":null}),
+            "/result",
+            result,
+        )
         .await;
     }
     async fn tool_heartbeat(&self, id: &str, tool: &str, elapsed_ms: u64) {
@@ -230,33 +256,37 @@ impl OutputSink for JsonSink {
         }))
         .await;
     }
-    async fn mod_log(&self, plugin: &str, text: &str) {
-        self.emit(json!({
-            "event": "ui_log",
-            "ts": Self::ts(),
-            "plugin": plugin,
-            "text": text,
-        }))
+    async fn command_output_source(&self, name: &str, display: &Utf16JsonProjection) {
+        self.emit_source(
+            json!({"event": "command_output", "ts": Self::ts(), "name": name, "display": null}),
+            "/display",
+            display,
+        )
         .await;
     }
-    async fn mod_toast(&self, plugin: &str, text: &str, timeout_ms: u64) {
-        self.emit(json!({
-            "event": "ui_toast",
-            "ts": Self::ts(),
-            "plugin": plugin,
-            "text": text,
-            "timeout_ms": timeout_ms,
-        }))
+    async fn mod_log(&self, plugin: &str, text: &Utf16JsonProjection) {
+        self.emit_source(
+            json!({"event":"ui_log", "plugin":plugin, "ts":Self::ts(), "text":null}),
+            "/text",
+            text,
+        )
         .await;
     }
-    async fn mod_status(&self, plugin: &str, text: Option<&str>) {
-        self.emit(json!({
-            "event": "ui_status",
-            "ts": Self::ts(),
-            "plugin": plugin,
-            "text": text,
-        }))
-        .await;
+    async fn mod_toast(&self, plugin: &str, text: &Utf16JsonProjection, timeout_ms: u64) {
+        self.emit_source(json!({"event":"ui_toast", "plugin":plugin, "timeout_ms":timeout_ms, "ts":Self::ts(), "text":null}), "/text", text).await;
+    }
+    async fn mod_status(&self, plugin: &str, text: Option<&Utf16JsonProjection>) {
+        if let Some(text) = text {
+            self.emit_source(
+                json!({"event":"ui_status", "plugin":plugin, "ts":Self::ts(), "text":null}),
+                "/text",
+                text,
+            )
+            .await;
+        } else {
+            self.emit(json!({"event":"ui_status", "plugin":plugin, "ts":Self::ts(), "text":null}))
+                .await;
+        }
     }
     async fn error(&self, code: &str, message: &str) {
         self.emit(json!({
@@ -408,4 +438,8 @@ mod tests {
             assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "{case}");
         }
     }
+}
+
+fn display_projection(text: &Utf16JsonProjection) -> String {
+    String::from_utf16_lossy(&text.string_units("").expect("output text is a root string"))
 }

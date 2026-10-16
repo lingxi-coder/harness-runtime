@@ -224,6 +224,18 @@ impl CompactionOrchestrator {
         self.autocompact_threshold()
     }
 
+    /// Apply the actual route's input budget. None is unknown, not a Claude default.
+    pub fn refresh_context_budget(&self, input_budget: Option<u64>) -> u64 {
+        if self.model_derived_threshold {
+            let threshold = input_budget
+                .map(crate::thresholds::threshold_for_input_budget)
+                .unwrap_or(u64::MAX);
+            self.autocompact_threshold
+                .store(threshold, Ordering::Relaxed);
+        }
+        self.autocompact_threshold()
+    }
+
     /// Run a user-requested `/compact` pass unconditionally.
     ///
     /// Manual compaction is deliberately separate from the automatic

@@ -106,6 +106,14 @@ pub enum ModelBillingModeDto {
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[allow(missing_docs)]
 pub struct ModelPricingTierDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_at: Option<String>,
     pub context_threshold_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_per_million: Option<f64>,
@@ -153,11 +161,26 @@ pub struct ModelCapabilitiesDto {
     pub structured_output: bool,
 }
 
+/// Context policy derived from the selected model connection, independent of usage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+#[allow(missing_docs)]
+pub struct ModelContextBudgetDto {
+    pub policy: String,
+    pub effective_input_budget: Option<u64>,
+    pub hard_input_limit: Option<u64>,
+    pub standard_price_input_tokens: Option<u64>,
+    pub recommendation_input_tokens: Option<u64>,
+    pub recommendation_source: Option<String>,
+}
+
 /// Full details for one provider-qualified model choice.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 #[allow(missing_docs)]
 pub struct ModelDetailsDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_budget: Option<ModelContextBudgetDto>,
     pub reference: String,
     pub provider_id: String,
     pub provider_label: String,

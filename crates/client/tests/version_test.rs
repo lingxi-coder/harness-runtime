@@ -32,15 +32,16 @@ fn version_is_semver() {
     }
 }
 
-/// Major 26 removes the legacy ToolResult raw diff fields and makes the
+/// Major 27 removes the legacy ToolResult raw diff fields and makes the
 /// host-derived tool header/display projections required. Major 25 moved
 /// `ClientEvent::Error.message` to the source-preserving string carrier.
 /// Side Chat additions append after the frozen ordinal prefix.
+/// Major 26 adds context policy and pricing interval fields to model records.
 ///
 /// This test is the deliberate second lock on the version: the structural guard
 /// only asks that SOME bump happened, so without this a later edit could ride
 /// along on this bump without anyone choosing it.
 #[test]
 fn version_is_twenty_six_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "26.0.0");
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "27.0.0");
 }

@@ -42,11 +42,26 @@ fn build_orch(
     Arc<MockOutputStream>,
     Arc<ConversationOrchestrator>,
 ) {
+    build_orch_with_budget(turns, None)
+}
+
+fn build_orch_with_budget(
+    turns: Vec<Vec<llm_runtime::HistoryEvent>>,
+    budget: Option<u32>,
+) -> (
+    Arc<MockStreamingApiClient>,
+    Arc<MockOutputStream>,
+    Arc<ConversationOrchestrator>,
+) {
+    let host = match budget {
+        Some(value) => MockApiClient::new(Vec::new()).with_recovery_budget(value),
+        None => MockApiClient::new(Vec::new()),
+    };
     let api = Arc::new(MockStreamingApiClient::with_turns(turns));
     let output = Arc::new(MockOutputStream::new());
     let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig::default(),
-        Arc::new(MockApiClient::new(Vec::new())),
+        Arc::new(host),
         api.clone(),
         Arc::new(ToolRegistry::new()),
         orchestrator::test_support::noop_hook_executor(),
@@ -163,4 +178,24 @@ async fn streaming_four_consecutive_max_tokens_exhausts_recovery() {
         final_message_id, last_id,
         "final_message_id must point at the surfaced terminal max_tokens assistant message"
     );
+}
+
+#[tokio::test]
+async fn streaming_visible_partial_is_retained_with_increased_continuation_budget() {
+    let (api, _, orch) = build_orch_with_budget(
+        vec![
+            turn_ending_with(1, "max_tokens"),
+            turn_ending_with(2, "end_turn"),
+        ],
+        Some(16000),
+    );
+    orch.run_turn_streaming("write a lot").await.unwrap();
+    let calls = api.captured_calls().await;
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].output_budget, None);
+    assert_eq!(calls[1].output_budget, Some(16000));
+    assert_eq!(count_nudges(&calls[1].messages), 1);
+    assert!(calls[1].messages.iter().any(|m| matches!(m,
+        ConversationMessage::Assistant { content, .. } if content.iter().any(|b|
+            matches!(b, ContentBlock::Text { text, .. } if text == "partial")))));
 }

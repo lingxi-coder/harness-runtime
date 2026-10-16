@@ -99,6 +99,9 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
                 // Application output budgets are SDK execution policy, not
                 // host-published display metadata. Preserve this SDK-only
                 // setting while the host remains authoritative for display facts.
+                if model.metadata.context.is_none() {
+                    model.metadata.context = source.metadata.context.clone();
+                }
                 model.metadata.application_output_tokens =
                     source.metadata.application_output_tokens;
                 // The host owns its six conversation capability switches. Keep

@@ -720,6 +720,7 @@ pub fn next_step_with_backoff(
         | LlmError::PermissionDenied { .. }
         | LlmError::RequestDispatchRejected { .. }
         | LlmError::ContextOverflow { .. }
+        | LlmError::InputBudgetExceeded { .. }
         | LlmError::RequestTooLarge
         | LlmError::FileUploadOutcomeUnknown { .. }
         | LlmError::QuotaExceeded

@@ -930,12 +930,10 @@ impl StreamingTurnDriver<'_> {
         // `"prompt_too_long"`). Use the exact same custom beta set as the
         // provider request so context-1m sessions are not preempted at the
         // default 200k boundary.
-        let active_betas = orch.api.active_betas();
-        let warning = compaction::calculate_token_warning_state(
+        let warning = orch.api.context_warning(
             compaction::grouping::estimate_tokens_for_range(&prepared.snapshot),
             &prepared.model,
-            &active_betas,
-            true,
+            prepared.model_profile.as_deref(),
         );
         if warning.is_at_blocking_limit {
             tracing::warn!(
@@ -1450,8 +1448,10 @@ impl StreamingTurnDriver<'_> {
             // never reaches the pump. The proactive blocking-limit preempt
             // above undershot the server's own limit, so recover REACTIVELY
             // via the SAME helper the batched path uses
-            // (`call_api_with_ptl_recovery`): truncate-head xN -> one full
-            // compact -> retry. On success we replay the recovered
+            // (`call_api_with_ptl_recovery`): summarize while preserving the
+            // original history, then retry. Local application input budgets
+            // use this same recovery without inventing provider overflow. On
+            // success we replay the recovered
             // non-streaming response exactly like the 529 fallback below; on
             // exhaustion we end the turn with the byte-exact prompt_too_long /
             // rapid_refill copy — identical to the proactive preempt and the
@@ -1460,12 +1460,7 @@ impl StreamingTurnDriver<'_> {
             // the 529 overload fallback; PTL recovery is the always-on batched
             // behavior). Previously a streaming 413 bubbled as a hard
             // `OrchestratorError::Streaming` error (documented divergence).
-            Err(error)
-                if matches!(
-                    error.classification_source(),
-                    LlmError::ContextOverflow { .. }
-                ) =>
-            {
+            Err(error) if error.context_recovery_token_gap().is_some() => {
                 // Re-snapshot history — the per-turn `snapshot` was MOVED into
                 // the failed `stream()` call. Prepend the additional-context
                 // meta message, like every `callModel` (claude-code `A6n`).
@@ -3543,11 +3538,10 @@ impl StreamingTurnDriver<'_> {
                 || route.model.clone(),
                 |listing| listing.display_model.clone(),
             );
-            let window = listing
-                .and_then(|listing| listing.metadata.context_window_tokens)
-                .unwrap_or_else(|| {
-                    llm_runtime::model::context_window::context_window_for_model(&route.model, &[])
-                });
+            let window = orch
+                .api
+                .input_context_budget(&route.model, route.profile.as_deref())
+                .unwrap_or(0);
             (label, window)
         };
         let (from_label, from_window) = facts(&current);

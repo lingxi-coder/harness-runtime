@@ -636,6 +636,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     provider_id: "anthropic".to_string(),
                     provider_label: "Anthropic".to_string(),
                     models: vec![client::protocol::listings::ModelDetailsDto {
+                        context_budget: None,
                         reference: "anthropic/claude-opus-4-8".to_string(),
                         provider_id: "anthropic".to_string(),
                         provider_label: "Anthropic".to_string(),

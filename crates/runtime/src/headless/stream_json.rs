@@ -5316,6 +5316,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auxiliary_frames_preserve_exact_utf16_source_units() {
+        let stream =
+            StreamJsonStream::new(make_params("source-units"), Output::new(tokio::io::sink()));
+        let mut rx = stream.drain_rx.lock().await.take().unwrap();
+        let units = vec![0xd800, 0x2028, 0xdc00];
+        let text =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        stream.emit_mod_log("test", &text).await;
+        stream.emit_mod_toast("test", &text, 10).await;
+        stream.emit_mod_status("test", Some(&text)).await;
+        stream.emit_system_notice(&text, true).await;
+        stream.emit_compact_summary("summary", &text).await;
+        for pointer in ["/text", "/text", "/text", "/message", "/message/content"] {
+            let OutboundMsg::Line(line) = rx.try_recv().unwrap() else {
+                panic!("expected JSON frame")
+            };
+            let frame = Utf16JsonProjection::parse(&line).unwrap();
+            assert_eq!(
+                frame.string_units(pointer),
+                Some(units.clone()),
+                "{pointer}: {line}"
+            );
+            assert!(!line.contains('�'));
+            assert!(!line.contains('\u{2028}'));
+        }
+    }
+
+    #[tokio::test]
     async fn mod_log_matches_claude_stream_json_system_frame() {
         let stream = StreamJsonStream::new(make_params("sess-mod"), Output::new(tokio::io::sink()));
         let mut rx = stream.drain_rx.lock().await.take().unwrap();

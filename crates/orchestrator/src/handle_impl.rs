@@ -3714,9 +3714,10 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 session.history.clone(),
             )
         };
-        let active_betas = self.api.active_betas();
-        let max_context_tokens =
-            compaction::context_window::context_window_for_model(&model, &active_betas);
+        let max_context_tokens = self
+            .api
+            .input_context_budget(&model, model_profile.as_deref())
+            .unwrap_or(0);
 
         // The system prompt and tool schemas are the bytes the next main-loop
         // request will advertise. Keep MCP definitions separate from ordinary

@@ -837,6 +837,9 @@ fn parse_model_entry(
                 .unwrap_or_else(|| {
                     native_provider_model_metadata(provider_kind, id).unwrap_or_default()
                 });
+            if let Some(context) = &metadata.context {
+                context.validate()?;
+            }
             Ok(ModelProfile {
                 display_model: id.to_string(),
                 request_model: id.to_string(),
@@ -1072,36 +1075,31 @@ fn json_type_name(value: &Value) -> &'static str {
 }
 
 fn anthropic_metadata(model: &str) -> lingxi_core::host::ModelMetadata {
-    use crate::model::context_window::{context_window_for_model, output_token_limit_for_model};
-
-    let rates = match model {
-        "claude-sonnet-5" => Some((2.0, 10.0, 0.2, 2.5)),
-        "claude-opus-5" => Some((5.0, 25.0, 0.5, 6.25)),
-        "claude-opus-5-5" => Some((4.0, 20.0, 0.2, 5.0)),
-        "claude-fable-5-1" | "claude-mythos-5-1" => Some((10.0, 50.0, 0.25, 12.5)),
-        "claude-haiku-4-5" => Some((1.0, 5.0, 0.1, 1.25)),
-        "claude-opus-4-8" | "claude-opus-4-7" | "claude-opus-4-6" => Some((5.0, 25.0, 0.5, 6.25)),
-        "claude-sonnet-4-6" => Some((3.0, 15.0, 0.3, 3.75)),
-        _ => None,
+    let profiles = lingxi_llm_client::builtin_providers().expect("SDK catalog is valid");
+    let Some(profile) = profiles.iter().find(|p| p.profile_name == "anthropic") else {
+        return Default::default();
     };
-    lingxi_core::host::ModelMetadata {
-        input_modalities: vec!["text".to_string(), "image".to_string(), "pdf".to_string()],
-        output_modalities: vec!["text".to_string()],
-        context_window_tokens: Some(context_window_for_model(model, &[])),
-        max_output_tokens: Some(output_token_limit_for_model(model)),
-        pricing: rates.map(|(input, output, cache_read, cache_write)| {
-            lingxi_core::host::ModelPricing {
-                billing_mode: lingxi_core::host::ModelBillingMode::PerToken,
-                input_per_million: Some(input),
-                output_per_million: Some(output),
-                cache_read_per_million: Some(cache_read),
-                cache_write_per_million: Some(cache_write),
-                source: Some("official".to_string()),
-                ..lingxi_core::host::ModelPricing::default()
-            }
-        }),
-        ..lingxi_core::host::ModelMetadata::default()
-    }
+    let Some(row) = profile.models.iter().find(|m| m.request_model == model) else {
+        return Default::default();
+    };
+    let mut metadata: lingxi_core::host::ModelMetadata =
+        serde_json::from_value(serde_json::to_value(&row.metadata).expect("metadata serializes"))
+            .expect("metadata contracts agree");
+    metadata.pricing = row
+        .pricing
+        .as_ref()
+        .map(|p| lingxi_core::host::ModelPricing {
+            billing_mode: lingxi_core::host::ModelBillingMode::PerToken,
+            input_per_million: p.input_per_million,
+            output_per_million: p.output_per_million,
+            cache_read_per_million: p.cache_read_per_million,
+            cache_write_per_million: p.cache_write_per_million,
+            reasoning_per_million: p.reasoning_per_million,
+            source: p.source.clone(),
+            ..Default::default()
+        });
+    crate::catalog::enrich_context_metadata(profile, row, &mut metadata);
+    metadata
 }
 
 /// Built-in Anthropic Claude model profiles used by desktop/mobile hosts.

@@ -32,6 +32,10 @@ pub fn lower_model_details(listing: &lingxi_core::host::ModelListing) -> ModelDe
                 .iter()
                 .map(|tier| ModelPricingTierDto {
                     context_threshold_tokens: tier.context_threshold_tokens,
+                    max_input_tokens: tier.max_input_tokens,
+                    service_tier: tier.service_tier.clone(),
+                    source: tier.source.clone(),
+                    verified_at: tier.verified_at.clone(),
                     input_per_million: tier.input_per_million,
                     output_per_million: tier.output_per_million,
                     cache_read_per_million: tier.cache_read_per_million,
@@ -42,6 +46,16 @@ pub fn lower_model_details(listing: &lingxi_core::host::ModelListing) -> ModelDe
             source: pricing.source.clone(),
         });
     ModelDetailsDto {
+        context_budget: listing.metadata.context_budget.as_ref().map(|c| {
+            crate::protocol::listings::ModelContextBudgetDto {
+                policy: c.policy.clone(),
+                effective_input_budget: c.effective_input_budget,
+                hard_input_limit: c.hard_input_limit,
+                standard_price_input_tokens: c.standard_price_input_tokens,
+                recommendation_input_tokens: c.recommendation_input_tokens,
+                recommendation_source: c.recommendation_source.clone(),
+            }
+        }),
         reference: lingxi_core::host::qualified_model_ref(
             &listing.request_model,
             Some(&listing.provider_id),

@@ -6019,6 +6019,37 @@ mod max_output_tokens_recovery_tests {
         ));
     }
 
+    #[tokio::test]
+    async fn visible_output_continues_with_route_resolved_larger_budget() {
+        let api =
+            Arc::new(MockApiClient::new(vec![max_tokens_response()]).with_recovery_budget(16000));
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let mut state = RecoveryState::default();
+        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            .await
+            .unwrap();
+        assert!(matches!(step, TurnStepOutcome::Continue(_)));
+        assert_eq!(state.max_output_tokens_override, Some(16000));
+        assert!(
+            state.retry_generation.is_none(),
+            "visible output must not be replayed"
+        );
+        assert_eq!(state.max_output_tokens_recovery_count, 1);
+        assert!(history(&orch)
+            .await
+            .iter()
+            .any(|m| matches!(m, ConversationMessage::Assistant { .. })));
+    }
+
     /// REC.A1: once escalated, a SECOND `max_tokens` TAKEs the armed override
     /// (so the retry used 64k) and, since the episode already escalated, falls
     /// through to the multi-turn nudge instead of escalating again — no

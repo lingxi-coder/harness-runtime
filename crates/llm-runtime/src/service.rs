@@ -2864,16 +2864,9 @@ impl ApiService {
             return Ok(None);
         }
         let observation = provider_metadata.payload_at("/llm_client/output_budget");
-        // Explicit task/user limits and an overflow-reduced same-route limit
-        // remain hard ceilings. Recovery must not erase their provenance.
-        if observation
-            .as_ref()
-            .and_then(|value| value.string_at("/source"))
-            .as_deref()
-            == Some("explicit")
-        {
-            return Ok(None);
-        }
+        // A request budget is recoverable after confirmed output exhaustion.
+        // The SDK bounds growth by this route's model and remaining context;
+        // administrative LINGXI_MAX_OUTPUT_TOKENS remains a hard ceiling.
         let issued = observation
             .as_ref()
             .and_then(|value| json_payload_u64_at(value, "/value"))
@@ -2882,9 +2875,7 @@ impl ApiService {
                     .as_ref()
                     .and_then(|value| json_payload_u64_at(value, "/provider_default"))
             });
-        let effective_context = crate::model::context_window::is_claude_family(model).then(|| {
-            crate::model::context_window::context_window_for_model(model, &self.custom_cli_betas)
-        });
+
         let Some(selected) = connection.models.iter().find(|row| {
             row.request_model == route.request_model
                 && row.display_model == route.display_model
@@ -2897,6 +2888,7 @@ impl ApiService {
             selected,
             lingxi_llm_client::RequestMode::Complete,
         );
+        let effective_context = selected.metadata.context_window_tokens;
         Ok(lingxi_llm_client::client::recovery_output_budget(
             context.profile(),
             &route.request_model,
@@ -2904,6 +2896,131 @@ impl ApiService {
             issued,
             effective_context,
         ))
+    }
+
+    /// Resolve the selected connection's context policy; no bare-name capacity cache.
+    pub fn resolve_context(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<crate::ResolvedContext, LlmError> {
+        self.resolve_context_for(
+            model,
+            profile,
+            &lingxi_llm_client::client::context::ContextRequest {
+                thinking: self
+                    .thinking()
+                    .ok()
+                    .map(|t| t != crate::model::thinking::ThinkingConfig::Disabled),
+                ..Default::default()
+            },
+            None,
+            None,
+        )
+    }
+
+    fn resolve_context_for(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        context_request: &lingxi_llm_client::client::context::ContextRequest,
+        output_tokens: Option<u32>,
+        service_tier: Option<lingxi_llm_client::protocol::ServiceTier>,
+    ) -> Result<crate::ResolvedContext, LlmError> {
+        let route = self.client.resolve_media_route(model, profile)?.main;
+        let profiles = self.client.provider_service_profiles();
+        let connection = profiles
+            .iter()
+            .find(|p| p.profile_name == route.profile_name)
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: "context route profile is missing".into(),
+            })?;
+        let selected = connection
+            .models
+            .iter()
+            .find(|m| {
+                m.request_model == route.request_model
+                    && m.display_model == route.display_model
+                    && m.billing_model == route.pricing_model.billing_model
+            })
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: "context route model is missing".into(),
+            })?;
+        let codec = lingxi_llm_client::CodecContext::for_model(
+            connection,
+            selected,
+            lingxi_llm_client::RequestMode::Complete,
+        );
+        let output = lingxi_llm_client::client::resolve_output_budget(
+            codec.profile(),
+            &selected.request_model,
+            output_tokens,
+        )
+        .ok()
+        .and_then(|budget| budget.value);
+        lingxi_llm_client::client::context::resolve_context(
+            connection,
+            selected,
+            context_request,
+            output,
+            &lingxi_llm_client::protocol::PricingContext {
+                service_tier,
+                unix_seconds: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()
+                    .map(|d| d.as_secs()),
+                ..Default::default()
+            },
+        )
+        .map_err(|e| LlmError::InvalidRequest {
+            message: e.to_string(),
+        })
+    }
+
+    /// Check each physical route before generation. Only a provider count may
+    /// produce ContextOverflow; approximations can enforce an application soft
+    /// budget but are explicitly identified as estimates in that local error.
+    async fn ensure_context_fit(&self, request: &LlmRequest) -> Result<(), LlmError> {
+        use lingxi_llm_client::protocol::{ContextPolicy, ThinkingMode};
+        // An opaque/overridden native model source may not have a catalog row.
+        // Do not borrow the route selector's limits for another wire identity.
+        if let Some(source) = request.input.model_source.as_ref() {
+            if source.string_at("").as_deref() != Some(request.input.model.as_str()) {
+                return Ok(());
+            }
+        }
+        let context = self.resolve_context_for(
+            &request.input.model,
+            request.profile.as_deref(),
+            &lingxi_llm_client::client::context::ContextRequest {
+                policy: (request.execution.query_source.as_deref() == Some("compaction"))
+                    .then_some(ContextPolicy::Long),
+                thinking: request
+                    .input
+                    .thinking
+                    .as_ref()
+                    .map(|t| t.mode != Some(ThinkingMode::Disabled)),
+                ..Default::default()
+            },
+            request.input.max_tokens,
+            request.input.service_tier,
+        )?;
+        let Some(budget) = context.effective_input_budget else {
+            return Ok(());
+        };
+        let estimate = crate::model::count_tokens::approximate_tokens(request);
+        if estimate < budget.saturating_sub(13_000.min(budget / 10)) {
+            return Ok(());
+        }
+        let mut counted = request.clone();
+        counted.profile = Some(context.profile_name.clone());
+        let exact = crate::model::count_tokens::try_count_tokens_exact(
+            self.client.as_ref(),
+            self.transport.clone(),
+            &counted,
+        )
+        .await?;
+        crate::model::context_admission::check(&context, estimate, exact)
     }
 
     pub fn resolve_media_route(
@@ -6360,6 +6477,7 @@ impl ApiService {
             LlmError::RateLimited { .. } => "rate_limited",
             // "prompt_too_long" — api-client `PromptTooLong { .. } => "prompt_too_long"` (:1147)
             LlmError::ContextOverflow { .. } => "prompt_too_long",
+            LlmError::InputBudgetExceeded { .. } => "input_budget_exceeded",
             // "request_too_large" — 2.1.212 error classifier: a 413 whose message
             // lacks "context window" → `"request_too_large"` (distinct from the
             // context-window `"prompt_too_long"` above).
@@ -7222,6 +7340,7 @@ impl ApiService {
             // refresh call to the IdP failed locally, so inventing a 401 here
             // would put a status in the transcript that no server ever sent.
             LlmError::OAuthRefreshDead
+            | LlmError::InputBudgetExceeded { .. }
             | LlmError::Transport { .. }
             | LlmError::TransportTimeout { .. }
             | LlmError::TlsCert { .. }
@@ -7453,6 +7572,7 @@ impl ApiService {
                     self.refresh_effort_settings(&mut req)?;
                     req.execution.resolve_native_effort = true;
                 }
+                self.ensure_context_fit(&req).await?;
                 let mut prepared = self.client.prepare_on(&req, self.transport.clone()).await?;
                 prepared.native_thinking_binding_controls_attempt = native_tbc_attempt.clone();
                 if suppress_context_1m_for_retry {
@@ -9151,6 +9271,7 @@ impl ApiService {
             // a thin wrapper transport that uses our already-modified request.
             self.refresh_effort_settings(&mut req)?;
             req.execution.resolve_native_effort = true;
+            self.ensure_context_fit(&req).await?;
             let mut prepared = match self.client.prepare_on(&req, self.transport.clone()).await {
                 Ok(p) => p,
                 Err(e) => return Err(e),

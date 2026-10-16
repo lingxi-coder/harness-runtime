@@ -506,6 +506,50 @@ async fn blocking_pre_compact_hook_skips_compaction_but_not_the_turn() {
 }
 
 #[tokio::test]
+async fn blocking_pre_compact_preserves_the_soft_input_budget_error_and_history() {
+    let probe = Arc::new(Probe::default());
+    let hooks = hook_executor_with(vec![(
+        Arc::new(RecordPreCompact {
+            probe: probe.clone(),
+            fail: false,
+            block: true,
+        }) as Arc<dyn BuiltinHookHandler>,
+        builtin_hook("record-pre-compact", HookEventType::PreCompact),
+    )])
+    .await;
+    let api = Arc::new(MockApiClient::new(Vec::new()));
+    api.set_fail_with(Some(llm_runtime::LlmError::InputBudgetExceeded {
+        input_tokens: 300000,
+        budget: 272000,
+        estimated: true,
+    }));
+    let output = Arc::new(MockOutputStream::new());
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        api.clone(),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        hooks,
+        Arc::new(NoOpPermissionGate),
+        output.clone(),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    )
+    .with_compaction(Arc::new(compaction::CompactionOrchestrator::new(u64::MAX)));
+    seed_history(&orch, 16).await;
+    let before = orch.session().lock().await.history.clone();
+    orch.run_turn("trigger").await.unwrap();
+    assert!(output.snapshot().await.iter().any(|event| matches!(event, OutputEvent::Text { text } if text.string_at("").is_some_and(|text| text.contains("Application input budget exceeded")))));
+    assert!(probe.pre_fired.load(Ordering::SeqCst));
+    assert_eq!(api.captured_msgs().await.len(), 1);
+    assert_eq!(orch.session().lock().await.history[..before.len()], before);
+    assert!(!output
+        .snapshot()
+        .await
+        .iter()
+        .any(|event| matches!(event, OutputEvent::CompactionCompleted { .. })));
+}
+
+#[tokio::test]
 async fn manual_compact_runs_reload_session_start_then_post_compact() {
     let probe = Arc::new(Probe::default());
     let setup = Arc::new(RecordCompactSetup {

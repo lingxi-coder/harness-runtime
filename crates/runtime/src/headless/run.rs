@@ -2072,7 +2072,7 @@ async fn run_slash_command_with_budget(
         }
         SlashDispatchResult::Handled { display } => {
             let display_text = display.string_at("").unwrap_or_default();
-            sink.command_output("", display_text).await;
+            sink.command_output_source("", &display).await;
             // G002: `/fusion` spawns a background `local_fusion` task and
             // returns `Handled` immediately (design: no auto-turn). In print
             // mode nothing else keeps the process alive, so without this the

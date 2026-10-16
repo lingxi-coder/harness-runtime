@@ -532,6 +532,14 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             .map(|_| ())
     }
 
+    fn context_budget(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<Option<llm_runtime::ResolvedContext>, LlmError> {
+        self.service.resolve_context(model, profile).map(Some)
+    }
+
     fn active_betas(&self) -> Vec<String> {
         self.service.active_custom_betas().to_vec()
     }

@@ -91,6 +91,17 @@ pub enum LlmError {
         /// How many tokens over the limit the prompt was, or `0` when unknown.
         token_gap: u64,
     },
+    /// A local application policy requires a smaller input. This is distinct
+    /// from provider overflow, particularly when the count is an estimate.
+    #[error("Application input budget exceeded: {precision} {input_tokens} tokens, budget {budget}. Compact the conversation, select long context, or increase the custom input budget. The input was not truncated.", precision = if *estimated { "estimated" } else { "provider-counted" })]
+    InputBudgetExceeded {
+        /// Count of the assembled request, including its system and tools.
+        input_tokens: u64,
+        /// The selected route's application input budget.
+        budget: u64,
+        /// Whether the count came from local estimation rather than the provider.
+        estimated: bool,
+    },
     /// Request body exceeded the provider's maximum size — a 413 whose message
     /// does NOT mention the context window (accumulated images/attachments
     /// pushed the raw request over the byte limit, not token overflow).
@@ -338,6 +349,18 @@ impl MediaDelegationAccounting {
 }
 
 impl LlmError {
+    /// A context failure that can be recovered by summarizing history. Local
+    /// soft limits use the conservative recovery plan, never a fabricated
+    /// provider token gap.
+    #[must_use]
+    pub fn context_recovery_token_gap(&self) -> Option<u64> {
+        match self.classification_source() {
+            Self::ContextOverflow { token_gap } => Some(*token_gap),
+            Self::InputBudgetExceeded { .. } => Some(0),
+            _ => None,
+        }
+    }
+
     /// Classification used for retries and policy; retain `self` when propagating the error.
     #[must_use]
     pub fn classification_source(&self) -> &Self {
