@@ -1189,14 +1189,13 @@ impl StreamJsonStream {
     pub fn refresh_held_result_totals(
         &self,
         cost: &CostSnapshot,
-        model: &str,
         betas: &[String],
         subagent_stats: Option<Value>,
     ) {
         let mut totals = json!({
             "total_cost_usd": cost.total_usd,
             "duration_api_ms": u64::try_from(cost.api_duration.as_millis()).unwrap_or(u64::MAX),
-            "modelUsage": Self::build_model_usage_block(cost, model, betas),
+            "modelUsage": Self::build_model_usage_block(cost, betas),
         });
         if let Some(stats) = subagent_stats {
             totals["subagent_stats"] = stats;
@@ -1948,7 +1947,6 @@ impl StreamJsonStream {
                 "",
                 "",
                 cost,
-                &params.model,
                 &params.fast_mode_state,
                 params.fast_mode_disabled_reason.as_deref(),
                 &[],
@@ -2355,7 +2353,6 @@ impl StreamJsonStream {
         result_text: &str,
         stop_reason: &str,
         cost: &CostSnapshot,
-        model_id: &str,
         fast_mode_state: &str,
         fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
@@ -2376,7 +2373,7 @@ impl StreamJsonStream {
         let model_usage = metadata
             .model_usage
             .clone()
-            .unwrap_or_else(|| Self::build_model_usage_block(cost, model_id, betas));
+            .unwrap_or_else(|| Self::build_model_usage_block(cost, betas));
         let mut obj = serde_json::Map::new();
         obj.insert(
             "duration_api_ms".into(),
@@ -2468,7 +2465,6 @@ impl StreamJsonStream {
         result_text: &Utf16JsonProjection,
         stop_reason: &str,
         cost: &CostSnapshot,
-        model_id: &str,
         fast_mode_state: &str,
         fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
@@ -2485,7 +2481,6 @@ impl StreamJsonStream {
                 text,
                 stop_reason,
                 cost,
-                model_id,
                 fast_mode_state,
                 fast_mode_disabled_reason,
                 betas,
@@ -2504,7 +2499,6 @@ impl StreamJsonStream {
         subtype: &str,
         errors: Vec<String>,
         cost: &CostSnapshot,
-        model_id: &str,
         fast_mode_state: &str,
         fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
@@ -2529,7 +2523,7 @@ impl StreamJsonStream {
         let model_usage = metadata
             .model_usage
             .clone()
-            .unwrap_or_else(|| Self::build_model_usage_block(cost, model_id, betas));
+            .unwrap_or_else(|| Self::build_model_usage_block(cost, betas));
         let structured_retry = subtype == "error_max_structured_output_retries";
         let mut obj = serde_json::Map::new();
         if structured_retry {
@@ -2600,7 +2594,6 @@ impl StreamJsonStream {
         subtype: &str,
         errors: Vec<String>,
         cost: &CostSnapshot,
-        model_id: &str,
         fast_mode_state: &str,
         fast_mode_disabled_reason: Option<&str>,
         betas: &[String],
@@ -2610,7 +2603,6 @@ impl StreamJsonStream {
                 subtype,
                 errors,
                 cost,
-                model_id,
                 fast_mode_state,
                 fast_mode_disabled_reason,
                 betas,
@@ -2768,75 +2760,55 @@ impl StreamJsonStream {
     /// GROUND-TRUTH). The key is the model id AS-IS (including any `[1m]`
     /// suffix). `contextWindow` and `maxOutputTokens` are looked up from the
     /// llm-runtime catalog via `betas` (so `[1m]`-capable models report 1M).
-    /// Empty map when no tokens were consumed.
+    /// Empty map when no attributed per-model usage was recorded.
     fn build_model_usage_block(
         cost: &CostSnapshot,
-        model_id: &str,
         betas: &[String],
     ) -> serde_json::Map<String, Value> {
         let mut model_usage = serde_json::Map::new();
         // Cost tracking records the provider response's actual model. That is
         // essential when `--fallback-model` switched away from the session's
         // primary: result metadata must name the model that consumed tokens,
-        // not merely the configured primary. Preserve the legacy aggregate
-        // fallback for hosts that do not expose per-model rows yet.
-        if !cost.by_model.is_empty() {
-            for row in &cost.by_model {
-                let ctx_window = context_window_for_model(&row.model, betas);
-                let max_output = max_output_tokens_for_model(&row.model);
-                // (cc 2.1.218) `n.canonicalModel = yo(r)` — the canonical id the
-                // PRICING lookup used. It may differ from the raw model string
-                // this entry is keyed by (provider-specific ids, aliases, `[1m]`
-                // suffixes), so a host can group cost across those spellings.
-                let canonical = cost::pricing::first_party_name_to_canonical(&row.model);
-                #[allow(clippy::cast_precision_loss)]
-                let cost_usd = row.total_nano_usd as f64 / 1_000_000_000.0;
-                // (cc 2.1.218) `n.provider=n_(r)` — the sibling of
-                // canonicalModel: the API provider that served this model
-                // ("firstParty" for the Anthropic first-party API; LingXi
-                // provider ids pass through the open string). Omitted when the
-                // recording site could not attribute one (`.optional()`).
-                let mut entry = json!({
-                    "inputTokens": row.input_tokens,
-                    "outputTokens": row.output_tokens.saturating_add(row.reasoning_tokens),
-                    "cacheReadInputTokens": row.cache_read_input_tokens,
-                    "cacheCreationInputTokens": row.cache_creation_input_tokens,
-                    "webSearchRequests": row.web_search_requests,
-                    "costUSD": cost_usd,
-                    "contextWindow": ctx_window,
-                    "maxOutputTokens": max_output,
-                    "thinkingTokens": row.reasoning_tokens,
-                    "canonicalModel": canonical
-                });
-                if let Some(provider) = &row.provider {
-                    entry
-                        .as_object_mut()
-                        .expect("json! object")
-                        .insert("provider".into(), json!(provider));
-                }
+        // not merely the configured primary. External aggregate costs have no
+        // model attribution and remain only in the overall cost total.
+        for row in &cost.by_model {
+            let ctx_window = context_window_for_model(&row.model, betas);
+            let max_output = max_output_tokens_for_model(&row.model);
+            // (cc 2.1.218) `n.canonicalModel = yo(r)` — the canonical id the
+            // PRICING lookup used. It may differ from the raw model string
+            // this entry is keyed by (provider-specific ids, aliases, `[1m]`
+            // suffixes), so a host can group cost across those spellings.
+            let canonical = cost::pricing::first_party_name_to_canonical(&row.model);
+            #[allow(clippy::cast_precision_loss)]
+            let cost_usd = row.total_nano_usd as f64 / 1_000_000_000.0;
+            // (cc 2.1.218) `n.provider=n_(r)` — the sibling of
+            // canonicalModel: the API provider that served this model
+            // ("firstParty" for the Anthropic first-party API; LingXi
+            // provider ids pass through the open string). Omitted when the
+            // recording site could not attribute one (`.optional()`).
+            let mut entry = json!({
+                "inputTokens": row.input_tokens,
+                "outputTokens": row.output_tokens.saturating_add(row.reasoning_tokens),
+                "cacheReadInputTokens": row.cache_read_input_tokens,
+                "cacheCreationInputTokens": row.cache_creation_input_tokens,
+                "webSearchRequests": row.web_search_requests,
+                "costUSD": cost_usd,
+                "contextWindow": ctx_window,
+                "maxOutputTokens": max_output,
+                "thinkingTokens": row.reasoning_tokens,
+                "canonicalModel": canonical
+            });
+            if let Some(provider) = &row.provider {
                 entry
                     .as_object_mut()
-                    .expect("modelUsage object")
-                    .insert("costBasis".into(), json!("list"));
-                model_usage.insert(row.model.clone(), entry);
+                    .expect("json! object")
+                    .insert("provider".into(), json!(provider));
             }
-        } else if cost.input_tokens > 0 || cost.output_tokens > 0 || cost.total_usd > 0.0 {
-            model_usage.insert(
-                model_id.to_string(),
-                json!({
-                    "inputTokens": cost.input_tokens,
-                    "outputTokens": cost.output_tokens,
-                    "cacheReadInputTokens": cost.cache_read_tokens,
-                    "cacheCreationInputTokens": cost.cache_creation_tokens,
-                    "webSearchRequests": 0_u64,
-                    "costUSD": cost.total_usd,
-                    "contextWindow": context_window_for_model(model_id, betas),
-                    "maxOutputTokens": max_output_tokens_for_model(model_id),
-                    "thinkingTokens": 0_u64,
-                    "canonicalModel": cost::pricing::first_party_name_to_canonical(model_id),
-                    "costBasis": "list"
-                }),
-            );
+            entry
+                .as_object_mut()
+                .expect("modelUsage object")
+                .insert("costBasis".into(), json!("list"));
+            model_usage.insert(row.model.clone(), entry);
         }
         model_usage
     }
@@ -3923,10 +3895,9 @@ mod canonical_model_tests {
         }
     }
 
-    /// The field is present on BOTH emission branches (per-model rows and the
-    /// legacy aggregate fallback) and sits alongside contextWindow/maxOutputTokens.
+    /// Attributed rows retain the actual model and provider metadata.
     #[test]
-    fn usage_block_emits_canonical_model_on_both_branches() {
+    fn usage_block_emits_attributed_canonical_model() {
         let mut per_model = lingxi_core::host::orchestrator::CostSnapshot::default();
         per_model.by_model = vec![lingxi_core::host::orchestrator::ModelUsageRow {
             model: "us.anthropic.claude-opus-4-7-v1:0".into(),
@@ -3939,7 +3910,7 @@ mod canonical_model_tests {
             reasoning_tokens: 0,
             web_search_requests: 0,
         }];
-        let block = StreamJsonStream::build_model_usage_block(&per_model, "ignored", &[]);
+        let block = StreamJsonStream::build_model_usage_block(&per_model, &[]);
         let row = block
             .get("us.anthropic.claude-opus-4-7-v1:0")
             .expect("per-model row");
@@ -3956,21 +3927,21 @@ mod canonical_model_tests {
         let canon_idx = keys.iter().position(|k| *k == "canonicalModel").unwrap();
         assert_eq!(keys.get(canon_idx + 1), Some(&"provider"));
         assert!(row.get("contextWindow").is_some(), "existing keys retained");
+    }
 
-        // Legacy aggregate fallback (no per-model rows): provider is unknown
-        // there and must be OMITTED (`.optional()`), never null.
-        let mut agg = lingxi_core::host::orchestrator::CostSnapshot::default();
-        agg.input_tokens = 5;
-        let block2 =
-            StreamJsonStream::build_model_usage_block(&agg, "claude-opus-4-7-20251101", &[]);
-        let row2 = block2
-            .get("claude-opus-4-7-20251101")
-            .expect("aggregate row");
-        assert_eq!(row2["canonicalModel"], "claude-opus-4-7");
-        assert!(
-            row2.get("provider").is_none(),
-            "unknown provider is omitted"
-        );
+    #[tokio::test]
+    async fn external_aggregate_cost_keeps_total_without_model_attribution() {
+        // Fusion settlement records external cost without a provider model row.
+        let cost = lingxi_core::host::orchestrator::CostSnapshot {
+            total_usd: 1.25,
+            ..Default::default()
+        };
+        let stream = StreamJsonStream::new_placeholder(Output::new(tokio::io::sink()));
+        let frame = stream
+            .build_result_success_frame("settled", "end_turn", &cost, "off", None, &[])
+            .await;
+        assert_eq!(frame["total_cost_usd"], 1.25);
+        assert_eq!(frame["modelUsage"], serde_json::json!({}));
     }
 }
 
@@ -4057,7 +4028,6 @@ mod tests {
                 "done",
                 "end_turn",
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],
@@ -4083,7 +4053,6 @@ mod tests {
                 "error_max_turns",
                 vec!["limit".into()],
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],
@@ -4115,7 +4084,6 @@ mod tests {
                 "failed request",
                 "end_turn",
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],
@@ -4137,7 +4105,6 @@ mod tests {
                 "HTTP error",
                 "end_turn",
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],
@@ -4173,7 +4140,6 @@ mod tests {
                 "error after message start",
                 "end_turn",
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],
@@ -4220,7 +4186,6 @@ mod tests {
                 "done",
                 "end_turn",
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],
@@ -4251,7 +4216,7 @@ mod tests {
         };
         stream.begin_query_timing();
         let absent = stream
-            .build_result_success_frame("done", "end_turn", &cost, "model", "off", None, &[])
+            .build_result_success_frame("done", "end_turn", &cost, "off", None, &[])
             .await;
         assert!(absent.get("safety_stops").is_none());
         assert!(absent.get("subagent_stats").is_none());
@@ -4268,7 +4233,7 @@ mod tests {
             })
             .await;
         let present = stream
-            .build_result_error_frame("error_max_turns", vec![], &cost, "model", "off", None, &[])
+            .build_result_error_frame("error_max_turns", vec![], &cost, "off", None, &[])
             .await;
         assert_eq!(present["safety_stops"], 0);
         assert_eq!(present["subagent_stats"]["spawned"], 0);
@@ -4276,7 +4241,7 @@ mod tests {
         let no_owner = StreamJsonStream::new_placeholder(Output::new(tokio::io::sink()));
         cost.safety_stops = None;
         let error = no_owner
-            .build_result_error_frame("error_max_turns", vec![], &cost, "model", "off", None, &[])
+            .build_result_error_frame("error_max_turns", vec![], &cost, "off", None, &[])
             .await;
         assert!(error.get("safety_stops").is_none() && error.get("subagent_stats").is_none());
         assert_eq!(
@@ -4379,7 +4344,6 @@ mod tests {
                             .map(|value| value.as_str().unwrap().to_owned())
                             .collect(),
                         &cost,
-                        "model",
                         "off",
                         Some("sdk_opt_in_required"),
                         &[],
@@ -4391,7 +4355,6 @@ mod tests {
                         row["result"].as_str().unwrap(),
                         row["stop_reason"].as_str().unwrap(),
                         &cost,
-                        "model",
                         "off",
                         Some("sdk_opt_in_required"),
                         &[],
@@ -4425,7 +4388,6 @@ mod tests {
                 "done",
                 "end_turn",
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],
@@ -4452,7 +4414,6 @@ mod tests {
                 "done",
                 "end_turn",
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],
@@ -4466,7 +4427,6 @@ mod tests {
                 "done",
                 "end_turn",
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],
@@ -4518,7 +4478,7 @@ mod tests {
             json!({"ephemeral_1h_input_tokens":4,"ephemeral_5m_input_tokens":6})
         );
         assert_eq!(usage["speed"], "fast");
-        let models = StreamJsonStream::build_model_usage_block(&cost, "ignored", &[]);
+        let models = StreamJsonStream::build_model_usage_block(&cost, &[]);
         assert_eq!(models["claude-sonnet-5-5"]["thinkingTokens"], 8);
         assert_eq!(models["claude-sonnet-5-5"]["outputTokens"], 48);
         assert_eq!(models["claude-sonnet-5-5"]["webSearchRequests"], 4);
@@ -5504,15 +5464,7 @@ mod tests {
             ..Default::default()
         };
         let frame = stream
-            .build_result_success_frame(
-                "pong",
-                "end_turn",
-                &cost,
-                "claude-opus-4-8",
-                "off",
-                None,
-                &[],
-            )
+            .build_result_success_frame("pong", "end_turn", &cost, "off", None, &[])
             .await;
         let usage = frame["usage"].as_object().unwrap();
         let keys: Vec<&str> = usage.keys().map(String::as_str).collect();
@@ -5573,7 +5525,7 @@ mod tests {
 
         let cost = CostSnapshot::default();
         let frame = stream
-            .build_result_success_frame("done", "end_turn", &cost, "m", "off", None, &[])
+            .build_result_success_frame("done", "end_turn", &cost, "off", None, &[])
             .await;
         let denials = frame["permission_denials"].as_array().expect("array");
         assert_eq!(denials.len(), 1, "the denial must reach the result frame");
@@ -5583,15 +5535,7 @@ mod tests {
 
         // The error frame reports the same list — it is the same run.
         let err = stream
-            .build_result_error_frame(
-                "error_during_execution",
-                vec![],
-                &cost,
-                "m",
-                "off",
-                None,
-                &[],
-            )
+            .build_result_error_frame("error_during_execution", vec![], &cost, "off", None, &[])
             .await;
         assert_eq!(err["permission_denials"].as_array().unwrap().len(), 1);
     }
@@ -5638,6 +5582,17 @@ mod tests {
             cache_creation_tokens: 5,
             api_calls: 1,
             session_duration: std::time::Duration::from_millis(1000),
+            by_model: vec![lingxi_core::host::orchestrator::ModelUsageRow {
+                model: "claude-opus-4-8".into(),
+                provider: Some("firstParty".into()),
+                total_nano_usd: 50_000_000,
+                input_tokens: 100,
+                output_tokens: 10,
+                cache_read_input_tokens: 50,
+                cache_creation_input_tokens: 5,
+                reasoning_tokens: 0,
+                web_search_requests: 0,
+            }],
             current_usage: Some(lingxi_core::host::CurrentUsageSnapshot {
                 input_tokens: 100,
                 output_tokens: 10,
@@ -5647,15 +5602,7 @@ mod tests {
             ..Default::default()
         };
         let frame = stream
-            .build_result_success_frame(
-                "pong",
-                "end_turn",
-                &cost,
-                "claude-opus-4-8",
-                "off",
-                None,
-                &[],
-            )
+            .build_result_success_frame("pong", "end_turn", &cost, "off", None, &[])
             .await;
 
         let obj = frame.as_object().unwrap();
@@ -5726,7 +5673,6 @@ mod tests {
                 "ok",
                 "end_turn",
                 &cost,
-                "claude-opus-4-8",
                 "off",
                 Some("sdk_opt_in_required"),
                 &[],
@@ -5751,7 +5697,6 @@ mod tests {
                 "error_during_execution",
                 vec!["boom".to_string()],
                 &cost,
-                "claude-opus-4-8",
                 "off",
                 Some("not_first_party"),
                 &[],
@@ -5771,7 +5716,6 @@ mod tests {
                 "error_during_execution",
                 vec!["API failed".to_string()],
                 &cost,
-                "claude-opus-4-8",
                 "off",
                 None,
                 &[],
@@ -5815,7 +5759,7 @@ mod tests {
         ];
         for (subtype, expected_terminal_reason) in &cases {
             let frame = stream
-                .build_result_error_frame(subtype, vec![], &cost, "model", "off", None, &[])
+                .build_result_error_frame(subtype, vec![], &cost, "off", None, &[])
                 .await;
             assert_eq!(
                 frame["terminal_reason"], *expected_terminal_reason,
@@ -6557,10 +6501,21 @@ mod tests {
     async fn model_usage_uses_catalog_context_window() {
         let params = make_params("sess");
         let stream = StreamJsonStream::new(params, Output::new(tokio::io::sink()));
-        let cost = CostSnapshot {
+        let cost_for_model = |model: &str| CostSnapshot {
             input_tokens: 100,
             output_tokens: 10,
             total_usd: 0.01,
+            by_model: vec![lingxi_core::host::orchestrator::ModelUsageRow {
+                model: model.to_owned(),
+                provider: Some("firstParty".into()),
+                total_nano_usd: 10_000_000,
+                input_tokens: 100,
+                output_tokens: 10,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning_tokens: 0,
+                web_search_requests: 0,
+            }],
             ..Default::default()
         };
 
@@ -6570,8 +6525,7 @@ mod tests {
             .build_result_success_frame(
                 "hi",
                 "end_turn",
-                &cost,
-                "claude-opus-4-8",
+                &cost_for_model("claude-opus-4-8"),
                 "off",
                 None,
                 &[],
@@ -6593,8 +6547,7 @@ mod tests {
             .build_result_success_frame(
                 "hi",
                 "end_turn",
-                &cost,
-                "claude-opus-4-6",
+                &cost_for_model("claude-opus-4-6"),
                 "off",
                 None,
                 &[],
@@ -6617,8 +6570,7 @@ mod tests {
             .build_result_success_frame(
                 "hi",
                 "end_turn",
-                &cost,
-                "claude-opus-4-8[1m]",
+                &cost_for_model("claude-opus-4-8[1m]"),
                 "off",
                 None,
                 &[],
@@ -6664,15 +6616,7 @@ mod tests {
             ..Default::default()
         };
         let frame = stream
-            .build_result_success_frame(
-                "done",
-                "end_turn",
-                &cost,
-                "claude-opus-4-6",
-                "off",
-                None,
-                &[],
-            )
+            .build_result_success_frame("done", "end_turn", &cost, "off", None, &[])
             .await;
         let usage = frame["modelUsage"].as_object().expect("modelUsage map");
         assert!(!usage.contains_key("claude-opus-4-6"));
@@ -6809,18 +6753,21 @@ mod tests {
             total_usd: 0.09,
             api_calls: 1,
             session_duration: std::time::Duration::from_millis(3926),
+            by_model: vec![lingxi_core::host::orchestrator::ModelUsageRow {
+                model: "claude-opus-4-8".into(),
+                provider: Some("firstParty".into()),
+                total_nano_usd: 90_000_000,
+                input_tokens: 100,
+                output_tokens: 4,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning_tokens: 0,
+                web_search_requests: 0,
+            }],
             ..Default::default()
         };
         let frame = stream
-            .build_result_success_frame(
-                "pong",
-                "end_turn",
-                &cost,
-                "claude-opus-4-8",
-                "off",
-                None,
-                &[],
-            )
+            .build_result_success_frame("pong", "end_turn", &cost, "off", None, &[])
             .await;
 
         // Golden assertions (volatile fields masked by shape, not value).
@@ -7042,7 +6989,6 @@ mod tests {
                             .map(|error| error.as_str().unwrap().to_owned())
                             .collect(),
                         &cost,
-                        "claude-sonnet-5-5",
                         "off",
                         Some("sdk_opt_in_required"),
                         &[],
@@ -7054,7 +7000,6 @@ mod tests {
                         expected["result"].as_str().unwrap(),
                         expected["stop_reason"].as_str().unwrap(),
                         &cost,
-                        "claude-sonnet-5-5",
                         "off",
                         Some("sdk_opt_in_required"),
                         &[],
@@ -7237,7 +7182,6 @@ mod refusal_publication_tests {
                     &Utf16JsonProjection::from("should not publish"),
                     "end_turn",
                     &CostSnapshot::default(),
-                    "model",
                     "off",
                     None,
                     &[],
@@ -7266,7 +7210,6 @@ mod refusal_publication_tests {
                 &Utf16JsonProjection::from("held result"),
                 "end_turn",
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],
@@ -7418,7 +7361,6 @@ mod verbose_json_tests {
                 &Utf16JsonProjection::from("ignored"),
                 "tool_use",
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],
@@ -7429,7 +7371,6 @@ mod verbose_json_tests {
                 "error_during_execution",
                 vec!["denied".into()],
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],
@@ -7571,7 +7512,6 @@ mod verbose_json_tests {
                 &Utf16JsonProjection::from("done"),
                 "end_turn",
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],
@@ -7614,7 +7554,6 @@ mod verbose_json_tests {
                         &Utf16JsonProjection::from(text),
                         "end_turn",
                         &CostSnapshot::default(),
-                        "model",
                         "off",
                         None,
                         &[],
@@ -7629,7 +7568,6 @@ mod verbose_json_tests {
             }
             stream.refresh_held_result_totals(
                 &CostSnapshot::default(),
-                "model",
                 &[],
                 Some(json!({"completed":1})),
             );
@@ -7785,7 +7723,6 @@ mod verbose_json_tests {
                 &completed,
                 "end_turn",
                 &CostSnapshot::default(),
-                "model",
                 "off",
                 None,
                 &[],

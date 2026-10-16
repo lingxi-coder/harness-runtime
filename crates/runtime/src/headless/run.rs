@@ -211,17 +211,8 @@ impl NativeQueryResultPublisher<'_> {
             return;
         }
         let cost = self.runtime.orchestrator.snapshot_cost().await;
-        let model = self
-            .runtime
-            .orchestrator
-            .session()
-            .lock()
-            .await
-            .model
-            .clone();
         self.stream.refresh_held_result_totals(
             &cost,
-            &model,
             self.betas,
             self.runtime
                 .agent_session_statistics()
@@ -292,19 +283,10 @@ impl NativeQueryResultPublisher<'_> {
         )
         .await;
         let cost = self.runtime.orchestrator.snapshot_cost().await;
-        let model = self
-            .runtime
-            .orchestrator
-            .session()
-            .lock()
-            .await
-            .model
-            .clone();
         let hold_results = self.should_hold_results().await;
         self.stream.hold_sdk_results(hold_results);
         self.stream.refresh_held_result_totals(
             &cost,
-            &model,
             self.betas,
             self.runtime
                 .agent_session_statistics()
@@ -343,7 +325,6 @@ impl NativeQueryResultPublisher<'_> {
                         &text,
                         "end_turn",
                         &cost,
-                        &model,
                         self.fast_mode_state,
                         self.fast_mode_disabled_reason,
                         self.betas,
@@ -358,7 +339,6 @@ impl NativeQueryResultPublisher<'_> {
                         stream_json_error_subtype(error),
                         vec![error.to_string()],
                         &cost,
-                        &model,
                         self.fast_mode_state,
                         self.fast_mode_disabled_reason,
                         self.betas,
@@ -644,10 +624,8 @@ pub async fn run_stream_json_print(
         // Publish the native JSON result before entering the shared
         // shutdown barrier. Stream-json has already delivered each frame.
         let cost = runtime.orchestrator.snapshot_cost().await;
-        let model = runtime.orchestrator.session().lock().await.model.clone();
         stream.refresh_held_result_totals(
             &cost,
-            &model,
             &argv.betas.clone().unwrap_or_default(),
             runtime.agent_session_statistics().await.map(|stats| {
                 serde_json::to_value(stats).expect("agent statistics are JSON scalars")
@@ -1822,7 +1800,6 @@ async fn run_stream_json_input_loop_inner(
                 &Utf16JsonProjection::from(""),
                 "end_turn",
                 &cost,
-                &model_str,
                 fast_mode_state,
                 fast_mode_disabled_reason,
                 &betas,
