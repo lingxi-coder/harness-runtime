@@ -5581,9 +5581,9 @@ async fn build_with_providers_and_routing_merges_config_chains_availability() {
     let (_tmp, mut cfg) = test_config(true);
     cfg.provider_profiles = Some({
         let mut m = std::collections::BTreeMap::new();
-        // NB: `provider-config`'s `parse_user_providers` (the dialect `build()`
-        // now routes through via `assemble`) takes `models` as a STRING ARRAY
-        // of model ids — distinct from the legacy `apply_settings_providers`
+        // NB: `provider-config::assemble` calls `llm_runtime::parse_provider_profiles_lenient`
+        // with deferred-static credentials and optional models. It takes `models` as a
+        // STRING ARRAY of model ids — distinct from the legacy `apply_settings_providers`
         // dialect (`[{ "id": ... }]`) the surviving e2e tests below still use.
         m.insert(
             "groq".to_string(),

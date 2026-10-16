@@ -11,7 +11,6 @@ pub mod assemble;
 mod availability;
 mod cost_translate;
 mod credentials;
-pub mod parse_providers;
 pub mod parse_routing;
 pub mod types;
 
@@ -20,7 +19,6 @@ pub use availability::{
     compute_availability, compute_availability_with_isolation, ProviderAvailability,
 };
 pub use credentials::MultiCredentialProvider;
-pub use parse_providers::{parse_user_providers, ParsedUserProvider};
 pub use parse_routing::parse_routing;
 pub use types::{
     AssembleInputs, Assembled, ChainConfig, ChainEntry, CredentialKind, CredentialSource,

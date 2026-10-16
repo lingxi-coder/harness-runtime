@@ -904,7 +904,6 @@ async fn run_bridge(script: &str, spawner: Arc<EchoSpawner>) -> workflow::RunOut
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await
     .expect("workflow runs to completion")
@@ -983,7 +982,6 @@ async fn run_with_progress_drain_completes_and_does_not_hang() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     );
     // If a progress sender outlives `run`, `drain` never ends and this join hangs.
     let joined = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -1024,7 +1022,6 @@ async fn agent_cap_rejects_the_1001st_spawn() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await;
     let err = result.expect_err("the 1001st agent() must throw the cap error");
@@ -1056,7 +1053,6 @@ async fn agent_cap_admits_first_1000_parallel_calls() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
     )
     .await
@@ -1090,7 +1086,6 @@ async fn unknown_agent_type_throws_not_found() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
     )
     .await;
@@ -1130,7 +1125,6 @@ async fn unknown_agent_type_throws_not_found() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
     )
     .await
@@ -1234,7 +1228,6 @@ async fn plugin_workflow_resolves_bare_agent_type_under_its_namespace() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await
     .expect("a bare agentType matching the workflow's own plugin namespace must resolve");
@@ -1287,7 +1280,6 @@ async fn plugin_namespaced_agent_wins_over_a_bare_shadow_when_both_are_registere
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await
     .expect("the call must resolve, not throw");
@@ -1328,7 +1320,6 @@ async fn a_bare_agent_type_the_plugin_did_not_register_still_resolves() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await
     .expect("a bare agentType with no namespaced sibling must still resolve");
@@ -1367,7 +1358,6 @@ async fn unknown_agent_type_under_plugin_workflow_names_both_spellings() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
     )
     .await;
@@ -1435,7 +1425,6 @@ async fn resumed_plugin_workflow_resolves_bare_agent_type_via_registry() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await
     .expect("a resumed plugin workflow must still resolve its own bare agentType");
@@ -1474,7 +1463,6 @@ async fn ambiguous_bare_workflow_name_resolves_no_namespace() {
         nested_with_plugin_workflows(&["acme:app-build", "other-plugin:app-build"]),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
     )
     .await;
@@ -1515,7 +1503,6 @@ async fn remote_isolation_is_rejected_in_local_workflow_build() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
     )
     .await
@@ -1563,7 +1550,6 @@ async fn budget_spent_is_turn_relative_via_baseline() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await
     .expect("runs");
@@ -1598,7 +1584,6 @@ async fn budget_ceiling_throws_when_turn_spend_exceeds_total() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await;
     let err = result.expect_err("over-budget agent() must throw");
@@ -1632,7 +1617,6 @@ async fn shared_pool_makes_spent_read_main_loop_plus_subagents() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
     )
     .await
@@ -1727,7 +1711,6 @@ async fn invalid_structured_output_parse_retries_reject_before_spawn() {
             NestedConfig::default(),
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
             Arc::new(AnalyticsBus::new()),
-            None,
             None,
         )
         .await
@@ -2090,7 +2073,6 @@ async fn top_level_args_global_reaches_the_script() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await
     .unwrap();
@@ -2136,7 +2118,6 @@ async fn workflow_runs_a_nested_scriptpath_inline_sharing_the_runtime() {
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
     )
     .await
@@ -2195,7 +2176,6 @@ async fn workflow_runs_a_nested_name_from_user_workflows_dir() {
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
     )
     .await;
@@ -2266,7 +2246,6 @@ async fn workflow_runs_a_nested_name_from_plugin_workflow_registry() {
         },
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
     )
     .await
@@ -3759,7 +3738,6 @@ async fn telemetry_no_phase_events_without_phase_calls() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         bus.clone(),
         None,
-        None,
     )
     .await
     .expect("runs");
@@ -3798,7 +3776,6 @@ async fn telemetry_phase_completed_fires_per_phase_for_named_workflow() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         bus.clone(),
-        None,
         // Pass a named invocation_mode — oracle §7: only "named" (built-in source)
         // emits tengu_workflow_phase_completed.
         Some(PhaseTelemetryCtx {
@@ -3870,7 +3847,6 @@ async fn telemetry_phase_completed_includes_phase_only_workflows() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         bus.clone(),
-        None,
         Some(PhaseTelemetryCtx {
             run_id: "wf_test_phase_only".to_string(),
             workflow_source: Some("built-in".to_string()),
@@ -3928,7 +3904,6 @@ async fn telemetry_phase_completed_suppressed_for_inline_workflow() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         bus.clone(),
-        None,
         // Inline invocation_mode: oracle §7 suppresses phase_completed for
         // "inline" (and "scriptPath") — only "named" (built-in source) emits it.
         Some(PhaseTelemetryCtx {
@@ -3977,7 +3952,6 @@ async fn telemetry_phase_completed_suppressed_for_script_path_workflow() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         bus.clone(),
-        None,
         Some(PhaseTelemetryCtx {
             run_id: "wf_test_scriptpath".to_string(),
             workflow_source: Some("/path/to/workflow.js".to_string()),
@@ -4023,7 +3997,6 @@ async fn telemetry_phase_completed_suppressed_when_no_telemetry_ctx() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         bus.clone(),
-        None,
         // No PhaseTelemetryCtx → is_named_source = false → no phase_completed events.
         // Note: run_bridge() / test helpers typically pass None here; this test
         // documents that the gate also protects the None case (no ctx = not named).
@@ -4068,7 +4041,6 @@ async fn telemetry_budget_cap_fires() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         bus.clone(),
-        None,
         None,
     )
     .await; // expected Err
@@ -4116,7 +4088,6 @@ async fn telemetry_agent_cap_fires() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         bus.clone(),
-        None,
         None,
     )
     .await; // expected Err
@@ -4251,7 +4222,6 @@ async fn workflow_agent_progress_start_and_done_emitted() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await
     .expect("runs");
@@ -4315,7 +4285,6 @@ async fn workflow_phase_and_log_progress_format() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await
     .expect("runs");
@@ -4365,7 +4334,6 @@ async fn workflow_agent_index_is_monotonic() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
     )
     .await
@@ -4425,7 +4393,6 @@ async fn workflow_progress_keeps_earliest_agents_through_log_flood() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
     )
     .await
@@ -4510,7 +4477,6 @@ async fn workflow_agent_carries_phase_context() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await
     .expect("runs");
@@ -4591,7 +4557,6 @@ async fn workflow_agent_cached_event_on_journal_replay() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await
     .expect("resume runs");
@@ -4643,7 +4608,6 @@ async fn workflow_agent_error_event_on_failure() {
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
         None,
-        None,
     )
     .await
     .expect("runs (failed agent is not a script error)");
@@ -4692,7 +4656,6 @@ async fn workflow_agent_throw_on_error_preserves_failure_reason() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
     )
     .await

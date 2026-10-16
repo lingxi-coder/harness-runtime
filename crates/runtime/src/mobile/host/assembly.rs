@@ -1900,11 +1900,11 @@ pub(super) async fn build_mobile_inner_with_ask(
         // mobile-linux but the runtime is blocked or unlinked. In that state the
         // tools stay ABSENT rather than silently falling back to the Android
         // legacy path.
-        android_shell: gated_shell_ctx.clone(),
-        android_git: gated_git_ctx.clone(),
+        mobile_shell: gated_shell_ctx.clone(),
+        mobile_git: gated_git_ctx.clone(),
         // Secret carrier follows the same public-gate decision: if the public
         // git tool is gated off, keep the secret seam absent too.
-        android_git_secret: gated_git_ctx
+        mobile_git_secret: gated_git_ctx
             .as_ref()
             .and_then(|_| cfg.mobile_git_secret().cloned()),
         // Mobile uses the same blocking TaskCreated/TaskCompleted hook contract

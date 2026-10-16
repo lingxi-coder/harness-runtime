@@ -4551,9 +4551,9 @@ pub async fn build_with_credential_stack(
         calendar: None,
         contacts: None,
         computer_control: platform_macos_computer_control::new_if_supported(),
-        android_shell: None,
-        android_git: None,
-        android_git_secret: None,
+        mobile_shell: None,
+        mobile_git: None,
+        mobile_git_secret: None,
         // BLOCKING TaskCreated/TaskCompleted hooks for the V2 Task* tool path
         // (claude-code `executeTaskCreatedHooks` / `executeTaskCompletedHooks`).
         // Wraps the SAME `Arc<HookExecutorImpl>` + cwd the registry firers use

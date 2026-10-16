@@ -3135,11 +3135,6 @@ pub struct DurableFusionTerminalRecord {
     pub outbox: Option<DurableFusionOutboxRecord>,
 }
 
-/// Compatibility alias used by callers that describe the field as a state
-/// rather than a status. Keep both spellings available while the durable
-/// outbox work remains a later package.
-pub type FusionPublicationState = FusionPublicationStatus;
-
 /// Progress stage names shared by Agent / slash / TUI.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "stage", rename_all = "snake_case")]

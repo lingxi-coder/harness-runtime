@@ -190,12 +190,6 @@ pub(crate) fn partition_key_for_era(
     sha256_hex(material.as_bytes())[..32].to_string()
 }
 
-/// Backward-compatible legacy partition vector.  Callers that have not
-/// negotiated a protocol continue to produce the original bytes.
-pub(crate) fn partition_key(logical_cache_key: &str, fingerprint: &str) -> String {
-    partition_key_for_era(logical_cache_key, fingerprint, "legacy")
-}
-
 fn canonicalize_logical_key_value(value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Object(map) => {
@@ -2263,16 +2257,18 @@ mod tests {
         // 2.1.252 -> 2.1.267; if they move without the constant moving, the
         // partition scheme itself changed and that is the bug to look for.
         assert_eq!(
-            partition_key(
+            partition_key_for_era(
                 "logical-cache-key",
-                "856f0d2375be22a510e79662f22d30c51c14dc3394b9d610af33a7116d81cda6"
+                "856f0d2375be22a510e79662f22d30c51c14dc3394b9d610af33a7116d81cda6",
+                "legacy",
             ),
             "c27ba42c0c0386de3ae9674d93fa4765"
         );
         assert_eq!(
-            partition_key(
+            partition_key_for_era(
                 "logical-cache-key",
-                "991e0dadd79d2d72abf31cf52d2cbd1d4f1e0c49b62b4d5e820b2e78cd12f971"
+                "991e0dadd79d2d72abf31cf52d2cbd1d4f1e0c49b62b4d5e820b2e78cd12f971",
+                "legacy",
             ),
             "f4e85c666c0b09ee1f312608556a4f5c"
         );

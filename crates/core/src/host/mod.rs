@@ -268,7 +268,7 @@ pub use fusion::{
     FusionError, FusionExecutor, FusionImplementHost, FusionInheritance, FusionLatencyClass,
     FusionModelChoice, FusionModelHints, FusionModelRef, FusionModelRole, FusionOrigin,
     FusionPanelMode, FusionPreparedSummary, FusionPreset, FusionProgress, FusionPublicationReceipt,
-    FusionPublicationState, FusionPublicationStatus, FusionRequest, FusionResult, FusionRunControl,
+    FusionPublicationStatus, FusionRequest, FusionResult, FusionRunControl,
     FusionRunFacts, FusionRunFactsRecorder, FusionRunId, FusionRunIdentity, FusionRunOutcome,
     FusionRunRecorder, FusionRunRecorderFactory, FusionSlashPublicationTarget, FusionStage,
     FusionStatus, FusionStrategyMetadata, FusionSubmission, FusionTerminalCapability, FusionTiming,

@@ -12,13 +12,6 @@
 use serde::de::DeserializeOwned;
 use std::path::PathBuf;
 
-/// Placeholder retained for backwards-compatibility with the M1 scaffold.
-///
-/// Future expansion may use this as the deserialized shape for streaming
-/// scenario fixtures (events + expected effect summary).
-#[derive(Debug, Default)]
-pub struct ParityFixture;
-
 /// Locate the `fixtures/` directory beside this source file.
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

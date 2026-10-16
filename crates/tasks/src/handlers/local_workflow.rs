@@ -2244,7 +2244,6 @@ mod captured_output_tests {
                 Arc::new(AnalyticsBus::new()),
                 None,
                 None,
-                None,
                 Some(scope.clone()),
             )
             .await
@@ -2365,7 +2364,6 @@ mod captured_output_tests {
                     Arc::new(AnalyticsBus::new()),
                     None,
                     None,
-                    None,
                     scoped.then(|| scope.clone()),
                 )
                 .await
@@ -2411,7 +2409,7 @@ mod captured_output_tests {
             "try { await agent('overflow'); } catch (e) {} try { await agent('must not dispatch'); } catch (e) {} return 'done';",
             DEFAULT_WORKFLOW_SUBAGENT, "workflow", probe.clone(), probe.clone(), probe.clone(),
             None, None, None, None, Some(100), None, 0, NestedConfig::default(),
-            Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(AnalyticsBus::new()), None, None, None, Some(scope.clone()),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)), Arc::new(AnalyticsBus::new()), None, None, Some(scope.clone()),
         ).await.unwrap();
         assert_eq!(probe.calls.load(Ordering::Relaxed), 1);
         assert!(
@@ -2710,9 +2708,6 @@ async fn run_workflow_script(
     // so a runaway pure-JS loop is stopped instead of leaking the OS thread.
     cancel: Arc<std::sync::atomic::AtomicBool>,
     bus: Arc<AnalyticsBus>,
-    // Legacy compatibility seam. Current callers read the run metrics snapshot;
-    // this argument is accepted but intentionally not used as the source of truth.
-    agent_count_out: Option<Arc<AtomicU64>>,
     // Optional fields for tengu_workflow_phase_completed (oracle §7):
     // `workflow_run_id`, `workflow_source`, `workflow_name`. When None, the
     // phase_completed events still fire but omit these optional context fields.
@@ -2735,7 +2730,6 @@ async fn run_workflow_script(
         nested,
         cancel,
         bus,
-        agent_count_out,
         phase_telemetry_ctx,
         None,
     )
@@ -2761,7 +2755,6 @@ async fn run_workflow_script_with_live_updates(
     nested: NestedConfig,
     cancel: Arc<std::sync::atomic::AtomicBool>,
     bus: Arc<AnalyticsBus>,
-    agent_count_out: Option<Arc<AtomicU64>>,
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
     workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
@@ -2782,7 +2775,6 @@ async fn run_workflow_script_with_live_updates(
         nested,
         cancel,
         bus,
-        agent_count_out,
         phase_telemetry_ctx,
         workflow_metrics_out,
     )
@@ -2808,7 +2800,6 @@ async fn run_workflow_script_with_live_updates_full(
     nested: NestedConfig,
     cancel: Arc<std::sync::atomic::AtomicBool>,
     bus: Arc<AnalyticsBus>,
-    agent_count_out: Option<Arc<AtomicU64>>,
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
     workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
 ) -> Result<workflow::RunOutcome, workflow::WorkflowError> {
@@ -2829,7 +2820,6 @@ async fn run_workflow_script_with_live_updates_full(
         nested,
         cancel,
         bus,
-        agent_count_out,
         phase_telemetry_ctx,
         workflow_metrics_out,
         None,
@@ -2855,7 +2845,6 @@ async fn run_workflow_script_with_live_updates_recorded(
     nested: NestedConfig,
     cancel: Arc<std::sync::atomic::AtomicBool>,
     bus: Arc<AnalyticsBus>,
-    agent_count_out: Option<Arc<AtomicU64>>,
     phase_telemetry_ctx: Option<PhaseTelemetryCtx>,
     workflow_metrics_out: Option<Arc<tokio::sync::Mutex<WorkflowRunMetrics>>>,
     output_scope: Option<lingxi_core::host::WorkflowOutputScope>,
@@ -2959,10 +2948,8 @@ async fn run_workflow_script_with_live_updates_recorded(
 
     let cap = concurrency_cap();
     // The current Claude runtime derives the cap/telemetry count from every
-    // real `agent()` call, including journal-cache hits. Keep the old optional
-    // counter seam accepted for callers, but do not use it as the source of
-    // truth for this run. `__wf_resolve` calls are not real agents.
-    let _ = agent_count_out;
+    // real `agent()` call, including journal-cache hits. `__wf_resolve` calls
+    // are not real agents.
     // Per-run agent call ordinal counter (oracle §8: the `index` field on
     // `workflow_agent` events is monotonically incrementing per call, including
     // cached replay calls; `__wf_resolve` calls do NOT count).
@@ -3998,7 +3985,6 @@ impl Task for LocalWorkflowHandler {
                     },
                     worker_cancel,
                     worker_bus.clone(),
-                    None,
                     // Pass the phase telemetry context so run_workflow_script can
                     // emit tengu_workflow_phase_completed with the correct run_id,
                     // workflow_source, workflow_name, and built-in-source gate.

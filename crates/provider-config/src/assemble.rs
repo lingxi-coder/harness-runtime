@@ -1,9 +1,11 @@
 //! Assemble the merged `ClientConfig` + pricing + chains + credential sources
 //! from Anthropic state + `settings.providers` + `settings.routing` (spec §5.3).
 
-use llm_runtime::{AuthStrategy, ClientConfig, CredentialConfig, ProviderId, ProviderProfile};
+use llm_runtime::{
+    parse_provider_profiles_lenient, AuthStrategy, ClientConfig, CredentialConfig,
+    ProviderId, ProviderParseOptions, ProviderProfile,
+};
 
-use crate::parse_providers::parse_user_providers;
 use crate::parse_routing::parse_routing;
 use crate::types::{AssembleInputs, Assembled, ChainEntry, CredentialKind, CredentialSource};
 
@@ -184,7 +186,10 @@ pub fn assemble_for_region(inputs: AssembleInputs, region: llm_runtime::Region) 
     }
 
     // 3. User providers (only routable ones — must declare >= 1 model).
-    let (parsed_users, user_warns) = parse_user_providers(&inputs.user_providers);
+    let (parsed_users, user_warns) = parse_provider_profiles_lenient(
+        &inputs.user_providers,
+        ProviderParseOptions::lenient_deferred_static(),
+    );
     warnings.extend(user_warns);
     for pu in parsed_users {
         if pu.profile.models.is_empty() {
