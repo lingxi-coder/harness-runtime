@@ -2092,6 +2092,7 @@ mod runtime_impl;
 mod headless_mcp;
 #[path = "conversation/headless_ui.rs"]
 mod headless_ui;
+#[path = "conversation/idle_compaction.rs"]
 mod idle_compaction_impl;
 
 use drivers_impl::parse_generated_session_name;
