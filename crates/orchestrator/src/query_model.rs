@@ -431,11 +431,13 @@ pub(crate) fn resolve(
 pub(crate) fn server_error_notice(
     from: &str,
     to: &str,
-    from_window: u64,
-    to_window: u64,
+    from_window: Option<u64>,
+    to_window: Option<u64>,
 ) -> String {
     let mut content = format!("Switched to {to} due to high demand for {from}");
-    if to_window < from_window {
+    if let Some((from_window, to_window)) =
+        from_window.zip(to_window).filter(|(from, to)| to < from)
+    {
         content.push_str(&format!(
             " · context window {} → {} tokens",
             format_window(from_window),
@@ -511,11 +513,20 @@ mod tests {
                 server_error_notice(
                     case["from"].as_str().unwrap(),
                     case["to"].as_str().unwrap(),
-                    case["from_window"].as_u64().unwrap(),
-                    case["to_window"].as_u64().unwrap()
+                    Some(case["from_window"].as_u64().unwrap()),
+                    Some(case["to_window"].as_u64().unwrap())
                 ),
                 case["expected"].as_str().unwrap(),
                 "{case}"
+            );
+        }
+        for (from_window, to_window) in
+            [(None, None), (Some(1_000_000), None), (None, Some(200_000))]
+        {
+            assert_eq!(
+                server_error_notice("Opus 4.7", "Sonnet 4.6", from_window, to_window),
+                "Switched to Sonnet 4.6 due to high demand for Opus 4.7",
+                "unknown windows must not be rendered as zero"
             );
         }
     }

@@ -110,6 +110,23 @@ fn native_tool_search_gce_enabled_with_env(
     !native_tool_search_env_value_is_truthy(disable_attachments.as_deref())
 }
 
+fn total_tokens_reminder_context_window(
+    api: &dyn crate::OrchestratorApiClient,
+    model: &str,
+    profile: Option<&str>,
+    mode: crate::prompt::total_tokens::TotalTokensMode,
+) -> Option<i64> {
+    use crate::prompt::total_tokens::TotalTokensMode;
+
+    if mode != TotalTokensMode::Countdown {
+        // Fixed, Infinite, and PaddedCountdown do not read the model window.
+        // In particular, an unknown input budget must not suppress the
+        // default padded-countdown reminder.
+        return Some(0);
+    }
+    Some(i64::try_from(api.context_window_tokens(model, profile)?).unwrap_or(i64::MAX))
+}
+
 fn native_tool_search_keeps_deferred_tools(
     deferral: &tool_api::DeferralState,
     native_gce_enabled: bool,
@@ -1933,9 +1950,12 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         )
         .unwrap_or(i64::MAX);
         let profile = self.session.lock().await.model_profile.clone();
-        let context_window =
-            i64::try_from(self.api.input_context_budget(&model, profile.as_deref())?)
-                .unwrap_or(i64::MAX);
+        let context_window = total_tokens_reminder_context_window(
+            self.api.as_ref(),
+            &model,
+            profile.as_deref(),
+            mode,
+        )?;
         let budget = tt::resolve_budget(None);
         let body = {
             let mut ledger = self
@@ -4414,5 +4434,51 @@ mod prefetch_history_tests {
 
         assert_eq!(query, "current request");
         assert!(tools.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod total_tokens_context_window_tests {
+    use super::total_tokens_reminder_context_window;
+    use crate::prompt::total_tokens::{self as tt, TotalTokensMode};
+    use crate::test_support::MockApiClient;
+
+    #[test]
+    fn padded_countdown_does_not_require_a_known_context_window() {
+        let api = MockApiClient::new(Vec::new());
+        let context_window = total_tokens_reminder_context_window(
+            &api,
+            "custom/model",
+            None,
+            TotalTokensMode::PaddedCountdown,
+        )
+        .expect("padded countdown does not need context-window metadata");
+        let remaining = tt::remaining_tokens(
+            TotalTokensMode::PaddedCountdown,
+            &mut tt::TotalTokensLedger::default(),
+            "main",
+            0,
+            context_window,
+            tt::DEFAULT_TOTAL_TOKENS_BUDGET,
+        );
+        assert_eq!(
+            tt::format_total_tokens(TotalTokensMode::PaddedCountdown, remaining),
+            "<total_tokens>15000000 tokens left</total_tokens>"
+        );
+    }
+
+    #[test]
+    fn countdown_stays_unknown_without_a_raw_context_window() {
+        let api = MockApiClient::new(Vec::new());
+        assert_eq!(
+            total_tokens_reminder_context_window(
+                &api,
+                "custom/model",
+                None,
+                TotalTokensMode::Countdown,
+            ),
+            None,
+            "unknown context must not become a zero-sized or guessed window"
+        );
     }
 }

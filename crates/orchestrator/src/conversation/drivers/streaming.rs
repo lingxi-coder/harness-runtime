@@ -3540,8 +3540,7 @@ impl StreamingTurnDriver<'_> {
             );
             let window = orch
                 .api
-                .input_context_budget(&route.model, route.profile.as_deref())
-                .unwrap_or(0);
+                .context_window_tokens(&route.model, route.profile.as_deref());
             (label, window)
         };
         let (from_label, from_window) = facts(&current);
