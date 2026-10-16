@@ -1724,17 +1724,18 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             "subagent_type": "fusion"
         }));
 
-        let error = <AgentTool as Tool>::call(
-            &tool,
-            input,
-            fresh_ctx_with_registry(Arc::new(ToolRegistry::new())),
-            fresh_tx(),
-        )
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        // Keep the parent profile valid so only the trusted session is missing.
+        ctx.options.model_profile = Some("openai".into());
+        let error = <AgentTool as Tool>::call(&tool, input, ctx, fresh_tx())
         .await
         .unwrap_err();
 
-        assert!(matches!(error, ToolError::Internal(message)
-            if message.contains("trusted origin session")));
+        assert!(
+            matches!(&error, ToolError::Internal(message)
+                if message.contains("trusted origin session")),
+            "expected the missing trusted-session rejection, got {error:?}"
+        );
         assert!(
             fusion
                 .sessions

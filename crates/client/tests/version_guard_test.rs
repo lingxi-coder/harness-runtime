@@ -1516,9 +1516,6 @@ fn current_contract_index() -> ContractIndex {
     put("MessageBlockDto::ToolResult.tool", "String");
     put("MessageBlockDto::ToolResult.result_json", "String");
     put("MessageBlockDto::ToolResult.is_error", "bool");
-    put("MessageBlockDto::ToolResult.old_string", "Option<String>");
-    put("MessageBlockDto::ToolResult.new_string", "Option<String>");
-    put("MessageBlockDto::ToolResult.file_path", "Option<String>");
     put(
         "MessageBlockDto::ToolResult.display",
         "ToolResultDisplayDto",

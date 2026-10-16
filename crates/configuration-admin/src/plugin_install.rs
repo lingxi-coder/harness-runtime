@@ -3236,13 +3236,13 @@ mod tests {
     }
 
     #[test]
-    fn install_accepts_typed_directory_source_inside_catalog() {
+    fn install_accepts_relative_source_inside_catalog() {
         let e = env();
         std::fs::write(
             e.market
                 .join(branding::PLUGIN_MANIFEST_DIR)
                 .join("marketplace.json"),
-            r#"{"name":"mymkt","owner":{"name":"me"},"plugins":[{"name":"hello","source":{"source":"directory","path":"./plugins/hello"}}]}"#,
+            r#"{"name":"mymkt","owner":{"name":"me"},"plugins":[{"name":"hello","source":"./plugins/hello"}]}"#,
         )
         .unwrap();
 
@@ -3924,8 +3924,18 @@ mod tests {
     #[test]
     fn install_rejects_dependency_cycles_before_materializing_root() {
         let e = env();
-        add_market_plugin(&e, "shared", "1.0.0", serde_json::json!(["hello"]));
-        set_dependencies(&e, "hello", "1.2.3", serde_json::json!(["shared"]));
+        add_market_plugin(
+            &e,
+            "shared",
+            "1.0.0",
+            serde_json::json!([{"name":"hello","version":"*"}]),
+        );
+        set_dependencies(
+            &e,
+            "hello",
+            "1.2.3",
+            serde_json::json!([{"name":"shared","version":"*"}]),
+        );
 
         let error = run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd).unwrap_err();
         assert!(error.contains(

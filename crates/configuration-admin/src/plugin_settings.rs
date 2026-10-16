@@ -512,7 +512,10 @@ mod tests {
                 .join("plugin.json"),
             serde_json::to_vec(&json!({
                 "name": name_of(id),
-                "dependencies": dependencies,
+                "dependencies": dependencies
+                    .iter()
+                    .map(|name| json!({"name": name, "version": "*"}))
+                    .collect::<Vec<_>>(),
             }))
             .unwrap(),
         )
