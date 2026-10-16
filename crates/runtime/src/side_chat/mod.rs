@@ -1061,7 +1061,7 @@ async fn dispatch(
             images,
             turn_id,
         } => {
-            let replay_images = images
+            let replay_images: Vec<client::protocol::message::MessageImageDto> = images
                 .iter()
                 .map(|image| client::protocol::message::MessageImageDto {
                     media_type: image.media_type.clone(),

@@ -8,7 +8,7 @@ use crate::ConversationOrchestrator;
 use lingxi_core::types::SessionId;
 use llm_runtime::prompt_cache::RequestSnapshot;
 use std::future::Future;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;

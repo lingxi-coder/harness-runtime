@@ -5476,7 +5476,7 @@ impl MobileEngineHandle {
                             queued_inputs = checkpoint
                                 .skill_prompt
                                 .as_ref()
-                                .map(DurableSkillPrompt::queued_prompt_inputs)
+                                .map(|skill| skill.queued_prompt_inputs(&checkpoint.images))
                                 .or_else(|| {
                                     checkpoint.prompt_identity.as_ref().map(|identity| {
                                         vec![identity
