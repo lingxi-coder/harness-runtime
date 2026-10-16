@@ -577,6 +577,9 @@ impl CommandRegistry {
             .collect()
     }
 
+    /// Collect Native's source-ordered prompt names and raw available-command
+    /// count before reminder projection filters and caps the displayed names.
+    #[must_use]
     pub fn headless_command_catalog(&self) -> crate::model::HeadlessCommandCatalog {
         let available = self.native_headless_available_commands();
         let prompt_command_names = available

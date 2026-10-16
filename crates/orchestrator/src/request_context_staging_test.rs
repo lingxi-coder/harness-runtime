@@ -3148,6 +3148,14 @@ async fn prepared_native_tool_addition_obeys_mctc_and_inline_gate_snapshot() {
             );
 
             let prompt_id = MessageId::new();
+            let prompt = ConversationMessage::user(prompt_id, "Native tool gate fixture".into());
+            orchestrator
+                .session
+                .lock()
+                .await
+                .history
+                .push(prompt.clone());
+            orchestrator.persist_message_to_jsonl(&prompt).await;
             let base_row = staged_system_attachment("environment", "environment snapshot");
             let deferred_row = PromptIngressAttachment {
                 message: ConversationMessage::user_meta(

@@ -2343,7 +2343,14 @@ mod tests {
 
     #[tokio::test]
     async fn summarize_all_retry_keeps_the_operation_api_budget() {
-        let history = vec![user_msg(&"q".repeat(5_000)), assistant_text("only reply")];
+        // A retry needs a complete oldest API round that can be dropped while
+        // retaining substantive content; one exchange correctly cannot retry.
+        let history = vec![
+            user_msg("oldest"),
+            assistant_text("first reply"),
+            user_msg("latest"),
+            assistant_text("latest reply"),
+        ];
         let (compactor, client) = wired_seq(Vec::new(), history.clone()).await;
         let api_attempts_left = llm_runtime::ApiAttemptsLeft::new(2);
         *client.texts.lock().unwrap() = VecDeque::from(vec![
