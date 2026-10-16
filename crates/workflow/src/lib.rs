@@ -354,44 +354,688 @@ pub trait WorkflowBudgetSource: Send + Sync {
     fn spent(&self) -> u64;
 }
 
-/// Rewrite a leading `export const meta = …` / `export const meta=…` into a
-/// plain `const meta = …` so the script body can be evaluated as a classic
-/// script. claude-code reads `meta` from the module's export; here the meta
-/// object is bound as a normal `const` (the executor reads it back via the
-/// global scope). Only the `export ` keyword on the `meta` declaration is
-/// stripped — every other statement is preserved verbatim.
+/// Return the workflow body after removing its validated metadata declaration,
+/// as Native qS does before handing the script to the workflow VM. Metadata is
+/// not a VM global. The returned source retains the original bytes after the
+/// declaration, subject only to qS's leading-body trim.
 #[must_use]
-pub fn strip_meta_export(script: &str) -> String {
-    let mut out = String::with_capacity(script.len());
-    for (i, line) in script.lines().enumerate() {
-        if i > 0 {
-            out.push('\n');
-        }
-        let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("export const meta") {
-            let indent = &line[..line.len() - trimmed.len()];
-            out.push_str(indent);
-            out.push_str("const meta");
-            out.push_str(rest);
-        } else {
-            out.push_str(line);
-        }
+pub fn prepare_script_body(script: &str) -> String {
+    if extract_workflow_meta(script).is_none() {
+        return script.to_owned();
     }
-    out
+
+    if let Some(body_start) = native_meta_fast_declaration_end(script) {
+        return native_trim_script_body(&script[body_start..]).to_owned();
+    }
+
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .is_err()
+    {
+        return script.to_owned();
+    }
+    let Some(tree) = parser.parse(script, None) else {
+        return script.to_owned();
+    };
+    if tree.root_node().has_error() {
+        return script.to_owned();
+    }
+    let Some(statement) = first_statement(tree.root_node()) else {
+        return script.to_owned();
+    };
+    let source = script.as_bytes();
+    let Some(object) = meta_object(statement, source) else {
+        return script.to_owned();
+    };
+    if walk_object_literal(object, source).is_err()
+        || !meta_string_field_nonempty(object, source, "name")
+        || !meta_string_field_nonempty(object, source, "description")
+    {
+        return script.to_owned();
+    }
+    let end = statement.end_byte();
+    if !script.is_char_boundary(end) {
+        return script.to_owned();
+    }
+    native_trim_script_body(&script[end..]).to_owned()
 }
 
-/// Validate the script's `meta` block by PARSING it (tree-sitter JS) and walking
-/// the tree exactly as claude-code does (@202919276 `_Bp`/`OKa`/`PKa`/`yBp`/
-/// `TBp`): `export const meta = {…}` must be the FIRST statement, the object a
-/// PURE LITERAL (no spreads / computed keys / methods / accessors / runtime
-/// values / template interpolation / reserved keys), and `meta.name` /
-/// `meta.description` non-empty strings. Every error string is byte-exact; the
-/// dynamic `${type}` slots are mapped back to the ESTree node names the binary
-/// emits ([`estree_name`]).
+fn native_trim_script_body(body: &str) -> &str {
+    fn is_js_whitespace(ch: char) -> bool {
+        matches!(
+            ch,
+            '\u{0009}'
+                | '\u{000a}'
+                | '\u{000b}'
+                | '\u{000c}'
+                | '\u{000d}'
+                | '\u{0020}'
+                | '\u{00a0}'
+                | '\u{1680}'
+                | '\u{2000}'
+                ..='\u{200a}'
+                    | '\u{2028}'
+                    | '\u{2029}'
+                    | '\u{202f}'
+                    | '\u{205f}'
+                    | '\u{3000}'
+                    | '\u{feff}'
+        )
+    }
+
+    let mut prefix_end = 0;
+    let mut last_line_feed_end = None;
+    for (index, ch) in body.char_indices() {
+        if ch != ';' && !is_js_whitespace(ch) {
+            break;
+        }
+        prefix_end = index + ch.len_utf8();
+        if ch == '\n' {
+            last_line_feed_end = Some(prefix_end);
+        }
+    }
+    let mut offset = last_line_feed_end.unwrap_or(0);
+    while let Some(ch) = body[offset..].chars().next() {
+        if !is_js_whitespace(ch) {
+            break;
+        }
+        offset += ch.len_utf8();
+    }
+    debug_assert!(offset <= prefix_end || prefix_end == 0);
+    &body[offset..]
+}
+
+/// qS (`src_207321470.js`, SHA `d07866f…`, byte 207325140) checks JavaScript
+/// `String.length` before attempting either its scanner or AST fallback. Its
+/// imported `gE` is 524,288 (`src_191056520.js`, byte 191206340). This code-unit
+/// bound is distinct from the byte-sized plugin file read cap in
+/// `plugin_registry`.
+const NATIVE_WORKFLOW_MAX_SCRIPT_CODE_UNITS: usize = 524_288;
+
+fn exceeds_native_script_code_unit_limit(script: &str) -> bool {
+    script.encode_utf16().count() > NATIVE_WORKFLOW_MAX_SCRIPT_CODE_UNITS
+}
+
+fn native_meta_fast_object_start(script: &str) -> Option<usize> {
+    fn skip_whitespace(script: &str, offset: &mut usize) {
+        while let Some(ch) = script[*offset..].chars().next() {
+            let is_whitespace = matches!(
+                ch,
+                '\u{0009}'
+                    | '\u{000a}'
+                    | '\u{000b}'
+                    | '\u{000c}'
+                    | '\u{000d}'
+                    | '\u{0020}'
+                    | '\u{00a0}'
+                    | '\u{1680}'
+                    | '\u{2000}'
+                    ..='\u{200a}'
+                        | '\u{2028}'
+                        | '\u{2029}'
+                        | '\u{202f}'
+                        | '\u{205f}'
+                        | '\u{3000}'
+                        | '\u{feff}'
+            );
+            if !is_whitespace {
+                break;
+            }
+            *offset += ch.len_utf8();
+        }
+    }
+
+    fn consume(script: &str, offset: &mut usize, expected: &str) -> bool {
+        if script[*offset..].starts_with(expected) {
+            *offset += expected.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    let mut offset = 0;
+    loop {
+        skip_whitespace(script, &mut offset);
+        let rest = &script[offset..];
+        if rest.starts_with("//") {
+            offset += 2;
+            while let Some(ch) = script[offset..].chars().next() {
+                if matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+                    break;
+                }
+                offset += ch.len_utf8();
+            }
+        } else if rest.starts_with("/*") {
+            let Some(end) = rest[2..].find("*/") else {
+                return None;
+            };
+            offset += 2 + end + 2;
+        } else {
+            break;
+        }
+    }
+
+    if !consume(script, &mut offset, "export") {
+        return None;
+    }
+    let before = offset;
+    skip_whitespace(script, &mut offset);
+    if offset == before || !consume(script, &mut offset, "const") {
+        return None;
+    }
+    let before = offset;
+    skip_whitespace(script, &mut offset);
+    if offset == before || !consume(script, &mut offset, "meta") {
+        return None;
+    }
+    skip_whitespace(script, &mut offset);
+    if !consume(script, &mut offset, "=") {
+        return None;
+    }
+    skip_whitespace(script, &mut offset);
+    script[offset..].starts_with('{').then_some(offset)
+}
+
+/// Find the matching brace for the scanner's top-level metadata object. This
+/// only locates the static header span; tree-sitter still validates the syntax
+/// and literal contents. Dynamic template substitutions deliberately fall
+/// back to full-source parsing, as qS does when its literal scanner declines.
+fn native_meta_fast_object_end(script: &str, start: usize) -> Option<usize> {
+    let bytes = script.as_bytes();
+    let mut index = start;
+    let mut depth = 0usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' | b'"' | b'`' => {
+                let quote = bytes[index];
+                index += 1;
+                while index < bytes.len() {
+                    if quote == b'`' && bytes[index..].starts_with(b"${") {
+                        return None;
+                    }
+                    match bytes[index] {
+                        b'\\' => {
+                            index += 1;
+                            if index < bytes.len() {
+                                if bytes[index] == b'\r' && bytes.get(index + 1) == Some(&b'\n') {
+                                    index += 2;
+                                } else {
+                                    index += 1;
+                                }
+                            }
+                        }
+                        byte if byte == quote => {
+                            index += 1;
+                            break;
+                        }
+                        _ => index += 1,
+                    }
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len()
+                    && !matches!(bytes[index], b'\n' | b'\r')
+                    && !bytes[index..].starts_with(&[0xe2, 0x80, 0xa8])
+                    && !bytes[index..].starts_with(&[0xe2, 0x80, 0xa9])
+                {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                let rest = &script[index + 2..];
+                let end = rest.find("*/")?;
+                index += 2 + end + 2;
+            }
+            b'{' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                index += 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Validate string escapes against qS's scanner `F` before admitting the
+/// malformed-body fast path. In particular, `\1`–`\9`, `\0` followed by a
+/// decimal digit, malformed `\x`/`\u` escapes, and code points above U+10FFFF
+/// make qS's literal scanner decline and fall through to full parsing.
+fn native_string_scanner_accepts(node: tree_sitter::Node<'_>, src: &[u8]) -> bool {
+    let text = node_text(node, src);
+    let template = node.kind() == "template_string";
+    let delimiter = match text.chars().next() {
+        Some('`') if template => '`',
+        Some(delimiter @ ('"' | '\'')) if node.kind() == "string" => delimiter,
+        _ => return false,
+    };
+    if text.len() < 2 || !text.ends_with(delimiter) || !text.is_char_boundary(text.len() - 1) {
+        return false;
+    }
+    let inner = &text[delimiter.len_utf8()..text.len() - delimiter.len_utf8()];
+    let bytes = inner.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'\\' {
+            let Some(ch) = inner[index..].chars().next() else {
+                return false;
+            };
+            if !template && matches!(ch, '\n' | '\r') {
+                return false;
+            }
+            if template && ch == '$' && bytes.get(index + 1) == Some(&b'{') {
+                return false;
+            }
+            index += ch.len_utf8();
+            continue;
+        }
+
+        index += 1;
+        let Some(escape) = inner.get(index..).and_then(|rest| rest.chars().next()) else {
+            return false;
+        };
+        match escape {
+            '0' => {
+                if bytes
+                    .get(index + 1)
+                    .is_some_and(|byte| byte.is_ascii_digit())
+                {
+                    return false;
+                }
+                index += 1;
+            }
+            '1'..='9' => return false,
+            'x' => {
+                let Some(digits) = bytes.get(index + 1..index + 3) else {
+                    return false;
+                };
+                if digits.len() != 2 || !digits.iter().all(|byte| byte.is_ascii_hexdigit()) {
+                    return false;
+                }
+                index += 3;
+            }
+            'u' => {
+                if bytes.get(index + 1) == Some(&b'{') {
+                    let digits_start = index + 2;
+                    let Some(relative_end) = bytes
+                        .get(digits_start..)
+                        .and_then(|rest| rest.iter().position(|byte| *byte == b'}'))
+                    else {
+                        return false;
+                    };
+                    let digits_end = digits_start + relative_end;
+                    let digits = &bytes[digits_start..digits_end];
+                    if digits.is_empty() || !digits.iter().all(|byte| byte.is_ascii_hexdigit()) {
+                        return false;
+                    }
+                    let first_significant = digits.iter().position(|byte| *byte != b'0');
+                    let significant =
+                        first_significant.map_or(&digits[digits.len()..], |start| &digits[start..]);
+                    if significant.len() > 6 {
+                        return false;
+                    }
+                    let Ok(digit_text) = std::str::from_utf8(significant) else {
+                        return false;
+                    };
+                    let code_point = if digit_text.is_empty() {
+                        0
+                    } else {
+                        let Ok(code_point) = u32::from_str_radix(digit_text, 16) else {
+                            return false;
+                        };
+                        code_point
+                    };
+                    if code_point > 0x10ffff {
+                        return false;
+                    }
+                    index = digits_end + 1;
+                } else {
+                    let Some(digits) = bytes.get(index + 1..index + 5) else {
+                        return false;
+                    };
+                    if digits.len() != 4 || !digits.iter().all(|byte| byte.is_ascii_hexdigit()) {
+                        return false;
+                    }
+                    index += 5;
+                }
+            }
+            '\r' => {
+                index += 1;
+                if bytes.get(index) == Some(&b'\n') {
+                    index += 1;
+                }
+            }
+            _ => index += escape.len_utf8(),
+        }
+    }
+    true
+}
+
+fn native_meta_literal_escapes_are_valid(obj: tree_sitter::Node<'_>, src: &[u8]) -> bool {
+    if matches!(obj.kind(), "string" | "template_string")
+        && !native_string_scanner_accepts(obj, src)
+    {
+        return false;
+    }
+    let mut cursor = obj.walk();
+    let valid = obj
+        .named_children(&mut cursor)
+        .all(|child| native_meta_literal_escapes_are_valid(child, src));
+    valid
+}
+
+/// qS's object scanner accepts a narrower grammar than the workflow AST
+/// literal validator. Only use the malformed-body fast path when the parsed
+/// header is also within that scanner grammar; otherwise Native falls through
+/// to parsing the entire source before it can return metadata.
+fn native_meta_fast_tree_is_scannable(obj: tree_sitter::Node<'_>, src: &[u8]) -> bool {
+    fn decimal_number_scans(raw: &str) -> bool {
+        let bytes = raw.as_bytes();
+        let mut index = 0;
+        if bytes.get(index) == Some(&b'.') {
+            index += 1;
+            let digits = index;
+            while bytes.get(index).is_some_and(|byte| byte.is_ascii_digit()) {
+                index += 1;
+            }
+            if index == digits {
+                return false;
+            }
+        } else {
+            match bytes.get(index) {
+                Some(&b'0') => index += 1,
+                Some(byte) if (b'1'..=b'9').contains(byte) => {
+                    index += 1;
+                    while bytes.get(index).is_some_and(|byte| byte.is_ascii_digit()) {
+                        index += 1;
+                    }
+                }
+                _ => return false,
+            }
+            if bytes.get(index) == Some(&b'.') {
+                index += 1;
+                while bytes.get(index).is_some_and(|byte| byte.is_ascii_digit()) {
+                    index += 1;
+                }
+            }
+        }
+        if matches!(bytes.get(index), Some(&b'e' | &b'E')) {
+            index += 1;
+            if matches!(bytes.get(index), Some(&b'+' | &b'-')) {
+                index += 1;
+            }
+            let digits = index;
+            while bytes.get(index).is_some_and(|byte| byte.is_ascii_digit()) {
+                index += 1;
+            }
+            if index == digits {
+                return false;
+            }
+        }
+        index == bytes.len()
+    }
+
+    fn ascii_identifier_scans(raw: &str) -> bool {
+        let mut bytes = raw.bytes();
+        let Some(first) = bytes.next() else {
+            return false;
+        };
+        (first.is_ascii_alphabetic() || matches!(first, b'_' | b'$'))
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+    }
+
+    fn value_scans(value: tree_sitter::Node<'_>, src: &[u8]) -> bool {
+        match value.kind() {
+            "string" | "template_string" => {
+                walk_value(value, src).is_ok() && native_string_scanner_accepts(value, src)
+            }
+            "true" | "false" | "null" => walk_value(value, src).is_ok(),
+            "number" => {
+                let raw = node_text(value, src);
+                decimal_number_scans(raw)
+                    && src
+                        .get(value.end_byte()..)
+                        .and_then(|rest| std::str::from_utf8(rest).ok())
+                        .and_then(|rest| rest.chars().next())
+                        .is_none_or(|next| {
+                            next != '.'
+                                && next != '\\'
+                                && !next.is_ascii_alphanumeric()
+                                && !matches!(next, '_' | '$')
+                                && next.is_ascii()
+                        })
+            }
+            "unary_expression" => {
+                let operator_is_minus = value
+                    .child_by_field_name("operator")
+                    .is_some_and(|operator| node_text(operator, src) == "-");
+                let argument_is_scannable_number = value
+                    .child_by_field_name("argument")
+                    .is_some_and(|argument| {
+                        argument.kind() == "number" && value_scans(argument, src)
+                    });
+                operator_is_minus && argument_is_scannable_number
+            }
+            "object" => object_scans(value, src),
+            "array" => {
+                if walk_value(value, src).is_err() {
+                    return false;
+                }
+                let mut cursor = value.walk();
+                let scannable = value
+                    .named_children(&mut cursor)
+                    .all(|child| child.kind() == "comment" || value_scans(child, src));
+                scannable
+            }
+            _ => false,
+        }
+    }
+
+    fn object_scans(object: tree_sitter::Node<'_>, src: &[u8]) -> bool {
+        if walk_object_literal(object, src).is_err() {
+            return false;
+        }
+        let mut cursor = object.walk();
+        let scannable = object.named_children(&mut cursor).all(|member| {
+            if member.kind() == "comment" {
+                return true;
+            }
+            if member.kind() != "pair" {
+                return false;
+            }
+            let Some(key) = member.child_by_field_name("key") else {
+                return false;
+            };
+            let key_scans = match key.kind() {
+                "string" => native_string_scanner_accepts(key, src),
+                "property_identifier" => ascii_identifier_scans(node_text(key, src)),
+                // qS's D accepts quoted keys or its ASCII identifier scanner;
+                // numeric keys are valid AST literals but force full parsing.
+                _ => false,
+            };
+            key_scans
+                && member
+                    .child_by_field_name("value")
+                    .is_some_and(|value| value_scans(value, src))
+        });
+        scannable
+    }
+
+    object_scans(obj, src)
+}
+
+/// Match qS's `I` boundary check after `S` found an object. A separator is a
+/// semicolon, EOF after scanner trivia, or a line terminator before a valid
+/// identifier other than `in`/`instanceof`. Other suffixes must use the full
+/// source parser and therefore cannot hide malformed trailing syntax.
+fn native_meta_fast_suffix_end(script: &str, object_end: usize) -> Option<usize> {
+    fn is_js_whitespace(ch: char) -> bool {
+        matches!(
+            ch,
+            '\u{0009}'
+                | '\u{000a}'
+                | '\u{000b}'
+                | '\u{000c}'
+                | '\u{000d}'
+                | '\u{0020}'
+                | '\u{00a0}'
+                | '\u{1680}'
+                | '\u{2000}'
+                ..='\u{200a}'
+                    | '\u{2028}'
+                    | '\u{2029}'
+                    | '\u{202f}'
+                    | '\u{205f}'
+                    | '\u{3000}'
+                    | '\u{feff}'
+        )
+    }
+
+    fn skip_scanner_trivia(script: &str, mut offset: usize) -> usize {
+        loop {
+            while let Some(ch) = script[offset..].chars().next() {
+                if !is_js_whitespace(ch) {
+                    break;
+                }
+                offset += ch.len_utf8();
+            }
+            let rest = &script[offset..];
+            if rest.starts_with("//") {
+                offset += 2;
+                while let Some(ch) = script[offset..].chars().next() {
+                    if matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}') {
+                        break;
+                    }
+                    offset += ch.len_utf8();
+                }
+            } else if rest.starts_with("/*") {
+                let Some(end) = rest[2..].find("*/") else {
+                    return offset;
+                };
+                offset += 2 + end + 2;
+            } else {
+                return offset;
+            }
+        }
+    }
+
+    fn identifier_at(script: &str, offset: usize) -> Option<&str> {
+        let bytes = script.as_bytes();
+        let first = *bytes.get(offset)?;
+        if !(first.is_ascii_alphabetic() || matches!(first, b'_' | b'$')) {
+            return None;
+        }
+        let mut end = offset + 1;
+        while let Some(byte) = bytes.get(end) {
+            if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$') {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+        if let Some(ch) = script.get(end..)?.chars().next() {
+            if ch == '\\' || ch.is_ascii_alphanumeric() || matches!(ch, '_' | '$') || !ch.is_ascii()
+            {
+                // qS's T rejects every non-ASCII code unit after an identifier.
+                return None;
+            }
+        }
+        script.get(offset..end)
+    }
+
+    if !script.is_char_boundary(object_end) {
+        return None;
+    }
+    let next = skip_scanner_trivia(script, object_end);
+    if script[next..].starts_with(';') {
+        return Some(next + 1);
+    }
+    if next == script.len() {
+        return Some(object_end);
+    }
+    if !script[object_end..next]
+        .chars()
+        .any(|ch| matches!(ch, '\n' | '\r' | '\u{2028}' | '\u{2029}'))
+    {
+        return None;
+    }
+    identifier_at(script, next)
+        .filter(|identifier| !matches!(*identifier, "in" | "instanceof"))
+        .map(|_| object_end)
+}
+
+/// Parse the exact source object found by qS's raw scanner under a canonical
+/// declaration wrapper. The prefix scanner accepts legal line breaks between
+/// `export`, `const`, `meta`, and `=`, while Tree-sitter's declaration parser
+/// can reject that spelling. Parsing only the captured object preserves the
+/// fast path's boundary: trailing workflow code is still skipped, and all
+/// node offsets remain aligned with the wrapper used for metadata projection.
+fn parse_native_scanned_meta(
+    script: &str,
+    start: usize,
+    end: usize,
+) -> Option<(tree_sitter::Tree, String)> {
+    let object_source = script.get(start..end)?;
+    let wrapped = format!("export const meta = {object_source};");
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(&wrapped, None)?;
+    if tree.root_node().has_error() {
+        return None;
+    }
+    let source = wrapped.as_bytes();
+    let object =
+        first_statement(tree.root_node()).and_then(|statement| meta_object(statement, source))?;
+    native_meta_fast_tree_is_scannable(object, source).then_some((tree, wrapped))
+}
+
+fn native_meta_fast_declaration_end(script: &str) -> Option<usize> {
+    if exceeds_native_script_code_unit_limit(script) {
+        return None;
+    }
+    let start = native_meta_fast_object_start(script)?;
+    let object_end = native_meta_fast_object_end(script, start)?;
+    let body_start = native_meta_fast_suffix_end(script, object_end)?;
+    let (tree, wrapped) = parse_native_scanned_meta(script, start, object_end)?;
+    let source = wrapped.as_bytes();
+    let object =
+        first_statement(tree.root_node()).and_then(|statement| meta_object(statement, source))?;
+    if !meta_string_field_nonempty(object, source, "name")
+        || !meta_string_field_nonempty(object, source, "description")
+    {
+        return None;
+    }
+    Some(body_start)
+}
+
+/// Validate the script's `meta` block with the 2.1.295 workflow parser
+/// (`qS`/`U`/`j`/`O`/`M`/`K`, `src_207321470.js`, SHA
+/// `d07866f…`; qS starts at artifact byte 207325140 and M/K at 207328692 /
+/// 207329121). The first statement must be `export const meta = {…}`, the
+/// object must be a plain literal, and `name` / `description` must be nonempty
+/// strings. Error node names are mapped from tree-sitter to qS's ESTree names
+/// ([`estree_name`]).
 ///
 /// # Errors
-/// Returns [`WorkflowError::Script`] with the byte-exact message on violation.
+/// Returns [`WorkflowError::Script`] for invalid metadata or JavaScript. The
+/// exact Acorn syntax-error formatter used by qS is not reproduced here.
 pub fn validate_meta(script: &str) -> Result<(), WorkflowError> {
+    if exceeds_native_script_code_unit_limit(script) {
+        return Err(WorkflowError::Script(format!(
+            "Script exceeds {NATIVE_WORKFLOW_MAX_SCRIPT_CODE_UNITS} bytes"
+        )));
+    }
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_javascript::LANGUAGE.into())
@@ -399,6 +1043,11 @@ pub fn validate_meta(script: &str) -> Result<(), WorkflowError> {
     let tree = parser
         .parse(script, None)
         .ok_or_else(|| WorkflowError::Engine("tree-sitter parse returned no tree".into()))?;
+    if tree.root_node().has_error() {
+        return Err(WorkflowError::Script(
+            "Workflow script contains invalid JavaScript syntax".into(),
+        ));
+    }
     let src = script.as_bytes();
 
     let Some(obj) = first_statement(tree.root_node()).and_then(|s| meta_object(s, src)) else {
@@ -410,6 +1059,11 @@ pub fn validate_meta(script: &str) -> Result<(), WorkflowError> {
         return Err(WorkflowError::Script(format!(
             "meta must be a pure literal: {reason}"
         )));
+    }
+    if !native_meta_literal_escapes_are_valid(obj, src) {
+        return Err(WorkflowError::Script(
+            "Workflow metadata contains an invalid string escape".into(),
+        ));
     }
     if !meta_string_field_nonempty(obj, src, "name") {
         return Err(WorkflowError::Script(
@@ -431,7 +1085,7 @@ pub fn validate_meta(script: &str) -> Result<(), WorkflowError> {
 pub fn validate_body(script: &str) -> Result<(), WorkflowError> {
     use rquickjs::{Context, Runtime};
 
-    let prepared = strip_meta_export(script);
+    let prepared = prepare_script_body(script);
     validate_body_language(&prepared)?;
     let runtime = Runtime::new().map_err(|e| WorkflowError::Engine(e.to_string()))?;
     let context = Context::full(&runtime).map_err(|e| WorkflowError::Engine(e.to_string()))?;
@@ -497,9 +1151,9 @@ fn node_text<'a>(node: tree_sitter::Node, src: &'a [u8]) -> &'a str {
 }
 
 /// Extract a `meta.<field>` string-literal value from a workflow script (used
-/// for `meta.name` → claude-code `workflowName`). Returns the cooked string
-/// value when the first statement is `export const meta = { … }` and the field
-/// is a plain / non-interpolated string literal; `None` otherwise.
+/// for `meta.name` → claude-code `workflowName`). Returns the cooked value of
+/// the last matching property, as in a JavaScript object literal, when the
+/// first statement is `export const meta = { … }`; `None` otherwise.
 #[must_use]
 pub fn meta_string_value(script: &str, field: &str) -> Option<String> {
     let mut parser = tree_sitter::Parser::new();
@@ -509,36 +1163,196 @@ pub fn meta_string_value(script: &str, field: &str) -> Option<String> {
     let tree = parser.parse(script, None)?;
     let src = script.as_bytes();
     let obj = first_statement(tree.root_node()).and_then(|s| meta_object(s, src))?;
-    let mut c = obj.walk();
-    for m in obj.named_children(&mut c) {
-        if m.kind() != "pair" {
-            continue;
+    let pair = last_meta_property(obj, src, field)?;
+    let value = pair.child_by_field_name("value")?;
+    match value.kind() {
+        "string" => Some(string_inner(value, src)),
+        "template_string" => {
+            let mut cc = value.walk();
+            let has_subst = value
+                .named_children(&mut cc)
+                .any(|n| n.kind() == "template_substitution");
+            (!has_subst).then(|| string_inner(value, src))
         }
-        let Some(key) = m.child_by_field_name("key") else {
-            continue;
-        };
-        let kname = match key.kind() {
-            "property_identifier" => node_text(key, src).to_string(),
-            "string" => string_inner(key, src),
-            _ => continue,
-        };
-        if kname != field {
-            continue;
-        }
-        let value = m.child_by_field_name("value")?;
-        return match value.kind() {
-            "string" => Some(string_inner(value, src)),
-            "template_string" => {
-                let mut cc = value.walk();
-                let has_subst = value
-                    .named_children(&mut cc)
-                    .any(|n| n.kind() == "template_substitution");
-                (!has_subst).then(|| string_inner(value, src))
-            }
-            _ => None,
-        };
+        _ => None,
     }
-    None
+}
+
+/// Parsed literal metadata consumed by Native's dynamic-workflow slash factory.
+/// Text fields retain their original UTF-16 units so escaped lone surrogates
+/// survive metadata extraction and prompt construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowMeta {
+    pub name: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    pub description: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    pub title: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    pub when_to_use: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    pub phases: Option<Vec<WorkflowMetaPhase>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowMetaPhase {
+    pub title: lingxi_core::types::utf16_json::Utf16JsonProjection,
+    pub detail: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    pub model: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+}
+
+/// Read literal metadata for workflow discovery. As in qS's `validateBody:false`
+/// fast path, this validates only the leading metadata object and does not
+/// compile or reject the trailing workflow body. Execution callers still run
+/// [`validate_meta`] and [`validate_body`] at their own boundary.
+#[must_use]
+pub fn extract_workflow_meta(script: &str) -> Option<WorkflowMeta> {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    if exceeds_native_script_code_unit_limit(script) {
+        return None;
+    }
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .ok()?;
+    let fast_tree = native_meta_fast_object_start(script).and_then(|start| {
+        let end = native_meta_fast_object_end(script, start)?;
+        native_meta_fast_suffix_end(script, end)?;
+        parse_native_scanned_meta(script, start, end)
+    });
+    let (tree, parsed_source) = if let Some((tree, wrapped)) = fast_tree {
+        (tree, wrapped)
+    } else {
+        let tree = parser.parse(script, None)?;
+        if tree.root_node().has_error() {
+            return None;
+        }
+        (tree, script.to_owned())
+    };
+    let src = parsed_source.as_bytes();
+    let obj =
+        first_statement(tree.root_node()).and_then(|statement| meta_object(statement, src))?;
+    if walk_object_literal(obj, src).is_err()
+        || !native_meta_literal_escapes_are_valid(obj, src)
+        || !meta_string_field_nonempty(obj, src, "name")
+        || !meta_string_field_nonempty(obj, src, "description")
+    {
+        return None;
+    }
+    let projection = |units: Vec<u16>| {
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("display text is derived from the same UTF-16 source units")
+    };
+    let name_units = find_meta_string_units(obj, src, "name")?;
+    if name_units.is_empty() {
+        return None;
+    }
+    let name = projection(name_units);
+    let description_units = find_meta_string_units(obj, src, "description")?;
+    if description_units.is_empty() {
+        return None;
+    }
+    let title = find_meta_string_units(obj, src, "title")
+        .filter(|units| !units.is_empty())
+        .map(projection);
+    let when_to_use = find_meta_string_units(obj, src, "whenToUse").map(projection);
+    let phases = find_meta_phases(obj, src).map(|phases| {
+        phases
+            .into_iter()
+            .map(|(title, detail, model)| WorkflowMetaPhase {
+                title: projection(title),
+                detail: detail.map(projection),
+                model: model.map(projection),
+            })
+            .collect()
+    });
+    Some(WorkflowMeta {
+        name,
+        description: projection(description_units),
+        title,
+        when_to_use,
+        phases,
+    })
+}
+
+fn find_meta_string_units(obj: tree_sitter::Node<'_>, src: &[u8], field: &str) -> Option<Vec<u16>> {
+    let pair = last_meta_property(obj, src, field)?;
+    let value = pair.child_by_field_name("value")?;
+    match value.kind() {
+        "string" => Some(string_inner_units(value, src)),
+        "template_string" => {
+            let mut value_cursor = value.walk();
+            let has_substitution = value
+                .named_children(&mut value_cursor)
+                .any(|child| child.kind() == "template_substitution");
+            (!has_substitution).then(|| string_inner_units(value, src))
+        }
+        _ => None,
+    }
+}
+
+/// Return the last own-property initializer with this decoded key. JavaScript
+/// object literals overwrite an earlier property when a later key repeats;
+/// keeping that rule here also means a later wrong-typed value masks an
+/// earlier valid literal instead of silently resurrecting it.
+fn last_meta_property<'tree>(
+    object: tree_sitter::Node<'tree>,
+    src: &[u8],
+    field: &str,
+) -> Option<tree_sitter::Node<'tree>> {
+    let mut cursor = object.walk();
+    object
+        .named_children(&mut cursor)
+        .filter(|pair| pair.kind() == "pair")
+        .filter(|pair| {
+            pair.child_by_field_name("key")
+                .and_then(|key| meta_property_name(key, src))
+                .is_some_and(|name| name == field)
+        })
+        .last()
+}
+
+fn meta_property_name(key: tree_sitter::Node<'_>, src: &[u8]) -> Option<String> {
+    match key.kind() {
+        // Acorn exposes an Identifier's decoded `.name`, including Unicode
+        // escapes. Cook the spelling so an escaped key participates in the
+        // same object-property overwrite semantics.
+        "property_identifier" => Some(cook_js_string(node_text(key, src))),
+        "string" => Some(string_inner(key, src)),
+        _ => None,
+    }
+}
+
+fn find_meta_phases(
+    obj: tree_sitter::Node<'_>,
+    src: &[u8],
+) -> Option<Vec<(Vec<u16>, Option<Vec<u16>>, Option<Vec<u16>>)>> {
+    let pair = last_meta_property(obj, src, "phases")?;
+    let array = pair.child_by_field_name("value")?;
+    if array.kind() != "array" {
+        return None;
+    }
+    let mut items = array.walk();
+    let phases = array
+        .named_children(&mut items)
+        .filter_map(|phase| {
+            if phase.kind() != "object" {
+                return None;
+            }
+            let title = object_string_field_units(phase, "title", src)?;
+            let detail = object_string_field_units(phase, "detail", src);
+            let model = object_string_field_units(phase, "model", src);
+            Some((title, detail, model))
+        })
+        .collect::<Vec<_>>();
+    (!phases.is_empty()).then_some(phases)
+}
+
+fn object_string_field_units(
+    object: tree_sitter::Node<'_>,
+    field: &str,
+    src: &[u8],
+) -> Option<Vec<u16>> {
+    let pair = last_meta_property(object, src, field)?;
+    let value = pair.child_by_field_name("value")?;
+    (value.kind() == "string").then(|| string_inner_units(value, src))
 }
 
 /// Extract the number of elements in a literal `meta.<field>` array. Claude
@@ -554,24 +1368,8 @@ pub fn meta_array_len(script: &str, field: &str) -> Option<usize> {
     let tree = parser.parse(script, None)?;
     let src = script.as_bytes();
     let obj = first_statement(tree.root_node()).and_then(|s| meta_object(s, src))?;
-    let mut c = obj.walk();
-    for pair in obj.named_children(&mut c) {
-        if pair.kind() != "pair" {
-            continue;
-        }
-        let Some(key) = pair.child_by_field_name("key") else {
-            continue;
-        };
-        let key_name = match key.kind() {
-            "property_identifier" => node_text(key, src).to_string(),
-            "string" => string_inner(key, src),
-            _ => continue,
-        };
-        if key_name == field {
-            return array_value_len(pair, src);
-        }
-    }
-    None
+    let pair = last_meta_property(obj, src, field)?;
+    array_value_len(pair, src)
 }
 
 fn array_value_len(pair: tree_sitter::Node<'_>, src: &[u8]) -> Option<usize> {
@@ -605,24 +1403,9 @@ fn array_value_len(pair: tree_sitter::Node<'_>, src: &[u8]) -> Option<usize> {
 }
 
 fn object_string_field(object: tree_sitter::Node<'_>, field: &str, src: &[u8]) -> Option<String> {
-    let mut cursor = object.walk();
-    let result = object.named_children(&mut cursor).find_map(|pair| {
-        if pair.kind() != "pair" {
-            return None;
-        }
-        let key = pair.child_by_field_name("key")?;
-        let key_name = match key.kind() {
-            "property_identifier" => node_text(key, src).to_string(),
-            "string" => string_inner(key, src),
-            _ => return None,
-        };
-        if key_name != field {
-            return None;
-        }
-        let value = pair.child_by_field_name("value")?;
-        (value.kind() == "string").then(|| string_inner(value, src))
-    });
-    result
+    let pair = last_meta_property(object, src, field)?;
+    let value = pair.child_by_field_name("value")?;
+    (value.kind() == "string").then(|| string_inner(value, src))
 }
 
 /// The byte-exact message claude-code returns when an INLINE workflow `script`
@@ -705,8 +1488,8 @@ fn first_statement(program: tree_sitter::Node) -> Option<tree_sitter::Node> {
     first
 }
 
-/// If `stmt` is `export const meta = {object}` (binary `_Bp`), return the object
-/// node; else `None`.
+/// Return the metadata object for qS's required first exported `const meta`
+/// declaration; otherwise return `None`.
 fn meta_object<'t>(stmt: tree_sitter::Node<'t>, src: &[u8]) -> Option<tree_sitter::Node<'t>> {
     if stmt.kind() != "export_statement" {
         return None;
@@ -724,7 +1507,7 @@ fn meta_object<'t>(stmt: tree_sitter::Node<'t>, src: &[u8]) -> Option<tree_sitte
         return None; // const meta + other declarators ⇒ not the single-`meta` form
     }
     let name = d.child_by_field_name("name")?;
-    if name.kind() != "identifier" || node_text(name, src) != "meta" {
+    if name.kind() != "identifier" || cook_js_string(node_text(name, src)) != "meta" {
         return None;
     }
     let value = d.child_by_field_name("value")?;
@@ -771,7 +1554,7 @@ fn walk_object_literal(obj: tree_sitter::Node, src: &[u8]) -> Result<(), String>
 /// `yBp`: a property key's name. Identifier / string / number keys are allowed.
 fn key_name(key: tree_sitter::Node, src: &[u8]) -> Result<String, String> {
     match key.kind() {
-        "property_identifier" => Ok(node_text(key, src).to_string()),
+        "property_identifier" => Ok(cook_js_string(node_text(key, src))),
         "string" => Ok(string_inner(key, src)),
         "number" => Ok(node_text(key, src).to_string()),
         other => Err(format!(
@@ -879,7 +1662,99 @@ fn string_inner(node: tree_sitter::Node, src: &[u8]) -> String {
         Some('"' | '\'' | '`') if n >= 2 && t.is_char_boundary(n - 1) => &t[1..n - 1],
         _ => t,
     };
-    cook_js_string(raw)
+    if node.kind() == "template_string" && raw.contains('\r') {
+        cook_js_string(&raw.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        cook_js_string(raw)
+    }
+}
+
+fn string_inner_units(node: tree_sitter::Node, src: &[u8]) -> Vec<u16> {
+    let text = node_text(node, src);
+    let raw = match text.chars().next() {
+        Some('"' | '\'' | '`') if text.len() >= 2 && text.is_char_boundary(text.len() - 1) => {
+            &text[1..text.len() - 1]
+        }
+        _ => text,
+    };
+    if node.kind() == "template_string" && raw.contains('\r') {
+        cook_js_string_units(&raw.replace("\r\n", "\n").replace('\r', "\n"))
+    } else {
+        cook_js_string_units(raw)
+    }
+}
+
+fn cook_js_string_units(raw: &str) -> Vec<u16> {
+    fn push_scalar(units: &mut Vec<u16>, scalar: u32) {
+        if scalar <= 0xffff {
+            units.push(scalar as u16);
+        } else if scalar <= 0x10ffff {
+            let value = scalar - 0x10000;
+            units.push(0xd800 | ((value >> 10) as u16));
+            units.push(0xdc00 | ((value & 0x3ff) as u16));
+        }
+    }
+    let mut units = Vec::with_capacity(raw.encode_utf16().count());
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            units.extend(ch.encode_utf16(&mut [0; 2]).iter().copied());
+            continue;
+        }
+        let Some(escape) = chars.next() else {
+            units.push(b'\\' as u16);
+            break;
+        };
+        match escape {
+            'n' => units.push(b'\n' as u16),
+            'r' => units.push(b'\r' as u16),
+            't' => units.push(b'\t' as u16),
+            'b' => units.push(0x0008),
+            'f' => units.push(0x000c),
+            'v' => units.push(0x000b),
+            '0' if !chars.peek().is_some_and(char::is_ascii_digit) => units.push(0),
+            '\n' => {}
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+            }
+            '\u{2028}' | '\u{2029}' => {}
+            'x' => {
+                let digits: String = (0..2).filter_map(|_| chars.next()).collect();
+                if let Ok(value) = u32::from_str_radix(&digits, 16) {
+                    push_scalar(&mut units, value);
+                } else {
+                    units.extend("x".encode_utf16());
+                    units.extend(digits.encode_utf16());
+                }
+            }
+            'u' => {
+                if chars.peek() == Some(&'{') {
+                    chars.next();
+                    let digits: String = chars.by_ref().take_while(|&item| item != '}').collect();
+                    if let Ok(value) = u32::from_str_radix(&digits, 16) {
+                        push_scalar(&mut units, value);
+                    } else {
+                        units.extend("u".encode_utf16());
+                    }
+                } else {
+                    let digits: String = (0..4).filter_map(|_| chars.next()).collect();
+                    if let Ok(value) = u16::from_str_radix(&digits, 16) {
+                        units.push(value);
+                    } else {
+                        units.extend("u".encode_utf16());
+                        units.extend(digits.encode_utf16());
+                    }
+                }
+            }
+            other => {
+                let mut encoded = [0; 2];
+                units.extend_from_slice(other.encode_utf16(&mut encoded));
+            }
+        }
+    }
+    units
 }
 
 /// Resolve JS string-literal escape sequences in `raw` (delimiters already
@@ -908,6 +1783,13 @@ fn cook_js_string(raw: &str) -> String {
             'f' => out.push('\u{c}'),
             'v' => out.push('\u{b}'),
             '0' if !chars.peek().is_some_and(char::is_ascii_digit) => out.push('\0'),
+            '\n' => {}
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+            }
+            '\u{2028}' | '\u{2029}' => {}
             'x' => {
                 let h: String = (0..2).filter_map(|_| chars.next()).collect();
                 if let Some(ch) = u32::from_str_radix(&h, 16).ok().and_then(char::from_u32) {
@@ -945,38 +1827,23 @@ fn cook_js_string(raw: &str) -> String {
 /// `TBp`: the object's `field` property exists and is a non-empty string literal
 /// (a plain `string` or a `template_string` with no interpolation).
 fn meta_string_field_nonempty(obj: tree_sitter::Node, src: &[u8], field: &str) -> bool {
-    let mut c = obj.walk();
-    for m in obj.named_children(&mut c) {
-        if m.kind() != "pair" {
-            continue;
+    let Some(pair) = last_meta_property(obj, src, field) else {
+        return false;
+    };
+    let Some(value) = pair.child_by_field_name("value") else {
+        return false;
+    };
+    match value.kind() {
+        "string" => !string_inner(value, src).is_empty(),
+        "template_string" => {
+            let mut cc = value.walk();
+            let has_subst = value
+                .named_children(&mut cc)
+                .any(|n| n.kind() == "template_substitution");
+            !has_subst && !string_inner(value, src).is_empty()
         }
-        let Some(key) = m.child_by_field_name("key") else {
-            continue;
-        };
-        let kname = match key.kind() {
-            "property_identifier" => node_text(key, src).to_string(),
-            "string" => string_inner(key, src),
-            _ => continue,
-        };
-        if kname != field {
-            continue;
-        }
-        let Some(value) = m.child_by_field_name("value") else {
-            return false;
-        };
-        return match value.kind() {
-            "string" => !string_inner(value, src).is_empty(),
-            "template_string" => {
-                let mut cc = value.walk();
-                let has_subst = value
-                    .named_children(&mut cc)
-                    .any(|n| n.kind() == "template_substitution");
-                !has_subst && !string_inner(value, src).is_empty()
-            }
-            _ => false,
-        };
+        _ => false,
     }
-    false
 }
 
 /// Execute a workflow script's **synchronous** body, capturing `phase()` and
@@ -995,7 +1862,7 @@ pub fn run_sync(script: &str) -> Result<RunOutcome, WorkflowError> {
     let progress: Rc<RefCell<Vec<Progress>>> = Rc::new(RefCell::new(Vec::new()));
     // Phase index counter: 1-based, incremented on each phase() call.
     let phase_counter: Rc<RefCell<u32>> = Rc::new(RefCell::new(0));
-    let prepared = strip_meta_export(script);
+    let prepared = prepare_script_body(script);
 
     ctx.with(|ctx| -> Result<(), WorkflowError> {
         let globals = ctx.globals();
@@ -1128,7 +1995,7 @@ where
     let failures: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
     let runner = Rc::new(RefCell::new(agent_runner));
     let on_progress = Rc::new(RefCell::new(on_progress));
-    let prepared = strip_meta_export(script);
+    let prepared = prepare_script_body(script);
     // Wrap in an async IIFE; route a throw into `__wf_error` so it survives the
     // microtask boundary (a rejected top-level promise would otherwise be lost).
     // claude-code (V8) captures `(e && e.stack) || e`, but QuickJS's `e.stack`
@@ -1461,6 +2328,35 @@ mod meta_validation_tests {
     }
 
     #[test]
+    fn native_size_guard_counts_js_utf16_units_not_utf8_file_bytes() {
+        let too_many_units = format!(
+            "export const meta = {{ name: 'x', description: '{}' }};",
+            "a".repeat(NATIVE_WORKFLOW_MAX_SCRIPT_CODE_UNITS + 1)
+        );
+        assert_eq!(
+            err(&too_many_units),
+            format!("Script exceeds {NATIVE_WORKFLOW_MAX_SCRIPT_CODE_UNITS} bytes")
+        );
+        assert!(extract_workflow_meta(&too_many_units).is_none());
+
+        let prefix = "export const meta = { name: 'x', description: '";
+        let suffix = "' };";
+        let prefix_units = prefix.encode_utf16().count();
+        let suffix_units = suffix.encode_utf16().count();
+        let remaining = NATIVE_WORKFLOW_MAX_SCRIPT_CODE_UNITS - prefix_units - suffix_units;
+        let emoji_count = remaining / 2;
+        let odd_unit = if remaining % 2 == 0 { "" } else { "a" };
+        let within_native_limit = format!("{prefix}{}{odd_unit}{suffix}", "😀".repeat(emoji_count));
+        assert_eq!(
+            within_native_limit.encode_utf16().count(),
+            NATIVE_WORKFLOW_MAX_SCRIPT_CODE_UNITS
+        );
+        assert!(within_native_limit.len() > NATIVE_WORKFLOW_MAX_SCRIPT_CODE_UNITS);
+        validate_meta(&within_native_limit)
+            .expect("the qS String.length limit is independent of the file byte cap");
+    }
+
+    #[test]
     fn meta_array_len_matches_literal_phase_count() {
         let script = "export const meta = { name: 'x', description: 'd', phases: [{ title: 'A' }, { title: 'B' }] };";
         assert_eq!(meta_array_len(script, "phases"), Some(2));
@@ -1548,7 +2444,14 @@ mod meta_validation_tests {
         assert_eq!(cook_js_string(r"a\x62c"), "abc");
         assert_eq!(cook_js_string(r"x\u{1F600}"), "x\u{1F600}");
         assert_eq!(cook_js_string(r"a\tb\nc"), "a\tb\nc");
+        assert_eq!(cook_js_string("a\\\nb"), "ab");
+        assert_eq!(cook_js_string("a\\\r\nb"), "ab");
+        assert_eq!(cook_js_string("a\\\u{2028}b"), "ab");
         assert_eq!(cook_js_string("plain"), "plain");
+        assert_eq!(
+            cook_js_string_units("a\\\u{2029}b"),
+            "ab".encode_utf16().collect::<Vec<_>>()
+        );
         // A quoted reserved key is still detected.
         assert_eq!(
             err(r#"export const meta = { name: 'x', description: 'd', "constructor": 1 };"#),
@@ -1557,6 +2460,370 @@ mod meta_validation_tests {
         // An escape-bearing name/description cooks to non-empty and passes.
         validate_meta(r#"export const meta = { name: "abc", description: "d\tx" };"#)
             .expect("escaped strings cook to non-empty");
+    }
+
+    #[test]
+    fn escaped_meta_binding_is_removed_with_its_parsed_declaration() {
+        let source = "/* leading comment */\nexport /* spacing */ const m\\u0065ta = { name: 'x', description: 'd' };\nlog('ran');";
+        validate_meta(source).expect("Acorn's Identifier.name is meta");
+        let prepared = prepare_script_body(source);
+        assert_eq!(prepared, "log('ran');");
+        assert!(!prepared.contains("export"));
+
+        let out = run_sync(source).expect("prepared classic script");
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "ran".into()
+            }]
+        );
+
+        let out = run_sync(
+            "export const meta = { name: 'header', description: 'd' };\nlog(typeof meta);",
+        )
+        .expect("metadata is not injected into the body VM");
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "undefined".into()
+            }]
+        );
+
+        let out = run_sync(
+            "export const meta = { name: 'header', description: 'd' };\nconst meta = 'body'; log(meta);",
+        )
+        .expect("the body may define its own meta binding");
+        assert_eq!(
+            out.progress,
+            vec![Progress::Log {
+                message: "body".into()
+            }]
+        );
+
+        let invalid = "export const meta = { name: 'x', description: 3 };";
+        assert_eq!(prepare_script_body(invalid), invalid);
+    }
+}
+
+#[cfg(test)]
+mod workflow_meta_extraction_tests {
+    use super::*;
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+
+    fn projection(units: &[u16]) -> Utf16JsonProjection {
+        Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec())
+            .expect("display value and UTF-16 units share one source")
+    }
+
+    #[test]
+    fn duplicate_properties_use_the_last_decoded_javascript_key() {
+        let source = r#"export const meta = {
+            name: 'old-name',
+            '\u006eame': 'current-name',
+            description: 'old description',
+            description: 'pair \uD83D\uDE00 lone \uD800',
+            title: 'old title',
+            title: 'current title',
+            whenToUse: 'old guidance',
+            whenToUse: 'current \uD801',
+            phases: [{ title: 'old phase' }],
+            phases: [
+                {
+                    title: 'old title', title: 'current \uD802',
+                    detail: 'old detail', detail: 7,
+                    model: 'old model', model: 'current \uD803',
+                },
+                { title: 'shadowed by a number', title: 7 },
+                { title: '', model: 7 },
+                { title: 'model omitted', model: 'old', model: 7 },
+            ],
+        };"#;
+
+        let meta = extract_workflow_meta(source).expect("literal metadata");
+        assert_eq!(
+            meta.name,
+            projection(&"current-name".encode_utf16().collect::<Vec<_>>())
+        );
+        assert_eq!(
+            meta.title,
+            Some(projection(
+                &"current title".encode_utf16().collect::<Vec<_>>()
+            ))
+        );
+        assert_eq!(
+            meta.description,
+            projection(&[
+                b'p' as u16,
+                b'a' as u16,
+                b'i' as u16,
+                b'r' as u16,
+                b' ' as u16,
+                0xd83d,
+                0xde00,
+                b' ' as u16,
+                b'l' as u16,
+                b'o' as u16,
+                b'n' as u16,
+                b'e' as u16,
+                b' ' as u16,
+                0xd800,
+            ])
+        );
+        assert_eq!(
+            meta.when_to_use,
+            Some(projection(&[
+                b'c' as u16,
+                b'u' as u16,
+                b'r' as u16,
+                b'r' as u16,
+                b'e' as u16,
+                b'n' as u16,
+                b't' as u16,
+                b' ' as u16,
+                0xd801
+            ]))
+        );
+        assert_eq!(
+            meta.phases,
+            Some(vec![
+                WorkflowMetaPhase {
+                    title: projection(&[
+                        b'c' as u16,
+                        b'u' as u16,
+                        b'r' as u16,
+                        b'r' as u16,
+                        b'e' as u16,
+                        b'n' as u16,
+                        b't' as u16,
+                        b' ' as u16,
+                        0xd802,
+                    ]),
+                    detail: None,
+                    model: Some(projection(&[
+                        b'c' as u16,
+                        b'u' as u16,
+                        b'r' as u16,
+                        b'r' as u16,
+                        b'e' as u16,
+                        b'n' as u16,
+                        b't' as u16,
+                        b' ' as u16,
+                        0xd803,
+                    ])),
+                },
+                WorkflowMetaPhase {
+                    title: projection(&[]),
+                    detail: None,
+                    model: None,
+                },
+                WorkflowMetaPhase {
+                    title: projection(&"model omitted".encode_utf16().collect::<Vec<_>>()),
+                    detail: None,
+                    model: None,
+                },
+            ])
+        );
+        assert_eq!(
+            meta_string_value(source, "name").as_deref(),
+            Some("current-name")
+        );
+        assert_eq!(meta_array_len(source, "phases"), Some(3));
+    }
+
+    #[test]
+    fn later_wrong_typed_required_property_masks_earlier_valid_value() {
+        for source in [
+            "export const meta = { name: 'valid', name: 7, description: 'd' };",
+            "export const meta = { name: 'x', description: 'valid', description: false };",
+        ] {
+            assert!(extract_workflow_meta(source).is_none());
+            assert!(validate_meta(source).is_err());
+        }
+
+        assert_eq!(
+            meta_string_value(
+                "export const meta = { name: 'x', description: 'd', label: 'valid', label: 4 };",
+                "label"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn phases_match_native_sanitization_and_optional_presence() {
+        for source in [
+            "export const meta = { name: 'x', description: 'd' };",
+            "export const meta = { name: 'x', description: 'd', phases: [] };",
+            "export const meta = { name: 'x', description: 'd', phases: [{ title: 1 }] };",
+            "export const meta = { name: 'x', description: 'd', phases: [{ title: 'discarded' }], phases: false };",
+        ] {
+            let meta = extract_workflow_meta(source).expect("valid metadata");
+            assert_eq!(meta.phases, None, "source: {source}");
+        }
+
+        let meta = extract_workflow_meta(
+            "export const meta = { name: 'x', description: 'd', phases: [{ title: 'kept' }] };",
+        )
+        .expect("valid metadata");
+        assert_eq!(meta.phases.as_ref().map(Vec::len), Some(1));
+
+        let optional = extract_workflow_meta(
+            "export const meta = { name: 'x', description: 'd', title: '', whenToUse: '' };",
+        )
+        .expect("valid metadata");
+        assert_eq!(optional.title, None);
+        assert_eq!(optional.when_to_use, Some(projection(&[])));
+
+        let empty_phase_strings = extract_workflow_meta(
+            "export const meta = { name: 'x', description: 'd', phases: [{ title: 'p', detail: '', model: '' }] };",
+        )
+        .expect("valid metadata");
+        assert_eq!(
+            empty_phase_strings.phases,
+            Some(vec![WorkflowMetaPhase {
+                title: projection(&[b'p' as u16]),
+                detail: Some(projection(&[])),
+                model: Some(projection(&[])),
+            }])
+        );
+    }
+
+    #[test]
+    fn name_keeps_lone_utf16_units_instead_of_rejecting_native_valid_strings() {
+        let meta =
+            extract_workflow_meta(r#"export const meta = { name: 'x\uD800', description: 'd' };"#)
+                .expect("Native accepts any nonempty JavaScript name string");
+        assert_eq!(meta.name, projection(&[b'x' as u16, 0xd800]));
+    }
+
+    #[test]
+    fn metadata_extraction_does_not_compile_the_workflow_body() {
+        // The dynamic workflow catalog calls qS with validateBody:false. Its
+        // metadata fast path can succeed before the body is separately run or
+        // compiled, so extraction must remain a metadata-only operation.
+        let source = "/* leading comment */\nexport const meta = { name: 'x', description: 'd' };\nfunction {";
+        assert!(extract_workflow_meta(source).is_some());
+        assert!(validate_meta(source).is_err());
+
+        // This spelling misses Native's raw-prefix scanner and takes its full
+        // AST fallback, which rejects the malformed tail.
+        let fallback = "export const m\\u0065ta = { name: 'x', description: 'd' };\nfunction {";
+        assert!(extract_workflow_meta(fallback).is_none());
+    }
+
+    #[test]
+    fn metadata_fast_path_matches_native_header_scanner_and_suffix_boundary() {
+        for source in [
+            "export const meta={name:'x',description:'a\\\nb'};function {",
+            "export const meta={name:'x',description:'a\\\r\nb'};function {",
+            "\nexport const meta={name:'x',description:'d'};function {",
+            "\rexport const meta={name:'x',description:'d'};function {",
+            "\u{feff}export const meta={name:'x',description:'d'};function {",
+            "export\nconst\nmeta\n=\n{name:'x',description:'d'};function {",
+            "export const meta={name:'x',description:'d'}/*\n*/function {",
+            "export const meta={name:'x',description:'d'}\nfunction {",
+            "export const meta={\"0\":1,name:'x',description:'d'};function {",
+            "export const meta={n:-1,name:'x',description:'d'};function {",
+            "export const meta={name:'x',description:'d'} /* trailing comment */",
+        ] {
+            assert!(
+                extract_workflow_meta(source).is_some(),
+                "Native's qS fast scanner accepts this header: {source:?}"
+            );
+        }
+
+        let multiline = "export\nconst\nmeta\n=\n{name:'x',description:'d'};\nfunction run() {}";
+        assert_eq!(
+            prepare_script_body(multiline),
+            "function run() {}",
+            "the fast path parses the scanner's object span without rejecting legal header newlines"
+        );
+
+        // qS's I check declines these boundaries; validateBody:false then
+        // parses the whole source, so the malformed tail must not disappear.
+        for source in [
+            "\u{0085}export const meta={name:'x',description:'d'};function {",
+            "export const meta={name:'x',description:'d'}.foo;function {",
+            "export const meta={name:'x',description:'d'}();function {",
+            "export const meta={name:'x',description:'d'}, extra=1;function {",
+            "export const meta={name:'x',description:'d'}function {",
+            "export const meta={name:'x',description:'d'}/*x*/function {",
+            "export const meta={name:'x',description:'d'}\nin junk",
+            "export const meta={name:'x',description:'d'}\ninstanceof junk",
+            "export const meta={name:'x',description:'d'}\n(function {",
+            "export const meta={name:'x',description:'d'}\n[function {",
+            "export const meta={0:1,name:'x',description:'d'};function {",
+            "export const meta={unused:0x10,name:'x',description:'d'};function {",
+            "export const meta={unused:1_000,name:'x',description:'d'};function {",
+            "export const meta={unused:1n,name:'x',description:'d'};function {",
+            r"export const meta={n\u0061me:'x',description:'d'};function {",
+            r"export const m\u0065ta={name:'x',description:'d'};function {",
+        ] {
+            assert!(
+                extract_workflow_meta(source).is_none(),
+                "Native declines this scanner form and falls back to full parsing: {source:?}"
+            );
+        }
+
+        // These forms are valid literal AST metadata, but qS's S/P scanner
+        // declines them and relies on the full parser when the body is valid.
+        for source in [
+            "export const meta={0:1,name:'x',description:'d'};log('body');",
+            "export const meta={unused:0x10,name:'x',description:'d'};log('body');",
+            "export const m\\u0065ta={name:'x',description:'d'};log('body');",
+            r"export const meta={n\u0061me:'x',description:'d'};log('body');",
+        ] {
+            assert!(
+                extract_workflow_meta(source).is_some(),
+                "full qS AST fallback accepts this literal metadata: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn string_escapes_match_native_scanner_before_malformed_body_fast_path() {
+        for source in [
+            r"export const meta={name:'x',description:'d\1'};function {",
+            r"export const meta={name:'x',description:'d\8'};function {",
+            r"export const meta={name:'x',description:'d\01'};function {",
+            r"export const meta={name:'x',description:'d\u{110000}'};function {",
+        ] {
+            assert!(
+                extract_workflow_meta(source).is_none(),
+                "qS rejects this escape before its full-source fallback: {source:?}"
+            );
+            assert!(validate_meta(source).is_err());
+        }
+
+        let valid = extract_workflow_meta(
+            r"export const meta={name:'x',description:'\u0001\0\x02\u{10ffff}\u{D800}'};",
+        )
+        .expect("qS accepts valid control, NUL, and Unicode scalar escapes");
+        assert_eq!(
+            valid.description,
+            projection(&[0x0001, 0x0000, 0x0002, 0xdbff, 0xdfff, 0xd800])
+        );
+
+        // The malformed body is skipped only when every escape in the scanned
+        // metadata literal is valid. Valid control escapes remain on that path.
+        let malformed_body = r"export const meta={name:'x',description:'\u0001\0'};function {";
+        assert!(extract_workflow_meta(malformed_body).is_some());
+        assert!(validate_meta(malformed_body).is_err());
+    }
+
+    #[test]
+    fn template_line_endings_and_string_continuations_are_cooked() {
+        let source = "export const meta = { name: 'x', description: `first\r\nsecond` };";
+        let meta = extract_workflow_meta(source).expect("valid metadata");
+        assert_eq!(meta.description.string_at(""), Some("first\nsecond"));
+
+        let source = "export const meta = { name: 'x', description: 'first\\\nsecond' };";
+        let meta = extract_workflow_meta(source).expect("valid metadata");
+        assert_eq!(meta.description.string_at(""), Some("firstsecond"));
+        assert_eq!(
+            meta_string_value(source, "description").as_deref(),
+            Some("firstsecond")
+        );
     }
 }
 
@@ -1717,18 +2984,41 @@ mod tests {
     }
 
     #[test]
-    fn strip_meta_export_only_touches_the_meta_decl() {
-        let src = "export const meta = { name: 'x' }\nlog('hi')";
+    fn prepare_script_body_removes_the_meta_declaration_and_native_trims_body() {
+        let src = "export const meta = { name: 'x', description: 'd' }\nlog('hi')";
+        assert_eq!(prepare_script_body(src), "log('hi')");
         assert_eq!(
-            strip_meta_export(src),
-            "const meta = { name: 'x' }\nlog('hi')"
+            prepare_script_body(
+                "export const meta = { name: 'x', description: 'd' };\n\n  log('hi')"
+            ),
+            "log('hi')"
         );
-        // Indentation preserved; unrelated `export` lines untouched.
         assert_eq!(
-            strip_meta_export("  export const meta={}"),
-            "  const meta={}"
+            prepare_script_body(
+                "export const meta = { name: 'x', description: 'd' }; ;\r\n\u{2028} log('hi')"
+            ),
+            "log('hi')"
         );
-        assert_eq!(strip_meta_export("export default 1"), "export default 1");
+        assert_eq!(
+            prepare_script_body("export const meta = { name: 'x', description: 'd' }; /* body */"),
+            "/* body */"
+        );
+        assert_eq!(
+            prepare_script_body(
+                "export const meta = { name: 'x', description: 'd' }; const meta = 'body';"
+            ),
+            "const meta = 'body';"
+        );
+        assert_eq!(
+            prepare_script_body(
+                "export const meta = { name: 'x', description: 'd' }; log(typeof meta);"
+            ),
+            "log(typeof meta);"
+        );
+        let malformed = "export const meta = { name: 'x', description: 'd' };\nfunction {";
+        assert_eq!(prepare_script_body(malformed), "function {");
+        assert!(validate_body(malformed).is_err());
+        assert_eq!(prepare_script_body("export default 1"), "export default 1");
     }
 
     #[test]

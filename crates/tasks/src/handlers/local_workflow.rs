@@ -3178,7 +3178,7 @@ async fn run_workflow_script_with_live_updates_recorded(
                                 )
                                 .await
                                 {
-                                    Ok(src) => workflow::strip_meta_export(&src),
+                                    Ok(src) => workflow::prepare_script_body(&src),
                                     Err(_) => String::new(),
                                 }
                             }
