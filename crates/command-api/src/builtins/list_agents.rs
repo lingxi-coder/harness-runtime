@@ -547,22 +547,19 @@ fn current_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-/// Install the command when the host's exact feature gate allows it. The
-/// provider is mandatory so a missing runtime service cannot become a
+/// Install the Native factory descriptor, retaining its exact enabled fact.
+/// Native reserves factory spellings before filtering disabled commands.
+/// The provider is mandatory so a missing runtime service cannot become a
 /// successful empty listing.
 pub fn register(
     registry: &mut crate::CommandRegistry,
     provider: Arc<dyn ListAgentsProvider>,
-) -> bool {
-    if !provider.command_availability().is_available() {
-        return false;
-    }
+) {
     registry.register_builtin_handler(Arc::new(ListAgentsHandler::new(provider)));
     registry.set_native_builtin_catalog_order(
         "list-agents",
         super::register::native_builtin_catalog_order("list-agents"),
     );
-    true
 }
 
 #[cfg(test)]
@@ -810,7 +807,7 @@ mod tests {
             calls: Mutex::new(0),
         });
         let mut registry = crate::CommandRegistry::new();
-        assert!(register(&mut registry, enabled_provider));
+        register(&mut registry, enabled_provider);
 
         let canonical = Utf16JsonProjection::from("list-agents");
         let alias = Utf16JsonProjection::from(LIST_AGENTS_ALIAS);
@@ -849,9 +846,13 @@ mod tests {
             calls: Mutex::new(0),
         });
         let mut disabled_registry = crate::CommandRegistry::new();
-        assert!(!register(&mut disabled_registry, disabled_provider));
-        assert!(disabled_registry.get_handler(&canonical).is_none());
-        assert!(disabled_registry.resolve(&alias).is_none());
+        register(&mut disabled_registry, disabled_provider);
+        assert!(disabled_registry.get_handler(&canonical).is_some());
+        let disabled = disabled_registry.resolve(&alias).expect("factory is retained");
+        assert!(!disabled.is_enabled);
+        assert!(disabled.native_catalog_order.is_some());
+        assert!(!disabled_registry.headless_command_admitted(disabled));
+        assert!(disabled_registry.headless_init_commands().is_empty());
     }
 
     #[tokio::test]
