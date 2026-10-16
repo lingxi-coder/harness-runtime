@@ -1753,11 +1753,34 @@ fn current_contract_index() -> ContractIndex {
     put("ModelCapabilitiesDto.reasoning", "bool");
     put("ModelCapabilitiesDto.structured_output", "bool");
 
+    put("ModelContextBudgetDto.policy", "String");
+    put(
+        "ModelContextBudgetDto.effective_input_budget",
+        "Option<u64>",
+    );
+    put("ModelContextBudgetDto.hard_input_limit", "Option<u64>");
+    put(
+        "ModelContextBudgetDto.standard_price_input_tokens",
+        "Option<u64>",
+    );
+    put(
+        "ModelContextBudgetDto.recommendation_input_tokens",
+        "Option<u64>",
+    );
+    put(
+        "ModelContextBudgetDto.recommendation_source",
+        "Option<String>",
+    );
+
     put("ModelDetailsDto.reference", "String");
     put("ModelDetailsDto.provider_id", "String");
     put("ModelDetailsDto.provider_label", "String");
     put("ModelDetailsDto.display_name", "String");
     put("ModelDetailsDto.model_id", "String");
+    put(
+        "ModelDetailsDto.context_budget",
+        "Option<ModelContextBudgetDto>",
+    );
     put("ModelDetailsDto.description", "Option<String>");
     put("ModelDetailsDto.family", "Option<String>");
     put("ModelDetailsDto.status", "Option<String>");
@@ -2329,8 +2352,8 @@ fn contract_index_covers_every_dto() {
     use client::protocol::listings::{
         AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto,
         DoctorReportDto, DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto,
-        MemoryTierDto, SessionAgentMessageRowDto, SessionAgentSummaryDto, SessionRowDto, SkillDto,
-        SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+        MemoryTierDto, ModelContextBudgetDto, SessionAgentMessageRowDto, SessionAgentSummaryDto,
+        SessionRowDto, SkillDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
     };
     use client::protocol::message::{MessageBlockDto, MessageDto};
     use client::protocol::permission::{
@@ -2347,6 +2370,14 @@ fn contract_index_covers_every_dto() {
     // Touch every type so removing a type breaks this compile. The values are
     // intentionally minimal; this is a coverage anchor, not a round-trip test.
     let _text = ClientTextDto::default();
+    let _context_budget = ModelContextBudgetDto {
+        policy: String::new(),
+        effective_input_budget: None,
+        hard_input_limit: None,
+        standard_price_input_tokens: None,
+        recommendation_input_tokens: None,
+        recommendation_source: None,
+    };
     let _ev: Vec<ClientEvent> = vec![
         ClientEvent::Error {
             kind: ErrorKindDto::Internal,

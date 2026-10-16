@@ -377,7 +377,8 @@ mod tests {
         sink.text("assistant text").await;
         sink.tool_call(
             "Read",
-            &Utf16JsonProjection::from_serde_value(&serde_json::Value::Null),
+            &Utf16JsonProjection::from_serde_value(&serde_json::Value::Null)
+                .expect("null is valid source JSON"),
         )
         .await;
         sink.turn_end("end_turn", 0.0, 0, 0).await;
