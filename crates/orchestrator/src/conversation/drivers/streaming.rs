@@ -1294,26 +1294,31 @@ impl StreamingTurnDriver<'_> {
             open_side_stream(
                 orch,
                 user_cancel,
-                retry_scope.run(
-                    orch.model_runtime.prompt_cache_capture.scope(
-                        orch.streaming_api.stream_with_effort_override(
-                            &model,
-                            model_profile.as_deref(),
-                            system_prompt.as_ref(),
-                            snapshot,
-                            tool_declarations.clone(),
-                            max_output_budget,
-                            None,
-                            tool_result_reminder_suffixes.clone(),
-                            crate::config::sanitize_query_source(&orch.config.query_source),
-                            skip_global_cache_for_system_prompt,
-                            request_dispatch_admission,
-                            request_dispatch_observer,
-                            native_anthropic_request_context.clone(),
-                            typed_attachment_ids,
-                            task_deliveries,
-                            orch.main_model_source_for_request(&model, model_profile.as_deref())
+                Box::pin(
+                    retry_scope.run(
+                        orch.model_runtime.prompt_cache_capture.scope(
+                            orch.streaming_api.stream_with_effort_override(
+                                &model,
+                                model_profile.as_deref(),
+                                system_prompt.as_ref(),
+                                snapshot,
+                                tool_declarations.clone(),
+                                max_output_budget,
+                                None,
+                                tool_result_reminder_suffixes.clone(),
+                                crate::config::sanitize_query_source(&orch.config.query_source),
+                                skip_global_cache_for_system_prompt,
+                                request_dispatch_admission,
+                                request_dispatch_observer,
+                                native_anthropic_request_context.clone(),
+                                typed_attachment_ids,
+                                task_deliveries,
+                                orch.main_model_source_for_request(
+                                    &model,
+                                    model_profile.as_deref(),
+                                )
                                 .await,
+                            ),
                         ),
                     ),
                 ),
@@ -2473,34 +2478,36 @@ impl StreamingTurnDriver<'_> {
                             let retry_stream = open_side_stream(
                                 orch,
                                 user_cancel,
-                                retry_scope.run(
-                                    orch.model_runtime.prompt_cache_capture.scope(
-                                        orch.streaming_api.stream_with_effort_override(
-                                            &re_model,
-                                            re_profile.as_deref(),
-                                            system_prompt.as_ref(),
-                                            re_snapshot,
-                                            llm_runtime::convert::to_tool_declarations(
-                                                wire_tools.clone(),
-                                            )
-                                            .map_err(OrchestratorError::ApiCall)?,
-                                            None,
-                                            None,
-                                            tool_result_reminder_suffixes.clone(),
-                                            crate::config::sanitize_query_source(
-                                                &orch.config.query_source,
-                                            ),
-                                            skip_global_cache_for_system_prompt,
-                                            request_dispatch_admission,
-                                            request_dispatch_observer,
-                                            native_anthropic_request_context.clone(),
-                                            typed_attachment_ids,
-                                            task_deliveries,
-                                            orch.main_model_source_for_request(
+                                Box::pin(
+                                    retry_scope.run(
+                                        orch.model_runtime.prompt_cache_capture.scope(
+                                            orch.streaming_api.stream_with_effort_override(
                                                 &re_model,
                                                 re_profile.as_deref(),
-                                            )
-                                            .await,
+                                                system_prompt.as_ref(),
+                                                re_snapshot,
+                                                llm_runtime::convert::to_tool_declarations(
+                                                    wire_tools.clone(),
+                                                )
+                                                .map_err(OrchestratorError::ApiCall)?,
+                                                None,
+                                                None,
+                                                tool_result_reminder_suffixes.clone(),
+                                                crate::config::sanitize_query_source(
+                                                    &orch.config.query_source,
+                                                ),
+                                                skip_global_cache_for_system_prompt,
+                                                request_dispatch_admission,
+                                                request_dispatch_observer,
+                                                native_anthropic_request_context.clone(),
+                                                typed_attachment_ids,
+                                                task_deliveries,
+                                                orch.main_model_source_for_request(
+                                                    &re_model,
+                                                    re_profile.as_deref(),
+                                                )
+                                                .await,
+                                            ),
                                         ),
                                     ),
                                 ),
