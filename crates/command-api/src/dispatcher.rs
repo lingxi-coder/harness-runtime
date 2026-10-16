@@ -2256,6 +2256,7 @@ mod tests {
     #[tokio::test]
     async fn headless_own_commands_require_explicit_capability_without_native_catalog_rows() {
         let mut registry = CommandRegistry::new();
+        registry.register_command(headless_test_prompt("own-supported", false));
         for (name, non_interactive) in [("own-supported", true), ("own-interactive", false)] {
             registry.register_builtin_handler(Arc::new(OwnHeadlessHandler {
                 name,

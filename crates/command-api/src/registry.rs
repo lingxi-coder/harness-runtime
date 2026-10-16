@@ -228,15 +228,22 @@ impl CommandRegistry {
             return;
         }
         let handler_native_type = h.native_type();
+        // A host extension explicitly supporting non-interactive execution
+        // without a Native type owns its metadata. In particular, a local
+        // `/cron` handler must not inherit its replaced prompt facade's type.
+        let own_headless_extension = handler_native_type.is_none() && h.supports_non_interactive();
         let existing_native = self.commands.get(&name_units);
-        let native_type =
-            handler_native_type.or_else(|| existing_native.and_then(|command| command.native_type));
+        let native_type = if own_headless_extension {
+            None
+        } else {
+            handler_native_type.or_else(|| existing_native.and_then(|command| command.native_type))
+        };
         let disable_non_interactive = if handler_native_type.is_some() {
             h.disable_non_interactive()
         } else {
             existing_native.is_some_and(|command| command.disable_non_interactive)
         };
-        let supports_non_interactive = if handler_native_type.is_some() {
+        let supports_non_interactive = if handler_native_type.is_some() || own_headless_extension {
             h.supports_non_interactive()
         } else {
             existing_native.is_some_and(|command| command.supports_non_interactive)
