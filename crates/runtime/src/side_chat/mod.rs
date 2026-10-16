@@ -2114,6 +2114,20 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        assert_eq!(
+            nested
+                .iter()
+                .filter(|(_, event)| matches!(
+                    event,
+                    ClientEvent::SlashCommandResult {
+                        turn_id: Some(502),
+                        ..
+                    }
+                ))
+                .count(),
+            1,
+            "the cancelled dispatch emits exactly one correlated terminal"
+        );
         let (terminal_index, terminal) = nested
             .iter()
             .find(|(_, event)| {
