@@ -546,26 +546,37 @@ impl OrchestratorApiClient for ProviderApiAdapter {
 
     fn context_window_tokens(&self, model: &str, profile: Option<&str>) -> Option<u64> {
         let context = self.service.resolve_context(model, profile).ok()?;
-        if let Some(window) = context.context_window_tokens {
-            // A configured/provider window is a raw route fact. Keep it even
-            // when an application input-budget policy is narrower.
-            return Some(window);
+        let native_claude = self.is_first_party_route(model, profile)
+            && llm_runtime::model::context_window::is_claude_family(model);
+        if !native_claude {
+            return context.context_window_tokens;
         }
-        // Native Claude's selected model policy supplies its own window only
-        // when the exact SDK route is first-party. Other providers with no
-        // published window remain unknown rather than inheriting a Claude
-        // default.
-        if !self.is_first_party_route(model, profile)
-            || !llm_runtime::model::context_window::is_claude_family(model)
-        {
-            return None;
-        }
-        Some(
+
+        let native_window = || {
             llm_runtime::model::context_window::context_window_for_model(
                 model,
                 self.service.active_custom_betas(),
-            ),
-        )
+            )
+        };
+        match context.context_window_tokens {
+            Some(_)
+                if matches!(
+                    &context.context_window_source,
+                    lingxi_llm_client::protocol::ContextWindowSource::Catalog
+                        | lingxi_llm_client::protocol::ContextWindowSource::Observation
+                ) =>
+            {
+                // Catalog and provider-observation windows are route facts, but
+                // the first-party Claude workflow window follows Native's
+                // selected model and beta policy. This intentionally does not
+                // narrow ApiService's raw/effective context result.
+                Some(native_window())
+            }
+            Some(window) => Some(window),
+            // Preserve the established first-party fallback for profiles with
+            // no published context window, independent of provenance.
+            None => Some(native_window()),
+        }
     }
 
     fn active_betas(&self) -> Vec<String> {
@@ -4494,6 +4505,76 @@ mod tests {
         }
     }
 
+    fn builtin_context_window_model(model: &str) -> ModelProfile {
+        llm_runtime::provider_settings::anthropic_model_profiles()
+            .into_iter()
+            .find(|entry| entry.request_model == model)
+            .unwrap_or_else(|| panic!("built-in Anthropic catalog has no {model:?}"))
+    }
+
+    fn make_context_window_adapter_with_profile(
+        profile_name: &str,
+        provider_id: ProviderId,
+        protocol: ProtocolFamily,
+        base_url: &str,
+        model: ModelProfile,
+        custom_betas: Vec<String>,
+    ) -> ProviderApiAdapter {
+        std::env::set_var("ADAPTER_TEST_KEY", "test-key");
+        let profile = ProviderProfile {
+            wire_profile: None,
+            regions: llm_runtime::Region::all(),
+            provider_id,
+            profile_name: profile_name.to_owned(),
+            base_url: base_url.to_owned(),
+            protocol,
+            auth: AuthStrategy::ApiKey,
+            credential: CredentialConfig::Env {
+                var: "ADAPTER_TEST_KEY".to_owned(),
+            },
+            models: vec![model],
+            pricing: PricingConfig::default(),
+            signing: None,
+            azure: None,
+            supports_websockets: false,
+            supports_websocket_compression: false,
+            websocket_connect_timeout_ms: None,
+            vision_delegate: None,
+            connection: Default::default(),
+        };
+        let client = Arc::new(
+            ModelRuntime::from_config(ClientConfig {
+                providers: vec![profile],
+            })
+            .expect("valid context-window provider profile"),
+        );
+        let service = ApiService::new(
+            client,
+            owned_request_capture(),
+            SubscriberState::default(),
+            UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        )
+        .with_custom_cli_betas(custom_betas);
+        ProviderApiAdapter::new(Arc::new(service))
+    }
+
+    fn make_first_party_context_window_adapter(
+        model: ModelProfile,
+        custom_betas: Vec<String>,
+    ) -> ProviderApiAdapter {
+        make_context_window_adapter_with_profile(
+            "anthropic",
+            ProviderId::AnthropicFirstParty,
+            ProtocolFamily::AnthropicMessages,
+            "https://api.anthropic.com",
+            model,
+            custom_betas,
+        )
+    }
+
     fn make_context_window_adapter() -> ProviderApiAdapter {
         let config: ClientConfig = serde_json::from_value(serde_json::json!({
         "providers": [{
@@ -4574,6 +4655,118 @@ mod tests {
             codex.context_window_tokens("gpt-search", Some("codex")),
             None,
             "a non-Claude provider with unknown window stays unknown"
+        );
+    }
+
+    #[test]
+    fn native_window_overrides_catalog_and_observation_but_not_explicit_or_unknown_facts() {
+        use lingxi_core::host::ModelContextWindowSource as HostSource;
+        use lingxi_llm_client::protocol::ContextWindowSource as SdkSource;
+
+        let opus = builtin_context_window_model("claude-opus-4-6");
+        assert_eq!(opus.metadata.context_window_tokens, Some(1_000_000));
+        assert_eq!(opus.metadata.context_window_source, HostSource::Catalog);
+        let catalog = make_first_party_context_window_adapter(opus.clone(), Vec::new());
+        let resolved = catalog
+            .context_budget("claude-opus-4-6", Some("anthropic"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.context_window_source, SdkSource::Catalog);
+        assert_eq!(resolved.context_window_tokens, Some(1_000_000));
+        assert_eq!(
+            catalog.context_window_tokens("claude-opus-4-6", Some("anthropic")),
+            Some(200_000),
+            "first-party Opus 4.6's catalog 1M listing must follow the default Native window"
+        );
+
+        let mut observed_opus = opus.clone();
+        observed_opus.metadata.context_window_source = HostSource::Observation;
+        let observed = make_first_party_context_window_adapter(observed_opus, Vec::new());
+        let resolved = observed
+            .context_budget("claude-opus-4-6", Some("anthropic"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.context_window_source, SdkSource::Observation);
+        assert_eq!(
+            observed.context_window_tokens("claude-opus-4-6", Some("anthropic")),
+            Some(200_000),
+            "a provider observation is a known fact but still uses the Native Claude policy"
+        );
+
+        for (host_source, sdk_source) in [
+            (HostSource::Explicit, SdkSource::Explicit),
+            (HostSource::Unknown, SdkSource::Unknown),
+        ] {
+            let mut override_opus = opus.clone();
+            override_opus.metadata.context_window_source = host_source;
+            let adapter = make_first_party_context_window_adapter(override_opus, Vec::new());
+            let resolved = adapter
+                .context_budget("claude-opus-4-6", Some("anthropic"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(resolved.context_window_source, sdk_source);
+            assert_eq!(
+                adapter.context_window_tokens("claude-opus-4-6", Some("anthropic")),
+                Some(1_000_000),
+                "explicit and unknown source facts must preserve the provider's raw window"
+            );
+        }
+    }
+
+    #[test]
+    fn native_window_keeps_suffix_and_planned_beta_one_m_context_routes() {
+        use lingxi_core::host::ModelContextWindowSource as HostSource;
+        use llm_runtime::model::context_window::CONTEXT_1M_BETA_HEADER;
+
+        let mut suffixed = builtin_context_window_model("claude-opus-4-6");
+        suffixed.display_model = "claude-opus-4-6[1m]".to_owned();
+        suffixed.request_model = suffixed.display_model.clone();
+        suffixed.metadata.context_window_tokens = Some(200_000);
+        suffixed.metadata.context_window_source = HostSource::Catalog;
+        let suffix_adapter = make_first_party_context_window_adapter(suffixed, Vec::new());
+        assert_eq!(
+            suffix_adapter.context_window_tokens("claude-opus-4-6[1m]", Some("anthropic")),
+            Some(1_000_000)
+        );
+
+        let mut planned_beta = builtin_context_window_model("claude-opus-4-6");
+        planned_beta.metadata.context_window_tokens = Some(200_000);
+        planned_beta.metadata.context_window_source = HostSource::Catalog;
+        let beta_adapter = make_first_party_context_window_adapter(
+            planned_beta,
+            vec![CONTEXT_1M_BETA_HEADER.to_owned()],
+        );
+        assert_eq!(
+            beta_adapter.context_window_tokens("claude-opus-4-6", Some("anthropic")),
+            Some(1_000_000)
+        );
+    }
+
+    #[test]
+    fn catalog_window_on_foundry_route_remains_provider_raw() {
+        use lingxi_core::host::ModelContextWindowSource as HostSource;
+        use lingxi_llm_client::protocol::ContextWindowSource as SdkSource;
+
+        let mut opus = builtin_context_window_model("claude-opus-4-6");
+        opus.metadata.context_window_source = HostSource::Catalog;
+        let adapter = make_context_window_adapter_with_profile(
+            "foundry",
+            ProviderId::FoundryClaude,
+            ProtocolFamily::FoundryClaude,
+            "https://example.invalid",
+            opus,
+            Vec::new(),
+        );
+        let resolved = adapter
+            .context_budget("claude-opus-4-6", Some("foundry"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.context_window_source, SdkSource::Catalog);
+        assert_eq!(resolved.context_window_tokens, Some(1_000_000));
+        assert_eq!(
+            adapter.context_window_tokens("claude-opus-4-6", Some("foundry")),
+            Some(1_000_000),
+            "Foundry is Claude-shaped but does not use the first-party Native window policy"
         );
     }
 
