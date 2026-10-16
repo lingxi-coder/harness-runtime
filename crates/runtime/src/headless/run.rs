@@ -2041,6 +2041,188 @@ async fn execute_structured_output(
     Ok(captured)
 }
 
+#[inline(never)]
+fn run_slash_dispatch_future<'a>(
+    input: &'a Utf16JsonProjection,
+    runtime: &'a Runtime,
+) -> futures::future::BoxFuture<'a, SlashDispatchResult> {
+    let context = command_api::ModCommandRunContext {
+        origin: serde_json::json!({"kind":"sdk"}),
+        is_fullscreen: false,
+        columns: 80,
+    };
+    let cancellation = runtime.turn_cancel();
+    Box::pin(command_api::with_mod_command_context(
+        context,
+        runtime.dispatcher.dispatch(input.clone(), cancellation),
+    ))
+}
+
+#[inline(never)]
+fn run_fallback_prompt_turn_future<'a>(
+    runtime: &'a Runtime,
+    prompt: Utf16JsonProjection,
+    request_context: Vec<Utf16JsonProjection>,
+    transcript_attachment: Option<orchestrator::RequestContextTranscriptAttachment>,
+    max_budget_usd: Option<f64>,
+    no_stream: bool,
+    sink: &'a dyn OutputSink,
+) -> futures::future::BoxFuture<'a, i32> {
+    Box::pin(run_fallback_prompt_turn(
+        runtime,
+        prompt,
+        request_context,
+        transcript_attachment,
+        max_budget_usd,
+        no_stream,
+        sink,
+    ))
+}
+
+#[inline(never)]
+fn run_slash_as_turn_future<'a>(
+    runtime: &'a Runtime,
+    prompt: Utf16JsonProjection,
+    max_budget_usd: Option<f64>,
+    no_stream: bool,
+    sink: &'a dyn OutputSink,
+) -> futures::future::BoxFuture<'a, i32> {
+    Box::pin(async move {
+        sink.turn_start().await;
+        let cancel = runtime.turn_cancel();
+        let turn_result = if no_stream {
+            Box::pin(orchestrator::native_user_message_source::with_sdk_source(
+                orchestrator::mod_prompt_origin::with_origin(
+                    serde_json::json!({"kind":"sdk"}),
+                    runtime.orchestrator.run_turn_with_cancel(prompt, cancel),
+                ),
+            ))
+            .await
+        } else {
+            Box::pin(orchestrator::native_user_message_source::with_sdk_source(
+                orchestrator::mod_prompt_origin::with_origin(
+                    serde_json::json!({"kind":"sdk"}),
+                    runtime
+                        .orchestrator
+                        .run_turn_streaming_with_cancel_image_sources(&prompt, Vec::new(), cancel),
+                ),
+            ))
+            .await
+        };
+        stop_background_agents_at_budget(
+            max_budget_usd,
+            runtime.orchestrator.as_ref(),
+            runtime.task_registry.as_ref(),
+            &runtime.output,
+        )
+        .await;
+        runtime.execution_interrupted.store(
+            matches!(&turn_result, Ok(orchestrator::TurnOutcome::Cancelled)),
+            std::sync::atomic::Ordering::Release,
+        );
+        match turn_result {
+            Ok(_outcome) => exit_codes::SUCCESS,
+            Err(error) => {
+                runtime.record_execution_error(&error);
+                if runtime.policy_helper_refusal.current().is_none() {
+                    sink.error("runtime", &error.to_string()).await;
+                }
+                exit_codes::RUNTIME_ERROR
+            }
+        }
+    })
+}
+
+#[inline(never)]
+fn run_slash_skill_as_turn_future<'a>(
+    runtime: &'a Runtime,
+    command: Utf16JsonProjection,
+    body: Utf16JsonProjection,
+    hook_messages: Vec<Utf16JsonProjection>,
+    max_budget_usd: Option<f64>,
+    no_stream: bool,
+    sink: &'a dyn OutputSink,
+) -> futures::future::BoxFuture<'a, i32> {
+    Box::pin(async move {
+        sink.turn_start().await;
+        let cancel = runtime.turn_cancel();
+        let inputs = orchestrator::skill_prompt_inputs(command, body, hook_messages);
+        let turn_result = if no_stream {
+            Box::pin(orchestrator::native_user_message_source::with_sdk_source(
+                orchestrator::mod_prompt_origin::with_origin(
+                    serde_json::json!({"kind":"sdk"}),
+                    runtime
+                        .orchestrator
+                        .run_queued_prompt_batch_batched(inputs, cancel),
+                ),
+            ))
+            .await
+        } else {
+            Box::pin(orchestrator::native_user_message_source::with_sdk_source(
+                orchestrator::mod_prompt_origin::with_origin(
+                    serde_json::json!({"kind":"sdk"}),
+                    runtime.orchestrator.run_queued_prompt_batch(inputs, cancel),
+                ),
+            ))
+            .await
+        };
+        stop_background_agents_at_budget(
+            max_budget_usd,
+            runtime.orchestrator.as_ref(),
+            runtime.task_registry.as_ref(),
+            &runtime.output,
+        )
+        .await;
+        runtime.execution_interrupted.store(
+            matches!(&turn_result, Ok(orchestrator::TurnOutcome::Cancelled)),
+            std::sync::atomic::Ordering::Release,
+        );
+        match turn_result {
+            Ok(_outcome) => exit_codes::SUCCESS,
+            Err(error) => {
+                runtime.record_execution_error(&error);
+                if runtime.policy_helper_refusal.current().is_none() {
+                    sink.error("runtime", &error.to_string()).await;
+                }
+                exit_codes::RUNTIME_ERROR
+            }
+        }
+    })
+}
+
+#[inline(never)]
+fn run_unknown_slash_fallback_future<'a>(
+    runtime: &'a Runtime,
+    input: Utf16JsonProjection,
+    name: Utf16JsonProjection,
+    suggestion: Option<Utf16JsonProjection>,
+    max_budget_usd: Option<f64>,
+    no_stream: bool,
+    sink: &'a dyn OutputSink,
+) -> futures::future::BoxFuture<'a, i32> {
+    Box::pin(async move {
+        let catalog = runtime.headless_command_catalog().await;
+        let reminder =
+            command_api::render_unknown_command_reminder(&name, suggestion.as_ref(), &catalog);
+        let attachment = unknown_command_fallback_attachment(
+            &name,
+            suggestion.as_ref(),
+            &catalog,
+            reminder.clone(),
+        );
+        run_fallback_prompt_turn_future(
+            runtime,
+            input,
+            vec![reminder],
+            Some(attachment),
+            max_budget_usd,
+            no_stream,
+            sink,
+        )
+        .await
+    })
+}
+
 /// Dispatch a `/command [args]` line through the registry with the print-mode budget.
 async fn run_slash_command_with_budget(
     input: &Utf16JsonProjection,
@@ -2049,18 +2231,7 @@ async fn run_slash_command_with_budget(
     no_stream: bool,
     sink: &dyn OutputSink,
 ) -> i32 {
-    let context = command_api::ModCommandRunContext {
-        origin: serde_json::json!({"kind":"sdk"}),
-        is_fullscreen: false,
-        columns: 80,
-    };
-    let cancellation = runtime.turn_cancel();
-    match Box::pin(command_api::with_mod_command_context(
-        context,
-        runtime.dispatcher.dispatch(input.clone(), cancellation),
-    ))
-    .await
-    {
+    match run_slash_dispatch_future(input, runtime).await {
         SlashDispatchResult::Failed { diagnostic } => {
             let message = diagnostic
                 .string_at("/message")
@@ -2101,127 +2272,40 @@ async fn run_slash_command_with_budget(
         // instead of just printing it, so a `/loop` invocation actually schedules
         // + executes.
         SlashDispatchResult::RunAsTurn { prompt } => {
-            sink.turn_start().await;
-            let cancel = runtime.turn_cancel();
-            let turn_result = if no_stream {
-                Box::pin(orchestrator::native_user_message_source::with_sdk_source(
-                    orchestrator::mod_prompt_origin::with_origin(
-                        serde_json::json!({"kind":"sdk"}),
-                        runtime.orchestrator.run_turn_with_cancel(prompt, cancel),
-                    ),
-                ))
-                .await
-            } else {
-                Box::pin(orchestrator::native_user_message_source::with_sdk_source(
-                    orchestrator::mod_prompt_origin::with_origin(
-                        serde_json::json!({"kind":"sdk"}),
-                        runtime
-                            .orchestrator
-                            .run_turn_streaming_with_cancel_image_sources(
-                                &prompt,
-                                Vec::new(),
-                                cancel,
-                            ),
-                    ),
-                ))
-                .await
-            };
-            stop_background_agents_at_budget(
-                max_budget_usd,
-                runtime.orchestrator.as_ref(),
-                runtime.task_registry.as_ref(),
-                &runtime.output,
-            )
-            .await;
-            runtime.execution_interrupted.store(
-                matches!(&turn_result, Ok(orchestrator::TurnOutcome::Cancelled)),
-                std::sync::atomic::Ordering::Release,
-            );
-            match turn_result {
-                Ok(_outcome) => exit_codes::SUCCESS,
-                Err(e) => {
-                    runtime.record_execution_error(&e);
-                    if runtime.policy_helper_refusal.current().is_none() {
-                        sink.error("runtime", &e.to_string()).await;
-                    }
-                    exit_codes::RUNTIME_ERROR
-                }
-            }
+            run_slash_as_turn_future(runtime, prompt, max_budget_usd, no_stream, sink).await
         }
         SlashDispatchResult::RunSkillAsTurn {
             command,
             body,
             hook_messages,
         } => {
-            sink.turn_start().await;
-            let cancel = runtime.turn_cancel();
-            let inputs = orchestrator::skill_prompt_inputs(command, body, hook_messages);
-            let turn_result = if no_stream {
-                Box::pin(orchestrator::native_user_message_source::with_sdk_source(
-                    orchestrator::mod_prompt_origin::with_origin(
-                        serde_json::json!({"kind":"sdk"}),
-                        runtime
-                            .orchestrator
-                            .run_queued_prompt_batch_batched(inputs, cancel),
-                    ),
-                ))
-                .await
-            } else {
-                Box::pin(orchestrator::native_user_message_source::with_sdk_source(
-                    orchestrator::mod_prompt_origin::with_origin(
-                        serde_json::json!({"kind":"sdk"}),
-                        runtime.orchestrator.run_queued_prompt_batch(inputs, cancel),
-                    ),
-                ))
-                .await
-            };
-            stop_background_agents_at_budget(
+            run_slash_skill_as_turn_future(
+                runtime,
+                command,
+                body,
+                hook_messages,
                 max_budget_usd,
-                runtime.orchestrator.as_ref(),
-                runtime.task_registry.as_ref(),
-                &runtime.output,
+                no_stream,
+                sink,
             )
-            .await;
-            runtime.execution_interrupted.store(
-                matches!(&turn_result, Ok(orchestrator::TurnOutcome::Cancelled)),
-                std::sync::atomic::Ordering::Release,
-            );
-            match turn_result {
-                Ok(_outcome) => exit_codes::SUCCESS,
-                Err(e) => {
-                    runtime.record_execution_error(&e);
-                    if runtime.policy_helper_refusal.current().is_none() {
-                        sink.error("runtime", &e.to_string()).await;
-                    }
-                    exit_codes::RUNTIME_ERROR
-                }
-            }
+            .await
         }
         SlashDispatchResult::Unknown {
             name, suggestion, ..
         } => {
-            let catalog = runtime.headless_command_catalog().await;
-            let reminder =
-                command_api::render_unknown_command_reminder(&name, suggestion.as_ref(), &catalog);
-            let attachment = unknown_command_fallback_attachment(
-                &name,
-                suggestion.as_ref(),
-                &catalog,
-                reminder.clone(),
-            );
-            Box::pin(run_fallback_prompt_turn(
+            run_unknown_slash_fallback_future(
                 runtime,
                 input.clone(),
-                vec![reminder],
-                Some(attachment),
+                name,
+                suggestion,
                 max_budget_usd,
                 no_stream,
                 sink,
-            ))
+            )
             .await
         }
         SlashDispatchResult::ParseFailure { input } => {
-            Box::pin(run_fallback_prompt_turn(
+            run_fallback_prompt_turn_future(
                 runtime,
                 input,
                 Vec::new(),
@@ -2229,7 +2313,7 @@ async fn run_slash_command_with_budget(
                 max_budget_usd,
                 no_stream,
                 sink,
-            ))
+            )
             .await
         }
         SlashDispatchResult::NotASlashCommand => {
