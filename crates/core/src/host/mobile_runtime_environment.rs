@@ -361,7 +361,7 @@ fn sanitize_label(value: Option<&str>) -> Option<String> {
 fn sanitize_guest_cwd(value: Option<&str>) -> Option<String> {
     sanitize_guest_path(
         value,
-        &["/root", "/tmp", "/var/tmp", "/workspace", "/var/lingxi"],
+        &["/home/lingxi", "/root", "/tmp", "/var/tmp", "/var/lingxi"],
     )
 }
 
@@ -410,7 +410,7 @@ mod tests {
                 MobileLaunchMode::Interactive,
             ),
             MobileToolRuntime::MobileLinuxGuest,
-            Some("/workspace/abc-123".into()),
+            Some("/home/lingxi/lingxi/abc-123".into()),
             Some("/bin/sh".into()),
             Some("Alpine BusyBox sh".into()),
             MobileNetworkPolicy::PermissionMediated,
@@ -434,8 +434,8 @@ mod tests {
     #[test]
     fn model_visible_cwd_normalizer_rejects_native_host_paths() {
         assert_eq!(
-            normalize_mobile_guest_cwd("/workspace/app/src"),
-            Some("/workspace/app/src".into())
+            normalize_mobile_guest_cwd("/home/lingxi/lingxi/app/src"),
+            Some("/home/lingxi/lingxi/app/src".into())
         );
         assert_eq!(normalize_mobile_guest_cwd("/private/var/mobile/app"), None);
         assert_eq!(normalize_mobile_guest_cwd("/data/user/0/app"), None);
@@ -536,10 +536,10 @@ mod tests {
 
         assert_eq!(
             environment
-                .render_workspace_system_reminder(Some("/workspace/other"))
+                .render_workspace_system_reminder(Some("/home/lingxi/lingxi/other"))
                 .as_deref(),
             Some(
-                "<system-reminder>\nMobile workspace context (version 1)\nGuest workspace: /workspace/other\n</system-reminder>"
+                "<system-reminder>\nMobile workspace context (version 1)\nGuest workspace: /home/lingxi/lingxi/other\n</system-reminder>"
             )
         );
         assert_eq!(
@@ -547,7 +547,7 @@ mod tests {
                 .render_workspace_system_reminder(Some("/Users/alice/private"))
                 .as_deref(),
             Some(
-                "<system-reminder>\nMobile workspace context (version 1)\nGuest workspace: /workspace/abc-123\n</system-reminder>"
+                "<system-reminder>\nMobile workspace context (version 1)\nGuest workspace: /home/lingxi/lingxi/abc-123\n</system-reminder>"
             )
         );
         assert!(!environment.render_body().contains("Guest workspace:"));

@@ -1070,6 +1070,7 @@ pub enum MobileEngineError {
 /// commands and drives the turn on the owned runtime.
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct MobileEngineHandle {
+    self_weak: std::sync::Weak<Self>,
     /// This Host generation owns all side state; no durable store is involved.
     side_chats: Arc<crate::side_chat::SideChatManager>,
     session_cron: Option<Arc<cron::CronScheduler>>,
@@ -1381,7 +1382,7 @@ mod session_identity_import_tests {
         assert_eq!(std::fs::read_to_string(&transcript_path).unwrap(), anchor);
 
         let row = session::jsonl::reader::route_lines(
-            r#"{"type":"user","uuid":"first-message","parentUuid":null,"sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-10-04T12:00:00.000Z","cwd":"/workspace","version":"test","isSidechain":false,"userType":"external","message":{"role":"user","content":"hello"}}"#,
+            r#"{"type":"user","uuid":"first-message","parentUuid":null,"sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-10-04T12:00:00.000Z","cwd":"/home/lingxi/lingxi","version":"test","isSidechain":false,"userType":"external","message":{"role":"user","content":"hello"}}"#,
         )
         .messages_in_order
         .into_iter()
@@ -1404,8 +1405,8 @@ mod session_identity_import_tests {
         );
         let writer = JsonlWriter::new(transcript_path.clone(), filesystem);
         let native = concat!(
-            "{\"type\":\"user\",\"uuid\":\"resume-user\",\"parentUuid\":null,\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"timestamp\":\"2026-10-04T12:00:00.000Z\",\"cwd\":\"/workspace\",\"version\":\"test\",\"isSidechain\":false,\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
-            "{\"type\":\"assistant\",\"uuid\":\"resume-assistant\",\"parentUuid\":\"resume-user\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"timestamp\":\"2026-10-04T12:00:01.000Z\",\"cwd\":\"/workspace\",\"version\":\"test\",\"isSidechain\":false,\"message\":{\"role\":\"assistant\",\"content\":\"world\"}}\n"
+            "{\"type\":\"user\",\"uuid\":\"resume-user\",\"parentUuid\":null,\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"timestamp\":\"2026-10-04T12:00:00.000Z\",\"cwd\":\"/home/lingxi/lingxi\",\"version\":\"test\",\"isSidechain\":false,\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+            "{\"type\":\"assistant\",\"uuid\":\"resume-assistant\",\"parentUuid\":\"resume-user\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"timestamp\":\"2026-10-04T12:00:01.000Z\",\"cwd\":\"/home/lingxi/lingxi\",\"version\":\"test\",\"isSidechain\":false,\"message\":{\"role\":\"assistant\",\"content\":\"world\"}}\n"
         );
         std::fs::write(&transcript_path, native).unwrap();
 
@@ -5840,159 +5841,29 @@ impl MobileEngineHandle {
     // map this entry exists to be (same convention as `EngineCommandRouter::route`
     // and `harness_runtime::desktop::build`).
     #[allow(clippy::too_many_lines)]
-    /// Heap-allocate the dispatch future instead of building it in the
-    /// caller's frame.
-    ///
-    /// `ClientCommand` is held by value across the awaits below and the enum
-    /// keeps growing — 144 bytes before the cron/loop subsystem, 392 after — so
-    /// every frame on the dispatch chain carries it. The 2 MB test-thread stack
-    /// runs out first, and it aborts the whole binary rather than failing one
-    /// test. The public signature is unchanged, so the UniFFI bindings are not
-    /// affected.
+    /// Poll engine commands on the owned runtime. Foreign executors, including
+    /// Swift's cooperative pool, can have much smaller stacks than our workers.
     pub async fn submit(&self, command: ClientCommand) -> Result<(), ClientError> {
-        // A questionnaire parks work that can itself be holding the transition
-        // lock (for example, a long-running workflow). Its answer is
-        // connection-scoped and only resolves the broker's oneshot, so waiting
-        // behind that lock turns the native sheet's submit spinner into a
-        // deadlock. Resolve these commands before serializing session state.
-        match command {
-            ClientCommand::Cancel { turn_id } => self.cancel_active_turn(turn_id).await,
-            ClientCommand::UpdatePromptSuggestionContext {
-                session_id,
-                focus,
-                input_empty,
-                pending_permission,
-                elicitation_active,
-            } => self
-                .inner
-                .orchestrator
-                .update_prompt_suggestion_context(
-                    lingxi_core::host::orchestrator::PromptSuggestionContext {
-                        session_id,
-                        focus,
-                        input_empty,
-                        pending_permission,
-                        elicitation_active,
-                    },
-                )
-                .await
-                .map_err(|error| ClientError::Internal {
-                    message: error.to_string(),
-                }),
-            ClientCommand::RecordPromptSuggestionSubmission { text } => self
-                .inner
-                .orchestrator
-                .record_prompt_suggestion_submission(&text)
-                .await
-                .map_err(|error| ClientError::Internal {
-                    message: error.to_string(),
-                }),
-            ClientCommand::PromptSuggestionFeedback {
-                session_id,
-                uuid,
-                action,
-            } => self
-                .inner
-                .orchestrator
-                .prompt_suggestion_feedback(&session_id, &uuid, &action)
-                .await
-                .map_err(|error| ClientError::Internal {
-                    message: error.to_string(),
-                }),
-            ClientCommand::AnswerAskUserQuestion {
-                request_id,
-                answers,
-            } => {
-                self.resolve_ask_user_question(request_id, Some(answers))
-                    .await
+        let handle = self
+            .self_weak
+            .upgrade()
+            .ok_or_else(|| ClientError::Internal {
+                message: "mobile engine is shutting down".into(),
+            })?;
+        let task = self
+            .runtime()
+            .spawn(async move { handle.submit_on_runtime(command).await });
+        // Preserve cancellation when a foreign caller drops its Rust future.
+        struct AbortCommand(tokio::task::AbortHandle);
+        impl Drop for AbortCommand {
+            fn drop(&mut self) {
+                self.0.abort();
             }
-            ClientCommand::CancelAskUserQuestion { request_id } => {
-                self.resolve_ask_user_question(request_id, None).await
-            }
-            ClientCommand::UiRender {
-                request_id,
-                request_json,
-            } => {
-                let request =
-                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_render");
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiClientModule { request_id, plugin } => {
-                self.emit_mod_ui_control_result(
-                    request_id,
-                    Ok(Utf16JsonProjection::object(vec![
-                        ("subtype".into(), "ui_client_module".into()),
-                        ("plugin".into(), plugin.into()),
-                    ])
-                    .expect("UI module request is a flat object")),
-                )
-                .await
-            }
-            ClientCommand::UiMessage {
-                request_id,
-                request_json,
-            } => {
-                let request = client::adapter::turn::parse_mod_ui_control_request(
-                    &request_json,
-                    "ui_message",
-                );
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiClientFault {
-                request_id,
-                request_json,
-            } => {
-                let request = client::adapter::turn::parse_mod_ui_control_request(
-                    &request_json,
-                    "ui_client_fault",
-                );
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiClientPress {
-                request_id,
-                request_json,
-            } => {
-                let request = client::adapter::turn::parse_mod_ui_control_request(
-                    &request_json,
-                    "ui_client_press",
-                );
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiPress {
-                request_id,
-                request_json,
-            } => {
-                let request =
-                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_press");
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiInput {
-                request_id,
-                request_json,
-            } => {
-                let request =
-                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_input");
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiSelect {
-                request_id,
-                request_json,
-            } => {
-                let request =
-                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_select");
-                self.emit_mod_ui_control_result(request_id, request).await
-            }
-            ClientCommand::UiClientOperation {
-                request_id,
-                operation_json,
-            } => {
-                let operation =
-                    client::adapter::turn::parse_mod_ui_client_operation(&operation_json);
-                self.emit_mod_ui_client_operation_result(request_id, operation)
-                    .await
-            }
-            command => Box::pin(self.submit_impl(command)).await,
         }
+        let _abort = AbortCommand(task.abort_handle());
+        task.await.map_err(|error| ClientError::Internal {
+            message: format!("mobile command task failed: {error}"),
+        })?
     }
 
     async fn resolve_ask_user_question(
@@ -7533,6 +7404,152 @@ impl MobileEngineHandle {
 }
 
 impl MobileEngineHandle {
+    async fn submit_on_runtime(&self, command: ClientCommand) -> Result<(), ClientError> {
+        // A questionnaire parks work that can itself be holding the transition
+        // lock (for example, a long-running workflow). Its answer is
+        // connection-scoped and only resolves the broker's oneshot, so waiting
+        // behind that lock turns the native sheet's submit spinner into a
+        // deadlock. Resolve these commands before serializing session state.
+        match command {
+            ClientCommand::Cancel { turn_id } => self.cancel_active_turn(turn_id).await,
+            ClientCommand::UpdatePromptSuggestionContext {
+                session_id,
+                focus,
+                input_empty,
+                pending_permission,
+                elicitation_active,
+            } => self
+                .inner
+                .orchestrator
+                .update_prompt_suggestion_context(
+                    lingxi_core::host::orchestrator::PromptSuggestionContext {
+                        session_id,
+                        focus,
+                        input_empty,
+                        pending_permission,
+                        elicitation_active,
+                    },
+                )
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: error.to_string(),
+                }),
+            ClientCommand::RecordPromptSuggestionSubmission { text } => self
+                .inner
+                .orchestrator
+                .record_prompt_suggestion_submission(&text)
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: error.to_string(),
+                }),
+            ClientCommand::PromptSuggestionFeedback {
+                session_id,
+                uuid,
+                action,
+            } => self
+                .inner
+                .orchestrator
+                .prompt_suggestion_feedback(&session_id, &uuid, &action)
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: error.to_string(),
+                }),
+            ClientCommand::AnswerAskUserQuestion {
+                request_id,
+                answers,
+            } => {
+                self.resolve_ask_user_question(request_id, Some(answers))
+                    .await
+            }
+            ClientCommand::CancelAskUserQuestion { request_id } => {
+                self.resolve_ask_user_question(request_id, None).await
+            }
+            ClientCommand::UiRender {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_render");
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiClientModule { request_id, plugin } => {
+                self.emit_mod_ui_control_result(
+                    request_id,
+                    Ok(Utf16JsonProjection::object(vec![
+                        ("subtype".into(), "ui_client_module".into()),
+                        ("plugin".into(), plugin.into()),
+                    ])
+                    .expect("UI module request is a flat object")),
+                )
+                .await
+            }
+            ClientCommand::UiMessage {
+                request_id,
+                request_json,
+            } => {
+                let request = client::adapter::turn::parse_mod_ui_control_request(
+                    &request_json,
+                    "ui_message",
+                );
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiClientFault {
+                request_id,
+                request_json,
+            } => {
+                let request = client::adapter::turn::parse_mod_ui_control_request(
+                    &request_json,
+                    "ui_client_fault",
+                );
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiClientPress {
+                request_id,
+                request_json,
+            } => {
+                let request = client::adapter::turn::parse_mod_ui_control_request(
+                    &request_json,
+                    "ui_client_press",
+                );
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiPress {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_press");
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiInput {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_input");
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiSelect {
+                request_id,
+                request_json,
+            } => {
+                let request =
+                    client::adapter::turn::parse_mod_ui_control_request(&request_json, "ui_select");
+                self.emit_mod_ui_control_result(request_id, request).await
+            }
+            ClientCommand::UiClientOperation {
+                request_id,
+                operation_json,
+            } => {
+                let operation =
+                    client::adapter::turn::parse_mod_ui_client_operation(&operation_json);
+                self.emit_mod_ui_client_operation_result(request_id, operation)
+                    .await
+            }
+            command => Box::pin(self.submit_impl(command)).await,
+        }
+    }
+
     /// Dispatch one non-turn Mod UI query directly to the currently mounted
     /// session handle. These commands bypass the live-turn/transition gate and
     /// report a response on the connection sink with their original correlator.

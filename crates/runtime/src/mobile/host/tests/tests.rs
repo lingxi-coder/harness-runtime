@@ -618,7 +618,7 @@ fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
         "parentUuid":null,
         "sessionId":session_id,
         "timestamp":timestamp,
-        "cwd":"/workspace",
+        "cwd":"/home/lingxi/lingxi",
         "version":"test",
         "isSidechain":false,
         "message":first_message
@@ -629,7 +629,7 @@ fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
         "parentUuid":null,
         "sessionId":session_id,
         "timestamp":timestamp,
-        "cwd":"/workspace",
+        "cwd":"/home/lingxi/lingxi",
         "version":"test",
         "isSidechain":false,
         "message":first_message,
@@ -641,7 +641,7 @@ fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
         .expect("Native API-error row is an object");
     api_error_object.insert("parentUuid".into(), serde_json::json!(first_uuid));
     api_error_object.insert("sessionId".into(), serde_json::json!(session_id));
-    api_error_object.insert("cwd".into(), serde_json::json!("/workspace"));
+    api_error_object.insert("cwd".into(), serde_json::json!("/home/lingxi/lingxi"));
     api_error_object.insert("version".into(), serde_json::json!("test"));
     api_error_object.insert("isSidechain".into(), serde_json::json!(false));
     let raw = [&first_row, &attachment_row, &api_error_row]
@@ -2844,6 +2844,43 @@ fn build_submit_handle_with_platform(
     let handle = build_mobile_engine(test_config(root), platform, listener_dyn, perm_sink)
         .expect("build_mobile_engine failed");
     (handle, listener)
+}
+
+#[test]
+fn foreign_small_stack_can_construct_engine() {
+    let root = tempfile::tempdir().expect("foreign constructor root");
+    std::thread::Builder::new()
+        .name("foreign-swift-build".into())
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            let (_handle, _listener) = build_submit_handle(root.path());
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn foreign_small_stack_can_refresh_slash_command_catalog() {
+    let root = tempfile::tempdir().expect("foreign caller root");
+    let (handle, listener) = build_submit_handle(root.path());
+    std::thread::Builder::new()
+        .name("foreign-swift-poll".into())
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            futures::executor::block_on(handle.submit(ClientCommand::RefreshListings {
+                which: vec![client::protocol::commands::ListingKindDto::SlashCommands],
+            }))
+            .expect("foreign caller can refresh the catalog");
+            assert!(listener
+                .received
+                .blocking_lock()
+                .iter()
+                .any(|event| { matches!(event, Ev::SlashCommandCatalog { .. }) }));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]
@@ -7245,7 +7282,10 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         assert!(
             types.iter().all(|kind| {
                 expected_nar.contains(&kind.as_str())
-                    || matches!(kind.as_str(), "date" | "session_context" | "hook_additional_context")
+                    || matches!(
+                        kind.as_str(),
+                        "date" | "session_context" | "hook_additional_context"
+                    )
             }),
             "every typed attachment is classified as one of five NAr producers, date/session_context, or UPE"
         );

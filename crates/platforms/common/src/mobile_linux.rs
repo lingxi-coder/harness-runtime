@@ -23,6 +23,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 pub use mobile_linux_core::*;
 const ALLOWED_WRITABLE_GUEST_PATHS: &[&str] = &[
     mobile_linux_api::guest_paths::HOME,
+    mobile_linux_api::guest_paths::ADMIN_HOME,
     mobile_linux_api::guest_paths::SCRATCH[0],
     mobile_linux_api::guest_paths::SCRATCH[1],
     mobile_linux_api::guest_paths::WORKSPACE_ROOT,
@@ -345,7 +346,7 @@ fn map_host_path_to_guest<'a>(
                 return Err(MobileLinuxError::InvalidRequest(format!(
                     "unsupported host path component for {}",
                     host_path.display()
-                )))
+                )));
             }
         }
     }
@@ -1385,7 +1386,7 @@ mod tests {
         vec![
             MountSpec {
                 host_path: temp.path().join("workspace"),
-                guest_path: "/workspace/project".to_string(),
+                guest_path: "/home/lingxi/lingxi/project".to_string(),
                 read_only: false,
                 purpose: mobile_linux_api::MountPurpose::Workspace,
             },
@@ -1597,7 +1598,10 @@ mod tests {
             .expect("plan type");
 
         assert_eq!(plan.request.command, "/bin/sh");
-        assert_eq!(plan.request.cwd.as_deref(), Some("/workspace/project"));
+        assert_eq!(
+            plan.request.cwd.as_deref(),
+            Some("/home/lingxi/lingxi/project")
+        );
         assert_eq!(
             plan.request.network,
             mobile_linux_api::NetworkPolicy::Disabled
@@ -1681,7 +1685,7 @@ mod tests {
 
         let sensitive = vec![MountSpec {
             host_path: temp.path().join("secrets"),
-            guest_path: "/workspace/secrets".to_string(),
+            guest_path: "/home/lingxi/lingxi/secrets".to_string(),
             read_only: true,
             purpose: mobile_linux_api::MountPurpose::Shared,
         }];
@@ -1694,13 +1698,13 @@ mod tests {
         let overlapping = vec![
             MountSpec {
                 host_path: temp.path().join("workspace"),
-                guest_path: "/workspace/project".to_string(),
+                guest_path: "/home/lingxi/lingxi/project".to_string(),
                 read_only: false,
                 purpose: mobile_linux_api::MountPurpose::Workspace,
             },
             MountSpec {
                 host_path: temp.path().join("workspace-sub"),
-                guest_path: "/workspace/project/sub".to_string(),
+                guest_path: "/home/lingxi/lingxi/project/sub".to_string(),
                 read_only: false,
                 purpose: mobile_linux_api::MountPurpose::Shared,
             },
@@ -1712,7 +1716,7 @@ mod tests {
         fs::create_dir_all(temp.path().join("external")).expect("external");
         let external_rw = vec![MountSpec {
             host_path: temp.path().join("external"),
-            guest_path: "/workspace/external".to_string(),
+            guest_path: "/home/lingxi/lingxi/external".to_string(),
             read_only: false,
             purpose: mobile_linux_api::MountPurpose::External,
         }];
@@ -1737,7 +1741,7 @@ mod tests {
             },
             MountSpec {
                 host_path: host.clone(),
-                guest_path: "/workspace/writable-alias".to_string(),
+                guest_path: "/home/lingxi/lingxi/writable-alias".to_string(),
                 read_only: false,
                 purpose: mobile_linux_api::MountPurpose::Workspace,
             },
@@ -1750,7 +1754,7 @@ mod tests {
         let nested_alias = vec![
             MountSpec {
                 host_path: host.clone(),
-                guest_path: "/workspace/project".to_string(),
+                guest_path: "/home/lingxi/lingxi/project".to_string(),
                 read_only: false,
                 purpose: mobile_linux_api::MountPurpose::Workspace,
             },
@@ -1781,7 +1785,7 @@ mod tests {
             Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
         let mounts = vec![MountSpec {
             host_path: linked,
-            guest_path: "/workspace/project".to_string(),
+            guest_path: "/home/lingxi/lingxi/project".to_string(),
             read_only: false,
             purpose: mobile_linux_api::MountPurpose::Workspace,
         }];

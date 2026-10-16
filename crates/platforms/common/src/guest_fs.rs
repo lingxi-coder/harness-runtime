@@ -2,7 +2,7 @@
 //!
 //! On mobile-linux platforms the model lives in TWO coordinate systems: file
 //! tools (Read/Write/Edit) speak host paths while the shell speaks guest
-//! paths (`/workspace/<id>`, `/root`). Every writable guest area is a
+//! paths (`/home/lingxi/lingxi/<id>`, `/root`). Every writable guest area is a
 //! host-backed bind mount, so the split is purely a missing translation
 //! table — [`GuestPathFileSystem`] closes it by rewriting guest paths onto
 //! their host twins before delegating to the real host filesystem. I/O never
@@ -428,7 +428,7 @@ mod tests {
     fn workspace_mount() -> MountSpec {
         MountSpec {
             host_path: PathBuf::from("/host/workspace/abc"),
-            guest_path: "/workspace/abc".to_string(),
+            guest_path: "/home/lingxi/lingxi/abc".to_string(),
             read_only: false,
             purpose: MountPurpose::Workspace,
         }
@@ -453,7 +453,7 @@ mod tests {
     async fn guest_paths_rebase_onto_their_mounts_host_twin() {
         let (inner, fs) = fs_with(vec![workspace_mount(), home_mount()]);
 
-        fs.read_file("/workspace/abc/src/main.rs", None, None)
+        fs.read_file("/home/lingxi/lingxi/abc/src/main.rs", None, None)
             .await
             .expect("workspace read");
         assert_eq!(
@@ -476,7 +476,9 @@ mod tests {
         );
 
         // The mount root itself maps to the host root.
-        fs.file_size("/workspace/abc").await.expect("mount root");
+        fs.file_size("/home/lingxi/lingxi/abc")
+            .await
+            .expect("mount root");
         assert_eq!(
             inner.last(),
             ("size".to_string(), "/host/workspace/abc".to_string())
@@ -487,13 +489,13 @@ mod tests {
     async fn longest_guest_prefix_wins() {
         let nested = MountSpec {
             host_path: PathBuf::from("/host/external"),
-            guest_path: "/workspace/abc/ext".to_string(),
+            guest_path: "/home/lingxi/lingxi/abc/ext".to_string(),
             read_only: false,
             purpose: MountPurpose::External,
         };
         let (inner, fs) = fs_with(vec![workspace_mount(), nested]);
 
-        fs.read_file("/workspace/abc/ext/data.txt", None, None)
+        fs.read_file("/home/lingxi/lingxi/abc/ext/data.txt", None, None)
             .await
             .expect("nested read");
         assert_eq!(
@@ -506,13 +508,13 @@ mod tests {
     async fn read_only_mounts_refuse_writes_but_serve_reads() {
         let ro = MountSpec {
             host_path: PathBuf::from("/host/shared"),
-            guest_path: "/workspace/abc".to_string(),
+            guest_path: "/home/lingxi/lingxi/abc".to_string(),
             read_only: true,
             purpose: MountPurpose::Workspace,
         };
         let (inner, fs) = fs_with(vec![ro]);
 
-        fs.read_file("/workspace/abc/f", None, None)
+        fs.read_file("/home/lingxi/lingxi/abc/f", None, None)
             .await
             .expect("read-only read");
         assert_eq!(
@@ -520,7 +522,7 @@ mod tests {
             ("read".to_string(), "/host/shared/f".to_string())
         );
 
-        let denied = fs.write_file("/workspace/abc/f", "x").await;
+        let denied = fs.write_file("/home/lingxi/lingxi/abc/f", "x").await;
         assert!(
             matches!(denied, Err(FsError::PermissionDenied(_))),
             "write to a read-only mount must be refused: {denied:?}"
@@ -533,9 +535,9 @@ mod tests {
         for path in [
             "/tmp/scratch.txt",
             "/var/tmp/scratch.txt",
-            "/root/unbacked",           // atlas root without a live mount
-            "/workspace/other-id/file", // guest workspace space, no mount
-            "/workspace/abc/../abc/f",  // dirty guest path must not leak
+            "/root/unbacked",                    // atlas root without a live mount
+            "/home/lingxi/lingxi/other-id/file", // guest workspace space, no mount
+            "/home/lingxi/lingxi/abc/../abc/f",  // dirty guest path must not leak
         ] {
             let result = fs.read_file(path, None, None).await;
             assert!(
@@ -562,9 +564,12 @@ mod tests {
     #[tokio::test]
     async fn symlink_translates_both_endpoints() {
         let (inner, fs) = fs_with(vec![workspace_mount()]);
-        fs.symlink("/workspace/abc/target", "/workspace/abc/link")
-            .await
-            .expect("symlink");
+        fs.symlink(
+            "/home/lingxi/lingxi/abc/target",
+            "/home/lingxi/lingxi/abc/link",
+        )
+        .await
+        .expect("symlink");
         let calls = inner.calls.lock().expect("calls mutex").clone();
         assert_eq!(
             calls,
@@ -586,7 +591,7 @@ mod tests {
         let (_, fs) = fs_with(vec![workspace_mount()]);
         // Translated: /workspace/abc → /host/workspace/abc, inside the
         // recording fs's workspace.
-        assert!(fs.is_within_workspace("/workspace/abc/file"));
+        assert!(fs.is_within_workspace("/home/lingxi/lingxi/abc/file"));
         // Fenced guest space is never "within the workspace".
         assert!(!fs.is_within_workspace("/tmp/file"));
         // Host paths keep the inner answer.

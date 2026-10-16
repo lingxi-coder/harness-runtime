@@ -79,7 +79,7 @@ pub struct IosPlatformInputs {
     /// Explicit host workspace root exposed to the guest when mobile-linux mode
     /// is selected. Legacy mode ignores it.
     pub workspace_host_path: Option<PathBuf>,
-    /// Stable guest workspace id used to produce `/workspace/<id>`.
+    /// Stable guest workspace id used to produce `/home/lingxi/lingxi/<id>`.
     pub stable_workspace_id: Option<String>,
 }
 

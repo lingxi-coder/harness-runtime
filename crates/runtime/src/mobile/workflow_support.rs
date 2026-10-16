@@ -1252,12 +1252,12 @@ mod run_id_tests {
                     task_id: "wabc12345".into(),
                     workflow_run_id: "wf_abcdef".into(),
                     workflow_id: "build-workflow".into(),
-                    script_path: "/workspace/build.js".into(),
+                    script_path: "/home/lingxi/lingxi/build.js".into(),
                     script_sha256: None,
                     args_json: None,
                     description: "Build workflow".into(),
                     start_time: None,
-                    transcript_dir: "/workspace/transcript".into(),
+                    transcript_dir: "/home/lingxi/lingxi/transcript".into(),
                 },
             )
             .expect("upsert checkpoint");

@@ -2994,6 +2994,33 @@ pub fn build_mobile_engine_inner(
     permission_sink: Arc<dyn PermissionRequestSink>,
     streaming_override: Option<Arc<dyn StreamingApiClient>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
+    // Runtime::block_on polls its root future on the calling thread. Swift's
+    // cooperative executor can call this synchronous FFI entry with only a
+    // 512 KiB stack, so construct the runtime and its async root on our stack.
+    std::thread::Builder::new()
+        .name("mobile-engine-build".into())
+        .stack_size(crate::RUNTIME_THREAD_STACK_SIZE)
+        .spawn(move || {
+            build_mobile_engine_on_worker(
+                cfg,
+                platform,
+                listener,
+                permission_sink,
+                streaming_override,
+            )
+        })
+        .map_err(|error| MobileEngineError::Internal(format!("mobile build thread: {error}")))?
+        .join()
+        .map_err(|_| MobileEngineError::Internal("mobile build thread panicked".into()))?
+}
+
+fn build_mobile_engine_on_worker(
+    cfg: MobileConfig,
+    platform: Arc<dyn Platform>,
+    listener: Arc<dyn ClientEventListener>,
+    permission_sink: Arc<dyn PermissionRequestSink>,
+    streaming_override: Option<Arc<dyn StreamingApiClient>>,
+) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     // The handle OWNS its runtime (§0.5). A multi-thread runtime so a streaming
     // turn spawned by F3-05 runs concurrently with the FFI read path.
     //
@@ -3699,7 +3726,8 @@ pub fn build_mobile_engine_inner(
             connection_sink.clone(),
         )
     });
-    let handle = Arc::new(MobileEngineHandle {
+    let handle = Arc::new_cyclic(|self_weak| MobileEngineHandle {
+        self_weak: self_weak.clone(),
         side_chats,
         session_cron,
         scheduled_reload: std::sync::atomic::AtomicBool::new(false),
