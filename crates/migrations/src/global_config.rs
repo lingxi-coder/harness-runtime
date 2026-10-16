@@ -27,7 +27,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use serde_json::{Map, Value};
 
 /// In-memory session trust flag — `bootstrap/state.ts:153,363,1317-1322`
@@ -401,10 +401,7 @@ fn filter_global_defaults_source(
         .map_err(|error| GlobalConfigError::Broken(error.to_string()))
 }
 
-fn source_value_equals_global_default(
-    key: &[u16],
-    value: core::types::utf16_json::JsonValueView<'_>,
-) -> bool {
+fn source_value_equals_global_default(key: &[u16], value: JsonValueView<'_>) -> bool {
     let number = value.as_number();
     if [
         "numStartups",
