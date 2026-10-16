@@ -10581,7 +10581,7 @@ async fn plugin_runtime_refresh_swaps_enabled_set_live() {
     write_cached_plugin(&plugins_dir, "mkt", "plugina", "1.0.0", "acmd");
     write_cached_plugin(&plugins_dir, "mkt", "pluginb", "1.0.0", "bcmd");
     // Start with only A enabled.
-    write_enabled_plugins(&home, &[("plugina@mkt", true)]);
+    write_enabled_plugins(&home, &[("plugina@mkt", true), ("pluginb@mkt", false)]);
 
     let command_registry = Arc::new(RwLock::new(CommandRegistry::new()));
     let storage = PlainTextSecureStorage::new(tmp.path().join("secrets"))
@@ -10676,7 +10676,7 @@ async fn plugin_runtime_refresh_aborts_enable_phase_after_disable_failure_then_r
     let plugins_dir = home.join("plugins");
     write_cached_plugin_with_stdio_mcp(&plugins_dir, "mkt", "plugina", "1.0.0", "acmd", "srv");
     write_cached_plugin(&plugins_dir, "mkt", "pluginb", "1.0.0", "bcmd");
-    write_enabled_plugins(&home, &[("plugina@mkt", true)]);
+    write_enabled_plugins(&home, &[("plugina@mkt", true), ("pluginb@mkt", false)]);
 
     let agent_catalog = Arc::new(RwLock::new(Vec::new()));
     let mcp_registry = Arc::new(mcp::McpRegistry::new(Arc::new(
