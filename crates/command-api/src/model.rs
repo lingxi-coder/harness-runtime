@@ -393,6 +393,7 @@ pub fn render_unknown_command_reminder(
     let listed = native_unknown_command_fallback_available_names(catalog);
     let remaining = catalog.available_command_count.saturating_sub(listed.len());
     let remaining_count = remaining.to_string();
+    let safe_suggestion = native_unknown_command_fallback_suggestion(suggestion);
     let mut parts = vec![Text("<system-reminder>\n")];
     if command_name_is_safe {
         parts.push(Text("The user's message starts with the slash command /"));
@@ -405,9 +406,9 @@ pub fn render_unknown_command_reminder(
             "The user's message starts with a slash command, but no command with that name is available in this session, so it did not run. ",
         ));
     }
-    if let Some(suggestion) = native_unknown_command_fallback_suggestion(suggestion) {
+    if let Some(suggestion) = safe_suggestion.as_ref() {
         parts.push(Text("The closest available command is /"));
-        parts.push(Source(&suggestion));
+        parts.push(Source(suggestion));
         parts.push(Text(". Ask the user before running it. "));
     }
 
