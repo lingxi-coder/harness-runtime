@@ -15,7 +15,7 @@ license.workspace = true
 core = { path = "../core" }
 schemars = { version = "0.8", optional = true }
 skill = { path = "../skill", optional = true }
-icu_collator = { version = "=2.3.1", default-features = false, features = ["compiled_data"] }
+icu_collator = { path = "../../third_party/icu_collator", version = "=2.3.1", default-features = false, features = ["compiled_data"] }
 icu_locale = "=2.3.1"
 workflow = { path = "../workflow", optional = true }
 cron = { path = "../cron", optional = true }

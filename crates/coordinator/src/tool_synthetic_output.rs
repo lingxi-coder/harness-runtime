@@ -314,6 +314,7 @@ mod tests {
     /// `tool-api/test-support` feature (not enabled for the coordinator crate).
     fn fresh_ctx() -> ToolUseContext {
         ToolUseContext {
+            available_tool_names: None,
             agent_spawn_provenance: Default::default(),
             native_query_depth: None,
             options: ToolUseOptions {

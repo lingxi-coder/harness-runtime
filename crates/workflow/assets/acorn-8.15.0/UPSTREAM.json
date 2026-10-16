@@ -1,0 +1,17 @@
+{
+  "source_url": "https://registry.npmjs.org/acorn/-/acorn-8.15.0.tgz",
+  "upstream_repository": "git+https://github.com/acornjs/acorn.git",
+  "package": "acorn",
+  "version": "8.15.0",
+  "license": "MIT",
+  "package_tarball_sha256": "e46eae89bd9761f16d1d25563b837b55b4b78f3ece06ee0b9789cb2644f523b3",
+  "package_json_sha256": "9e422c8225c9cc4c774e9a9392d0ecac7f766b46122ef2db99db0fc4bbedc247",
+  "assets": {
+    "dist/acorn.js": "fdb08546776ec6228b03e8d02b40d4ab3255bae5f401adba7ff5dad927ac5c9c",
+    "LICENSE": "76a876cf886ff9be2a8b5e2e86514fed06223c8c9f0c1e9ee9606e93841e00b7"
+  },
+  "acquisition": "official npm registry tarball; package metadata verified from the tarball",
+  "native_source_copied": false,
+  "native_launched": false,
+  "cargo_run": false
+}

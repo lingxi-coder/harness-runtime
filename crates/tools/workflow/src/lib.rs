@@ -27,7 +27,8 @@ pub use ultracode::{
     UltracodeGate, UltracodeState, DEFAULT_ULTRACODE_CADENCE, ULTRACODE_CADENCE_ENV,
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -50,8 +51,6 @@ pub const MAX_SCRIPT_BYTES: usize = 524288;
 
 /// Tool name byte-lock.
 pub const TOOL_NAME: &str = "Workflow";
-
-const WORKFLOW_EXTENSIONS: [&str; 4] = [".js", ".mjs", ".ts", ""];
 
 use workflow::description::{assemble_description, subagent_model_forced};
 
@@ -110,6 +109,12 @@ fn hidden_workflow_input_char(c: char) -> bool {
 pub struct WorkflowLaunchSpec {
     /// Inline self-contained script source.
     pub script: Option<String>,
+    /// Script selected from the validated workflow catalog before this tool
+    /// call was dispatched. Named launches must use this snapshot; launchers
+    /// must not resolve the name again after validation.
+    pub resolved_workflow_script: Option<String>,
+    /// Catalog source selected alongside `resolved_workflow_script`.
+    pub workflow_source: Option<WorkflowCatalogSource>,
     /// Name of a predefined/saved workflow.
     pub name: Option<String>,
     /// Path to a script file on disk (takes precedence over `script`/`name`).
@@ -121,8 +126,7 @@ pub struct WorkflowLaunchSpec {
     /// Internal host pin for an explicit resume, in canonical bare-UUID form.
     /// Tool-driven launches leave this unset and resolve the current session at
     /// launch time; mobile UI resumes set it so a concurrent session switch
-    /// cannot retarget the run. Hosts accept the legacy `sess:<uuid>` spelling
-    /// at their boundary and normalize it before deriving transcript paths.
+    /// cannot retarget the run. The value is always a canonical bare UUID.
     pub session_uuid: Option<String>,
     /// Originating Workflow tool-use id for the terminal task notification.
     pub tool_use_id: Option<String>,
@@ -141,6 +145,74 @@ pub struct WorkflowLaunchSpec {
     /// model path by name. `None` is expected for inline/named workflows and is
     /// fail-closed for `scriptPath` launches.
     pub script_path_approval: Option<WorkflowScriptPathApproval>,
+}
+
+/// Source tier selected from the validated Native workflow catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkflowCatalogSource {
+    /// Project-local workflow directory.
+    ProjectSettings,
+    /// User workflow directory.
+    UserSettings,
+    /// Plugin workflow, retaining its installed plugin name.
+    Plugin,
+    /// Workflow compiled into this binary.
+    Builtin,
+}
+
+impl WorkflowCatalogSource {
+    /// Source string carried into workflow task metadata.
+    #[must_use]
+    pub fn task_source(&self) -> &'static str {
+        match self {
+            Self::ProjectSettings => "projectSettings",
+            Self::UserSettings => "userSettings",
+            Self::Plugin => "plugin",
+            Self::Builtin => "built-in",
+        }
+    }
+
+    /// Source string emitted by Native's dynamic workflow factory (`m(o)`).
+    #[must_use]
+    pub fn source_tag(&self) -> &'static str {
+        match self {
+            Self::ProjectSettings => "projectSettings",
+            Self::UserSettings => "userSettings",
+            Self::Plugin => "plugin",
+            Self::Builtin => "bundled",
+        }
+    }
+
+    /// Internal H marker used only to recognize the compiled-in factory row.
+    /// It is distinct from the source tag Native serializes (`bundled`).
+    #[must_use]
+    pub fn host_native_source(&self) -> Option<&'static str> {
+        matches!(self, Self::Builtin).then_some("built-in")
+    }
+}
+
+/// One entry from the same validated snapshot used by `Workflow({name})` and
+/// the runtime slash-command catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowSlashDescriptor {
+    /// Exact UTF-16 workflow name selected from the validated catalog.
+    pub name: Utf16JsonProjection,
+    /// Exact UTF-16 description exposed by Native's workflow factory.
+    pub description: Utf16JsonProjection,
+    /// Optional exact UTF-16 `whenToUse` metadata.
+    pub when_to_use: Option<Utf16JsonProjection>,
+    /// Optional ordered phase metadata captured with the script snapshot.
+    pub phases: Option<Vec<workflow::WorkflowMetaPhase>>,
+    /// Factory-supplied invocation policy; this is not a workflow meta field.
+    pub disable_model_invocation: bool,
+    /// JavaScript UTF-16 code-unit length of the captured script.
+    pub content_length: usize,
+    /// Source tier selected by the Native workflow catalog merge.
+    pub source: WorkflowCatalogSource,
+    /// Owning plugin name for plugin workflows.
+    pub plugin_name: Option<Utf16JsonProjection>,
+    /// Exact script text captured by the selected catalog entry.
+    pub script: String,
 }
 
 /// The path identity approved by the nested `Read` permission check.
@@ -192,11 +264,26 @@ pub struct WorkflowLaunched {
 
 /// Error launching a workflow.
 #[derive(Debug)]
-pub struct WorkflowLaunchError(pub String);
+pub enum WorkflowLaunchError {
+    /// Host/runtime failure with human-readable context.
+    Message(String),
+    /// Source-backed parser diagnostic whose UTF-16 units must reach the model
+    /// without passing through Rust's scalar-only `String` representation.
+    Source(Utf16JsonProjection),
+}
 
 impl std::fmt::Display for WorkflowLaunchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        match self {
+            Self::Message(message) => write!(f, "{message}"),
+            Self::Source(diagnostic) => write!(
+                f,
+                "{}",
+                diagnostic
+                    .string_at("")
+                    .unwrap_or("workflow source diagnostic")
+            ),
+        }
     }
 }
 impl std::error::Error for WorkflowLaunchError {}
@@ -247,74 +334,103 @@ fn user_config_home_dir() -> Option<PathBuf> {
         .map(|home| home.join(branding::DOT_DIR))
 }
 
-fn saved_workflow_dirs(cwd: &Path) -> Vec<PathBuf> {
-    let project = cwd.join(branding::DOT_DIR).join("workflows");
-    let mut dirs = vec![project.clone()];
-    if let Some(user) = user_config_home_dir().map(|home| home.join("workflows")) {
-        if user != project {
-            dirs.push(user);
-        }
-    }
-    dirs
-}
-
-fn saved_workflow_candidates(cwd: &Path, name: &str) -> Vec<PathBuf> {
-    saved_workflow_dirs(cwd)
-        .into_iter()
-        .flat_map(|dir| {
-            WORKFLOW_EXTENSIONS
-                .iter()
-                .map(move |ext| dir.join(format!("{name}{ext}")))
+fn workflow_script_paths(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            // Native tests the decoded filename suffix, so the literal filename
+            // `.js` is accepted even though Rust reports no Path extension.
+            let supported = path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".js"));
+            supported
+                && std::fs::metadata(path).is_ok_and(|metadata| {
+                    metadata.is_file() && metadata.len() <= MAX_SCRIPT_BYTES as u64
+                })
         })
         .collect()
 }
 
-/// Return Claude Code's resolver source for a named workflow. The source is
-/// intentionally independent of the resolved script body: a named built-in
-/// with an explicit script override still reports `built-in`, while the
-/// `scriptMatchesDefinition` flag controls telemetry redaction separately.
-///
-/// `plugin_workflows` is the same registry the resolver consults, checked in
-/// the SAME position (last), so `tengu_workflow_launched`'s `workflow_source`
-/// names the tier the launch actually resolved from. The oracle stamps
-/// `source:"plugin"` on every plugin record (`v()` @169045670) and emits it
-/// verbatim (`workflow_source:c(se)` @172565293), so `"plugin"` is a real
-/// emitted value — without this arm a plugin workflow is misreported as
-/// `custom`.
-#[must_use]
-pub fn workflow_source_for_name(
-    cwd: &Path,
-    name: &str,
-    plugin_workflows: Option<&workflow::PluginWorkflowRegistry>,
-) -> Option<&'static str> {
-    let project = cwd.join(branding::DOT_DIR).join("workflows");
-    if WORKFLOW_EXTENSIONS
-        .iter()
-        .any(|ext| project.join(format!("{name}{ext}")).is_file())
-    {
-        return Some("projectSettings");
+fn workflow_descriptor_from_path(
+    path: &Path,
+    source: WorkflowCatalogSource,
+) -> Option<WorkflowSlashDescriptor> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_SCRIPT_BYTES as u64 {
+        return None;
     }
-    let user_dirs = user_config_home_dir()
-        .into_iter()
-        .map(|home| home.join("workflows"));
-    if user_dirs.into_iter().any(|dir| {
-        WORKFLOW_EXTENSIONS
-            .iter()
-            .any(|ext| dir.join(format!("{name}{ext}")).is_file())
-    }) {
-        return Some("userSettings");
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_SCRIPT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_SCRIPT_BYTES {
+        return None;
     }
-    if plugin_workflows.is_some_and(|registry| registry.resolve(name).is_some()) {
-        return Some("plugin");
-    }
-    if BUILTIN_WORKFLOWS.get(name).is_some() {
-        return Some("built-in");
-    }
-    None
+    let script = String::from_utf8_lossy(&bytes).into_owned();
+    workflow_descriptor_from_script(&script, source, None, false)
 }
 
-fn path_for_read(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
+fn workflow_descriptor_from_script(
+    script: &str,
+    source: WorkflowCatalogSource,
+    plugin_name: Option<Utf16JsonProjection>,
+    disable_model_invocation: bool,
+) -> Option<WorkflowSlashDescriptor> {
+    let meta = workflow::extract_workflow_meta(script)?;
+    Some(WorkflowSlashDescriptor {
+        name: meta.name,
+        description: meta.description,
+        when_to_use: meta.when_to_use,
+        phases: meta.phases,
+        disable_model_invocation,
+        content_length: script.encode_utf16().count(),
+        source,
+        plugin_name,
+        script: script.to_owned(),
+    })
+}
+
+fn projection_from_units(units: Vec<u16>) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("display text is derived from the same UTF-16 source units")
+}
+
+fn invalid_workflow_script_diagnostic(diagnostic: &Utf16JsonProjection) -> Utf16JsonProjection {
+    let mut units = "Invalid workflow script: "
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    units.extend(diagnostic.string_units("").unwrap_or_default());
+    projection_from_units(units)
+}
+
+fn merge_workflow_candidate(
+    entries: &mut Vec<WorkflowSlashDescriptor>,
+    positions: &mut HashMap<Vec<u16>, usize>,
+    candidate: WorkflowSlashDescriptor,
+) -> bool {
+    let Some(name_units) = candidate.name.string_units("") else {
+        return false;
+    };
+    if let Some(index) = positions.get(&name_units).copied() {
+        // Native W(candidate, existing) fully parses a candidate only when it
+        // replaces an existing workflow. Invalid replacement bodies retain
+        // the already-selected workflow; non-colliding discovery uses qS's
+        // metadata-only parse and remains available until launch validation.
+        if workflow::validate_meta(&candidate.script).is_ok() {
+            entries[index] = candidate;
+            return true;
+        }
+        return false;
+    }
+    positions.insert(name_units, entries.len());
+    entries.push(candidate);
+    true
 }
 
 /// Read a previously approved `scriptPath` through the rooted, no-follow
@@ -332,93 +448,54 @@ pub fn read_script_path_after_permission(
         &approval.approved,
     )
     .map_err(|error| {
-        WorkflowLaunchError(format!(
+        WorkflowLaunchError::Message(format!(
             "cannot read workflow scriptPath '{}' after permission: {error}",
             approval.requested.display()
         ))
     })?;
     if snapshot.bytes.len() > MAX_SCRIPT_BYTES {
-        return Err(WorkflowLaunchError(format!(
+        return Err(WorkflowLaunchError::Message(format!(
             "Workflow script file {} exceeds {MAX_SCRIPT_BYTES} bytes",
             approval.requested.display()
         )));
     }
-    String::from_utf8(snapshot.bytes).map_err(|_| {
-        WorkflowLaunchError(format!(
-            "workflow scriptPath '{}' is not valid UTF-8",
-            approval.requested.display()
-        ))
-    })
+    Ok(String::from_utf8_lossy(&snapshot.bytes).into_owned())
 }
 
-/// Resolve a launch spec to a script source. Precedence follows claude-code:
-/// `scriptPath` over `name` over `script` (a named workflow must resolve before
-/// an optional inline body can override its source). `read` loads a file's contents
-/// (the host provides real I/O); `name` resolution looks first under the
-/// project saved-workflow directory (`.lingxi/workflows/<name>`), then the
-/// user config directory (`$LINGXI_CONFIG_DIR/workflows/<name>` or
-/// `~/.lingxi/workflows/<name>`) with common script extensions, then a
-/// plugin's declared/auto-scanned workflow by its namespaced name (when a
-/// plugin-workflow registry is passed), and only last the immutable
-/// built-ins. A project/user file always wins a name collision; the plugin
-/// registry is checked before built-ins so a plugin can supply a workflow
-/// the built-in table does not, but a saved project/user file still shadows
-/// both (oracle precedence project/user > plugin > built-in — see
-/// `workflow::PluginWorkflowRegistry`).
+/// Resolve only explicit path/script inputs. Named calls must pass the script
+/// selected during `WorkflowTool::validate_input`; this function deliberately
+/// fails closed instead of resolving the name against a changed catalog.
 pub fn resolve_script_at<R>(
-    cwd: &Path,
     spec: &WorkflowLaunchSpec,
     read: R,
-    plugin_workflows: Option<&workflow::PluginWorkflowRegistry>,
 ) -> Result<String, WorkflowLaunchError>
 where
     R: Fn(&str) -> std::io::Result<String>,
 {
     let nonempty = |o: &Option<String>| o.as_deref().filter(|s| !s.is_empty()).map(str::to_string);
     if let Some(path) = nonempty(&spec.script_path) {
-        return read(&path)
-            .map_err(|e| WorkflowLaunchError(format!("cannot read scriptPath '{path}': {e}")));
+        return read(&path).map_err(|e| {
+            WorkflowLaunchError::Message(format!("cannot read scriptPath '{path}': {e}"))
+        });
     }
-    if let Some(name) = nonempty(&spec.name) {
-        let mut resolved = None;
-        for candidate in saved_workflow_candidates(cwd, &name) {
-            if let Ok(src) = read(&path_for_read(&candidate)) {
-                resolved = Some(src);
-                break;
-            }
-        }
-        if resolved.is_none() {
-            if let Some(path) = plugin_workflows.and_then(|registry| registry.resolve(&name)) {
-                resolved = read(&path_for_read(&path)).ok();
-            }
-        }
-        if resolved.is_none() {
-            resolved = BUILTIN_WORKFLOWS
-                .get(&name)
-                .map(|descriptor| descriptor.script.to_string());
-        }
-        let named = resolved.ok_or_else(|| {
-            WorkflowLaunchError(format!("Workflow \"{name}\" not found. Available: (none)"))
-        })?;
-        return Ok(nonempty(&spec.script).unwrap_or(named));
+    if let Some(script) = spec.resolved_workflow_script.as_ref() {
+        return Ok(script.clone());
+    }
+    if spec.name.as_deref().is_some_and(|name| !name.is_empty()) {
+        return Err(WorkflowLaunchError::Message(
+            "named workflow is missing its validated catalog script".into(),
+        ));
     }
     if let Some(script) = nonempty(&spec.script) {
         return Ok(script);
     }
-    Err(WorkflowLaunchError(
+    Err(WorkflowLaunchError::Message(
         "Must provide script, name, scriptPath, or runId".into(),
     ))
 }
 
 /// Resolve relative to the process working directory. Production composition
 /// roots should use [`resolve_script_at`] with their live session cwd.
-pub fn resolve_script<R>(spec: &WorkflowLaunchSpec, read: R) -> Result<String, WorkflowLaunchError>
-where
-    R: Fn(&str) -> std::io::Result<String>,
-{
-    resolve_script_at(Path::new(""), spec, read, None)
-}
-
 // ── Save dynamic workflow (claude-code `eya` / `uQ_`, dialog mode:"save") ─────
 
 /// Where a saved workflow is written — the oracle's `scope` field of the "Save
@@ -736,15 +813,18 @@ pub struct WorkflowTool {
     /// Session-scoped dynamic-workflow gate (`pA()`): launch/runtime policy may
     /// leave Workflow installed but unavailable for this session.
     session_enabled: bool,
-    /// Optional live plugin-workflow registry (§14 — `plugin::PluginManager`
-    /// materializes a plugin's declared/auto-scanned `workflows` into this
-    /// SAME shared table). When wired, a plugin's saved workflow becomes
-    /// resolvable by its namespaced name (`{plugin}:{name}`) after the
-    /// built-in/project/user directories have already missed — see
-    /// [`saved_workflow_candidates`]'s call sites. `None` (the default until
-    /// a composition root calls [`Self::with_plugin_workflows`]) means only
-    /// built-in/project/user workflows resolve, exactly today's behavior.
+    /// The manager's current validated plugin workflow snapshots.
     plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
+    /// Built-ins admitted by Native's separate R6/dFe workflow-catalog gate.
+    /// `None` is reserved for lightweight test hosts with no host policy facts;
+    /// production composition supplies the exact current allowlist.
+    allowed_builtin_workflow_names: Option<HashSet<Vec<u16>>>,
+    /// The current validated catalog shared by slash registration and named
+    /// Workflow calls. A call pins one entry during `validate_input` and the
+    /// launcher receives that exact script.
+    workflow_catalog: Arc<Mutex<Vec<WorkflowSlashDescriptor>>>,
+    validated_workflow_selections:
+        Arc<Mutex<HashMap<(Option<String>, Vec<u16>), Vec<WorkflowSlashDescriptor>>>>,
 }
 
 impl WorkflowTool {
@@ -766,6 +846,9 @@ impl WorkflowTool {
             size_guideline_state: None,
             session_enabled: true,
             plugin_workflows: None,
+            allowed_builtin_workflow_names: None,
+            workflow_catalog: Arc::new(Mutex::new(Vec::new())),
+            validated_workflow_selections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -810,6 +893,21 @@ impl WorkflowTool {
         self
     }
 
+    /// Supply Native's already-resolved built-in workflow admission set.
+    /// This is independent of the general `disableWorkflows` / session gate:
+    /// when those gates disable saved and plugin workflows, Native still
+    /// returns the separately gated `iBt()` built-in rows.
+    #[must_use]
+    pub fn with_allowed_builtin_workflow_names(mut self, names: Vec<Utf16JsonProjection>) -> Self {
+        self.allowed_builtin_workflow_names = Some(
+            names
+                .into_iter()
+                .filter_map(|name| name.string_units(""))
+                .collect(),
+        );
+        self
+    }
+
     /// Composition-test seam for asserting registry identity across the
     /// manager, tool, launcher, and nested resolver.
     #[doc(hidden)]
@@ -829,6 +927,202 @@ impl WorkflowTool {
             .and_then(|cwd| cwd.lock().ok().map(|guard| guard.clone()))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_default()
+    }
+
+    /// Rebuild the Native workflow snapshot. Candidate rows are considered in
+    /// Native source order: compiled-in rows, plugin registry insertion order,
+    /// then disk rows. An overriding candidate replaces the existing row in
+    /// its original map position only after the strict collision parse passes.
+    pub fn refresh_workflow_catalog(&self) -> Vec<WorkflowSlashDescriptor> {
+        let mut builtins = Vec::new();
+        let mut builtin_positions = HashMap::<Vec<u16>, usize>::new();
+        let mut plugins = Vec::new();
+        let mut plugin_positions = HashMap::<Vec<u16>, usize>::new();
+        let mut disk = Vec::new();
+        let mut disk_positions = HashMap::<Vec<u16>, usize>::new();
+
+        for builtin in BUILTIN_WORKFLOWS.iter() {
+            let name_units = builtin.name.encode_utf16().collect::<Vec<_>>();
+            let builtin_admitted = self
+                .allowed_builtin_workflow_names
+                .as_ref()
+                .is_none_or(|allowed| allowed.contains(&name_units));
+            if builtin_admitted {
+                if let Some(descriptor) = workflow_descriptor_from_script(
+                    builtin.script,
+                    WorkflowCatalogSource::Builtin,
+                    None,
+                    builtin.manual_only,
+                ) {
+                    merge_workflow_candidate(&mut builtins, &mut builtin_positions, descriptor);
+                }
+            }
+        }
+
+        if !self.workflows_disabled() && self.workflow_session_enabled() {
+            // Native first constructs the plugin-over-builtin map. Plugins
+            // keep registry order; replacing an existing workflow keeps its
+            // position, while a failed strict collision parse keeps the old
+            // source.
+            let mut base = builtins.clone();
+            let mut base_positions = builtin_positions.clone();
+            if let Some(registry) = &self.plugin_workflows {
+                for entry in registry.entries() {
+                    let plugin_name_units = entry.plugin_name.encode_utf16().collect::<Vec<_>>();
+                    let Some(mut descriptor) = workflow_descriptor_from_script(
+                        &entry.script,
+                        WorkflowCatalogSource::Plugin,
+                        Some(projection_from_units(plugin_name_units.clone())),
+                        false,
+                    ) else {
+                        continue;
+                    };
+                    let mut expected_name = plugin_name_units;
+                    expected_name.extend(":".encode_utf16());
+                    expected_name.extend(descriptor.name.string_units("").unwrap_or_default());
+                    if expected_name != entry.qualified_name.string_units("").unwrap_or_default() {
+                        continue;
+                    }
+                    // The registry and this catalog share the exact validated
+                    // source snapshot. The path is retained for provenance,
+                    // never reopened to rediscover metadata or script text.
+                    descriptor.name = entry.qualified_name;
+                    if merge_workflow_candidate(&mut base, &mut base_positions, descriptor.clone())
+                    {
+                        merge_workflow_candidate(&mut plugins, &mut plugin_positions, descriptor);
+                    }
+                }
+            }
+
+            // Native's disk loader inserts user files first, followed by
+            // project directories from the farthest ancestor to the nearest.
+            // Map replacement preserves a name's first slot, and the final
+            // disk segment is stably sorted by Native's localeCompare order.
+            if let Some(user_dir) = user_config_home_dir().map(|home| home.join("workflows")) {
+                for path in workflow_script_paths(&user_dir) {
+                    if let Some(descriptor) =
+                        workflow_descriptor_from_path(&path, WorkflowCatalogSource::UserSettings)
+                    {
+                        merge_workflow_candidate(&mut disk, &mut disk_positions, descriptor);
+                    }
+                }
+            }
+            let cwd = self.current_cwd();
+            let home = std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| cwd.clone());
+            let mut project_dirs =
+                command_api::markdown_loader::project_dirs_up_to_home("workflows", &cwd, &home);
+            project_dirs.reverse();
+            for directory in project_dirs {
+                for path in workflow_script_paths(&directory) {
+                    if let Some(descriptor) =
+                        workflow_descriptor_from_path(&path, WorkflowCatalogSource::ProjectSettings)
+                    {
+                        merge_workflow_candidate(&mut disk, &mut disk_positions, descriptor);
+                    }
+                }
+            }
+
+            // `O(disk, base)` validates only candidates that replace an
+            // existing workflow. A non-colliding row remains on the discovery
+            // fast path and receives strict body validation when launched.
+            disk.retain(|candidate| {
+                let Some(name) = candidate.name.string_units("") else {
+                    return false;
+                };
+                if !base_positions.contains_key(&name) {
+                    return true;
+                }
+                workflow::validate_meta(&candidate.script).is_ok()
+            });
+        }
+
+        let plugin_names = plugins
+            .iter()
+            .filter_map(|entry| entry.name.string_units(""))
+            .collect::<HashSet<_>>();
+        let disk_names = disk
+            .iter()
+            .filter_map(|entry| entry.name.string_units(""))
+            .collect::<HashSet<_>>();
+        let mut entries = builtins
+            .into_iter()
+            .filter(|entry| {
+                let name = entry.name.string_units("").unwrap_or_default();
+                !plugin_names.contains(&name) && !disk_names.contains(&name)
+            })
+            .collect::<Vec<_>>();
+        entries.extend(plugins.into_iter().filter(|entry| {
+            let name = entry.name.string_units("").unwrap_or_default();
+            !disk_names.contains(&name)
+        }));
+        disk.sort_by(|left, right| {
+            let left = left.name.string_units("").unwrap_or_default();
+            let right = right.name.string_units("").unwrap_or_default();
+            command_api::native_locale_compare_utf16(&left, &right)
+        });
+        entries.extend(disk);
+        *self
+            .workflow_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = entries.clone();
+        entries
+    }
+
+    /// The selected workflow metadata and body, ready for runtime conversion
+    /// into a Native prompt slash command.
+    #[must_use]
+    pub fn workflow_slash_descriptors(&self) -> Vec<WorkflowSlashDescriptor> {
+        self.workflow_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn remember_workflow_selection(
+        &self,
+        ctx: &ToolUseContext,
+        descriptor: WorkflowSlashDescriptor,
+    ) {
+        let Some(name_units) = descriptor.name.string_units("") else {
+            return;
+        };
+        let key = (
+            ctx.tool_use_id.as_ref().map(ToString::to_string),
+            name_units,
+        );
+        let mut selections = self
+            .validated_workflow_selections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pending = selections.entry(key).or_default();
+        pending.push(descriptor);
+        if pending.len() > 8 {
+            pending.remove(0);
+        }
+    }
+
+    fn take_workflow_selection(
+        &self,
+        ctx: &ToolUseContext,
+        name_units: &[u16],
+    ) -> Option<WorkflowSlashDescriptor> {
+        let key = (
+            ctx.tool_use_id.as_ref().map(ToString::to_string),
+            name_units.to_vec(),
+        );
+        let mut selections = self
+            .validated_workflow_selections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pending = selections.get_mut(&key)?;
+        let selected = pending.pop();
+        if pending.is_empty() {
+            selections.remove(&key);
+        }
+        selected
     }
 
     fn rooted_location_for_approval(&self, approved: &Path) -> Option<(PathBuf, PathBuf)> {
@@ -1019,26 +1313,11 @@ impl WorkflowTool {
     /// Upstream `nre(tools)` — can THIS request load the `workflow-authoring`
     /// skill?
     ///
-    /// Upstream answers with six conditions: workflows enabled, bundled skills
-    /// not disabled, slash commands not disabled, the entrypoint is not
-    /// `local-agent`, no `skillOverrides` entry of `off` /
-    /// `user-invocable-only`, the session skill allowlist (when there is one)
-    /// includes it — and then, per call, that the `Skill` tool is among the
-    /// advertised tools.
-    ///
-    /// This port has no substrate for three of them — `disableBundledSkills`,
-    /// `skillOverrides` and the session skill allowlist do not exist here — so
-    /// it answers the question those six conditions are asking, rather than
-    /// reproducing the conditions: the registrar reports that the skill exists,
-    /// and the wire-schema build reports whether this request advertises the
-    /// `Skill` tool that loads it. Both are published by the code that knows
-    /// the fact, and either being false takes the inline branch.
-    ///
-    /// ⛔ False must stay the safe answer. An unset flag inlines the reference,
-    /// which costs tokens; a wrongly-set one points at a skill the model cannot
-    /// load, which makes every documented hook unreachable.
-    fn authoring_skill_reachable(&self, _options: &PromptOptions) -> bool {
-        lingxi_core::host::session_flags::workflow_authoring_skill_reachable()
+    /// The current tool-pool builder computes Native's complete per-request
+    /// predicate and passes it through `PromptOptions`. This avoids a cached
+    /// registration flag becoming stale after policy or tool-pool changes.
+    fn authoring_skill_reachable(&self, options: &PromptOptions) -> bool {
+        options.workflow_authoring_available
     }
 
     /// Is the tool disabled, by env var OR managed setting? Binary `fbn()`.
@@ -1057,9 +1336,17 @@ impl WorkflowTool {
                 )
             })
         };
+        let name = input
+            .string_units("/name")
+            .filter(|units| !units.is_empty())
+            .map(|units| String::from_utf16_lossy(&units));
         Ok(WorkflowLaunchSpec {
             script: string_field("script")?,
-            name: string_field("name")?,
+            resolved_workflow_script: None,
+            workflow_source: None,
+            // This host-facing label is display-only. Catalog identity is
+            // validated and consumed by exact UTF-16 units before launch.
+            name,
             script_path: string_field("scriptPath")?,
             args: input.subprojection("/args").ok(),
             resume_from_run_id: string_field("resumeFromRunId")?,
@@ -1160,42 +1447,30 @@ impl WorkflowTool {
         }
     }
 
-    /// List saved workflow names from project and user workflow directories.
-    /// Returns a comma-joined string for the errorCode-1b message. Missing
-    /// directories are ignored.
-    fn list_available_workflow_names(&self) -> Option<String> {
-        let mut saw_dir = false;
-        let mut names: Vec<String> = BUILTIN_WORKFLOWS
-            .names()
-            .into_iter()
-            .map(str::to_string)
+    /// List names from the current validated Native workflow snapshot.
+    /// Returns a comma-joined UTF-16 snapshot for the errorCode-1b message.
+    fn list_available_workflow_names(&self) -> Option<Utf16JsonProjection> {
+        self.refresh_workflow_catalog();
+        let mut names: Vec<Vec<u16>> = self
+            .workflow_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(|entry| entry.name.string_units(""))
             .collect();
-        for dir in saved_workflow_dirs(&self.current_cwd()) {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                continue;
-            };
-            saw_dir = true;
-            names.extend(entries.filter_map(|e| {
-                let fname = e.ok()?.file_name();
-                let fname = fname.to_string_lossy();
-                // Strip known extensions to get the bare name.
-                for ext in [".js", ".mjs", ".ts"] {
-                    if let Some(stem) = fname.strip_suffix(ext) {
-                        return Some(stem.to_string());
-                    }
-                }
-                Some(fname.into_owned())
-            }));
-        }
-        if let Some(registry) = &self.plugin_workflows {
-            names.extend(registry.names());
-        }
-        if !saw_dir && names.is_empty() {
-            return None;
-        }
         names.sort();
         names.dedup();
-        Some(names.join(", "))
+        if names.is_empty() {
+            return None;
+        }
+        let mut units = Vec::new();
+        for (index, name) in names.into_iter().enumerate() {
+            if index != 0 {
+                units.extend(", ".encode_utf16());
+            }
+            units.extend(name);
+        }
+        Some(projection_from_units(units))
     }
 }
 
@@ -1427,7 +1702,7 @@ impl Tool for WorkflowTool {
     async fn validate_input(
         &self,
         input: &Utf16JsonProjection,
-        _ctx: &ToolUseContext,
+        ctx: &ToolUseContext,
     ) -> Result<(), ValidationError> {
         // ── Schema-level `.refine()` on the `script` field (claude-code 2.1.195) ──
         // The zod input schema is `script: A.string().max(z$).refine(UIe, hYp)`,
@@ -1498,12 +1773,15 @@ impl Tool for WorkflowTool {
         };
         let script_path = s("scriptPath")?.filter(|value| !value.is_empty());
         let script = s("script")?.filter(|value| !value.is_empty());
-        let name = s("name")?.filter(|value| !value.is_empty());
+        let name_units = input
+            .string_units("/name")
+            .filter(|units| !units.is_empty());
 
         // Resolved script text (for errorCode 2 and 4 checks below). A
         // `scriptPath` is deliberately represented as `None`: its bytes must
         // not be read until the nested `Read` permission check has completed.
         let resolved_script: Option<String>;
+        let mut selected_workflow = None;
 
         if let Some(ref path) = script_path {
             // Path checks are lexical and therefore safe before authorization;
@@ -1511,61 +1789,29 @@ impl Tool for WorkflowTool {
             self.resolve_script_path_for_permission(path)
                 .map_err(|message| ValidationError(message.into()))?;
             resolved_script = None;
-        } else if let Some(ref wf_name) = name {
-            // Built-ins are immutable and must win before project/user files.
-            // Keep validation on the same resolver order as the launcher:
-            // otherwise an invalid project file named `deep-research.js` could
-            // reject a launch whose execution would actually use the bundled
-            // script.
-            if let Some(descriptor) = BUILTIN_WORKFLOWS.get(wf_name) {
-                resolved_script = Some(
-                    script
-                        .clone()
-                        .unwrap_or_else(|| descriptor.script.to_string()),
-                );
+        } else if let Some(ref wf_name_units) = name_units {
+            if wf_name_units.contains(&(0 as u16)) {
+                return Err(ValidationError(
+                    "workflow name contains a NUL character".into(),
+                ));
+            }
+            let catalog = self.refresh_workflow_catalog();
+            if let Some(descriptor) = catalog.into_iter().find(|descriptor| {
+                descriptor.name.string_units("").as_deref() == Some(wf_name_units.as_slice())
+            }) {
+                resolved_script = Some(script.clone().unwrap_or_else(|| descriptor.script.clone()));
+                selected_workflow = Some(descriptor);
             } else {
-                // Try to resolve from saved workflows (project first, then user).
-                let mut found: Option<String> = None;
-                for candidate in saved_workflow_candidates(&self.current_cwd(), wf_name) {
-                    match std::fs::read_to_string(&candidate) {
-                        Ok(src) => {
-                            found = Some(src);
-                            break;
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                        Err(_) => continue,
-                    }
-                }
-                // §14 — a plugin's declared/auto-scanned workflow joins the
-                // search path LAST: project/user files above already win on a
-                // name collision (oracle precedence project/user > plugin >
-                // built-in; namespacing means a real collision only happens
-                // if a project/user file is itself literally named
-                // `<plugin>:<name>.js`).
-                if found.is_none() {
-                    if let Some(path) = self
-                        .plugin_workflows
-                        .as_ref()
-                        .and_then(|registry| registry.resolve(wf_name))
-                    {
-                        found = std::fs::read_to_string(&path).ok();
-                    }
-                }
-                if let Some(src) = found {
-                    resolved_script = Some(script.clone().unwrap_or(src));
+                let available = self.list_available_workflow_names();
+                let mut message = "Workflow \"".encode_utf16().collect::<Vec<_>>();
+                message.extend_from_slice(wf_name_units);
+                message.extend("\" not found. Available: ".encode_utf16());
+                if let Some(available) = available {
+                    message.extend(available.string_units("").unwrap_or_default());
                 } else {
-                    // 1b — workflow name not found; list available names
-                    let available: String =
-                        self.list_available_workflow_names().unwrap_or_default();
-                    let list = if available.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        available
-                    };
-                    return Err(ValidationError(
-                        format!("Workflow \"{wf_name}\" not found. Available: {list}").into(),
-                    ));
+                    message.extend("(none)".encode_utf16());
                 }
+                return Err(ValidationError(projection_from_units(message)));
             }
         } else if let Some(ref inline) = script {
             resolved_script = Some(inline.clone());
@@ -1576,13 +1822,21 @@ impl Tool for WorkflowTool {
             ));
         }
 
-        // errorCode 2 — parse/meta error (`Invalid workflow script: ${error}`)
-        // Mirrors binary's `Bw(n.script)` → `validate_meta`.
+        // errorCode 2 — parse/meta diagnostic is returned from the source
+        // validator without a harness-only wrapper prefix.
         if let Some(resolved_script) = resolved_script.as_deref() {
-            if let Err(e) = workflow::validate_meta(resolved_script) {
-                return Err(ValidationError(
-                    format!("Invalid workflow script: {e}").into(),
-                ));
+            if let Err(error) = workflow::validate_meta(resolved_script) {
+                if let Some(diagnostic) = error.source_diagnostic() {
+                    return Err(ValidationError(invalid_workflow_script_diagnostic(
+                        diagnostic,
+                    )));
+                }
+                let message = match error {
+                    workflow::WorkflowError::Script(message)
+                    | workflow::WorkflowError::Engine(message) => message,
+                    _ => unreachable!("source diagnostics were handled above"),
+                };
+                return Err(ValidationError(message.into()));
             }
         }
 
@@ -1600,14 +1854,19 @@ impl Tool for WorkflowTool {
                     let msg = match e {
                         WorkflowError::Script(m) => m,
                         WorkflowError::Engine(m) => m,
+                        WorkflowError::ScriptSource(diagnostic) => {
+                            return Err(ValidationError(invalid_workflow_script_diagnostic(
+                                &diagnostic,
+                            )));
+                        }
                     };
                     return Err(ValidationError(msg.into()));
                 }
             }
-        } else if let Some(name) = name {
+        } else if let Some(name_units) = input.string_units("/name") {
             // Named workflows are resolved and validated by the launcher after
             // permission. Keep this branch intentionally I/O-free.
-            if name.contains('\0') {
+            if name_units.contains(&0) {
                 return Err(ValidationError(
                     "workflow name contains a NUL character".into(),
                 ));
@@ -1625,6 +1884,9 @@ impl Tool for WorkflowTool {
         // Observable behaviour matches: a resume of a still-running workflow is
         // rejected before a second run starts.
 
+        if let Some(descriptor) = selected_workflow {
+            self.remember_workflow_selection(ctx, descriptor);
+        }
         Ok(())
     }
 
@@ -1651,6 +1913,26 @@ impl Tool for WorkflowTool {
             ToolError::Internal("Workflow launching is not available in this host".into())
         })?;
         let mut spec = Self::spec_from_input(&input)?;
+        if spec.script_path.as_deref().is_none_or(str::is_empty) {
+            if let Some(name_units) = input
+                .string_units("/name")
+                .filter(|units| !units.is_empty())
+            {
+                let selected = self
+                    .take_workflow_selection(&ctx, &name_units)
+                    .ok_or_else(|| {
+                        ToolError::Internal(
+                            "validated workflow catalog snapshot is missing; refusing to resolve the name again".into(),
+                        )
+                    })?;
+                spec.resolved_workflow_script = Some(
+                    spec.script
+                        .clone()
+                        .unwrap_or_else(|| selected.script.clone()),
+                );
+                spec.workflow_source = Some(selected.source);
+            }
+        }
         // A Workflow task can outlive the turn that launched it. Capture the
         // owning session at this boundary so later `agent()` calls continue
         // to use the original session-scoped budget after a clear/resume or
@@ -1690,7 +1972,7 @@ impl Tool for WorkflowTool {
         let plugin_resume = spec
             .name
             .as_deref()
-            .filter(|name| {
+            .filter(|_| {
                 !spec
                     .script
                     .as_deref()
@@ -1699,11 +1981,10 @@ impl Tool for WorkflowTool {
                         .script_path
                         .as_deref()
                         .is_some_and(|value| !value.is_empty())
-                    && workflow_source_for_name(
-                        &self.current_cwd(),
-                        name,
-                        self.plugin_workflows.as_deref(),
-                    ) == Some("plugin")
+                    && spec
+                        .workflow_source
+                        .as_ref()
+                        .is_some_and(|source| matches!(source, WorkflowCatalogSource::Plugin))
             })
             .map(|name| {
                 let mut fields = vec![("name".to_owned(), name.into())];
@@ -1713,10 +1994,12 @@ impl Tool for WorkflowTool {
                 Utf16JsonProjection::object(fields)
                     .expect("workflow resume request fields are unique")
             });
-        let launch_result = launcher
-            .launch(spec)
-            .await
-            .map_err(|error| ToolError::Internal(error.to_string()))?;
+        let launch_result = launcher.launch(spec).await.map_err(|error| match error {
+            WorkflowLaunchError::Message(message) => ToolError::Internal(message.into()),
+            WorkflowLaunchError::Source(diagnostic) => {
+                ToolError::InvalidInput(invalid_workflow_script_diagnostic(&diagnostic))
+            }
+        })?;
         if let Some(error) = launch_result.error {
             let model_content =
                 format!("Workflow script has a syntax error and was not launched:\n{error}");
@@ -1981,91 +2264,17 @@ mod tests {
     }
 
     #[test]
-    fn named_workflow_source_matches_claude_categories() {
-        assert_eq!(
-            workflow_source_for_name(std::path::Path::new("."), "deep-research", None),
-            Some("built-in")
-        );
-        assert_eq!(
-            workflow_source_for_name(std::path::Path::new("."), "missing", None),
-            None
-        );
-    }
-
-    /// `tengu_workflow_launched.workflow_source` must name the tier the launch
-    /// actually resolved from. The oracle stamps `source:"plugin"` on every
-    /// plugin record (`v()` @169045670) and emits it verbatim
-    /// (`se=e.scriptPath?"scriptPath":h??"inline"`,
-    /// `workflow_source:c(se)` @172565293), so `"plugin"` is a real emitted
-    /// value — without the plugin arm a plugin workflow is reported as the
-    /// `custom` fallback `engine-desktop`'s `named_source.unwrap_or("custom")`
-    /// supplies.
-    #[test]
-    fn named_workflow_source_reports_plugin_for_a_registry_hit() {
-        let registry = workflow::PluginWorkflowRegistry::new();
-        registry.register(vec![workflow::PluginWorkflowEntry {
-            name: "acme:deploy".into(),
-            script_path: std::path::PathBuf::from("/plugins/acme/scripts/deploy.js"),
-        }]);
-        assert_eq!(
-            workflow_source_for_name(std::path::Path::new("."), "acme:deploy", Some(&registry)),
-            Some("plugin")
-        );
-        // The registry is consulted LAST — a built-in still wins.
-        assert_eq!(
-            workflow_source_for_name(std::path::Path::new("."), "deep-research", Some(&registry)),
-            Some("built-in")
-        );
-        assert_eq!(
-            workflow_source_for_name(std::path::Path::new("."), "acme:missing", Some(&registry)),
-            None
-        );
-    }
-
-    #[test]
-    fn plugin_workflow_registry_reaches_resolver_and_source_telemetry() {
-        let cwd = unique_temp_path("plugin-resolver");
-        std::fs::create_dir_all(&cwd).expect("create resolver cwd");
-        let script_path = cwd.join("plugin-workflow.js");
-        std::fs::write(&script_path, VALID_SCRIPT).expect("write plugin workflow");
-        let registry = workflow::PluginWorkflowRegistry::new();
-        registry.register(vec![workflow::PluginWorkflowEntry {
-            name: "acme:review".to_string(),
-            script_path: script_path.clone(),
-        }]);
-
-        let resolved = resolve_script_at(
-            &cwd,
-            &WorkflowLaunchSpec {
-                name: Some("acme:review".to_string()),
-                ..Default::default()
-            },
-            |path| std::fs::read_to_string(path),
-            Some(&registry),
-        )
-        .expect("plugin workflow name must resolve");
-        assert_eq!(resolved, VALID_SCRIPT);
-        assert_eq!(
-            workflow_source_for_name(&cwd, "acme:review", Some(&registry)),
-            Some("plugin")
-        );
-        let _ = std::fs::remove_dir_all(cwd);
-    }
-
-    #[test]
     fn max_result_size_is_100000() {
         assert_eq!(tool(None).max_result_size_chars(), 100000);
     }
 
     #[test]
-    fn resolve_script_precedence_and_name_lookup() {
+    fn resolve_script_precedence_uses_the_validated_catalog_snapshot() {
         use std::collections::HashMap;
-        let files: HashMap<&str, &str> = HashMap::from([
-            ("/abs/wf.js", "FROM_PATH"),
-            (".lingxi/workflows/review.js", "FROM_NAME"),
-        ]);
+        let files = std::cell::RefCell::new(HashMap::from([("/abs/wf.js", "FROM_PATH")]));
         let read = |p: &str| {
             files
+                .borrow()
                 .get(p)
                 .map(|s| (*s).to_string())
                 .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "nope"))
@@ -2077,65 +2286,70 @@ mod tests {
             script_path: Some("/abs/wf.js".into()),
             ..Default::default()
         };
-        assert_eq!(resolve_script(&spec, read).unwrap(), "FROM_PATH");
+        assert_eq!(resolve_script_at(&spec, read).unwrap(), "FROM_PATH");
 
         // inline script when there is no scriptPath.
         let spec = WorkflowLaunchSpec {
             script: Some("INLINE".into()),
             ..Default::default()
         };
-        assert_eq!(resolve_script(&spec, read).unwrap(), "INLINE");
+        assert_eq!(resolve_script_at(&spec, read).unwrap(), "INLINE");
 
-        // name → .lingxi/workflows/<name>.js.
+        // A name must carry the exact selected script through validation.
         let spec = WorkflowLaunchSpec {
             name: Some("review".into()),
+            resolved_workflow_script: Some("FROM_VALIDATED_CATALOG".into()),
+            workflow_source: Some(WorkflowCatalogSource::UserSettings),
             ..Default::default()
         };
-        assert_eq!(resolve_script(&spec, read).unwrap(), "FROM_NAME");
+        files
+            .borrow_mut()
+            .insert("/abs/wf.js", "CHANGED_AFTER_VALIDATION");
+        assert_eq!(
+            resolve_script_at(&spec, read).unwrap(),
+            "FROM_VALIDATED_CATALOG",
+            "named launch uses its pinned script after the source changes"
+        );
 
-        // A named workflow resolves first, while an explicit body overrides
-        // the resolved source. An unknown name must not fall through to the
-        // inline body.
+        // A named workflow carries the exact script selected by validation;
+        // when an explicit body was supplied, that body is what validation
+        // pins. An unknown name must not fall through to an inline body.
         let spec = WorkflowLaunchSpec {
             name: Some("review".into()),
             script: Some("NAMED_OVERRIDE".into()),
+            resolved_workflow_script: Some("NAMED_OVERRIDE".into()),
             ..Default::default()
         };
-        assert_eq!(resolve_script(&spec, read).unwrap(), "NAMED_OVERRIDE");
+        assert_eq!(resolve_script_at(&spec, read).unwrap(), "NAMED_OVERRIDE");
         let spec = WorkflowLaunchSpec {
             name: Some("missing".into()),
             script: Some("DO_NOT_FALL_THROUGH".into()),
             ..Default::default()
         };
-        assert!(resolve_script(&spec, read).is_err());
+        assert!(resolve_script_at(&spec, read).is_err());
 
         // unknown name + nothing-provided → errors.
         let spec = WorkflowLaunchSpec {
             name: Some("missing".into()),
             ..Default::default()
         };
-        assert!(resolve_script(&spec, read).is_err());
-        assert!(resolve_script(&WorkflowLaunchSpec::default(), read).is_err());
+        assert!(resolve_script_at(&spec, read).is_err());
+        assert!(resolve_script_at(&WorkflowLaunchSpec::default(), read).is_err());
     }
 
     #[test]
-    fn saved_workflow_shadows_builtin_name() {
-        let read = |path: &str| {
-            if path == ".lingxi/workflows/deep-research.js" {
-                Ok("MALICIOUS_PROJECT_OVERRIDE".to_string())
-            } else {
-                Err(std::io::Error::new(std::io::ErrorKind::NotFound, "nope"))
-            }
+    fn named_launch_without_validated_snapshot_fails_closed() {
+        let spec = WorkflowLaunchSpec {
+            name: Some("deep-research".into()),
+            ..Default::default()
         };
-        let resolved = resolve_script(
-            &WorkflowLaunchSpec {
-                name: Some("deep-research".into()),
-                ..Default::default()
-            },
-            read,
-        )
-        .expect("built-in resolves");
-        assert_eq!(resolved, "MALICIOUS_PROJECT_OVERRIDE");
+        let error = resolve_script_at(&spec, |_| panic!("named launch must not reread a catalog"))
+            .expect_err("the launcher must require a captured script");
+        assert!(matches!(
+            error,
+            WorkflowLaunchError::Message(message)
+                if message == "named workflow is missing its validated catalog script"
+        ));
     }
 
     #[test]
@@ -2143,41 +2357,32 @@ mod tests {
         let names = tool(None)
             .list_available_workflow_names()
             .expect("built-ins");
-        assert!(names.split(", ").any(|name| name == "deep-research"));
+        assert!(names
+            .string_at("")
+            .unwrap()
+            .split(", ")
+            .any(|name| name == "deep-research"));
     }
 
     #[test]
-    fn resolve_script_name_falls_back_to_user_workflows_dir() {
-        use std::collections::HashMap;
-        let _g = ENV_LOCK.lock().unwrap();
-        let config_dir = unique_temp_path("resolve-user");
-        let user_workflow = config_dir.join("workflows").join("review.mjs");
-        let mut files: HashMap<String, String> = HashMap::new();
-        files.insert(
-            user_workflow.to_string_lossy().into_owned(),
-            "FROM_USER".into(),
-        );
-        let read = |p: &str| {
-            files
-                .get(p)
-                .cloned()
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "nope"))
-        };
+    fn builtin_catalog_gate_is_independent_from_dynamic_workflow_gates() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
-        let got = with_config_dir_env(&config_dir, || {
-            resolve_script(
-                &WorkflowLaunchSpec {
-                    name: Some("review".into()),
-                    ..Default::default()
-                },
-                read,
-            )
-        })
-        .unwrap();
+        let no_policy_verdict = tool(None).with_allowed_builtin_workflow_names(Vec::new());
+        assert!(no_policy_verdict.refresh_workflow_catalog().is_empty());
 
-        assert_eq!(got, "FROM_USER");
+        let allowed_builtin = tool(None)
+            .with_allowed_builtin_workflow_names(vec!["deep-research".into()])
+            .with_disable_workflows(true)
+            .with_session_enabled(false);
+        let catalog = allowed_builtin.refresh_workflow_catalog();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].name.string_at(""), Some("deep-research"));
+        assert_eq!(catalog[0].source, WorkflowCatalogSource::Builtin);
     }
 
+    #[test]
     /// Both oracle files and their shipped base renderings are pinned to the
     /// binary byte-for-byte. The local divergence register is empty, so a
     /// future deliberate exception must be source-backed and explicitly
@@ -2189,7 +2394,6 @@ mod tests {
     /// the test asserts its absence from the other — a marker that merely
     /// "still appears somewhere" would not notice a passage sliding between the
     /// two documents, which is precisely the drift this split introduces.
-    #[test]
     fn oracle_description_matches_the_binary_byte_for_byte() {
         // ── The per-request head (`t`) ──
         assert_eq!(
@@ -2271,57 +2475,44 @@ mod tests {
         );
     }
 
-    /// Serialises the tests that drive the process-global reachability flags.
-    ///
-    /// `prompt()` reads them live, so a test that flips them races any other
-    /// test asserting what `prompt()` returns — the classic "green alone, red in
-    /// the full suite" flake, which also reads as another session's fault.
-    static GATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Put the reachability flags in a known state and report the previous one.
-    fn set_gate(registered: bool, skill_tool: bool) {
-        lingxi_core::host::session_flags::set_workflow_authoring_skill_registered(registered);
-        lingxi_core::host::session_flags::set_skill_tool_advertised(skill_tool);
-    }
-
-    /// Both halves of `nre` must hold. Either one false inlines the reference,
-    /// because a skill that is registered but unloadable — or loadable but
-    /// absent — leaves every documented hook unreachable.
+    /// Prompt selection is per request: the tool pool builder supplies the
+    /// combined Native availability predicate rather than publishing global
+    /// registration/advertisement flags.
     #[tokio::test]
-    async fn the_description_points_at_the_skill_only_when_both_halves_hold() {
-        let _guard = GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let opts = PromptOptions::default();
+    async fn the_description_uses_the_current_request_workflow_authoring_gate() {
         let tool = WorkflowTool::new(None).with_size_guideline(WorkflowSizeGuideline::Unrestricted);
 
-        set_gate(true, true);
-        let pointed = tool.prompt(&opts).await;
+        let pointed = tool
+            .prompt(&PromptOptions {
+                workflow_authoring_available: true,
+                ..Default::default()
+            })
+            .await;
         let pointed_text = pointed.string_at("").unwrap();
         assert!(
             pointed_text.contains("`workflow-authoring`")
                 && !pointed_text.contains("- workflow(nameOrRef:"),
-            "with the skill registered and the Skill tool advertised, the description must point"
+            "the current request may point at the skill only when Native's predicate is true"
         );
 
-        for (registered, skill_tool, why) in [
-            (false, true, "the skill is not registered"),
-            (
-                true,
-                false,
-                "this request does not advertise the Skill tool",
-            ),
-            (false, false, "neither holds"),
-        ] {
-            set_gate(registered, skill_tool);
-            let inlined = tool.prompt(&opts).await;
-            let inlined_text = inlined.string_at("").unwrap();
-            assert!(
-                inlined_text.contains("- workflow(nameOrRef:"),
-                "the reference must be inlined when {why}: otherwise the description points at \
-                 documentation the model cannot load, and every hook it lists is unreachable"
-            );
-            assert!(inlined_text.len() > pointed_text.len() * 4);
-        }
-        set_gate(false, false);
+        let default_inlined = tool.prompt(&PromptOptions::default()).await;
+        assert!(default_inlined
+            .string_at("")
+            .unwrap()
+            .contains("- workflow(nameOrRef:"));
+
+        let inlined = tool
+            .prompt(&PromptOptions {
+                workflow_authoring_available: false,
+                ..Default::default()
+            })
+            .await;
+        let inlined_text = inlined.string_at("").unwrap();
+        assert!(
+            inlined_text.contains("- workflow(nameOrRef:"),
+            "a false per-request Native predicate must inline the reference"
+        );
+        assert!(inlined_text.len() > pointed_text.len() * 4);
     }
 
     /// The reachability invariant the split must not break.
@@ -2589,8 +2780,6 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_appends_size_guideline_when_configured() {
-        let _guard = GATE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        set_gate(false, false);
         let opts = PromptOptions::default();
         // The base is the ASSEMBLED description, not the bare oracle: 2.1.267
         // appends either the authoring reference or the one-line pointer to it.
@@ -2717,6 +2906,12 @@ mod tests {
         "export const meta = { name: 'test', description: 'A test workflow' };\n",
         "await agent('do something');\n",
     );
+
+    fn named_workflow_script(name: &str, description: &str) -> String {
+        format!(
+            "export const meta = {{ name: {name:?}, description: {description:?} }};\nawait agent('run');\n"
+        )
+    }
 
     #[tokio::test]
     async fn validate_error_1a_must_provide_one_of_three_fields() {
@@ -3002,7 +3197,13 @@ mod tests {
         std::fs::rename(&replacement, &link).unwrap();
         let error = read_script_path_after_permission(&approval)
             .expect_err("retargeted leaf must never be read");
-        assert!(error.0.contains("after permission"), "{error:?}");
+        assert!(
+            matches!(
+                &error,
+                WorkflowLaunchError::Message(message) if message.contains("after permission")
+            ),
+            "{error:?}"
+        );
 
         let _ = std::fs::remove_dir_all(cwd);
     }
@@ -3046,7 +3247,13 @@ mod tests {
         std::fs::rename(&replacement, &link).unwrap();
         let error = read_script_path_after_permission(&approval)
             .expect_err("retargeted parent must never be read");
-        assert!(error.0.contains("after permission"), "{error:?}");
+        assert!(
+            matches!(
+                &error,
+                WorkflowLaunchError::Message(message) if message.contains("after permission")
+            ),
+            "{error:?}"
+        );
 
         let _ = std::fs::remove_dir_all(cwd);
     }
@@ -3059,15 +3266,21 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
-        // A script with no meta block at all triggers the "must be first statement" error.
+        let script =
+            "export const meta = { name: 'syntax', description: 'diagnostic' };\n// 😀\nconst = ;";
+        let expected = workflow::validate_meta(script)
+            .expect_err("the fixture has malformed JavaScript after valid metadata")
+            .source_diagnostic()
+            .expect("Acorn source diagnostics retain exact UTF-16")
+            .clone();
+        let expected = invalid_workflow_script_diagnostic(&expected);
         let err = t
-            .validate_input(&source_json!({ "script": "console.log('hello');" }), &ctx)
+            .validate_input(&source_json!({ "script": script }), &ctx)
             .await
             .unwrap_err();
-        assert!(
-            validation_error_message(&err).starts_with("Invalid workflow script:"),
-            "expected errorCode 2 message, got: {:?}",
-            err
+        assert_eq!(
+            err.0, expected,
+            "validation must preserve source units exactly"
         );
     }
 
@@ -3082,9 +3295,16 @@ mod tests {
             "export const meta = { name: 'bad-body', description: 'syntax error' };\n",
             "if (\n",
         );
-        t.validate_input(&source_json!({ "script": script }), &ctx)
+        let error = t
+            .validate_input(&source_json!({ "script": script }), &ctx)
             .await
-            .expect("body compilation belongs to the launcher, not validate_input");
+            .expect_err("Native validateInput reports qS source parse failures");
+        let expected: Utf16JsonProjection = "Invalid workflow script: Script parse error: Unexpected token (3:0)\n\n\n^\n\nWorkflow scripts must be plain JavaScript — common causes are TypeScript syntax (type annotations, interfaces, generics) and broken string quoting or escaping."
+            .into();
+        assert_eq!(
+            error.0, expected,
+            "preserve the exact Native source diagnostic"
+        );
     }
 
     #[tokio::test]
@@ -3211,95 +3431,293 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saved_plugin_builtin_precedence_is_identical_across_all_tool_paths() {
+    async fn workflow_catalog_matches_native_segments_overrides_and_snapshot_launch() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
-        let cwd = unique_temp_path("three-tier-precedence");
-        let saved_dir = cwd.join(branding::DOT_DIR).join("workflows");
-        std::fs::create_dir_all(&saved_dir).unwrap();
-        let saved_path = saved_dir.join("deep-research.js");
-        std::fs::write(&saved_path, "invalid saved workflow").unwrap();
-        let plugin_path = cwd.join("plugin.js");
-        std::fs::write(&plugin_path, "invalid plugin workflow").unwrap();
+        let root = unique_temp_path("workflow-catalog");
+        let cwd = root.join("project").join("child");
+        let user_dir = root.join("user-config");
+        let user_workflows = user_dir.join("workflows");
+        let far_workflows = root.join(branding::DOT_DIR).join("workflows");
+        let project_workflows = root
+            .join("project")
+            .join(branding::DOT_DIR)
+            .join("workflows");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(&user_workflows).unwrap();
+        std::fs::create_dir_all(&far_workflows).unwrap();
+        std::fs::create_dir_all(&project_workflows).unwrap();
+
+        let user_shared = user_workflows.join("user-file.js");
+        let user_zeta = user_workflows.join("not-zeta.js");
+        let far_beta = far_workflows.join("a-file.js");
+        let far_overlay = far_workflows.join("far-overlay.js");
+        let far_invalid_near = far_workflows.join("far-invalid-near.js");
+        let near_alpha = project_workflows.join("z-file.js");
+        let near_shared = project_workflows.join("shared.js");
+        let near_overlay = project_workflows.join("near-overlay.js");
+        let near_invalid = project_workflows.join("invalid-near.js");
+        let project_plugin_shadow = project_workflows.join("shadow.js");
+        let invalid_builtin_shadow = project_workflows.join("invalid-deep-research.js");
+        let invalid_utf8 = project_workflows.join("invalid-utf8.js");
+        let unsupported_mjs = project_workflows.join("unsupported.mjs");
+        let suffix_only_js = project_workflows.join(".js");
+        std::fs::write(&user_shared, named_workflow_script("shared", "user")).unwrap();
+        std::fs::write(&user_zeta, named_workflow_script("zeta", "user zeta")).unwrap();
+        std::fs::write(&far_beta, named_workflow_script("beta", "far beta")).unwrap();
+        std::fs::write(
+            &far_overlay,
+            named_workflow_script("overlay", "far overlay"),
+        )
+        .unwrap();
+        std::fs::write(
+            &far_invalid_near,
+            named_workflow_script("invalid-near", "far valid"),
+        )
+        .unwrap();
+        std::fs::write(&near_alpha, named_workflow_script("alpha", "near alpha")).unwrap();
+        std::fs::write(
+            &near_shared,
+            named_workflow_script("shared", "project shared"),
+        )
+        .unwrap();
+        std::fs::write(
+            &near_overlay,
+            named_workflow_script("overlay", "near overlay"),
+        )
+        .unwrap();
+        std::fs::write(
+            &near_invalid,
+            format!(
+                "{}\nconst = ;\n",
+                named_workflow_script("invalid-near", "invalid")
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &suffix_only_js,
+            named_workflow_script("suffix-only", "filename exactly .js"),
+        )
+        .unwrap();
+        std::fs::write(
+            &project_plugin_shadow,
+            named_workflow_script("acme:shadow", "project shadows plugin"),
+        )
+        .unwrap();
+        std::fs::write(
+            &invalid_builtin_shadow,
+            format!(
+                "{}\nconst = ;\n",
+                named_workflow_script("deep-research", "invalid")
+            ),
+        )
+        .unwrap();
+        let mut invalid_utf8_bytes =
+            named_workflow_script("decoded", "invalid UTF-8 is replaced").into_bytes();
+        invalid_utf8_bytes.extend_from_slice(b"// ");
+        invalid_utf8_bytes.push(0xff);
+        invalid_utf8_bytes.push(b'\n');
+        std::fs::write(&invalid_utf8, invalid_utf8_bytes).unwrap();
+        std::fs::write(
+            &unsupported_mjs,
+            named_workflow_script("unsupported-extension", "must not enter catalog"),
+        )
+        .unwrap();
 
         let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
-        registry.register(vec![workflow::PluginWorkflowEntry {
-            name: "deep-research".to_string(),
-            script_path: plugin_path,
-        }]);
-        let spec = WorkflowLaunchSpec {
-            name: Some("deep-research".to_string()),
-            ..Default::default()
-        };
-        let resolve = || {
-            resolve_script_at(
-                &cwd,
-                &spec,
-                |path| std::fs::read_to_string(path),
-                Some(registry.as_ref()),
-            )
-        };
-        let tool = WorkflowTool::new(None)
+        let _ = registry.register(
+            lingxi_core::types::PluginId::new(),
+            vec![workflow::PluginWorkflowEntry {
+                qualified_name: "z-plugin:deploy".into(),
+                script: named_workflow_script("deploy", "z plugin"),
+                script_path: root.join("z-plugin.js"),
+                plugin_name: "z-plugin".into(),
+            }],
+        );
+        let _ = registry.register(
+            lingxi_core::types::PluginId::new(),
+            vec![workflow::PluginWorkflowEntry {
+                qualified_name: "a-plugin:deploy".into(),
+                script: named_workflow_script("deploy", "a plugin"),
+                script_path: root.join("a-plugin.js"),
+                plugin_name: "a-plugin".into(),
+            }],
+        );
+        let _ = registry.register(
+            lingxi_core::types::PluginId::new(),
+            vec![workflow::PluginWorkflowEntry {
+                qualified_name: "acme:shadow".into(),
+                script: named_workflow_script("shadow", "plugin shadowed by disk"),
+                script_path: root.join("plugin-shadow.js"),
+                plugin_name: "acme".into(),
+            }],
+        );
+        let launcher = MockLauncher::new("workflow-catalog");
+        let t = WorkflowTool::new(Some(launcher.clone()))
             .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
-            .with_plugin_workflows(registry.clone());
-        let ctx = tool_api::test_support::fresh_ctx();
-
-        assert_eq!(resolve().unwrap(), "invalid saved workflow");
-        assert_eq!(
-            workflow_source_for_name(&cwd, "deep-research", Some(registry.as_ref())),
-            Some("projectSettings")
-        );
-        tool.validate_input(&source_json!({"name": "deep-research"}), &ctx)
-            .await
-            .expect("named workflow validation must not read the saved winner");
-
-        std::fs::remove_file(&saved_path).unwrap();
-        assert_eq!(resolve().unwrap(), "invalid plugin workflow");
-        assert_eq!(
-            workflow_source_for_name(&cwd, "deep-research", Some(registry.as_ref())),
-            Some("plugin")
-        );
-        tool.validate_input(&source_json!({"name": "deep-research"}), &ctx)
-            .await
-            .expect("named workflow validation must not read the plugin winner");
-
-        registry.unregister(&["deep-research".to_string()]);
-        assert!(resolve().unwrap().contains("const VOTES_PER_CLAIM = 3"));
-        assert_eq!(
-            workflow_source_for_name(&cwd, "deep-research", Some(registry.as_ref())),
-            Some("built-in")
-        );
-        tool.validate_input(&source_json!({"name": "deep-research"}), &ctx)
-            .await
-            .expect("builtin is the final fallback");
-        let _ = std::fs::remove_dir_all(cwd);
-    }
-
-    #[tokio::test]
-    async fn validate_name_resolves_user_workflow_dir() {
-        let t = tool(None);
-        let ctx = tool_api::test_support::fresh_ctx();
-        let _g = ENV_LOCK.lock().unwrap();
-        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
-        let config_dir = unique_temp_path("validate-user");
-        let workflows_dir = config_dir.join("workflows");
-        std::fs::create_dir_all(&workflows_dir).unwrap();
-        let wf_path = workflows_dir.join("user-only-wf.js");
-        std::fs::write(&wf_path, VALID_SCRIPT).unwrap();
+            .with_plugin_workflows(registry);
 
         let old_config_dir = std::env::var_os(branding::CONFIG_DIR_ENV);
-        std::env::set_var(branding::CONFIG_DIR_ENV, &config_dir);
-        let result = t
-            .validate_input(&source_json!({ "name": "user-only-wf" }), &ctx)
-            .await;
+        std::env::set_var(branding::CONFIG_DIR_ENV, &user_dir);
+        let catalog = t.refresh_workflow_catalog();
+        let names = catalog
+            .iter()
+            .map(|entry| entry.name.string_at("").unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &names[..3],
+            ["deep-research", "z-plugin:deploy", "a-plugin:deploy"]
+        );
+        assert_eq!(
+            names,
+            [
+                "deep-research",
+                "z-plugin:deploy",
+                "a-plugin:deploy",
+                "acme:shadow",
+                "alpha",
+                "beta",
+                "decoded",
+                "invalid-near",
+                "overlay",
+                "shared",
+                "suffix-only",
+                "zeta",
+            ]
+        );
+        let source_for = |name: &str| {
+            catalog
+                .iter()
+                .find(|entry| entry.name.string_at("") == Some(name))
+                .map(|entry| entry.source.clone())
+        };
+        assert_eq!(
+            source_for("deep-research"),
+            Some(WorkflowCatalogSource::Builtin)
+        );
+        assert_eq!(
+            source_for("overlay"),
+            Some(WorkflowCatalogSource::ProjectSettings)
+        );
+        assert_eq!(
+            source_for("shared"),
+            Some(WorkflowCatalogSource::ProjectSettings)
+        );
+        assert_eq!(
+            source_for("acme:shadow"),
+            Some(WorkflowCatalogSource::ProjectSettings)
+        );
+        assert_eq!(source_for("unsupported-extension"), None);
+        assert_eq!(
+            source_for("user-file"),
+            None,
+            "catalog identity comes from meta.name"
+        );
+        assert_eq!(
+            source_for("suffix-only"),
+            Some(WorkflowCatalogSource::ProjectSettings)
+        );
+        assert!(catalog
+            .iter()
+            .find(|entry| entry.name.string_at("") == Some("decoded"))
+            .unwrap()
+            .script
+            .contains('\u{fffd}'));
+        assert_eq!(
+            catalog
+                .iter()
+                .find(|entry| entry.name.string_at("") == Some("overlay"))
+                .unwrap()
+                .script,
+            named_workflow_script("overlay", "near overlay")
+        );
+        assert_eq!(
+            catalog
+                .iter()
+                .find(|entry| entry.name.string_at("") == Some("invalid-near"))
+                .unwrap()
+                .script,
+            named_workflow_script("invalid-near", "far valid"),
+            "a malformed nearer project shadow retains the prior valid workflow"
+        );
+
+        let ctx = tool_api::test_support::fresh_ctx();
+        let launch_input = source_json!({"name":"alpha"});
+        t.validate_input(&launch_input, &ctx)
+            .await
+            .expect("the metadata name is a catalog selector independent of filename");
+        std::fs::write(
+            &near_alpha,
+            named_workflow_script("alpha", "changed after validation"),
+        )
+        .unwrap();
+        t.call(launch_input, ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("launch uses the validated selection");
+        let launched = launcher
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("launcher called");
+        assert_eq!(
+            launched.workflow_source,
+            Some(WorkflowCatalogSource::ProjectSettings)
+        );
+        assert_eq!(
+            launched.resolved_workflow_script.as_deref(),
+            Some(named_workflow_script("alpha", "near alpha").as_str())
+        );
+
         match old_config_dir {
-            Some(v) => std::env::set_var(branding::CONFIG_DIR_ENV, v),
+            Some(value) => std::env::set_var(branding::CONFIG_DIR_ENV, value),
             None => std::env::remove_var(branding::CONFIG_DIR_ENV),
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
 
-        let _ = std::fs::remove_file(&wf_path);
-        let _ = std::fs::remove_dir_all(&config_dir);
-        result.expect("name-resolved workflow must fall back to user workflow dir");
+    #[test]
+    fn valid_project_workflow_replaces_a_builtin_catalog_row() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+        let root = unique_temp_path("builtin-workflow-shadow");
+        let cwd = root.join("project");
+        let config = root.join("user-config");
+        let project_workflows = cwd.join(branding::DOT_DIR).join("workflows");
+        std::fs::create_dir_all(cwd.join(".git")).unwrap();
+        std::fs::create_dir_all(&project_workflows).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_config = std::env::var_os(branding::CONFIG_DIR_ENV);
+        std::env::set_var("HOME", &root);
+        std::env::set_var(branding::CONFIG_DIR_ENV, &config);
+        std::fs::write(
+            project_workflows.join("custom-name.js"),
+            named_workflow_script("deep-research", "project replacement"),
+        )
+        .unwrap();
+
+        let catalog = tool(None)
+            .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd)))
+            .refresh_workflow_catalog();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].name.string_at(""), Some("deep-research"));
+        assert_eq!(catalog[0].source, WorkflowCatalogSource::ProjectSettings);
+        assert_eq!(
+            catalog[0].script,
+            named_workflow_script("deep-research", "project replacement")
+        );
+
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        match previous_config {
+            Some(value) => std::env::set_var(branding::CONFIG_DIR_ENV, value),
+            None => std::env::remove_var(branding::CONFIG_DIR_ENV),
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// §14 — a plugin's declared workflow, namespaced `{plugin}:{name}` by
@@ -3311,13 +3729,19 @@ mod tests {
         let dir = unique_temp_path("plugin-registry");
         std::fs::create_dir_all(&dir).unwrap();
         let script_path = dir.join("deploy.js");
-        std::fs::write(&script_path, VALID_SCRIPT).unwrap();
+        let script = named_workflow_script("deploy", "plugin deploy");
+        std::fs::write(&script_path, &script).unwrap();
 
         let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
-        registry.register(vec![workflow::PluginWorkflowEntry {
-            name: "acme:deploy".to_string(),
-            script_path: script_path.clone(),
-        }]);
+        let _ = registry.register(
+            lingxi_core::types::PluginId::new(),
+            vec![workflow::PluginWorkflowEntry {
+                qualified_name: "acme:deploy".into(),
+                script,
+                script_path: script_path.clone(),
+                plugin_name: "acme".into(),
+            }],
+        );
 
         let t = tool(None).with_plugin_workflows(registry);
         let ctx = tool_api::test_support::fresh_ctx();
@@ -3330,6 +3754,61 @@ mod tests {
         let _ = std::fs::remove_file(&script_path);
         let _ = std::fs::remove_dir_all(&dir);
         result.expect("a plugin-registered workflow should resolve by its namespaced name");
+    }
+
+    #[tokio::test]
+    async fn plugin_name_with_lone_surrogate_selects_and_launches_by_exact_utf16() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+        let script = "export const meta = { name: 'deploy\\uD800', description: 'source name' };\nawait agent('run');\n".to_owned();
+        let name_units = "acme:deploy"
+            .encode_utf16()
+            .chain([0xd800])
+            .collect::<Vec<_>>();
+        let name = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&name_units),
+            name_units.clone(),
+        )
+        .unwrap();
+        let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
+        let _ = registry.register(
+            lingxi_core::types::PluginId::new(),
+            vec![workflow::PluginWorkflowEntry {
+                qualified_name: name.clone(),
+                script: script.clone(),
+                script_path: PathBuf::from("/plugins/acme/deploy.js"),
+                plugin_name: "acme".into(),
+            }],
+        );
+        let launcher = MockLauncher::new("plugin-lone-surrogate");
+        let tool = WorkflowTool::new(Some(launcher.clone()))
+            .with_plugin_workflows(registry)
+            .with_allowed_builtin_workflow_names(Vec::new());
+        let input =
+            Utf16JsonProjection::object_units(vec![("name".encode_utf16().collect(), name)])
+                .unwrap();
+        let ctx = tool_api::test_support::fresh_ctx();
+
+        tool.validate_input(&input, &ctx)
+            .await
+            .expect("catalog lookup must use exact UTF-16 name units");
+        tool.call(input, ctx, tool_api::test_support::fresh_tx())
+            .await
+            .expect("the validated source snapshot must launch");
+        let launched = launcher
+            .seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("launcher called");
+        assert_eq!(
+            launched.workflow_source,
+            Some(WorkflowCatalogSource::Plugin)
+        );
+        assert_eq!(
+            launched.resolved_workflow_script.as_deref(),
+            Some(script.as_str())
+        );
     }
 
     /// A wired-but-empty registry does not change the ordinary "not found"
@@ -3348,89 +3827,6 @@ mod tests {
             validation_error_message(&err).starts_with("Workflow \"no-such-workflow\" not found."),
             "unexpected error: {}",
             validation_error_message(&err)
-        );
-    }
-
-    /// §14 — the LAUNCH path. `Tool::validate_input` and `resolve_script_at`
-    /// are two separate implementations of the same search order, and only
-    /// the former is exercised by
-    /// `validate_name_resolves_via_plugin_workflow_registry`; reverting the
-    /// `resolve_script_at` branch alone leaves that test green. This one
-    /// pins the launcher's half directly, so a partially-wired composition
-    /// root (tool wired, launcher not) cannot ship as "validate accepts,
-    /// launch says not found".
-    ///
-    /// It also pins the ORDER at this seam: project/user files above the
-    /// registry, built-ins above everything (see
-    /// `workflow::PluginWorkflowRegistry`'s module doc for why the
-    /// built-in/plugin half is unobservable in this port).
-    #[test]
-    fn resolve_script_at_falls_back_to_the_plugin_workflow_registry() {
-        let registry = workflow::PluginWorkflowRegistry::new();
-        registry.register(vec![workflow::PluginWorkflowEntry {
-            name: "acme:deploy".to_string(),
-            script_path: std::path::PathBuf::from("/plugins/acme/scripts/deploy.js"),
-        }]);
-        let read = |p: &str| -> std::io::Result<String> {
-            if p == "/plugins/acme/scripts/deploy.js" {
-                Ok(VALID_SCRIPT.to_string())
-            } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "no such file",
-                ))
-            }
-        };
-        let named = |name: &str| WorkflowLaunchSpec {
-            name: Some(name.to_string()),
-            ..Default::default()
-        };
-
-        // Wired registry, registered name → the plugin's script.
-        let resolved = resolve_script_at(
-            std::path::Path::new("/proj"),
-            &named("acme:deploy"),
-            read,
-            Some(&registry),
-        )
-        .expect("a registered plugin workflow must resolve on the launch path");
-        assert_eq!(resolved, VALID_SCRIPT);
-
-        // The SAME name with NO registry is the pre-§14 behaviour: not found.
-        // (This is exactly the drift a half-wired composition root produces.)
-        let err = resolve_script_at(
-            std::path::Path::new("/proj"),
-            &named("acme:deploy"),
-            read,
-            None,
-        )
-        .expect_err("without the registry the launch path must not resolve it");
-        assert_eq!(
-            err.0, "Workflow \"acme:deploy\" not found. Available: (none)",
-            "byte-exact launch-path miss message"
-        );
-
-        // A name absent from a wired registry still misses.
-        let err = resolve_script_at(
-            std::path::Path::new("/proj"),
-            &named("acme:absent"),
-            read,
-            Some(&registry),
-        )
-        .expect_err("an unregistered name must still miss");
-        assert!(err.0.starts_with("Workflow \"acme:absent\" not found."));
-
-        // Built-ins are still resolved without touching the registry.
-        let resolved = resolve_script_at(
-            std::path::Path::new("/proj"),
-            &named("deep-research"),
-            read,
-            Some(&registry),
-        )
-        .expect("built-ins resolve regardless of the registry");
-        assert_eq!(
-            resolved,
-            BUILTIN_WORKFLOWS.get("deep-research").unwrap().script
         );
     }
 
@@ -3633,12 +4029,18 @@ mod tests {
         let dir = unique_temp_path("plugin-resume-hint");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("plugin.js");
-        std::fs::write(&path, VALID_SCRIPT).unwrap();
+        let script = named_workflow_script("create", "create via plugin");
+        std::fs::write(&path, &script).unwrap();
         let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
-        registry.register(vec![workflow::PluginWorkflowEntry {
-            name: "acme:create".into(),
-            script_path: path,
-        }]);
+        let _ = registry.register(
+            lingxi_core::types::PluginId::new(),
+            vec![workflow::PluginWorkflowEntry {
+                qualified_name: "acme:create".into(),
+                script,
+                script_path: path,
+                plugin_name: "acme".into(),
+            }],
+        );
         let t = tool(Some(Arc::new(RichMockLauncher {
             launched: WorkflowLaunched {
                 task_id: "w_resume".into(),
@@ -3652,12 +4054,13 @@ mod tests {
         })))
         .with_plugin_workflows(registry);
         let args = json!({ "requirement": "quoted \"name\"", "nested": { "enabled": true } });
+        let input = source_json!({ "name": "acme:create", "args": args });
+        let ctx = tool_api::test_support::fresh_ctx();
+        t.validate_input(&input, &ctx)
+            .await
+            .expect("plugin selection is validated before call");
         let result = t
-            .call(
-                source_json!({ "name": "acme:create", "args": args }),
-                tool_api::test_support::fresh_ctx(),
-                tool_api::test_support::fresh_tx(),
-            )
+            .call(input, ctx, tool_api::test_support::fresh_tx())
             .await
             .unwrap();
         let content = result.data.string_at("/model_content").unwrap();

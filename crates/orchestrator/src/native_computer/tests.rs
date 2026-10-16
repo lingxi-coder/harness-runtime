@@ -1005,6 +1005,7 @@ impl Fixture {
                 assistant_message,
                 same_turn_tool_uses: vec![],
             },
+            None,
             self.fence(),
         )
         .await?;

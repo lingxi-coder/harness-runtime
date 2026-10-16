@@ -2071,7 +2071,6 @@ pub(super) async fn build_mobile_inner_with_ask(
         default_model_selection_provider: subagent_default_model_selection_provider_cell.clone(),
         checkpoints: workflow_checkpoints.clone(),
         status_sink: local_workflow_status_sink.clone(),
-        plugin_workflows: plugin_workflow_registry.clone(),
     });
     let workflow_policy_enabled = tool_workflow::workflows_enabled(false);
     let workflow_size_guideline_state =
@@ -2098,6 +2097,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         )
         .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
         .with_session_enabled(workflow_session_enabled)
+        .with_allowed_builtin_workflow_names(Vec::new())
         .with_plugin_workflows(plugin_workflow_registry.clone())
         .with_permission_gate(perms.clone())
         .with_permission_policy(
@@ -2738,6 +2738,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         cfg.lingxi_home.clone(),
         cwd.clone(),
         device_skill_tools.clone(),
+        workflow_tool.clone(),
     )));
     // `/list-agents` reads this mobile session's live task and name stores.
     // Mobile is a local app-private host, so use its explicit local-default
@@ -2762,15 +2763,29 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Register after the command registry assignment so materialized commands
     // and skills remain visible to the live dispatcher. Discovery resolves
     // dependency order and manifest defaultEnabled, while explicit layer values win.
-    for (id, manifest, install_dir) in
-        plugin::discover_effective_plugins(&cfg.lingxi_home.join("plugins"), &enabled_plugins).await
+    let plugin_discovery_context = plugin::PluginDiscoveryContext {
+        cwd: cwd.clone(),
+        project_root: orch.project_root(),
+    };
+    for (id, manifest, install_dir) in plugin::discover_effective_plugins(
+        &cfg.lingxi_home.join("plugins"),
+        &enabled_plugins,
+        &plugin_discovery_context,
+    )
+    .await
     {
         if let Err(error) = plugin_manager.enable(&id, manifest, install_dir).await {
             tracing::warn!(%error,"installed mobile plugin could not be loaded");
         }
     }
+    crate::workflow_catalog::refresh_workflow_commands(
+        &shared_command_registry,
+        workflow_tool.as_ref(),
+    )
+    .await;
     let prompt_paths_orch = orch.clone();
     let bundled_prompt_model_orch = orch.clone();
+    let workflow_prompt_availability_orch = orch.clone();
     let expansion_ctx_orch = orch.clone();
     let skill_prompt_transformer = crate::skill_prompt::mod_skill_prompt_transformer(
         hook_registry.clone(),
@@ -2795,6 +2810,19 @@ pub(super) async fn build_mobile_inner_with_ask(
         .with_bundled_prompt_model(Arc::new(move || {
             let orch = bundled_prompt_model_orch.clone();
             Box::pin(async move { orch.bundled_prompt_model().await.map(Some) })
+        }))
+        .with_bundled_prompt_availability(Arc::new(move || {
+            let orch = workflow_prompt_availability_orch.clone();
+            Box::pin(async move {
+                command_api::BundledPromptAvailability {
+                    available_tool_names: Some(
+                        orch.current_effective_tool_name_projections().await,
+                    ),
+                    // No mobile PolicyVerdictState exists, so the current
+                    // local remembered-core set is empty.
+                    workflow_authoring_base_allowed: false,
+                }
+            })
         }))
         .with_skill_usage_session(skill_usage_session);
     let dispatcher = if cfg.session_mode == session::jsonl::SessionMode::Code {
@@ -2860,6 +2888,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             cfg.lingxi_home.clone(),
             cwd.clone(),
             device_skill_tools.clone(),
+            workflow_tool.clone(),
         );
         if let Some(parsed) = parse_slash_command(&"/reload-skills".into()) {
             let _ = handler.handle(&parsed).await;

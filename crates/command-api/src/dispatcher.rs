@@ -5,8 +5,8 @@
 
 use crate::expand::{expand_markdown_command, ExpandCtx};
 use crate::model::{
-    source_concat, CommandResult, CommandSource, NativeCommandType, NativePromptPreparation,
-    PromptPart, SlashCommandKind,
+    source_concat, BundledPromptAvailability, BundledPromptAvailabilityProvider, CommandResult,
+    CommandSource, NativeCommandType, NativePromptPreparation, PromptPart, SlashCommandKind,
 };
 use crate::parser::{
     is_js_whitespace_unit, parse_slash_command, tokenize_args_source, ParsedSlashCommand,
@@ -336,6 +336,7 @@ pub struct RegistrySlashDispatcher {
     injected_messages_as_turns: bool,
     prompt_paths: Option<Arc<dyn Fn() -> (PathBuf, PathBuf) + Send + Sync>>,
     bundled_prompt_model: Option<BundledPromptModelProvider>,
+    bundled_prompt_availability: Option<BundledPromptAvailabilityProvider>,
     /// Permission gate that receives each input's frontmatter
     /// `disallowed-tools` (claude-code `Tbt(setToolPermissionContext, …)`).
     /// `None` — every existing caller — leaves the field inert, so a host that
@@ -415,6 +416,7 @@ impl RegistrySlashDispatcher {
             injected_messages_as_turns: false,
             prompt_paths: None,
             bundled_prompt_model: None,
+            bundled_prompt_availability: None,
             permission_gate: None,
             dispatch_mode: SlashDispatchMode::Generic,
         }
@@ -444,6 +446,18 @@ impl RegistrySlashDispatcher {
     #[must_use]
     pub fn with_bundled_prompt_model(mut self, provider: BundledPromptModelProvider) -> Self {
         self.bundled_prompt_model = Some(provider);
+        self
+    }
+
+    /// Supply the current Workflow-authoring eligibility facts for each
+    /// dynamic prompt expansion. This is awaited per dispatch so tool filtering
+    /// and policy changes are not frozen at command registration.
+    #[must_use]
+    pub fn with_bundled_prompt_availability(
+        mut self,
+        provider: BundledPromptAvailabilityProvider,
+    ) -> Self {
+        self.bundled_prompt_availability = Some(provider);
         self
     }
 
@@ -668,6 +682,7 @@ impl RegistrySlashDispatcher {
             injected_messages_as_turns: self.injected_messages_as_turns,
             prompt_paths: self.prompt_paths.clone(),
             bundled_prompt_model: self.bundled_prompt_model.clone(),
+            bundled_prompt_availability: self.bundled_prompt_availability.clone(),
             // The gate must travel too: a shared dispatcher that did not clear
             // the command denies would leave the previous skill's restrictions
             // standing for every input routed through the clone.
@@ -919,6 +934,10 @@ impl RegistrySlashDispatcher {
                         },
                         None => None,
                     };
+                    let availability = match self.bundled_prompt_availability.as_ref() {
+                        Some(provider) => provider().await,
+                        None => BundledPromptAvailability::default(),
+                    };
                     let content = match pf.try_build_at(
                         &parsed.raw_args,
                         crate::BundledPromptContext {
@@ -926,6 +945,9 @@ impl RegistrySlashDispatcher {
                             cwd: &cwd,
                             is_preload: false,
                             main_loop_model: model.as_deref(),
+                            available_tool_names: availability.available_tool_names.as_deref(),
+                            workflow_authoring_base_allowed: availability
+                                .workflow_authoring_base_allowed,
                         },
                     ) {
                         Ok(content) => content,

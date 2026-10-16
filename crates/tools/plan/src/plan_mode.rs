@@ -1629,6 +1629,7 @@ mod tests {
         let invoker = tool_api::tool_invoker_impl::RegistryToolInvoker::new(Arc::new(registry))
             .with_gate(gate);
         let context = || lingxi_core::host::tool_invoker::SubagentInvocationContext {
+            available_tool_names: None,
             cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,
             instruction_context: None,

@@ -295,6 +295,7 @@ pub static HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 #[must_use]
 pub fn fresh_ctx() -> ToolUseContext {
     ToolUseContext {
+        available_tool_names: None,
         agent_spawn_provenance: Default::default(),
         native_query_depth: None,
         options: ToolUseOptions {

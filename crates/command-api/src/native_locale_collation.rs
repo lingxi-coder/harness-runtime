@@ -1,8 +1,9 @@
 //! Locale-aware ordering for filesystem skill directory names.
 //!
-//! Native sorts each skill root by `skill.name.localeCompare(...)`. Filesystem
-//! entry names arrive as valid Rust `str` values after the platform's UTF-8
-//! decoding, so ICU4X's well-formed UTF-8 comparator is the appropriate path.
+//! Native sorts names with JavaScript `String.prototype.localeCompare`. This
+//! module uses the same ICU4X profile for valid Unicode text and accepts raw
+//! UTF-16 input, but ICU4X currently replaces unpaired surrogates differently
+//! from the pinned JavaScript runtime for some comparisons.
 
 use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
 use icu_collator::preferences::{CollationCaseFirst, CollationNumericOrdering};
@@ -12,6 +13,14 @@ use icu_locale::Locale;
 /// Construct the default-locale collator used for local filesystem skill names.
 pub(crate) fn native_skill_name_collator() -> CollatorBorrowed<'static> {
     collator_for_locale(&native_default_locale())
+}
+
+/// Compare UTF-16 names using the same default-locale ICU profile as Native
+/// `localeCompare`. Scalar Unicode ordering is pinned to the JavaScript oracle;
+/// some lone-surrogate pairs remain a known collation gap.
+#[must_use]
+pub fn native_locale_compare_utf16(left: &[u16], right: &[u16]) -> std::cmp::Ordering {
+    native_skill_name_collator().compare_utf16(left, right)
 }
 
 /// Construct the Native `localeCompare` sort profile for a BCP-47 locale.

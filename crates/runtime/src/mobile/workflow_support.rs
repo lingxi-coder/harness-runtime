@@ -826,8 +826,9 @@ impl lingxi_core::host::tool_invoker::ToolInvoker for DeferredToolInvoker {
     }
 }
 
-/// The mobile [`tool_workflow::WorkflowLauncher`]: resolves + validates the
-/// script, mints/reuses the run id, persists the script for
+/// The mobile [`tool_workflow::WorkflowLauncher`]: consumes the validated
+/// named-workflow snapshot (or an approved path / inline source), mints/reuses
+/// the run id, persists the script for
 /// re-runnability, and spawns the `LocalWorkflow` task through the mobile
 /// `TaskRegistry`. Adapted from the desktop `TaskRegistryWorkflowLauncher`
 /// with mobile path anchors (`std::fs` is fine here — every path is inside
@@ -852,9 +853,6 @@ pub(crate) struct MobileWorkflowLauncher {
         Arc<std::sync::OnceLock<agent::handle::DefaultModelSelectionProvider>>,
     pub(crate) checkpoints: Arc<MobileWorkflowCheckpointStore>,
     pub(crate) status_sink: Arc<MobileWorkflowStatusSink>,
-    /// Same live registry written by the mobile PluginManager and read by the
-    /// Workflow tool plus nested resolver.
-    pub(crate) plugin_workflows: Arc<workflow::PluginWorkflowRegistry>,
 }
 
 #[async_trait::async_trait]
@@ -876,20 +874,35 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 cwd.join(path)
             }
         };
-        let script = tool_workflow::resolve_script_at(
-            &cwd,
-            &spec,
-            |p| std::fs::read_to_string(abs(p)),
-            Some(self.plugin_workflows.as_ref()),
-        )?;
+        let script =
+            if let Some(raw_path) = spec.script_path.as_deref().filter(|path| !path.is_empty()) {
+                let approval = spec.script_path_approval.take().ok_or_else(|| {
+                    tool_workflow::WorkflowLaunchError::Message(
+                        "Workflow scriptPath permission snapshot is missing; refusing to read it"
+                            .into(),
+                    )
+                })?;
+                let requested = abs(raw_path);
+                if approval.requested != requested {
+                    return Err(tool_workflow::WorkflowLaunchError::Message(
+                        "Workflow scriptPath changed after permission was checked".into(),
+                    ));
+                }
+                tool_workflow::read_script_path_after_permission(&approval)?
+            } else if let Some(script) = spec.resolved_workflow_script.take() {
+                script
+            } else if spec.name.as_deref().is_some_and(|name| !name.is_empty()) {
+                return Err(tool_workflow::WorkflowLaunchError::Message(
+                    "named workflow launch is missing its validated catalog snapshot".into(),
+                ));
+            } else {
+                tool_workflow::resolve_script_at(&spec, |path| std::fs::read_to_string(abs(path)))?
+            };
         // Reject a malformed `meta` block at the tool boundary; the byte-exact
         // message surfaces to the model as the tool error (desktop parity).
-        workflow::validate_meta(&script).map_err(|e| {
-            let msg = match e {
-                workflow::WorkflowError::Script(m) => m,
-                other => other.to_string(),
-            };
-            tool_workflow::WorkflowLaunchError(msg)
+        workflow::validate_meta(&script).map_err(|error| match error.source_diagnostic() {
+            Some(diagnostic) => tool_workflow::WorkflowLaunchError::Source(diagnostic.clone()),
+            None => tool_workflow::WorkflowLaunchError::Message(error.to_string()),
         })?;
         // Determinism gate: an INLINE `script` may not use
         // Date.now()/Math.random()/new Date() (breaks resume);
@@ -902,13 +915,16 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 .is_none();
         if is_inline {
             if let Err(workflow::WorkflowError::Script(m)) = workflow::check_determinism(&script) {
-                return Err(tool_workflow::WorkflowLaunchError(m));
+                return Err(tool_workflow::WorkflowLaunchError::Message(m));
             }
         }
         if let Err(error) = workflow::validate_body(&script) {
             let error = match error {
                 workflow::WorkflowError::Engine(message)
                 | workflow::WorkflowError::Script(message) => message,
+                workflow::WorkflowError::ScriptSource(diagnostic) => {
+                    return Err(tool_workflow::WorkflowLaunchError::Source(diagnostic));
+                }
             };
             let run_id = tool_workflow::mint_run_id(spec.resume_from_run_id.as_deref());
             let workflow_name = workflow::meta_string_value(&script, "name");
@@ -943,13 +959,13 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             // would write outside the scratch dir, e.g. over the workspace's
             // host-managed `lib/lingxi-bridge.js`.
             if !tool_workflow::is_valid_run_id(rid) {
-                return Err(tool_workflow::WorkflowLaunchError(format!(
+                return Err(tool_workflow::WorkflowLaunchError::Message(format!(
                     "resumeFromRunId {rid:?} is not a workflow run id (expected wf_ followed by \
                      at least 6 lowercase alphanumerics or dashes)"
                 )));
             }
             if let Some(task_id) = self.registry.find_running_workflow_by_run_id(rid).await {
-                return Err(tool_workflow::WorkflowLaunchError(format!(
+                return Err(tool_workflow::WorkflowLaunchError::Message(format!(
                     "Workflow {rid} is still running (task {task_id}). Stop it first with \
                      TaskStop({{taskId: \"{task_id}\"}}) before resuming."
                 )));
@@ -970,7 +986,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             .registry
             .try_reserve_workflow_run_id(&run_id)
             .await
-            .map_err(|error| tool_workflow::WorkflowLaunchError(error.to_string()))?;
+            .map_err(|error| tool_workflow::WorkflowLaunchError::Message(error.to_string()))?;
         let launch_result = async {
             let subagents = orchestrator::transcript_paths::subagents_dir(
                 &self.lingxi_home,
@@ -983,39 +999,39 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
             let script_path = if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty())
             {
                 abs(p).to_str().map(str::to_string).ok_or_else(|| {
-                    tool_workflow::WorkflowLaunchError(
+                    tool_workflow::WorkflowLaunchError::Message(
                         "workflow script path is not valid UTF-8".to_string(),
                     )
                 })?
             } else {
                 let session_dir = subagents.parent().ok_or_else(|| {
-                    tool_workflow::WorkflowLaunchError(
+                    tool_workflow::WorkflowLaunchError::Message(
                         "cannot derive workflow session directory".to_string(),
                     )
                 })?;
                 let dir = session_dir.join("workflows");
                 let file = dir.join(format!("{run_id}.js"));
                 std::fs::create_dir_all(&dir).map_err(|error| {
-                    tool_workflow::WorkflowLaunchError(format!(
+                    tool_workflow::WorkflowLaunchError::Message(format!(
                         "cannot create workflow script directory '{}': {error}",
                         dir.display()
                     ))
                 })?;
                 std::fs::write(&file, &script).map_err(|error| {
-                    tool_workflow::WorkflowLaunchError(format!(
+                    tool_workflow::WorkflowLaunchError::Message(format!(
                         "cannot persist workflow script '{}': {error}",
                         file.display()
                     ))
                 })?;
                 file.to_str().map(str::to_string).ok_or_else(|| {
-                    tool_workflow::WorkflowLaunchError(
+                    tool_workflow::WorkflowLaunchError::Message(
                         "workflow script path is not valid UTF-8".to_string(),
                     )
                 })?
             };
             let transcript_dir = { subagents.join("workflows").join(&run_id) };
             std::fs::create_dir_all(&transcript_dir).map_err(|error| {
-                tool_workflow::WorkflowLaunchError(format!(
+                tool_workflow::WorkflowLaunchError::Message(format!(
                     "cannot create workflow transcript directory '{}': {error}",
                     transcript_dir.display()
                 ))
@@ -1026,7 +1042,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 .append(true)
                 .open(&journal_path)
                 .map_err(|error| {
-                    tool_workflow::WorkflowLaunchError(format!(
+                    tool_workflow::WorkflowLaunchError::Message(format!(
                         "cannot create workflow journal '{}': {error}",
                         journal_path.display()
                     ))
@@ -1039,26 +1055,15 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 .is_some();
             let has_name = spec.name.as_deref().filter(|s| !s.is_empty()).is_some();
             let named_source = spec
-                .name
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .and_then(|name| {
-                    tool_workflow::workflow_source_for_name(
-                        &cwd,
-                        name,
-                        Some(self.plugin_workflows.as_ref()),
-                    )
-                });
+                .workflow_source
+                .as_ref()
+                .map(tool_workflow::WorkflowCatalogSource::task_source);
             let (invocation_mode, workflow_source) = if has_script_path {
                 ("scriptPath".to_string(), "scriptPath".to_string())
             } else if has_name {
                 (
                     "named".to_string(),
-                    if named_source.is_some() {
-                        named_source.unwrap_or("custom").to_string()
-                    } else {
-                        "custom".to_string()
-                    },
+                    named_source.unwrap_or("custom").to_string(),
                 )
             } else {
                 ("inline".to_string(), "inline".to_string())
@@ -1099,11 +1104,11 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                     task_description.into(),
                 )
                 .await
-                .map_err(|e| tool_workflow::WorkflowLaunchError(e.to_string()))?;
+                .map_err(|e| tool_workflow::WorkflowLaunchError::Message(e.to_string()))?;
             self.registry
                 .set_workflow_resume_metadata(&task_id, script_path.clone(), transcript_dir.clone())
                 .await
-                .map_err(|error| tool_workflow::WorkflowLaunchError(error.to_string()))?;
+                .map_err(|error| tool_workflow::WorkflowLaunchError::Message(error.to_string()))?;
             let args_json = spec
                 .args
                 .as_ref()
@@ -1128,7 +1133,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                 Ok(pending_events) => pending_events,
                 Err(error) => {
                     let _ = self.registry.kill(&task_id).await;
-                    return Err(tool_workflow::WorkflowLaunchError(format!(
+                    return Err(tool_workflow::WorkflowLaunchError::Message(format!(
                         "cannot persist workflow checkpoint: {error}"
                     )));
                 }

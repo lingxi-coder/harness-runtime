@@ -105,20 +105,6 @@ static TOOL_SEARCH_ENABLED: AtomicBool = AtomicBool::new(false);
 /// root after managed policy and environment gates are known.
 static DYNAMIC_WORKFLOWS_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Whether the `workflow-authoring` bundled skill was registered this session.
-///
-/// Published by the registrar itself rather than assumed: the Workflow tool
-/// description drops 17 KB of hook documentation in favour of a pointer to this
-/// skill, and it may only do so while the skill is genuinely there.
-static WORKFLOW_AUTHORING_SKILL_REGISTERED: AtomicBool = AtomicBool::new(false);
-
-/// Whether the `Skill` tool is among the tools advertised for the current
-/// request (upstream `nre`'s `o.some(l => Wt(l, "Skill"))` conjunct).
-///
-/// A registered skill the model has no tool to load is still unreachable, and
-/// tool filtering can drop `Skill` per request.
-static SKILL_TOOL_ADVERTISED: AtomicBool = AtomicBool::new(false);
-
 /// Session-owned dynamic-workflow gate shared by the Workflow tool,
 /// orchestrator handle, and TUI consumers. This lets one process host
 /// multiple sessions without routing workflow availability through the legacy
@@ -296,27 +282,6 @@ impl Default for WorkflowSizeGuidelineState {
 
 /// Record whether the current process is a non-interactive (`-p`/print/headless)
 /// session. Idempotent; safe to call repeatedly (the value is fixed per process).
-/// Record that the `workflow-authoring` skill registered this session.
-pub fn set_workflow_authoring_skill_registered(registered: bool) {
-    WORKFLOW_AUTHORING_SKILL_REGISTERED.store(registered, Ordering::Relaxed);
-}
-
-/// Record whether the `Skill` tool is advertised for the request being built.
-pub fn set_skill_tool_advertised(advertised: bool) {
-    SKILL_TOOL_ADVERTISED.store(advertised, Ordering::Relaxed);
-}
-
-/// Upstream `nre(tools)` — can the model load the `workflow-authoring` skill?
-///
-/// Both halves must hold: the skill exists, and this request offers the tool
-/// that loads it. False is always the safe answer — it makes the Workflow
-/// description inline the reference instead of pointing at it.
-#[must_use]
-pub fn workflow_authoring_skill_reachable() -> bool {
-    WORKFLOW_AUTHORING_SKILL_REGISTERED.load(Ordering::Relaxed)
-        && SKILL_TOOL_ADVERTISED.load(Ordering::Relaxed)
-}
-
 pub fn set_non_interactive_session(non_interactive: bool) {
     NON_INTERACTIVE_SESSION.store(non_interactive, Ordering::Relaxed);
 }

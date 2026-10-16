@@ -61,6 +61,23 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use telemetry::tengu::plugin as plugin_telemetry;
 use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata, PiiTagged, Verified};
 
+/// Session filesystem context used to select the active per-scope install row
+/// for each enabled plugin key. Runtime callers must provide the actual current
+/// cwd and project root; installed-record selection must not infer these from
+/// unrelated registered roots.
+#[derive(Clone, Debug)]
+pub struct PluginDiscoveryContext {
+    pub cwd: PathBuf,
+    pub project_root: PathBuf,
+}
+
+impl PluginDiscoveryContext {
+    #[must_use]
+    pub fn new(cwd: PathBuf, project_root: PathBuf) -> Self {
+        Self { cwd, project_root }
+    }
+}
+
 /// A leading UTF-8 byte-order mark, as some editors on Windows write it.
 /// `serde_json` does not treat U+FEFF as whitespace, so every manifest/config
 /// JSON string read in this file must have it stripped before parsing (same
@@ -836,15 +853,160 @@ fn recorded_install_path(plugins_dir: &Path, raw: &str) -> PathBuf {
     }
 }
 
-/// Return authoritative cache candidates for one enabledPlugins key. Some
-/// means the installed database contains a matching record, including when the
-/// record is malformed or points at a missing cache; callers must not infer a
-/// primary cache path in that case. `None` means there is no primary install
-/// record for the enabled key.
+fn normalized_absolute_path(path: PathBuf) -> PathBuf {
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn normalized_context_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_default().join(path)
+    };
+    normalized_absolute_path(absolute)
+}
+
+fn normalized_scope_path(path: &Path, cwd: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    normalized_absolute_path(absolute)
+}
+
+fn path_matches_on_current_platform(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        left.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn path_is_within_on_current_platform(path: &Path, root: &Path) -> bool {
+    if path.starts_with(root) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let path_components = path.components().collect::<Vec<_>>();
+        let root_components = root.components().collect::<Vec<_>>();
+        path_components.len() >= root_components.len()
+            && root_components
+                .iter()
+                .zip(path_components.iter())
+                .all(|(root, path)| {
+                    root.as_os_str()
+                        .to_string_lossy()
+                        .eq_ignore_ascii_case(&path.as_os_str().to_string_lossy())
+                })
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+fn installed_record_is_active(record: &Value, context: &PluginDiscoveryContext) -> bool {
+    match record.get("scope").and_then(Value::as_str) {
+        Some("user" | "managed") => true,
+        Some("project" | "local") => {
+            let Some(project_path) = record.get("projectPath").and_then(Value::as_str) else {
+                return false;
+            };
+            let cwd = normalized_context_path(&context.cwd);
+            let project_root = normalized_scope_path(&context.project_root, &cwd);
+            let project_path = normalized_scope_path(Path::new(project_path), &cwd);
+            path_matches_on_current_platform(&project_path, &cwd)
+                || path_matches_on_current_platform(&project_path, &project_root)
+                || path_is_within_on_current_platform(&project_path, &project_root)
+        }
+        _ => false,
+    }
+}
+
+fn installed_record_path(plugins_dir: &Path, record: &Value) -> Option<PathBuf> {
+    record
+        .get("installPath")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .map(|path| recorded_install_path(plugins_dir, path))
+}
+
+fn lexically_confined_install_path(plugins_dir: &Path, path: &Path) -> bool {
+    let root = normalized_context_path(plugins_dir);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    };
+    if candidate
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let candidate = normalized_scope_path(&candidate, &root);
+    path_is_within_on_current_platform(&candidate, &root)
+}
+
+/// Native lbn returns the first active install row with a safe usable path,
+/// then the first safe row if no install is currently present. Keep H's
+/// stronger canonical-root and no-symlink checks when deciding usability.
+async fn select_active_install_path(plugins_dir: &Path, candidates: &[PathBuf]) -> Option<PathBuf> {
+    let mut first_safe_missing = None;
+    for candidate in candidates {
+        match tokio::fs::symlink_metadata(candidate).await {
+            Ok(_) => {
+                // Existing but non-directory, symlinked, or out-of-root paths
+                // are suspect and must not become the lbn fallback row.
+                if confined_plugin_install_dir(candidate, &[plugins_dir])
+                    .await
+                    .is_some()
+                {
+                    return Some(candidate.clone());
+                }
+            }
+            Err(_) => {
+                if first_safe_missing.is_none()
+                    && lexically_confined_install_path(plugins_dir, candidate)
+                {
+                    first_safe_missing = Some(candidate.clone());
+                }
+            }
+        }
+    }
+    first_safe_missing
+}
+
+/// Return active installed paths for one enabledPlugins key. `Some(empty)`
+/// means matching registry rows exist but none is active in this session;
+/// callers must not activate another project's row or infer a cache path.
+/// `None` means there is no matching V2 install record.
 fn exact_installed_paths(
     plugins_dir: &Path,
     entry_id: &str,
     records: Option<&Value>,
+    context: &PluginDiscoveryContext,
 ) -> Option<Vec<PathBuf>> {
     let (name, Some(marketplace)) = parse_plugin_identifier(entry_id) else {
         return None;
@@ -865,25 +1027,8 @@ fn exact_installed_paths(
         let paths = match value {
             Value::Array(entries) => entries
                 .iter()
-                .filter_map(|record| {
-                    let version = record
-                        .get("version")
-                        .and_then(Value::as_str)
-                        .filter(|version| !version.is_empty());
-                    if let Some(version) = version {
-                        Some(versioned_cache_path(
-                            plugins_dir,
-                            marketplace,
-                            name,
-                            version,
-                        ))
-                    } else {
-                        record
-                            .get("installPath")
-                            .and_then(Value::as_str)
-                            .map(|path| recorded_install_path(plugins_dir, path))
-                    }
-                })
+                .filter(|record| installed_record_is_active(record, context))
+                .filter_map(|record| installed_record_path(plugins_dir, record))
                 .filter(|path| seen.insert(path.clone()))
                 .collect(),
             _ => Vec::new(),
@@ -1189,19 +1334,16 @@ mod name_validation_tests {
 /// cache-only loader `loadAllPluginsCacheOnly()` (`main.tsx:282`) delegates to
 /// `loadPluginsFromMarketplaces({cacheOnly})` (`pluginLoader.ts:1888`), which
 /// is driven by `settings.enabledPlugins` — a map of `plugin@marketplace` →
-/// enabled (`pluginLoader.ts:1898-1906`). Each enabled `name@marketplace`
-/// entry resolves through `getVersionedCachePath` (`pluginLoader.ts:139`) to
-/// the versioned cache directory
-/// `<plugins>/cache/{marketplace}/{plugin}/{version}/`
-/// whose `.lingxi-plugin/plugin.json` is then read by `createPluginFromPath`
-/// (`pluginLoader.ts:1348`).
+/// enabled. Native `Tve` selects one active per-scope row with `lbn` and
+/// passes its `installPath` to `createPluginFromPath` (`pluginLoader.ts:1348`).
+/// Current V2 cache rows point that path at
+/// `<plugins>/cache/{marketplace}/{plugin}/{version}/`.
 ///
-/// This port reads the `enabled` allowlist, skips disabled entries, and resolves
-/// each remaining `name@marketplace` from the matching `installed_plugins.json`
-/// record's exact version. Bare `name` entries (no marketplace) and
-/// uninstalled/missing entries are skipped — never a flat walk. When no
-/// primary install record exists, only configured seed-cache roots may provide
-/// a fallback candidate.
+/// This port reads the caller's effective enabled map, skips disabled entries,
+/// and resolves each remaining `name@marketplace` from the single active
+/// per-scope `installed_plugins.json` row. Bare `name` entries (no marketplace)
+/// are skipped — never a flat walk. A selected cache miss may fall back to a
+/// configured seed cache; a key whose rows are all out of scope may not.
 ///
 /// What is still NOT ported (residual): marketplace-catalog source resolution
 /// and enterprise allow/blocklist policy (`getStrictKnownMarketplaces` /
@@ -1210,21 +1352,24 @@ mod name_validation_tests {
 pub async fn discover_enabled_plugins(
     plugins_dir: &Path,
     enabled: &BTreeMap<String, bool>,
+    context: &PluginDiscoveryContext,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
-    discover_enabled_plugins_with_bus(plugins_dir, enabled, None).await
+    discover_enabled_plugins_with_bus(plugins_dir, enabled, context, None).await
 }
 
 pub async fn discover_enabled_plugins_with_bus(
     plugins_dir: &Path,
     enabled: &BTreeMap<String, bool>,
+    context: &PluginDiscoveryContext,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
-    discover_enabled_plugins_impl(plugins_dir, enabled, analytics_bus, true).await
+    discover_enabled_plugins_impl(plugins_dir, enabled, context, analytics_bus, true).await
 }
 
 async fn discover_enabled_plugins_impl(
     plugins_dir: &Path,
     enabled: &BTreeMap<String, bool>,
+    context: &PluginDiscoveryContext,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
     resolve_collisions: bool,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
@@ -1246,14 +1391,23 @@ async fn discover_enabled_plugins_impl(
         if name.is_empty() {
             continue;
         }
-        let mut candidates =
-            exact_installed_paths(plugins_dir, entry_id, installed_records.as_ref())
-                .unwrap_or_default();
-        // Resolve a recorded primary path first and consult the configured
-        // seed cache only when that authoritative path is absent. A primary
-        // directory without an install record is never inferred as installed.
+        let installed_paths =
+            exact_installed_paths(plugins_dir, entry_id, installed_records.as_ref(), context);
+        let has_registry_rows = installed_paths.is_some();
+        let selected_primary = match installed_paths {
+            Some(paths) => select_active_install_path(plugins_dir, &paths).await,
+            None => None,
+        };
+        let mut candidates = selected_primary.into_iter().collect::<Vec<_>>();
+        // Resolve only the selected active row. When a key has registry rows
+        // but none belongs to this session, do not resurrect another
+        // project's row through a seed cache.
         let primary_exists = candidates.iter().any(|path| path_exists(path));
-        let seed_candidates = seed_plugin_cache_candidates(marketplace, name, &candidates).await;
+        let seed_candidates = if has_registry_rows && candidates.is_empty() {
+            Vec::new()
+        } else {
+            seed_plugin_cache_candidates(marketplace, name, &candidates).await
+        };
         if !primary_exists {
             for seed in &seed_candidates {
                 if !candidates.contains(seed) {
@@ -1261,23 +1415,23 @@ async fn discover_enabled_plugins_impl(
                 }
             }
         }
-        for versioned in candidates {
+        for install_dir in candidates {
             let mut allowed_roots = Vec::with_capacity(seed_dirs.len() + 1);
             allowed_roots.push(plugins_dir);
             allowed_roots.extend(seed_dirs.iter().map(PathBuf::as_path));
-            let Some(versioned) = confined_plugin_install_dir(&versioned, &allowed_roots).await
+            let Some(install_dir) = confined_plugin_install_dir(&install_dir, &allowed_roots).await
             else {
                 continue;
             };
             if let Some((id, manifest)) = load_plugin_from_path_with_mcp_gate_and_bus(
-                &versioned,
+                &install_dir,
                 false,
                 Some(entry_id.as_str()),
                 analytics_bus,
             )
             .await
             {
-                out.push((id, manifest, versioned));
+                out.push((id, manifest, install_dir));
             }
         }
         if primary_exists {
@@ -1435,29 +1589,13 @@ async fn discover_recorded_plugins_identified(
                 // for the cache path. Fall back to installPath only for older
                 // records that did not persist a version.
                 serde_json::Value::Array(recs) => {
-                    let (name, marketplace) = parse_plugin_identifier(key);
                     let mut seen = HashSet::new();
-                    for rec in recs {
-                        let dir = rec
-                            .get("version")
-                            .and_then(Value::as_str)
-                            .filter(|version| !version.is_empty())
-                            .and_then(|version| {
-                                marketplace.map(|marketplace| {
-                                    versioned_cache_path(plugins_dir, marketplace, name, version)
-                                })
-                            })
-                            .or_else(|| {
-                                rec.get("installPath")
-                                    .and_then(Value::as_str)
-                                    .map(|path| recorded_install_path(plugins_dir, path))
-                            });
-                        let Some(dir) = dir else {
-                            continue;
-                        };
-                        if !seen.insert(dir.clone()) {
-                            continue;
-                        }
+                    let candidate_dirs = recs
+                        .iter()
+                        .filter_map(|record| installed_record_path(plugins_dir, record))
+                        .filter(|dir| seen.insert(dir.clone()))
+                        .collect::<Vec<_>>();
+                    for dir in candidate_dirs {
                         let Some(dir) = confined_plugin_install_dir(&dir, &[plugins_dir]).await
                         else {
                             continue;
@@ -1558,38 +1696,30 @@ pub async fn discover_recorded_plugins_with_bus(
 
 /// Resolve the effective runtime plugin set.
 ///
-/// Explicit `enabledPlugins` entries win. Installed plugins with no explicit
-/// setting fall back to their manifest's `defaultEnabled` value (defaulting to
-/// true), while explicitly disabled plugins remain unloaded. An enabled key
-/// without a primary install record may resolve only from configured seed-cache
-/// roots; the primary cache is never scanned to infer an install record.
+/// Only keys present and enabled in the caller's effective enabledPlugins map
+/// are loaded. For each such key, the active V2 row is selected from
+/// user/managed rows and project/local rows matching the supplied session cwd
+/// or project root. Disabled and absent keys remain unloaded; callers own the
+/// Native `pK()` + settings merge that constructs the enabled map. A selected
+/// cache miss may use a configured seed cache; rows that are all out of scope
+/// cannot be resurrected by a seed. The primary cache is never scanned to infer
+/// an install record.
 pub async fn discover_effective_plugins(
     plugins_dir: &Path,
     enabled: &BTreeMap<String, bool>,
+    context: &PluginDiscoveryContext,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
-    discover_effective_plugins_with_bus(plugins_dir, enabled, None).await
+    discover_effective_plugins_with_bus(plugins_dir, enabled, context, None).await
 }
 
 pub async fn discover_effective_plugins_with_bus(
     plugins_dir: &Path,
     enabled: &BTreeMap<String, bool>,
+    context: &PluginDiscoveryContext,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> Vec<(PluginId, PluginManifest, PathBuf)> {
-    let mut out = discover_enabled_plugins_impl(plugins_dir, enabled, analytics_bus, false).await;
-    let mut seen_paths: BTreeSet<PathBuf> = out.iter().map(|(_, _, path)| path.clone()).collect();
-
-    for (identifier, id, manifest, path) in
-        discover_recorded_plugins_identified(plugins_dir, analytics_bus, false).await
-    {
-        let active = enabled
-            .get(&identifier)
-            .copied()
-            .unwrap_or(manifest.default_enabled);
-        if active && seen_paths.insert(path.clone()) {
-            out.push((id, manifest, path));
-        }
-    }
-
+    let out =
+        discover_enabled_plugins_impl(plugins_dir, enabled, context, analytics_bus, false).await;
     resolve_discovered_plugins(out, analytics_bus).await
 }
 
@@ -5330,9 +5460,12 @@ mod tests {
         let bus = Arc::new(AnalyticsBus::new());
         bus.attach_sink(sink.clone()).await;
         let enabled = BTreeMap::from([(String::from("seeded@market"), true)]);
+        let context =
+            PluginDiscoveryContext::new(tmp.path().to_path_buf(), tmp.path().to_path_buf());
         let discovered = discover_enabled_plugins_with_bus(
             tmp.path().join("plugins").as_path(),
             &enabled,
+            &context,
             Some(&bus),
         )
         .await;
@@ -5357,7 +5490,8 @@ mod tests {
         // satisfy the enabled key.
         fs::remove_file(crate::installed::path(&plugins_dir)).unwrap();
         let loaded_without_record =
-            discover_enabled_plugins_with_bus(plugins_dir.as_path(), &enabled, None).await;
+            discover_enabled_plugins_with_bus(plugins_dir.as_path(), &enabled, &context, None)
+                .await;
         assert_eq!(loaded_without_record.len(), 1);
         assert_eq!(loaded_without_record[0].2, seed);
         assert_eq!(
@@ -5369,7 +5503,8 @@ mod tests {
         // become the actual loaded source.
         fs::remove_dir_all(tmp.path().join("plugins/cache")).unwrap();
         let loaded_from_seed =
-            discover_enabled_plugins_with_bus(plugins_dir.as_path(), &enabled, None).await;
+            discover_enabled_plugins_with_bus(plugins_dir.as_path(), &enabled, &context, None)
+                .await;
         assert_eq!(loaded_from_seed.len(), 1);
         assert_eq!(loaded_from_seed[0].2, seed);
     }
@@ -5384,7 +5519,9 @@ mod tests {
         fs::write(primary.join("commands/ping.md"), "# primary").unwrap();
 
         let enabled = BTreeMap::from([(String::from("unrecorded@market"), true)]);
-        let discovered = discover_enabled_plugins(&plugins_dir, &enabled).await;
+        let context =
+            PluginDiscoveryContext::new(tmp.path().to_path_buf(), tmp.path().to_path_buf());
+        let discovered = discover_enabled_plugins(&plugins_dir, &enabled, &context).await;
 
         assert!(
             discovered.is_empty(),
@@ -5669,7 +5806,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn effective_discovery_applies_explicit_state_before_manifest_default() {
+    async fn effective_discovery_requires_the_effective_enabled_map_key() {
         let tmp = tempfile::tempdir().unwrap();
         let plugins_dir = tmp.path();
         let enabled_path = plugins_dir.join("cache/mkt/enabled/1.0.0");
@@ -5725,13 +5862,12 @@ mod tests {
         )
         .unwrap();
 
-        let defaults = discover_effective_plugins(plugins_dir, &BTreeMap::new()).await;
-        assert_eq!(
-            defaults
-                .iter()
-                .map(|(_, manifest, _)| manifest.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["enabled"]
+        let context =
+            PluginDiscoveryContext::new(plugins_dir.to_path_buf(), plugins_dir.to_path_buf());
+        let absent = discover_effective_plugins(plugins_dir, &BTreeMap::new(), &context).await;
+        assert!(
+            absent.is_empty(),
+            "a defaultEnabled manifest cannot add a key absent from Native's effective enabledPlugins map"
         );
 
         let overrides = BTreeMap::from([
@@ -5740,7 +5876,7 @@ mod tests {
             // Arrays are projected to true before this bool-map API is called.
             ("array-enabled@mkt".to_string(), true),
         ]);
-        let explicit = discover_effective_plugins(plugins_dir, &overrides).await;
+        let explicit = discover_effective_plugins(plugins_dir, &overrides, &context).await;
         assert_eq!(
             explicit
                 .iter()
@@ -5748,6 +5884,82 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["array-enabled", "disabled"]
         );
+    }
+
+    #[tokio::test]
+    async fn effective_discovery_selects_one_active_scope_record_in_registry_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins_dir = tmp.path().join("plugins");
+        let cwd = tmp.path().join("repo/subdir");
+        let project_root = tmp.path().join("repo");
+        let foreign_root = tmp.path().join("other-project");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&foreign_root).unwrap();
+
+        let foreign = plugins_dir.join("cache/acme/same/9.0.0");
+        let active_local = plugins_dir.join("cache/acme/same/2.0.0");
+        let active_user = plugins_dir.join("cache/acme/same/1.0.0");
+        for (dir, version) in [
+            (&foreign, "9.0.0"),
+            (&active_local, "2.0.0"),
+            (&active_user, "1.0.0"),
+        ] {
+            fs::create_dir_all(dir.join("commands")).unwrap();
+            write_manifest(
+                dir,
+                &serde_json::json!({"name": "same", "version": version}),
+            );
+            fs::write(dir.join("commands/ping.md"), format!("# {version}")).unwrap();
+        }
+
+        fs::write(
+            crate::installed::path(&plugins_dir),
+            serde_json::to_vec(&serde_json::json!({
+                "version": 2,
+                "plugins": {
+                    "same@acme": [
+                        {
+                            "scope": "project",
+                            "projectPath": &foreign_root,
+                            "version": "9.0.0",
+                            "installPath": "cache/acme/same/9.0.0"
+                        },
+                        {
+                            "scope": "project",
+                            "projectPath": &cwd,
+                            "version": "0.5.0",
+                            "installPath": "cache/acme/same/0.5.0"
+                        },
+                        {
+                            "scope": "local",
+                            "projectPath": &project_root,
+                            "version": "2.0.0",
+                            "installPath": "cache/acme/same/2.0.0"
+                        },
+                        {
+                            "scope": "user",
+                            "version": "1.0.0",
+                            "installPath": "cache/acme/same/1.0.0"
+                        }
+                    ]
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let context = PluginDiscoveryContext::new(cwd, project_root);
+        let enabled = BTreeMap::from([(String::from("same@acme"), true)]);
+        let explicit = discover_enabled_plugins(&plugins_dir, &enabled, &context).await;
+        assert_eq!(explicit.len(), 1);
+        assert_eq!(explicit[0].1.version, "2.0.0");
+        assert_eq!(explicit[0].2, active_local);
+
+        // Effective discovery must apply the same one-row scope selection.
+        let effective = discover_effective_plugins(&plugins_dir, &enabled, &context).await;
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].1.version, "2.0.0");
+        assert_eq!(effective[0].2, active_local);
     }
 
     #[tokio::test]
@@ -5780,7 +5992,10 @@ mod tests {
         )
         .unwrap();
 
-        let discovered = discover_effective_plugins(plugins_dir, &BTreeMap::new()).await;
+        let context =
+            PluginDiscoveryContext::new(plugins_dir.to_path_buf(), plugins_dir.to_path_buf());
+        let enabled = BTreeMap::from([(String::from("weather@mkt"), true)]);
+        let discovered = discover_effective_plugins(plugins_dir, &enabled, &context).await;
 
         assert_eq!(
             discovered

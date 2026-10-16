@@ -945,6 +945,7 @@ async fn workflow_script_path_read_deny_overrides_subagent_allow() {
     let invoker =
         RegistryToolInvoker::new(Arc::new(registry)).with_gate(Arc::new(NoOpPermissionGate));
     let ctx = SubagentInvocationContext {
+        available_tool_names: None,
         cancellation_token: tokio_util::sync::CancellationToken::new(),
         permission_pause_observer: None,
         parent_agent_id: None,

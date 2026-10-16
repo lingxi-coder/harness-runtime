@@ -530,6 +530,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     let mut guarded_async_hook_reminders = prepared.guarded_async_hook_reminders;
     let context_announcements = prepared.context_announcements;
     let mut tools = prepared.wire_tools;
+    let mut available_tool_names = prepared.available_tool_names;
     let deferred_tools_reminder = prepared.deferred_reminder;
     let date_change_reminder = prepared.date_change_reminder;
 
@@ -548,6 +549,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
         {
             history_snapshot = frozen.messages;
             tools = frozen.tools;
+            available_tool_names = frozen.available_tool_names;
             skip_global_cache_for_system_prompt = frozen.skip_global_cache;
             system_override = Some(frozen.system);
         } else {
@@ -623,6 +625,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
             system: system.cloned(),
             messages: history_snapshot.clone(),
             tools: tools.clone(),
+            available_tool_names: available_tool_names.clone(),
             skip_global_cache: skip_global_cache_for_system_prompt,
             thinking_resumption_host_facts: thinking_resumption_host_facts.clone(),
         })
@@ -1183,6 +1186,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
             request_history,
             same_turn_tool_uses.clone(),
             request_history_source,
+            available_tool_names.clone(),
             query_depth,
         )
         .await?;

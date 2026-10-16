@@ -106,3 +106,10 @@ uniffi::setup_scaffolding!();
 /// Host-owned, RAM-only independent side conversations.
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 pub mod side_chat;
+
+/// Keep Workflow's validated catalog snapshot in sync with the live slash registry.
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod workflow_catalog;
+/// Native-shaped slash-command projection for the validated workflow catalog.
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod workflow_slash;

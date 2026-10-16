@@ -1360,11 +1360,9 @@ struct WireToolSchemaCacheKey {
     exact_schema_identities: Vec<(String, String)>,
     model: String,
     model_profile: Option<String>,
-    /// Whether the `workflow-authoring` skill was loadable when this entry was
-    /// built. The Workflow description swaps 17 KB of hook documentation for a
-    /// pointer based on it, so an entry cached before the skill registered must
-    /// not be reused after — the tool names are identical either side of that.
-    workflow_authoring_skill_reachable: bool,
+    /// Whether this request can load `workflow-authoring`, matching the value
+    /// passed to each tool's PromptOptions during construction of this entry.
+    workflow_authoring_available: bool,
     bash_precommit_skills: tool_api::tool_trait::BashPrecommitSkills,
     bash_precommit_session_generation: u64,
     mod_registration_identity: Option<(u64, u64)>,

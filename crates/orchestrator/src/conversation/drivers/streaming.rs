@@ -168,6 +168,7 @@ struct OpenedStreamingIteration<'a> {
     guarded_async_hook_reminders: Vec<(MessageId, Arc<dyn HookPublicationGuard>)>,
     context_announcements: PreparedContextAnnouncements,
     wire_tools: Vec<lingxi_core::host::SourceToolWireDefinition>,
+    available_tool_names: Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     skip_global_cache_for_system_prompt: bool,
     deferred_reminder: Option<ConversationMessage>,
     date_change_reminder: Option<ConversationMessage>,
@@ -1072,6 +1073,7 @@ impl StreamingTurnDriver<'_> {
             mut guarded_async_hook_reminders,
             context_announcements,
             mut wire_tools,
+            mut available_tool_names,
             mut skip_global_cache_for_system_prompt,
             deferred_reminder,
             date_change_reminder,
@@ -1097,6 +1099,7 @@ impl StreamingTurnDriver<'_> {
             {
                 snapshot = frozen.messages;
                 wire_tools = frozen.tools;
+                available_tool_names = frozen.available_tool_names;
                 skip_global_cache_for_system_prompt = frozen.skip_global_cache;
                 system_override = Some(frozen.system);
             } else {
@@ -1113,25 +1116,14 @@ impl StreamingTurnDriver<'_> {
             .map_err(OrchestratorError::ApiCall)?;
         let mut query_history = snapshot.clone();
 
-        let mut exec = match &user_cancel {
-            Some(token) => {
-                crate::streaming_executor::StreamingToolExecutor::try_new_with_user_cancel(
-                    orch,
-                    query_history.clone(),
-                    loop_state.native_query_depth,
-                    token.clone(),
-                )
-                .await?
-            }
-            None => {
-                crate::streaming_executor::StreamingToolExecutor::try_new(
-                    orch,
-                    query_history.clone(),
-                    loop_state.native_query_depth,
-                )
-                .await?
-            }
-        };
+        let mut exec = crate::streaming_executor::StreamingToolExecutor::try_new_for_query(
+            orch,
+            query_history.clone(),
+            loop_state.native_query_depth,
+            user_cancel.clone(),
+            available_tool_names.clone(),
+        )
+        .await?;
         // Hold `tool_result` frames until the collection point below can
         // release them in RECEIVED order, with a cancelled tool's synthetic
         // already substituted. Off again after the drive, so any later
@@ -1195,6 +1187,7 @@ impl StreamingTurnDriver<'_> {
                 system: system_prompt.clone(),
                 messages: snapshot.clone(),
                 tools: wire_tools.clone(),
+                available_tool_names: available_tool_names.clone(),
                 skip_global_cache: skip_global_cache_for_system_prompt,
                 thinking_resumption_host_facts: thinking_resumption_host_facts.clone(),
             });
@@ -1381,6 +1374,7 @@ impl StreamingTurnDriver<'_> {
                     &mut guarded_async_hook_reminders,
                     &context_announcements,
                     &wire_tools,
+                    available_tool_names.clone(),
                     skip_global_cache_for_system_prompt,
                     native_anthropic_request_context.clone(),
                     system_prompt,
@@ -1569,19 +1563,14 @@ impl StreamingTurnDriver<'_> {
                                 }
                             }
                         }
-                        exec = match &user_cancel {
-                            Some(token) => crate::streaming_executor::StreamingToolExecutor::try_new_with_user_cancel(
-                                orch,
-                                request_history.clone(),
-                                loop_state.native_query_depth,
-                                token.clone(),
-                            ).await?,
-                            None => crate::streaming_executor::StreamingToolExecutor::try_new(
-                                orch,
-                                request_history.clone(),
-                                loop_state.native_query_depth,
-                            ).await?,
-                        };
+                        exec = crate::streaming_executor::StreamingToolExecutor::try_new_for_query(
+                            orch,
+                            request_history.clone(),
+                            loop_state.native_query_depth,
+                            user_cancel.clone(),
+                            available_tool_names.clone(),
+                        )
+                        .await?;
                         let assistant_message =
                             pumped_assistant_message(&pumped_from_recovery, assistant_id);
                         let mut prior_tool_uses = Vec::new();
@@ -1727,6 +1716,7 @@ impl StreamingTurnDriver<'_> {
             guarded_async_hook_reminders,
             context_announcements,
             wire_tools,
+            available_tool_names,
             skip_global_cache_for_system_prompt,
             deferred_reminder,
             date_change_reminder,
@@ -1758,6 +1748,7 @@ impl StreamingTurnDriver<'_> {
         guarded_async_hook_reminders: &mut Vec<(MessageId, Arc<dyn HookPublicationGuard>)>,
         context_announcements: &PreparedContextAnnouncements,
         wire_tools: &[lingxi_core::host::SourceToolWireDefinition],
+        available_tool_names: Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
         skip_global_cache_for_system_prompt: bool,
         native_anthropic_request_context: Option<lingxi_llm_client::NativeAnthropicRequestContext>,
         system_prompt: &Option<
@@ -2009,25 +2000,14 @@ impl StreamingTurnDriver<'_> {
         // tool_uses by the post-stream drive loop below (this is the
         // ONLY path that still `add_tool`s after the stream — the
         // normal path registers mid-stream).
-        let mut exec = match user_cancel.as_ref() {
-            Some(token) => {
-                crate::streaming_executor::StreamingToolExecutor::try_new_with_user_cancel(
-                    orch,
-                    request_history.clone(),
-                    native_query_depth,
-                    token.clone(),
-                )
-                .await?
-            }
-            None => {
-                crate::streaming_executor::StreamingToolExecutor::try_new(
-                    orch,
-                    request_history.clone(),
-                    native_query_depth,
-                )
-                .await?
-            }
-        };
+        let mut exec = crate::streaming_executor::StreamingToolExecutor::try_new_for_query(
+            orch,
+            request_history.clone(),
+            native_query_depth,
+            user_cancel.clone(),
+            available_tool_names.clone(),
+        )
+        .await?;
         let assistant_message = pumped_assistant_message(&pumped_from_fallback, assistant_id);
         let mut prior_tool_uses = Vec::new();
         for tu in &pumped_from_fallback.tool_uses {
@@ -2150,6 +2130,7 @@ impl StreamingTurnDriver<'_> {
             mut guarded_async_hook_reminders,
             context_announcements,
             wire_tools,
+            available_tool_names,
             skip_global_cache_for_system_prompt,
             deferred_reminder,
             date_change_reminder,
@@ -2825,6 +2806,7 @@ impl StreamingTurnDriver<'_> {
                                 &mut guarded_async_hook_reminders,
                                 &context_announcements,
                                 &wire_tools,
+                                available_tool_names.clone(),
                                 skip_global_cache_for_system_prompt,
                                 native_anthropic_request_context.clone(),
                                 system_prompt,
@@ -2954,19 +2936,14 @@ impl StreamingTurnDriver<'_> {
         let next_mod_response = if turn_step_hook_active {
             match remaining {
                 Some(stream) => {
-                    let exec = match user_cancel.as_ref() {
-                        Some(token) => crate::streaming_executor::StreamingToolExecutor::try_new_with_user_cancel(
-                            orch,
-                            query_history.clone(),
-                            loop_state.native_query_depth,
-                            token.clone(),
-                        ).await?,
-                        None => crate::streaming_executor::StreamingToolExecutor::try_new(
-                            orch,
-                            query_history.clone(),
-                            loop_state.native_query_depth,
-                        ).await?,
-                    };
+                    let exec = crate::streaming_executor::StreamingToolExecutor::try_new_for_query(
+                        orch,
+                        query_history.clone(),
+                        loop_state.native_query_depth,
+                        user_cancel.clone(),
+                        available_tool_names.clone(),
+                    )
+                    .await?;
                     Some(OpenedStreamingIteration {
                         opened: OpenedModelStream::Stream(stream),
                         exec,
@@ -2981,6 +2958,7 @@ impl StreamingTurnDriver<'_> {
                         guarded_async_hook_reminders,
                         context_announcements,
                         wire_tools: wire_tools.clone(),
+                        available_tool_names,
                         skip_global_cache_for_system_prompt,
                         deferred_reminder,
                         date_change_reminder,

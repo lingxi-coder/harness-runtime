@@ -2448,7 +2448,6 @@ async fn workflow_launches_and_completes_on_mobile() {
         default_model_selection_provider: Arc::new(std::sync::OnceLock::new()),
         checkpoints: rt.workflow_checkpoints.clone(),
         status_sink: rt.workflow_status_sink.clone(),
-        plugin_workflows: rt.wired_plugin_workflow_registry.clone(),
     };
     let launched = launcher
         .launch(tool_workflow::WorkflowLaunchSpec {
@@ -2644,7 +2643,6 @@ async fn workflow_relative_script_path_uses_live_cwd_but_session_files_stay_unde
         default_model_selection_provider: Arc::new(std::sync::OnceLock::new()),
         checkpoints: rt.workflow_checkpoints.clone(),
         status_sink: rt.workflow_status_sink.clone(),
-        plugin_workflows: rt.wired_plugin_workflow_registry.clone(),
     };
 
     let launched = launcher

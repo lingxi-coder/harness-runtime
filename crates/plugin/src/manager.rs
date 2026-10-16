@@ -57,6 +57,7 @@ use std::sync::Arc;
 use telemetry::tengu::plugin as plugin_telemetry;
 use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata, PiiTagged, Verified};
 use thiserror::Error;
+use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock};
 use tool_api::ToolRegistry;
 
@@ -324,10 +325,6 @@ pub struct PluginManager {
     /// composition root wires one via [`Self::with_plugin_workflows`] — every
     /// other component slot still materializes normally either way.
     plugin_workflows: Option<Arc<workflow::PluginWorkflowRegistry>>,
-    /// Namespaced workflow names (`{plugin}:{name}`) each plugin seeded into
-    /// [`Self::plugin_workflows`], so [`Self::unload_plugin`] can remove
-    /// exactly those entries (mirrors [`Self::plugin_mcp_names`]).
-    plugin_workflow_names: RwLock<HashMap<PluginId, Vec<String>>>,
     /// Live registry of plugin-declared custom themes (§14,
     /// [`theme_registry::PluginThemeRegistry`]). Unlike `plugin_workflows`,
     /// this port has no OTHER crate that needs to share the same `Arc` yet
@@ -337,7 +334,7 @@ pub struct PluginManager {
     plugin_themes: Arc<PluginThemeRegistry>,
     /// Namespaced theme slugs (`{plugin}:{name}`) each plugin seeded into
     /// [`Self::plugin_themes`], so [`Self::unload_plugin`] can remove exactly
-    /// those entries (mirrors [`Self::plugin_workflow_names`]).
+    /// those entries.
     plugin_theme_slugs: RwLock<HashMap<PluginId, Vec<String>>>,
     /// Optional live task registry used to arm plugin-declared persistent
     /// monitors. The host owns the concrete registry; this crate only submits
@@ -576,7 +573,6 @@ impl PluginManager {
             plugin_agent_names: RwLock::new(HashMap::new()),
             plugin_mcp_names: RwLock::new(HashMap::new()),
             plugin_workflows: None,
-            plugin_workflow_names: RwLock::new(HashMap::new()),
             plugin_themes: Arc::new(PluginThemeRegistry::new()),
             plugin_theme_slugs: RwLock::new(HashMap::new()),
             task_registry: None,
@@ -1682,26 +1678,12 @@ impl PluginManager {
         //      script's `export const meta = {…}` block instead of
         //      frontmatter).
         //
-        //      `v()` gates a file THREE ways before it may join the table,
-        //      and every gate DROPS the file rather than falling back:
-        //        `let e = await ZI(c,o,um); if (e===null) return
-        //           warn(`Plugin workflow ${o}: not a regular file or exceeds
-        //           ${um} bytes — skipping`), null;`
-        //        `let r = bf(e,{validateBody:!1}); if ("error" in r) return
-        //           warn(`Plugin workflow ${o} has invalid meta: ${r.error}
-        //           — skipping`), null;`
-        //      There is NO filename fallback on either branch: a shared
-        //      helper module dropped in `workflows/` (no `export const meta`)
-        //      is simply not a workflow. Registering it under its file stem
-        //      would put a name in the `Workflow` tool's `Available:` list
-        //      that then dies at `workflow::validate_meta` inside the
-        //      launcher — an accept-then-fail the oracle never produces —
-        //      so the port applies the same three gates.
-        //      `workflow::validate_meta` is this port's `bf(…,{validateBody:
-        //      !1})`: it parses the `meta` block only (first-statement, pure
-        //      literal, non-empty `name`/`description`) and is the very gate
-        //      the launcher already runs, so nothing can pass here and fail
-        //      there.
+        //      Native 2.1.295 `v()` applies the regular-file/524288-byte
+        //      bound, then calls `qS(..., { validateBody: false })`. Discovery
+        //      validates only the leading literal metadata and intentionally
+        //      keeps a valid `meta.name` even when the trailing body is invalid;
+        //      the catalog/launch boundary handles body syntax. There is no
+        //      filename fallback for a file without valid metadata.
         //
         //      Only collected when a registry is actually wired — the common
         //      case (no composition root has called `with_plugin_workflows`
@@ -1714,6 +1696,15 @@ impl PluginManager {
                 } else {
                     install_dir.join(&wp.path)
                 };
+                // Native checks the discovered filename with `.endsWith(".js")`
+                // before following a symlink to its target (including `.js`).
+                if !abs
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .is_some_and(|name| name.ends_with(".js"))
+                {
+                    continue;
+                }
                 // Keep the registry on one filesystem identity. In
                 // particular, macOS temp directories may be addressed via
                 // both `/var` and `/private/var`; storing the canonical path
@@ -1738,29 +1729,58 @@ impl PluginManager {
                     );
                     continue;
                 }
-                let Ok(raw) = tokio::fs::read_to_string(&abs).await else {
+                // Native decodes Buffer contents as UTF-8 with replacement.
+                // Bound the actual read too (the file can change after stat),
+                // then preserve that decoded string in the validated snapshot.
+                let Ok(file) = tokio::fs::File::open(&abs).await else {
                     continue;
                 };
-                if let Err(e) = workflow::validate_meta(&raw) {
-                    tracing::warn!(
-                        path = %abs.display(),
-                        "Plugin workflow {} has invalid meta: {e} — skipping",
-                        abs.display()
-                    );
-                    continue;
-                }
-                // `validate_meta` already proved `meta.name` is a non-empty
-                // string literal, so this cannot fall through in practice; a
-                // `None` here would be a parser disagreement, and dropping
-                // the file is the oracle-shaped outcome either way.
-                let Some(base_name) =
-                    workflow::meta_string_value(&raw, "name").filter(|value| !value.is_empty())
+                let mut bytes = Vec::with_capacity(
+                    usize::try_from(metadata.len().min(workflow::MAX_WORKFLOW_SCRIPT_BYTES))
+                        .unwrap_or(0),
+                );
+                let Ok(read) = file
+                    .take(workflow::MAX_WORKFLOW_SCRIPT_BYTES.saturating_add(1))
+                    .read_to_end(&mut bytes)
+                    .await
                 else {
                     continue;
                 };
+                if u64::try_from(read).unwrap_or(u64::MAX) > workflow::MAX_WORKFLOW_SCRIPT_BYTES {
+                    tracing::warn!(
+                        path = %abs.display(),
+                        "Plugin workflow {}: not a regular file or exceeds {} bytes — skipping",
+                        abs.display(),
+                        workflow::MAX_WORKFLOW_SCRIPT_BYTES
+                    );
+                    continue;
+                }
+                let raw = String::from_utf8_lossy(&bytes).into_owned();
+                // Keep the JavaScript string's UTF-16 code units: meta.name
+                // may contain an unpaired surrogate that a Rust `String`
+                // cannot represent without changing its identity.
+                let Some(meta) = workflow::extract_workflow_meta(&raw) else {
+                    continue;
+                };
+                let Some(name_units) = meta.name.string_units("") else {
+                    continue;
+                };
+                if name_units.is_empty() {
+                    continue;
+                }
+                let mut qualified_units = manifest.name.encode_utf16().collect::<Vec<_>>();
+                qualified_units.push(':' as u16);
+                qualified_units.extend(name_units);
+                let qualified_name = Utf16JsonProjection::root_string(
+                    String::from_utf16_lossy(&qualified_units),
+                    qualified_units,
+                )
+                .expect("validated workflow name is a root JSON string");
                 workflow_entries.push(workflow::PluginWorkflowEntry {
-                    name: format!("{plugin_name}:{base_name}"),
+                    qualified_name,
+                    script: raw,
                     script_path: abs,
+                    plugin_name: manifest.name.clone(),
                 });
             }
         }
@@ -2174,18 +2194,11 @@ impl PluginManager {
             .register_plugin_servers(manifest.id, configs)
             .await;
 
-        // 9. Workflows — join the saved-workflow search path (§14). Remember
-        //    the namespaced names FIRST so `unload_plugin` can remove exactly
-        //    these entries regardless of what else the registry holds.
+        // 9. Replace this plugin owner's ordered workflow candidates. The
+        //    shared registry rebuilds its visible same-name snapshot and can
+        //    restore an earlier candidate when a later owner is unloaded.
         if let Some(registry) = &self.plugin_workflows {
-            if !workflow_entries.is_empty() {
-                let names: Vec<String> = workflow_entries.iter().map(|e| e.name.clone()).collect();
-                registry.register(workflow_entries);
-                self.plugin_workflow_names
-                    .write()
-                    .await
-                    .insert(manifest.id, names);
-            }
+            registry.register(manifest.id, workflow_entries);
         }
 
         // 10. Themes — join the live plugin-theme registry (§14). Remember
@@ -2376,12 +2389,10 @@ impl PluginManager {
             }
         }
         let _ = self.lsp_registry.unregister_plugin(id).await;
-        // Workflow cleanup: remove exactly the namespaced entries this
-        // plugin seeded into the shared registry.
-        if let Some(names) = self.plugin_workflow_names.write().await.remove(id) {
-            if let Some(registry) = &self.plugin_workflows {
-                registry.unregister(&names);
-            }
+        // Remove this owner and rebuild the snapshot from plugins that remain
+        // loaded; a previously shadowed valid workflow may become visible.
+        if let Some(registry) = &self.plugin_workflows {
+            registry.unregister(*id);
         }
         // Theme cleanup: remove exactly the namespaced slugs this plugin
         // seeded into the plugin-theme registry.
@@ -2438,6 +2449,358 @@ mod plugin_skill_reference_tests {
             "Use $acme-plugin:frontend-design, $acme-plugin:device and \
              $ARGUMENTS. Keep $other and $plugin:device."
         );
+    }
+}
+
+#[cfg(test)]
+mod plugin_workflow_context_tests {
+    use super::*;
+    use command_api::CommandRegistry;
+    use hooks::HookRegistry;
+    use outputstyles::OutputStyleRegistry;
+    use platform_posix::{
+        PlainTextSecureStorage, PosixClock, PosixFileSystem, PosixHttp, PosixLspTransport,
+        PosixMcpTransport, PosixRuntime,
+    };
+    use skill::SkillRegistry;
+    use std::fs;
+    use tool_api::ToolRegistry;
+
+    async fn manager(
+        root: &Path,
+        workflows: Arc<workflow::PluginWorkflowRegistry>,
+    ) -> PluginManager {
+        let storage = PlainTextSecureStorage::new(root.join("secrets"))
+            .await
+            .unwrap();
+        let credentials = Arc::new(CredentialManager::new(
+            Arc::new(storage),
+            Arc::new(PosixClock::new()),
+            Arc::new(PosixHttp::new()),
+        ));
+        PluginManager::new(
+            root.to_path_buf(),
+            Arc::new(PosixFileSystem::new(root.to_path_buf())),
+            Arc::new(PosixHttp::new()),
+            Arc::new(PosixRuntime::new()),
+            credentials,
+            Arc::new(StrictPluginOnlyPolicy::empty()),
+            Arc::new(RwLock::new(CommandRegistry::new())),
+            Arc::new(RwLock::new(SkillRegistry::new())),
+            Arc::new(RwLock::new(HookRegistry::new())),
+            Arc::new(RwLock::new(OutputStyleRegistry::new())),
+            Arc::new(McpRegistry::new(Arc::new(PosixMcpTransport::new()))),
+            Arc::new(LspRegistry::new(Arc::new(PosixLspTransport::new()))),
+            Arc::new(RwLock::new(ToolRegistry::new())),
+        )
+        .with_plugin_workflows(workflows)
+    }
+
+    fn write_plugin(
+        root: &Path,
+        directory: &str,
+        manifest: serde_json::Value,
+        script: &str,
+    ) -> PathBuf {
+        write_plugin_file(root, directory, manifest, "workflow.js", script)
+    }
+
+    fn write_plugin_file(
+        root: &Path,
+        directory: &str,
+        manifest: serde_json::Value,
+        filename: &str,
+        script: &str,
+    ) -> PathBuf {
+        let plugin_dir = root.join(directory);
+        fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
+        fs::create_dir_all(plugin_dir.join("scripts")).unwrap();
+        fs::write(
+            plugin_dir.join(".lingxi-plugin/plugin.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::write(plugin_dir.join("scripts").join(filename), script).unwrap();
+        plugin_dir
+    }
+
+    async fn enable_plugin(manager: &PluginManager, plugin_dir: &Path) {
+        let Some((id, manifest)) =
+            crate::discovery::load_plugin_from_path_with_mcp_gate(plugin_dir, false, None).await
+        else {
+            panic!("plugin fixture should load: {}", plugin_dir.display());
+        };
+        manager
+            .enable(&id, manifest, plugin_dir.to_path_buf())
+            .await
+            .expect("plugin enable should materialize its validated workflow");
+    }
+
+    async fn enable_plugin_with_source(
+        manager: &PluginManager,
+        plugin_dir: &Path,
+        install_source_id: &str,
+    ) {
+        let Some((id, manifest)) = crate::discovery::load_plugin_from_path_with_mcp_gate(
+            plugin_dir,
+            false,
+            Some(install_source_id),
+        )
+        .await
+        else {
+            panic!("plugin fixture should load: {}", plugin_dir.display());
+        };
+        manager
+            .enable(&id, manifest, plugin_dir.to_path_buf())
+            .await
+            .expect("plugin enable should materialize its validated workflow");
+    }
+
+    fn units(value: &Utf16JsonProjection) -> Vec<u16> {
+        value
+            .string_units("")
+            .expect("qualified name should be a root JSON string")
+    }
+
+    #[tokio::test]
+    async fn disabling_a_loaded_same_source_version_restores_shadowed_workflow() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workflows = Arc::new(workflow::PluginWorkflowRegistry::new());
+        let manager = manager(tmp.path(), workflows.clone()).await;
+        let v1_script =
+            "export const meta = { name: 'deploy', description: 'Deploy v1' };\nlog('v1')";
+        let v2_script =
+            "export const meta = { name: 'deploy', description: 'Deploy v2' };\nlog('v2')";
+        let v1_dir = write_plugin(
+            tmp.path(),
+            "plugins/cache/acme/same/1.0.0",
+            serde_json::json!({
+                "name": "same",
+                "version": "1.0.0",
+                "workflows": "./scripts/workflow.js"
+            }),
+            v1_script,
+        );
+        let v2_dir = write_plugin(
+            tmp.path(),
+            "plugins/cache/acme/same/2.0.0",
+            serde_json::json!({
+                "name": "same",
+                "version": "2.0.0",
+                "workflows": "./scripts/workflow.js"
+            }),
+            v2_script,
+        );
+        // This fixture covers the owner registry's restoration behavior when
+        // two versions are independently loaded (for example by a host refresh
+        // racing a manual registration). Effective installed-plugin discovery
+        // is tested separately to select only the active Native lbn row.
+        let (v1_id, v1_manifest) = crate::discovery::load_plugin_from_path_with_mcp_gate(
+            &v1_dir,
+            false,
+            Some("same@acme"),
+        )
+        .await
+        .expect("v1 plugin fixture should load");
+        let (v2_id, v2_manifest) = crate::discovery::load_plugin_from_path_with_mcp_gate(
+            &v2_dir,
+            false,
+            Some("same@acme"),
+        )
+        .await
+        .expect("v2 plugin fixture should load");
+        manager
+            .enable(&v1_id, v1_manifest, v1_dir.clone())
+            .await
+            .expect("enable v1 owner");
+        manager
+            .enable(&v2_id, v2_manifest, v2_dir.clone())
+            .await
+            .expect("enable v2 owner");
+        assert_ne!(
+            v1_id, v2_id,
+            "each installed version has its own loaded owner"
+        );
+        assert_eq!(manager.loaded_plugin_ids().await.len(), 2);
+        assert_eq!(
+            workflows.resolve("same:deploy"),
+            Some(v2_dir.join("scripts/workflow.js").canonicalize().unwrap())
+        );
+
+        manager.disable(&v2_id).await.expect("disable shadowing v2");
+        assert!(matches!(
+            manager.plugin_state(&v1_id).await,
+            Some(PluginState::Loaded { .. })
+        ));
+        assert_eq!(
+            workflows.resolve("same:deploy"),
+            Some(v1_dir.join("scripts/workflow.js").canonicalize().unwrap()),
+            "unloading the active shadow restores the still-loaded v1 workflow"
+        );
+        manager.disable(&v1_id).await.expect("disable v1");
+        assert_eq!(workflows.resolve("same:deploy"), None);
+    }
+
+    #[tokio::test]
+    async fn workflow_snapshot_keeps_validated_script_raw_name_and_canonical_plugin_owner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workflows = Arc::new(workflow::PluginWorkflowRegistry::new());
+        let manager = manager(tmp.path(), workflows.clone()).await;
+        let plugin_script = concat!(
+            "export const meta = { name: 'deploy\\uD800', description: 'Deploy' };\n",
+            "// exact script bytes are captured once after validation\n",
+        );
+        let bare_script = "export const meta = { name: 'inspect', description: 'Inspect' };\n";
+        let renamed_script = "export const meta = { name: 'renamed', description: 'Renamed' };\n";
+        let plugin_dir = write_plugin(
+            tmp.path(),
+            "plugins/with-context",
+            serde_json::json!({
+                "name": "with-context",
+                "version": "1.0.0",
+                "workflows": "./scripts/workflow.js"
+            }),
+            plugin_script,
+        );
+        let bare_dir = write_plugin(
+            tmp.path(),
+            "plugins/without-optional-context",
+            serde_json::json!({
+                "name": "without-optional-context",
+                "version": "1.0.0",
+                "workflows": "./scripts/workflow.js"
+            }),
+            bare_script,
+        );
+        let renamed_dir = write_plugin(
+            tmp.path(),
+            "plugins/renamed-from-marketplace",
+            serde_json::json!({
+                "name": "renamed-plugin",
+                "renameFrom": "legacy-plugin",
+                "version": "1.0.0",
+                "workflows": "./scripts/workflow.js"
+            }),
+            renamed_script,
+        );
+
+        enable_plugin(&manager, &plugin_dir).await;
+        enable_plugin(&manager, &bare_dir).await;
+        enable_plugin_with_source(&manager, &renamed_dir, "legacy-plugin@marketplace-x").await;
+
+        let entries = workflows.entries();
+        assert_eq!(entries.len(), 3);
+        let mut expected_qualified = "with-context:deploy".encode_utf16().collect::<Vec<_>>();
+        expected_qualified.push(0xd800);
+        assert_eq!(units(&entries[0].qualified_name), expected_qualified);
+        assert_eq!(entries[0].plugin_name, "with-context");
+        assert_eq!(entries[0].script, plugin_script);
+        assert_eq!(
+            entries[0].script_path,
+            plugin_dir
+                .join("scripts/workflow.js")
+                .canonicalize()
+                .unwrap()
+        );
+
+        assert_eq!(
+            units(&entries[1].qualified_name),
+            "without-optional-context:inspect"
+                .encode_utf16()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(entries[1].plugin_name, "without-optional-context");
+        assert_eq!(entries[1].script, bare_script);
+
+        assert_eq!(
+            units(&entries[2].qualified_name),
+            "renamed-plugin:renamed".encode_utf16().collect::<Vec<_>>()
+        );
+        assert_eq!(entries[2].plugin_name, "renamed-plugin");
+        assert_eq!(entries[2].script, renamed_script);
+    }
+
+    #[tokio::test]
+    async fn workflow_discovery_keeps_valid_meta_when_body_syntax_is_invalid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workflows = Arc::new(workflow::PluginWorkflowRegistry::new());
+        let manager = manager(tmp.path(), workflows.clone()).await;
+        let script = "export const meta = { name: 'malformed', description: 'd' };\nif (";
+        let plugin_dir = write_plugin(
+            tmp.path(),
+            "plugins/malformed-body",
+            serde_json::json!({
+                "name": "malformed-body",
+                "version": "1.0.0",
+                "workflows": "./scripts/workflow.js"
+            }),
+            script,
+        );
+
+        enable_plugin(&manager, &plugin_dir).await;
+
+        let entries = workflows.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].script, script);
+        assert_eq!(
+            units(&entries[0].qualified_name),
+            "malformed-body:malformed"
+                .encode_utf16()
+                .collect::<Vec<_>>()
+        );
+        assert!(workflow::extract_workflow_meta(script).is_some());
+        assert!(workflow::validate_body(script).is_err());
+    }
+
+    #[tokio::test]
+    async fn workflow_discovery_replaces_invalid_utf8_like_native_buffer_decode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workflows = Arc::new(workflow::PluginWorkflowRegistry::new());
+        let manager = manager(tmp.path(), workflows.clone()).await;
+        let mut bytes = b"export const meta = { name: 'utf8', description: 'd' };\n// ".to_vec();
+        bytes.push(0xff);
+        let expected = String::from_utf8_lossy(&bytes).into_owned();
+        let plugin_dir = write_plugin(
+            tmp.path(),
+            "plugins/invalid-utf8",
+            serde_json::json!({
+                "name": "invalid-utf8",
+                "version": "1.0.0",
+                "workflows": "./scripts/workflow.js"
+            }),
+            "placeholder",
+        );
+        fs::write(plugin_dir.join("scripts/workflow.js"), &bytes).unwrap();
+
+        enable_plugin(&manager, &plugin_dir).await;
+
+        let entries = workflows.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].script, expected);
+        assert!(entries[0].script.contains('\u{fffd}'));
+    }
+
+    #[tokio::test]
+    async fn workflow_discovery_ignores_non_javascript_component_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workflows = Arc::new(workflow::PluginWorkflowRegistry::new());
+        let manager = manager(tmp.path(), workflows.clone()).await;
+        let script = "export const meta = { name: 'not-js', description: 'd' };";
+        let plugin_dir = write_plugin_file(
+            tmp.path(),
+            "plugins/non-js-workflow",
+            serde_json::json!({
+                "name": "non-js-workflow",
+                "version": "1.0.0",
+                "workflows": "./scripts/workflow.ts"
+            }),
+            "workflow.ts",
+            script,
+        );
+
+        enable_plugin(&manager, &plugin_dir).await;
+
+        assert!(workflows.entries().is_empty());
     }
 }
 

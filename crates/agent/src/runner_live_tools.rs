@@ -355,6 +355,7 @@ mod tests {
 
     fn invocation_context() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            available_tool_names: None,
             cancellation_token: CancellationToken::new(),
             permission_pause_observer: None,
             parent_agent_id: None,

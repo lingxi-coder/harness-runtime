@@ -588,6 +588,10 @@ pub struct PromptOptions {
     /// Tool prompts that need provider-specific wording should use this instead
     /// of request-builder internals.
     pub model_profile: Option<String>,
+    /// Whether this exact request can load the bundled `workflow-authoring` skill.
+    /// This is captured per request so concurrent queries cannot observe another
+    /// request's Skill-tool availability.
+    pub workflow_authoring_available: bool,
     /// Skill suggestions from the owning session's current eligible skill set.
     /// Callers suppress these when the request does not offer the `Skill` tool.
     pub bash_precommit_skills: BashPrecommitSkills,

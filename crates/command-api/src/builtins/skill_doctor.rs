@@ -417,8 +417,12 @@ fn estimate_listing_tokens(command: &SlashCommand) -> u64 {
             .string_units("")
             .map_or(0, |units| units.len())
         + 4;
-    if let Some(when) = command.when_to_use.as_deref() {
-        chars = chars.saturating_add(when.chars().count() + 3);
+    if let Some(when_units) = command
+        .when_to_use
+        .as_ref()
+        .and_then(|when| when.string_units(""))
+    {
+        chars = chars.saturating_add(when_units.len() + 3);
     }
     u64::try_from(chars.saturating_add(3) / 4)
         .unwrap_or(u64::MAX)

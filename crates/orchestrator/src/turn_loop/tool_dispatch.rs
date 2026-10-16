@@ -2298,6 +2298,7 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
             )
         };
         let context = ToolUseContext {
+            available_tool_names: None,
             options: ToolUseOptions {
                 debug: false,
                 verbose: false,
@@ -3772,6 +3773,7 @@ pub(crate) async fn streaming_tool_context_base(
         (session.model.clone(), session.model_profile.clone())
     };
     ToolUseContext {
+        available_tool_names: None,
         options: ToolUseOptions {
             debug: false,
             verbose: false,

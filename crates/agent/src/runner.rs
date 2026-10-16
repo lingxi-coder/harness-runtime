@@ -226,10 +226,17 @@ fn invocation_context_for_tool(
     system_prompt: Option<&Utf16JsonProjection>,
     model: &str,
     model_profile: Option<String>,
+    allowed_tools: &[String],
     tool_context_state: Option<lingxi_core::host::tool_invoker::ToolInvocationContextState>,
 ) -> lingxi_core::host::tool_invoker::SubagentInvocationContext {
     let agent_id = ctx.agent_id;
     lingxi_core::host::tool_invoker::SubagentInvocationContext {
+        available_tool_names: Some(
+            allowed_tools
+                .iter()
+                .map(|name| Utf16JsonProjection::from(name.as_str()))
+                .collect(),
+        ),
         native_query_depth: Some(ctx.native_query_depth),
         cancellation_token: CancellationToken::new(),
         permission_pause_observer: ctx.task_registry.clone().map(|registry| {
@@ -497,6 +504,7 @@ async fn stage_assistant_row(
             system_prompt,
             logical_model,
             logical_model_profile.clone(),
+            allowed_tools,
             tool_context_state.clone(),
         );
         // Main's W1 carrier distinguishes the query's pre-call history, the

@@ -82,7 +82,8 @@ async fn resolves_enabled_entries_to_versioned_cache_paths() {
     enabled.insert("weather@acme".to_string(), true);
     enabled.insert("calc@acme".to_string(), false); // disabled → skipped
 
-    let discovered = plugin::discover_enabled_plugins(root, &enabled).await;
+    let context = plugin::PluginDiscoveryContext::new(root.to_path_buf(), root.to_path_buf());
+    let discovered = plugin::discover_enabled_plugins(root, &enabled, &context).await;
 
     assert_eq!(
         discovered.len(),
@@ -110,8 +111,8 @@ async fn resolves_the_recorded_version_when_multiple_cache_versions_exist() {
     write_cached_plugin(root, "acme", "weather", "1.0.0");
     write_cached_plugin(root, "acme", "weather", "2.0.0");
 
-    // The installed record is authoritative. Keeping both cache versions on
-    // disk makes a directory probe ambiguous; the record selects 2.0.0.
+    // The installed row is authoritative. Keeping both cache versions on
+    // disk makes a directory probe ambiguous; the single row selects 2.0.0.
     let installed = serde_json::json!({
         "version": 2,
         "plugins": {
@@ -131,13 +132,14 @@ async fn resolves_the_recorded_version_when_multiple_cache_versions_exist() {
     .unwrap();
 
     let enabled = BTreeMap::from([("weather@acme".to_string(), true)]);
-    let discovered = plugin::discover_enabled_plugins(root, &enabled).await;
+    let context = plugin::PluginDiscoveryContext::new(root.to_path_buf(), root.to_path_buf());
+    let discovered = plugin::discover_enabled_plugins(root, &enabled, &context).await;
 
     assert_eq!(discovered.len(), 1);
     assert_eq!(
         discovered[0].2,
         root.join("cache/acme/weather/2.0.0"),
-        "enabled discovery must use the installed record's exact version"
+        "enabled discovery must use the active installed row's exact path"
     );
 }
 
@@ -165,8 +167,9 @@ async fn an_authoritative_missing_record_does_not_probe_another_cache_version() 
     .unwrap();
 
     let enabled = BTreeMap::from([("weather@acme".to_string(), true)]);
+    let context = plugin::PluginDiscoveryContext::new(root.to_path_buf(), root.to_path_buf());
     assert!(
-        plugin::discover_enabled_plugins(root, &enabled)
+        plugin::discover_enabled_plugins(root, &enabled, &context)
             .await
             .is_empty(),
         "a present but missing installed record must not silently select another version"
@@ -199,7 +202,8 @@ async fn missing_version_dir_for_enabled_entry_is_skipped() {
     let mut enabled: BTreeMap<String, bool> = BTreeMap::new();
     enabled.insert("ghost@acme".to_string(), true);
 
-    let discovered = plugin::discover_enabled_plugins(root, &enabled).await;
+    let context = plugin::PluginDiscoveryContext::new(root.to_path_buf(), root.to_path_buf());
+    let discovered = plugin::discover_enabled_plugins(root, &enabled, &context).await;
     assert!(
         discovered.is_empty(),
         "uninstalled enabled entry is skipped"

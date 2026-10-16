@@ -765,6 +765,8 @@ mod tests {
                     cwd: &cwd,
                     is_preload: true,
                     main_loop_model: None,
+                    available_tool_names: None,
+                    workflow_authoring_base_allowed: false,
                 },
             )
             .unwrap();

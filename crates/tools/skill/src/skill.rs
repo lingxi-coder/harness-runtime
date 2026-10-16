@@ -1527,6 +1527,8 @@ present this turn, the skill is loaded — follow it directly rather than callin
                     cwd: &cwd,
                     is_preload: false,
                     main_loop_model: Some(ctx.options.main_loop_model.as_str()),
+                    available_tool_names: ctx.available_tool_names.as_deref(),
+                    workflow_authoring_base_allowed: false,
                 },
             ) {
                 Ok(prompt) => restore_parser_text(prompt, &argument_markers),

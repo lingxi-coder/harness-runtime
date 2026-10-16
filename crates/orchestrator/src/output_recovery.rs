@@ -427,6 +427,7 @@ pub(crate) struct FrozenGeneration {
     pub system: Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
     pub messages: Vec<lingxi_core::types::ConversationMessage>,
     pub tools: Vec<lingxi_core::host::source_tool_wire::SourceToolWireDefinition>,
+    pub available_tool_names: Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     pub skip_global_cache: bool,
     pub thinking_resumption_host_facts: NativeThinkingResumptionHostFacts,
 }

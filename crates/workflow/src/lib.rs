@@ -30,6 +30,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+mod acorn_parser;
 mod plugin_registry;
 pub use plugin_registry::{PluginWorkflowEntry, PluginWorkflowRegistry, MAX_WORKFLOW_SCRIPT_BYTES};
 
@@ -310,6 +311,9 @@ pub enum WorkflowError {
     Engine(String),
     /// The script threw or failed to evaluate.
     Script(String),
+    /// Acorn rejected source syntax; exact UTF-16 units are retained for the
+    /// model-facing diagnostic.
+    ScriptSource(lingxi_core::types::utf16_json::Utf16JsonProjection),
 }
 
 impl std::fmt::Display for WorkflowError {
@@ -317,11 +321,26 @@ impl std::fmt::Display for WorkflowError {
         match self {
             Self::Engine(e) => write!(f, "workflow engine error: {e}"),
             Self::Script(e) => write!(f, "workflow script error: {e}"),
+            Self::ScriptSource(source) => f.write_str(source.string_at("").unwrap_or_default()),
         }
     }
 }
 
 impl std::error::Error for WorkflowError {}
+
+impl WorkflowError {
+    /// Return an exact UTF-16 source diagnostic when this error came from the
+    /// workflow parser. Other script and engine errors are ordinary strings.
+    #[must_use]
+    pub fn source_diagnostic(
+        &self,
+    ) -> Option<&lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        match self {
+            Self::ScriptSource(source) => Some(source),
+            Self::Engine(_) | Self::Script(_) => None,
+        }
+    }
+}
 
 /// The outcome of running a workflow script body.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -368,36 +387,15 @@ pub fn prepare_script_body(script: &str) -> String {
         return native_trim_script_body(&script[body_start..]).to_owned();
     }
 
-    let mut parser = tree_sitter::Parser::new();
-    if parser
-        .set_language(&tree_sitter_javascript::LANGUAGE.into())
-        .is_err()
-    {
-        return script.to_owned();
-    }
-    let Some(tree) = parser.parse(script, None) else {
+    let Some(parsed) = validate_native_workflow_syntax(script).ok() else {
         return script.to_owned();
     };
-    if tree.root_node().has_error() {
-        return script.to_owned();
-    }
-    let Some(statement) = first_statement(tree.root_node()) else {
+    let Some(meta) = parsed.meta_object else {
         return script.to_owned();
     };
-    let source = script.as_bytes();
-    let Some(object) = meta_object(statement, source) else {
+    let Some(end) = utf16_offset_to_byte(script, meta.declaration_end_utf16) else {
         return script.to_owned();
     };
-    if walk_object_literal(object, source).is_err()
-        || !meta_string_field_nonempty(object, source, "name")
-        || !meta_string_field_nonempty(object, source, "description")
-    {
-        return script.to_owned();
-    }
-    let end = statement.end_byte();
-    if !script.is_char_boundary(end) {
-        return script.to_owned();
-    }
     native_trim_script_body(&script[end..]).to_owned()
 }
 
@@ -979,12 +977,7 @@ fn native_meta_fast_suffix_end(script: &str, object_end: usize) -> Option<usize>
 /// can reject that spelling. Parsing only the captured object preserves the
 /// fast path's boundary: trailing workflow code is still skipped, and all
 /// node offsets remain aligned with the wrapper used for metadata projection.
-fn parse_native_scanned_meta(
-    script: &str,
-    start: usize,
-    end: usize,
-) -> Option<(tree_sitter::Tree, String)> {
-    let object_source = script.get(start..end)?;
+fn parse_meta_object_source(object_source: &str) -> Option<(tree_sitter::Tree, String)> {
     let wrapped = format!("export const meta = {object_source};");
     let mut parser = tree_sitter::Parser::new();
     parser
@@ -995,9 +988,45 @@ fn parse_native_scanned_meta(
         return None;
     }
     let source = wrapped.as_bytes();
+    first_statement(tree.root_node()).and_then(|statement| meta_object(statement, source))?;
+    Some((tree, wrapped))
+}
+
+fn parse_native_scanned_meta(
+    script: &str,
+    start: usize,
+    end: usize,
+) -> Option<(tree_sitter::Tree, String)> {
+    let object_source = script.get(start..end)?;
+    let (tree, wrapped) = parse_meta_object_source(object_source)?;
+    let source = wrapped.as_bytes();
     let object =
         first_statement(tree.root_node()).and_then(|statement| meta_object(statement, source))?;
     native_meta_fast_tree_is_scannable(object, source).then_some((tree, wrapped))
+}
+
+fn utf16_offset_to_byte(script: &str, offset_utf16: usize) -> Option<usize> {
+    let mut current_utf16 = 0;
+    for (byte_offset, ch) in script.char_indices() {
+        if current_utf16 == offset_utf16 {
+            return Some(byte_offset);
+        }
+        let next_utf16 = current_utf16.checked_add(ch.len_utf16())?;
+        if offset_utf16 < next_utf16 {
+            return None;
+        }
+        current_utf16 = next_utf16;
+    }
+    (current_utf16 == offset_utf16).then_some(script.len())
+}
+
+fn source_slice_for_utf16_span(script: &str, start_utf16: usize, end_utf16: usize) -> Option<&str> {
+    if start_utf16 > end_utf16 {
+        return None;
+    }
+    let start = utf16_offset_to_byte(script, start_utf16)?;
+    let end = utf16_offset_to_byte(script, end_utf16)?;
+    script.get(start..end)
 }
 
 fn native_meta_fast_declaration_end(script: &str) -> Option<usize> {
@@ -1019,36 +1048,119 @@ fn native_meta_fast_declaration_end(script: &str) -> Option<usize> {
     Some(body_start)
 }
 
+const NATIVE_WORKFLOW_PARSE_HINT: &str = "Workflow scripts must be plain JavaScript — common causes are TypeScript syntax (type annotations, interfaces, generics) and broken string quoting or escaping.";
+
+fn append_source_text(units: &mut Vec<u16>, text: &str) {
+    units.extend(text.encode_utf16());
+}
+
+fn source_projection_from_units(
+    units: Vec<u16>,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let display = String::from_utf16_lossy(&units);
+    lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(display, units)
+        .expect("display text is derived from the same UTF-16 source units")
+}
+
+fn native_workflow_parse_fallback(
+    error: &acorn_parser::AcornSyntaxError,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let mut units = Vec::new();
+    append_source_text(&mut units, "Script parse error: ");
+    append_source_text(&mut units, &error.message);
+    append_source_text(&mut units, ". ");
+    append_source_text(&mut units, NATIVE_WORKFLOW_PARSE_HINT);
+    source_projection_from_units(units)
+}
+
+fn format_native_workflow_parse_error(
+    script: &str,
+    error: &acorn_parser::AcornSyntaxError,
+) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
+    let Some(line_number) = error.line else {
+        return native_workflow_parse_fallback(error);
+    };
+    let Some(column_utf16) = error.column_utf16 else {
+        return native_workflow_parse_fallback(error);
+    };
+    let Some(line) = line_number
+        .checked_sub(1)
+        .and_then(|index| script.split('\n').nth(index))
+    else {
+        return native_workflow_parse_fallback(error);
+    };
+
+    let line_units = line.encode_utf16().collect::<Vec<_>>();
+    let column = column_utf16.min(line_units.len());
+    let start = column
+        .saturating_sub(40)
+        .min(line_units.len().saturating_sub(80));
+    let end = start.saturating_add(80).min(line_units.len());
+    // qS slices UTF-16 code units, so retain the exact slice even if its
+    // boundary cuts an astral character into an unpaired surrogate.
+    let mut units = Vec::new();
+    append_source_text(&mut units, "Script parse error: ");
+    append_source_text(&mut units, &error.message);
+    append_source_text(&mut units, "\n\n");
+    units.extend_from_slice(&line_units[start..end]);
+    append_source_text(&mut units, "\n");
+    units.extend(std::iter::repeat_n(u16::from(b' '), column - start));
+    units.push(u16::from(b'^'));
+    append_source_text(&mut units, "\n\n");
+    append_source_text(&mut units, NATIVE_WORKFLOW_PARSE_HINT);
+    source_projection_from_units(units)
+}
+
+fn validate_native_workflow_syntax(
+    script: &str,
+) -> Result<acorn_parser::AcornParseResult, WorkflowError> {
+    match acorn_parser::parse(script) {
+        Ok(parsed) => Ok(parsed),
+        Err(acorn_parser::AcornParserError::Runtime(message)) => Err(WorkflowError::Engine(
+            format!("workflow Acorn parser runtime error: {message}"),
+        )),
+        Err(acorn_parser::AcornParserError::Syntax(error)) => Err(WorkflowError::ScriptSource(
+            format_native_workflow_parse_error(script, &error),
+        )),
+    }
+}
+
 /// Validate the script's `meta` block with the 2.1.295 workflow parser
 /// (`qS`/`U`/`j`/`O`/`M`/`K`, `src_207321470.js`, SHA
 /// `d07866f…`; qS starts at artifact byte 207325140 and M/K at 207328692 /
 /// 207329121). The first statement must be `export const meta = {…}`, the
 /// object must be a plain literal, and `name` / `description` must be nonempty
-/// strings. Error node names are mapped from tree-sitter to qS's ESTree names
-/// ([`estree_name`]).
+/// strings. Acorn is authoritative for full-source syntax; Tree-sitter walks
+/// the metadata literal after that syntax gate. Error node names are mapped to
+/// qS's ESTree names ([`estree_name`]).
 ///
 /// # Errors
-/// Returns [`WorkflowError::Script`] for invalid metadata or JavaScript. The
-/// exact Acorn syntax-error formatter used by qS is not reproduced here.
+/// Returns [`WorkflowError::Script`] for invalid metadata and
+/// [`WorkflowError::ScriptSource`] for Acorn syntax errors. Source diagnostics
+/// retain exact UTF-16 units when qS's excerpt cuts an astral scalar.
 pub fn validate_meta(script: &str) -> Result<(), WorkflowError> {
     if exceeds_native_script_code_unit_limit(script) {
         return Err(WorkflowError::Script(format!(
             "Script exceeds {NATIVE_WORKFLOW_MAX_SCRIPT_CODE_UNITS} bytes"
         )));
     }
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&tree_sitter_javascript::LANGUAGE.into())
-        .map_err(|e| WorkflowError::Engine(format!("tree-sitter init: {e}")))?;
-    let tree = parser
-        .parse(script, None)
-        .ok_or_else(|| WorkflowError::Engine("tree-sitter parse returned no tree".into()))?;
-    if tree.root_node().has_error() {
+    let parsed = validate_native_workflow_syntax(script)?;
+    let Some(meta) = parsed.meta_object else {
         return Err(WorkflowError::Script(
-            "Workflow script contains invalid JavaScript syntax".into(),
+            format!("{}export const meta = {{ name, description, phases }}{} must be the FIRST statement in the script", char::from(96), char::from(96)),
         ));
-    }
-    let src = script.as_bytes();
+    };
+    let Some(object_source) =
+        source_slice_for_utf16_span(script, meta.object_start_utf16, meta.object_end_utf16)
+    else {
+        return Err(WorkflowError::Engine(
+            "Acorn returned a metadata span that is not aligned to source text".into(),
+        ));
+    };
+    let (tree, wrapped) = parse_meta_object_source(object_source).ok_or_else(|| {
+        WorkflowError::Engine("Tree-sitter could not parse Acorn's metadata object".into())
+    })?;
+    let src = wrapped.as_bytes();
 
     let Some(obj) = first_statement(tree.root_node()).and_then(|s| meta_object(s, src)) else {
         return Err(WorkflowError::Script(
@@ -1208,10 +1320,6 @@ pub fn extract_workflow_meta(script: &str) -> Option<WorkflowMeta> {
     if exceeds_native_script_code_unit_limit(script) {
         return None;
     }
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&tree_sitter_javascript::LANGUAGE.into())
-        .ok()?;
     let fast_tree = native_meta_fast_object_start(script).and_then(|start| {
         let end = native_meta_fast_object_end(script, start)?;
         native_meta_fast_suffix_end(script, end)?;
@@ -1220,11 +1328,11 @@ pub fn extract_workflow_meta(script: &str) -> Option<WorkflowMeta> {
     let (tree, parsed_source) = if let Some((tree, wrapped)) = fast_tree {
         (tree, wrapped)
     } else {
-        let tree = parser.parse(script, None)?;
-        if tree.root_node().has_error() {
-            return None;
-        }
-        (tree, script.to_owned())
+        let parsed = validate_native_workflow_syntax(script).ok()?;
+        let meta = parsed.meta_object?;
+        let object_source =
+            source_slice_for_utf16_span(script, meta.object_start_utf16, meta.object_end_utf16)?;
+        parse_meta_object_source(object_source)?
     };
     let src = parsed_source.as_bytes();
     let obj =
@@ -1484,7 +1592,7 @@ fn first_statement(program: tree_sitter::Node) -> Option<tree_sitter::Node> {
     let mut c = program.walk();
     let first = program
         .named_children(&mut c)
-        .find(|n| n.kind() != "comment");
+        .find(|n| !matches!(n.kind(), "comment" | "hash_bang_line"));
     first
 }
 
@@ -2257,6 +2365,23 @@ mod meta_validation_tests {
         }
     }
 
+    fn source_err(script: &str) -> (String, Vec<u16>) {
+        match validate_meta(script) {
+            Err(error) => {
+                let source = error
+                    .source_diagnostic()
+                    .expect("Acorn syntax failures expose their exact UTF-16 source diagnostic");
+                (
+                    source.string_at("").unwrap_or_default().to_owned(),
+                    source
+                        .string_units("")
+                        .expect("source diagnostic has root UTF-16 units"),
+                )
+            }
+            other => panic!("expected source diagnostic, got {other:?}"),
+        }
+    }
+
     #[test]
     fn accepts_a_valid_pure_literal_meta() {
         validate_meta(
@@ -2301,6 +2426,98 @@ mod meta_validation_tests {
         assert_eq!(err("const meta = { name: 'a', description: 'b' };"), m); // not exported
         assert_eq!(err("export let meta = { name: 'a', description: 'b' };"), m); // let, not const
         assert_eq!(err("export const other = { name: 'a' };"), m); // wrong name
+    }
+
+    #[test]
+    fn acorn_full_parse_controls_syntax_and_native_diagnostic_format() {
+        let source_line = "const emoji='🚀'; const = 1;";
+        let source =
+            format!("export const meta = {{ name: 'x', description: 'd' }};\n{source_line}");
+        let expected = format!(
+            "Script parse error: Unexpected token (2:24)\n\n{source_line}\n{}^\n\n{}",
+            " ".repeat(24),
+            NATIVE_WORKFLOW_PARSE_HINT
+        );
+        let (display, units) = source_err(&source);
+        assert_eq!(display, expected);
+        assert_eq!(units, expected.encode_utf16().collect::<Vec<_>>());
+
+        let no_location = acorn_parser::AcornSyntaxError {
+            message: "opaque parser failure".into(),
+            line: None,
+            column_utf16: None,
+            position_utf16: None,
+        };
+        let fallback = format_native_workflow_parse_error("source", &no_location);
+        let expected_fallback =
+            format!("Script parse error: opaque parser failure. {NATIVE_WORKFLOW_PARSE_HINT}");
+        assert_eq!(fallback.string_at(""), Some(expected_fallback.as_str()));
+        assert_eq!(
+            fallback.string_units(""),
+            Some(expected_fallback.encode_utf16().collect())
+        );
+    }
+
+    #[test]
+    fn clipped_parse_excerpt_preserves_a_split_surrogate_as_utf16_units() {
+        let line = format!("{}🚀{}", "a".repeat(59), "b".repeat(79));
+        let error = acorn_parser::AcornSyntaxError {
+            message: "synthetic".into(),
+            line: Some(1),
+            column_utf16: Some(100),
+            position_utf16: Some(100),
+        };
+        let diagnostic = format_native_workflow_parse_error(&line, &error);
+        let units = diagnostic
+            .string_units("")
+            .expect("root diagnostic exposes exact source code units");
+        let prefix_units = "Script parse error: synthetic\n\n".encode_utf16().count();
+        assert_eq!(
+            units[prefix_units],
+            "🚀"
+                .encode_utf16()
+                .nth(1)
+                .expect("astral scalar has a low surrogate")
+        );
+    }
+
+    #[test]
+    fn acorn_acceptance_is_not_overruled_by_tree_sitter_body_errors() {
+        let multiline = "export\nconst\nmeta\n=\n{name:'x',description:'d'}; return 7;";
+        validate_meta(multiline).expect("qS accepts line breaks inside the metadata declaration");
+
+        let multiline_call = "export\nconst\nmeta\n=\n{name:'x',description:'d', value: make()};";
+        assert_eq!(
+            err(multiline_call),
+            "meta must be a pure literal: non-literal node type in meta: CallExpression"
+        );
+        let multiline_template =
+            "export\nconst\nmeta\n=\n{name:'x',description:'d', value: `x${value}`};";
+        assert_eq!(
+            err(multiline_template),
+            "meta must be a pure literal: template interpolation not allowed in meta"
+        );
+
+        let escaped_span =
+            "/*🚀*/\nexport\nconst\nmeta\n=\n{name:'x',description:'d', value:0x10};\nreturn 7;";
+        validate_meta(escaped_span)
+            .expect("Acorn spans metadata across multiline headers and astral prefixes");
+        assert!(extract_workflow_meta(escaped_span).is_some());
+        assert_eq!(prepare_script_body(escaped_span), "return 7;");
+
+        let source = r"export const m\u0065ta = { name: 'x', description: 'd' }; return 7;";
+        validate_meta(source).expect("qS permits return outside a function");
+        assert!(extract_workflow_meta(source).is_some());
+        assert_eq!(prepare_script_body(source), "return 7;");
+        validate_body(source).expect("prepared body is valid in the workflow async wrapper");
+    }
+
+    #[test]
+    fn native_hashbang_is_ignored_when_finding_the_first_statement() {
+        let source = "#!/usr/bin/env node\nexport const meta = { name: 'x', description: 'd' };\nlog('ran');";
+        validate_meta(source).expect("Acorn treats the initial hashbang as a comment");
+        assert!(extract_workflow_meta(source).is_some());
+        assert_eq!(prepare_script_body(source), "log('ran');");
     }
 
     #[test]

@@ -14,7 +14,6 @@ pub mod commit_skill;
 pub mod cron_skill;
 pub mod dataviz_skill;
 pub mod debug_skill;
-pub mod deep_research_skill;
 pub mod explain_usage_skill;
 pub mod fewer_permission_prompts_skill;
 pub mod keybindings_help_skill;
@@ -38,7 +37,6 @@ pub fn register_bundled_skills(reg: &mut CommandRegistry, cron_enabled: bool) {
     // Native 2.1.295 Kbo puts workflow commands before v9's bundledSkills,
     // then builtin-plugin skills afterwards. SEe/Ws append order is retained
     // before the independent user/model invocation projections.
-    register_deep_research_skill(reg);
     register_dataviz_skill(reg);
     register_update_config_skill(reg);
     register_keybindings_help_skill(reg);
@@ -209,34 +207,6 @@ fn register_dataviz_skill(reg: &mut CommandRegistry) {
         loaded_from: Some("bundled".into()),
         user_invocable: Some(true),
         has_user_specified_description: true,
-        ..SlashCommand::default()
-    });
-}
-
-/// Register the manual-only `/deep-research` launcher. The short prompt invokes
-/// the immutable built-in through the ordinary Workflow tool, so slash and tool
-/// entry points share one launch/runtime path.
-fn register_deep_research_skill(reg: &mut CommandRegistry) {
-    reg.register_command(SlashCommand {
-        name: "deep-research".into(),
-        description: deep_research_skill::DESCRIPTION.into(),
-        menu_description: Some("Research a question across verified sources".into()),
-        source: CommandSource::Bundled,
-        native_source: Some("built-in".into()),
-        native_type: Some(crate::model::NativeCommandType::Prompt),
-        native_slash_kind: Some(crate::model::NativeSlashKind::Workflow),
-        kind: SlashCommandKind::Bundled {
-            frontmatter: CommandFrontmatter {
-                allowed_tools: Some(vec!["Workflow".into()]),
-                ..CommandFrontmatter::default()
-            },
-            prompt_fn: Some(Arc::new(deep_research_skill::DeepResearchPromptFn)),
-        },
-        loaded_from: Some("bundled".into()),
-        user_invocable: Some(true),
-        disable_model_invocation: true,
-        has_user_specified_description: true,
-        argument_hint: Some(deep_research_skill::ARGUMENT_HINT.into()),
         ..SlashCommand::default()
     });
 }
@@ -436,10 +406,6 @@ fn register_workflow_authoring_skill(reg: &mut CommandRegistry) {
         has_user_specified_description: true,
         ..SlashCommand::default()
     });
-    // The Workflow tool description trades 17 KB of hook documentation for a
-    // pointer to this skill. It may only do that once the skill actually
-    // exists, so the registrar is what says so.
-    lingxi_core::host::session_flags::set_workflow_authoring_skill_registered(true);
 }
 
 fn register_simplify_skill(reg: &mut CommandRegistry) {
@@ -657,13 +623,6 @@ mod tests {
     fn the_bundled_skill_name_set_is_locked() {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, true);
-        let deep_research = reg.resolve(&"deep-research".into()).expect("registered");
-        assert_eq!(
-            deep_research.native_slash_kind,
-            Some(crate::model::NativeSlashKind::Workflow),
-            "the fixed builtin launcher retains Native workflow metadata"
-        );
-
         // Enumerate what actually registered, so this catches an ADDITION as
         // well as a loss. Filtering a hardcoded list against the registry would
         // only ever notice removals -- a new skill would slip in silently,
@@ -690,7 +649,6 @@ mod tests {
             "dataviz".to_string(),
             // Ported 2026-09-10, once the session debug log it reads existed.
             "debug".to_string(),
-            "deep-research".to_string(),
             "doctor".to_string(),
             // Ported 2026-09-10.
             "explain-usage".to_string(),
@@ -1051,36 +1009,6 @@ mod tests {
     }
 
     #[test]
-    fn deep_research_is_manual_only_and_uses_workflow_name_launcher() {
-        let mut reg = CommandRegistry::new();
-        register_bundled_skills(&mut reg, false);
-        let cmd = reg.resolve(&"deep-research".into()).expect("registered");
-        assert_eq!(cmd.user_invocable, Some(true));
-        assert!(cmd.disable_model_invocation);
-        assert_eq!(
-            cmd.argument_hint
-                .as_ref()
-                .and_then(|hint| hint.string_at("")),
-            Some("<question>")
-        );
-        match &cmd.kind {
-            SlashCommandKind::Bundled {
-                frontmatter,
-                prompt_fn,
-            } => {
-                assert_eq!(
-                    frontmatter.allowed_tools.as_deref(),
-                    Some(["Workflow".to_string()].as_slice())
-                );
-                let prompt = prompt_fn.as_ref().expect("prompt").build(&"why?".into());
-                assert!(prompt.contains("\"name\":\"deep-research\""));
-                assert!(prompt.contains("\"args\":\"why?\""));
-            }
-            other => panic!("expected bundled command, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn batch_is_user_only_with_when_to_use() {
         let mut reg = CommandRegistry::new();
         register_bundled_skills(&mut reg, false);
@@ -1096,7 +1024,8 @@ mod tests {
         );
         assert!(cmd
             .when_to_use
-            .as_deref()
+            .as_ref()
+            .and_then(|value| value.string_at(""))
             .unwrap()
             .starts_with("Use when the user wants"));
         assert!(cmd.description.contains("5–30 isolated worktree agents"));

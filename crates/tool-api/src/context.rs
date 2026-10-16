@@ -43,6 +43,10 @@ pub struct ToolUseContext {
     /// Tool-use blocks from earlier sibling rows in the same query, excluding
     /// the current assistant row. The host refreshes this on every call.
     pub same_turn_tool_uses: Vec<lingxi_core::types::ContentBlock>,
+    /// Effective tool names visible to the model query that produced this call,
+    /// including registered aliases. `None` means the caller did not supply a
+    /// tool list; `Some([])` is an explicitly empty caller list.
+    pub available_tool_names: Option<Vec<Utf16JsonProjection>>,
     /// The agent that issued this call, if known.
     pub agent_id: Option<AgentId>,
     /// Native per-context nested-memory triggers; independent of file cache.
@@ -209,6 +213,7 @@ impl ToolUseContext {
             messages: Vec::new(),
             tool_use_id: None,
             assistant_message_id: None,
+            available_tool_names: None,
             assistant_message: None,
             same_turn_tool_uses: Vec::new(),
             agent_id: None,

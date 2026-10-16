@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["third_party/git2-rs/git2", "third_party/git2-rs/libgit2-sys", "third_party/libssh2-sys", "third_party/mbedtls-sys", "third_party/syntect"]
+exclude = ["third_party/git2-rs/git2", "third_party/git2-rs/libgit2-sys", "third_party/libssh2-sys", "third_party/mbedtls-sys", "third_party/syntect", "third_party/icu_collator"]
 resolver = "2"
 members = [
     "crates/json-projection",

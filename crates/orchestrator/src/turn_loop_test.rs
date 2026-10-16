@@ -11348,6 +11348,7 @@ mod pre_tool_hook_tests {
                 },
                 same_turn_tool_uses: vec![],
             },
+            None,
             fence.clone(),
         )
         .await

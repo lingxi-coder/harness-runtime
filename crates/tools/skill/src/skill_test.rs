@@ -1960,6 +1960,69 @@ mod fork_dispatch_tests {
         ctx
     }
 
+    #[tokio::test]
+    async fn dynamic_body_receives_exact_caller_tool_names_and_absence() {
+        struct Capture(Arc<std::sync::Mutex<Vec<(Option<Vec<String>>, bool)>>>);
+        impl command_api::BundledPromptFn for Capture {
+            fn build(&self, _: &Utf16JsonProjection) -> Utf16JsonProjection {
+                "ok".into()
+            }
+
+            fn try_build_at(
+                &self,
+                _: &Utf16JsonProjection,
+                context: command_api::BundledPromptContext<'_>,
+            ) -> std::io::Result<Utf16JsonProjection> {
+                let names = context.available_tool_names.map(|names| {
+                    names
+                        .iter()
+                        .map(|name| name.string_at("").unwrap().to_owned())
+                        .collect()
+                });
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((names, context.workflow_authoring_base_allowed));
+                Ok("ok".into())
+            }
+        }
+
+        let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let desc = SkillDescriptor {
+            dynamic_body: Some(Arc::new(Capture(captured.clone()))),
+            ..prompt_desc("loop")
+        };
+        let tool = SkillTool::with_loader(
+            shell_test_ctx(dummy_out()),
+            Arc::new(FixedLoader(Some(desc))),
+        );
+
+        let mut with_tools = fresh_ctx();
+        with_tools.available_tool_names = Some(vec!["Skill".into(), "/workflow".into()]);
+        tool.call(source_json!({"skill":"loop"}), with_tools, fresh_tx())
+            .await
+            .expect("dynamic skill expands");
+
+        let mut empty_tools = fresh_ctx();
+        empty_tools.available_tool_names = Some(Vec::new());
+        tool.call(source_json!({"skill":"loop"}), empty_tools, fresh_tx())
+            .await
+            .expect("dynamic skill expands with an explicit empty caller catalog");
+
+        tool.call(source_json!({"skill":"loop"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("dynamic skill expands when caller omitted its tool list");
+
+        assert_eq!(
+            *captured.lock().unwrap(),
+            vec![
+                (Some(vec!["Skill".into(), "/workflow".into()]), false),
+                (Some(Vec::new()), false),
+                (None, false),
+            ]
+        );
+    }
+
     /// A `context: fork` skill launches a BACKGROUND subagent instead of
     /// expanding into this conversation, and reports it in claude's shape.
     #[tokio::test]

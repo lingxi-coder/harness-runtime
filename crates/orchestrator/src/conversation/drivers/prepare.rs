@@ -48,6 +48,10 @@ pub(crate) struct PreparedTurnStep {
     pub(crate) deferred_system_prompt:
         Option<lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
     pub(crate) wire_tools: Vec<lingxi_core::host::SourceToolWireDefinition>,
+    /// Exact canonical names and aliases captured from the same filtered tool
+    /// vector that produced this request's wire tools.
+    pub(crate) available_tool_names:
+        Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     pub(crate) skip_global_cache_for_system_prompt: bool,
     pub(crate) deferred_reminder: Option<ConversationMessage>,
     pub(crate) date_change_reminder: Option<ConversationMessage>,
@@ -151,6 +155,7 @@ impl ConversationOrchestrator {
             deferred_context_announcement_rows: Vec::new(),
             deferred_system_prompt: None,
             wire_tools: previous.wire_tools.clone(),
+            available_tool_names: previous.available_tool_names.clone(),
             skip_global_cache_for_system_prompt: previous.skip_global_cache_for_system_prompt,
             deferred_reminder: previous.deferred_reminder.clone(),
             date_change_reminder: previous.date_change_reminder.clone(),
@@ -395,8 +400,12 @@ impl ConversationOrchestrator {
         // The common post-user staging path runs before the current request's
         // final tool filters; if it did not produce a row, retry the typed
         // producer now against the exact pool used for this request.
-        let (wire_tools, skip_global_cache_for_system_prompt, complete_wire_tools) =
-            self.build_wire_tools_with_complete().await?;
+        let (
+            wire_tools,
+            skip_global_cache_for_system_prompt,
+            complete_wire_tools,
+            available_tool_names,
+        ) = self.build_wire_tools_with_complete().await?;
         if native_nar_ingress
             && !crate::request_context::prompt_ingress_batch_finalized()
             && crate::request_context::staged_prompt_ingress_attachments().is_some()
@@ -1037,6 +1046,7 @@ impl ConversationOrchestrator {
             deferred_context_announcement_rows,
             deferred_system_prompt: system.cloned(),
             wire_tools,
+            available_tool_names: Some(available_tool_names),
             skip_global_cache_for_system_prompt,
             deferred_reminder,
             date_change_reminder,

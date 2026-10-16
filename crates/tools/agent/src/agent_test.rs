@@ -356,6 +356,7 @@ mod tests {
 
     fn fresh_ctx_with_registry(registry: Arc<ToolRegistry>) -> ToolUseContext {
         ToolUseContext {
+            available_tool_names: None,
             agent_spawn_provenance: Default::default(),
             options: ToolUseOptions {
                 debug: false,
@@ -2317,6 +2318,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "Agent",
                     fusion_input(Some("implement")),
                     SubagentInvocationContext {
+                        available_tool_names: None,
                         cancellation_token: tokio_util::sync::CancellationToken::new(),
                         permission_pause_observer: None,
                         parent_agent_id: None,
@@ -5884,6 +5886,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 "NoopTool",
                 source_fixture(&serde_json::json!({})),
                 lingxi_core::host::tool_invoker::SubagentInvocationContext {
+                    available_tool_names: None,
                     cancellation_token: lingxi_core::host::CancellationToken::new(),
                     permission_pause_observer: None,
                     parent_agent_id: None,
@@ -7612,6 +7615,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 include_examples: true,
                 model: None,
                 model_profile: None,
+                workflow_authoring_available: false,
                 bash_precommit_skills: Default::default(),
                 bash_precommit_session_generation: 0,
             })

@@ -211,6 +211,10 @@ pub struct SubagentInvocationContext {
     /// Current Native query depth of the caller when known. This is not the
     /// separate Agent spawn-nesting depth and remains None for non-query calls.
     pub native_query_depth: Option<u32>,
+    /// Current caller's effective tool names for Native bundled-skill gates.
+    /// Canonical names and aliases are captured together; `None` and `Some([])`
+    /// retain their distinct Native meanings.
+    pub available_tool_names: Option<Vec<Utf16JsonProjection>>,
     /// Trusted originating session for nested Agent/Fusion budget scoping.
     /// Receivers must propagate this value explicitly and must not infer it
     /// from hook/session metadata.

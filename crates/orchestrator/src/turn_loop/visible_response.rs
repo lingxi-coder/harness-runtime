@@ -16,6 +16,7 @@ pub(super) fn process_visible_response<'a>(
     request_history: Vec<ConversationMessage>,
     same_turn_tool_uses: Vec<ContentBlock>,
     request_history_source: super::mod_batched_step::RequestHistorySource,
+    available_tool_names: Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     query_depth: u32,
 ) -> futures::future::BoxFuture<'a, Result<TurnStepOutcome, OrchestratorError>> {
     Box::pin(async move {
@@ -251,6 +252,7 @@ pub(super) fn process_visible_response<'a>(
                         assistant_message: assistant_msg.clone(),
                         same_turn_tool_uses,
                     },
+                    available_tool_names.clone(),
                     publication_fence.clone(),
                 )
             })

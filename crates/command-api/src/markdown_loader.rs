@@ -1304,7 +1304,7 @@ pub fn build_markdown_command(file: &MarkdownCommandFile, source: CommandSource)
         // SLASH.1/SLASH.4: TS `createSkillCommand` copies `disable-model-invocation`
         // and `when_to_use` from the parsed frontmatter onto the top-level command.
         disable_model_invocation: file.frontmatter.disable_model_invocation,
-        when_to_use: file.frontmatter.when_to_use.clone(),
+        when_to_use: file.frontmatter.when_to_use.clone().map(Into::into),
         paths: file.frontmatter.paths.clone(),
         user_facing_name: Some(user_facing_name),
         ..SlashCommand::default()
@@ -1357,7 +1357,7 @@ pub fn build_skill_command(file: &SkillMarkdownCommandFile, source: CommandSourc
             .collect(),
         loaded_from: Some("skills".to_string()),
         disable_model_invocation: file.frontmatter.disable_model_invocation,
-        when_to_use: file.frontmatter.when_to_use.clone(),
+        when_to_use: file.frontmatter.when_to_use.clone().map(Into::into),
         paths: file.frontmatter.paths.clone(),
         skill_root: Some(file.skill_root.clone()),
         // `userInvocable: en` — was hardcoded `true`, which made an on-disk
@@ -2065,7 +2065,12 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
             &file,
             CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         );
-        assert_eq!(cmd.when_to_use.as_deref(), Some("use for X"));
+        assert_eq!(
+            cmd.when_to_use
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("use for X")
+        );
     }
 
     #[test]
@@ -2371,7 +2376,12 @@ Return the fixed ordinary-malformed-frontmatter body fallback.
         assert_eq!(cmd.loaded_from.as_deref(), Some("skills"));
         assert_eq!(cmd.skill_root.as_deref(), Some(skill_dir.as_path()));
         assert_eq!(cmd.content_length, Some(skill_markdown.len()));
-        assert_eq!(cmd.when_to_use.as_deref(), Some("when demo is useful"));
+        assert_eq!(
+            cmd.when_to_use
+                .as_ref()
+                .and_then(|value| value.string_at("")),
+            Some("when demo is useful")
+        );
         match &cmd.kind {
             SlashCommandKind::Markdown {
                 file_path,

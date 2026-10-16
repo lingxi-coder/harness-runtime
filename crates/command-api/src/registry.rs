@@ -14,6 +14,12 @@ use serde_json::{json, Value};
 /// Owns all known slash commands and built-in handler implementations.
 pub struct CommandRegistry {
     commands: HashMap<Vec<u16>, SlashCommand>,
+    /// Snapshot of workflow commands supplied by the shared Workflow catalog.
+    /// These are not ordinary registrations: their Native source position is
+    /// after disk settings commands and before plugin/bundled commands, and a
+    /// refresh replaces this producer's entire contribution atomically.
+    dynamic_workflow_commands: HashMap<Vec<u16>, SlashCommand>,
+    dynamic_workflow_order: Vec<Vec<u16>>,
     /// Physical registration order, retained for operations whose contract
     /// depends on assembly history.
     registration_order: Vec<Vec<u16>>,
@@ -64,6 +70,8 @@ impl CommandRegistry {
     pub fn new() -> Self {
         Self {
             commands: HashMap::new(),
+            dynamic_workflow_commands: HashMap::new(),
+            dynamic_workflow_order: Vec::new(),
             registration_order: Vec::new(),
             aliases: HashMap::new(),
             builtin_handlers: HashMap::new(),
@@ -331,11 +339,48 @@ impl CommandRegistry {
     #[must_use]
     pub fn resolve(&self, name: &Utf16JsonProjection) -> Option<&SlashCommand> {
         let name_units = name.string_units("")?;
-        if let Some(command) = self.commands.get(&name_units) {
+        if let Some(command) = self.resolve_units(&name_units) {
             return Some(command);
         }
         let canon = self.aliases.get(&name_units).unwrap_or(&name_units);
-        self.commands.get(canon)
+        self.resolve_units(canon)
+    }
+
+    fn resolve_units(&self, name: &[u16]) -> Option<&SlashCommand> {
+        let registered = self.commands.get(name);
+        if self.mod_commands.contains_key(name)
+            || registered
+                .is_some_and(|command| matches!(command.source, CommandSource::Settings(_)))
+        {
+            return registered;
+        }
+        self.dynamic_workflow_commands.get(name).or(registered)
+    }
+
+    /// Replace only the dynamic workflow producer's rows. Static registrations
+    /// remain intact behind these rows, so removing a workflow or a shadowing
+    /// plugin reveals the current remaining source without reconstructing the
+    /// entire command registry.
+    pub fn replace_native_workflow_commands(&mut self, commands: Vec<SlashCommand>) {
+        let mut replacement = HashMap::new();
+        let mut order = Vec::new();
+        for command in commands {
+            if command.native_slash_kind != Some(crate::model::NativeSlashKind::Workflow)
+                || command.native_type != Some(NativeCommandType::Prompt)
+            {
+                continue;
+            }
+            let Some(name) = command.name.string_units("") else {
+                continue;
+            };
+            if name.is_empty() || replacement.contains_key(&name) {
+                continue;
+            }
+            order.push(name.clone());
+            replacement.insert(name, command);
+        }
+        self.dynamic_workflow_commands = replacement;
+        self.dynamic_workflow_order = order;
     }
 
     /// Fetch a built-in handler by id.
@@ -351,6 +396,12 @@ impl CommandRegistry {
         handler_id: &Utf16JsonProjection,
     ) -> Option<Arc<dyn BuiltinCommandHandler>> {
         let handler_units = handler_id.string_units("")?;
+        if self.resolve_units(&handler_units).is_some_and(|command| {
+            command.native_slash_kind == Some(crate::model::NativeSlashKind::Workflow)
+                && self.dynamic_workflow_commands.contains_key(&handler_units)
+        }) {
+            return None;
+        }
         if let Some(handler) = self.builtin_handlers.get(&handler_units) {
             return Some(handler.clone());
         }
@@ -567,16 +618,28 @@ impl CommandRegistry {
     /// returning the full command list before any UI/model filtering.
     #[must_use]
     pub fn list_all(&self) -> Vec<&SlashCommand> {
-        self.commands.values().collect()
+        self.registration_ordered_commands()
     }
 
     /// Registered commands in physical source/assembly order.
     #[must_use]
     pub fn registration_ordered_commands(&self) -> Vec<&SlashCommand> {
-        self.registration_order
+        let mut commands = self
+            .registration_order
             .iter()
-            .filter_map(|name| self.commands.get(name))
-            .collect()
+            .filter_map(|name| {
+                let registered = self.commands.get(name)?;
+                let selected = self.resolve_units(name)?;
+                std::ptr::eq(registered, selected).then_some(registered)
+            })
+            .collect::<Vec<_>>();
+        commands.extend(self.dynamic_workflow_order.iter().filter_map(|name| {
+            let selected = self.resolve_units(name)?;
+            self.dynamic_workflow_commands
+                .get(name)
+                .filter(|dynamic| std::ptr::eq(*dynamic, selected))
+        }));
+        commands
     }
 
     /// Project the live command pool in Native's source-category order while
@@ -1179,14 +1242,18 @@ fn native_suggestion_edit_distance(left: &[u16], right: &[u16]) -> usize {
 fn native_command_source_rank(command: &SlashCommand) -> (u8, u8) {
     use lingxi_core::types::SettingsScope;
 
+    if command.native_slash_kind == Some(crate::model::NativeSlashKind::Workflow) {
+        return (1, 0);
+    }
+
     match command.source {
         CommandSource::Settings(SettingsScope::Managed) => (0, 0),
         CommandSource::Settings(SettingsScope::User) => (0, 1),
         CommandSource::Settings(SettingsScope::Project | SettingsScope::Local) => (0, 2),
-        CommandSource::Plugin => (1, u8::from(command.skill_root.is_some())),
-        CommandSource::Bundled => (2, 0),
-        CommandSource::Builtin => (3, 0),
-        CommandSource::Mcp => (4, 0),
+        CommandSource::Plugin => (2, u8::from(command.skill_root.is_some())),
+        CommandSource::Bundled => (3, 0),
+        CommandSource::Builtin => (4, 0),
+        CommandSource::Mcp => (5, 0),
     }
 }
 
@@ -1476,6 +1543,85 @@ mod tests {
                 .map(|name| name.string_at("").unwrap())
                 .collect::<Vec<_>>(),
             ["first-prompt", "non-user-prompt"]
+        );
+    }
+
+    #[test]
+    fn replacing_native_workflows_preserves_other_commands_and_source_order() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(markdown_cmd("project-skill", Vec::new()));
+        registry.register_command(SlashCommand {
+            name: "bundled-skill".into(),
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: None,
+            },
+            ..SlashCommand::default()
+        });
+        registry.register_command(SlashCommand {
+            name: "builtin-command".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Builtin {
+                handler_id: "builtin-command".into(),
+            },
+            ..SlashCommand::default()
+        });
+
+        let workflow = |name: &str| SlashCommand {
+            name: name.into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: None,
+            },
+            native_type: Some(NativeCommandType::Prompt),
+            native_slash_kind: Some(crate::model::NativeSlashKind::Workflow),
+            ..SlashCommand::default()
+        };
+
+        registry.replace_native_workflow_commands(vec![
+            workflow("workflow-one"),
+            workflow("workflow-two"),
+            workflow("workflow-two"),
+            // A non-workflow command is outside this producer and is ignored.
+            SlashCommand {
+                name: "must-not-be-added".into(),
+                ..SlashCommand::default()
+            },
+        ]);
+        let names = |registry: &CommandRegistry| {
+            registry
+                .native_source_ordered_commands()
+                .iter()
+                .map(|command| command.name.string_at("").unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(&registry),
+            [
+                "project-skill",
+                "workflow-one",
+                "workflow-two",
+                "bundled-skill",
+                "builtin-command",
+            ]
+        );
+
+        registry.replace_native_workflow_commands(vec![
+            workflow("workflow-two"),
+            workflow("workflow-three"),
+        ]);
+        assert_eq!(
+            names(&registry),
+            [
+                "project-skill",
+                "workflow-two",
+                "workflow-three",
+                "bundled-skill",
+                "builtin-command",
+            ],
+            "refresh replaces this producer's rows and preserves the other source groups"
         );
     }
 

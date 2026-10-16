@@ -5,7 +5,9 @@ use crate::parser::ParsedSlashCommand;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{Effect, McpConnectionId, PluginId};
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 /// Owning session context for a dynamic bundled skill prompt. Every production
@@ -20,7 +22,40 @@ pub struct BundledPromptContext<'a> {
     pub is_preload: bool,
     /// Dispatching session or child's selected model, rather than its parent.
     pub main_loop_model: Option<&'a str>,
+    /// Exact effective tool-name snapshot for this invocation. None means the
+    /// caller did not supply a tools option; Some([]) means an empty pool.
+    pub available_tool_names: Option<&'a [Utf16JsonProjection]>,
+    /// Native eOe non-tool policy/gate predicates evaluated for this call.
+    pub workflow_authoring_base_allowed: bool,
 }
+
+impl BundledPromptContext<'_> {
+    /// Whether Native's Workflow authoring tail is available for this call.
+    #[must_use]
+    pub fn workflow_authoring_available(&self) -> bool {
+        self.workflow_authoring_base_allowed
+            && self
+                .available_tool_names
+                .is_none_or(|names| names.iter().any(|name| name.string_at("") == Some("Skill")))
+    }
+}
+
+/// Per-dispatch availability source used when expanding a registered prompt.
+#[derive(Debug, Clone, Default)]
+pub struct BundledPromptAvailability {
+    /// Exact tool-name snapshot; None and Some([]) have distinct meaning.
+    pub available_tool_names: Option<Vec<Utf16JsonProjection>>,
+    /// Native eOe non-tool predicates for this invocation.
+    pub workflow_authoring_base_allowed: bool,
+}
+
+/// Current per-invocation source for dynamic prompt availability.
+pub type BundledPromptAvailabilityFuture =
+    Pin<Box<dyn Future<Output = BundledPromptAvailability> + Send + 'static>>;
+
+/// Current per-invocation source for dynamic prompt availability.
+pub type BundledPromptAvailabilityProvider =
+    Arc<dyn Fn() -> BundledPromptAvailabilityFuture + Send + Sync>;
 
 /// A context-aware dynamic bundled skill prompt.
 pub trait BundledPromptFn: Send + Sync {
@@ -216,9 +251,15 @@ pub struct SlashCommand {
     /// Where the command was loaded from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loaded_from: Option<String>,
-    /// Advisory model guidance from skill metadata.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub when_to_use: Option<String>,
+    /// Advisory model guidance from skill metadata. UTF-16 is retained because
+    /// Native stores this field on dynamic workflow command descriptors.
+    #[serde(
+        default,
+        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
+        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub when_to_use: Option<Utf16JsonProjection>,
     /// Gitignore-style conditional skill path patterns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,

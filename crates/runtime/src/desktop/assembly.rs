@@ -4640,6 +4640,7 @@ pub async fn build_with_credential_stack(
     // `build()` returns, so the loader never reads the empty registry.
     let shared_command_registry: Arc<RwLock<CommandRegistry>> =
         Arc::new(RwLock::new(CommandRegistry::new()));
+    let workflow_tool_slot = Arc::new(RwLock::new(None));
     let mod_command_catalog = Arc::new(command_api::RegistryModCommandCatalog::new(
         shared_command_registry.clone(),
     ));
@@ -4649,6 +4650,7 @@ pub async fn build_with_credential_stack(
         cfg.lingxi_home.clone(),
         cfg.add_dir.clone(),
         cfg.customization_gates.safe_mode,
+        workflow_tool_slot.clone(),
     ));
     // Bind the forked-skill resume gate's skill resolver to the SAME `Arc` that
     // is filled with the real registry at (6). Binding the slot (not its
@@ -4982,6 +4984,7 @@ pub async fn build_with_credential_stack(
     // task through it and returns `{status:"async_launched", taskId, taskType}`.
     let dynamic_workflows_gate;
     let workflow_size_guideline_state;
+    let workflow_tool: Arc<tool_workflow::WorkflowTool>;
     #[cfg(test)]
     let wired_workflow_tool: Option<Arc<tool_workflow::WorkflowTool>>;
     {
@@ -4994,7 +4997,6 @@ pub async fn build_with_credential_stack(
                 session_uuid: main_session_uuid.clone(),
                 default_model_selection_provider: subagent_default_model_selection_provider_cell
                     .clone(),
-                plugin_workflows: plugin_workflow_registry.clone(),
             });
         // Resolve the workflow-size setting through the canonical settings
         // composition: default → user → project → local → flag → managed.
@@ -5034,13 +5036,14 @@ pub async fn build_with_credential_stack(
             workflow_policy_enabled && workflow_session_enabled,
             workflow_session_managed || !workflow_policy_enabled,
         );
-        let mut workflow_tool = tool_workflow::WorkflowTool::new(Some(workflow_launcher))
+        let mut workflow_tool_builder = tool_workflow::WorkflowTool::new(Some(workflow_launcher))
             .with_current_cwd(current_cwd_cell.clone())
             .with_size_guideline_state(workflow_size_guideline_state.clone())
             .with_size_guideline_source(workflow_size_guideline, managed_workflow, default_workflow)
             .with_disable_workflows(managed_disable_workflows)
             .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
             .with_session_enabled(workflow_session_enabled)
+            .with_allowed_builtin_workflow_names(Vec::new())
             // §14 — the SAME registry the launcher above holds, so
             // `validate_input` and `launch` agree on what resolves.
             .with_plugin_workflows(plugin_workflow_registry.clone())
@@ -5048,14 +5051,15 @@ pub async fn build_with_credential_stack(
             // the main turn, including its interactive/headless behavior.
             .with_permission_gate(perms.clone());
         if let Some(policy) = boot_permission_policy.clone() {
-            workflow_tool = workflow_tool.with_permission_policy(policy);
+            workflow_tool_builder = workflow_tool_builder.with_permission_policy(policy);
         }
-        let workflow_tool = Arc::new(workflow_tool);
+        workflow_tool = Arc::new(workflow_tool_builder);
+        *workflow_tool_slot.write().await = Some(workflow_tool.clone());
         #[cfg(test)]
         {
             wired_workflow_tool = Some(workflow_tool.clone());
         }
-        tools_inner.register_builtin(workflow_tool);
+        tools_inner.register_builtin(workflow_tool.clone());
     }
     let registered_mcp_tools =
         tool_mcp::build_registered_mcp_tools(&mcp_registry, mcp_tool_ctx.clone()).await;
@@ -6128,6 +6132,7 @@ pub async fn build_with_credential_stack(
         &cfg.add_dir,
         cfg.managed_policy_snapshot_cache.clone(),
         shared_command_registry.clone(),
+        workflow_tool.clone(),
     )
     .await?;
     let insights_availability = command_api::builtins::InsightsCommandAvailability {
@@ -6374,8 +6379,8 @@ pub async fn build_with_credential_stack(
     //       driven (faithful): the `settings.enabledPlugins`
     //       (`plugin@marketplace` → enabled) entries resolve to versioned cache
     //       dirs `cache/{marketplace}/{plugin}/{version}/`, the layout
-    //       `loadAllPluginsCacheOnly` consumes; a flat-walk fallback covers
-    //       pre-fetched local plugin dirs. Each plugin command's BODY +
+    //       `loadAllPluginsCacheOnly` consumes. Explicit `--plugin-dir` session
+    //       plugins use their separate command-line discovery path. Each plugin command's BODY +
     //       frontmatter are loaded from its markdown file (not empty), and a
     //       plugin loads all-or-nothing (agent frontmatter is validated before
     //       any registry mutation). Best-effort: a malformed plugin logs a
@@ -6412,6 +6417,12 @@ pub async fn build_with_credential_stack(
     // entirely disabled (safe mode / `--bare` with no `--plugin-dir`), so the
     // interactive refresh reports "plugins disabled" rather than reloading.
     let mut plugin_runtime: Option<Arc<PluginRuntime>> = None;
+    let plugin_discovery_cwd = session_cwd.cwd();
+    let plugin_discovery_context = plugin::PluginDiscoveryContext {
+        cwd: plugin_discovery_cwd.clone(),
+        project_root: permission::set_cwd::project_root_of(&plugin_discovery_cwd)
+            .unwrap_or_else(|| plugin_discovery_cwd.clone()),
+    };
     if ambient_plugins || inline_plugins || restricted_policy_plugins {
         let plugins_dir = std::env::var_os("LINGXI_PLUGIN_CACHE_DIR")
             .map_or_else(|| cfg.lingxi_home.join("plugins"), std::path::PathBuf::from);
@@ -6419,14 +6430,15 @@ pub async fn build_with_credential_stack(
         // allowlist (`plugin@marketplace` → enabled) to versioned cache dirs
         // `cache/{marketplace}/{plugin}/{version}/`, exactly as
         // `loadAllPluginsCacheOnly` (`pluginLoader.ts:1888`) consumes a real
-        // `~/.lingxi/plugins`; a flat-walk fallback covers pre-fetched local
-        // dirs, and `--plugin-dir` session plugins append. The shared body is
+        // `~/.lingxi/plugins`; `--plugin-dir` session plugins use their
+        // explicit command-line discovery path. The shared body is
         // `discover_plugin_set`, reused by [`PluginRuntime::refresh`].
         let discovered = discover_plugin_set(
             ambient_plugins,
             inline_plugins,
             &cfg.lingxi_home,
-            &cwd_for_plugins,
+            &plugin_discovery_cwd,
+            &plugin_discovery_context,
             &plugins_dir,
             &cfg.cli_plugin_dirs,
             &[],
@@ -6525,11 +6537,14 @@ pub async fn build_with_credential_stack(
         }
         plugin_runtime = Some(Arc::new(PluginRuntime {
             manager: pm,
+            registry: shared_command_registry.clone(),
+            workflow_tool: workflow_tool.clone(),
             load_order: RwLock::new(plugin_load_order),
             analytics_bus: analytics_bus.clone(),
             plugins_dir,
             home: cfg.lingxi_home.clone(),
             cwd: cwd_for_plugins.clone(),
+            session_cwd: session_cwd.clone(),
             cli_plugin_dirs: cfg.cli_plugin_dirs.clone(),
             additional_project_roots: repo_root_reloader.registered_roots(),
             ambient: ambient_plugins,
@@ -6576,6 +6591,11 @@ pub async fn build_with_credential_stack(
     repo_root_reloader
         .set_plugin_runtime(plugin_runtime.clone())
         .await;
+    crate::workflow_catalog::refresh_workflow_commands(
+        &shared_command_registry,
+        workflow_tool.as_ref(),
+    )
+    .await;
 
     // (M4 cc2.1.198) `--agent <agent>` — resolve the session agent against the
     // FINAL catalog (dir + `--agents` flag + plugin agents), the binary's `dts`
@@ -6808,6 +6828,7 @@ pub async fn build_with_credential_stack(
     let mcp_prompt_registry = mcp_registry.clone();
     let prompt_paths_orch = orch.clone();
     let bundled_prompt_model_orch = orch.clone();
+    let workflow_prompt_availability_orch = orch.clone();
     let skill_prompt_transformer = crate::skill_prompt::mod_skill_prompt_transformer(
         plugin_hook_registry.clone(),
         mod_session.clone(),
@@ -6825,6 +6846,19 @@ pub async fn build_with_credential_stack(
         .with_bundled_prompt_model(Arc::new(move || {
             let orch = bundled_prompt_model_orch.clone();
             Box::pin(async move { orch.bundled_prompt_model().await.map(Some) })
+        }))
+        .with_bundled_prompt_availability(Arc::new(move || {
+            let orch = workflow_prompt_availability_orch.clone();
+            Box::pin(async move {
+                command_api::BundledPromptAvailability {
+                    available_tool_names: Some(
+                        orch.current_effective_tool_name_projections().await,
+                    ),
+                    // This local host has no PolicyVerdictState, so Native's
+                    // remembered-core workflow-authoring allowlist is empty.
+                    workflow_authoring_base_allowed: false,
+                }
+            })
         }))
         .with_skill_invocation_observer(skill_invocation_observer)
         .with_skill_usage_session(skill_usage_session)

@@ -237,21 +237,47 @@ pub(crate) struct StreamingToolExecutor<'a> {
 impl<'a> StreamingToolExecutor<'a> {
     /// Build the actor-backed scheduler. Runtime construction fails closed unless the finalized
     /// composition root bound this exact orchestrator Arc.
+    #[cfg(test)]
     pub(crate) async fn try_new(
         orch: &'a ConversationOrchestrator,
         query_history: Vec<ConversationMessage>,
         native_query_depth: u32,
     ) -> Result<Self, crate::error::OrchestratorError> {
-        Self::try_new_inner(orch, query_history, native_query_depth, None).await
+        Self::try_new_inner(orch, query_history, native_query_depth, None, None).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn try_new_with_user_cancel(
         orch: &'a ConversationOrchestrator,
         query_history: Vec<ConversationMessage>,
         native_query_depth: u32,
         user_cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Self, crate::error::OrchestratorError> {
-        Self::try_new_inner(orch, query_history, native_query_depth, Some(user_cancel)).await
+        Self::try_new_inner(
+            orch,
+            query_history,
+            native_query_depth,
+            Some(user_cancel),
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn try_new_for_query(
+        orch: &'a ConversationOrchestrator,
+        query_history: Vec<ConversationMessage>,
+        native_query_depth: u32,
+        user_cancel: Option<tokio_util::sync::CancellationToken>,
+        available_tool_names: Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
+    ) -> Result<Self, crate::error::OrchestratorError> {
+        Self::try_new_inner(
+            orch,
+            query_history,
+            native_query_depth,
+            user_cancel,
+            available_tool_names,
+        )
+        .await
     }
 
     async fn try_new_inner(
@@ -259,6 +285,7 @@ impl<'a> StreamingToolExecutor<'a> {
         query_history: Vec<ConversationMessage>,
         native_query_depth: u32,
         user_cancel: Option<tokio_util::sync::CancellationToken>,
+        available_tool_names: Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     ) -> Result<Self, crate::error::OrchestratorError> {
         let owner = orch
             .upgrade_streaming_tool_dispatch_owner()
@@ -319,8 +346,9 @@ impl<'a> StreamingToolExecutor<'a> {
                 })
             })
         });
-        let shared_context =
+        let mut shared_context =
             crate::turn_loop::streaming_tool_context_base(orch, query_history).await;
+        shared_context.available_tool_names = available_tool_names;
         let (session_root, publication_commit_lock) = orch
             .lifecycle_runtime
             .session_tool_hook_generation

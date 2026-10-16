@@ -942,9 +942,10 @@ pub fn desktop_tool_registry(
 }
 
 /// Launches `LocalWorkflow` background tasks for the `Workflow` tool by spawning
-/// through the shared [`tasks::registry::TaskRegistry`]. Resolves the spec's
-/// `scriptPath` / `script` / `name` to a script source (claude-code precedence);
-/// `scriptPath`/`name` are read from disk relative to `cwd`.
+/// through the shared [`tasks::registry::TaskRegistry`]. A named workflow uses
+/// the exact script snapshot selected by `WorkflowTool`; only an explicit
+/// `scriptPath` is read after its permission snapshot, and inline scripts use
+/// the call's own source.
 struct TaskRegistryWorkflowLauncher {
     registry: Arc<tasks::registry::TaskRegistry>,
     /// Project cwd that owns the session directory; fixed for the session.
@@ -962,15 +963,6 @@ struct TaskRegistryWorkflowLauncher {
     /// orchestrator exists.
     default_model_selection_provider:
         Arc<std::sync::OnceLock<agent::handle::DefaultModelSelectionProvider>>,
-    /// The SAME `workflow::PluginWorkflowRegistry` the composition root hands
-    /// to `plugin::PluginManager` and `tool_workflow::WorkflowTool` (§14).
-    ///
-    /// It must be the same one: `WorkflowTool::validate_input` consults the
-    /// registry to decide whether a name resolves, and this launcher resolves
-    /// the script it validated. Wiring only one of the two would make
-    /// `validate_input` accept `acme:deploy` and then fail here with
-    /// `Workflow "acme:deploy" not found. Available: (none)`.
-    plugin_workflows: Arc<workflow::PluginWorkflowRegistry>,
 }
 
 #[async_trait::async_trait]
@@ -987,15 +979,6 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         let session_uuid = spec
             .session_uuid
             .clone()
-            .map(|raw| {
-                // WorkflowLaunchSpec accepts legacy `sess:<uuid>` and the
-                // canonical bare UUID form. Transcript/task ownership uses
-                // the latter, so normalize once at this trusted host
-                // boundary rather than splitting a resumed workflow across
-                // two session directories.
-                lingxi_core::types::SessionId::parse_prefixed(&raw)
-                    .map_or(raw, |id| id.as_uuid().to_string())
-            })
             .unwrap_or_else(|| self.session_uuid.clone());
         let cwd = self
             .current_cwd
@@ -1017,37 +1000,33 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         let script =
             if let Some(raw_path) = spec.script_path.as_deref().filter(|path| !path.is_empty()) {
                 let approval = spec.script_path_approval.take().ok_or_else(|| {
-                    tool_workflow::WorkflowLaunchError(
+                    tool_workflow::WorkflowLaunchError::Message(
                         "Workflow scriptPath permission snapshot is missing; refusing to read it"
                             .into(),
                     )
                 })?;
                 let requested = abs(raw_path);
                 if approval.requested != requested {
-                    return Err(tool_workflow::WorkflowLaunchError(
+                    return Err(tool_workflow::WorkflowLaunchError::Message(
                         "Workflow scriptPath changed after permission was checked".into(),
                     ));
                 }
                 tool_workflow::read_script_path_after_permission(&approval)?
+            } else if let Some(script) = spec.resolved_workflow_script.take() {
+                script
+            } else if spec.name.as_deref().is_some_and(|name| !name.is_empty()) {
+                return Err(tool_workflow::WorkflowLaunchError::Message(
+                    "named workflow launch is missing its validated catalog snapshot".into(),
+                ));
             } else {
-                // §14 — the SAME registry `WorkflowTool::validate_input` checked,
-                // so a name that validated resolves here too.
-                tool_workflow::resolve_script_at(
-                    &cwd,
-                    &spec,
-                    |p| std::fs::read_to_string(abs(p)),
-                    Some(self.plugin_workflows.as_ref()),
-                )?
+                tool_workflow::resolve_script_at(&spec, |path| std::fs::read_to_string(abs(path)))?
             };
         // Reject a malformed `meta` block at the tool boundary (claude-code parses
         // + validates `meta` when the Workflow tool accepts a script). The
         // byte-exact message surfaces to the model as the tool error.
-        workflow::validate_meta(&script).map_err(|e| {
-            let msg = match e {
-                workflow::WorkflowError::Script(m) => m,
-                other => other.to_string(),
-            };
-            tool_workflow::WorkflowLaunchError(msg)
+        workflow::validate_meta(&script).map_err(|error| match error.source_diagnostic() {
+            Some(diagnostic) => tool_workflow::WorkflowLaunchError::Source(diagnostic.clone()),
+            None => tool_workflow::WorkflowLaunchError::Message(error.to_string()),
         })?;
         // Determinism gate (claude-code validateInput `if (e.script && HKa(...))`):
         // an INLINE `script` may not use Date.now()/Math.random()/new Date()
@@ -1060,13 +1039,16 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 .is_none();
         if is_inline {
             if let Err(workflow::WorkflowError::Script(m)) = workflow::check_determinism(&script) {
-                return Err(tool_workflow::WorkflowLaunchError(m));
+                return Err(tool_workflow::WorkflowLaunchError::Message(m));
             }
         }
         if let Err(error) = workflow::validate_body(&script) {
             let error = match error {
                 workflow::WorkflowError::Engine(message)
                 | workflow::WorkflowError::Script(message) => message,
+                workflow::WorkflowError::ScriptSource(diagnostic) => {
+                    return Err(tool_workflow::WorkflowLaunchError::Source(diagnostic));
+                }
             };
             let run_id = tool_workflow::mint_run_id(spec.resume_from_run_id.as_deref());
             let workflow_name = workflow::meta_string_value(&script, "name");
@@ -1087,13 +1069,13 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
         // launcher (which owns the registry). Message byte-exact (`ED` = TaskStop).
         if let Some(rid) = spec.resume_from_run_id.as_deref().filter(|s| !s.is_empty()) {
             if !tool_workflow::is_valid_run_id(rid) {
-                return Err(tool_workflow::WorkflowLaunchError(format!(
+                return Err(tool_workflow::WorkflowLaunchError::Message(format!(
                     "resumeFromRunId {rid:?} is not a workflow run id (expected wf_ followed by \
                      at least 6 lowercase alphanumerics or dashes)"
                 )));
             }
             if let Some(task_id) = self.registry.find_running_workflow_by_run_id(rid).await {
-                return Err(tool_workflow::WorkflowLaunchError(format!(
+                return Err(tool_workflow::WorkflowLaunchError::Message(format!(
                     "Workflow {rid} is still running (task {task_id}). Stop it first with \
                      TaskStop({{taskId: \"{task_id}\"}}) before resuming."
                 )));
@@ -1120,7 +1102,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             .registry
             .try_reserve_workflow_run_id(&run_id)
             .await
-            .map_err(|error| tool_workflow::WorkflowLaunchError(error.to_string()))?;
+            .map_err(|error| tool_workflow::WorkflowLaunchError::Message(error.to_string()))?;
         let launch_result = async {
             // Persist the script so it is editable + re-runnable via `scriptPath`
             // (claude-code persists every invocation's script "under the session
@@ -1134,32 +1116,32 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             let script_path = if let Some(p) = spec.script_path.as_deref().filter(|s| !s.is_empty())
             {
                 abs(p).to_str().map(str::to_string).ok_or_else(|| {
-                    tool_workflow::WorkflowLaunchError(
+                    tool_workflow::WorkflowLaunchError::Message(
                         "workflow script path is not valid UTF-8".to_string(),
                     )
                 })?
             } else {
                 let session_dir = subagents.parent().ok_or_else(|| {
-                    tool_workflow::WorkflowLaunchError(
+                    tool_workflow::WorkflowLaunchError::Message(
                         "cannot derive workflow session directory".to_string(),
                     )
                 })?;
                 let dir = session_dir.join("workflows");
                 let file = dir.join(format!("{run_id}.js"));
                 std::fs::create_dir_all(&dir).map_err(|error| {
-                    tool_workflow::WorkflowLaunchError(format!(
+                    tool_workflow::WorkflowLaunchError::Message(format!(
                         "cannot create workflow script directory '{}': {error}",
                         dir.display()
                     ))
                 })?;
                 std::fs::write(&file, &script).map_err(|error| {
-                    tool_workflow::WorkflowLaunchError(format!(
+                    tool_workflow::WorkflowLaunchError::Message(format!(
                         "cannot persist workflow script '{}': {error}",
                         file.display()
                     ))
                 })?;
                 file.to_str().map(str::to_string).ok_or_else(|| {
-                    tool_workflow::WorkflowLaunchError(
+                    tool_workflow::WorkflowLaunchError::Message(
                         "workflow script path is not valid UTF-8".to_string(),
                     )
                 })?
@@ -1171,7 +1153,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             // then append `workflows/<runId>`.
             let transcript_dir = { subagents.join("workflows").join(&run_id) };
             std::fs::create_dir_all(&transcript_dir).map_err(|error| {
-                tool_workflow::WorkflowLaunchError(format!(
+                tool_workflow::WorkflowLaunchError::Message(format!(
                     "cannot create workflow transcript directory '{}': {error}",
                     transcript_dir.display()
                 ))
@@ -1188,21 +1170,13 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                 .filter(|s| !s.is_empty())
                 .is_some();
             let named_source = spec
-                .name
-                .as_deref()
-                .filter(|s| !s.is_empty())
-                .and_then(|name| {
-                    tool_workflow::workflow_source_for_name(
-                        &cwd,
-                        name,
-                        Some(self.plugin_workflows.as_ref()),
-                    )
-                });
-            let named_builtin = spec
-                .name
-                .as_deref()
-                .and_then(|name| tool_workflow::BUILTIN_WORKFLOWS.get(name))
-                .is_some_and(|descriptor| descriptor.script == script);
+                .workflow_source
+                .as_ref()
+                .map(tool_workflow::WorkflowCatalogSource::task_source);
+            let named_builtin = matches!(
+                spec.workflow_source.as_ref(),
+                Some(tool_workflow::WorkflowCatalogSource::Builtin)
+            ) && spec.script.as_deref().is_none_or(str::is_empty);
             let has_name = spec.name.as_deref().filter(|s| !s.is_empty()).is_some();
             // Claude's invocation mode uses scriptPath first, then the named
             // selector, then a standalone inline script. Keep telemetry's
@@ -1213,11 +1187,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
             } else if has_name {
                 (
                     "named".to_string(),
-                    if named_builtin {
-                        "built-in".to_string()
-                    } else {
-                        named_source.unwrap_or("custom").to_string()
-                    },
+                    named_source.unwrap_or("custom").to_string(),
                 )
             } else {
                 ("inline".to_string(), "inline".to_string())
@@ -1263,11 +1233,11 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                     task_description.into(),
                 )
                 .await
-                .map_err(|e| tool_workflow::WorkflowLaunchError(e.to_string()))?;
+                .map_err(|e| tool_workflow::WorkflowLaunchError::Message(e.to_string()))?;
             self.registry
                 .set_workflow_resume_metadata(&task_id, script_path.clone(), transcript_dir.clone())
                 .await
-                .map_err(|error| tool_workflow::WorkflowLaunchError(error.to_string()))?;
+                .map_err(|error| tool_workflow::WorkflowLaunchError::Message(error.to_string()))?;
             Ok(tool_workflow::WorkflowLaunched {
                 task_id,
                 run_id: Some(run_id.clone()),
@@ -1853,6 +1823,7 @@ async fn desktop_command_registry(
     // `/reload-skills` (batch 8) mutates it live so a reload refreshes the set
     // the rest of the session sees.
     shared_registry: Arc<RwLock<CommandRegistry>>,
+    workflow_tool: Arc<tool_workflow::WorkflowTool>,
 ) -> Result<CommandRegistry, lingxi_core::settings::SettingsError> {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
@@ -1915,7 +1886,7 @@ async fn desktop_command_registry(
     command_api::builtins::register_core_batch_8(
         &mut reg,
         handle.clone(),
-        shared_registry,
+        shared_registry.clone(),
         cwd.to_path_buf(),
         lingxi_home.to_path_buf(),
         Some(managed_dir.clone()),
@@ -1924,6 +1895,27 @@ async fn desktop_command_registry(
         gates.safe_mode,
         disable_agent_view,
     );
+    let reload_workflow_tool = workflow_tool.clone();
+    reg.register_builtin_handler(Arc::new(
+        command_api::builtins::ReloadSkillsHandler::with_all_roots(
+            shared_registry,
+            cwd.to_path_buf(),
+            lingxi_home.to_path_buf(),
+            Some(managed_dir.clone()),
+            home.clone(),
+            additional_skill_dirs.clone(),
+            gates.safe_mode,
+        )
+        .with_locked_post_reload_finalizer(
+            false,
+            Arc::new(move |registry| {
+                crate::workflow_catalog::replace_workflow_commands(
+                    registry,
+                    reload_workflow_tool.as_ref(),
+                );
+            }),
+        ),
+    ));
     // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom-command + skill
     // dir discovery (`K5d.skills:!1` / `V5d.skills:!0`; the commands-dir
     // loader `cWa` bails on `xd()||Hc("skills")`). Builtins above stay — only
@@ -4757,15 +4749,17 @@ fn load_blocked_marketplaces(
 /// Discover the set of plugins that should be active for the current session —
 /// the shared body of both the startup bootstrap (§6.5) and the
 /// `/reload-plugins` refresh ([`PluginRuntime::refresh`]). `ambient` resolves
-/// the `enabledPlugins` allowlist against the on-disk plugin cache (with a
-/// flat-walk fallback for dev/local dirs); `inline` appends any `--plugin-dir`
-/// session plugins. Returns `(id, manifest, install_dir)` per plugin — exactly
-/// what [`plugin::PluginManager::enable`] consumes.
+/// the merged `enabledPlugins` allowlist against the on-disk plugin cache and
+/// selects records for the current session context; `inline` appends any
+/// explicit `--plugin-dir` session plugins. Returns `(id, manifest,
+/// install_dir)` per plugin — exactly what [`plugin::PluginManager::enable`]
+/// consumes.
 async fn discover_plugin_set(
     ambient: bool,
     inline: bool,
     lingxi_home: &std::path::Path,
     cwd: &std::path::Path,
+    discovery_context: &plugin::PluginDiscoveryContext,
     plugins_dir: &std::path::Path,
     cli_plugin_dirs: &[std::path::PathBuf],
     additional_project_roots: &[std::path::PathBuf],
@@ -4794,20 +4788,13 @@ async fn discover_plugin_set(
             managed_snapshot,
         )
         .await;
-        let mut d = plugin::discovery::discover_effective_plugins_with_bus(
+        let d = plugin::discovery::discover_effective_plugins_with_bus(
             plugins_dir,
             &enabled,
+            discovery_context,
             Some(analytics_bus),
         )
         .await;
-        // Fallback: no allowlist match ⇒ flat-walk for direct plugin dirs.
-        if d.is_empty() && ambient {
-            d = plugin::discovery::discover_installed_plugins_with_bus(
-                plugins_dir,
-                Some(analytics_bus),
-            )
-            .await;
-        }
         d
     } else {
         Vec::new()
@@ -4850,6 +4837,7 @@ pub struct PluginRefreshCounts {
 /// because plugins are materialised after the orchestrator is constructed.
 struct DesktopRepoRootReloader {
     registry: Arc<RwLock<CommandRegistry>>,
+    workflow_tool: Arc<RwLock<Option<Arc<tool_workflow::WorkflowTool>>>>,
     cwd: std::path::PathBuf,
     lingxi_home: std::path::PathBuf,
     managed_dir: Option<std::path::PathBuf>,
@@ -4869,9 +4857,11 @@ impl DesktopRepoRootReloader {
         lingxi_home: std::path::PathBuf,
         native_skill_roots: Vec<std::path::PathBuf>,
         safe_mode: bool,
+        workflow_tool: Arc<RwLock<Option<Arc<tool_workflow::WorkflowTool>>>>,
     ) -> Self {
         Self {
             registry,
+            workflow_tool,
             cwd,
             lingxi_home,
             managed_dir: Some(crate::desktop::settings_watch::managed_settings_dir()),
@@ -4963,6 +4953,15 @@ impl lingxi_core::host::RepoRootReloader for DesktopRepoRootReloader {
                     .push("plugin catalog is disabled in this runtime".to_string()),
             }
         }
+        if request.reload_skills || request.reload_plugins {
+            if let Some(workflow_tool) = self.workflow_tool.read().await.clone() {
+                crate::workflow_catalog::refresh_workflow_commands(
+                    &self.registry,
+                    workflow_tool.as_ref(),
+                )
+                .await;
+            }
+        }
         outcome
     }
 }
@@ -4980,11 +4979,14 @@ impl lingxi_core::host::RepoRootReloader for DesktopRepoRootReloader {
 /// of the plugin-agent catalog portion.
 pub struct PluginRuntime {
     manager: Arc<plugin::PluginManager>,
+    registry: Arc<RwLock<CommandRegistry>>,
+    workflow_tool: Arc<tool_workflow::WorkflowTool>,
     load_order: RwLock<Vec<lingxi_core::types::PluginId>>,
     analytics_bus: Arc<telemetry::AnalyticsBus>,
     plugins_dir: std::path::PathBuf,
     home: std::path::PathBuf,
     cwd: std::path::PathBuf,
+    session_cwd: Arc<SessionCwd>,
     cli_plugin_dirs: Vec<std::path::PathBuf>,
     additional_project_roots: Arc<RwLock<Vec<std::path::PathBuf>>>,
     ambient: bool,
@@ -5077,11 +5079,17 @@ impl PluginRuntime {
             .await;
         // (1) The fresh target set from disk + settings.
         let additional_project_roots = self.additional_project_roots.read().await.clone();
+        let (cwd, _) = self.session_cwd.snapshot();
+        let discovery_context = plugin::PluginDiscoveryContext {
+            cwd: cwd.clone(),
+            project_root: permission::set_cwd::project_root_of(&cwd).unwrap_or_else(|| cwd.clone()),
+        };
         let target = discover_plugin_set(
             self.ambient,
             self.inline,
             &self.home,
-            &self.cwd,
+            &cwd,
+            &discovery_context,
             &self.plugins_dir,
             &self.cli_plugin_dirs,
             &additional_project_roots,
@@ -5111,6 +5119,11 @@ impl PluginRuntime {
             }
         }
         if counts.errors > 0 {
+            crate::workflow_catalog::refresh_workflow_commands(
+                &self.registry,
+                self.workflow_tool.as_ref(),
+            )
+            .await;
             return counts;
         }
         self.load_order.write().await.clear();
@@ -5143,6 +5156,11 @@ impl PluginRuntime {
                 }
             }
         }
+        crate::workflow_catalog::refresh_workflow_commands(
+            &self.registry,
+            self.workflow_tool.as_ref(),
+        )
+        .await;
         counts
     }
 }

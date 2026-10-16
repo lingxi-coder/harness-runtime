@@ -19,6 +19,26 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::handlers::CONFIG_DIR_ENV_LOCK as ENV_LOCK;
 
+fn plugin_workflow_entry(
+    qualified_name: &str,
+    script_path: PathBuf,
+    script: String,
+) -> workflow::PluginWorkflowEntry {
+    let (plugin_name, _) = qualified_name
+        .split_once(':')
+        .expect("plugin workflow names are namespaced");
+    let plugin_name = plugin_name.to_string();
+    let units = qualified_name.encode_utf16().collect::<Vec<_>>();
+    let qualified_name = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("fixture workflow name is a root JSON string");
+    workflow::PluginWorkflowEntry {
+        qualified_name,
+        script,
+        script_path,
+        plugin_name,
+    }
+}
+
 #[tokio::test]
 async fn nested_name_resolves_plugin_snapshot_after_saved_miss() {
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
@@ -28,10 +48,11 @@ async fn nested_name_resolves_plugin_snapshot_after_saved_miss() {
     let script =
         "export const meta = { name: 'nested', description: 'nested plugin' };\nreturn 7;\n";
     std::fs::write(&script_path, script).expect("seed plugin script");
-    registry.register(vec![workflow::PluginWorkflowEntry {
-        name: "acme:nested".to_string(),
+    registry.register(vec![plugin_workflow_entry(
+        "acme:nested",
         script_path,
-    }]);
+        script.to_string(),
+    )]);
 
     let resolved =
         resolve_nested_script(&json!({"name": "acme:nested"}), Some(&fs), Some(&registry))
@@ -1380,9 +1401,18 @@ fn nested_with_plugin_workflows(names: &[&str]) -> NestedConfig {
     registry.register(
         names
             .iter()
-            .map(|name| workflow::PluginWorkflowEntry {
-                name: (*name).to_string(),
-                script_path: std::path::PathBuf::from(format!("/plugins/{name}.js")),
+            .map(|name| {
+                let (_, workflow_name) = name
+                    .split_once(':')
+                    .expect("fixture plugin workflow names are namespaced");
+                let script = format!(
+                    "export const meta = {{ name: '{workflow_name}', description: 'fixture' }};\n"
+                );
+                plugin_workflow_entry(
+                    name,
+                    std::path::PathBuf::from(format!("/plugins/{name}.js")),
+                    script,
+                )
             })
             .collect(),
     );
@@ -2207,13 +2237,18 @@ async fn workflow_runs_a_nested_name_from_plugin_workflow_registry() {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let script_dir = tempdir().unwrap();
     let script_path = script_dir.path().join("deploy.js");
-    std::fs::write(&script_path, "return { source: 'plugin', n: args.n };").unwrap();
+    let script = concat!(
+        "export const meta = { name: 'deploy', description: 'Deploy' };\n",
+        "return { source: 'plugin', n: args.n };\n",
+    );
+    std::fs::write(&script_path, script).unwrap();
 
     let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
-    registry.register(vec![workflow::PluginWorkflowEntry {
-        name: "acme:deploy".to_string(),
-        script_path: script_path.clone(),
-    }]);
+    registry.register(vec![plugin_workflow_entry(
+        "acme:deploy",
+        script_path.clone(),
+        script.to_string(),
+    )]);
 
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let spawner = Arc::new(EchoSpawner::default());

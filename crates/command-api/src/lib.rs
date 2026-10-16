@@ -55,6 +55,7 @@ pub use mod_catalog::{
     ModCommandExecutor, ModCommandQueue, ModCommandRunContext, RegistryModCommandCatalog,
 };
 pub use model::*;
+pub use native_locale_collation::native_locale_compare_utf16;
 pub use parser::{parse_slash_command, ParsedSlashCommand};
 pub use registry::{CommandRegistry, NativeHeadlessCatalogContext};
 pub use shell_expansion::{

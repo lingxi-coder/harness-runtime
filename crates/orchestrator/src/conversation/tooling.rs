@@ -2,6 +2,16 @@
 
 use super::*;
 
+fn effective_tool_name_projections(
+    tools: &[std::sync::Arc<dyn tool_api::tool_trait::Tool>],
+) -> Vec<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+    tools
+        .iter()
+        .flat_map(|tool| std::iter::once(tool.name()).chain(tool.aliases().iter().copied()))
+        .map(lingxi_core::types::utf16_json::Utf16JsonProjection::from)
+        .collect()
+}
+
 fn normalize_absolute_lexical_read_path(path: &std::path::Path) -> std::path::PathBuf {
     let mut normalized = std::path::PathBuf::new();
     for component in path.components() {
@@ -598,7 +608,7 @@ impl ConversationOrchestrator {
         (Vec<lingxi_core::host::SourceToolWireDefinition>, bool),
         lingxi_core::settings::SettingsError,
     > {
-        let (wire, skip_global_cache_for_system_prompt, _) =
+        let (wire, skip_global_cache_for_system_prompt, _, _) =
             self.build_wire_tools_with_complete().await?;
         Ok((wire, skip_global_cache_for_system_prompt))
     }
@@ -614,6 +624,7 @@ impl ConversationOrchestrator {
             Vec<lingxi_core::host::SourceToolWireDefinition>,
             bool,
             Vec<lingxi_core::host::SourceToolWireDefinition>,
+            Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         ),
         lingxi_core::settings::SettingsError,
     > {
@@ -641,6 +652,10 @@ impl ConversationOrchestrator {
             .main_model_source_for_request(&model, model_profile.as_deref())
             .await;
         let tools = self.filtered_available_tools().await;
+        // Capture canonical names and aliases from the exact post-filter vector
+        // used below to build this request's wire tool declarations. A later
+        // catalog read could diverge if settings or hooks refresh mid-query.
+        let available_tool_names = effective_tool_name_projections(&tools);
         let mod_host = if let Some(registry) = &self.lifecycle_runtime.hook_registry {
             registry.read().await.mod_host()
         } else {
@@ -661,7 +676,11 @@ impl ConversationOrchestrator {
             tool.name() == tool_skill::skill::SKILL_TOOL_NAME
                 || tool.aliases().contains(&tool_skill::skill::SKILL_TOOL_NAME)
         });
-        lingxi_core::host::session_flags::set_skill_tool_advertised(skill_tool_advertised);
+        // The current host has no PolicyVerdictState, so Native's non-tool
+        // workflow-authoring gate is false. Keep the Skill-tool conjunct sourced
+        // from this exact post-filter request vector; do not publish it globally.
+        let workflow_authoring_base_allowed = false;
+        let workflow_authoring_available = workflow_authoring_base_allowed && skill_tool_advertised;
         let bash_precommit_skills =
             match (skill_tool_advertised, &self.prompt_runtime.skill_listing) {
                 (true, Some(provider)) => {
@@ -693,8 +712,7 @@ impl ConversationOrchestrator {
                 .collect(),
             model: model.clone(),
             model_profile: model_profile.clone(),
-            workflow_authoring_skill_reachable:
-                lingxi_core::host::session_flags::workflow_authoring_skill_reachable(),
+            workflow_authoring_available,
             bash_precommit_skills,
             bash_precommit_session_generation,
             mod_registration_identity,
@@ -716,6 +734,7 @@ impl ConversationOrchestrator {
                         include_examples: true,
                         model: Some(model.clone()),
                         model_profile: model_profile.clone(),
+                        workflow_authoring_available,
                         bash_precommit_skills,
                         bash_precommit_session_generation,
                     },
@@ -892,7 +911,12 @@ impl ConversationOrchestrator {
                     .find(|definition| definition.name == tool.name())
                     .is_some_and(|definition| !definition.defer_loading)
         });
-        Ok((wire, skip_global_cache_for_system_prompt, complete_wire))
+        Ok((
+            wire,
+            skip_global_cache_for_system_prompt,
+            complete_wire,
+            available_tool_names,
+        ))
     }
 
     async fn mod_tool_provider(&self, tool: &dyn tool_api::tool_trait::Tool) -> serde_json::Value {
@@ -1263,6 +1287,15 @@ impl ConversationOrchestrator {
         Self::text_content(message).is_some_and(|text| {
             text.starts_with("<system-reminder>\nMobile runtime environment (version ")
         })
+    }
+
+    /// Return the canonical names and aliases in the current post-filter tool
+    /// catalog. Raw slash dispatch uses this live per-dispatch view.
+    pub async fn current_effective_tool_name_projections(
+        &self,
+    ) -> Vec<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        let tools = self.filtered_available_tools().await;
+        effective_tool_name_projections(&tools)
     }
 
     /// Return the live, policy-filtered tool catalog in MCP's 2025-06-18

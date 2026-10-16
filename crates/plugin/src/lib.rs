@@ -77,6 +77,7 @@ pub use discovery::{
     cli_plugin_dir_collection_children, discover_cli_plugin_dirs, discover_effective_plugins,
     discover_enabled_plugins, discover_installed_plugins, discover_recorded_plugins,
     has_control_or_bidi_formatting, validate_marketplace_name, validate_plugin_name,
+    PluginDiscoveryContext,
 };
 pub use git::{
     clone_plugin_git, clone_plugin_git_pinned, is_confusable_authority_url, is_suspicious_url,

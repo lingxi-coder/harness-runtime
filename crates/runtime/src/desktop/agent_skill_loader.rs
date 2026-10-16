@@ -187,6 +187,8 @@ impl AgentSkillLoader {
                             cwd: &cwd,
                             is_preload: true,
                             main_loop_model: model,
+                            available_tool_names: None,
+                            workflow_authoring_base_allowed: false,
                         },
                     )
                     .map_err(|error| error.to_string())?;

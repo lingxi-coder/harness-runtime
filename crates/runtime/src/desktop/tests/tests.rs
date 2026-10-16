@@ -105,29 +105,11 @@ async fn desktop_config_forwards_process_local_credential_policy() {
     );
 }
 
-/// §14 — a WIRING gate, not a behaviour test.
-///
-/// `workflow::PluginWorkflowRegistry` is only reachable if the composition
-/// root hands the SAME `Arc` to all four participants inside `build()`:
-/// the `PluginManager` (its only writer), the `WorkflowTool`
-/// (`validate_input` + the `Available:` listing), the
-/// `TaskRegistryWorkflowLauncher` (`resolve_script_at` on the launch path
-/// and `tengu_workflow_launched`'s `workflow_source`), and the
-/// `LocalWorkflowHandler` (nested `workflow({name})`).
-///
-/// Every one of those pieces is unit-tested in its own crate and every one
-/// of those tests passes with `build()` wiring NOTHING — which is exactly
-/// how the feature shipped unreachable the first time. Wiring a strict
-/// SUBSET is worse than wiring none: the tool accepts `acme:deploy` and
-/// the launcher then reports it "not found". No runtime test can observe
-/// this without standing up the whole desktop stack, so the gate reads the
-/// composition root's own source.
-///
-/// The needles are assembled at runtime from split literals on purpose: a
-/// gate spelled out verbatim here would match ITSELF in `include_str!` and
-/// stay green with `build()` gutted.
+/// WIRING gate for the validated workflow catalog and its runtime slash
+/// projection. Named launchers consume the snapshot selected by `WorkflowTool`
+/// rather than resolving the workflow name a second time.
 #[test]
-fn build_wires_one_plugin_workflow_registry_into_every_participant() {
+fn build_wires_plugin_workflows_and_publishes_the_validated_catalog_snapshot() {
     const SRC: &str = concat!(
         include_str!("../mod.rs"),
         "\n",
@@ -140,8 +122,6 @@ fn build_wires_one_plugin_workflow_registry_into_every_participant() {
     let construct =
         format!("let {registry_var} = Arc::new(workflow::PluginWorkflowRegistry::new());");
     let builder = format!(".with_plugin_workflows({registry_var}.clone())");
-    let launcher_field = format!("plugin_workflows: {registry_var}.clone()");
-
     assert_eq!(
         build_src.matches(&construct).count(),
         1,
@@ -153,21 +133,19 @@ fn build_wires_one_plugin_workflow_registry_into_every_participant() {
         "`{builder}` must appear 3× in build(): LocalWorkflowHandler, WorkflowTool, PluginManager"
     );
     assert_eq!(
-        build_src.matches(&launcher_field).count(),
+        build_src
+            .matches("spec.resolved_workflow_script.take()")
+            .count(),
         1,
-        "TaskRegistryWorkflowLauncher must be built with the shared registry (`{launcher_field}`)"
+        "the task launcher must consume the validated script snapshot exactly once"
     );
-    // …and the launcher must actually USE the field it holds — once in
-    // `resolve_script_at` (the launch path) and once in
-    // `workflow_source_for_name` (the `tengu_workflow_launched` source).
-    // A positive count, not a "no `None` anywhere" grep: `harness-runtime::mobile`
-    // legitimately passes `None` (it has no plugin subsystem at all), and
-    // a zero-match assertion would be green by default here.
-    let uses = format!("Some(self.plugin_workflow{}.as_ref())", "s");
-    assert_eq!(
-        build_src.matches(&uses).count(),
-        2,
-        "the launcher must pass its registry to BOTH resolve_script_at and workflow_source_for_name (`{uses}`)"
+    assert!(
+        build_src.contains("workflow_catalog::refresh_workflow_commands"),
+        "build must publish the validated workflow catalog after plugin bootstrap"
+    );
+    assert!(
+        build_src.contains("workflow_catalog::replace_workflow_commands"),
+        "reload paths must replace the isolated workflow producer snapshot"
     );
 }
 
@@ -187,7 +165,7 @@ fn build_wires_one_plugin_workflow_registry_into_every_participant() {
 ///
 /// No runtime test can observe this without standing up the whole
 /// desktop stack plus a live TUI permission gate — same reasoning as
-/// `build_wires_one_plugin_workflow_registry_into_every_participant`
+/// `build_wires_plugin_workflows_and_publishes_the_validated_catalog_snapshot`
 /// above — so this reads the composition root's own source instead, and
 /// checks all four cells so the next background invoker added to
 /// `build()` cannot silently miss the flag.
@@ -660,6 +638,9 @@ async fn desktop_registry_exposes_connect() {
         &[],
         Default::default(),
         Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
+        Arc::new(
+            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
+        ),
     )
     .await
     .expect("desktop settings must load for command registry");
@@ -770,6 +751,10 @@ async fn safe_mode_and_bare_skip_custom_command_discovery() {
             &[],
             Default::default(),
             Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
+            Arc::new(
+                tool_workflow::WorkflowTool::new(None)
+                    .with_allowed_builtin_workflow_names(Vec::new()),
+            ),
         )
         .await
         .expect("desktop settings must load for command registry");
@@ -896,6 +881,10 @@ async fn an_add_dir_root_contributes_its_skills() {
             &roots,
             Default::default(),
             Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
+            Arc::new(
+                tool_workflow::WorkflowTool::new(None)
+                    .with_allowed_builtin_workflow_names(Vec::new()),
+            ),
         )
         .await
         .expect("desktop settings must load for command registry");
@@ -10618,10 +10607,15 @@ async fn plugin_runtime_refresh_swaps_enabled_set_live() {
     ));
     let rt = super::PluginRuntime {
         manager: manager.clone(),
+        registry: command_registry.clone(),
+        workflow_tool: Arc::new(
+            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
+        ),
         analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
         plugins_dir: plugins_dir.clone(),
         home: home.clone(),
         cwd: cwd.clone(),
+        session_cwd: tool_api::SessionCwd::new(cwd.clone(), Vec::new()),
         cli_plugin_dirs: Vec::new(),
         additional_project_roots: Arc::new(RwLock::new(Vec::new())),
         ambient: true,
@@ -10701,10 +10695,15 @@ async fn plugin_runtime_refresh_aborts_enable_phase_after_disable_failure_then_r
     .await;
     let rt = super::PluginRuntime {
         manager: manager.clone(),
+        registry: command_registry.clone(),
+        workflow_tool: Arc::new(
+            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
+        ),
         analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
         plugins_dir: plugins_dir.clone(),
         home: home.clone(),
         cwd: cwd.clone(),
+        session_cwd: tool_api::SessionCwd::new(cwd.clone(), Vec::new()),
         cli_plugin_dirs: Vec::new(),
         additional_project_roots: Arc::new(RwLock::new(Vec::new())),
         ambient: true,
@@ -10820,10 +10819,15 @@ async fn concurrent_plugin_runtime_refresh_is_single_flight_and_leaves_one_owner
     .await;
     let rt = Arc::new(super::PluginRuntime {
         manager: manager.clone(),
+        registry: command_registry.clone(),
+        workflow_tool: Arc::new(
+            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
+        ),
         analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
         plugins_dir: plugins_dir.clone(),
         home: home.clone(),
         cwd: cwd.clone(),
+        session_cwd: tool_api::SessionCwd::new(cwd.clone(), Vec::new()),
         cli_plugin_dirs: Vec::new(),
         additional_project_roots: Arc::new(RwLock::new(Vec::new())),
         ambient: true,
@@ -11362,10 +11366,15 @@ async fn plugin_runtime_refresh_strips_agent_escalation_from_live_catalog() {
     .await;
     let rt = super::PluginRuntime {
         manager: manager.clone(),
+        registry: command_registry.clone(),
+        workflow_tool: Arc::new(
+            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
+        ),
         analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
         plugins_dir: plugins_dir.clone(),
         home: home.clone(),
         cwd: cwd.clone(),
+        session_cwd: tool_api::SessionCwd::new(cwd.clone(), Vec::new()),
         cli_plugin_dirs: Vec::new(),
         additional_project_roots: Arc::new(RwLock::new(Vec::new())),
         ambient: true,
@@ -11482,7 +11491,7 @@ async fn plugin_runtime_refresh_benign_agent_does_enter_catalog() {
     write_enabled_plugins(&home, &[("goodplugin@mkt", true)]);
 
     let agent_catalog = Arc::new(RwLock::new(Vec::new()));
-    let (manager, _command_registry) = make_reload_test_manager(
+    let (manager, command_registry) = make_reload_test_manager(
         &plugins_dir,
         &cwd,
         &tmp.path().join("secrets"),
@@ -11491,10 +11500,15 @@ async fn plugin_runtime_refresh_benign_agent_does_enter_catalog() {
     .await;
     let rt = super::PluginRuntime {
         manager: manager.clone(),
+        registry: command_registry.clone(),
+        workflow_tool: Arc::new(
+            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
+        ),
         analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
         plugins_dir: plugins_dir.clone(),
         home: home.clone(),
         cwd: cwd.clone(),
+        session_cwd: tool_api::SessionCwd::new(cwd.clone(), Vec::new()),
         cli_plugin_dirs: Vec::new(),
         additional_project_roots: Arc::new(RwLock::new(Vec::new())),
         ambient: true,
@@ -11813,10 +11827,15 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
     );
     let rt = super::PluginRuntime {
         manager: manager.clone(),
+        registry: command_registry.clone(),
+        workflow_tool: Arc::new(
+            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
+        ),
         analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
         plugins_dir: plugins_dir.clone(),
         home: home.clone(),
         cwd: cwd.clone(),
+        session_cwd: tool_api::SessionCwd::new(cwd.clone(), Vec::new()),
         cli_plugin_dirs: Vec::new(),
         additional_project_roots: Arc::new(RwLock::new(Vec::new())),
         ambient: true,
@@ -12006,11 +12025,16 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
     let managed_policy_root = tempfile::tempdir().unwrap();
     let managed_snapshot =
         super::settings_watch::read_managed_settings_snapshot(managed_policy_root.path()).await;
+    let discovery_context = plugin::PluginDiscoveryContext {
+        cwd: cwd.clone(),
+        project_root: cwd.clone(),
+    };
     let discovered_at_boot = super::discover_plugin_set(
         true,
         false,
         &home,
         &cwd,
+        &discovery_context,
         &plugins_dir,
         &[],
         &[],

@@ -1,0 +1,18 @@
+{
+  "upstream": "icu_collator",
+  "version": "2.3.1",
+  "registry_checksum": "08984ed58ac439ebf3e13d2cf26b0c46a60afcd21721c1d14087c0b240344dda",
+  "patches": {
+    "icu-wtf16.patch": "1e8934cfd7d49637486686ffa99550820f3d4232486041bdb84052b64993fb02",
+    "compile-fix.patch": "36aaa720fb7bc2391633be3c857c0838e7951475849e8484df30986c40cfa03b"
+  },
+  "compiled_source_sha256": {
+    "comparison.rs": "d6df03c65683935c2c7b3756410b50cf7c76c95e7671ac4270b2e2f99a80fb89",
+    "elements.rs": "758f114e740b4fcb3d318b45cfc0ada0a65c276fdce13b25b30be4f3e1602ec4",
+    "docs.rs": "ac419b4862203753b1819f5aecc1077eb8ec604dee8d85cea12f9584ef3100ac",
+    "tests.rs": "db97d559db7589d5fb9db946592995ed5a1f54d69c9b297a4b5aba786dd6fccb"
+  },
+  "validation": "Focused private driver: 9 assertions and 200 Node/Bun oracle rows passed; full upstream integration tests not run (offline postcard unavailable); no Native pass claimed.",
+  "integration_format_adjustment": "Rustfmt1.94 workspace import ordering only; private probe source hashes retained above.",
+  "integration_comparison_sha256": "34421241a70d4d39a7ebde058e8ca6955d47560aa877ae9742ee705e14ffb73c"
+}

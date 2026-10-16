@@ -13,6 +13,7 @@ license.workspace = true
 
 [dependencies]
 core = { path = "../../core" }
+command-api = { path = "../../command-api" }
 tool-api = { path = "../../tool-api" }
 permission = { path = "../../permission" }
 branding.workspace = true

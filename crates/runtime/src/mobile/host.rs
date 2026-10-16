@@ -741,6 +741,7 @@ fn mobile_reload_skills_handler(
     lingxi_home: std::path::PathBuf,
     home: std::path::PathBuf,
     device_skill_tools: Vec<String>,
+    workflow_tool: Arc<tool_workflow::WorkflowTool>,
 ) -> command_api::builtins::reload_skills::ReloadSkillsHandler {
     command_api::builtins::reload_skills::ReloadSkillsHandler::with_all_roots(
         registry,
@@ -756,6 +757,7 @@ fn mobile_reload_skills_handler(
         Arc::new(move |reg| {
             crate::mobile::register_mobile_bundled_prompt_commands(reg);
             crate::mobile::device_skills::register_mobile_device_skills(reg, &device_skill_tools);
+            crate::workflow_catalog::replace_workflow_commands(reg, workflow_tool.as_ref());
         }),
     )
 }

@@ -2872,8 +2872,6 @@ dependencies = [
 [[package]]
 name = "icu_collator"
 version = "2.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08984ed58ac439ebf3e13d2cf26b0c46a60afcd21721c1d14087c0b240344dda"
 dependencies = [
  "icu_collator_data",
  "icu_collections",
@@ -7694,6 +7692,7 @@ version = "0.12.0"
 dependencies = [
  "async-trait",
  "branding",
+ "command-api",
  "core",
  "once_cell",
  "permission",

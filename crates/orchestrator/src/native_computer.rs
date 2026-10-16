@@ -1045,9 +1045,15 @@ pub(crate) async fn dispatch_tools(
     uses: &[(ToolUseId, String, Utf16JsonProjection, Option<String>)],
     assistant_id: MessageId,
     facts: crate::turn_loop::ToolUseDispatchFacts,
+    available_tool_names: Option<Vec<Utf16JsonProjection>>,
     fence: crate::autonomous_tool_scheduler::ToolDispatchPublicationFence,
 ) -> Result<crate::turn_loop::DeferredToolDispatch, OrchestratorError> {
     let work = orch.computer_runtime.work.lock().await.clone();
+    let mut ctx =
+        crate::turn_loop::streaming_tool_context_base(orch, facts.query_history.clone()).await;
+    ctx.available_tool_names = available_tool_names;
+    ctx.cancel = current_turn_cancel();
+    ctx.native_query_depth = Some(facts.native_query_depth);
     if !uses.iter().any(|(id, ..)| work.contains_key(id)) {
         return crate::turn_loop::tool_dispatch::dispatch_tool_uses_tracked_deferred_with_facts(
             orch,
@@ -1056,16 +1062,12 @@ pub(crate) async fn dispatch_tools(
             Some(assistant_id),
             Some(facts),
             None,
-            None,
+            Some(ctx),
             None,
             Some(Arc::new(fence)),
         )
         .await;
     }
-    let mut ctx =
-        crate::turn_loop::streaming_tool_context_base(orch, facts.query_history.clone()).await;
-    ctx.cancel = current_turn_cancel();
-    ctx.native_query_depth = Some(facts.native_query_depth);
     let tool = uses
         .iter()
         .find_map(|(id, ..)| work.get(id))
@@ -1079,7 +1081,7 @@ pub(crate) async fn dispatch_tools(
         for call in uses {
             let Some(member) = work.get(&call.0).cloned() else {
                 let result = crate::turn_loop::tool_dispatch::dispatch_tool_uses_tracked_deferred_with_facts(
-                    orch, std::slice::from_ref(call), current_turn_cancel(), Some(assistant_id), Some(facts.clone()), None, None, None, Some(Arc::new(fence.clone())),
+                    orch, std::slice::from_ref(call), current_turn_cancel(), Some(assistant_id), Some(facts.clone()), None, Some(ctx.clone()), None, Some(Arc::new(fence.clone())),
                 ).await?;
                 merge_dispatch(&mut aggregate, result);
                 continue;

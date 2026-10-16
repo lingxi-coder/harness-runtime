@@ -210,6 +210,7 @@ impl ToolInvoker for RegistryToolInvoker {
             return Ok(());
         };
         let ctx = crate::context::ToolUseContext {
+            available_tool_names: None,
             options: crate::context::ToolUseOptions {
                 debug: false,
                 verbose: false,
@@ -418,6 +419,7 @@ impl RegistryToolInvoker {
                 .as_ref()
                 .clone(),
             None => crate::context::ToolUseContext {
+                available_tool_names: ctx.available_tool_names.clone(),
                 options: crate::context::ToolUseOptions {
                     debug: false,
                     verbose: false,
@@ -471,6 +473,7 @@ impl RegistryToolInvoker {
         tool_use_ctx.options.model_profile = ctx.parent_model_profile.clone();
         tool_use_ctx.options.is_non_interactive_session = ctx.is_non_interactive_session;
         tool_use_ctx.messages = ctx.current_history.clone();
+        tool_use_ctx.available_tool_names = ctx.available_tool_names.clone();
         tool_use_ctx.assistant_message = ctx.assistant_message.clone();
         tool_use_ctx.same_turn_tool_uses = ctx.same_turn_tool_uses.clone();
         tool_use_ctx.tool_use_id = ctx
@@ -1640,6 +1643,7 @@ mod tests {
             .insert("/project/pkg/AGENTS.md".into());
 
         let mut invocation = SubagentInvocationContext {
+            available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
             parent_agent_id: None,
@@ -1788,6 +1792,7 @@ mod tests {
                 "NameRecordingTool",
                 json!({}),
                 SubagentInvocationContext {
+                    available_tool_names: None,
                     cancellation_token: tokio_util::sync::CancellationToken::new(),
                     permission_pause_observer: None,
                     parent_agent_id: None,
@@ -1966,6 +1971,7 @@ mod tests {
 
     fn no_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
             parent_agent_id: None,
@@ -2170,6 +2176,7 @@ mod tests {
 
     fn named_ctx(can_show: bool) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
             parent_agent_id: None,
@@ -2322,6 +2329,7 @@ mod tests {
 
     fn ctx_with_tool_use_id(id: &str) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
             parent_agent_id: None,

@@ -490,6 +490,7 @@ pub async fn resolve_subagent_tools_with_handback(
             include_examples: true,
             model: child_selection.map(|selection| selection.model.clone()),
             model_profile: child_selection.and_then(|selection| selection.model_profile.clone()),
+            workflow_authoring_available: false,
             bash_precommit_skills,
             bash_precommit_session_generation: registry.bash_precommit_session_generation(),
         },
