@@ -31,7 +31,7 @@ fn send_prompt_preserves_lone_surrogate_through_typed_command_roundtrip() {
 
 #[test]
 fn slash_command_preserves_surrogate_pairs_and_ordinary_typed_text() {
-    let raw = r#"{"type":"run_slash_command","raw":"/deploy \ud83d\ude80"}"#;
+    let raw = r#"{"type":"run_slash_command","raw":"/deploy \ud83d\ude80","images":[]}"#;
     let command: ClientCommand = serde_json::from_str(raw).expect("deserialize raw slash command");
     let ClientCommand::RunSlashCommand { raw, .. } = &command else {
         panic!("expected RunSlashCommand");
@@ -53,6 +53,7 @@ fn slash_command_preserves_surrogate_pairs_and_ordinary_typed_text() {
 
     let ordinary = ClientCommand::RunSlashCommand {
         raw: ClientTextDto::from_utf8("/help"),
+        images: Vec::new(),
         turn_id: None,
     };
     let ordinary_json = serde_json::to_string(&ordinary).expect("serialize ordinary command");
@@ -63,6 +64,11 @@ fn slash_command_preserves_surrogate_pairs_and_ordinary_typed_text() {
     assert_eq!(
         serde_json::from_str::<ClientCommand>(&ordinary_json).expect("round-trip ordinary command"),
         ordinary
+    );
+    assert!(
+        serde_json::from_str::<ClientCommand>(r#"{"type":"run_slash_command","raw":"/help"}"#)
+            .is_err(),
+        "images is required by protocol 28"
     );
 }
 

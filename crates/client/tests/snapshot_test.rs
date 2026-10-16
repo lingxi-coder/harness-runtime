@@ -1404,6 +1404,10 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
             "command/run_slash_command.json",
             ClientCommand::RunSlashCommand {
                 raw: "/model opus".into(),
+                images: vec![client::protocol::commands::ImageRefDto {
+                    media_type: "image/png".into(),
+                    base64: "aGVsbG8=".into(),
+                }],
                 turn_id: Some(7),
             },
         ),

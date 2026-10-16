@@ -1108,6 +1108,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::SetFastMode.enabled", "bool");
     put("ClientCommand::RunSlashCommand", "run_slash_command");
     put("ClientCommand::RunSlashCommand.raw", "ClientTextDto");
+    put("ClientCommand::RunSlashCommand.images", "Vec<ImageRefDto>");
     put("ClientCommand::RunSlashCommand.turn_id", "Option<u64>");
 
     put("ClientCommand::RefreshListings", "refresh_listings");

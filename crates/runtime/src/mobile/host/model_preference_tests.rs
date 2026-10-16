@@ -367,6 +367,7 @@ mod model_preference_tests {
             handle
                 .submit(ClientCommand::RunSlashCommand {
                     raw: "/model".into(),
+                    images: Vec::new(),
                     turn_id: Some(1),
                 })
                 .await
@@ -375,6 +376,7 @@ mod model_preference_tests {
             handle
                 .submit(ClientCommand::RunSlashCommand {
                     raw: "/model github-copilot/gpt-5.6-sol".into(),
+                    images: Vec::new(),
                     turn_id: Some(2),
                 })
                 .await
@@ -389,6 +391,7 @@ mod model_preference_tests {
             handle
                 .submit(ClientCommand::RunSlashCommand {
                     raw: "/model removed-provider/missing".into(),
+                    images: Vec::new(),
                     turn_id: Some(3),
                 })
                 .await
@@ -408,6 +411,7 @@ mod model_preference_tests {
             handle
                 .submit(ClientCommand::RunSlashCommand {
                     raw: "/model".into(),
+                    images: Vec::new(),
                     turn_id: Some(4),
                 })
                 .await

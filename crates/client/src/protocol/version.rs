@@ -170,4 +170,5 @@
 /// Version 27 removes the duplicated legacy raw diff fields from ToolResult and
 /// requires host-derived `header` / `display` projections on tool blocks and
 /// tool events. `ToolResultDisplayDto.diff` remains optional for non-diff tools.
-pub const CLIENT_PROTOCOL_VERSION: &str = "27.0.0";
+/// Version 28 requires ordered inline image attachments on RunSlashCommand.
+pub const CLIENT_PROTOCOL_VERSION: &str = "28.0.0";

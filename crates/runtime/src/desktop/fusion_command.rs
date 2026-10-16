@@ -9,10 +9,9 @@ use command_api::model::{BuiltinCommandHandler, CommandResult};
 use command_api::parser::ParsedSlashCommand;
 use lingxi_core::host::{FusionExecutor, FusionRunId, FusionStatus, OrchestratorHandle};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tasks::{TaskSpawnInput, TaskType};
-use tokio::sync::Mutex;
 
 const FUSION_ARGUMENT_HINT: &str = "[--strategy scope:id] [--quality|--fast] [--same-provider|--cross-provider] [--verify-claims] [--implement [--verify \"COMMAND\"]...] PROMPT | setup | clean | --retry-publication fu_RUN_ID";
 

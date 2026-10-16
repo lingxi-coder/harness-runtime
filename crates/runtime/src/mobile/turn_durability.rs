@@ -122,12 +122,23 @@ impl DurableSkillPrompt {
         }
     }
 
-    pub(crate) fn queued_prompt_inputs(&self) -> Vec<orchestrator::QueuedPromptInput> {
+    pub(crate) fn queued_prompt_inputs(
+        &self,
+        images: &[ImageRefDto],
+    ) -> Vec<orchestrator::QueuedPromptInput> {
         let mut inputs = orchestrator::skill_prompt_inputs(
             self.command.clone(),
             self.body.clone(),
             self.hook_messages.clone(),
         );
+        if let Some(first) = inputs.first_mut() {
+            first
+                .images
+                .extend(images.iter().map(|image| ImageSource::Base64 {
+                    media_type: image.media_type.clone(),
+                    data: image.base64.clone(),
+                }));
+        }
         for (((input, message_id), prompt_id), trailing_history_row_ids) in inputs
             .iter_mut()
             .zip(self.input_message_ids)
@@ -843,6 +854,7 @@ impl DurableTurnStore {
         turn_id: Option<u64>,
         original_client_turn_id: Option<u64>,
         raw: Utf16JsonProjection,
+        images: Vec<ImageRefDto>,
     ) -> Result<DurableTurnCheckpoint, DurableTurnStoreError> {
         self.admit_queued_operation(
             QueueOperationKind::Slash,
@@ -851,7 +863,7 @@ impl DurableTurnStore {
             original_client_turn_id,
             raw,
             None,
-            Vec::new(),
+            images,
         )
     }
 
@@ -1337,7 +1349,6 @@ impl DurableTurnStore {
             });
             checkpoint.skill_prompt = skill_prompt;
             checkpoint.prompt_mode = None;
-            checkpoint.images.clear();
             checkpoint.state = Some(TurnRecoveryStateDto::Running);
             checkpoint.queue_delivery = QueueDeliveryState::Claimed;
             checkpoint.safe_to_resume = true;
@@ -2302,6 +2313,61 @@ mod tests {
     }
 
     #[test]
+    fn claimed_slash_images_survive_cold_resume_into_prompt_input() {
+        let (temp, store) = store();
+        let images = vec![ImageRefDto {
+            media_type: "image/png".into(),
+            base64: "AQID".into(),
+        }];
+        let admitted = store
+            .admit_queued_slash(
+                "session",
+                Some(47),
+                Some(47),
+                Utf16JsonProjection::from("/inspect"),
+                images.clone(),
+            )
+            .expect("persist the slash command and images before dispatch");
+        store
+            .claim_queued_slash("session", admitted.turn_id)
+            .expect("claim the non-replayable slash dispatch");
+        let prepared = store
+            .prepare_claimed_slash_turn(
+                "session",
+                admitted.turn_id,
+                Utf16JsonProjection::from("Describe the attached image"),
+                None,
+            )
+            .expect("make the dispatched command's model turn recoverable");
+        assert_eq!(prepared.queue_delivery, QueueDeliveryState::Claimed);
+        assert!(prepared.safe_to_resume);
+
+        drop(store);
+        let cold = DurableTurnStore::new(temp.path().join("turns"));
+        assert_eq!(
+            cold.resume("session", admitted.turn_id)
+                .expect("resume after a process restart")
+                .0,
+            ResumeDisposition::Ready,
+        );
+        let restored = cold
+            .load("session", admitted.turn_id)
+            .expect("reload the recoverable slash turn");
+        assert_eq!(restored.images, images);
+        let identity = restored
+            .prompt_identity
+            .as_ref()
+            .expect("the RunAsTurn continuation retains its prompt identity");
+        let input = identity.queued_prompt_input(restored.prompt.clone(), &restored.images);
+        assert_eq!(input.images.len(), 1);
+        assert!(matches!(
+            &input.images[0],
+            ImageSource::Base64 { media_type, data }
+                if media_type == "image/png" && data == "AQID"
+        ));
+    }
+
+    #[test]
     fn claimed_bash_is_at_most_once_and_cold_resume_uses_persisted_result_rows() {
         let (temp, store) = store();
         let admitted = store
@@ -2898,7 +2964,7 @@ mod tests {
         assert_eq!(restored.input_message_ids, input_message_ids);
         assert_eq!(restored.hook_message_ids, hook_message_ids);
         assert_eq!(restored.input_prompt_ids, input_prompt_ids);
-        let queued_inputs = restored.queued_prompt_inputs();
+        let queued_inputs = restored.queued_prompt_inputs(&[]);
         assert_eq!(queued_inputs.len(), 2);
         assert_eq!(
             queued_inputs[0].message_id,

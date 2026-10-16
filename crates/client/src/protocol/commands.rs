@@ -424,6 +424,8 @@ define_client_command! {
     RunSlashCommand {
         // The raw command line (e.g. `"/model opus"`), leading `/` included.
         raw: ClientTextDto,
+        // Ordered inline image attachments supplied with this slash command.
+        images: Vec<ImageRefDto>,
         // Optional client turn id used to correlate prompt-like slash commands
         // with the normal streaming turn lifecycle.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1006,9 +1008,15 @@ impl From<ClientCommandWire> for ClientCommand {
             },
             ClientCommandWire::SetModel { model } => Self::SetModel { model },
             ClientCommandWire::ListModels => Self::ListModels,
-            ClientCommandWire::RunSlashCommand { raw, turn_id } => {
-                Self::RunSlashCommand { raw, turn_id }
-            }
+            ClientCommandWire::RunSlashCommand {
+                raw,
+                images,
+                turn_id,
+            } => Self::RunSlashCommand {
+                raw,
+                images,
+                turn_id,
+            },
             ClientCommandWire::RefreshListings { which } => Self::RefreshListings { which },
             ClientCommandWire::ListSessionAgents => Self::ListSessionAgents,
             ClientCommandWire::LoadSessionAgentTranscript { agent_id } => {
@@ -1375,6 +1383,7 @@ impl<'de> Deserialize<'de> for ClientCommand {
             }),
             "run_slash_command" => Ok(Self::RunSlashCommand {
                 raw: command_raw_required(&mut fields, "raw")?,
+                images: command_raw_required(&mut fields, "images")?,
                 turn_id: command_raw_optional(&mut fields, "turn_id")?,
             }),
             // Skill ids are source text. Decode the nested DTO from its raw
@@ -1462,11 +1471,11 @@ pub enum PromptModeDto {
     Plan,
 }
 
-/// An inline image attachment for [`ClientCommand::SendPrompt`]. Uniform inline
+/// An inline image attachment for SendPrompt or RunSlashCommand. Uniform inline
 /// `{media_type, base64}` on the wire (no transport-leaking enum, decision
 /// §0.8): the adapter writes the inline bytes to a temp file on the engine host
-/// for the path-based engine entry. Mobile inline image *input* is itself
-/// DEFERRED (§5.12) — this DTO is the frozen shape, not a lit-up path.
+/// for the path-based engine entry. Mobile slash dispatch retains this DTO in
+/// its durable checkpoint and restores it with the expanded prompt batch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct ImageRefDto {

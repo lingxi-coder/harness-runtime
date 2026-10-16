@@ -1,5 +1,11 @@
 {
   "type": "run_slash_command",
   "raw": "/model opus",
+  "images": [
+    {
+      "media_type": "image/png",
+      "base64": "aGVsbG8="
+    }
+  ],
   "turn_id": 7
 }

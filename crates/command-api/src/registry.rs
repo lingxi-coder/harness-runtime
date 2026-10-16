@@ -2438,7 +2438,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_reminder_lists_all_safe_names_in_source_order() {
+    fn unknown_reminder_caps_safe_names_in_source_order() {
         let catalog = crate::model::HeadlessCommandCatalog {
             prompt_command_names: (0..41)
                 .map(|index| format!("prompt-{index}").into())
@@ -2449,8 +2449,8 @@ mod tests {
             crate::model::render_unknown_command_reminder(&"missing".into(), None, &catalog);
         let text = rendered.string_at("").unwrap();
         assert!(text.contains("/prompt-0, /prompt-1"));
-        assert!(text.contains("/prompt-39, /prompt-40, and 2 more."));
-        assert!(!text.contains("/prompt-41"));
+        assert!(text.contains("/prompt-38, /prompt-39, and 3 more."));
+        assert!(!text.contains("/prompt-40"));
     }
 
     #[test]

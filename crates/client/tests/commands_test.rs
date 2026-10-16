@@ -298,17 +298,24 @@ fn session_agent_commands_round_trip() {
 fn run_slash_command_round_trips() {
     let cmd = ClientCommand::RunSlashCommand {
         raw: ClientTextDto::from_utf8("/model opus"),
+        images: vec![ImageRefDto {
+            media_type: "image/png".to_string(),
+            base64: "aGVsbG8=".to_string(),
+        }],
         turn_id: Some(7),
     };
     let json = serde_json::to_value(&cmd).expect("serialize RunSlashCommand");
     assert_eq!(json["type"], "run_slash_command");
     assert_eq!(json["raw"], "/model opus");
+    assert_eq!(json["images"][0]["media_type"], "image/png");
+    assert_eq!(json["images"][0]["base64"], "aGVsbG8=");
     assert_eq!(json["turn_id"], 7);
     let back: ClientCommand = serde_json::from_value(json).expect("deserialize RunSlashCommand");
     assert_eq!(back, cmd);
 
     let without_turn = ClientCommand::RunSlashCommand {
         raw: ClientTextDto::from_utf8("/help"),
+        images: Vec::new(),
         turn_id: None,
     };
     let json = serde_json::to_value(&without_turn).expect("serialize RunSlashCommand");
@@ -769,6 +776,7 @@ fn no_live_command_carries_session_id() {
         },
         ClientCommand::RunSlashCommand {
             raw: ClientTextDto::from_utf8("/x"),
+            images: Vec::new(),
             turn_id: None,
         },
         ClientCommand::RefreshListings {

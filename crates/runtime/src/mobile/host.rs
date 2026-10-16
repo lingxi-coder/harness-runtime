@@ -4395,6 +4395,7 @@ impl MobileEngineHandle {
     async fn submit_slash_command(
         &self,
         raw: ClientTextDto,
+        images: Vec<ImageRefDto>,
         client_turn_id: Option<u64>,
         transition: tokio::sync::MutexGuard<'_, ()>,
     ) -> Result<(), ClientError> {
@@ -4431,8 +4432,13 @@ impl MobileEngineHandle {
         // The loop transition guard prevents a concurrent New/Resume retarget
         // between choosing that session and durably admitting the operation.
         if let Some(active) = self.active_cancel.lock().await.clone() {
-            self.persist_and_enqueue_mobile_slash(&active.session_id, client_turn_id, raw_source)
-                .await?;
+            self.persist_and_enqueue_mobile_slash(
+                &active.session_id,
+                client_turn_id,
+                raw_source,
+                images.clone(),
+            )
+            .await?;
             return Ok(());
         }
         let session_id = self.active_session_id();
@@ -4442,8 +4448,13 @@ impl MobileEngineHandle {
             .map_err(Self::map_durable_turn_error)?
             .is_empty()
         {
-            self.persist_and_enqueue_mobile_slash(&session_id, client_turn_id, raw_source)
-                .await?;
+            self.persist_and_enqueue_mobile_slash(
+                &session_id,
+                client_turn_id,
+                raw_source,
+                images.clone(),
+            )
+            .await?;
             return Ok(());
         }
 
@@ -4455,6 +4466,7 @@ impl MobileEngineHandle {
                         &active.session_id,
                         client_turn_id,
                         raw_source,
+                        images.clone(),
                     )
                     .await?;
                     return Ok(());
@@ -4470,6 +4482,7 @@ impl MobileEngineHandle {
             client_turn_id,
             client_turn_id,
             raw_source.clone(),
+            images.clone(),
         ) {
             Ok(checkpoint) => checkpoint,
             Err(error) => {
@@ -4492,7 +4505,8 @@ impl MobileEngineHandle {
             .register_active_turn(owner.cancel.clone())
             .await;
         drop(transition);
-        self.execute_claimed_slash(raw_source, client_turn_id, owner, claimed)
+        let execution_images = claimed.images.clone();
+        self.execute_claimed_slash(raw_source, client_turn_id, owner, claimed, execution_images)
             .await
     }
 
@@ -4501,12 +4515,14 @@ impl MobileEngineHandle {
         session_id: &str,
         client_turn_id: Option<u64>,
         raw: Utf16JsonProjection,
+        images: Vec<ImageRefDto>,
     ) -> Result<(), ClientError> {
         let checkpoint = match self.durable_turns.admit_queued_slash(
             session_id,
             client_turn_id,
             client_turn_id,
             raw.clone(),
+            images.clone(),
         ) {
             Ok(checkpoint) => checkpoint,
             Err(DurableTurnStoreError::AlreadyExists { .. }) => {
@@ -4522,6 +4538,7 @@ impl MobileEngineHandle {
                     .map_err(Self::map_durable_turn_error)?;
                 if existing.queue_operation != QueueOperationKind::Slash
                     || existing.prompt != raw
+                    || existing.images != images
                     || existing.original_client_turn_id != client_turn_id
                 {
                     return Err(ClientError::Internal {
@@ -4596,11 +4613,13 @@ impl MobileEngineHandle {
             .register_active_turn(owner.cancel.clone())
             .await;
         drop(transition);
+        let execution_images = claimed.images.clone();
         self.execute_claimed_slash(
             checkpoint.prompt,
             checkpoint.original_client_turn_id,
             owner,
             claimed,
+            execution_images,
         )
         .await
     }
@@ -4679,6 +4698,7 @@ impl MobileEngineHandle {
         client_turn_id: Option<u64>,
         owner: Arc<ActiveTurn>,
         checkpoint: crate::mobile::turn_durability::DurableTurnCheckpoint,
+        images: Vec<ImageRefDto>,
     ) -> Result<(), ClientError> {
         if owner.cancel.is_cancelled() {
             let _ = self.durable_turns.complete_claimed_slash(
@@ -4809,7 +4829,7 @@ impl MobileEngineHandle {
                 self.start_streaming_turn_inner(
                     prompt,
                     None,
-                    Vec::new(),
+                    images,
                     Some(checkpoint.turn_id),
                     checkpoint.original_client_turn_id,
                     false,
@@ -4826,7 +4846,7 @@ impl MobileEngineHandle {
                 hook_messages,
             } => {
                 let skill_prompt = DurableSkillPrompt::new(command.clone(), body, hook_messages);
-                let queued_inputs = skill_prompt.queued_prompt_inputs();
+                let queued_inputs = skill_prompt.queued_prompt_inputs(&images);
                 let checkpoint = match self.durable_turns.prepare_claimed_slash_turn(
                     &owner.session_id,
                     checkpoint.turn_id,
@@ -6234,7 +6254,7 @@ impl MobileEngineHandle {
                         } else {
                             match (skill_prompt.as_ref(), checkpoint.prompt_identity.as_ref()) {
                                 (Some(skill_prompt), None) => {
-                                    Some(skill_prompt.queued_prompt_inputs())
+                                    Some(skill_prompt.queued_prompt_inputs(&checkpoint.images))
                                 }
                                 (None, Some(identity)) => Some(vec![identity.queued_prompt_input(
                                     checkpoint.prompt.clone(),
@@ -6661,8 +6681,13 @@ impl MobileEngineHandle {
             // expanded prompt AS a turn through the SAME streaming path as
             // `SendPrompt` (claude-code injects the expanded prompt as the user
             // message), so a typed `/loop` actually schedules + executes.
-            ClientCommand::RunSlashCommand { raw, turn_id } => {
-                self.submit_slash_command(raw, turn_id, _transition).await
+            ClientCommand::RunSlashCommand {
+                raw,
+                images,
+                turn_id,
+            } => {
+                self.submit_slash_command(raw, images, turn_id, _transition)
+                    .await
             }
 
             ClientCommand::UpdateSettings {

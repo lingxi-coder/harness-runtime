@@ -6747,6 +6747,24 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             .collect()
     }
 
+    fn source_user_images(
+        messages: &[ConversationMessage],
+    ) -> Vec<lingxi_core::types::ImageSource> {
+        messages
+            .iter()
+            .flat_map(|message| match message {
+                ConversationMessage::User { content, .. } => content
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Image { source } => Some(source.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
     fn bounded_utf16_diagnostic(units: &[u16]) -> String {
         use sha2::{Digest, Sha256};
 
@@ -7446,6 +7464,14 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         .encode_utf16()
         .chain([0xd800])
         .collect::<Vec<_>>();
+    let command_images = vec![client::protocol::commands::ImageRefDto {
+        media_type: "image/png".into(),
+        base64: "cG5nLWltYWdl".into(),
+    }];
+    let expected_command_images = vec![lingxi_core::types::ImageSource::Base64 {
+        media_type: "image/png".into(),
+        data: "cG5nLWltYWdl".into(),
+    }];
     let command_header_units = "<command-message>mobile-review</command-message>\n<command-name>/mobile-review</command-name>\n<command-args>"
         .encode_utf16()
         .chain([0xd800])
@@ -7488,6 +7514,8 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
 
     let first_for_work = first.clone();
     let first_command_units = command_units.clone();
+    let first_command_images = command_images.clone();
+    let first_expected_command_images = expected_command_images.clone();
     let first_command_header_units = command_header_units.clone();
     let first_expected_upe_context = expected_upe_context.clone();
     let first_hook_process = hook_process.clone();
@@ -7517,6 +7545,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             first
                 .submit(ClientCommand::RunSlashCommand {
                     raw: ClientTextDto::from_code_units(first_command_units.clone()),
+                    images: first_command_images.clone(),
                     turn_id: Some(247),
                 })
                 .await
@@ -7566,6 +7595,11 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
 
             let first_calls = pending.captured_calls();
             assert_eq!(first_calls.len(), 1);
+            assert_eq!(
+                source_user_images(&first_calls[0].messages),
+                first_expected_command_images,
+                "RunSlashCommand image bytes reach the first skill model request"
+            );
             let hook_commands = first_hook_process.captured_commands();
             assert_eq!(
                 hook_commands.len(),
@@ -7781,6 +7815,11 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 .durable_turns
                 .load(&session_id, 247)
                 .expect("load skill turn checkpoint");
+            assert_eq!(
+                checkpoint.images,
+                first_command_images,
+                "the accepted slash image is retained by the durable checkpoint"
+            );
             let source = checkpoint
                 .skill_prompt
                 .as_ref()
@@ -8043,6 +8082,10 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             .load(&session_id, 247)
             .expect("read resumed skill checkpoint");
         assert_eq!(
+            checkpoint.images, command_images,
+            "cold recovery retains the original slash image attachment"
+        );
+        assert_eq!(
             checkpoint
                 .skill_prompt
                 .as_ref()
@@ -8077,6 +8120,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         resumed
             .submit(ClientCommand::RunSlashCommand {
                 raw: ClientTextDto::from_code_units(command_units.clone()),
+                images: Vec::new(),
                 turn_id: Some(248),
             })
             .await
@@ -8103,6 +8147,11 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         .expect("new same-text skill turn completes its durable writes");
         let calls = resumed_stream.captured_calls().await;
         assert_eq!(calls.len(), 2);
+        assert_eq!(
+            source_user_images(&calls[0].messages),
+            expected_command_images,
+            "cold ResumeTurn reconstructs RunSlashCommand images from durable checkpoint"
+        );
         let hook_commands = hook_process.captured_commands();
         assert_eq!(hook_commands.len(), 2, "a new turn fires UPE once");
         let transcript_path =
@@ -10711,6 +10760,7 @@ fn chat_source_rejects_a_code_only_slash_command_before_dispatch() {
         handle
             .submit(ClientCommand::RunSlashCommand {
                 raw: "/loop every 5 minutes inspect the workspace".into(),
+                images: Vec::new(),
                 turn_id: Some(42),
             })
             .await
@@ -11601,6 +11651,7 @@ fn mobile_context_settings_failure_delivers_and_settles_durable_slash_without_mo
         handle
             .submit(ClientCommand::RunSlashCommand {
                 raw: "/context".into(),
+                images: Vec::new(),
                 turn_id: Some(641),
             })
             .await

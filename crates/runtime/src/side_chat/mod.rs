@@ -634,12 +634,11 @@ impl SideChatManager {
                 turn_id,
                 images,
                 ..
-            } if text_starts_with_slash(&text) => {
-                if !images.is_empty() {
-                    return Err("slash commands with images are unavailable in side chat".into());
-                }
-                ClientCommand::RunSlashCommand { raw: text, turn_id }
-            }
+            } if text_starts_with_slash(&text) => ClientCommand::RunSlashCommand {
+                raw: text,
+                images,
+                turn_id,
+            },
             command => command,
         };
         let turn = matches!(
@@ -1057,7 +1056,25 @@ async fn dispatch(
             side.session.permission_gate.end_main_turn(owner);
             result.map(|_| ()).map_err(|error| error.to_string())
         }
-        ClientCommand::RunSlashCommand { raw, turn_id } => {
+        ClientCommand::RunSlashCommand {
+            raw,
+            images,
+            turn_id,
+        } => {
+            let replay_images = images
+                .iter()
+                .map(|image| client::protocol::message::MessageImageDto {
+                    media_type: image.media_type.clone(),
+                    url: format!("data:{};base64,{}", image.media_type, image.base64),
+                })
+                .collect();
+            let image_sources = images
+                .into_iter()
+                .map(|image| lingxi_core::types::ImageSource::Base64 {
+                    media_type: image.media_type,
+                    data: image.base64,
+                })
+                .collect::<Vec<_>>();
             let raw_source = raw.clone().into_projection();
             match side
                 .session
@@ -1081,7 +1098,7 @@ async fn dispatch(
                                             text: raw.clone(),
                                         },
                                     ],
-                                    images: vec![],
+                                    images: replay_images.clone(),
                                     loop_wakeup: None,
                                     visualization_context: None,
                                     sent_at_ms: None,
@@ -1090,7 +1107,14 @@ async fn dispatch(
                     }
                     side.replay.emit(ClientEvent::TurnStarted { turn_id }).await;
                     let owner = side.session.permission_gate.begin_main_turn(None, turn_id);
-                    let result = orch.run_turn_streaming_with_cancel(prompt, cancel).await;
+                    let result = orch
+                        .run_turn_streaming_with_cancel_image_sources_and_message_id(
+                            prompt,
+                            image_sources,
+                            cancel,
+                            None,
+                        )
+                        .await;
                     side.session.permission_gate.end_main_turn(owner);
                     result.map(|_| ()).map_err(|e| e.to_string())
                 }
@@ -1114,7 +1138,7 @@ async fn dispatch(
                                             text: raw.clone(),
                                         },
                                     ],
-                                    images: vec![],
+                                    images: replay_images.clone(),
                                     loop_wakeup: None,
                                     visualization_context: None,
                                     sent_at_ms: None,
@@ -1122,13 +1146,39 @@ async fn dispatch(
                             });
                     }
                     side.replay.emit(ClientEvent::TurnStarted { turn_id }).await;
-                    let inputs = orchestrator::skill_prompt_inputs(command, body, hook_messages);
+                    let mut inputs =
+                        orchestrator::skill_prompt_inputs(command, body, hook_messages);
+                    if let Some(input) = inputs.iter_mut().find(|input| !input.is_meta) {
+                        input.images = image_sources;
+                    }
                     let owner = side.session.permission_gate.begin_main_turn(None, turn_id);
                     let result = orch.run_queued_prompt_batch(inputs, cancel).await;
                     side.session.permission_gate.end_main_turn(owner);
                     result.map(|_| ()).map_err(|error| error.to_string())
                 }
                 SlashDispatchResult::Handled { display } => {
+                    if !replay_images.is_empty() {
+                        let _order = side.replay.order.lock().await;
+                        side.replay
+                            .events
+                            .lock()
+                            .await
+                            .push(ClientEvent::MessageComplete {
+                                stop_reason: None,
+                                message: Some(client::protocol::message::MessageDto {
+                                    role: "user".into(),
+                                    blocks: vec![
+                                        client::protocol::message::MessageBlockDto::Text {
+                                            text: raw.clone(),
+                                        },
+                                    ],
+                                    images: replay_images,
+                                    loop_wakeup: None,
+                                    visualization_context: None,
+                                    sent_at_ms: None,
+                                }),
+                            });
+                    }
                     side.replay
                         .emit(ClientEvent::SlashCommandResult {
                             turn_id,
@@ -2048,6 +2098,56 @@ mod tests {
         assert_eq!(sink.0.lock().await.iter().filter(|event|matches!(event,ClientEvent::SideChatSubmitted{request_id,..} if request_id=="stop")).count(),2);
         manager.shutdown().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn slash_prompt_with_images_is_admitted_and_replayed_with_its_attachment() {
+        let sink = Arc::new(Sink::default());
+        let manager = SideChatManager::new(parent(), Arc::new(Factory), sink.clone());
+        let id = manager
+            .create("create".into(), None, None, None)
+            .await
+            .unwrap();
+        manager
+            .submit(
+                &id,
+                "image-slash".into(),
+                ClientCommand::SendPrompt {
+                    text: "/model".into(),
+                    prompt_mode: None,
+                    images: vec![client::protocol::commands::ImageRefDto {
+                        media_type: "image/png".into(),
+                        base64: "AQID".into(),
+                    }],
+                    turn_id: Some(42),
+                    visualization_context: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let replayed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = sink.0.lock().await.iter().find_map(|event| match event {
+                    ClientEvent::MessageComplete {
+                        message: Some(message),
+                        ..
+                    } if message.role == "user" => Some(message.clone()),
+                    _ => None,
+                });
+                if let Some(message) = event {
+                    break message;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("image slash admission should publish its user attachment");
+        assert_eq!(replayed.images.len(), 1);
+        assert_eq!(replayed.images[0].media_type, "image/png");
+        assert_eq!(replayed.images[0].url, "data:image/png;base64,AQID");
+
+        manager.shutdown().await.unwrap();
+    }
     #[tokio::test]
     async fn forbidden_nested_side_does_not_ack_or_mutate_admission() {
         let sink = Arc::new(Sink::default());
@@ -2062,6 +2162,7 @@ mod tests {
                 "submit-1".into(),
                 ClientCommand::RunSlashCommand {
                     raw: "/side hi".into(),
+                    images: Vec::new(),
                     turn_id: Some(1)
                 }
             )

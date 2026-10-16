@@ -183,6 +183,7 @@
   "ClientCommand::ResumeTurn": "resume_turn",
   "ClientCommand::ResumeTurn.turn_id": "u64",
   "ClientCommand::RunSlashCommand": "run_slash_command",
+  "ClientCommand::RunSlashCommand.images": "Vec<ImageRefDto>",
   "ClientCommand::RunSlashCommand.raw": "ClientTextDto",
   "ClientCommand::RunSlashCommand.turn_id": "Option<u64>",
   "ClientCommand::SendPrompt": "send_prompt",

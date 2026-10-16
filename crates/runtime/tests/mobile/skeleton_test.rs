@@ -248,6 +248,7 @@ fn submit_run_slash_command_preserves_lone_surrogate_in_streamed_and_durable_pro
         handle
             .submit(ClientCommand::RunSlashCommand {
                 raw: ClientTextDto::from_code_units(raw_command),
+                images: Vec::new(),
                 turn_id: Some(7),
             })
             .await
