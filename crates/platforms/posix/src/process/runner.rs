@@ -2436,6 +2436,62 @@ mod async_hook_tests {
         assert_eq!(out.exit_code, 0);
         assert!(!out.timed_out);
     }
+    #[tokio::test]
+    async fn cancelling_idle_hook_reaps_its_owned_process_group() {
+        let owner = format!("idle-hook-{}", std::process::id());
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let observer = Arc::new(HookPidObserver {
+            bytes: std::sync::Mutex::new(Vec::new()),
+            ready: tokio::sync::Notify::new(),
+        });
+        let command = sh("sleep 30 & echo $!; wait").with_process_owner(Some(owner));
+        let task = tokio::spawn({
+            let cancellation = cancellation.clone();
+            let observer: Arc<dyn lingxi_core::host::HookOutputObserver> = observer.clone();
+            async move {
+                PosixProcess::new()
+                    .run_hook_with_async_detection_observed_cancellable(
+                        &command,
+                        Duration::from_secs(10),
+                        Some(observer),
+                        Some(cancellation),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), observer.ready.notified())
+            .await
+            .expect("hook emits the descendant PID before blocking");
+        let child_pid = String::from_utf8(observer.bytes.lock().unwrap().clone())
+            .expect("PID output is UTF-8")
+            .trim()
+            .to_string();
+        assert!(!child_pid.is_empty(), "hook emitted a descendant PID");
+
+        cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("cancellation kills and reaps the hook group")
+            .expect("hook runner task does not panic");
+        assert!(
+            matches!(result, Err(ProcessError::Io(message)) if message == "hook execution cancelled")
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut alive = true;
+        while std::time::Instant::now() < deadline {
+            alive = std::process::Command::new("/bin/kill")
+                .args(["-0", &child_pid])
+                .status()
+                .expect("kill -0 runs")
+                .success();
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(!alive, "idle hook descendant {child_pid} must not survive");
+    }
 }
 
 #[cfg(test)]
@@ -2746,62 +2802,5 @@ mod streaming_tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(!alive, "cancelled streaming shell {pid} must not survive");
-    }
-
-    #[tokio::test]
-    async fn cancelling_idle_hook_reaps_its_owned_process_group() {
-        let owner = format!("idle-hook-{}", std::process::id());
-        let cancellation = tokio_util::sync::CancellationToken::new();
-        let observer = Arc::new(HookPidObserver {
-            bytes: std::sync::Mutex::new(Vec::new()),
-            ready: tokio::sync::Notify::new(),
-        });
-        let command = sh("sleep 30 & echo $!; wait").with_process_owner(Some(owner));
-        let task = tokio::spawn({
-            let cancellation = cancellation.clone();
-            let observer: Arc<dyn lingxi_core::host::HookOutputObserver> = observer.clone();
-            async move {
-                PosixProcess::new()
-                    .run_hook_with_async_detection_observed_cancellable(
-                        &command,
-                        Duration::from_secs(10),
-                        Some(observer),
-                        Some(cancellation),
-                    )
-                    .await
-            }
-        });
-        tokio::time::timeout(Duration::from_secs(2), observer.ready.notified())
-            .await
-            .expect("hook emits the descendant PID before blocking");
-        let child_pid = String::from_utf8(observer.bytes.lock().unwrap().clone())
-            .expect("PID output is UTF-8")
-            .trim()
-            .to_string();
-        assert!(!child_pid.is_empty(), "hook emitted a descendant PID");
-
-        cancellation.cancel();
-        let result = tokio::time::timeout(Duration::from_secs(2), task)
-            .await
-            .expect("cancellation kills and reaps the hook group")
-            .expect("hook runner task does not panic");
-        assert!(
-            matches!(result, Err(ProcessError::Io(message)) if message == "hook execution cancelled")
-        );
-
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        let mut alive = true;
-        while std::time::Instant::now() < deadline {
-            alive = std::process::Command::new("/bin/kill")
-                .args(["-0", &child_pid])
-                .status()
-                .expect("kill -0 runs")
-                .success();
-            if !alive {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        assert!(!alive, "idle hook descendant {child_pid} must not survive");
     }
 }
