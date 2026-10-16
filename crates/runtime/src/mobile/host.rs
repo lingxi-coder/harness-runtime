@@ -1378,7 +1378,7 @@ mod session_identity_import_tests {
         assert_eq!(std::fs::read_to_string(&transcript_path).unwrap(), anchor);
 
         let row = session::jsonl::reader::route_lines(
-            r#"{"type":"user","uuid":"first-message","parentUuid":null,"sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-10-04T12:00:00.000Z","cwd":"/workspace","version":"test","isSidechain":false,"userType":"external","message":{"role":"user","content":"hello"}}"#,
+            r#"{"type":"user","uuid":"first-message","parentUuid":null,"sessionId":"11111111-2222-3333-4444-555555555555","timestamp":"2026-10-04T12:00:00.000Z","cwd":"/home/lingxi/lingxi","version":"test","isSidechain":false,"userType":"external","message":{"role":"user","content":"hello"}}"#,
         )
         .messages_in_order
         .into_iter()
@@ -1401,8 +1401,8 @@ mod session_identity_import_tests {
         );
         let writer = JsonlWriter::new(transcript_path.clone(), filesystem);
         let native = concat!(
-            "{\"type\":\"user\",\"uuid\":\"resume-user\",\"parentUuid\":null,\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"timestamp\":\"2026-10-04T12:00:00.000Z\",\"cwd\":\"/workspace\",\"version\":\"test\",\"isSidechain\":false,\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
-            "{\"type\":\"assistant\",\"uuid\":\"resume-assistant\",\"parentUuid\":\"resume-user\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"timestamp\":\"2026-10-04T12:00:01.000Z\",\"cwd\":\"/workspace\",\"version\":\"test\",\"isSidechain\":false,\"message\":{\"role\":\"assistant\",\"content\":\"world\"}}\n"
+            "{\"type\":\"user\",\"uuid\":\"resume-user\",\"parentUuid\":null,\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"timestamp\":\"2026-10-04T12:00:00.000Z\",\"cwd\":\"/home/lingxi/lingxi\",\"version\":\"test\",\"isSidechain\":false,\"message\":{\"role\":\"user\",\"content\":\"hello\"}}\n",
+            "{\"type\":\"assistant\",\"uuid\":\"resume-assistant\",\"parentUuid\":\"resume-user\",\"sessionId\":\"11111111-2222-3333-4444-555555555555\",\"timestamp\":\"2026-10-04T12:00:01.000Z\",\"cwd\":\"/home/lingxi/lingxi\",\"version\":\"test\",\"isSidechain\":false,\"message\":{\"role\":\"assistant\",\"content\":\"world\"}}\n"
         );
         std::fs::write(&transcript_path, native).unwrap();
 

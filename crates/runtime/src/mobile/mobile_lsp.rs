@@ -126,7 +126,10 @@ impl MobileLinuxGuestLspPathMapper {
         host_root.hash(&mut hasher);
         let mapping = WorkspaceMapping {
             host_root,
-            guest_root: PathBuf::from(format!("/workspace/lingxi-lsp-{:016x}", hasher.finish())),
+            guest_root: PathBuf::from(format!(
+                "/home/lingxi/lingxi/lingxi-lsp-{:016x}",
+                hasher.finish()
+            )),
             purpose: MountPurpose::External,
         };
         self.register_workspace_root(
@@ -788,11 +791,11 @@ mod tests {
             None,
         ));
         let root = PathBuf::from("/apps/lease-test");
-        let uri = Url::parse("file:///workspace/lease-test/app.js").expect("URI");
+        let uri = Url::parse("file:///home/lingxi/lingxi/lease-test/app.js").expect("URI");
         diagnostics
             .record_document_sync(
                 &root.join("app.js"),
-                Path::new("/workspace/lease-test/app.js"),
+                Path::new("/home/lingxi/lingxi/lease-test/app.js"),
                 uri.clone(),
                 Some(1),
                 true,

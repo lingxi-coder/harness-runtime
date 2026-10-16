@@ -162,7 +162,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -173,7 +173,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -219,7 +219,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
  "x11rb",
 ]
 
@@ -1880,7 +1880,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3952,7 +3952,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-android"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=b65f8856d773d27ebf73b0cade907884d3080704#b65f8856d773d27ebf73b0cade907884d3080704"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
 dependencies = [
  "async-trait",
  "mobile-linux-api",
@@ -3966,7 +3966,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-api"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=b65f8856d773d27ebf73b0cade907884d3080704#b65f8856d773d27ebf73b0cade907884d3080704"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
 dependencies = [
  "async-trait",
  "serde",
@@ -3976,7 +3976,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-core"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=b65f8856d773d27ebf73b0cade907884d3080704#b65f8856d773d27ebf73b0cade907884d3080704"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
 dependencies = [
  "mobile-linux-api",
  "serde",
@@ -5173,7 +5173,7 @@ dependencies = [
 [[package]]
 name = "platform-pty"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=b65f8856d773d27ebf73b0cade907884d3080704#b65f8856d773d27ebf73b0cade907884d3080704"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
 dependencies = [
  "anyhow",
  "filedescriptor",
@@ -5583,7 +5583,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5982,7 +5982,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -5995,7 +5995,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6603,7 +6603,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -7952,7 +7952,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]

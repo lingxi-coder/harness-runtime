@@ -241,13 +241,19 @@ mod tests {
     #[test]
     fn atlas_atoms_are_pinned() {
         use mobile_linux_api::guest_paths as sdk;
-        assert_eq!(sdk::HOME, "/root");
+        assert_eq!(sdk::HOME, "/home/lingxi");
         assert_eq!(sdk::SCRATCH, &["/tmp", "/var/tmp"]);
-        assert_eq!(sdk::WORKSPACE_ROOT, "/workspace");
-        assert_eq!(sdk::workspace("abc-123"), "/workspace/abc-123");
+        assert_eq!(sdk::WORKSPACE_ROOT, "/home/lingxi/lingxi");
+        assert_eq!(sdk::workspace("abc-123"), "/home/lingxi/lingxi/abc-123");
         assert_eq!(
             sdk::writable_roots(),
-            ["/root", "/tmp", "/var/tmp", "/workspace"]
+            [
+                "/home/lingxi",
+                "/root",
+                "/tmp",
+                "/var/tmp",
+                "/home/lingxi/lingxi"
+            ]
         );
     }
 

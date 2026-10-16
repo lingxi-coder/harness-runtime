@@ -36,7 +36,7 @@ fn mobile_git_gate_disables_selected_but_unavailable_runtime() {
         Some(tool_api::MobileGitToolCtx {
             enabled: true,
             has_token: true,
-            workspace_root: "/workspace".into(),
+            workspace_root: "/home/lingxi/lingxi".into(),
         }),
         Some(&unavailable_mobile_linux_capability()),
     )
@@ -66,8 +66,8 @@ fn unavailable_gated_shell_is_not_described_as_mobile_linux() {
     )
     .expect("carrier retained for registration gate");
     let session_cwd = SessionCwd::new(
-        std::path::PathBuf::from("/workspace/app"),
-        vec![std::path::PathBuf::from("/workspace/app")],
+        std::path::PathBuf::from("/home/lingxi/lingxi/app"),
+        vec![std::path::PathBuf::from("/home/lingxi/lingxi/app")],
     );
 
     let environment = build_mobile_runtime_environment(
@@ -92,7 +92,7 @@ fn unavailable_gated_shell_is_not_described_as_mobile_linux() {
 fn workspace_prompt_paths_are_guest_only() {
     let mounts = [mobile_linux_api::MountSpec {
         host_path: std::path::PathBuf::from("/native/workspace"),
-        guest_path: "/workspace/app".into(),
+        guest_path: "/home/lingxi/lingxi/app".into(),
         read_only: false,
         purpose: mobile_linux_api::MountPurpose::Workspace,
     }];
@@ -100,12 +100,16 @@ fn workspace_prompt_paths_are_guest_only() {
     assert_eq!(
         model_visible_mobile_cwd(std::path::Path::new("/native/workspace/src"), &mounts, true,)
             .as_deref(),
-        Some("/workspace/app/src")
+        Some("/home/lingxi/lingxi/app/src")
     );
     assert_eq!(
-        model_visible_mobile_cwd(std::path::Path::new("/workspace/app/src"), &mounts, true)
-            .as_deref(),
-        Some("/workspace/app/src")
+        model_visible_mobile_cwd(
+            std::path::Path::new("/home/lingxi/lingxi/app/src"),
+            &mounts,
+            true
+        )
+        .as_deref(),
+        Some("/home/lingxi/lingxi/app/src")
     );
     assert_eq!(
         model_visible_mobile_cwd(
@@ -129,7 +133,7 @@ fn workspace_prompt_paths_are_guest_only() {
 fn mobile_subagent_env_renderer_uses_guest_paths_only() {
     let mounts = vec![mobile_linux_api::MountSpec {
         host_path: std::path::PathBuf::from("/native/workspace"),
-        guest_path: "/workspace/app".into(),
+        guest_path: "/home/lingxi/lingxi/app".into(),
         read_only: false,
         purpose: mobile_linux_api::MountPurpose::Workspace,
     }];
@@ -141,7 +145,7 @@ fn mobile_subagent_env_renderer_uses_guest_paths_only() {
     let environment = lingxi_core::host::MobileRuntimeEnvironment::new(
         ios_host(),
         lingxi_core::host::MobileToolRuntime::MobileLinuxGuest,
-        Some("/workspace/app".into()),
+        Some("/home/lingxi/lingxi/app".into()),
         Some("/bin/sh".into()),
         Some("mobile-linux".into()),
         lingxi_core::host::MobileNetworkPolicy::PermissionMediated,
@@ -156,21 +160,21 @@ fn mobile_subagent_env_renderer_uses_guest_paths_only() {
     );
 
     let base = renderer("claude-opus-4-8[1m]", None);
-    assert!(base.contains("Working directory: /workspace/app\n"));
+    assert!(base.contains("Working directory: /home/lingxi/lingxi/app\n"));
     assert!(!base.contains("/private/var/mobile/Containers/Data/Application/secret"));
 
     let mapped = renderer(
         "claude-opus-4-8[1m]",
         Some(std::path::Path::new("/native/workspace/src")),
     );
-    assert!(mapped.contains("Working directory: /workspace/app/src\n"));
+    assert!(mapped.contains("Working directory: /home/lingxi/lingxi/app/src\n"));
     assert!(!mapped.contains("/native/workspace/src"));
 
     let unmapped = renderer(
         "claude-opus-4-8[1m]",
         Some(std::path::Path::new("/private/var/mobile/worktree")),
     );
-    assert!(unmapped.contains("Working directory: /workspace/app\n"));
+    assert!(unmapped.contains("Working directory: /home/lingxi/lingxi/app\n"));
     assert!(!unmapped.contains("/private/var/mobile/worktree"));
 }
 

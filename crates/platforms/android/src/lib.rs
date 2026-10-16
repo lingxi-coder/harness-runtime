@@ -83,7 +83,7 @@ pub struct AndroidPlatformInputs {
     /// Host workspace root exposed to the mobile-linux guest. Defaults to
     /// `<app_files_root>/workspaces/default` when unset.
     pub mobile_linux_workspace_root: Option<PathBuf>,
-    /// Stable workspace identifier for the guest path `/workspace/<id>`.
+    /// Stable workspace identifier for the guest path `/home/lingxi/lingxi/<id>`.
     pub mobile_linux_workspace_id: Option<String>,
     /// Managed rootfs directory reserved for the runtime implementation.
     pub mobile_linux_managed_root: Option<PathBuf>,
@@ -199,7 +199,7 @@ fn default_mobile_linux_mounts(
     let workspace_id = sanitize_workspace_id(workspace_id);
     vec![MountSpec {
         host_path: workspace_root.to_path_buf(),
-        guest_path: format!("/workspace/{workspace_id}"),
+        guest_path: mobile_linux_api::guest_paths::workspace(&workspace_id),
         read_only: false,
         purpose: MountPurpose::Workspace,
     }]
@@ -458,7 +458,7 @@ mod tests {
 
         platform
             .filesystem()
-            .write_file("/workspace/default/probe.txt", "from guest path")
+            .write_file("/home/lingxi/lingxi/default/probe.txt", "from guest path")
             .await
             .expect("guest file path resolves into workspace");
         assert_eq!(

@@ -618,7 +618,7 @@ fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
         "parentUuid":null,
         "sessionId":session_id,
         "timestamp":timestamp,
-        "cwd":"/workspace",
+        "cwd":"/home/lingxi/lingxi",
         "version":"test",
         "isSidechain":false,
         "message":first_message
@@ -629,7 +629,7 @@ fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
         "parentUuid":null,
         "sessionId":session_id,
         "timestamp":timestamp,
-        "cwd":"/workspace",
+        "cwd":"/home/lingxi/lingxi",
         "version":"test",
         "isSidechain":false,
         "message":first_message,
@@ -641,7 +641,7 @@ fn main_session_agent_snapshot_joins_outer_uuids_to_stable_index_sidecar() {
         .expect("Native API-error row is an object");
     api_error_object.insert("parentUuid".into(), serde_json::json!(first_uuid));
     api_error_object.insert("sessionId".into(), serde_json::json!(session_id));
-    api_error_object.insert("cwd".into(), serde_json::json!("/workspace"));
+    api_error_object.insert("cwd".into(), serde_json::json!("/home/lingxi/lingxi"));
     api_error_object.insert("version".into(), serde_json::json!("test"));
     api_error_object.insert("isSidechain".into(), serde_json::json!(false));
     let raw = [&first_row, &attachment_row, &api_error_row]
@@ -7222,7 +7222,10 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         assert!(
             types.iter().all(|kind| {
                 expected_nar.contains(&kind.as_str())
-                    || matches!(kind.as_str(), "date" | "session_context" | "hook_additional_context")
+                    || matches!(
+                        kind.as_str(),
+                        "date" | "session_context" | "hook_additional_context"
+                    )
             }),
             "every typed attachment is classified as one of five NAr producers, date/session_context, or UPE"
         );
