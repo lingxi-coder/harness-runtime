@@ -149,6 +149,8 @@ impl LlmRequest {
                 Some(wire::ThinkingBudget::Tokens(tokens.try_into().map_err(
                     |e: std::num::TryFromIntError| invalid(e.to_string()),
                 )?));
+            // This explicit override replaces the application-selected budget.
+            self.execution.automatic_thinking_budget = false;
         } else {
             return Err(invalid("effort must be a level or token budget".into()));
         }
@@ -395,6 +397,27 @@ pub fn validate_capabilities(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numeric_thinking_override_replaces_automatic_budget_provenance() {
+        for (effort, expected_automatic) in [
+            (serde_json::json!(4096), false),
+            (serde_json::json!("enabled"), true),
+            (serde_json::json!("disabled"), true),
+            (serde_json::json!("high"), true),
+        ] {
+            let mut request = LlmRequest::new("model");
+            request.set_reasoning(Some(ReasoningConfig::Enabled {
+                budget_tokens: 16384,
+            }));
+            request.execution.automatic_thinking_budget = true;
+            request.set_effort(Some(effort.clone())).unwrap();
+            assert_eq!(
+                request.execution.automatic_thinking_budget, expected_automatic,
+                "{effort}"
+            );
+        }
+    }
 
     #[test]
     fn request_serialization_has_one_canonical_model_input_and_no_host_authority() {

@@ -254,6 +254,7 @@ pub(crate) async fn prepare(
             &profile.profile_name,
             &input,
             &sdk::RequestOptions {
+                automatic_thinking_budget: request.execution.automatic_thinking_budget,
                 anthropic_request_kind,
                 native_anthropic_endpoint_admission,
                 native_anthropic_context: sdk::NativeAnthropicContextInput {

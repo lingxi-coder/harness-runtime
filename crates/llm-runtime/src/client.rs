@@ -197,8 +197,23 @@ impl ModelRuntime {
             .routes
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
-        lingxi_llm_client::client::resolve_output_budget(
+        let selected = entry
+            .profile
+            .models
+            .iter()
+            .find(|row| {
+                row.request_model == route.request_model
+                    && row.display_model == route.display_model
+                    && row.billing_model == route.pricing_model.billing_model
+            })
+            .ok_or(LlmError::ModelUnavailable)?;
+        let context = lingxi_llm_client::CodecContext::for_model(
             &entry.profile,
+            selected,
+            lingxi_llm_client::RequestMode::Complete,
+        );
+        lingxi_llm_client::client::resolve_output_budget(
+            context.profile(),
             &route.request_model,
             requested,
         )
@@ -2744,6 +2759,38 @@ mod shared_client_regression {
             primary_capped.source,
             lingxi_llm_client::client::OutputBudgetSource::ClampedExplicit
         );
+    }
+
+    #[test]
+    fn output_budget_uses_the_exact_catalog_row_when_wire_ids_are_shared() {
+        let source = serde_json::json!({"providers":[{
+            "provider_id":"anthropic_first_party", "profile_name":"proxy", "protocol":"anthropic_messages",
+            "auth":"none", "credential":{"type":"none"}, "base_url":"https://proxy.test",
+            "models":[
+                {"display_model":"Small", "request_model":"shared", "billing_model":"shared", "metadata":{"applicationOutputTokens":32000,"maxOutputTokens":8192}},
+                {"display_model":"Large", "request_model":"shared", "billing_model":"shared", "metadata":{"applicationOutputTokens":48000,"maxOutputTokens":64000}}
+            ]
+        }]});
+        let mut config: ClientConfig = serde_json::from_value(source.clone()).unwrap();
+        // Application defaults belong to the SDK source snapshot, while the
+        // host metadata projection contains published display facts only.
+        let mut sdk_source = source["providers"][0].clone();
+        sdk_source.as_object_mut().unwrap().remove("credential");
+        config.providers[0].wire_profile = Some(serde_json::from_value(sdk_source).unwrap());
+        let client = ModelRuntime::from_config(config).unwrap();
+        let small = client
+            .resolve_output_budget_in("Small", Some("proxy"), None)
+            .unwrap();
+        let large = client
+            .resolve_output_budget_in("Large", Some("proxy"), None)
+            .unwrap();
+        assert_eq!(small.value, Some(8192));
+        assert_eq!(
+            small.source,
+            lingxi_llm_client::client::OutputBudgetSource::ClampedApplicationDefault
+        );
+        assert_eq!(large.value, Some(48000));
+        assert_eq!(large.maximum, Some(64000));
     }
 
     #[tokio::test]

@@ -199,6 +199,8 @@ impl PartialEq for RequestCredentials {
 /// recovery scope; it does not authorize another physical dispatch.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExecutionContext {
+    /// Preserve automatic manual-thinking intent until SDK attempt preparation.
+    pub automatic_thinking_budget: bool,
     /// Trusted main/origin session captured before provider preparation.
     pub request_session_id: Option<String>,
     /// Logical request credential capture reused across retry drafts only.
