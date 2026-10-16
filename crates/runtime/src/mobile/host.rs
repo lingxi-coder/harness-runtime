@@ -1070,6 +1070,7 @@ pub enum MobileEngineError {
 /// commands and drives the turn on the owned runtime.
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct MobileEngineHandle {
+    self_weak: std::sync::Weak<Self>,
     /// This Host generation owns all side state; no durable store is involved.
     side_chats: Arc<crate::side_chat::SideChatManager>,
     session_cron: Option<Arc<cron::CronScheduler>>,
@@ -5817,16 +5818,32 @@ impl MobileEngineHandle {
     // map this entry exists to be (same convention as `EngineCommandRouter::route`
     // and `harness_runtime::desktop::build`).
     #[allow(clippy::too_many_lines)]
-    /// Heap-allocate the dispatch future instead of building it in the
-    /// caller's frame.
-    ///
-    /// `ClientCommand` is held by value across the awaits below and the enum
-    /// keeps growing — 144 bytes before the cron/loop subsystem, 392 after — so
-    /// every frame on the dispatch chain carries it. The 2 MB test-thread stack
-    /// runs out first, and it aborts the whole binary rather than failing one
-    /// test. The public signature is unchanged, so the UniFFI bindings are not
-    /// affected.
+    /// Poll engine commands on the owned runtime. Foreign executors, including
+    /// Swift's cooperative pool, can have much smaller stacks than our workers.
     pub async fn submit(&self, command: ClientCommand) -> Result<(), ClientError> {
+        let handle = self
+            .self_weak
+            .upgrade()
+            .ok_or_else(|| ClientError::Internal {
+                message: "mobile engine is shutting down".into(),
+            })?;
+        let task = self
+            .runtime()
+            .spawn(async move { handle.submit_on_runtime(command).await });
+        // Preserve cancellation when a foreign caller drops its Rust future.
+        struct AbortCommand(tokio::task::AbortHandle);
+        impl Drop for AbortCommand {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+        let _abort = AbortCommand(task.abort_handle());
+        task.await.map_err(|error| ClientError::Internal {
+            message: format!("mobile command task failed: {error}"),
+        })?
+    }
+
+    async fn submit_on_runtime(&self, command: ClientCommand) -> Result<(), ClientError> {
         // A questionnaire parks work that can itself be holding the transition
         // lock (for example, a long-running workflow). Its answer is
         // connection-scoped and only resolves the broker's oneshot, so waiting

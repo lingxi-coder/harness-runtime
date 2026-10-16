@@ -3682,7 +3682,8 @@ pub fn build_mobile_engine_inner(
             connection_sink.clone(),
         )
     });
-    let handle = Arc::new(MobileEngineHandle {
+    let handle = Arc::new_cyclic(|self_weak| MobileEngineHandle {
+        self_weak: self_weak.clone(),
         side_chats,
         session_cron,
         scheduled_reload: std::sync::atomic::AtomicBool::new(false),

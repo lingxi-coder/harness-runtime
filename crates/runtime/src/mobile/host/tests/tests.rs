@@ -2847,6 +2847,29 @@ fn build_submit_handle_with_platform(
 }
 
 #[test]
+fn foreign_small_stack_can_refresh_slash_command_catalog() {
+    let root = tempfile::tempdir().expect("foreign caller root");
+    let (handle, listener) = build_submit_handle(root.path());
+    std::thread::Builder::new()
+        .name("foreign-swift-poll".into())
+        .stack_size(512 * 1024)
+        .spawn(move || {
+            futures::executor::block_on(handle.submit(ClientCommand::RefreshListings {
+                which: vec![client::protocol::commands::ListingKindDto::SlashCommands],
+            }))
+            .expect("foreign caller can refresh the catalog");
+            assert!(listener
+                .received
+                .blocking_lock()
+                .iter()
+                .any(|event| { matches!(event, Ev::SlashCommandCatalog { .. }) }));
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn mobile_controls_event_contains_the_live_native_proactivity_snapshot() {
     let root = tempfile::tempdir().expect("mobile controls root");
     let (handle, listener) = build_submit_handle(root.path());
