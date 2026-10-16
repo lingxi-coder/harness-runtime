@@ -51,8 +51,8 @@ use super::{
     MobileSessionAgentObserver, MobileWakeupDelivery, TurnLifecycleListener, MOBILE_CRON_HANDLES,
 };
 
-/// Project Native QO values from the already-merged settings. This bool map
-/// drives discovery; array source values are not rewritten by this projection.
+/// Project the Native marketplace active view from merged settings. Only an
+/// explicit boolean `true` enables a plugin; arrays project to false.
 fn mobile_enabled_plugins_for_discovery(
     settings: &lingxi_core::settings::SettingsJson,
 ) -> std::collections::BTreeMap<String, bool> {
@@ -64,7 +64,7 @@ fn mobile_enabled_plugins_for_discovery(
         .filter_map(|(name, value)| {
             value
                 .as_bool()
-                .or_else(|| value.is_array().then_some(true))
+                .or_else(|| value.is_array().then_some(false))
                 .map(|enabled| (name.clone(), enabled))
         })
         .collect()
@@ -77,7 +77,7 @@ mod mobile_enabled_plugins_tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn mobile_projection_matches_true_array_and_absent_key_semantics() {
+    fn mobile_projection_maps_arrays_to_false_and_preserves_absent_key_semantics() {
         let settings = SettingsJson {
             enabled_plugins: Some(BTreeMap::from([
                 ("empty@mkt".to_string(), serde_json::json!([])),
@@ -91,8 +91,8 @@ mod mobile_enabled_plugins_tests {
         };
         let enabled = mobile_enabled_plugins_for_discovery(&settings);
 
-        assert_eq!(enabled.get("empty@mkt"), Some(&true));
-        assert_eq!(enabled.get("strings@mkt"), Some(&true));
+        assert_eq!(enabled.get("empty@mkt"), Some(&false));
+        assert_eq!(enabled.get("strings@mkt"), Some(&false));
         assert_eq!(enabled.get("off@mkt"), Some(&false));
         assert!(!enabled.contains_key("missing@mkt"));
     }
@@ -1719,6 +1719,16 @@ pub(super) async fn build_mobile_inner_with_ask(
     // listing all observe one live command set.
     let shared_command_registry: Arc<RwLock<command_api::CommandRegistry>> =
         Arc::new(RwLock::new(command_api::CommandRegistry::new()));
+    let workflow_cwd = Arc::new(std::sync::Mutex::new(session_cwd.cwd()));
+    session_cwd.link_live_cwd(workflow_cwd.clone());
+    let workflow_tool_slot = Arc::new(RwLock::new(None));
+    let workflow_command_snapshot =
+        Arc::new(crate::workflow_catalog::WorkflowCommandSnapshot::new(
+            shared_command_registry.clone(),
+            workflow_tool_slot.clone(),
+            workflow_cwd.clone(),
+        ));
+    let command_snapshot_provider = workflow_command_snapshot.provider();
     let local_workflow_invoker =
         Arc::new(crate::mobile::workflow_support::DeferredToolInvoker::new());
     let local_workflow_status_sink = Arc::new(
@@ -2008,7 +2018,8 @@ pub(super) async fn build_mobile_inner_with_ask(
             cfg.session_mode,
         )
         .with_prompt_cwd(session_cwd.clone())
-        .with_skill_usage_session(skill_usage_session.clone()),
+        .with_skill_usage_session(skill_usage_session.clone())
+        .with_command_snapshot_provider(command_snapshot_provider.clone()),
     );
     let skill_loader: Arc<dyn tool_skill::skill::SkillLoader> = live_skill_loader.clone();
     let agent_skill_loader: Arc<dyn lingxi_core::host::skill_loader::SkillLoader> =
@@ -2027,6 +2038,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         Some(read_state_map.clone()),
         super::mobile_code_review_suggestion_provider(cfg.clone()),
         Some(cfg.clone()),
+        Some(command_snapshot_provider.clone()),
     );
     #[cfg(test)]
     let wired_skill_loader = skill_loader.clone();
@@ -2060,8 +2072,6 @@ pub(super) async fn build_mobile_inner_with_ask(
     // sealed `task_registry` Arc). Mobile has no managed-settings tier, so
     // `disableWorkflows` policy is absent (false); `LINGXI_DISABLE_WORKFLOWS`
     // still works via `workflows_enabled`.
-    let workflow_cwd = Arc::new(std::sync::Mutex::new(session_cwd.cwd()));
-    session_cwd.link_live_cwd(workflow_cwd.clone());
     let workflow_launcher = Arc::new(crate::mobile::workflow_support::MobileWorkflowLauncher {
         registry: task_registry.clone(),
         project_cwd: cwd.clone(),
@@ -2106,6 +2116,7 @@ pub(super) async fn build_mobile_inner_with_ask(
                 .expect("mobile workflow permission policy is always wired"),
         ),
     );
+    *workflow_tool_slot.write().await = Some(workflow_tool.clone());
     tools.register_builtin(workflow_tool.clone());
     if cfg.inline_visualization {
         let store =
@@ -2739,6 +2750,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         cwd.clone(),
         device_skill_tools.clone(),
         workflow_tool.clone(),
+        workflow_command_snapshot.clone(),
     )));
     // `/list-agents` reads this mobile session's live task and name stores.
     // Mobile is a local app-private host, so use its explicit local-default
@@ -2778,11 +2790,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             tracing::warn!(%error,"installed mobile plugin could not be loaded");
         }
     }
-    crate::workflow_catalog::refresh_workflow_commands(
-        &shared_command_registry,
-        workflow_tool.as_ref(),
-    )
-    .await;
+    workflow_command_snapshot.refresh().await;
     let prompt_paths_orch = orch.clone();
     let bundled_prompt_model_orch = orch.clone();
     let workflow_prompt_availability_orch = orch.clone();
@@ -2793,6 +2801,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         mod_prompt_output,
     );
     let dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
+        .with_command_snapshot_provider(command_snapshot_provider)
         .with_skill_prompt_transformer(skill_prompt_transformer)
         .with_expansion_hooks(
             expansion_hook_executor,
@@ -2889,6 +2898,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             cwd.clone(),
             device_skill_tools.clone(),
             workflow_tool.clone(),
+            workflow_command_snapshot.clone(),
         );
         if let Some(parsed) = parse_slash_command(&"/reload-skills".into()) {
             let _ = handler.handle(&parsed).await;

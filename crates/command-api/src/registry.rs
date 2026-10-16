@@ -102,6 +102,11 @@ impl CommandRegistry {
         if !self.side_chat {
             return true;
         }
+        if command.native_slash_kind == Some(crate::model::NativeSlashKind::Workflow) {
+            // Side Chat does not expose the `Workflow` tool, which the dynamic
+            // workflow prompt instructs the model to invoke.
+            return false;
+        }
         if self.mod_owner_of(&command.name).is_some()
             || matches!(command.source, CommandSource::Plugin | CommandSource::Mcp)
         {
@@ -972,8 +977,8 @@ impl CommandRegistry {
     /// still match them on exact input.
     #[must_use]
     pub fn palette_commands(&self) -> Vec<SlashCommand> {
-        self.commands
-            .values()
+        self.registration_ordered_commands()
+            .into_iter()
             .filter(|command| native_factory_enabled(command))
             .filter(|command| command.user_invocable != Some(false))
             .filter(|command| self.execution_allowed(command))
@@ -1622,6 +1627,49 @@ mod tests {
                 "builtin-command",
             ],
             "refresh replaces this producer's rows and preserves the other source groups"
+        );
+    }
+
+    #[test]
+    fn palette_commands_include_the_effective_dynamic_workflow_winner() {
+        let mut registry = CommandRegistry::new();
+        registry.register_command(SlashCommand {
+            name: "workflow-name".into(),
+            source: CommandSource::Builtin,
+            kind: SlashCommandKind::Builtin {
+                handler_id: "workflow-name".into(),
+            },
+            ..SlashCommand::default()
+        });
+        registry.replace_native_workflow_commands(vec![SlashCommand {
+            name: "workflow-name".into(),
+            description: "dynamic workflow".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: None,
+            },
+            native_type: Some(NativeCommandType::Prompt),
+            native_slash_kind: Some(crate::model::NativeSlashKind::Workflow),
+            ..SlashCommand::default()
+        }]);
+
+        let palette = registry.palette_commands();
+        assert_eq!(
+            palette.len(),
+            1,
+            "the shadowed static row is not a second candidate"
+        );
+        assert_eq!(
+            palette[0].description.string_at(""),
+            Some("dynamic workflow")
+        );
+        assert_eq!(
+            registry
+                .resolve(&"workflow-name".into())
+                .unwrap()
+                .native_slash_kind,
+            Some(crate::model::NativeSlashKind::Workflow)
         );
     }
 
@@ -3362,6 +3410,54 @@ mod tests {
         assert!(!palette.contains(&"internal".to_string()));
         assert!(!palette.contains(&"login".to_string()));
     }
+    #[test]
+    fn side_chat_copy_filter_excludes_workflows_without_the_workflow_tool() {
+        let mut main_registry = CommandRegistry::new();
+        main_registry.register_command(SlashCommand {
+            name: "plain-skill".into(),
+            source: CommandSource::Bundled,
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: None,
+            },
+            ..SlashCommand::default()
+        });
+        main_registry.replace_native_workflow_commands(vec![SlashCommand {
+            name: "review-workflow".into(),
+            description: "Review the change".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: None,
+            },
+            native_type: Some(NativeCommandType::Prompt),
+            native_slash_kind: Some(crate::model::NativeSlashKind::Workflow),
+            ..SlashCommand::default()
+        }]);
+        assert!(main_registry
+            .palette_commands()
+            .iter()
+            .any(|command| command.name.string_at("") == Some("review-workflow")));
+
+        // This is the exact descriptor-copy filter used by DesktopSideChatFactory.
+        let mut side_chat_registry = CommandRegistry::new();
+        side_chat_registry.set_side_chat(true);
+        for command in main_registry.list_all() {
+            if side_chat_registry.execution_allowed(command) {
+                side_chat_registry.register_command(command.clone());
+            }
+        }
+
+        assert!(side_chat_registry.resolve(&"plain-skill".into()).is_some());
+        assert!(side_chat_registry
+            .resolve(&"review-workflow".into())
+            .is_none());
+        assert!(side_chat_registry
+            .palette_commands()
+            .iter()
+            .all(|command| { command.name.string_at("") != Some("review-workflow") }));
+    }
+
     #[test]
     fn side_chat_palette_keeps_opaque_inline_skill_names() {
         fn inline_skill(name: &str) -> SlashCommand {

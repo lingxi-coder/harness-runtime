@@ -39,8 +39,8 @@ pub use argument_substitution::{
 };
 pub use describe::format_description_with_source;
 pub use dispatcher::{
-    BackgroundPromptLauncher, McpPromptResolver, ModCommandRunInterceptor, RegistrySlashDispatcher,
-    SkillInvocationObserver,
+    BackgroundPromptLauncher, CommandSnapshotFuture, CommandSnapshotProvider, McpPromptResolver,
+    ModCommandRunInterceptor, RegistrySlashDispatcher, SkillInvocationObserver,
 };
 pub use expand::{expand_markdown_command, ExpandCtx, ExpandError};
 pub use markdown_loader::{

@@ -294,6 +294,7 @@ pub fn command_visible_in_session_mode(command: &SlashCommand, mode: SessionMode
 /// [`SkillLoader`] backed by the shared live mobile [`CommandRegistry`].
 pub struct MobileDiskSkillLoader {
     registry: Arc<RwLock<CommandRegistry>>,
+    command_snapshot_provider: Option<command_api::CommandSnapshotProvider>,
     session_id: Option<String>,
     session_mode: SessionMode,
     prompt_cwd: Option<Arc<tool_api::SessionCwd>>,
@@ -310,6 +311,7 @@ impl MobileDiskSkillLoader {
     pub fn for_mode(registry: Arc<RwLock<CommandRegistry>>, session_mode: SessionMode) -> Self {
         Self {
             registry,
+            command_snapshot_provider: None,
             session_id: None,
             session_mode,
             prompt_cwd: None,
@@ -341,6 +343,16 @@ impl MobileDiskSkillLoader {
         self
     }
 
+    /// Refresh cwd-scoped command rows before this loader reads the registry.
+    #[must_use]
+    pub fn with_command_snapshot_provider(
+        mut self,
+        provider: command_api::CommandSnapshotProvider,
+    ) -> Self {
+        self.command_snapshot_provider = Some(provider);
+        self
+    }
+
     /// Share the session-scoped lifetime usage recorder with slash dispatch.
     #[must_use]
     pub fn with_skill_usage_session(
@@ -366,6 +378,7 @@ impl MobileDiskSkillLoader {
         }
         Self {
             registry,
+            command_snapshot_provider: None,
             session_id,
             session_mode,
             prompt_cwd: Some(tool_api::SessionCwd::new(cwd.to_path_buf(), Vec::new())),
@@ -421,6 +434,9 @@ impl ToolSkillLoader for MobileDiskSkillLoader {
     // Supply canonical names for the Skill tool's unknown-name suggestions.
     // Read the live registry and apply the same visibility rules as load().
     async fn list_names(&self) -> Vec<Utf16JsonProjection> {
+        if let Some(provider) = &self.command_snapshot_provider {
+            provider().await;
+        }
         let registry = self.registry.read().await;
         registry
             .list_all()
@@ -432,6 +448,9 @@ impl ToolSkillLoader for MobileDiskSkillLoader {
     }
 
     async fn load(&self, name: &Utf16JsonProjection) -> Result<Option<SkillDescriptor>, ToolError> {
+        if let Some(provider) = &self.command_snapshot_provider {
+            provider().await;
+        }
         let reg = self.registry.read().await;
         Ok(reg.resolve(name).and_then(|cmd| {
             (command_visible_in_session_mode(cmd, self.session_mode)
@@ -479,8 +498,16 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
         agent_type: &str,
         cwd: Option<&std::path::Path>,
         model: Option<&str>,
+        child_available_tool_names: &[Utf16JsonProjection],
         cancellation: lingxi_core::host::CancellationToken,
     ) -> Result<Option<SkillLoad>, String> {
+        if let Some(provider) = &self.command_snapshot_provider {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err("Agent skill preload cancelled".into()),
+                _ = provider() => {}
+            }
+        }
         let registry = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err("Agent skill preload cancelled".into()),
@@ -523,7 +550,7 @@ impl AgentSkillLoader for MobileDiskSkillLoader {
                             cwd: &cwd,
                             is_preload: true,
                             main_loop_model: model,
-                            available_tool_names: None,
+                            available_tool_names: Some(child_available_tool_names),
                             workflow_authoring_base_allowed: false,
                         },
                     )
@@ -777,6 +804,7 @@ mod tests {
             "acme-plugin:designer",
             None,
             None,
+            &[],
             lingxi_core::host::CancellationToken::new(),
         )
         .await
@@ -815,6 +843,7 @@ mod tests {
             "acme-plugin:designer",
             None,
             None,
+            &[],
             lingxi_core::host::CancellationToken::new(),
         )
         .await
@@ -1006,6 +1035,7 @@ mod tests {
                 "agent",
                 Some(Path::new("/child")),
                 Some("claude-fable-5"),
+                &[],
                 lingxi_core::host::CancellationToken::new()
             )
             .await

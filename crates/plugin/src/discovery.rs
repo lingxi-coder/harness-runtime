@@ -3333,7 +3333,7 @@ async fn detect_components(
         None => default_themes,
     };
     let workflows = match &parsed.workflows {
-        Some(paths) => resolve_ext_declared_paths(plugin_dir, paths.clone(), "js").await,
+        Some(paths) => resolve_workflow_declared_paths(plugin_dir, paths.clone()).await,
         None => default_workflows,
     };
     let mut hooks = standard_hooks.hooks;
@@ -3700,6 +3700,133 @@ async fn resolve_ext_declared_paths(
     }
     out.sort_by(|a, b| a.path.cmp(&b.path));
     dedup_component_paths(&mut out);
+    out
+}
+
+/// Resolve declared workflow paths with the Native workflow boundary:
+/// normalize the `./`-relative spelling, then realpath and contain the target
+/// under the plugin root. This is intentionally separate from themes and
+/// other components, whose existing no-symlink policy remains unchanged.
+async fn resolve_workflow_declared_paths(plugin_dir: &Path, paths: PathDecl) -> Vec<ComponentPath> {
+    let Some(canonical_root) = tokio::fs::canonicalize(plugin_dir).await.ok() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for raw in paths.into_vec() {
+        let Some(relative) = normalize_native_workflow_path(&raw) else {
+            tracing::warn!(path = %raw, "skipping invalid plugin manifest workflow path");
+            continue;
+        };
+        let spelled = plugin_dir.join(relative);
+        let Some(target) = canonical_workflow_target(&canonical_root, &spelled).await else {
+            tracing::warn!(path = %raw, "skipping missing or out-of-root plugin workflow path");
+            continue;
+        };
+        let Ok(metadata) = tokio::fs::metadata(&target).await else {
+            continue;
+        };
+        if metadata.is_dir() {
+            // A declared symlinked directory is followed only after its
+            // canonical target has passed the plugin-root containment check.
+            let mut found = glob_workflow_ext_flat(&target, &canonical_root).await;
+            stamp_component_root(&mut found, &target);
+            out.extend(found);
+        } else if metadata.is_file() && has_native_workflow_js_suffix(&spelled) {
+            // Keep the declared spelling through discovery so the manager
+            // applies Native's `.endsWith(".js")` test before following a
+            // file symlink. The manager canonicalizes and rechecks the target
+            // immediately before opening it.
+            let parent = spelled.parent().unwrap_or(plugin_dir).to_path_buf();
+            out.push(ComponentPath {
+                path: spelled,
+                metadata: component_root_metadata(&parent),
+            });
+        }
+    }
+    dedup_component_paths(&mut out);
+    out
+}
+
+/// Normalize a Native `./` workflow declaration without allowing it to climb
+/// above the plugin root. Ordinary `..` segments are valid when normalization
+/// remains inside the root (`./a/../inside.js`); backslashes are rejected by
+/// the Native workflow path validator.
+fn normalize_native_workflow_path(raw: &str) -> Option<PathBuf> {
+    let relative = raw.strip_prefix("./")?;
+    if relative.contains('\\') {
+        return None;
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in Path::new(relative).components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(part) => normalized.push(part),
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    Some(normalized)
+}
+
+fn has_native_workflow_js_suffix(path: &Path) -> bool {
+    path.file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|name| name.ends_with(".js"))
+}
+
+async fn canonical_workflow_target(root: &Path, spelled: &Path) -> Option<PathBuf> {
+    let target = tokio::fs::canonicalize(spelled).await.ok()?;
+    target.starts_with(root).then_some(target)
+}
+
+/// Flat workflow scan that accepts symlink entries only when their resolved
+/// targets remain within the already-validated plugin root. This follows the
+/// workflow loader's symlink behavior without changing theme scanning.
+async fn glob_workflow_ext_flat(dir: &Path, plugin_root: &Path) -> Vec<ComponentPath> {
+    let mut out = Vec::new();
+    let Some(canonical_root) = tokio::fs::canonicalize(plugin_root).await.ok() else {
+        return out;
+    };
+    let Some(canonical_dir) = tokio::fs::canonicalize(dir).await.ok() else {
+        return out;
+    };
+    if !canonical_dir.starts_with(&canonical_root)
+        || !tokio::fs::metadata(&canonical_dir)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir())
+    {
+        return out;
+    }
+    let Ok(mut entries) = tokio::fs::read_dir(&canonical_dir).await else {
+        return out;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !has_native_workflow_js_suffix(&path) {
+            continue;
+        }
+        let Ok(metadata) = tokio::fs::metadata(&path).await else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(target) = tokio::fs::canonicalize(&path).await else {
+            continue;
+        };
+        if !target.starts_with(&canonical_root) {
+            continue;
+        }
+        out.push(ComponentPath {
+            path,
+            metadata: component_root_metadata(&canonical_dir),
+        });
+    }
     out
 }
 
@@ -5023,6 +5150,62 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn declared_workflow_file_suffix_is_case_sensitive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join("scripts")).unwrap();
+        write_manifest(
+            plugin,
+            &serde_json::json!({
+                "name": "demo",
+                "workflows": [
+                    "./scripts/.js",
+                    "./scripts/lower.js",
+                    "./scripts/upper.JS"
+                ]
+            }),
+        );
+        fs::write(plugin.join("scripts/.js"), "// dotfile suffix").unwrap();
+        fs::write(plugin.join("scripts/lower.js"), "// lower").unwrap();
+        fs::write(plugin.join("scripts/upper.JS"), "// upper").unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        let names = manifest
+            .components
+            .workflows
+            .iter()
+            .map(|component| component.path.file_name().unwrap().to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec![".js", "lower.js"]);
+    }
+
+    #[tokio::test]
+    async fn declared_workflow_directory_uses_case_sensitive_js_suffix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join("workflow-files")).unwrap();
+        write_manifest(
+            plugin,
+            &serde_json::json!({
+                "name": "demo",
+                "workflows": "./workflow-files"
+            }),
+        );
+        fs::write(plugin.join("workflow-files/.js"), "// dotfile suffix").unwrap();
+        fs::write(plugin.join("workflow-files/lower.js"), "// lower").unwrap();
+        fs::write(plugin.join("workflow-files/upper.JS"), "// upper").unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        let names = manifest
+            .components
+            .workflows
+            .iter()
+            .map(|component| component.path.file_name().unwrap().to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec![".js", "lower.js"]);
+    }
+
     /// `themes` is declared at TWO layers — `pt` is spread into both the
     /// top-level manifest schema `jpe` and `Vs`'s inner `experimental` object
     /// — and the oracle's record builder PREFERS the experimental one:
@@ -5694,6 +5877,86 @@ mod tests {
             .components
             .commands
             .is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn declared_workflow_paths_follow_only_in_root_symlinks_and_normalize_inside_parent_segments(
+    ) {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path().join("plugin");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(plugin.join("real-workflows")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        write_manifest(
+            &plugin,
+            &serde_json::json!({
+                "name": "safe",
+                "workflows": [
+                    "./aliases/deploy.js",
+                    "./aliases-directory",
+                    "./missing-parent/../inside/normalized.js",
+                    "./",
+                    "./outside.js",
+                    "./loop.js",
+                    "./real-workflows/escape.js",
+                    "./../outside/outside.js",
+                    "./real-workflows\\escape.js"
+                ]
+            }),
+        );
+        fs::write(plugin.join("real-workflows/deploy-target.mjs"), "// deploy").unwrap();
+        fs::write(plugin.join("real-workflows/inside.js"), "// inside").unwrap();
+        fs::create_dir_all(plugin.join("inside")).unwrap();
+        fs::write(plugin.join("inside/normalized.js"), "// normalized").unwrap();
+        fs::write(outside.join("outside.js"), "// outside").unwrap();
+        fs::create_dir_all(plugin.join("aliases")).unwrap();
+        symlink(
+            plugin.join("real-workflows/deploy-target.mjs"),
+            plugin.join("aliases/deploy.js"),
+        )
+        .unwrap();
+        symlink(
+            plugin.join("real-workflows"),
+            plugin.join("aliases-directory"),
+        )
+        .unwrap();
+        symlink(outside.join("outside.js"), plugin.join("outside.js")).unwrap();
+        symlink(plugin.join("loop.js"), plugin.join("loop.js")).unwrap();
+        symlink(
+            outside.join("outside.js"),
+            plugin.join("real-workflows/escape.js"),
+        )
+        .unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(&plugin)
+            .await
+            .expect("plugin manifest loads");
+        let names = manifest
+            .components
+            .workflows
+            .iter()
+            .map(|component| {
+                component
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec!["deploy.js", "inside.js", "normalized.js"],
+            "in-root file/directory aliases and an in-root normalized `..` survive; outside and looping links do not"
+        );
+        assert_eq!(
+            manifest.components.workflows[0].path,
+            plugin.join("aliases/deploy.js"),
+            "preserve the .js symlink alias for the manager's pre-follow filename check"
+        );
     }
 
     /// Oracle `gt`'s `type` is a fixed enum (`string`/`number`/`boolean`/

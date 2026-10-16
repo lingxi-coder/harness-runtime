@@ -15,6 +15,27 @@ use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+fn test_workflow_runtime(
+    registry: Arc<tokio::sync::RwLock<command_api::CommandRegistry>>,
+    cwd: std::path::PathBuf,
+) -> (
+    Arc<tool_workflow::WorkflowTool>,
+    Arc<crate::workflow_catalog::WorkflowCommandSnapshot>,
+) {
+    let current_cwd = Arc::new(std::sync::Mutex::new(cwd));
+    let workflow_tool = Arc::new(
+        tool_workflow::WorkflowTool::new(None)
+            .with_current_cwd(current_cwd.clone())
+            .with_allowed_builtin_workflow_names(Vec::new()),
+    );
+    let workflow_snapshot = Arc::new(crate::workflow_catalog::WorkflowCommandSnapshot::new(
+        registry,
+        Arc::new(tokio::sync::RwLock::new(Some(workflow_tool.clone()))),
+        current_cwd,
+    ));
+    (workflow_tool, workflow_snapshot)
+}
+
 fn generated_test_source(value: Value) -> Utf16JsonProjection {
     Utf16JsonProjection::from_serde_value(&value).expect("generated test JSON is valid")
 }
@@ -105,11 +126,11 @@ async fn desktop_config_forwards_process_local_credential_policy() {
     );
 }
 
-/// WIRING gate for the validated workflow catalog and its runtime slash
-/// projection. Named launchers consume the snapshot selected by `WorkflowTool`
-/// rather than resolving the workflow name a second time.
+/// Source-wiring guard for the desktop workflow composition. Snapshot
+/// publication/cwd refresh and reload-finalizer lifecycle are tested in
+/// `workflow_catalog`.
 #[test]
-fn build_wires_plugin_workflows_and_publishes_the_validated_catalog_snapshot() {
+fn desktop_build_shares_plugin_workflow_registry_and_validated_script() {
     const SRC: &str = concat!(
         include_str!("../mod.rs"),
         "\n",
@@ -139,14 +160,6 @@ fn build_wires_plugin_workflows_and_publishes_the_validated_catalog_snapshot() {
         1,
         "the task launcher must consume the validated script snapshot exactly once"
     );
-    assert!(
-        build_src.contains("workflow_catalog::refresh_workflow_commands"),
-        "build must publish the validated workflow catalog after plugin bootstrap"
-    );
-    assert!(
-        build_src.contains("workflow_catalog::replace_workflow_commands"),
-        "reload paths must replace the isolated workflow producer snapshot"
-    );
 }
 
 /// Finding [23] (and round-4 review finding [15], which caught the same
@@ -164,8 +177,8 @@ fn build_wires_plugin_workflows_and_publishes_the_validated_catalog_snapshot() {
 /// exists to close.
 ///
 /// No runtime test can observe this without standing up the whole
-/// desktop stack plus a live TUI permission gate — same reasoning as
-/// `build_wires_plugin_workflows_and_publishes_the_validated_catalog_snapshot`
+/// desktop stack plus a live TUI permission gate — same source-wiring
+/// approach as `desktop_build_shares_plugin_workflow_registry_and_validated_script`
 /// above — so this reads the composition root's own source instead, and
 /// checks all four cells so the next background invoker added to
 /// `build()` cannot silently miss the flag.
@@ -625,6 +638,9 @@ async fn desktop_registry_exposes_connect() {
         Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
     let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth);
     let tmp = std::env::temp_dir();
+    let shared_registry = Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new()));
+    let (workflow_tool, workflow_snapshot) =
+        test_workflow_runtime(shared_registry.clone(), tmp.clone());
     let reg = super::desktop_command_registry(
         handle,
         auth,
@@ -637,10 +653,9 @@ async fn desktop_registry_exposes_connect() {
         false,
         &[],
         Default::default(),
-        Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
-        Arc::new(
-            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
-        ),
+        shared_registry,
+        workflow_tool,
+        workflow_snapshot,
     )
     .await
     .expect("desktop settings must load for command registry");
@@ -738,6 +753,10 @@ async fn safe_mode_and_bare_skip_custom_command_discovery() {
         let handle: Arc<dyn OrchestratorHandle> =
             Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
         let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth);
+        let shared_registry =
+            Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new()));
+        let (workflow_tool, workflow_snapshot) =
+            test_workflow_runtime(shared_registry.clone(), cwd.clone());
         let reg = super::desktop_command_registry(
             handle,
             auth,
@@ -750,11 +769,9 @@ async fn safe_mode_and_bare_skip_custom_command_discovery() {
             false,
             &[],
             Default::default(),
-            Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
-            Arc::new(
-                tool_workflow::WorkflowTool::new(None)
-                    .with_allowed_builtin_workflow_names(Vec::new()),
-            ),
+            shared_registry,
+            workflow_tool,
+            workflow_snapshot,
         )
         .await
         .expect("desktop settings must load for command registry");
@@ -868,6 +885,10 @@ async fn an_add_dir_root_contributes_its_skills() {
         let handle: Arc<dyn OrchestratorHandle> =
             Arc::new(orchestrator::test_support::MockOrchestratorHandle::new());
         let auth: Arc<dyn AuthHandle> = Arc::new(MockAuth);
+        let shared_registry =
+            Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new()));
+        let (workflow_tool, workflow_snapshot) =
+            test_workflow_runtime(shared_registry.clone(), cwd.clone());
         let reg = super::desktop_command_registry(
             handle,
             auth,
@@ -880,11 +901,9 @@ async fn an_add_dir_root_contributes_its_skills() {
             false,
             &roots,
             Default::default(),
-            Arc::new(tokio::sync::RwLock::new(command_api::CommandRegistry::new())),
-            Arc::new(
-                tool_workflow::WorkflowTool::new(None)
-                    .with_allowed_builtin_workflow_names(Vec::new()),
-            ),
+            shared_registry,
+            workflow_tool,
+            workflow_snapshot,
         )
         .await
         .expect("desktop settings must load for command registry");
@@ -10607,10 +10626,7 @@ async fn plugin_runtime_refresh_swaps_enabled_set_live() {
     ));
     let rt = super::PluginRuntime {
         manager: manager.clone(),
-        registry: command_registry.clone(),
-        workflow_tool: Arc::new(
-            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
-        ),
+        workflow_command_snapshot: test_workflow_runtime(command_registry.clone(), cwd.clone()).1,
         analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
         plugins_dir: plugins_dir.clone(),
         home: home.clone(),
@@ -10695,10 +10711,7 @@ async fn plugin_runtime_refresh_aborts_enable_phase_after_disable_failure_then_r
     .await;
     let rt = super::PluginRuntime {
         manager: manager.clone(),
-        registry: command_registry.clone(),
-        workflow_tool: Arc::new(
-            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
-        ),
+        workflow_command_snapshot: test_workflow_runtime(command_registry.clone(), cwd.clone()).1,
         analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
         plugins_dir: plugins_dir.clone(),
         home: home.clone(),
@@ -10819,10 +10832,7 @@ async fn concurrent_plugin_runtime_refresh_is_single_flight_and_leaves_one_owner
     .await;
     let rt = Arc::new(super::PluginRuntime {
         manager: manager.clone(),
-        registry: command_registry.clone(),
-        workflow_tool: Arc::new(
-            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
-        ),
+        workflow_command_snapshot: test_workflow_runtime(command_registry.clone(), cwd.clone()).1,
         analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
         plugins_dir: plugins_dir.clone(),
         home: home.clone(),
@@ -11366,10 +11376,7 @@ async fn plugin_runtime_refresh_strips_agent_escalation_from_live_catalog() {
     .await;
     let rt = super::PluginRuntime {
         manager: manager.clone(),
-        registry: command_registry.clone(),
-        workflow_tool: Arc::new(
-            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
-        ),
+        workflow_command_snapshot: test_workflow_runtime(command_registry.clone(), cwd.clone()).1,
         analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
         plugins_dir: plugins_dir.clone(),
         home: home.clone(),
@@ -11500,10 +11507,7 @@ async fn plugin_runtime_refresh_benign_agent_does_enter_catalog() {
     .await;
     let rt = super::PluginRuntime {
         manager: manager.clone(),
-        registry: command_registry.clone(),
-        workflow_tool: Arc::new(
-            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
-        ),
+        workflow_command_snapshot: test_workflow_runtime(command_registry.clone(), cwd.clone()).1,
         analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
         plugins_dir: plugins_dir.clone(),
         home: home.clone(),
@@ -11827,10 +11831,7 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
     );
     let rt = super::PluginRuntime {
         manager: manager.clone(),
-        registry: command_registry.clone(),
-        workflow_tool: Arc::new(
-            tool_workflow::WorkflowTool::new(None).with_allowed_builtin_workflow_names(Vec::new()),
-        ),
+        workflow_command_snapshot: test_workflow_runtime(command_registry.clone(), cwd.clone()).1,
         analytics_bus: Arc::new(telemetry::AnalyticsBus::with_default_sink()),
         plugins_dir: plugins_dir.clone(),
         home: home.clone(),

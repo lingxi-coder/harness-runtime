@@ -250,19 +250,13 @@ fn native_reserved_spellings(
 fn native_builtin_plugin_spellings(entrypoint: Option<&str>) -> HashSet<String> {
     let mut reserved = HashSet::new();
     let local_agent = entrypoint == Some("local-agent");
-    let remote = entrypoint.is_some_and(|value| value.starts_with("remote"));
 
     // Native's builtin plugin initializer always loads plugin-authoring except
-    // for local-agent. Claude Test is loaded only when both gates allow it.
+    // for local-agent. Claude Test is an account/policy-gated builtin plugin
+    // that this runtime does not produce. Its spellings are reserved only if
+    // an actual command descriptor is present in the registry above.
     if !local_agent {
         reserved.insert("plugin-authoring".to_owned());
-        if !remote {
-            reserved.extend([
-                "claude-test".to_owned(),
-                "claude-test-execute".to_owned(),
-                "claude-test-draft".to_owned(),
-            ]);
-        }
     }
     reserved
 }
@@ -338,12 +332,12 @@ mod native_workflow_projection_tests {
     }
 
     #[test]
-    fn builtin_plugin_reservations_follow_both_entrypoint_gates() {
+    fn builtin_plugin_reservations_follow_runtime_availability_and_entrypoint() {
         let ordinary = native_builtin_plugin_spellings(None);
         assert!(ordinary.contains("plugin-authoring"));
-        assert!(ordinary.contains("claude-test"));
-        assert!(ordinary.contains("claude-test-execute"));
-        assert!(ordinary.contains("claude-test-draft"));
+        assert!(!ordinary.contains("claude-test"));
+        assert!(!ordinary.contains("claude-test-execute"));
+        assert!(!ordinary.contains("claude-test-draft"));
 
         let remote = native_builtin_plugin_spellings(Some("remote_desktop"));
         assert!(remote.contains("plugin-authoring"));
@@ -374,6 +368,32 @@ mod native_workflow_projection_tests {
             &user_owned_same_name,
             Some("local-agent")
         ));
+    }
+
+    #[test]
+    fn unavailable_claude_test_name_does_not_hide_a_project_skill_alias() {
+        let registry = CommandRegistry::new();
+        let reserved = native_reserved_spellings(&registry, None);
+        let mut command = SlashCommand {
+            name: "claude-test".into(),
+            description: "Project-owned local browser test skill".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            native_type: Some(NativeCommandType::Prompt),
+            loaded_from: Some("skills".into()),
+            ..SlashCommand::default()
+        };
+        command.user_facing_name = Some("project test suite".into());
+        let name = command.name.string_units("").expect("project skill name");
+        let projected = project_command(&command, &name, &reserved)
+            .expect("project skill should remain visible when the gated plugin is unavailable");
+        let aliases = projected
+            .at_pointer("/aliases")
+            .and_then(|aliases| aliases.array_entries())
+            .expect("project skill alias list");
+        assert!(aliases
+            .1
+            .iter()
+            .any(|(_, alias)| alias.as_str() == Some("claude-test")));
     }
 
     #[test]

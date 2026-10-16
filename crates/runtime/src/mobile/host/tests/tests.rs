@@ -1726,6 +1726,7 @@ async fn mobile_bundled_device_skill_is_prompt_discoverable_after_executor_conve
         None,
         Arc::new(|| Ok(false)),
         None,
+        None,
     );
     let snapshot = provider
         .skill_listing_snapshot()

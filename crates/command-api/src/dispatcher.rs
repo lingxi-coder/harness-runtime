@@ -26,11 +26,19 @@ use lingxi_core::host::permission_gate::PermissionGate;
 use lingxi_core::host::{CancellationToken, SlashCommandDispatcher, SlashDispatchResult};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::McpConnectionId;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 type Ujp = Utf16JsonProjection;
+
+/// Future returned by a host callback that refreshes a live command snapshot.
+pub type CommandSnapshotFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+
+/// Host callback awaited before a live command-registry snapshot is read.
+pub type CommandSnapshotProvider = Arc<dyn Fn() -> CommandSnapshotFuture + Send + Sync + 'static>;
 
 /// Build Native's user-facing command header for a prompt command.
 fn native_prompt_command_header(command: &crate::model::SlashCommand, raw_args: &Ujp) -> Ujp {
@@ -342,6 +350,8 @@ pub struct RegistrySlashDispatcher {
     /// `None` — every existing caller — leaves the field inert, so a host that
     /// wires no gate behaves exactly as before.
     permission_gate: Option<Arc<dyn PermissionGate>>,
+    /// Optional async refresh for host-owned cwd-scoped command snapshots.
+    command_snapshot_provider: Option<CommandSnapshotProvider>,
     /// Optional admission boundary for the Headless ordinary slash path.
     /// Interactive hosts keep the generic dispatcher behavior.
     dispatch_mode: SlashDispatchMode,
@@ -355,6 +365,20 @@ enum SlashDispatchMode {
 }
 
 impl RegistrySlashDispatcher {
+    /// Install an async refresh for cwd-scoped command snapshots.
+    #[must_use]
+    pub fn with_command_snapshot_provider(mut self, provider: CommandSnapshotProvider) -> Self {
+        self.command_snapshot_provider = Some(provider);
+        self
+    }
+
+    /// Refresh the host-owned command snapshot before direct registry reads.
+    pub async fn refresh_command_snapshot(&self) {
+        if let Some(provider) = &self.command_snapshot_provider {
+            provider().await;
+        }
+    }
+
     /// Wire the permission gate that this dispatcher tells about each input's
     /// `disallowed-tools` — see [`PermissionGate::set_command_input_denies`].
     /// Without it, a skill's `disallowed-tools` is parsed and then ignored on
@@ -418,6 +442,7 @@ impl RegistrySlashDispatcher {
             bundled_prompt_model: None,
             bundled_prompt_availability: None,
             permission_gate: None,
+            command_snapshot_provider: None,
             dispatch_mode: SlashDispatchMode::Generic,
         }
     }
@@ -687,6 +712,7 @@ impl RegistrySlashDispatcher {
             // the command denies would leave the previous skill's restrictions
             // standing for every input routed through the clone.
             permission_gate: self.permission_gate.clone(),
+            command_snapshot_provider: self.command_snapshot_provider.clone(),
             dispatch_mode: self.dispatch_mode,
         }
     }
@@ -702,6 +728,7 @@ impl RegistrySlashDispatcher {
     /// Return the model-facing command catalog. Commands explicitly hidden from
     /// model invocation are intentionally excluded.
     pub async fn list_commands(&self) -> Vec<crate::model::SlashCommand> {
+        self.refresh_command_snapshot().await;
         let registry = self.registry.read().await;
         let mut commands: Vec<_> = registry
             .model_invocable_commands()
@@ -717,6 +744,7 @@ impl RegistrySlashDispatcher {
     /// commands, merges dynamic aliases, and excludes only commands that users
     /// cannot invoke in the current environment.
     pub async fn list_palette_commands(&self) -> Vec<crate::model::SlashCommand> {
+        self.refresh_command_snapshot().await;
         let registry = self.registry.read().await;
         let mut commands = registry.palette_commands();
         commands.sort_by(|a, b| a.name.string_units("").cmp(&b.name.string_units("")));
@@ -728,6 +756,7 @@ impl RegistrySlashDispatcher {
     /// source order and separates the prompt-invocable names from the count of
     /// all currently available commands.
     pub async fn headless_command_catalog(&self) -> crate::model::HeadlessCommandCatalog {
+        self.refresh_command_snapshot().await;
         self.registry.read().await.headless_command_catalog()
     }
 
@@ -799,6 +828,16 @@ impl RegistrySlashDispatcher {
     /// Execute an already-admitted slash command without firing Mod middleware.
     /// A `command.run` core callback uses this to prevent recursive dispatch.
     pub async fn dispatch_without_mod_hooks(
+        &self,
+        raw: &Utf16JsonProjection,
+        cancellation: CancellationToken,
+    ) -> SlashDispatchResult {
+        self.refresh_command_snapshot().await;
+        self.dispatch_without_mod_hooks_current(raw, cancellation)
+            .await
+    }
+
+    async fn dispatch_without_mod_hooks_current(
         &self,
         raw: &Utf16JsonProjection,
         cancellation: CancellationToken,
@@ -1473,6 +1512,7 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
         raw: Utf16JsonProjection,
         cancellation: CancellationToken,
     ) -> SlashDispatchResult {
+        self.refresh_command_snapshot().await;
         if let Some(rejection) = self.headless_admission_rejection(&raw).await {
             // An excluded command becomes ordinary model input. It must not
             // inherit the previous skill's per-input denies or install the
@@ -1516,7 +1556,8 @@ impl SlashCommandDispatcher for RegistrySlashDispatcher {
                     .await;
             }
         }
-        self.dispatch_without_mod_hooks(&raw, cancellation).await
+        self.dispatch_without_mod_hooks_current(&raw, cancellation)
+            .await
     }
 }
 

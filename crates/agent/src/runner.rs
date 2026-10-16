@@ -2678,8 +2678,35 @@ async fn drain_preload_cancellation_events(
     }
 }
 
+/// Snapshot the actual initial child tool surface before loading frontmatter
+/// skills. `tool_schemas` is the final canonical wire surface; `allowed_tools`
+/// is the same resolver result expanded with each child's aliases. Together
+/// they describe the child request, not the parent's tool pool.
+fn final_child_tool_name_snapshot(
+    ctx: &SubagentContext,
+    tool_schemas: &[lingxi_core::host::SourceToolWireDefinition],
+) -> Vec<Utf16JsonProjection> {
+    let mut names = Vec::with_capacity(ctx.allowed_tools.len() + tool_schemas.len());
+    // Keep canonical names from the actual wire snapshot first, then include
+    // resolver aliases and any other accepted child names.
+    for tool in tool_schemas {
+        let name = Utf16JsonProjection::from(tool.name.as_str());
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    for name in &ctx.allowed_tools {
+        let name = Utf16JsonProjection::from(name.as_str());
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
 async fn build_preload_messages(
     ctx: &SubagentContext,
+    child_available_tool_names: &[Utf16JsonProjection],
 ) -> Result<Vec<lingxi_core::types::ConversationMessage>, String> {
     use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId};
 
@@ -2768,6 +2795,7 @@ async fn build_preload_messages(
                     &agent_type,
                     ctx.cwd.as_deref(),
                     Some(resolve_model(ctx).as_str()),
+                    child_available_tool_names,
                     ctx.cancellation_token.clone(),
                 )
                 .await?
@@ -3635,7 +3663,8 @@ async fn run_subagent_loop(
         // Re-open this only with a measured prefix diff across two turns.
         let entered_preload = ctx.preload_lifecycle.begin();
         let preload = if entered_preload {
-            build_preload_messages(&ctx).await
+            let child_available_tool_names = final_child_tool_name_snapshot(&ctx, &tool_schemas);
+            build_preload_messages(&ctx, &child_available_tool_names).await
         } else {
             Ok(Vec::new())
         };

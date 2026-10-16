@@ -933,7 +933,9 @@ impl WorkflowTool {
     /// Native source order: compiled-in rows, plugin registry insertion order,
     /// then disk rows. An overriding candidate replaces the existing row in
     /// its original map position only after the strict collision parse passes.
-    pub fn refresh_workflow_catalog(&self) -> Vec<WorkflowSlashDescriptor> {
+    /// The supplied cwd is the caller's captured session directory for this
+    /// build; the live cwd cell is not reread while constructing the pool.
+    pub fn refresh_workflow_catalog(&self, cwd: &Path) -> Vec<WorkflowSlashDescriptor> {
         let mut builtins = Vec::new();
         let mut builtin_positions = HashMap::<Vec<u16>, usize>::new();
         let mut plugins = Vec::new();
@@ -1007,11 +1009,10 @@ impl WorkflowTool {
                     }
                 }
             }
-            let cwd = self.current_cwd();
             let home = std::env::var_os("HOME")
                 .or_else(|| std::env::var_os("USERPROFILE"))
                 .map(PathBuf::from)
-                .unwrap_or_else(|| cwd.clone());
+                .unwrap_or_else(|| cwd.to_path_buf());
             let mut project_dirs =
                 command_api::markdown_loader::project_dirs_up_to_home("workflows", &cwd, &home);
             project_dirs.reverse();
@@ -1449,12 +1450,10 @@ impl WorkflowTool {
 
     /// List names from the current validated Native workflow snapshot.
     /// Returns a comma-joined UTF-16 snapshot for the errorCode-1b message.
-    fn list_available_workflow_names(&self) -> Option<Utf16JsonProjection> {
-        self.refresh_workflow_catalog();
-        let mut names: Vec<Vec<u16>> = self
-            .workflow_catalog
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    fn list_available_workflow_names(
+        catalog: &[WorkflowSlashDescriptor],
+    ) -> Option<Utf16JsonProjection> {
+        let mut names: Vec<Vec<u16>> = catalog
             .iter()
             .filter_map(|entry| entry.name.string_units(""))
             .collect();
@@ -1795,14 +1794,19 @@ impl Tool for WorkflowTool {
                     "workflow name contains a NUL character".into(),
                 ));
             }
-            let catalog = self.refresh_workflow_catalog();
-            if let Some(descriptor) = catalog.into_iter().find(|descriptor| {
-                descriptor.name.string_units("").as_deref() == Some(wf_name_units.as_slice())
-            }) {
+            let catalog_cwd = ctx.cwd.clone().unwrap_or_else(|| self.current_cwd());
+            let catalog = self.refresh_workflow_catalog(&catalog_cwd);
+            if let Some(descriptor) = catalog
+                .iter()
+                .find(|descriptor| {
+                    descriptor.name.string_units("").as_deref() == Some(wf_name_units.as_slice())
+                })
+                .cloned()
+            {
                 resolved_script = Some(script.clone().unwrap_or_else(|| descriptor.script.clone()));
                 selected_workflow = Some(descriptor);
             } else {
-                let available = self.list_available_workflow_names();
+                let available = Self::list_available_workflow_names(&catalog);
                 let mut message = "Workflow \"".encode_utf16().collect::<Vec<_>>();
                 message.extend_from_slice(wf_name_units);
                 message.extend("\" not found. Available: ".encode_utf16());
@@ -2354,9 +2358,9 @@ mod tests {
 
     #[test]
     fn workflow_listing_always_includes_builtin_names() {
-        let names = tool(None)
-            .list_available_workflow_names()
-            .expect("built-ins");
+        let tool = tool(None);
+        let catalog = tool.refresh_workflow_catalog(Path::new("."));
+        let names = WorkflowTool::list_available_workflow_names(&catalog).expect("built-ins");
         assert!(names
             .string_at("")
             .unwrap()
@@ -2365,18 +2369,87 @@ mod tests {
     }
 
     #[test]
+    fn refresh_workflow_catalog_uses_the_captured_cwd_argument() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let old_disabled = std::env::var_os("LINGXI_DISABLE_WORKFLOWS");
+        std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
+
+        let root = unique_temp_path("captured-workflow-cwd");
+        let config = root.join("config");
+        let first_cwd = root.join("first");
+        let second_cwd = root.join("second");
+        let first_workflows = first_cwd.join(branding::DOT_DIR).join("workflows");
+        let second_workflows = second_cwd.join(branding::DOT_DIR).join("workflows");
+        std::fs::create_dir_all(first_cwd.join(".git")).unwrap();
+        std::fs::create_dir_all(second_cwd.join(".git")).unwrap();
+        std::fs::create_dir_all(&first_workflows).unwrap();
+        std::fs::create_dir_all(&second_workflows).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            first_workflows.join("first-only.js"),
+            named_workflow_script("first-only", "first cwd"),
+        )
+        .unwrap();
+        std::fs::write(
+            second_workflows.join("second-only.js"),
+            named_workflow_script("second-only", "second cwd"),
+        )
+        .unwrap();
+
+        let live_cwd = Arc::new(std::sync::Mutex::new(second_cwd.clone()));
+        let tool = tool(None)
+            .with_current_cwd(live_cwd)
+            .with_allowed_builtin_workflow_names(Vec::new());
+        let first_catalog =
+            with_config_dir_env(&config, || tool.refresh_workflow_catalog(&first_cwd));
+        let second_catalog =
+            with_config_dir_env(&config, || tool.refresh_workflow_catalog(&second_cwd));
+        let cached_catalog = tool.workflow_slash_descriptors();
+        let cached_names = cached_catalog
+            .iter()
+            .filter_map(|descriptor| descriptor.name.string_at(""))
+            .collect::<Vec<_>>();
+        assert!(cached_names.contains(&"second-only"));
+        assert!(!cached_names.contains(&"first-only"));
+
+        // The first caller retains its own returned snapshot after a later cwd
+        // refresh overwrites the shared most-recent catalog cache.
+        let first_names = WorkflowTool::list_available_workflow_names(&first_catalog)
+            .unwrap()
+            .string_at("")
+            .unwrap()
+            .to_owned();
+        let second_names = WorkflowTool::list_available_workflow_names(&second_catalog)
+            .unwrap()
+            .string_at("")
+            .unwrap()
+            .to_owned();
+        assert!(first_names.contains("first-only"), "{first_names}");
+        assert!(!first_names.contains("second-only"), "{first_names}");
+        assert!(second_names.contains("second-only"), "{second_names}");
+        assert!(!second_names.contains("first-only"), "{second_names}");
+
+        match old_disabled {
+            Some(value) => std::env::set_var("LINGXI_DISABLE_WORKFLOWS", value),
+            None => std::env::remove_var("LINGXI_DISABLE_WORKFLOWS"),
+        }
+    }
+
+    #[test]
     fn builtin_catalog_gate_is_independent_from_dynamic_workflow_gates() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
         let no_policy_verdict = tool(None).with_allowed_builtin_workflow_names(Vec::new());
-        assert!(no_policy_verdict.refresh_workflow_catalog().is_empty());
+        assert!(no_policy_verdict
+            .refresh_workflow_catalog(Path::new("."))
+            .is_empty());
 
         let allowed_builtin = tool(None)
             .with_allowed_builtin_workflow_names(vec!["deep-research".into()])
             .with_disable_workflows(true)
             .with_session_enabled(false);
-        let catalog = allowed_builtin.refresh_workflow_catalog();
+        let catalog = allowed_builtin.refresh_workflow_catalog(Path::new("."));
         assert_eq!(catalog.len(), 1);
         assert_eq!(catalog[0].name.string_at(""), Some("deep-research"));
         assert_eq!(catalog[0].source, WorkflowCatalogSource::Builtin);
@@ -3560,7 +3633,7 @@ mod tests {
 
         let old_config_dir = std::env::var_os(branding::CONFIG_DIR_ENV);
         std::env::set_var(branding::CONFIG_DIR_ENV, &user_dir);
-        let catalog = t.refresh_workflow_catalog();
+        let catalog = t.refresh_workflow_catalog(&cwd);
         let names = catalog
             .iter()
             .map(|entry| entry.name.string_at("").unwrap().to_owned())
@@ -3699,8 +3772,8 @@ mod tests {
         .unwrap();
 
         let catalog = tool(None)
-            .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd)))
-            .refresh_workflow_catalog();
+            .with_current_cwd(Arc::new(std::sync::Mutex::new(cwd.clone())))
+            .refresh_workflow_catalog(&cwd);
         assert_eq!(catalog.len(), 1);
         assert_eq!(catalog[0].name.string_at(""), Some("deep-research"));
         assert_eq!(catalog[0].source, WorkflowCatalogSource::ProjectSettings);

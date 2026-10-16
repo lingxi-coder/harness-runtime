@@ -341,6 +341,10 @@ mod tests {
 
         let mut registry = CommandRegistry::new();
         register_mobile_device_skills(&mut registry, &tool_names(&["calendar"]));
+        let available_tool_names = tool_names(&["calendar"])
+            .into_iter()
+            .map(|name| lingxi_core::types::utf16_json::Utf16JsonProjection::from(name.as_str()))
+            .collect::<Vec<_>>();
         let loader =
             MobileDiskSkillLoader::for_mode(Arc::new(RwLock::new(registry)), SessionMode::Chat);
         let loaded = loader
@@ -349,6 +353,7 @@ mod tests {
                 "general-purpose",
                 None,
                 None,
+                &available_tool_names,
                 lingxi_core::host::CancellationToken::new(),
             )
             .await

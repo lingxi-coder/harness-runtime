@@ -61,7 +61,7 @@ use crate::CommandRegistry;
 use async_trait::async_trait;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use tokio::sync::RwLock;
 
 type PostReloadFinalizer = Arc<dyn Fn(&mut CommandRegistry) + Send + Sync>;
@@ -85,11 +85,10 @@ struct ReloadSkillsRoots {
 
 /// `/reload-skills` handler — a 1:1 port of `Jtf` (`reload-skills/index.ts`).
 ///
-/// Holds a shared handle to the live command registry (the `plugin::manager`
-/// pattern: `Arc<RwLock<CommandRegistry>>` mutated live from a command path)
-/// so the reload actually changes what the rest of the session sees.
+/// Holds a weak handle to the live command registry so a registry-owned
+/// handler does not keep its own registry alive after the session shuts down.
 pub struct ReloadSkillsHandler {
-    registry: Arc<RwLock<CommandRegistry>>,
+    registry: Weak<RwLock<CommandRegistry>>,
     roots: ReloadSkillsRoots,
     /// `Ql()` — the CLI `--safe-mode` flag. When set, the skill partition stays
     /// empty: reload may invalidate stale entries but must not rediscover
@@ -111,7 +110,7 @@ impl ReloadSkillsHandler {
     #[must_use]
     pub fn new(registry: Arc<RwLock<CommandRegistry>>) -> Self {
         Self {
-            registry,
+            registry: Arc::downgrade(&registry),
             roots: ReloadSkillsRoots {
                 cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                 lingxi_home: lingxi_home_dir(),
@@ -141,7 +140,7 @@ impl ReloadSkillsHandler {
         safe_mode: bool,
     ) -> Self {
         Self {
-            registry,
+            registry: Arc::downgrade(&registry),
             roots: ReloadSkillsRoots {
                 cwd,
                 lingxi_home,
@@ -243,16 +242,25 @@ fn format_reload_message(total: usize, added: usize, removed: usize, safe_mode: 
 #[async_trait]
 impl BuiltinCommandHandler for ReloadSkillsHandler {
     async fn handle(&self, _args: &ParsedSlashCommand) -> CommandResult {
+        let Some(registry) = self.registry.upgrade() else {
+            return CommandResult::Done {
+                display: Some(
+                    "Could not reload skills because the live command registry is unavailable."
+                        .into(),
+                ),
+            };
+        };
+
         // `r = await ZR(n)`, `o = new Set(r.map(name))` — snapshot before reload.
         let before = {
-            let reg = self.registry.read().await;
+            let reg = registry.read().await;
             skill_loaded_names(&reg)
         };
 
         // `GI(); Bj();` — invalidate the live skill partition, then re-walk
         // disk and repopulate it.
         {
-            let mut reg = self.registry.write().await;
+            let mut reg = registry.write().await;
             reg.unregister_loaded_from("skills");
             if self.reload_legacy_commands {
                 reg.unregister_loaded_from("commands_DEPRECATED");
@@ -290,7 +298,7 @@ impl BuiltinCommandHandler for ReloadSkillsHandler {
 
         // `s = await ZR(n)`, `i = new Set(s.map(name))` — snapshot after reload.
         let after = {
-            let reg = self.registry.read().await;
+            let reg = registry.read().await;
             skill_loaded_names(&reg)
         };
 
@@ -388,6 +396,24 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn registry_owned_reload_handler_does_not_retain_registry() {
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        let weak_registry = Arc::downgrade(&registry);
+        let handler = Arc::new(ReloadSkillsHandler::new(registry.clone()));
+        registry
+            .write()
+            .await
+            .register_builtin_handler(handler.clone());
+
+        drop(registry);
+        assert!(weak_registry.upgrade().is_none());
+        assert_eq!(
+            run(&handler).await,
+            "Could not reload skills because the live command registry is unavailable."
+        );
+    }
+
     // ---- format_reload_message: byte-exact against the binary's 4 shapes ----
 
     #[test]
@@ -433,8 +459,9 @@ mod tests {
         fs::create_dir_all(cwd.join(".git")).expect("git marker");
         fs::create_dir_all(&lingxi_home).expect("lingxi home");
 
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
         let h = ReloadSkillsHandler::with_all_roots(
-            Arc::new(RwLock::new(CommandRegistry::new())),
+            registry.clone(),
             cwd,
             lingxi_home,
             None,
@@ -459,8 +486,9 @@ mod tests {
         fs::create_dir_all(&lingxi_home).expect("lingxi home");
         write_skill(&cwd.join(".lingxi").join("skills"), "demo", "Demo skill");
 
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
         let h = ReloadSkillsHandler::with_all_roots(
-            Arc::new(RwLock::new(CommandRegistry::new())),
+            registry.clone(),
             cwd,
             lingxi_home,
             None,
@@ -485,8 +513,9 @@ mod tests {
         fs::create_dir_all(&lingxi_home).expect("lingxi home");
         write_skill(&cwd.join(".lingxi").join("skills"), "demo", "Demo skill");
 
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
         let h = ReloadSkillsHandler::with_all_roots(
-            Arc::new(RwLock::new(CommandRegistry::new())),
+            registry.clone(),
             cwd,
             lingxi_home,
             None,
@@ -552,8 +581,9 @@ mod tests {
         write_skill(&cwd.join(".lingxi").join("skills"), "a", "A");
         write_skill(&cwd.join(".lingxi").join("skills"), "b", "B");
 
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
         let h = ReloadSkillsHandler::with_all_roots(
-            Arc::new(RwLock::new(CommandRegistry::new())),
+            registry.clone(),
             cwd,
             lingxi_home,
             None,
@@ -573,7 +603,8 @@ mod tests {
         // Smoke test for the zero-arg constructor's fallback roots (whatever
         // the real cwd/HOME happen to be in the test environment) — just
         // asserts it runs and returns a well-formed message shape.
-        let h = ReloadSkillsHandler::new(Arc::new(RwLock::new(CommandRegistry::new())));
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        let h = ReloadSkillsHandler::new(registry.clone());
         let out = run(&h).await;
         assert!(out.starts_with("Reloaded skills: "));
         assert!(out.contains(" available ("));

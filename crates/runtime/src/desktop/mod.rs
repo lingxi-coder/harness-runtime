@@ -1824,6 +1824,7 @@ async fn desktop_command_registry(
     // the rest of the session sees.
     shared_registry: Arc<RwLock<CommandRegistry>>,
     workflow_tool: Arc<tool_workflow::WorkflowTool>,
+    workflow_command_snapshot: Arc<crate::workflow_catalog::WorkflowCommandSnapshot>,
 ) -> Result<CommandRegistry, lingxi_core::settings::SettingsError> {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
@@ -1895,7 +1896,8 @@ async fn desktop_command_registry(
         gates.safe_mode,
         disable_agent_view,
     );
-    let reload_workflow_tool = workflow_tool.clone();
+    let reload_finalizer =
+        workflow_command_snapshot.locked_post_reload_finalizer(workflow_tool.clone());
     reg.register_builtin_handler(Arc::new(
         command_api::builtins::ReloadSkillsHandler::with_all_roots(
             shared_registry,
@@ -1906,15 +1908,7 @@ async fn desktop_command_registry(
             additional_skill_dirs.clone(),
             gates.safe_mode,
         )
-        .with_locked_post_reload_finalizer(
-            false,
-            Arc::new(move |registry| {
-                crate::workflow_catalog::replace_workflow_commands(
-                    registry,
-                    reload_workflow_tool.as_ref(),
-                );
-            }),
-        ),
+        .with_locked_post_reload_finalizer(false, reload_finalizer),
     ));
     // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom-command + skill
     // dir discovery (`K5d.skills:!1` / `V5d.skills:!0`; the commands-dir
@@ -4376,8 +4370,9 @@ async fn build_agent_mcp_tool_set(
     }
 }
 
-/// Fold an admitted source projection into the Native QO bool view. Any
-/// array, including an empty one, is true; later source layers replace a key.
+/// Fold an admitted source projection into the Native marketplace active view.
+/// The source predicate is exactly `value === true`: arrays project to false,
+/// while later source layers still replace an earlier value.
 fn merge_enabled_plugins_source(merged: &mut BTreeMap<String, bool>, source: &Utf16JsonProjection) {
     let Some(entries) = source
         .get_property("enabledPlugins")
@@ -4392,7 +4387,7 @@ fn merge_enabled_plugins_source(merged: &mut BTreeMap<String, bool>, source: &Ut
         let active = entry
             .value
             .as_bool()
-            .or_else(|| entry.value.array_len().map(|_| true));
+            .or_else(|| entry.value.array_len().map(|_| false));
         if let Some(active) = active {
             merged.insert(plugin_id, active);
         }
@@ -4443,7 +4438,9 @@ async fn load_enabled_plugins(
     if let Some(settings) = flag_settings {
         if let Some(enabled) = settings.enabled_plugins.as_ref() {
             for (plugin, value) in enabled {
-                let active = value.as_bool().or_else(|| value.is_array().then_some(true));
+                let active = value
+                    .as_bool()
+                    .or_else(|| value.is_array().then_some(false));
                 if let Some(active) = active {
                     merged.insert(plugin.clone(), active);
                 }
@@ -4682,37 +4679,38 @@ mod enabled_plugins_projection_tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn later_array_and_boolean_values_replace_prior_tiers_and_empty_array_is_on() {
+    fn only_boolean_true_enables_and_later_source_values_replace_prior_tiers() {
         let mut enabled = BTreeMap::new();
         let lower = Utf16JsonProjection::parse(
-            r#"{"enabledPlugins":{"empty@mkt":[],"range@mkt":["not-a-version-range"],"array_then_bool@mkt":["1"],"bool_then_array@mkt":false,"false@mkt":false}}"#,
+            r#"{"enabledPlugins":{"empty@mkt":[],"range@mkt":["not-a-version-range"],"array_then_bool@mkt":["1"],"bool_then_array@mkt":false,"true_then_array@mkt":true,"false@mkt":false}}"#,
         )
         .unwrap();
         let later = Utf16JsonProjection::parse(
-            r#"{"enabledPlugins":{"array_then_bool@mkt":false,"bool_then_array@mkt":[],"false@mkt":false}}"#,
+            r#"{"enabledPlugins":{"array_then_bool@mkt":false,"bool_then_array@mkt":[],"true_then_array@mkt":[],"false@mkt":false}}"#,
         )
         .unwrap();
 
         merge_enabled_plugins_source(&mut enabled, &lower);
         merge_enabled_plugins_source(&mut enabled, &later);
 
-        assert_eq!(enabled.get("empty@mkt"), Some(&true));
-        assert_eq!(enabled.get("range@mkt"), Some(&true));
+        assert_eq!(enabled.get("empty@mkt"), Some(&false));
+        assert_eq!(enabled.get("range@mkt"), Some(&false));
         assert_eq!(enabled.get("array_then_bool@mkt"), Some(&false));
-        assert_eq!(enabled.get("bool_then_array@mkt"), Some(&true));
+        assert_eq!(enabled.get("bool_then_array@mkt"), Some(&false));
+        assert_eq!(enabled.get("true_then_array@mkt"), Some(&false));
         assert_eq!(enabled.get("false@mkt"), Some(&false));
         assert!(!enabled.contains_key("missing@mkt"));
     }
 
     #[test]
-    fn array_source_keeps_exact_utf16_members_while_projection_enables_it() {
+    fn array_source_keeps_exact_utf16_members_without_enabling_plugin() {
         let source =
             Utf16JsonProjection::parse(r#"{"enabledPlugins":{"surrogate@mkt":["\ud800"]}}"#)
                 .unwrap();
         let mut enabled = BTreeMap::new();
         merge_enabled_plugins_source(&mut enabled, &source);
 
-        assert_eq!(enabled.get("surrogate@mkt"), Some(&true));
+        assert_eq!(enabled.get("surrogate@mkt"), Some(&false));
         let raw_member = source
             .get_property("enabledPlugins")
             .unwrap()
@@ -4837,7 +4835,7 @@ pub struct PluginRefreshCounts {
 /// because plugins are materialised after the orchestrator is constructed.
 struct DesktopRepoRootReloader {
     registry: Arc<RwLock<CommandRegistry>>,
-    workflow_tool: Arc<RwLock<Option<Arc<tool_workflow::WorkflowTool>>>>,
+    workflow_command_snapshot: Arc<crate::workflow_catalog::WorkflowCommandSnapshot>,
     cwd: std::path::PathBuf,
     lingxi_home: std::path::PathBuf,
     managed_dir: Option<std::path::PathBuf>,
@@ -4857,11 +4855,11 @@ impl DesktopRepoRootReloader {
         lingxi_home: std::path::PathBuf,
         native_skill_roots: Vec<std::path::PathBuf>,
         safe_mode: bool,
-        workflow_tool: Arc<RwLock<Option<Arc<tool_workflow::WorkflowTool>>>>,
+        workflow_command_snapshot: Arc<crate::workflow_catalog::WorkflowCommandSnapshot>,
     ) -> Self {
         Self {
             registry,
-            workflow_tool,
+            workflow_command_snapshot,
             cwd,
             lingxi_home,
             managed_dir: Some(crate::desktop::settings_watch::managed_settings_dir()),
@@ -4954,13 +4952,7 @@ impl lingxi_core::host::RepoRootReloader for DesktopRepoRootReloader {
             }
         }
         if request.reload_skills || request.reload_plugins {
-            if let Some(workflow_tool) = self.workflow_tool.read().await.clone() {
-                crate::workflow_catalog::refresh_workflow_commands(
-                    &self.registry,
-                    workflow_tool.as_ref(),
-                )
-                .await;
-            }
+            self.workflow_command_snapshot.refresh().await;
         }
         outcome
     }
@@ -4979,8 +4971,7 @@ impl lingxi_core::host::RepoRootReloader for DesktopRepoRootReloader {
 /// of the plugin-agent catalog portion.
 pub struct PluginRuntime {
     manager: Arc<plugin::PluginManager>,
-    registry: Arc<RwLock<CommandRegistry>>,
-    workflow_tool: Arc<tool_workflow::WorkflowTool>,
+    workflow_command_snapshot: Arc<crate::workflow_catalog::WorkflowCommandSnapshot>,
     load_order: RwLock<Vec<lingxi_core::types::PluginId>>,
     analytics_bus: Arc<telemetry::AnalyticsBus>,
     plugins_dir: std::path::PathBuf,
@@ -5119,11 +5110,7 @@ impl PluginRuntime {
             }
         }
         if counts.errors > 0 {
-            crate::workflow_catalog::refresh_workflow_commands(
-                &self.registry,
-                self.workflow_tool.as_ref(),
-            )
-            .await;
+            self.workflow_command_snapshot.refresh().await;
             return counts;
         }
         self.load_order.write().await.clear();
@@ -5156,11 +5143,7 @@ impl PluginRuntime {
                 }
             }
         }
-        crate::workflow_catalog::refresh_workflow_commands(
-            &self.registry,
-            self.workflow_tool.as_ref(),
-        )
-        .await;
+        self.workflow_command_snapshot.refresh().await;
         counts
     }
 }
@@ -5647,6 +5630,7 @@ fn registry_skill_listing_provider(
         Arc::new(|| Ok(NativeSkillListingSettings::default())),
         Arc::new(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
         None,
+        None,
     )
 }
 
@@ -5659,6 +5643,7 @@ fn registry_skill_listing_provider_for_desktop(
     cfg: DesktopConfig,
     session_cwd: Arc<SessionCwd>,
     settings_loader: NativeSkillListingSettingsLoader,
+    command_snapshot_provider: command_api::CommandSnapshotProvider,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
     let cwd_source = session_cwd.clone();
     let cwd_provider: Arc<dyn Fn() -> PathBuf + Send + Sync> =
@@ -5670,6 +5655,7 @@ fn registry_skill_listing_provider_for_desktop(
         settings_loader,
         cwd_provider,
         Some(cfg.lingxi_home.clone()),
+        Some(command_snapshot_provider),
     )
 }
 
@@ -5900,12 +5886,14 @@ fn registry_skill_listing_provider_with_sources(
     >,
     cwd_provider: Arc<dyn Fn() -> PathBuf + Send + Sync>,
     skill_usage_home: Option<PathBuf>,
+    command_snapshot_provider: Option<command_api::CommandSnapshotProvider>,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
     // Conditional-skill activation is SESSION state, not per-listing: once a
     // touched file has revealed a skill, a later turn whose touched set no
     // longer names that file must not hide it again.
     let conditional = Arc::new(std::sync::Mutex::new(skill::ConditionalSkills::new()));
     let precommit_registry = registry.clone();
+    let precommit_snapshot_provider = command_snapshot_provider.clone();
     let provider = orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
         let registry = registry.clone();
         let conditional = conditional.clone();
@@ -5913,7 +5901,11 @@ fn registry_skill_listing_provider_with_sources(
         let settings_loader = settings_loader.clone();
         let cwd_provider = cwd_provider.clone();
         let skill_usage_home = skill_usage_home.clone();
+        let command_snapshot_provider = command_snapshot_provider.clone();
         async move {
+            if let Some(provider) = &command_snapshot_provider {
+                provider().await;
+            }
             use command_api::CommandSource;
             use lingxi_core::settings::SkillOverride;
             let reg = registry.read().await;
@@ -6012,7 +6004,11 @@ fn registry_skill_listing_provider_with_sources(
     let provider = provider.with_bash_precommit_skills(move |entries| {
         let registry = precommit_registry.clone();
         let include_code_review_suggestion = include_code_review_suggestion.clone();
+        let command_snapshot_provider = precommit_snapshot_provider.clone();
         async move {
+            if let Some(provider) = &command_snapshot_provider {
+                provider().await;
+            }
             let include_code_review_suggestion = include_code_review_suggestion()?;
             let registry = registry.read().await;
             Ok(crate::skill_prompt::bash_precommit_skills(

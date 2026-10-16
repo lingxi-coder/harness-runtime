@@ -73,6 +73,7 @@ async fn eligible_skill_provenance_matches_native_precommit_fixture() {
                 settings_loader,
                 Arc::new(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
                 None,
+                None,
             );
             let snapshot = provider.skill_listing_snapshot().await.unwrap();
             assert_eq!(
@@ -190,6 +191,7 @@ async fn desktop_skill_listing_uses_native_catalog_overrides_and_usage_snapshot(
         Arc::new(move || Ok(settings.clone())),
         Arc::new(move || root.clone()),
         Some(home.path().to_path_buf()),
+        None,
     );
 
     let snapshot = provider.skill_listing_snapshot().await.unwrap();

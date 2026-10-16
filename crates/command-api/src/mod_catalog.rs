@@ -1,8 +1,8 @@
 //! Live slash-command projection for `$.command.list()`.
 
 use crate::{
-    BuiltinCommandHandler, CommandRegistry, CommandResult, CommandSource, NativeCommandType,
-    ParsedSlashCommand, SlashCommand, SlashCommandKind,
+    BuiltinCommandHandler, CommandRegistry, CommandResult, CommandSnapshotProvider, CommandSource,
+    NativeCommandType, ParsedSlashCommand, SlashCommand, SlashCommandKind,
 };
 use hooks::mods::{ModCommandCatalog, ModError};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -211,6 +211,7 @@ impl BuiltinCommandHandler for ModCommandHandler {
 /// Reads the same registry as slash dispatch and the user-facing typeahead.
 pub struct RegistryModCommandCatalog {
     registry: Arc<RwLock<CommandRegistry>>,
+    command_snapshot_provider: Option<CommandSnapshotProvider>,
     executor: ExecutorSlot,
     queue: Arc<std::sync::RwLock<Option<Arc<dyn ModCommandQueue>>>>,
 }
@@ -221,9 +222,17 @@ impl RegistryModCommandCatalog {
     pub fn new(registry: Arc<RwLock<CommandRegistry>>) -> Self {
         Self {
             registry,
+            command_snapshot_provider: None,
             executor: Arc::new(std::sync::RwLock::new(None)),
             queue: Arc::new(std::sync::RwLock::new(None)),
         }
+    }
+
+    /// Refresh cwd-scoped command rows before exposing the catalog to a Mod.
+    #[must_use]
+    pub fn with_command_snapshot_provider(mut self, provider: CommandSnapshotProvider) -> Self {
+        self.command_snapshot_provider = Some(provider);
+        self
     }
 
     /// Bind the live session executor once its orchestrator exists.
@@ -246,6 +255,9 @@ impl RegistryModCommandCatalog {
 #[async_trait::async_trait]
 impl ModCommandCatalog for RegistryModCommandCatalog {
     async fn list(&self) -> Result<Utf16JsonProjection, ModError> {
+        if let Some(provider) = &self.command_snapshot_provider {
+            provider().await;
+        }
         let registry = self.registry.read().await;
         let mut commands = registry.palette_commands();
         commands
@@ -356,6 +368,9 @@ impl ModCommandCatalog for RegistryModCommandCatalog {
                 ));
             }
         };
+        if let Some(provider) = &self.command_snapshot_provider {
+            provider().await;
+        }
         let mut registry = self.registry.write().await;
         if let Some(owner) = registry.mod_owner_of(&name) {
             if owner != plugin {
@@ -408,6 +423,9 @@ impl ModCommandCatalog for RegistryModCommandCatalog {
         command: Utf16JsonProjection,
         args: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ModError> {
+        if let Some(provider) = &self.command_snapshot_provider {
+            provider().await;
+        }
         if command.string_units("").is_none() {
             return Err(ModError::Hook(
                 "command.run command must be a string".into(),
@@ -559,6 +577,53 @@ mod tests {
             let args = args.string_at("").unwrap_or_default();
             Ok(format!("{plugin}:{command}:{args}").into())
         }
+    }
+
+    #[tokio::test]
+    async fn register_refreshes_workflow_snapshot_before_collision_check() {
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        let workflow = SlashCommand {
+            name: "current-workflow".into(),
+            description: "Current workflow".into(),
+            source: CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+            kind: SlashCommandKind::Bundled {
+                frontmatter: Default::default(),
+                prompt_fn: None,
+            },
+            native_type: Some(NativeCommandType::Prompt),
+            native_slash_kind: Some(crate::model::NativeSlashKind::Workflow),
+            ..SlashCommand::default()
+        };
+        let provider_registry = registry.clone();
+        let provider: CommandSnapshotProvider = Arc::new(move || {
+            let registry = provider_registry.clone();
+            let workflow = workflow.clone();
+            Box::pin(async move {
+                registry
+                    .write()
+                    .await
+                    .replace_native_workflow_commands(vec![workflow]);
+            })
+        });
+        let catalog = RegistryModCommandCatalog::new(registry.clone())
+            .with_command_snapshot_provider(provider);
+
+        assert!(catalog
+            .register(
+                "demo",
+                source_json(&json!({"name":"current-workflow","description":"Mod command"})),
+            )
+            .await
+            .is_err());
+        let registry = registry.read().await;
+        assert_eq!(registry.mod_owner_of(&"current-workflow".into()), None);
+        assert_eq!(
+            registry
+                .resolve(&"current-workflow".into())
+                .unwrap()
+                .native_slash_kind,
+            Some(crate::model::NativeSlashKind::Workflow)
+        );
     }
 
     #[tokio::test]

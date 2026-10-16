@@ -64,6 +64,7 @@ pub struct AgentSkillLoader {
     /// Shared shell-expansion provider. `None` keeps hermetic tests free of
     /// process execution; production always wires the live provider.
     shell_expansion: Option<Arc<dyn command_api::ShellExpansionProvider>>,
+    command_snapshot_provider: Option<command_api::CommandSnapshotProvider>,
 }
 
 impl AgentSkillLoader {
@@ -77,6 +78,7 @@ impl AgentSkillLoader {
             session_id,
             prompt_cwd: None,
             shell_expansion: None,
+            command_snapshot_provider: None,
         }
     }
 
@@ -93,6 +95,16 @@ impl AgentSkillLoader {
         provider: Arc<dyn command_api::ShellExpansionProvider>,
     ) -> Self {
         self.shell_expansion = Some(provider);
+        self
+    }
+
+    /// Refresh cwd-scoped commands before resolving an agent's preloaded skills.
+    #[must_use]
+    pub fn with_command_snapshot_provider(
+        mut self,
+        provider: command_api::CommandSnapshotProvider,
+    ) -> Self {
+        self.command_snapshot_provider = Some(provider);
         self
     }
 
@@ -142,6 +154,7 @@ impl AgentSkillLoader {
         display_name: &str,
         cwd_override: Option<&std::path::Path>,
         model: Option<&str>,
+        child_available_tool_names: &[Utf16JsonProjection],
         cancellation: CancellationToken,
     ) -> Result<Option<SkillLoad>, String> {
         if cancellation.is_cancelled() {
@@ -187,7 +200,7 @@ impl AgentSkillLoader {
                             cwd: &cwd,
                             is_preload: true,
                             main_loop_model: model,
-                            available_tool_names: None,
+                            available_tool_names: Some(child_available_tool_names),
                             workflow_authoring_base_allowed: false,
                         },
                     )
@@ -286,8 +299,16 @@ impl SkillLoader for AgentSkillLoader {
         agent_type: &str,
         cwd: Option<&std::path::Path>,
         model: Option<&str>,
+        child_available_tool_names: &[Utf16JsonProjection],
         cancellation: CancellationToken,
     ) -> Result<Option<SkillLoad>, String> {
+        if let Some(provider) = &self.command_snapshot_provider {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err("Agent skill preload cancelled".into()),
+                _ = provider() => {}
+            }
+        }
         let reg = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err("Agent skill preload cancelled".into()),
@@ -303,8 +324,15 @@ impl SkillLoader for AgentSkillLoader {
         // claude passes the ORIGINAL `skillName` (the frontmatter entry) to
         // `formatSkillLoadingMetadata` (runAgent.ts:634), so the loading-metadata
         // block shows the name as authored, not the resolved/qualified name.
-        self.to_skill_load(&cmd, skill_name, cwd, model, cancellation)
-            .await
+        self.to_skill_load(
+            &cmd,
+            skill_name,
+            cwd,
+            model,
+            child_available_tool_names,
+            cancellation,
+        )
+        .await
     }
 }
 
@@ -339,6 +367,7 @@ mod tests {
                 "general-purpose",
                 None,
                 None,
+                &[],
                 CancellationToken::new(),
             )
             .await
@@ -378,6 +407,7 @@ mod tests {
                 "general-purpose",
                 None,
                 None,
+                &[],
                 CancellationToken::new(),
             )
             .await
@@ -400,7 +430,14 @@ mod tests {
         reg.register_command(md("pm:feat", "FEATURE"));
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
         let load = loader
-            .resolve_and_load("feat", "pm:planner", None, None, CancellationToken::new())
+            .resolve_and_load(
+                "feat",
+                "pm:planner",
+                None,
+                None,
+                &[],
+                CancellationToken::new(),
+            )
             .await
             .expect("checked skill preload")
             .expect("resolved via plugin prefix");
@@ -414,7 +451,14 @@ mod tests {
         reg.register_command(md("some-plugin:deep", "DEEP"));
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
         let load = loader
-            .resolve_and_load("deep", "other-agent", None, None, CancellationToken::new())
+            .resolve_and_load(
+                "deep",
+                "other-agent",
+                None,
+                None,
+                &[],
+                CancellationToken::new(),
+            )
             .await
             .expect("checked skill preload")
             .expect("resolved via suffix");
@@ -426,7 +470,7 @@ mod tests {
         let reg = CommandRegistry::new();
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
         assert!(loader
-            .resolve_and_load("nope", "a", None, None, CancellationToken::new())
+            .resolve_and_load("nope", "a", None, None, &[], CancellationToken::new())
             .await
             .expect("checked skill preload")
             .is_none());
@@ -446,7 +490,7 @@ mod tests {
         });
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
         assert!(loader
-            .resolve_and_load("help", "a", None, None, CancellationToken::new())
+            .resolve_and_load("help", "a", None, None, &[], CancellationToken::new())
             .await
             .expect("checked skill preload")
             .is_none());
@@ -458,7 +502,7 @@ mod tests {
         reg.register_command(md("s", "id=${LINGXI_SESSION_ID}"));
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), Some("sess:42".to_string()));
         let load = loader
-            .resolve_and_load("s", "a", None, None, CancellationToken::new())
+            .resolve_and_load("s", "a", None, None, &[], CancellationToken::new())
             .await
             .expect("checked skill preload")
             .expect("resolved");
@@ -490,7 +534,7 @@ mod tests {
         });
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None);
         let load = loader
-            .resolve_and_load("loop", "a", None, None, CancellationToken::new())
+            .resolve_and_load("loop", "a", None, None, &[], CancellationToken::new())
             .await
             .expect("checked skill preload")
             .expect("resolved");
@@ -514,6 +558,9 @@ mod tests {
                 let cwd = context.cwd;
                 let preload = context.is_preload;
                 assert_eq!(context.main_loop_model, Some("claude-fable-5"));
+                assert!(context.available_tool_names.is_some_and(|names| {
+                    names.len() == 1 && names[0].string_at("") == Some("Search")
+                }));
                 assert_eq!(args.string_at(""), Some(""));
                 assert!(preload);
                 assert_eq!(root, std::path::Path::new("/project"));
@@ -536,6 +583,7 @@ mod tests {
         let cwd = tool_api::SessionCwd::new("/project".into(), Vec::new());
         cwd.swap("/project/parent-dir".into(), Vec::new());
         let loader = AgentSkillLoader::new(Arc::new(RwLock::new(reg)), None).with_prompt_cwd(cwd);
+        let available_tool_names = vec![Utf16JsonProjection::from("Search")];
         assert_eq!(
             loader
                 .resolve_and_load(
@@ -543,6 +591,7 @@ mod tests {
                     "agent",
                     Some(std::path::Path::new("/project/subdir")),
                     Some("claude-fable-5"),
+                    &available_tool_names,
                     CancellationToken::new()
                 )
                 .await

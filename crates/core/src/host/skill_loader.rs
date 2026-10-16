@@ -59,6 +59,11 @@ pub trait SkillLoader: Send + Sync {
     /// plugin prefix the impl tries for the plugin-qualified resolution strategy.
     /// `cwd` overrides the parent session cwd for isolated/worktree children.
     /// `model` is the child's selected model, including inherited resolution.
+    /// `child_available_tool_names` is the final child pool at preload time:
+    /// canonical advertised names in wire order, followed by any additional
+    /// accepted child names and aliases in resolver order. It is never the
+    /// parent pool. An empty slice means the child pool is known to be empty,
+    /// not that the names are unknown.
     /// `cancellation` is owned by the live Agent run and is canceled by its host
     /// before a terminal UserInterrupt/UserExit is queued. Implementations must
     /// pass it through any shell work and await cancellation cleanup before returning.
@@ -69,6 +74,7 @@ pub trait SkillLoader: Send + Sync {
         agent_type: &str,
         cwd: Option<&std::path::Path>,
         model: Option<&str>,
+        child_available_tool_names: &[Utf16JsonProjection],
         cancellation: CancellationToken,
     ) -> Result<Option<SkillLoad>, String>;
 }

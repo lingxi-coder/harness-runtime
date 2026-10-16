@@ -4641,16 +4641,28 @@ pub async fn build_with_credential_stack(
     let shared_command_registry: Arc<RwLock<CommandRegistry>> =
         Arc::new(RwLock::new(CommandRegistry::new()));
     let workflow_tool_slot = Arc::new(RwLock::new(None));
-    let mod_command_catalog = Arc::new(command_api::RegistryModCommandCatalog::new(
-        shared_command_registry.clone(),
-    ));
+    // Share the same mutable cwd observed by Bash, worktree swaps, the
+    // orchestrator, and the workflow snapshot cache key.
+    let current_cwd_cell = std::sync::Arc::new(std::sync::Mutex::new(cwd.clone()));
+    session_cwd.link_live_cwd(current_cwd_cell.clone());
+    let workflow_command_snapshot =
+        Arc::new(crate::workflow_catalog::WorkflowCommandSnapshot::new(
+            shared_command_registry.clone(),
+            workflow_tool_slot.clone(),
+            current_cwd_cell.clone(),
+        ));
+    let command_snapshot_provider = workflow_command_snapshot.provider();
+    let mod_command_catalog = Arc::new(
+        command_api::RegistryModCommandCatalog::new(shared_command_registry.clone())
+            .with_command_snapshot_provider(command_snapshot_provider.clone()),
+    );
     let repo_root_reloader = Arc::new(DesktopRepoRootReloader::new(
         shared_command_registry.clone(),
         cfg.cwd.clone(),
         cfg.lingxi_home.clone(),
         cfg.add_dir.clone(),
         cfg.customization_gates.safe_mode,
-        workflow_tool_slot.clone(),
+        workflow_command_snapshot.clone(),
     ));
     // Bind the forked-skill resume gate's skill resolver to the SAME `Arc` that
     // is filled with the real registry at (6). Binding the slot (not its
@@ -4684,7 +4696,8 @@ pub async fn build_with_credential_stack(
             skill_session_id.clone(),
         )
         .with_skill_usage_session(skill_usage_session.clone())
-        .with_invocation_observer(skill_invocation_observer.clone()),
+        .with_invocation_observer(skill_invocation_observer.clone())
+        .with_command_snapshot_provider(command_snapshot_provider.clone()),
     );
     // G5: fill the subagent spawner's skill-loader cell with a
     // `lingxi_core::host::skill_loader::SkillLoader` over the SAME shared command registry,
@@ -4697,7 +4710,8 @@ pub async fn build_with_credential_stack(
             Some(skill_session_id),
         )
         .with_prompt_cwd(tool_ctx.session_cwd.clone())
-        .with_shell_expansion(tool_skill::build_prompt_shell_provider(&tool_ctx)),
+        .with_shell_expansion(tool_skill::build_prompt_shell_provider(&tool_ctx))
+        .with_command_snapshot_provider(command_snapshot_provider.clone()),
     );
     let _ = subagent_skill_loader_cell.set(skill_loader_arc.clone());
     // Same skills-preload loader for the in-process teammate (full parity).
@@ -4710,16 +4724,10 @@ pub async fn build_with_credential_stack(
     // cycle. Injected here (the desktop composition root) only — `harness-runtime::mobile`
     // never registers the shell tools, so the mobile path keeps the no-firer
     // BashTool.
-    // Shared mutable-cwd cell: the firer writes the new dir on each Bash `cd`,
-    // and the orchestrator (below, via `with_current_cwd`) reads it for hook
-    // payloads — so a PreToolUse/PostToolUse/lifecycle hook sees the post-`cd`
-    // directory, 1:1 with claude-code's single global `getCwd()`/`setCwdState`.
-    let current_cwd_cell = std::sync::Arc::new(std::sync::Mutex::new(cwd.clone()));
-    // Mirror worktree enter/exit swaps into this shared live-cwd cell so a
-    // file/Glob/Grep read *between* a `session_cwd.swap(..)` and the next Bash
-    // call (which re-points its own copy) sees the post-swap cwd, not the stale
-    // pre-swap one. Bash still owns intra-turn `cd` updates to the same cell.
-    session_cwd.link_live_cwd(current_cwd_cell.clone());
+    // The shared mutable-cwd cell was created before the Skill loaders so its
+    // registry readers and workflow snapshot can use the same live identity.
+    // The firer writes each Bash `cd`; the orchestrator reads it for hook
+    // payloads and worktree swaps update it through `SessionCwd::swap`.
     // Clone for the Stop/SubagentStop hook snapshot provider (it locates the
     // project-root cron file via the live cwd); the original cell is moved into
     // `.with_current_cwd(...)` below.
@@ -5672,6 +5680,7 @@ pub async fn build_with_credential_stack(
                 cfg.clone(),
                 session_cwd.clone(),
                 command_visibility_settings_loader.clone(),
+                command_snapshot_provider.clone(),
             );
             let child_provider = provider.clone();
             tools.set_bash_precommit_skills_provider(move || {
@@ -6133,6 +6142,7 @@ pub async fn build_with_credential_stack(
         cfg.managed_policy_snapshot_cache.clone(),
         shared_command_registry.clone(),
         workflow_tool.clone(),
+        workflow_command_snapshot.clone(),
     )
     .await?;
     let insights_availability = command_api::builtins::InsightsCommandAvailability {
@@ -6537,8 +6547,7 @@ pub async fn build_with_credential_stack(
         }
         plugin_runtime = Some(Arc::new(PluginRuntime {
             manager: pm,
-            registry: shared_command_registry.clone(),
-            workflow_tool: workflow_tool.clone(),
+            workflow_command_snapshot: workflow_command_snapshot.clone(),
             load_order: RwLock::new(plugin_load_order),
             analytics_bus: analytics_bus.clone(),
             plugins_dir,
@@ -6591,11 +6600,7 @@ pub async fn build_with_credential_stack(
     repo_root_reloader
         .set_plugin_runtime(plugin_runtime.clone())
         .await;
-    crate::workflow_catalog::refresh_workflow_commands(
-        &shared_command_registry,
-        workflow_tool.as_ref(),
-    )
-    .await;
+    workflow_command_snapshot.refresh().await;
 
     // (M4 cc2.1.198) `--agent <agent>` — resolve the session agent against the
     // FINAL catalog (dir + `--agents` flag + plugin agents), the binary's `dts`
@@ -6835,6 +6840,7 @@ pub async fn build_with_credential_stack(
         mod_prompt_output,
     );
     let mut dispatcher = RegistrySlashDispatcher::new(shared_command_registry.clone())
+        .with_command_snapshot_provider(command_snapshot_provider.clone())
         .with_mod_command_interceptor(mod_command_executor)
         .with_skill_prompt_transformer(skill_prompt_transformer)
         .with_prompt_paths(Arc::new(move || {

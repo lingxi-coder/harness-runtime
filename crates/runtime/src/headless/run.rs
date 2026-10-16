@@ -147,6 +147,7 @@ async fn init_command_projections(
     ),
     String,
 > {
+    runtime.dispatcher.refresh_command_snapshot().await;
     let visibility = runtime
         .command_visibility_snapshot()
         .map_err(|error| error.to_string())?;
@@ -1204,6 +1205,7 @@ async fn run_stream_json_input_loop_inner(
     // Native Og invokes T5(getCommands()) for each initialize request.
     // Retain current registry/settings sources instead of a startup snapshot.
     let init_commands_registry = runtime.dispatcher.registry();
+    let init_commands_dispatcher = runtime.dispatcher.clone_shared();
     let init_command_visibility = runtime.command_visibility_snapshot_loader();
 
     // Agents for the initialize response.
@@ -1317,6 +1319,7 @@ async fn run_stream_json_input_loop_inner(
                     let init_commands = if subtype == "initialize" {
                         match init_command_visibility() {
                             Ok(visibility) => {
+                                init_commands_dispatcher.refresh_command_snapshot().await;
                                 let registry = init_commands_registry.read().await;
                                 initialize_commands::collect(&registry, &visibility)
                             }

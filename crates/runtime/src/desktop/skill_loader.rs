@@ -136,6 +136,7 @@ pub struct CommandRegistrySkillLoader {
     /// slash dispatch so the Native 60-second debounce spans both paths.
     skill_usage_session: Option<command_api::skill_usage::SkillUsageSession>,
     invocation_observer: Option<command_api::SkillInvocationObserver>,
+    command_snapshot_provider: Option<command_api::CommandSnapshotProvider>,
 }
 
 impl CommandRegistrySkillLoader {
@@ -151,6 +152,7 @@ impl CommandRegistrySkillLoader {
             session_id: None,
             skill_usage_session: None,
             invocation_observer: None,
+            command_snapshot_provider: None,
         }
     }
 
@@ -184,11 +186,24 @@ impl CommandRegistrySkillLoader {
         self.skill_usage_session = Some(session);
         self
     }
+
+    /// Refresh cwd-scoped command rows before this loader reads the registry.
+    #[must_use]
+    pub fn with_command_snapshot_provider(
+        mut self,
+        provider: command_api::CommandSnapshotProvider,
+    ) -> Self {
+        self.command_snapshot_provider = Some(provider);
+        self
+    }
 }
 
 #[async_trait::async_trait]
 impl SkillLoader for CommandRegistrySkillLoader {
     async fn load(&self, name: &Utf16JsonProjection) -> Result<Option<SkillDescriptor>, ToolError> {
+        if let Some(provider) = &self.command_snapshot_provider {
+            provider().await;
+        }
         // `resolve` follows aliases (TS `findCommand` over name + aliases).
         let reg = self.registry.read().await;
         Ok(reg
@@ -217,6 +232,9 @@ impl SkillLoader for CommandRegistrySkillLoader {
     /// the suggestion never needs a descriptor, and building them all would
     /// touch disk for a path that is already an error.
     async fn list_names(&self) -> Vec<Utf16JsonProjection> {
+        if let Some(provider) = &self.command_snapshot_provider {
+            provider().await;
+        }
         let reg = self.registry.read().await;
         reg.list_all()
             .iter()

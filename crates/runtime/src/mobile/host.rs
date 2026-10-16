@@ -540,6 +540,7 @@ fn mobile_skill_listing_provider(
         read_file_state,
         Arc::new(|| Ok(false)),
         None,
+        None,
     )
 }
 
@@ -551,19 +552,25 @@ fn mobile_skill_listing_provider_with_settings(
         dyn Fn() -> Result<bool, lingxi_core::settings::SettingsError> + Send + Sync,
     >,
     listing_config: Option<MobileConfig>,
+    command_snapshot_provider: Option<command_api::CommandSnapshotProvider>,
 ) -> Arc<dyn orchestrator::prompt::skill_listing::SkillListingProvider> {
     // Session state: once a touched file has revealed a conditional skill, a
     // later turn must not hide it again (the read-state map is an LRU, so the
     // matching path can age out).
     let conditional = Arc::new(std::sync::Mutex::new(skill::ConditionalSkills::new()));
     let precommit_registry = registry.clone();
+    let precommit_snapshot_provider = command_snapshot_provider.clone();
     Arc::new(
         orchestrator::prompt::skill_listing::LazySkillListingProvider::new(move || {
             let registry = registry.clone();
             let conditional = conditional.clone();
             let read_file_state = read_file_state.clone();
             let listing_config = listing_config.clone();
+            let command_snapshot_provider = command_snapshot_provider.clone();
             async move {
+                if let Some(provider) = &command_snapshot_provider {
+                    provider().await;
+                }
                 use command_api::CommandSource;
                 let reg = registry.read().await;
                 let effective_settings = listing_config
@@ -700,7 +707,11 @@ fn mobile_skill_listing_provider_with_settings(
         .with_bash_precommit_skills(move |entries| {
             let registry = precommit_registry.clone();
             let include_code_review_suggestion = include_code_review_suggestion.clone();
+            let command_snapshot_provider = precommit_snapshot_provider.clone();
             async move {
+                if let Some(provider) = &command_snapshot_provider {
+                    provider().await;
+                }
                 let include_code_review_suggestion = include_code_review_suggestion()?;
                 let registry_guard = registry.read().await;
                 Ok(crate::skill_prompt::bash_precommit_skills(
@@ -723,12 +734,11 @@ fn mobile_code_review_suggestion_provider(
     })
 }
 
-async fn mobile_live_plugin_skill_count(
-    registry: &Arc<RwLock<command_api::CommandRegistry>>,
-) -> usize {
+async fn mobile_live_plugin_skill_count(dispatcher: &RegistrySlashDispatcher) -> usize {
+    dispatcher.refresh_command_snapshot().await;
+    let registry = dispatcher.registry();
+    let registry = registry.read().await;
     registry
-        .read()
-        .await
         .list_all()
         .into_iter()
         .filter(|command| command.source == command_api::CommandSource::Plugin)
@@ -742,7 +752,9 @@ fn mobile_reload_skills_handler(
     home: std::path::PathBuf,
     device_skill_tools: Vec<String>,
     workflow_tool: Arc<tool_workflow::WorkflowTool>,
+    workflow_command_snapshot: Arc<crate::workflow_catalog::WorkflowCommandSnapshot>,
 ) -> command_api::builtins::reload_skills::ReloadSkillsHandler {
+    let workflow_finalizer = workflow_command_snapshot.locked_post_reload_finalizer(workflow_tool);
     command_api::builtins::reload_skills::ReloadSkillsHandler::with_all_roots(
         registry,
         cwd,
@@ -757,7 +769,7 @@ fn mobile_reload_skills_handler(
         Arc::new(move |reg| {
             crate::mobile::register_mobile_bundled_prompt_commands(reg);
             crate::mobile::device_skills::register_mobile_device_skills(reg, &device_skill_tools);
-            crate::workflow_catalog::replace_workflow_commands(reg, workflow_tool.as_ref());
+            workflow_finalizer(reg);
         }),
     )
 }
@@ -3419,7 +3431,7 @@ impl MobileEngineHandle {
     pub fn skill_count(&self) -> u32 {
         let count = self
             .runtime()
-            .block_on(mobile_live_plugin_skill_count(&self.inner.slash_registry));
+            .block_on(mobile_live_plugin_skill_count(&self.inner.dispatcher));
         u32::try_from(count).unwrap_or(u32::MAX)
     }
 
@@ -4419,6 +4431,7 @@ impl MobileEngineHandle {
                 .await;
         }
         let raw_source = raw.into_projection();
+        self.inner.dispatcher.refresh_command_snapshot().await;
         if self.inner.session_mode == session::jsonl::SessionMode::Chat {
             let allowed = if let Some(parsed) = command_api::parse_slash_command(&raw_source) {
                 let registry = self.inner.slash_registry.read().await;
@@ -8248,6 +8261,7 @@ impl MobileEngineHandle {
     }
 
     async fn slash_command_catalog_snapshot(&self) -> Vec<SlashCommandDto> {
+        self.inner.dispatcher.refresh_command_snapshot().await;
         let reg = self.inner.slash_registry.read().await;
         Self::slash_command_catalog_from_registry(&reg, self.inner.session_mode)
     }

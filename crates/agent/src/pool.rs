@@ -1394,6 +1394,7 @@ mod tests {
             _agent_type: &str,
             _cwd: Option<&std::path::Path>,
             _model: Option<&str>,
+            _child_available_tool_names: &[lingxi_core::types::utf16_json::Utf16JsonProjection],
             cancellation: CancellationToken,
         ) -> Result<Option<lingxi_core::host::skill_loader::SkillLoad>, String> {
             let _drop_probe = PreloadFutureDropProbe {

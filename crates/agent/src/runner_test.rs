@@ -257,6 +257,7 @@ fn tool_invocation_carries_native_query_depth_separately_from_spawn_depth() {
         None,
         "test-model",
         None,
+        &ctx.allowed_tools,
         None,
     );
 
@@ -8828,6 +8829,7 @@ struct MockSkillLoader {
     known: String,
     content_text: String,
     expected_model: Option<String>,
+    observed_tool_names: Option<Arc<Mutex<Vec<Vec<Utf16JsonProjection>>>>>,
 }
 #[async_trait]
 impl lingxi_core::host::skill_loader::SkillLoader for MockSkillLoader {
@@ -8837,8 +8839,15 @@ impl lingxi_core::host::skill_loader::SkillLoader for MockSkillLoader {
         _agent_type: &str,
         _cwd: Option<&std::path::Path>,
         model: Option<&str>,
+        child_available_tool_names: &[Utf16JsonProjection],
         _cancellation: lingxi_core::host::CancellationToken,
     ) -> Result<Option<lingxi_core::host::skill_loader::SkillLoad>, String> {
+        if let Some(observed) = &self.observed_tool_names {
+            observed
+                .lock()
+                .unwrap()
+                .push(child_available_tool_names.to_vec());
+        }
         if let Some(expected) = &self.expected_model {
             assert_eq!(model, Some(expected.as_str()));
         }
@@ -9183,10 +9192,26 @@ async fn resolved_skill_prepends_metadata_then_content() {
     ctx.agent_definition.agent_type = "my-agent".into();
     ctx.agent_definition.skills = vec!["my-skill".into()];
     ctx.agent_definition.model = crate::definition::AgentModel::Explicit("claude-fable-5".into());
+    ctx.tool_schemas = vec![
+        source_tool("Read", "Read a file", serde_json::json!({"type": "object"})),
+        source_tool(
+            "Search",
+            "Search files",
+            serde_json::json!({"type": "object"}),
+        ),
+    ];
+    ctx.allowed_tools = vec![
+        "Read".into(),
+        "ReadFile".into(),
+        "Search".into(),
+        "FindText".into(),
+    ];
+    let observed_tool_names = Arc::new(Mutex::new(Vec::new()));
     ctx.skill_loader = Some(Arc::new(MockSkillLoader {
         known: "my-skill".into(),
         content_text: "SKILL BODY".into(),
         expected_model: Some("claude-fable-5".into()),
+        observed_tool_names: Some(observed_tool_names.clone()),
     }));
 
     let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
@@ -9212,6 +9237,46 @@ async fn resolved_skill_prepends_metadata_then_content() {
             .collect::<Vec<_>>(),
         "metadata block then content"
     );
+    assert_eq!(
+        observed_tool_names.lock().unwrap().as_slice(),
+        &[vec![
+            Utf16JsonProjection::from("Read"),
+            Utf16JsonProjection::from("Search"),
+            Utf16JsonProjection::from("ReadFile"),
+            Utf16JsonProjection::from("FindText"),
+        ]],
+        "frontmatter preload receives the final child names and aliases, not parent tools"
+    );
+}
+
+#[test]
+fn child_preload_tool_snapshot_keeps_aliases_and_wire_only_tools() {
+    let api = CapturingApiClient::new();
+    let mut ctx = loop_ctx(api, None, 2);
+    ctx.allowed_tools = vec!["Read".into(), "ReadFile".into()];
+    let tool_schemas = vec![
+        source_tool("Read", "Read a file", serde_json::json!({"type": "object"})),
+        source_tool(
+            "StructuredOutput",
+            "Return structured output",
+            serde_json::json!({"type": "object"}),
+        ),
+    ];
+
+    let names = super::final_child_tool_name_snapshot(&ctx, &tool_schemas);
+    let parent_tool_names = ["Skill", "Read", "Write"];
+
+    assert!(parent_tool_names.contains(&"Skill"));
+    assert_eq!(
+        names,
+        vec![
+            Utf16JsonProjection::from("Read"),
+            Utf16JsonProjection::from("StructuredOutput"),
+            Utf16JsonProjection::from("ReadFile"),
+        ],
+        "frontmatter sees child wire names/aliases, not a parent-only Skill tool"
+    );
+    assert!(!names.contains(&Utf16JsonProjection::from("Skill")));
 }
 
 #[tokio::test]
@@ -9226,10 +9291,12 @@ async fn missing_skill_is_skipped_no_message() {
     ctx.prompt_messages = vec![ConversationMessage::user(MessageId::new(), "go".into())];
     ctx.agent_definition.agent_type = "my-agent".into();
     ctx.agent_definition.skills = vec!["nope".into()];
+    let observed_tool_names = Arc::new(Mutex::new(Vec::new()));
     ctx.skill_loader = Some(Arc::new(MockSkillLoader {
         known: "my-skill".into(),
         content_text: "SKILL BODY".into(),
         expected_model: None,
+        observed_tool_names: Some(observed_tool_names.clone()),
     }));
 
     let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
@@ -9239,6 +9306,11 @@ async fn missing_skill_is_skipped_no_message() {
     let _ = drain(out_rx).await;
 
     let msgs = api.captured();
+    assert_eq!(
+        observed_tool_names.lock().unwrap().as_slice(),
+        &[Vec::<Utf16JsonProjection>::new()],
+        "a known empty child pool is passed as an empty snapshot, not an absent one"
+    );
     assert_eq!(
         msgs.len(),
         2,
@@ -9280,6 +9352,7 @@ async fn preload_order_additional_context_then_skills() {
         known: "my-skill".into(),
         content_text: "SKILL BODY".into(),
         expected_model: None,
+        observed_tool_names: None,
     }));
 
     let (event_tx, event_rx) = mpsc::channel::<lingxi_core::Event>(8);
@@ -12447,6 +12520,7 @@ async fn skill_preload_read_error_fails_before_model_request() {
             _: &str,
             _cwd: Option<&std::path::Path>,
             _model: Option<&str>,
+            _child_available_tool_names: &[Utf16JsonProjection],
             _cancellation: lingxi_core::host::CancellationToken,
         ) -> Result<Option<lingxi_core::host::skill_loader::SkillLoad>, String> {
             Err("loop.md denied".into())

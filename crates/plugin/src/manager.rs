@@ -61,6 +61,21 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{Mutex, RwLock};
 use tool_api::ToolRegistry;
 
+fn same_workflow_file_identity(before: &std::fs::Metadata, after: &std::fs::Metadata) -> bool {
+    if !before.is_file() || !after.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        before.dev() == after.dev() && before.ino() == after.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        before.len() == after.len() && before.modified().ok() == after.modified().ok()
+    }
+}
+
 #[cfg(test)]
 #[derive(Default)]
 struct MonitorLifecycleTestHooks {
@@ -1705,14 +1720,26 @@ impl PluginManager {
                 {
                     continue;
                 }
-                // Keep the registry on one filesystem identity. In
-                // particular, macOS temp directories may be addressed via
-                // both `/var` and `/private/var`; storing the canonical path
-                // prevents later policy and equality checks from disagreeing
-                // about the same verified script.
+                // Discovery preserves a workflow's declared spelling so the
+                // `.js` suffix check above happens before following a file
+                // symlink. Re-resolve it here because the link may have
+                // changed since manifest discovery, and only accept a target
+                // still inside this plugin's canonical install root.
+                let Ok(root_metadata) = tokio::fs::symlink_metadata(install_dir).await else {
+                    continue;
+                };
+                if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+                    continue;
+                }
+                let Ok(canonical_root) = tokio::fs::canonicalize(install_dir).await else {
+                    continue;
+                };
                 let Ok(abs) = tokio::fs::canonicalize(&abs).await else {
                     continue;
                 };
+                if !abs.starts_with(&canonical_root) {
+                    continue;
+                }
                 // Oracle `ZI(c,o,um)`: regular file (or a symlink resolving to
                 // one — `tokio::fs::metadata` follows links, matching `_()`'s
                 // `isFile()||isSymbolicLink()` readdir filter) AND at most
@@ -1735,6 +1762,32 @@ impl PluginManager {
                 let Ok(file) = tokio::fs::File::open(&abs).await else {
                     continue;
                 };
+                let Ok(opened_metadata) = file.metadata().await else {
+                    continue;
+                };
+                if !opened_metadata.is_file()
+                    || opened_metadata.len() > workflow::MAX_WORKFLOW_SCRIPT_BYTES
+                    || !same_workflow_file_identity(&metadata, &opened_metadata)
+                {
+                    continue;
+                }
+                // The opened handle is fixed now. Recheck that the path used
+                // to reach it still resolves to the same contained target;
+                // this closes the discovery-to-open symlink-swap window
+                // without claiming protection against arbitrary filesystem
+                // mutation after this validation point.
+                let Ok(revalidated) = tokio::fs::canonicalize(&abs).await else {
+                    continue;
+                };
+                if revalidated != abs || !revalidated.starts_with(&canonical_root) {
+                    continue;
+                }
+                let Ok(current_metadata) = tokio::fs::metadata(&abs).await else {
+                    continue;
+                };
+                if !same_workflow_file_identity(&opened_metadata, &current_metadata) {
+                    continue;
+                }
                 let mut bytes = Vec::with_capacity(
                     usize::try_from(metadata.len().min(workflow::MAX_WORKFLOW_SCRIPT_BYTES))
                         .unwrap_or(0),
@@ -2750,6 +2803,94 @@ mod plugin_workflow_context_tests {
         );
         assert!(workflow::extract_workflow_meta(script).is_some());
         assert!(workflow::validate_body(script).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workflow_manager_loads_an_in_root_js_alias_to_a_non_js_target() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let workflows = Arc::new(workflow::PluginWorkflowRegistry::new());
+        let manager = manager(tmp.path(), workflows.clone()).await;
+        let script = "export const meta = { name: 'linked', description: 'Linked' };\n";
+        let plugin_dir = write_plugin_file(
+            tmp.path(),
+            "plugins/linked-workflow",
+            serde_json::json!({
+                "name": "linked-workflow",
+                "version": "1.0.0",
+                "workflows": "./scripts/workflow.js"
+            }),
+            "workflow.js",
+            "placeholder",
+        );
+        let alias = plugin_dir.join("scripts/workflow.js");
+        fs::remove_file(&alias).unwrap();
+        fs::write(plugin_dir.join("scripts/target.mjs"), script).unwrap();
+        symlink(plugin_dir.join("scripts/target.mjs"), &alias).unwrap();
+
+        enable_plugin(&manager, &plugin_dir).await;
+
+        let entries = workflows.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].script, script);
+        assert_eq!(
+            entries[0].script_path,
+            plugin_dir
+                .join("scripts/target.mjs")
+                .canonicalize()
+                .unwrap(),
+            "the loaded workflow snapshot stores the fixed canonical target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workflow_manager_rechecks_containment_after_declared_symlink_changes() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let workflows = Arc::new(workflow::PluginWorkflowRegistry::new());
+        let manager = manager(tmp.path(), workflows.clone()).await;
+        let script = "export const meta = { name: 'swap', description: 'Swap' };\n";
+        let plugin_dir = write_plugin_file(
+            tmp.path(),
+            "plugins/swapped-workflow",
+            serde_json::json!({
+                "name": "swapped-workflow",
+                "version": "1.0.0",
+                "workflows": "./scripts/workflow.js"
+            }),
+            "workflow.js",
+            "placeholder",
+        );
+        let alias = plugin_dir.join("scripts/workflow.js");
+        fs::remove_file(&alias).unwrap();
+        let inside = plugin_dir.join("scripts/inside.mjs");
+        fs::write(&inside, script).unwrap();
+        symlink(&inside, &alias).unwrap();
+
+        let Some((id, manifest)) =
+            crate::discovery::load_plugin_from_path_with_mcp_gate(&plugin_dir, false, None).await
+        else {
+            panic!("plugin fixture should load before the link changes");
+        };
+        assert_eq!(manifest.components.workflows.len(), 1);
+
+        let outside = tmp.path().join("outside-workflow.mjs");
+        fs::write(&outside, script.replace("swap", "escaped")).unwrap();
+        fs::remove_file(&alias).unwrap();
+        symlink(&outside, &alias).unwrap();
+
+        manager
+            .enable(&id, manifest, plugin_dir.clone())
+            .await
+            .expect("a changed workflow symlink skips only that workflow");
+        assert!(
+            workflows.entries().is_empty(),
+            "the manager must recheck canonical containment at its actual read boundary"
+        );
     }
 
     #[tokio::test]

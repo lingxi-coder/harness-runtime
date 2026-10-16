@@ -40,7 +40,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
 
@@ -67,7 +67,7 @@ struct SkillDoctorRoots {
 #[derive(Clone)]
 pub struct SkillDoctorHandler {
     roots: SkillDoctorRoots,
-    registry: Option<Arc<RwLock<CommandRegistry>>>,
+    registry: Option<Weak<RwLock<CommandRegistry>>>,
 }
 
 impl SkillDoctorHandler {
@@ -104,7 +104,7 @@ impl SkillDoctorHandler {
         additional_skill_dirs: Vec<PathBuf>,
     ) -> Self {
         let mut handler = Self::new(cwd, lingxi_home, managed_dir, additional_skill_dirs);
-        handler.registry = Some(registry);
+        handler.registry = Some(Arc::downgrade(&registry));
         handler
     }
 }
@@ -118,7 +118,10 @@ impl BuiltinCommandHandler for SkillDoctorHandler {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
         let loaded = match self.registry.as_ref() {
-            Some(registry) => load_registry_entries(&self.roots, registry, now_unix_ms).await,
+            Some(registry) => match registry.upgrade() {
+                Some(registry) => load_registry_entries(&self.roots, &registry, now_unix_ms).await,
+                None => Err("live command registry is no longer available".to_string()),
+            },
             None => load_entries(&self.roots, now_unix_ms).await,
         };
         match loaded {
@@ -970,6 +973,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn registry_backed_handler_does_not_retain_or_fallback_after_registry_drop() {
+        let root = tmp_root("dropped-registry");
+        let registry = Arc::new(RwLock::new(CommandRegistry::new()));
+        let weak_registry = Arc::downgrade(&registry);
+        let handler = Arc::new(SkillDoctorHandler::with_registry(
+            registry.clone(),
+            root.clone(),
+            root.join(".lingxi"),
+            None,
+            Vec::new(),
+        ));
+        registry
+            .write()
+            .await
+            .register_builtin_handler(handler.clone());
+
+        drop(registry);
+        assert!(weak_registry.upgrade().is_none());
+        let display = match handler.handle(&args()).await {
+            CommandResult::Done {
+                display: Some(display),
+            } => display.string_at("").unwrap().to_owned(),
+            other => panic!("expected Done with diagnostic, got {other:?}"),
+        };
+        assert!(display.contains("live command registry is no longer available"));
+        assert!(!display.contains(EMPTY_TABLE));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
     async fn live_registry_includes_plugin_and_mcp_skills_and_groups_warnings() {
         let root = tmp_root("live-registry");
         let cwd = root.join("repo");
@@ -991,7 +1024,7 @@ mod tests {
         let registry = Arc::new(RwLock::new(registry));
 
         let handler =
-            SkillDoctorHandler::with_registry(registry, cwd, lingxi_home, None, Vec::new());
+            SkillDoctorHandler::with_registry(registry.clone(), cwd, lingxi_home, None, Vec::new());
         let display = match handler.handle(&args()).await {
             CommandResult::Done {
                 display: Some(display),
