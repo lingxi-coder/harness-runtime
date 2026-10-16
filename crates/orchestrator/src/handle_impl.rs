@@ -361,30 +361,69 @@ impl ConversationOrchestrator {
             });
 
         let mut binding = None;
+        let relative_alias = validation_source_text
+            .as_deref()
+            .is_some_and(agent::model_resolution::is_relative_model_alias);
         if let Some(source_text) = validation_source_text.as_deref() {
             // Concrete catalog entries take their real provider route first.
-            // Relative aliases are resolved against the selected parent below.
-            let direct_route = self
-                .api
-                .resolve_media_route(source_text, fallback.profile.as_deref())
-                .or_else(|_| self.api.resolve_media_route(source_text, None));
-            if let Ok(route) = direct_route {
-                let registered_native_route = !Self::route_uses_native_model_catalog(&route)
-                    || route_listings.iter().any(|listing| {
-                        listing.request_model == route.main.request_model
-                            && listing.provider_id == route.main.profile_name
-                    });
-                if registered_native_route {
-                    binding = Some(ModelSourceBinding {
-                        source: source.clone(),
-                        effective_source: lingxi_core::types::utf16_json::Utf16JsonProjection::from(
-                            route.main.request_model.clone(),
-                        ),
-                        route_anchor: ModelRouteAnchor {
-                            model: route.main.request_model,
-                            profile: Some(route.main.profile_name),
-                        },
-                    });
+            // Relative aliases use the Native route-context resolver below;
+            // retain this direct fallback only when that resolver is absent.
+            if !relative_alias || self.model_resolution_context_provider.is_none() {
+                let direct_route = self
+                    .api
+                    .resolve_media_route(source_text, fallback.profile.as_deref())
+                    .or_else(|_| self.api.resolve_media_route(source_text, None));
+                if let Ok(route) = direct_route {
+                    let registered_native_route = !Self::route_uses_native_model_catalog(&route)
+                        || route_listings.iter().any(|listing| {
+                            listing.request_model == route.main.request_model
+                                && listing.provider_id == route.main.profile_name
+                        });
+                    if registered_native_route {
+                        let effective_source = if Self::route_uses_native_model_catalog(&route) {
+                            let native_effective_model = self
+                                .model_resolution_context_provider
+                                .as_ref()
+                                .and_then(|provider| {
+                                    provider
+                                        .context_for_route(
+                                            &route.main.request_model,
+                                            Some(&route.main.profile_name),
+                                        )
+                                        .ok()
+                                })
+                                .and_then(|context| {
+                                    agent::model_resolution::resolve_user_specified_model(
+                                        source_text,
+                                        &context,
+                                    )
+                                    .ok()
+                                });
+                            match native_effective_model {
+                                Some(model) => {
+                                    lingxi_core::types::utf16_json::Utf16JsonProjection::from(model)
+                                }
+                                None if relative_alias => {
+                                    lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                                        route.main.request_model.clone(),
+                                    )
+                                }
+                                None => validation_source.clone(),
+                            }
+                        } else {
+                            lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                                route.main.request_model.clone(),
+                            )
+                        };
+                        binding = Some(ModelSourceBinding {
+                            source: source.clone(),
+                            effective_source,
+                            route_anchor: ModelRouteAnchor {
+                                model: route.main.request_model,
+                                profile: Some(route.main.profile_name),
+                            },
+                        });
+                    }
                 }
             }
             if binding.is_none() {
@@ -402,12 +441,25 @@ impl ConversationOrchestrator {
                                 &selection.model,
                                 selection.model_profile.as_deref(),
                             ) {
-                                binding = Some(ModelSourceBinding {
-                                    source: source.clone(),
-                                    effective_source:
+                                let effective_source =
+                                    if Self::route_uses_native_model_catalog(&route) {
+                                        let native_effective_model =
+                                            agent::model_resolution::resolve_user_specified_model(
+                                                source_text,
+                                                &selection.model_resolution_context,
+                                            )
+                                            .unwrap_or_else(|_| selection.model.clone());
+                                        lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                                            native_effective_model,
+                                        )
+                                    } else {
                                         lingxi_core::types::utf16_json::Utf16JsonProjection::from(
                                             route.main.request_model.clone(),
-                                        ),
+                                        )
+                                    };
+                                binding = Some(ModelSourceBinding {
+                                    source: source.clone(),
+                                    effective_source,
                                     route_anchor: ModelRouteAnchor {
                                         model: route.main.request_model,
                                         profile: Some(route.main.profile_name),
@@ -4280,20 +4332,34 @@ mod tests {
             model: &str,
             profile: Option<&str>,
         ) -> Result<llm_runtime::MediaRoute, llm_runtime::LlmError> {
-            if model == "claude-known" && profile.is_none_or(|profile| profile == "anthropic") {
-                Ok(model_selection_route(model))
+            let request_model = match model {
+                "claude-sonnet-4-5" => "claude-sonnet-4-5-20250929",
+                _ => model,
+            };
+            if matches!(request_model, "claude-known" | "claude-sonnet-4-5-20250929")
+                && profile.is_none_or(|profile| profile == "anthropic")
+            {
+                Ok(model_selection_route(request_model))
             } else {
                 Err(llm_runtime::LlmError::ModelUnavailable)
             }
         }
 
         fn list_model_listings(&self) -> Vec<lingxi_core::host::ModelListing> {
-            vec![lingxi_core::host::ModelListing {
-                request_model: "claude-known".into(),
-                display_model: "Friendly Claude".into(),
-                provider_id: "anthropic".into(),
-                ..Default::default()
-            }]
+            [
+                ("claude-known", "Friendly Claude"),
+                ("claude-sonnet-4-5-20250929", "Sonnet"),
+            ]
+            .into_iter()
+            .map(
+                |(request_model, display_model)| lingxi_core::host::ModelListing {
+                    request_model: request_model.into(),
+                    display_model: display_model.into(),
+                    provider_id: "anthropic".into(),
+                    ..Default::default()
+                },
+            )
+            .collect()
         }
 
         fn model_validation_account_generation(&self) -> Option<u64> {
@@ -4314,6 +4380,38 @@ mod tests {
             self.probed_sources.lock().unwrap().push(units);
             Ok(())
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_native_model_source_survives_sdk_route_resolution() {
+        use lingxi_core::host::ModelValidationMode;
+
+        let orch = crate::ConversationOrchestrator::new(
+            crate::OrchestratorConfig {
+                model: "claude-known".into(),
+                ..Default::default()
+            },
+            Arc::new(ModelSelectionApi::default()),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let source = Utf16JsonProjection::from("claude-sonnet-4-5");
+        let (route_model, route_profile, binding) = orch
+            .resolve_explicit_model_source(&source, None, ModelValidationMode::ServerProbeDisabled)
+            .await
+            .expect("the fixture admits the explicit Native model source");
+
+        assert_eq!(route_model, "claude-sonnet-4-5-20250929");
+        assert_eq!(route_profile.as_deref(), Some("anthropic"));
+        assert_eq!(
+            binding.effective_source.string_units(""),
+            source.string_units(""),
+            "SDK route resolution supplies transport identity without replacing Native's model id"
+        );
     }
 
     fn memory_warning_orchestrator() -> ConversationOrchestrator {

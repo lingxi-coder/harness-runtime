@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
-use futures::StreamExt as _;
+use futures::{future::BoxFuture, StreamExt as _};
 use lingxi_core::types::{
     utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, MessageId,
 };
@@ -1022,7 +1022,27 @@ impl StreamingTurnDriver<'_> {
         }))
     }
 
-    async fn open_iteration<'a>(
+    fn open_iteration<'orch: 'call, 'call>(
+        orch: &'orch ConversationOrchestrator,
+        prepared: PreparedStreamingIteration,
+        system_prompt: &'call Option<
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
+        user_cancel: &'call Option<CancellationToken>,
+        loop_state: &'call mut TurnLoopState,
+        retry_scope: &'call ModelCallRetryScope,
+    ) -> BoxFuture<'call, Result<OpenStreamingOutcome<'orch>, OrchestratorError>> {
+        Box::pin(Self::open_iteration_inner(
+            orch,
+            prepared,
+            system_prompt,
+            user_cancel,
+            loop_state,
+            retry_scope,
+        ))
+    }
+
+    async fn open_iteration_inner<'a>(
         orch: &'a ConversationOrchestrator,
         prepared: PreparedStreamingIteration,
         system_prompt: &Option<
@@ -2040,7 +2060,25 @@ impl StreamingTurnDriver<'_> {
         })
     }
 
-    async fn pump_iteration<'a>(
+    fn pump_iteration<'orch: 'call, 'call>(
+        orch: &'orch ConversationOrchestrator,
+        prepared: PreparedStreamingIteration,
+        system_prompt: &'call Option<
+            lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        >,
+        user_cancel: &'call Option<CancellationToken>,
+        loop_state: &'call mut TurnLoopState,
+    ) -> BoxFuture<'call, Result<PumpStreamingOutcome<'orch>, OrchestratorError>> {
+        Box::pin(Self::pump_iteration_inner(
+            orch,
+            prepared,
+            system_prompt,
+            user_cancel,
+            loop_state,
+        ))
+    }
+
+    async fn pump_iteration_inner<'a>(
         orch: &'a ConversationOrchestrator,
         prepared: PreparedStreamingIteration,
         system_prompt: &Option<
