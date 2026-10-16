@@ -716,6 +716,7 @@ impl ConversationOrchestrator {
         model_binding: Option<lingxi_core::host::ModelSourceBinding>,
         clear_user_selection: bool,
     ) -> Result<(), HandleError> {
+        self.cancel_idle_compaction();
         // Unknown provenance must not become an accidental pre-hook bypass.
         // Legacy/third-party handle callers are SDK callers unless they use one
         // of the schema's explicit sources.
@@ -1044,6 +1045,7 @@ impl ConversationOrchestrator {
         &self,
         request: OwnedSessionSwitch,
     ) -> Result<(), HandleError> {
+        self.cancel_idle_compaction();
         let claim = self
             .lifecycle_runtime
             .session_switch_supervisor
@@ -3264,6 +3266,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             )?);
         }
 
+        self.cancel_idle_compaction();
         let _turn_guard = self.turn_gate.lock().await;
         let target = self.session.lock().await.session_id;
         for message in messages {
@@ -3292,6 +3295,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             lingxi_core::types::SessionId::parse_prefixed(session_id).ok_or_else(|| {
                 HandleError::ActionFailed(format!("invalid target session id {session_id:?}"))
             })?;
+        self.cancel_idle_compaction();
         let _turn_guard = self.turn_gate.lock().await;
         let message = if is_user {
             user_message_from_source(lingxi_core::types::MessageId::new(), text, false)?
@@ -3325,6 +3329,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // Serialize with turns and hot-resume/clear so the target check,
         // transcript parent lookup, append, and live-history update all land on
         // one side of a session transition.
+        self.cancel_idle_compaction();
         let _turn_guard = self.turn_gate.lock().await;
         let current = self.session.lock().await.session_id;
         let msg = user_message_from_source(lingxi_core::types::MessageId::new(), text, true)?;

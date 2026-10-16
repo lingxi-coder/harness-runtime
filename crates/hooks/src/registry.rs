@@ -37,6 +37,13 @@ pub struct HookModelSelection {
 /// having to populate everything.
 #[derive(Clone, Default)]
 pub struct HookContext {
+    /// Idle compaction cancellation is host-only and applies only to the
+    /// PreCompact dispatch that was started by that idle transaction.
+    pub idle_compaction_cancellation: Option<lingxi_core::host::CancellationToken>,
+    /// Per-idle-compaction owner for command-hook process groups. Set only on
+    /// idle PreCompact dispatches so cancellation can kill descendants without
+    /// affecting ordinary foreground hooks.
+    pub idle_compaction_process_owner: Option<String>,
     /// Defer UserPromptExpansion transcript attachments so the command host
     /// can append their ordered history rows after the expanded prompt body.
     pub defer_prompt_expansion_history_rows: bool,

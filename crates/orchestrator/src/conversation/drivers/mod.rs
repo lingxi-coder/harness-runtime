@@ -898,6 +898,7 @@ impl ConversationOrchestrator {
         prompt: impl Into<Utf16JsonProjection>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         let prompt = prompt.into();
+        self.cancel_idle_compaction();
         let _turn_guard = self.turn_gate.lock().await;
         self.begin_turn_metrics();
         let _activity_guard = self.main_loop_activity(true);
@@ -1119,6 +1120,7 @@ impl ConversationOrchestrator {
         let mod_origin = streaming::external_receive_kind(&ambient_origin)
             .is_some()
             .then_some(ambient_origin);
+        self.cancel_idle_compaction();
         let _turn_guard = self.turn_gate.lock().await;
         let _activity_guard = self.main_loop_activity(true);
         tracing::info!(
@@ -1183,6 +1185,7 @@ impl ConversationOrchestrator {
         &self,
         generation_cancel: Option<CancellationToken>,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        self.cancel_idle_compaction();
         let turn_guard = if let Some(cancel) = generation_cancel.as_ref() {
             self.lock_turn_unless_cancelled(cancel).await
         } else {
@@ -1202,6 +1205,7 @@ impl ConversationOrchestrator {
         registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        self.cancel_idle_compaction();
         let _turn_guard = self.turn_gate.lock().await;
         if cancel.is_cancelled() || !registry.has_pending_task_notifications_for(None).await {
             // The host already reserved its UI/permission lifecycle. Close it
@@ -2784,6 +2788,7 @@ impl ConversationOrchestrator {
         &self,
         cancel: &CancellationToken,
     ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+        self.cancel_idle_compaction();
         tokio::select! {
             biased;
             () = cancel.cancelled() => None,
@@ -3392,6 +3397,29 @@ impl ConversationOrchestrator {
         .await
     }
 
+    /// As [`Self::run_turn_streaming_with_cancel_image_sources`], notifying the
+    /// host once this request has acquired the orchestrator turn gate. Hosts
+    /// that move pending input into this call can use the callback as the
+    /// ownership boundary: cancellation before the gate leaves the input with
+    /// the caller; cancellation or errors after admission belong to this turn.
+    pub fn run_turn_streaming_with_cancel_image_sources_and_admission(
+        &self,
+        prompt: impl Into<Utf16JsonProjection>,
+        images: Vec<lingxi_core::types::ImageSource>,
+        cancel: CancellationToken,
+        on_admitted: Box<dyn FnOnce() + Send + 'static>,
+    ) -> futures::future::BoxFuture<'_, Result<TurnOutcome, OrchestratorError>> {
+        self.run_turn_streaming_with_origin_and_row_token_and_admission(
+            prompt,
+            images,
+            cancel,
+            None,
+            true,
+            None,
+            on_admitted,
+        )
+    }
+
     /// As [`Self::run_turn_streaming_with_cancel_image_sources`], but allows the
     /// caller to pin the persisted user-message UUID.
     pub async fn run_turn_streaming_with_cancel_image_sources_and_message_id(
@@ -3468,7 +3496,7 @@ impl ConversationOrchestrator {
 
     /// Queue adapters preserve the row token independently from internal
     /// conversation identity.
-    pub async fn run_turn_streaming_with_origin_and_row_token(
+    pub fn run_turn_streaming_with_origin_and_row_token(
         &self,
         prompt: impl Into<Utf16JsonProjection>,
         images: Vec<lingxi_core::types::ImageSource>,
@@ -3476,72 +3504,116 @@ impl ConversationOrchestrator {
         message_id: Option<MessageId>,
         in_human_turn: bool,
         row_token: Option<String>,
-    ) -> Result<TurnOutcome, OrchestratorError> {
-        if in_human_turn {
-            self.reset_goal_interruption();
-        }
-        let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
-            return Ok(TurnOutcome::Cancelled);
-        };
-        self.run_turn_streaming_source_with_origin_locked(
-            &turn_guard,
-            prompt.into(),
+    ) -> futures::future::BoxFuture<'_, Result<TurnOutcome, OrchestratorError>> {
+        self.run_turn_streaming_with_origin_and_row_token_and_admission(
+            prompt,
             images,
             cancel,
             message_id,
             in_human_turn,
             row_token,
+            Box::new(|| {}),
         )
-        .await
+    }
+
+    #[inline(never)]
+    fn run_turn_streaming_with_origin_and_row_token_and_admission<'a>(
+        &'a self,
+        prompt: impl Into<Utf16JsonProjection>,
+        images: Vec<lingxi_core::types::ImageSource>,
+        cancel: CancellationToken,
+        message_id: Option<MessageId>,
+        in_human_turn: bool,
+        row_token: Option<String>,
+        on_admitted: Box<dyn FnOnce() + Send + 'static>,
+    ) -> futures::future::BoxFuture<'a, Result<TurnOutcome, OrchestratorError>> {
+        let prompt = prompt.into();
+        Box::pin(async move {
+            if in_human_turn {
+                self.reset_goal_interruption();
+            }
+            let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+                return Ok(TurnOutcome::Cancelled);
+            };
+            on_admitted();
+            self.run_turn_streaming_source_with_origin_locked(
+                &turn_guard,
+                prompt,
+                images,
+                cancel,
+                message_id,
+                in_human_turn,
+                row_token,
+            )
+            .await
+        })
     }
 
     /// Deliver a queued batch as separate transcript messages in one model turn.
     /// Per-entry metadata is owned by this call, never stored as a session override.
-    pub async fn run_queued_prompt_batch(
+    pub fn run_queued_prompt_batch(
         &self,
-        mut inputs: Vec<QueuedPromptInput>,
+        inputs: Vec<QueuedPromptInput>,
         cancel: CancellationToken,
-    ) -> Result<TurnOutcome, OrchestratorError> {
-        if inputs.is_empty() {
-            return Ok(TurnOutcome::EndTurn);
-        }
-        apply_current_native_user_source(&mut inputs);
-        if inputs.iter().any(|input| !input.is_meta) {
-            self.reset_goal_interruption();
-        }
-        let turn_guard = if queued_inputs_are_direct_bash(&inputs) {
-            // A directly executed Shell command has already crossed its
-            // side-effect boundary and its result is durable. Even if the
-            // user cancels before this queued turn acquires the gate, finish
-            // appending the Native rows; the cancellation token still
-            // suppresses the model request.
-            self.turn_gate.lock().await
-        } else {
-            let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
-                return Ok(TurnOutcome::Cancelled);
+    ) -> futures::future::BoxFuture<'_, Result<TurnOutcome, OrchestratorError>> {
+        self.run_queued_prompt_batch_with_admission(inputs, cancel, Box::new(|| {}))
+    }
+
+    /// Deliver a queued batch while reporting when it has acquired the
+    /// orchestrator turn gate. The callback runs exactly once after admission;
+    /// an empty batch or cancellation while waiting returns without calling it.
+    #[inline(never)]
+    pub fn run_queued_prompt_batch_with_admission(
+        &self,
+        inputs: Vec<QueuedPromptInput>,
+        cancel: CancellationToken,
+        on_admitted: Box<dyn FnOnce() + Send + 'static>,
+    ) -> futures::future::BoxFuture<'_, Result<TurnOutcome, OrchestratorError>> {
+        Box::pin(async move {
+            let mut inputs = inputs;
+            if inputs.is_empty() {
+                return Ok(TurnOutcome::EndTurn);
+            }
+            apply_current_native_user_source(&mut inputs);
+            if inputs.iter().any(|input| !input.is_meta) {
+                self.reset_goal_interruption();
+            }
+            self.cancel_idle_compaction();
+            let turn_guard = if queued_inputs_are_direct_bash(&inputs) {
+                // A directly executed Shell command has already crossed its
+                // side-effect boundary and its result is durable. Even if the
+                // user cancels before this queued turn acquires the gate, finish
+                // appending the Native rows; the cancellation token still
+                // suppresses the model request.
+                self.turn_gate.lock().await
+            } else {
+                let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+                    return Ok(TurnOutcome::Cancelled);
+                };
+                turn_guard
             };
-            turn_guard
-        };
-        let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
-        let prompt = inputs[primary]
-            .text
-            .string_at("")
-            .unwrap_or_default()
-            .to_owned();
-        let message_id = inputs[primary].message_id;
-        let in_human_turn = inputs.iter().any(|input| !input.is_meta);
-        self.run_turn_streaming_inputs_locked(
-            &turn_guard,
-            &prompt,
-            Vec::new(),
-            cancel,
-            message_id,
-            in_human_turn,
-            Some(inputs),
-            None,
-            None,
-        )
-        .await
+            on_admitted();
+            let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
+            let prompt = inputs[primary]
+                .text
+                .string_at("")
+                .unwrap_or_default()
+                .to_owned();
+            let message_id = inputs[primary].message_id;
+            let in_human_turn = inputs.iter().any(|input| !input.is_meta);
+            self.run_turn_streaming_inputs_locked(
+                &turn_guard,
+                &prompt,
+                Vec::new(),
+                cancel,
+                message_id,
+                in_human_turn,
+                Some(inputs),
+                None,
+                None,
+            )
+            .await
+        })
     }
 
     pub(super) async fn run_turn_streaming_source_with_origin_locked(
@@ -4418,5 +4490,146 @@ mod current_prompt_upe_scope_tests {
             std::collections::HashSet::from([current_upe_id]),
             "peer context is not a new local human prompt"
         );
+    }
+
+    #[tokio::test]
+    async fn streaming_admission_callback_waits_for_the_orchestrator_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = Arc::new(MockApiClient::new(vec![]));
+        let orch = Arc::new(ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        ));
+
+        let held_gate = orch.turn_gate.lock().await;
+        let cancel = CancellationToken::new();
+        let waiting_admissions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waiting_admissions_callback = waiting_admissions.clone();
+        let mut waiting = Box::pin(
+            orch.run_turn_streaming_with_cancel_image_sources_and_admission(
+                source_string_projection("cancel before admission"),
+                Vec::new(),
+                cancel.clone(),
+                Box::new(move || {
+                    waiting_admissions_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+            ),
+        );
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        assert_eq!(
+            waiting_admissions.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+
+        cancel.cancel();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("cancelled gate wait must settle")
+            .unwrap();
+        assert!(matches!(outcome, TurnOutcome::Cancelled));
+        assert_eq!(
+            waiting_admissions.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(api.captured_requests().await.is_empty());
+        drop(held_gate);
+
+        let admitted_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let admitted_count_callback = admitted_count.clone();
+        let cancel_at_admission = CancellationToken::new();
+        let cancel_at_admission_callback = cancel_at_admission.clone();
+        let outcome = orch
+            .run_turn_streaming_with_cancel_image_sources_and_admission(
+                source_string_projection("callback after admission"),
+                Vec::new(),
+                cancel_at_admission,
+                Box::new(move || {
+                    admitted_count_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    cancel_at_admission_callback.cancel();
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, TurnOutcome::Cancelled));
+        assert_eq!(admitted_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(api.captured_requests().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn queued_batch_admission_callback_waits_for_the_orchestrator_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let api = Arc::new(MockApiClient::new(vec![]));
+        let orch = Arc::new(ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        ));
+        let input = QueuedPromptInput {
+            text: source_string_projection("queued slash prompt"),
+            ..Default::default()
+        };
+
+        let held_gate = orch.turn_gate.lock().await;
+        let cancel = CancellationToken::new();
+        let waiting_admissions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waiting_admissions_callback = waiting_admissions.clone();
+        let mut waiting = Box::pin(orch.run_queued_prompt_batch_with_admission(
+            vec![input],
+            cancel.clone(),
+            Box::new(move || {
+                waiting_admissions_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        ));
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        assert_eq!(
+            waiting_admissions.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+
+        cancel.cancel();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("cancelled batch gate wait must settle")
+            .unwrap();
+        assert!(matches!(outcome, TurnOutcome::Cancelled));
+        assert_eq!(
+            waiting_admissions.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(api.captured_requests().await.is_empty());
+        drop(held_gate);
+
+        let admitted_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let admitted_count_callback = admitted_count.clone();
+        let cancel_at_admission = CancellationToken::new();
+        let cancel_at_admission_callback = cancel_at_admission.clone();
+        let outcome = orch
+            .run_queued_prompt_batch_with_admission(
+                vec![QueuedPromptInput {
+                    text: source_string_projection("callback after batch admission"),
+                    ..Default::default()
+                }],
+                cancel_at_admission,
+                Box::new(move || {
+                    admitted_count_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    cancel_at_admission_callback.cancel();
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(outcome, TurnOutcome::Cancelled));
+        assert_eq!(admitted_count.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(api.captured_requests().await.is_empty());
     }
 }

@@ -39,6 +39,7 @@ fn file_provider_settings_override_launch_defaults_and_enable_new_profiles() {
     )
     .unwrap();
     let cfg = super::MobileConfig {
+        idle_compaction_enabled: false,
         cwd,
         lingxi_home: home,
         provider_profiles: Some(BTreeMap::from([
@@ -92,6 +93,7 @@ fn explicit_file_allowlist_remains_authoritative() {
     )
     .unwrap();
     let cfg = super::MobileConfig {
+        idle_compaction_enabled: false,
         cwd: temp.path().join("project"),
         lingxi_home: temp.path().to_path_buf(),
         routing: Some(json!({"mobileEnabledProfiles": ["legacy"]})),

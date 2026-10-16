@@ -176,6 +176,8 @@ impl ConversationOrchestrator {
             transcript: TranscriptStore::new(),
             prompt_runtime: PromptRuntime::new_with_response_language(response_language),
             compaction_runtime: CompactionRuntime::new(),
+            idle_compaction_enabled: false,
+            idle_compaction: super::idle_compaction_impl::IdleCompactionState::default(),
             lifecycle_runtime: LifecycleRuntime::new(),
             computer_runtime: crate::native_computer::ComputerRuntime::default(),
             tool_execution_journal: None,
@@ -1284,6 +1286,13 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_compaction(mut self, compactor: Arc<compaction::CompactionOrchestrator>) -> Self {
         self.compaction_runtime.compaction = Some(compactor);
+        self
+    }
+
+    /// Enable the local, session-scoped idle compaction controller. Platform
+    /// config defaults this to false and does not read remote experiment state.
+    pub fn with_idle_compaction_enabled(mut self, enabled: bool) -> Self {
+        self.idle_compaction_enabled = enabled && !self.side_chat;
         self
     }
 

@@ -1719,6 +1719,10 @@ pub struct ConversationOrchestrator {
     pub(crate) model_switch_gate: Mutex<()>,
     /// Model selection, accounting, fallback, and request preparation state.
     pub(crate) model_runtime: ModelRuntime,
+    /// Local host opt-in; default false and never inferred from remote policy.
+    pub(crate) idle_compaction_enabled: bool,
+    /// Owned per-session idle timer and cancellation boundary.
+    pub(crate) idle_compaction: idle_compaction_impl::IdleCompactionState,
     /// Session-owned dynamic-workflow gate shared with the Workflow tool and
     /// TUI `/config` consumers.
     pub(crate) dynamic_workflows_gate: lingxi_core::host::session_flags::DynamicWorkflowsGate,
@@ -2088,6 +2092,7 @@ mod runtime_impl;
 mod headless_mcp;
 #[path = "conversation/headless_ui.rs"]
 mod headless_ui;
+mod idle_compaction_impl;
 
 use drivers_impl::parse_generated_session_name;
 pub(crate) use runtime_impl::TurnTimingCapture;

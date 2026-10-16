@@ -587,6 +587,105 @@ mod command_arm_tests {
             .with_process_runner(process, Arc::new(StubSandbox))
     }
 
+    struct IdleBlockingRunner {
+        started: tokio::sync::Notify,
+        killed: lingxi_core::host::CancellationToken,
+        command_owner: Mutex<Option<String>>,
+        killed_owner: Mutex<Option<String>>,
+    }
+
+    #[async_trait]
+    impl ProcessRunner for IdleBlockingRunner {
+        async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            *self.command_owner.lock().unwrap() = cmd.process_owner().map(str::to_owned);
+            self.started.notify_one();
+            self.killed.cancelled().await;
+            Ok(output("", "", 0))
+        }
+
+        async fn spawn_background(
+            &self,
+            _cmd: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+
+        async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+            Ok(())
+        }
+
+        async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+            *self.killed_owner.lock().unwrap() = Some(owner.to_owned());
+            self.killed.cancel();
+            vec![4242]
+        }
+
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn idle_prec_compact_cancellation_kills_owned_command_and_releases_dispatch() {
+        let runner = Arc::new(IdleBlockingRunner {
+            started: tokio::sync::Notify::new(),
+            killed: lingxi_core::host::CancellationToken::new(),
+            command_owner: Mutex::new(None),
+            killed_owner: Mutex::new(None),
+        });
+        let mut hook = command_hook();
+        hook.events = vec![HookEventType::PreCompact];
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_process_runner(runner.clone(), Arc::new(StubSandbox));
+        let idle_cancel = lingxi_core::host::CancellationToken::new();
+        let owner = "idle-precompact:unit-test".to_string();
+        let dispatch = tokio::spawn({
+            let idle_cancel = idle_cancel.clone();
+            let owner = owner.clone();
+            async move {
+                exec.execute(
+                    HookEvent::PreCompact {
+                        reason: "auto".into(),
+                        custom_instructions: None,
+                    },
+                    HookContext {
+                        idle_compaction_cancellation: Some(idle_cancel),
+                        idle_compaction_process_owner: Some(owner),
+                        ..HookContext::default()
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), runner.started.notified())
+            .await
+            .expect("command hook starts before cancellation");
+
+        let cancelled_at = std::time::Instant::now();
+        idle_cancel.cancel();
+        let aggregate = tokio::time::timeout(Duration::from_secs(1), dispatch)
+            .await
+            .expect("idle cancellation must release the hook dispatch")
+            .expect("hook dispatch task must not panic");
+
+        assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+        assert!(aggregate.all_results.is_empty());
+        assert_eq!(
+            runner.command_owner.lock().unwrap().as_deref(),
+            Some(owner.as_str())
+        );
+        assert_eq!(
+            runner.killed_owner.lock().unwrap().as_deref(),
+            Some(owner.as_str())
+        );
+    }
+
     #[tokio::test]
     async fn exit_zero_allows_no_decision() {
         let runner = MockRunner::ok(output("approved\n", "", 0));

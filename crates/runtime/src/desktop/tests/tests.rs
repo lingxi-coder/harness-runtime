@@ -429,6 +429,7 @@ fn workflow_size_uses_custom_home_flag_and_managed_precedence() {
     let managed: lingxi_core::settings::SettingsJson =
         serde_json::from_str(r#"{"workflowSizeGuideline":"small"}"#).unwrap();
     let cfg = DesktopConfig {
+        idle_compaction_enabled: false,
         cwd: cwd.clone(),
         lingxi_home,
         flag_settings: Some(flag),
@@ -461,6 +462,7 @@ fn workflow_size_tracks_the_builtin_default_separately_from_explicit_medium() {
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::create_dir_all(&lingxi_home).unwrap();
     let cfg = DesktopConfig {
+        idle_compaction_enabled: false,
         cwd: cwd.clone(),
         lingxi_home,
         ..DesktopConfig::default()
@@ -495,6 +497,7 @@ fn workflow_session_enabled_uses_custom_home_flag_and_managed_precedence() {
     let managed: lingxi_core::settings::SettingsJson =
         serde_json::from_str(r#"{"enableWorkflows":true}"#).unwrap();
     let cfg = DesktopConfig {
+        idle_compaction_enabled: false,
         cwd: cwd.clone(),
         lingxi_home,
         flag_settings: Some(flag),
@@ -522,6 +525,7 @@ fn workflow_session_enabled_defaults_true() {
     std::fs::create_dir_all(&cwd).unwrap();
     std::fs::create_dir_all(&lingxi_home).unwrap();
     let cfg = DesktopConfig {
+        idle_compaction_enabled: false,
         cwd: cwd.clone(),
         lingxi_home,
         ..DesktopConfig::default()
@@ -2732,6 +2736,7 @@ fn desktop_config_default_is_constructible() {
     // type implements `Clone`/secret-safe `Debug` so a host can fan it out
     // and include its non-sensitive shape in diagnostics.
     let custom = DesktopConfig {
+        idle_compaction_enabled: false,
         use_noop_permission_gate: false,
         ..cfg.clone()
     };
@@ -2834,6 +2839,7 @@ fn desktop_config_debug_redacts_secret_bearing_fields() {
     const SECRET_CANARY: &str = "LX_SECRET_CANARY_NEVER_LOG_6e44f87c";
 
     let cfg = DesktopConfig {
+        idle_compaction_enabled: false,
         api_base: format!("https://user:{SECRET_CANARY}@example.test/?token={SECRET_CANARY}"),
         api_key: SECRET_CANARY.to_string(),
         api_key_helper: Some(format!("printf {SECRET_CANARY}")),
@@ -2882,6 +2888,7 @@ fn permission_mode_threads_into_context_and_policy() {
     // (1) The field carries the CLI-resolved mode through struct-update —
     //     this is the value `build()` copies into the tool context.
     let cfg = DesktopConfig {
+        idle_compaction_enabled: false,
         permission_mode: PermissionMode::BypassPermissions,
         ..DesktopConfig::default()
     };
@@ -3579,6 +3586,7 @@ pub(super) fn test_config(use_noop: bool) -> (tempfile::TempDir, DesktopConfig) 
     let cwd = tmp.path().to_path_buf();
     let lingxi_home = cwd.join(".lingxi");
     let cfg = DesktopConfig {
+        idle_compaction_enabled: false,
         build_info: command_api::builtins::BuildInfo::default(),
         enable_automation_scheduler: true,
         host_workspace_trusted: None,
@@ -7203,6 +7211,7 @@ fn default_config_is_not_coordinator() {
     // The frozen field set remains reachable via struct-update syntax, and
     // the flag flips cleanly to opt into a coordinator session.
     let coord = DesktopConfig {
+        idle_compaction_enabled: false,
         session_started_as_coordinator: true,
         ..cfg
     };

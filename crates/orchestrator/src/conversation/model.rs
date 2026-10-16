@@ -792,6 +792,7 @@ impl ConversationOrchestrator {
         fallback_model: &str,
         source_profile: &str,
     ) -> crate::query_model::ServerFallbackTransition {
+        self.cancel_idle_compaction();
         // Native applies every allowed visible server hop and snapshots the
         // app state at acceptance. A model pick during the physical request
         // does not suppress the swap; live picks are reconciled between calls.

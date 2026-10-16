@@ -299,6 +299,7 @@ impl ConversationOrchestrator {
     }
     /// Prepare current Agent history and tool policy for an SDK native connector.
     pub async fn prepare_realtime_agent(&self) -> Result<RealtimeAgentContext, OrchestratorError> {
+        self.cancel_idle_compaction();
         let _gate = self.turn_gate.lock().await;
         let (session_id, history) = {
             let session = self.session.lock().await;
@@ -437,6 +438,7 @@ impl ConversationOrchestrator {
         {
             return Err(failure("native realtime resource limits must be positive"));
         }
+        self.cancel_idle_compaction();
         let _gate = tokio::select! {biased;_ = session_cancel.cancelled()=>return Ok(RealtimeAgentEnd::Cancelled),gate=self.turn_gate.lock()=>gate};
         {
             let session = self.session.lock().await;

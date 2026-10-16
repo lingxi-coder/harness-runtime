@@ -1291,6 +1291,7 @@ impl StreamingTurnDriver<'_> {
                 );
             let request_dispatch_observer =
                 observe_main_dispatch(orch.turn_request_dispatch_observer(), &orch.output);
+            orch.cancel_idle_compaction();
             open_side_stream(
                 orch,
                 user_cancel,
@@ -2475,6 +2476,7 @@ impl StreamingTurnDriver<'_> {
                                 orch.turn_request_dispatch_observer(),
                                 &orch.output,
                             );
+                            orch.cancel_idle_compaction();
                             let retry_stream = open_side_stream(
                                 orch,
                                 user_cancel,

@@ -4994,6 +4994,7 @@ fn provider_credentials_round_trip_through_mobile_submit() {
 fn model_listing_offers_only_allowlisted_providers() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cfg = MobileConfig {
+        idle_compaction_enabled: false,
         cwd: tmp.path().to_path_buf(),
         lingxi_home: tmp.path().join(branding::DOT_DIR),
         routing: Some(serde_json::json!({ "mobileEnabledProfiles": ["deepseek"] })),
@@ -5049,6 +5050,7 @@ fn model_listing_offers_only_allowlisted_providers() {
 fn set_model_rejects_a_provider_the_allowlist_removed() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cfg = MobileConfig {
+        idle_compaction_enabled: false,
         cwd: tmp.path().to_path_buf(),
         lingxi_home: tmp.path().join(branding::DOT_DIR),
         routing: Some(serde_json::json!({ "mobileEnabledProfiles": ["anthropic"] })),
@@ -5089,6 +5091,7 @@ fn set_model_rejects_a_provider_the_allowlist_removed() {
 fn new_session_with_an_unroutable_model_is_refused_without_clearing_the_session() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cfg = MobileConfig {
+        idle_compaction_enabled: false,
         cwd: tmp.path().to_path_buf(),
         lingxi_home: tmp.path().join(branding::DOT_DIR),
         routing: Some(serde_json::json!({ "mobileEnabledProfiles": ["anthropic", "openai"] })),
@@ -5145,6 +5148,7 @@ fn a_user_defined_provider_is_offered_and_selectable() {
         }),
     )]);
     let cfg = MobileConfig {
+        idle_compaction_enabled: false,
         cwd: tmp.path().to_path_buf(),
         lingxi_home: tmp.path().join(branding::DOT_DIR),
         provider_profiles: Some(providers),
@@ -5207,6 +5211,7 @@ fn a_user_defined_provider_is_offered_and_selectable() {
 fn empty_allowlist_still_lists_the_catalog_so_a_fresh_install_is_not_blank() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let cfg = MobileConfig {
+        idle_compaction_enabled: false,
         cwd: tmp.path().to_path_buf(),
         lingxi_home: tmp.path().join(branding::DOT_DIR),
         routing: Some(serde_json::json!({ "mobileEnabledProfiles": [] })),

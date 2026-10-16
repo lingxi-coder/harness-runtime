@@ -14,6 +14,7 @@ fn empty_routable_catalog_respects_the_captured_provider_region() {
         )
         .expect("write provider region");
         let cfg = MobileConfig {
+            idle_compaction_enabled: false,
             cwd: tmp.path().to_path_buf(),
             lingxi_home: home,
             routing: Some(serde_json::json!({ "mobileEnabledProfiles": enabled_profiles })),

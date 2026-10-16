@@ -177,6 +177,50 @@ pub trait ProcessRunner: Send + Sync {
             .await
     }
 
+    /// SH-07 — observed hook execution with an optional host cancellation
+    /// signal. The default preserves existing platform behavior; runners that
+    /// own streaming child processes can use the signal to terminate and reap
+    /// idle-only lifecycle hooks even after their `{"async":true}` marker has
+    /// detached the child from the caller.
+    async fn run_hook_with_async_detection_observed_cancellable(
+        &self,
+        cmd: &SandboxedCommand,
+        default_async_timeout: std::time::Duration,
+        observer: Option<std::sync::Arc<dyn HookOutputObserver>>,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<HookRunOutcome, ProcessError> {
+        let Some(cancellation) = cancellation else {
+            return self
+                .run_hook_with_async_detection_observed(cmd, default_async_timeout, observer)
+                .await;
+        };
+        let owner = cmd.process_owner().map(str::to_owned);
+        let mut run = Box::pin(self.run_hook_with_async_detection_observed(
+            cmd,
+            default_async_timeout,
+            observer,
+        ));
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                if let Some(owner) = owner.as_deref() {
+                    self.kill_owner_processes(owner).await;
+                }
+                // Do not poll a run future after cancellation. On runners whose
+                // future starts the child on first poll, doing so here could
+                // launch a process after the owner cleanup above. Dropping the
+                // future cancels any in-flight work; a second owner sweep catches
+                // a process that was registered while the first sweep raced it.
+                drop(run);
+                if let Some(owner) = owner.as_deref() {
+                    self.kill_owner_processes(owner).await;
+                }
+                Err(ProcessError::Io("hook execution cancelled".into()))
+            }
+            result = &mut run => result,
+        }
+    }
+
     /// Run a sandboxed FOREGROUND tool command, but — matching claude-code
     /// 2.1.210+ — when the command hits its timeout, hand the still-running child
     /// off to the background instead of killing it. Returns
@@ -459,7 +503,93 @@ use mobile_linux_api::ProcessError;
 
 #[cfg(test)]
 mod tests {
-    use super::ProcessError;
+    use super::{ProcessError, ProcessOutput, ProcessRunner};
+    use crate::host::sandbox::{ProcessCommand, SandboxedCommand, SandboxedTag};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    struct NeverStartedRunner {
+        run_polls: Arc<AtomicUsize>,
+        killed_owners: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl ProcessRunner for NeverStartedRunner {
+        async fn run(&self, _cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            self.run_polls.fetch_add(1, Ordering::SeqCst);
+            std::future::pending().await
+        }
+
+        async fn spawn_background(
+            &self,
+            _cmd: &SandboxedCommand,
+        ) -> Result<super::ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+
+        async fn kill(&self, _handle: &super::ProcessHandle) -> Result<(), ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+
+        fn is_available(&self) -> bool {
+            false
+        }
+
+        async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+            self.killed_owners
+                .lock()
+                .expect("owner list lock")
+                .push(owner.to_owned());
+            Vec::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_default_runner_does_not_poll_run_future() {
+        let run_polls = Arc::new(AtomicUsize::new(0));
+        let killed_owners = Arc::new(Mutex::new(Vec::new()));
+        let runner = NeverStartedRunner {
+            run_polls: run_polls.clone(),
+            killed_owners: killed_owners.clone(),
+        };
+        let command = SandboxedCommand::__new_sandboxed(
+            ProcessCommand {
+                command: "unused".into(),
+                args: Vec::new(),
+                cwd: None,
+                env: Default::default(),
+                timeout: None,
+                stdin: None,
+            },
+            SandboxedTag::BypassAuditedWithReason {
+                reason: "unit test".into(),
+            },
+        )
+        .with_process_owner(Some("idle-compaction-test".into()));
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+
+        let result = runner
+            .run_hook_with_async_detection_observed_cancellable(
+                &command,
+                std::time::Duration::from_secs(1),
+                None,
+                Some(cancellation),
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(ProcessError::Io(message)) if message == "hook execution cancelled"
+        ));
+        assert_eq!(run_polls.load(Ordering::SeqCst), 0);
+        assert!(killed_owners
+            .lock()
+            .expect("owner list lock")
+            .iter()
+            .any(|owner| owner == "idle-compaction-test"));
+    }
 
     #[test]
     fn structured_variants_name_the_guarantee() {

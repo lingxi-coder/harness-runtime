@@ -1877,6 +1877,7 @@ impl ConversationOrchestrator {
         custom_instructions: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<lingxi_core::host::CompactionSummary, lingxi_core::host::HandleError> {
+        self.cancel_idle_compaction();
         let Some(compactor) = self.compaction_runtime.compaction.clone() else {
             return Err(lingxi_core::host::HandleError::ActionFailed(
                 "compaction unavailable".into(),
@@ -3514,10 +3515,40 @@ impl ConversationOrchestrator {
     }
 
     pub(crate) async fn maybe_compact_before_call(&self, side_cancel: Option<&CancellationToken>) {
+        self.maybe_compact_before_call_with_options(side_cancel, None, false, None)
+            .await;
+    }
+
+    /// Run the shared automatic compaction transaction from the idle timer.
+    /// It bypasses only the ordinary threshold gate and carries one physical
+    /// provider-attempt budget through the existing summarizer path.
+    pub(crate) async fn maybe_compact_for_idle(&self, cancel: &CancellationToken) {
+        if !self.idle_compaction_enabled || self.side_chat || cancel.is_cancelled() {
+            return;
+        }
+        self.maybe_compact_before_call_with_options(
+            None,
+            Some(cancel),
+            true,
+            Some(llm_runtime::ApiAttemptsLeft::new(1)),
+        )
+        .await;
+    }
+
+    async fn maybe_compact_before_call_with_options(
+        &self,
+        side_cancel: Option<&CancellationToken>,
+        idle_cancel: Option<&CancellationToken>,
+        force_idle: bool,
+        api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
+    ) {
         let Some(compactor) = self.compaction_runtime.compaction.clone() else {
             // No compactor wired — strict no-op (history untouched).
             return;
         };
+        if idle_cancel.is_some_and(CancellationToken::is_cancelled) {
+            return;
+        }
 
         // Context collapse owns proactive headroom while enabled. Its committed
         // view is applied later by `prepare_model_call_snapshot`; prompt-too-long
@@ -3536,7 +3567,9 @@ impl ConversationOrchestrator {
         // (`turn_counter < RAPID_REFILL_TURN_WINDOW`) measures
         // turns-since-previous-compact correctly. Capture under the lock, then
         // emit after releasing it (the analytics emit is async).
-        let post_autocompact = {
+        let post_autocompact = if force_idle {
+            None
+        } else {
             let mut tracking = self.compaction_runtime.compaction_tracking.lock().await;
             if tracking.compacted {
                 tracking.turn_counter = tracking.turn_counter.saturating_add(1);
@@ -3611,7 +3644,7 @@ impl ConversationOrchestrator {
 
         // Threshold gate: under threshold ⇒ strict no-op. `snip_freed = 0`
         // because we have done no snip work yet at the call site.
-        if !compaction::should_auto_compact(estimate, 0, threshold) {
+        if !force_idle && !compaction::should_auto_compact(estimate, 0, threshold) {
             return;
         }
 
@@ -3675,7 +3708,28 @@ impl ConversationOrchestrator {
         // PreCompact hook: <blockedBy>` and skips compaction (history untouched).
         let compact_started = std::time::Instant::now();
         self.output.emit_compaction_started().await;
-        let pre_compact = self.fire_pre_compact("auto", None).await;
+        let idle_hook_owner =
+            force_idle.then(|| format!("idle-pre-compact:{}", uuid::Uuid::new_v4()));
+        let pre_compact = if let (Some(cancel), Some(owner)) = (idle_cancel, idle_hook_owner) {
+            let Some(outcome) = self
+                .fire_pre_compact_for_idle("auto", None, cancel, owner)
+                .await
+            else {
+                self.output
+                    .emit_compaction_finished(Some("Compaction canceled."))
+                    .await;
+                return;
+            };
+            outcome
+        } else {
+            self.fire_pre_compact("auto", None).await
+        };
+        if idle_cancel.is_some_and(CancellationToken::is_cancelled) {
+            self.output
+                .emit_compaction_finished(Some("Compaction canceled."))
+                .await;
+            return;
+        }
         if let Some(detail) = pre_compact.blocked_by {
             let detail = detail.string_at("").unwrap_or_default().to_owned();
             tracing::warn!("Precomputed compact blocked by PreCompact hook: {detail}");
@@ -3699,6 +3753,12 @@ impl ConversationOrchestrator {
                 return;
             }
         };
+        if idle_cancel.is_some_and(CancellationToken::is_cancelled) {
+            self.output
+                .emit_compaction_finished(Some("Compaction canceled."))
+                .await;
+            return;
+        }
         let tracking_state = std::sync::Arc::new(tokio::sync::Mutex::new(
             self.compaction_runtime
                 .compaction_tracking
@@ -3710,26 +3770,58 @@ impl ConversationOrchestrator {
         let compact_for_core = compactor.clone();
         let phase_output = self.output.clone();
         let last_assistant_at_for_core = last_assistant_at;
-        let side_token = side_cancel.filter(|_| self.side_chat).cloned();
+        let operation_cancel = if self.side_chat {
+            side_cancel.cloned()
+        } else if force_idle {
+            idle_cancel.cloned()
+        } else {
+            None
+        };
+        let operation_cancel_for_core = operation_cancel.clone();
+        let token_budget = api_attempts_left.clone();
         let core: SessionCompactCore = std::sync::Arc::new(move |source_messages, instructions| {
-            let cancel = side_token.clone();
+            let cancel = operation_cancel_for_core.clone();
             let tracking = tracking_for_core.clone();
             let compactor = compact_for_core.clone();
             let phase_output = phase_output.clone();
             let last_assistant_at = last_assistant_at_for_core;
+            let force_idle = force_idle;
+            let token_budget = token_budget.clone();
             Box::pin(async move {
                 phase_output.emit_compaction_phase("summarizing").await;
                 let api_started = std::time::Instant::now();
                 let mut tracking = tracking.lock().await;
-                let request = compactor.process_iteration_tracked_with_instructions_and_timing(
-                    source_messages.clone(),
-                    0,
-                    &mut tracking,
-                    instructions.as_ref(),
-                    last_assistant_at,
-                    std::time::SystemTime::now(),
-                    None,
-                );
+                let iteration_started_at = if force_idle {
+                    None
+                } else {
+                    Some(std::time::SystemTime::now())
+                };
+                let request = async {
+                    if force_idle {
+                        compactor
+                            .process_reactive_tracked(
+                                source_messages.clone(),
+                                &mut tracking,
+                                instructions.as_ref(),
+                                None,
+                                token_budget,
+                            )
+                            .await
+                    } else {
+                        compactor
+                            .process_iteration_tracked_with_instructions_and_timing(
+                                source_messages.clone(),
+                                0,
+                                &mut tracking,
+                                instructions.as_ref(),
+                                last_assistant_at,
+                                iteration_started_at
+                                    .expect("non-idle compaction records its start"),
+                                token_budget,
+                            )
+                            .await
+                    }
+                };
                 let result = if let Some(cancel) = cancel {
                     tokio::select! {
                         biased;
@@ -3739,7 +3831,7 @@ impl ConversationOrchestrator {
                 } else {
                     request.await
                 }
-                    .map_err(|error| hooks::mods::ModError::Native(error.to_string()))?;
+                .map_err(|error| hooks::mods::ModError::Native(error.to_string()))?;
                 Ok(SessionCompactCoreOutput::new(
                     result,
                     source_messages,
@@ -3747,15 +3839,47 @@ impl ConversationOrchestrator {
                 ))
             })
         });
-        let compacted = self
-            .dispatch_session_compact_mods(
-                "auto",
-                snapshot,
-                pre_compact.additional_instructions.as_ref(),
-                core,
+        if operation_cancel
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            self.output
+                .emit_compaction_finished(Some("Compaction canceled."))
+                .await;
+            return;
+        }
+        let compacted = if let Some(cancel) = operation_cancel.as_ref() {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => None,
+                result = self.dispatch_session_compact_mods(
+                    "auto",
+                    snapshot,
+                    pre_compact.additional_instructions.as_ref(),
+                    core,
+                ) => Some(result),
+            }
+        } else {
+            Some(
+                self.dispatch_session_compact_mods(
+                    "auto",
+                    snapshot,
+                    pre_compact.additional_instructions.as_ref(),
+                    core,
+                )
+                .await,
             )
-            .await;
-        if side_cancel.is_some_and(|cancel| self.side_chat && cancel.is_cancelled()) {
+        };
+        let Some(compacted) = compacted else {
+            self.output
+                .emit_compaction_finished(Some("Compaction canceled."))
+                .await;
+            return;
+        };
+        if operation_cancel
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
             self.output
                 .emit_compaction_finished(Some("Compaction canceled."))
                 .await;
@@ -3862,7 +3986,7 @@ impl ConversationOrchestrator {
                 messages_before,
                 bytes_before,
                 compact_started,
-                None,
+                operation_cancel.as_ref(),
             )
             .await;
         if applied.is_some() {
@@ -4082,6 +4206,36 @@ impl ConversationOrchestrator {
                 ctx,
             )
             .await;
+        Self::fold_pre_compact_hook_outcome(agg)
+    }
+
+    pub(crate) async fn fire_pre_compact_for_idle(
+        &self,
+        trigger: &str,
+        custom_instructions: Option<&lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        cancellation: &CancellationToken,
+        process_owner: String,
+    ) -> Option<PreCompactHookOutcome> {
+        let mut ctx = self.lifecycle_hook_ctx(false).await;
+        ctx.idle_compaction_cancellation = Some(cancellation.clone());
+        ctx.idle_compaction_process_owner = Some(process_owner);
+        let agg = self
+            .hooks
+            .execute(
+                HookEvent::PreCompact {
+                    reason: trigger.to_string(),
+                    custom_instructions: custom_instructions.cloned(),
+                },
+                ctx,
+            )
+            .await;
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        Some(Self::fold_pre_compact_hook_outcome(agg))
+    }
+
+    fn fold_pre_compact_hook_outcome(agg: hooks::AggregateHookResult) -> PreCompactHookOutcome {
         let blocked_by =
             matches!(agg.decision, Some(hooks::response::HookDecision::Block)).then(|| {
                 agg.reason

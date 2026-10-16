@@ -33,6 +33,17 @@ impl PromptCacheDiagnostics {
         (self.session_id == Some(session_id)).then_some(&self.ledger)
     }
 
+    pub(crate) fn idle_request_summary(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+        now_ms: u64,
+    ) -> Option<(RequestSnapshot, cost::prompt_cache_ledger::CacheSummary)> {
+        if self.session_id != Some(session_id) {
+            return None;
+        }
+        Some((self.baseline.clone()?, self.ledger.summary(now_ms)))
+    }
+
     fn select_session(&mut self, session_id: lingxi_core::types::SessionId) {
         if self.session_id != Some(session_id) {
             *self = Self {
@@ -176,6 +187,8 @@ impl ConversationOrchestrator {
             cache_creation_tokens: counts.cache_write_tokens,
             ttl,
         });
+        drop(diagnostics);
+        self.arm_idle_compaction_after_request(current).await;
     }
 
     pub(crate) async fn expect_prompt_cache_rebuild(&self) {
@@ -202,6 +215,7 @@ mod tests {
 
     fn snapshot() -> RequestSnapshot {
         RequestSnapshot {
+            request_anchor_at_ms: Some(0),
             at_ms: 0,
             system: [0; 32],
             system_chars: 2,

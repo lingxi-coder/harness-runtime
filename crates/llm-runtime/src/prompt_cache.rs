@@ -14,6 +14,11 @@ pub type Fingerprint = [u8; 32];
 /// Evidence for the main request that actually reached provider dispatch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestSnapshot {
+    /// H's logical-request parameter-save time, captured when the caller
+    /// enters one API operation. Physical SDK retries inside that operation
+    /// share this anchor. It is deliberately distinct from `at_ms`, which is
+    /// the accepted physical-dispatch time below.
+    pub request_anchor_at_ms: Option<u64>,
     /// Provider dispatch time, before waiting for the response to finish.
     pub at_ms: u64,
     pub system: Fingerprint,
@@ -34,10 +39,16 @@ pub struct RequestSnapshot {
     pub messages: Vec<Fingerprint>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct CapturedRequest {
+    snapshot: Option<RequestSnapshot>,
+    request_anchor_at_ms: Option<u64>,
+}
+
 /// One owner per main conversation, explicitly scoped around each API call.
 /// Sharing an `ApiService` with side queries cannot overwrite this capture.
 #[derive(Debug, Clone, Default)]
-pub struct RequestCapture(Arc<Mutex<Option<RequestSnapshot>>>);
+pub struct RequestCapture(Arc<Mutex<CapturedRequest>>);
 
 tokio::task_local! {
     static CAPTURE: RequestCapture;
@@ -45,15 +56,35 @@ tokio::task_local! {
 
 impl RequestCapture {
     pub async fn scope<F: std::future::Future>(&self, future: F) -> F::Output {
+        let anchor_at_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
+        self.scope_at(anchor_at_ms, future).await
+    }
+
+    async fn scope_at<F: std::future::Future>(&self, anchor_at_ms: u64, future: F) -> F::Output {
         // A separate slot for the in-flight call also isolates nested scopes.
-        let request = Self::default();
+        let request = Self(Arc::new(Mutex::new(CapturedRequest {
+            snapshot: None,
+            request_anchor_at_ms: Some(anchor_at_ms),
+        })));
         let output = CAPTURE.scope(request.clone(), Box::pin(future)).await;
-        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = request.take();
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) =
+            request.0.lock().unwrap_or_else(|e| e.into_inner()).clone();
         output
     }
 
     pub fn take(&self) -> Option<RequestSnapshot> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .snapshot
+            .take()
+    }
+
+    fn request_anchor_at_ms(&self) -> Option<u64> {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .request_anchor_at_ms
     }
 }
 
@@ -66,11 +97,19 @@ pub(crate) fn snapshot_prepared(prepared: &crate::PreparedLlmCall) -> Option<Req
             | crate::ProtocolFamily::FoundryClaude
     )
     .then(|| {
-        RequestSnapshot::from_request(
+        inherit_request_anchor(RequestSnapshot::from_request(
             &prepared.provider_request,
             &prepared.route.resolved_route.request_model,
-        )
+        ))
     })
+}
+
+fn inherit_request_anchor(mut snapshot: RequestSnapshot) -> RequestSnapshot {
+    snapshot.request_anchor_at_ms = CAPTURE
+        .try_with(RequestCapture::request_anchor_at_ms)
+        .ok()
+        .flatten();
+    snapshot
 }
 
 /// Record a request only after the SDK dispatch marker accepts the attempt.
@@ -79,7 +118,7 @@ pub(crate) fn observe_snapshot(mut snapshot: Option<RequestSnapshot>) {
         if let Some(snapshot) = snapshot.as_mut() {
             snapshot.at_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
         }
-        *capture.0.lock().unwrap_or_else(|e| e.into_inner()) = snapshot;
+        capture.0.lock().unwrap_or_else(|e| e.into_inner()).snapshot = snapshot;
     });
 }
 
@@ -296,6 +335,7 @@ impl RequestSnapshot {
             None => "",
         };
         Self {
+            request_anchor_at_ms: None,
             at_ms: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
             system: part_hash(
                 &block_array_without_cache_controls(&system, request.json_encoding)
@@ -430,12 +470,47 @@ mod tests {
         let request = request(r#"{"model":"parent"}"#);
         let snapshot = RequestSnapshot::from_request(&request, "parent");
         parent
-            .scope(async {
-                CAPTURE.with(|capture| *capture.0.lock().unwrap() = Some(snapshot.clone()));
+            .scope_at(10, async {
+                CAPTURE.with(|capture| {
+                    *capture.0.lock().unwrap().snapshot =
+                        Some(inherit_request_anchor(snapshot.clone()))
+                });
                 child.scope(async {}).await;
             })
             .await;
-        assert_eq!(parent.take(), Some(snapshot));
+        let captured = parent.take().expect("parent request is captured");
+        assert_eq!(captured.request_anchor_at_ms, Some(10));
+        assert_eq!(captured.model, snapshot.model);
         assert_eq!(child.take(), None);
+    }
+
+    #[tokio::test]
+    async fn logical_request_anchor_is_shared_by_retries_but_refreshes_for_next_request() {
+        let capture = RequestCapture::default();
+        let request = request(r#"{"model":"main"}"#);
+        let base = RequestSnapshot::from_request(&request, "main");
+        let mut attempt_anchors = Vec::new();
+        capture
+            .scope_at(100, async {
+                for _retry in 0..2 {
+                    let snapshot = inherit_request_anchor(base.clone());
+                    attempt_anchors.push(snapshot.request_anchor_at_ms);
+                    observe_snapshot(Some(snapshot));
+                }
+            })
+            .await;
+        let first_request = capture.take().expect("first request snapshot");
+        assert_eq!(attempt_anchors, [Some(100), Some(100)]);
+        assert_eq!(first_request.request_anchor_at_ms, Some(100));
+
+        capture
+            .scope_at(250, async {
+                let next = inherit_request_anchor(base);
+                observe_snapshot(Some(next));
+            })
+            .await;
+        let next_request = capture.take().expect("next logical request snapshot");
+        assert_eq!(next_request.request_anchor_at_ms, Some(250));
+        assert_eq!(next_request.ttl_1h, first_request.ttl_1h);
     }
 }

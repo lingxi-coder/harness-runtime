@@ -1329,6 +1329,13 @@ impl HookExecutorImpl {
         // One `toolUseID` per dispatch, shared by every matched hook.
         let attachment_id = attachment_identity(&event);
         for hook in &matched {
+            if ctx
+                .idle_compaction_cancellation
+                .as_ref()
+                .is_some_and(lingxi_core::host::CancellationToken::is_cancelled)
+            {
+                break;
+            }
             // Emit a `hook_progress` event for every matching hook *before* it
             // runs, carrying the per-hook `status_message` (claude-code
             // `utils/hooks.ts:2094-2116`). The spinner substitutes this text
@@ -1357,10 +1364,21 @@ impl HookExecutorImpl {
                 }
                 // Synchronous path — unchanged from M5-06.
                 let run_started = std::time::Instant::now();
-                let result = self
+                let result = match self
                     .dispatcher()
-                    .dispatch(hook, &event, &ctx, progress_id.as_deref())
-                    .await;
+                    .dispatch_with_idle_cancellation(hook, &event, &ctx, progress_id.as_deref())
+                    .await
+                {
+                    Some(result) => result,
+                    None => {
+                        self.finish_hook_progress(
+                            progress_id.as_deref(),
+                            ctx.publication_guard.as_deref(),
+                        )
+                        .await;
+                        break;
+                    }
+                };
                 // hook runs are bounded by the runner timeout — u128 ms fits u64
                 #[allow(clippy::cast_possible_truncation)]
                 let run_ms = run_started.elapsed().as_millis() as u64;
@@ -2250,6 +2268,47 @@ struct Dispatcher {
 }
 
 impl Dispatcher {
+    async fn dispatch_with_idle_cancellation(
+        &self,
+        hook: &HookDefinition,
+        event: &HookEvent,
+        ctx: &HookContext,
+        progress_id: Option<&str>,
+    ) -> Option<HookResult> {
+        let Some(cancellation) = ctx.idle_compaction_cancellation.as_ref() else {
+            return Some(self.dispatch(hook, event, ctx, progress_id).await);
+        };
+        let mut dispatch = Box::pin(self.dispatch(hook, event, ctx, progress_id));
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => {
+                if let (Some(owner), Some(process)) = (
+                    ctx.idle_compaction_process_owner.as_deref(),
+                    self.process.as_ref(),
+                ) {
+                    process.kill_owner_processes(owner).await;
+                    if tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        &mut dispatch,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        drop(dispatch);
+                        process.kill_owner_processes(owner).await;
+                    }
+                } else {
+                    // HTTP and worker-backed hooks have no OS process owner;
+                    // dropping their request future cancels the in-flight
+                    // transport/dispatch route.
+                    drop(dispatch);
+                }
+                None
+            }
+            result = &mut dispatch => Some(result),
+        }
+    }
+
     /// SH-07 — start claude-code's `hook_progress` poll for one command hook.
     ///
     /// Oracle 2.1.238 @ 296463298:
@@ -2738,7 +2797,9 @@ impl Dispatcher {
                 // Hooks require workspace trust upstream (claude-code
                 // `shouldSkipHookDueToTrust`), so an audited bypass is the
                 // parity-honest construction here.
-                let sandboxed = sandbox.bypass_with_audit(pcmd, "hook_command");
+                let sandboxed = sandbox
+                    .bypass_with_audit(pcmd, "hook_command")
+                    .with_process_owner(ctx.idle_compaction_process_owner.clone());
                 // SH-07: start the `hook_progress` poll (claude-code `tWi`)
                 // BEFORE the child is spawned, exactly where upstream attaches
                 // its `stdout`/`stderr` `data` listeners, and hand the runner a
@@ -2768,10 +2829,11 @@ impl Dispatcher {
                 });
                 let run_started = std::time::Instant::now();
                 let (result, timed_out) = match process
-                    .run_hook_with_async_detection_observed(
+                    .run_hook_with_async_detection_observed_cancellable(
                         &sandboxed,
                         default_async_timeout,
                         live_observer,
+                        ctx.idle_compaction_cancellation.clone(),
                     )
                     .await
                 {
@@ -3501,6 +3563,15 @@ struct HookProgressFrames {
     buf: Arc<std::sync::Mutex<HookLiveOutput>>,
     stop: Arc<std::sync::atomic::AtomicBool>,
     handle: Option<lingxi_core::host::BackgroundTaskHandle>,
+}
+
+impl Drop for HookProgressFrames {
+    fn drop(&mut self) {
+        // The runtime spawner owns the poll task. If an idle PreCompact hook
+        // future is cancelled, stop its next poll even though async cleanup via
+        // `RuntimeSpawner::cancel` is no longer available from Drop.
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 struct PromptExpansionFoldContext<'a> {

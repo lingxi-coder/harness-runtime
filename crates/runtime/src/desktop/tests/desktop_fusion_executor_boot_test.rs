@@ -181,6 +181,7 @@ async fn preflight_error_recovers_after_a_fix_then_save_without_restart() {
     let managed_dir = tmp.path().join("managed");
     std::fs::create_dir_all(&managed_dir).unwrap();
     let cfg = DesktopConfig {
+        idle_compaction_enabled: false,
         cwd: cwd.clone(),
         lingxi_home,
         ..DesktopConfig::default()
@@ -243,6 +244,7 @@ async fn preflight_reads_the_latest_managed_policy_without_reconstruction() {
     std::env::set_var(super::settings_watch::MANAGED_DIR_ENV, tmp.path());
 
     let cfg = DesktopConfig {
+        idle_compaction_enabled: false,
         cwd: tmp.path().join("project"),
         lingxi_home: tmp.path().join("home"),
         ..DesktopConfig::default()
@@ -297,6 +299,7 @@ async fn administration_and_execution_share_admitted_layers_and_cli_revision() {
     let managed_dir = tmp.path().join("managed-settings");
     std::fs::create_dir_all(&managed_dir).unwrap();
     let cfg = DesktopConfig {
+        idle_compaction_enabled: false,
         cwd: tmp.path().join("project"),
         lingxi_home: tmp.path().join("home"),
         setting_source_scope: (true, false),

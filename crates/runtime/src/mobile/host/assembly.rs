@@ -2420,6 +2420,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Audit fix (#3): attach the compactor + the shared cache-safe slot so the
     // turn loop autocompacts before context-window overflow (desktop parity).
     .with_compaction(compactor)
+    .with_idle_compaction_enabled(cfg.idle_compaction_enabled)
     .with_cache_safe_slot(cache_safe_slot)
     // Audit fix (#13): per-turn V2 `<task-reminder>` over the file-backed
     // TodoStore (tool_task IS registered on mobile) — mirror of desktop.

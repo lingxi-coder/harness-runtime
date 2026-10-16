@@ -1269,7 +1269,10 @@ impl Drop for MobileEngineHandle {
         let lsp_registry = self.inner.lsp_registry.clone();
         let session_cron = self.session_cron.clone();
         let side_chats = self.side_chats.clone();
+        let orchestrator = self.inner.orchestrator.clone();
+        orchestrator.cancel_idle_compaction();
         mobile_automation_runtime().spawn(async move {
+            orchestrator.shutdown_idle_compaction().await;
             if let Err(error) = side_chats.shutdown().await {
                 tracing::warn!(%error, "mobile side chat teardown did not finish");
             }

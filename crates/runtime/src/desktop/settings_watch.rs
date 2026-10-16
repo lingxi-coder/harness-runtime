@@ -2614,6 +2614,7 @@ mod tests {
             },
         ];
         let config = super::super::DesktopConfig {
+            idle_compaction_enabled: false,
             cwd: cwd.clone(),
             lingxi_home: home,
             default_model: "catalog-model".into(),
@@ -2792,6 +2793,7 @@ mod tests {
         )
         .unwrap();
         let config = super::super::DesktopConfig {
+            idle_compaction_enabled: false,
             cwd: cwd.clone(),
             lingxi_home: home.clone(),
             setting_source_scope: (true, true),

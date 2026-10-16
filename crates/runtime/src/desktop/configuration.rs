@@ -309,6 +309,9 @@ pub struct DesktopConfig {
     /// Whether this runtime owns versioned automation dispatch. CLI defaults to
     /// true; desktop hosts enable it only for their persistent scope controller.
     pub enable_automation_scheduler: bool,
+    /// Opt in to the session-scoped idle compaction controller. Defaults off;
+    /// this is a local host policy and does not consult remote experiment flags.
+    pub idle_compaction_enabled: bool,
     /// Explicit trust decision from the host for this workspace. `None` keeps
     /// CLI trust resolution; `Some(false)` must override any persisted grant.
     pub host_workspace_trusted: Option<bool>,
@@ -976,6 +979,7 @@ impl std::fmt::Debug for DesktopConfig {
                 "enable_automation_scheduler",
                 &self.enable_automation_scheduler,
             )
+            .field("idle_compaction_enabled", &self.idle_compaction_enabled)
             .field("host_workspace_trusted", &self.host_workspace_trusted)
             .field("insights_policy_gate", &self.insights_policy_gate)
             .field(
@@ -1158,6 +1162,7 @@ impl Default for DesktopConfig {
             build_info: command_api::builtins::BuildInfo::default(),
             mcp_services_factory: None,
             enable_automation_scheduler: true,
+            idle_compaction_enabled: false,
             composition: None,
             user_agent_environment: None,
             request_identity: None,

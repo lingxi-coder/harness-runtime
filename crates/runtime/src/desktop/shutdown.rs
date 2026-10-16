@@ -177,6 +177,20 @@ impl DesktopSessionLifecycle {
         // still holds its own guard and settles on its own.
         let stage =
             |budget: std::time::Duration| deadline.min(tokio::time::Instant::now() + budget);
+        match tokio::time::timeout_at(
+            stage(std::time::Duration::from_secs(2)),
+            self.orchestrator.shutdown_idle_compaction(),
+        )
+        .await
+        {
+            Ok(()) => {}
+            Err(_) => {
+                producers_drained = false;
+                report
+                    .errors
+                    .push("idle compaction did not drain within the shutdown budget".into());
+            }
+        }
         // Both watcher families can fire hooks that retain the orchestrator or
         // create children. Join their actual jobs before draining consumers.
         if tokio::time::timeout_at(stage(std::time::Duration::from_millis(500)), async {

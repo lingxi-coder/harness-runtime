@@ -5572,6 +5572,7 @@ pub async fn build_with_credential_stack(
     .with_native_tool_pool_refresh_callback_available(native_tool_pool_refresh_callback_available)
     .with_native_settings_agent_context(cfg.native_settings_agent_context);
     let orch_builder = orch_builder.with_workflow_size_guideline(workflow_size_guideline_state);
+    let orch_builder = orch_builder.with_idle_compaction_enabled(cfg.idle_compaction_enabled);
     // Gap #5: wire the production JSONL writer (constructed just above) so the
     // session is persisted + discoverable by the resume loader.
     // (M3 cc2.1.198) `--no-session-persistence` ⟶ `cfg.session_persistence:

@@ -1371,6 +1371,28 @@ impl ProcessRunner for PosixProcess {
         default_async_timeout: std::time::Duration,
         observer: Option<std::sync::Arc<dyn lingxi_core::host::HookOutputObserver>>,
     ) -> Result<HookRunOutcome, ProcessError> {
+        self.run_hook_with_async_detection_observed_cancellable(
+            cmd,
+            default_async_timeout,
+            observer,
+            None,
+        )
+        .await
+    }
+
+    async fn run_hook_with_async_detection_observed_cancellable(
+        &self,
+        cmd: &SandboxedCommand,
+        default_async_timeout: std::time::Duration,
+        observer: Option<std::sync::Arc<dyn lingxi_core::host::HookOutputObserver>>,
+        cancellation: Option<tokio_util::sync::CancellationToken>,
+    ) -> Result<HookRunOutcome, ProcessError> {
+        if cancellation
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+        {
+            return Err(ProcessError::Io("hook execution cancelled".into()));
+        }
         let inner = cmd.inner();
         let mut tcmd = Self::build_command(cmd);
         tcmd.stdin(Stdio::piped())
@@ -1380,7 +1402,12 @@ impl ProcessRunner for PosixProcess {
             // the process so a timed-out hook is not orphaned.
             .kill_on_drop(true);
 
+        if cmd.process_owner().is_some() {
+            attach_setsid(&mut tcmd);
+        }
+
         let mut child = tcmd.spawn().map_err(|e| ProcessError::Io(e.to_string()))?;
+        let agent_registration = super::agent_processes::register(cmd.process_owner(), child.id());
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
                 stdin
@@ -1424,9 +1451,11 @@ impl ProcessRunner for PosixProcess {
             // Detach: drain remaining output (so the pipe never blocks the child)
             // and reap it, bounded by the async timeout; on timeout the child is
             // dropped → `kill_on_drop` SIGKILLs it.
+            let owner = cmd.process_owner().map(str::to_owned);
             tokio::spawn(async move {
+                let _agent_registration = agent_registration;
                 let mut child = child;
-                let drain_and_wait = async {
+                let mut drain_and_wait = Box::pin(async {
                     let mut stdout_buf = Vec::new();
                     let mut stderr_buf = Vec::new();
                     let stderr_read = async {
@@ -1440,20 +1469,66 @@ impl ProcessRunner for PosixProcess {
                         tokio::join!(reader.read_to_end(&mut stdout_buf), stderr_read);
                     let status = child.wait().await;
                     (stdout_buf, stderr_buf, status)
-                };
+                });
                 // The drained stdout is the hook's output AFTER the consumed
                 // `{"async":true}` marker line — exactly the payload the fold-back
                 // maps through the command-hook contract (`map_command_output`).
-                let output = match tokio::time::timeout(async_timeout, drain_and_wait).await {
-                    Ok((stdout_buf, stderr_buf, status)) => ProcessOutput {
+                let drained = if let Some(cancellation) = cancellation.clone() {
+                    tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => {
+                            if let Some(owner) = owner.as_deref() {
+                                PosixProcess::new().kill_owner_processes(owner).await;
+                            }
+                            match tokio::time::timeout(
+                                std::time::Duration::from_millis(500),
+                                &mut drain_and_wait,
+                            ).await {
+                                Ok(result) => Some(result),
+                                Err(_) => {
+                                    drop(drain_and_wait);
+                                    if let Some(owner) = owner.as_deref() {
+                                        PosixProcess::new().kill_owner_processes(owner).await;
+                                    }
+                                    None
+                                }
+                            }
+                        }
+                        result = tokio::time::timeout(async_timeout, &mut drain_and_wait) => {
+                            match result {
+                                Ok(result) => Some(result),
+                                Err(_) => {
+                                    drop(drain_and_wait);
+                                    if let Some(owner) = owner.as_deref() {
+                                        PosixProcess::new().kill_owner_processes(owner).await;
+                                    }
+                                    None
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    tokio::time::timeout(async_timeout, &mut drain_and_wait)
+                        .await
+                        .ok()
+                };
+                let was_cancelled = cancellation
+                    .as_ref()
+                    .is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
+                let output = match drained {
+                    Some((stdout_buf, stderr_buf, status)) => ProcessOutput {
                         stdout: String::from_utf8_lossy(&stdout_buf).into_owned(),
                         stderr: String::from_utf8_lossy(&stderr_buf).into_owned(),
                         exit_code: status.map_or(-1, |s| s.code().unwrap_or(-1)),
                         timed_out: false,
                     },
-                    Err(_) => ProcessOutput {
+                    None => ProcessOutput {
                         stdout: String::new(),
-                        stderr: "async hook timed out; process was terminated".to_string(),
+                        stderr: if was_cancelled {
+                            "async hook was cancelled; process was terminated".to_string()
+                        } else {
+                            "async hook timed out; process was terminated".to_string()
+                        },
                         exit_code: -1,
                         timed_out: true,
                     },
@@ -1497,10 +1572,41 @@ impl ProcessRunner for PosixProcess {
             Ok::<_, ProcessError>((rest, stderr_buf, status))
         };
 
-        match tokio::time::timeout_at(deadline, complete).await {
-            Err(_) => Err(ProcessError::Timeout),
-            Ok(Err(e)) => Err(e),
-            Ok(Ok((rest, stderr_buf, status))) => {
+        let _agent_registration = agent_registration;
+        let mut complete = Box::pin(complete);
+        let completed = if let Some(cancellation) = cancellation {
+            tokio::select! {
+                biased;
+                () = cancellation.cancelled() => {
+                    if let Some(owner) = cmd.process_owner() {
+                        self.kill_owner_processes(owner).await;
+                    }
+                    if tokio::time::timeout(
+                        std::time::Duration::from_millis(500),
+                        &mut complete,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        drop(complete);
+                        if let Some(owner) = cmd.process_owner() {
+                            self.kill_owner_processes(owner).await;
+                        }
+                    }
+                    return Err(ProcessError::Io("hook execution cancelled".into()));
+                }
+                result = tokio::time::timeout_at(deadline, &mut complete) => {
+                    result.map_err(|_| ProcessError::Timeout)?
+                }
+            }
+        } else {
+            tokio::time::timeout_at(deadline, &mut complete)
+                .await
+                .map_err(|_| ProcessError::Timeout)?
+        };
+        match completed {
+            Err(e) => Err(e),
+            Ok((rest, stderr_buf, status)) => {
                 // Reconstruct stdout exactly: consumed first line + the rest.
                 let mut stdout_bytes = first_line;
                 stdout_bytes.extend_from_slice(&rest);
@@ -1722,6 +1828,21 @@ mod async_hook_tests {
     use std::io::Write as _;
     use std::sync::{Arc, Barrier};
     use std::time::Duration;
+
+    struct HookPidObserver {
+        bytes: std::sync::Mutex<Vec<u8>>,
+        ready: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl lingxi_core::host::HookOutputObserver for HookPidObserver {
+        async fn on_chunk(&self, stdout_delta: &[u8], _stderr_delta: &[u8]) {
+            if !stdout_delta.is_empty() {
+                self.bytes.lock().unwrap().extend_from_slice(stdout_delta);
+                self.ready.notify_one();
+            }
+        }
+    }
 
     #[test]
     fn background_utf8_decoder_preserves_every_multibyte_boundary() {
@@ -2625,5 +2746,62 @@ mod streaming_tests {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         assert!(!alive, "cancelled streaming shell {pid} must not survive");
+    }
+
+    #[tokio::test]
+    async fn cancelling_idle_hook_reaps_its_owned_process_group() {
+        let owner = format!("idle-hook-{}", std::process::id());
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let observer = Arc::new(HookPidObserver {
+            bytes: std::sync::Mutex::new(Vec::new()),
+            ready: tokio::sync::Notify::new(),
+        });
+        let command = sh("sleep 30 & echo $!; wait").with_process_owner(Some(owner));
+        let task = tokio::spawn({
+            let cancellation = cancellation.clone();
+            let observer: Arc<dyn lingxi_core::host::HookOutputObserver> = observer.clone();
+            async move {
+                PosixProcess::new()
+                    .run_hook_with_async_detection_observed_cancellable(
+                        &command,
+                        Duration::from_secs(10),
+                        Some(observer),
+                        Some(cancellation),
+                    )
+                    .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), observer.ready.notified())
+            .await
+            .expect("hook emits the descendant PID before blocking");
+        let child_pid = String::from_utf8(observer.bytes.lock().unwrap().clone())
+            .expect("PID output is UTF-8")
+            .trim()
+            .to_string();
+        assert!(!child_pid.is_empty(), "hook emitted a descendant PID");
+
+        cancellation.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("cancellation kills and reaps the hook group")
+            .expect("hook runner task does not panic");
+        assert!(
+            matches!(result, Err(ProcessError::Io(message)) if message == "hook execution cancelled")
+        );
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let mut alive = true;
+        while std::time::Instant::now() < deadline {
+            alive = std::process::Command::new("/bin/kill")
+                .args(["-0", &child_pid])
+                .status()
+                .expect("kill -0 runs")
+                .success();
+            if !alive {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(!alive, "idle hook descendant {child_pid} must not survive");
     }
 }

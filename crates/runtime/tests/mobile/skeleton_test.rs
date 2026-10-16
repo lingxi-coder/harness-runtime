@@ -96,6 +96,7 @@ fn submit_send_prompt_drives_listener_text_then_turn_ended() {
     let listener = Arc::new(FakeListener::default());
     let perm_sink = Arc::new(CollectingPermissionSink::default());
     let cfg = MobileConfig {
+        idle_compaction_enabled: false,
         cwd: tmp.path().to_path_buf(),
         lingxi_home: tmp.path().join(".lingxi"),
         ..MobileConfig::default()
@@ -193,6 +194,7 @@ fn submit_run_slash_command_preserves_lone_surrogate_in_streamed_and_durable_pro
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let mut cfg = MobileConfig {
+        idle_compaction_enabled: false,
         cwd: tmp.path().to_path_buf(),
         lingxi_home: tmp.path().join(".lingxi"),
         inline_visualization: true,
@@ -363,6 +365,7 @@ fn completed_mobile_turns_are_persisted_and_listed_per_session() {
     let platform = Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()));
     let listener = Arc::new(FakeListener::default());
     let cfg = MobileConfig {
+        idle_compaction_enabled: false,
         cwd: tmp.path().to_path_buf(),
         lingxi_home: tmp.path().join(".lingxi"),
         ..MobileConfig::default()

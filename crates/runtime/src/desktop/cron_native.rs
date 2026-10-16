@@ -545,6 +545,7 @@ mod tests {
     async fn target_replay_waits_for_writer_ownership_and_keeps_the_latest_parent() {
         let temp = tempfile::tempdir().unwrap();
         let config = DesktopConfig {
+            idle_compaction_enabled: false,
             cwd: temp.path().join("project"),
             lingxi_home: temp.path().join("home"),
             ..DesktopConfig::default()
@@ -797,6 +798,7 @@ mod supervision_tests {
         let home = temp.path().join("not-a-directory");
         std::fs::write(&home, "file").unwrap();
         let config = DesktopConfig {
+            idle_compaction_enabled: false,
             lingxi_home: home,
             cwd: temp.path().to_path_buf(),
             ..Default::default()

@@ -276,6 +276,7 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&cwd).unwrap();
         let cfg = DesktopConfig {
+            idle_compaction_enabled: false,
             cwd,
             lingxi_home: home.clone(),
             setting_source_scope: (true, true),

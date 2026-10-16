@@ -110,6 +110,9 @@ pub struct MobileConfig {
     /// Explicit local host policy verdict for `/team-onboarding`. Mobile applies
     /// its local default only when this value is absent; explicit false denies.
     pub team_onboarding_policy_gate: Option<bool>,
+    /// Opt in to the session-scoped idle compaction controller. Defaults off;
+    /// this is a local host policy and does not consult remote experiment flags.
+    pub idle_compaction_enabled: bool,
 }
 
 impl std::fmt::Debug for MobileConfig {
@@ -160,6 +163,7 @@ impl std::fmt::Debug for MobileConfig {
                 "team_onboarding_policy_gate",
                 &self.team_onboarding_policy_gate,
             )
+            .field("idle_compaction_enabled", &self.idle_compaction_enabled)
             .field(
                 "insights_source_executor",
                 if self.insights_source_executor.is_some() {
@@ -202,6 +206,7 @@ impl Default for MobileConfig {
             insights_source_executor: None,
             insights_policy_gate: None,
             team_onboarding_policy_gate: None,
+            idle_compaction_enabled: false,
         }
     }
 }
