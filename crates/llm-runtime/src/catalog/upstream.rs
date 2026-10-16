@@ -11,6 +11,21 @@ pub struct BuiltinCatalog {
     pub pricing: PricingCatalog,
 }
 
+fn context_window_source(
+    source: wire::ContextWindowSource,
+) -> lingxi_core::host::ModelContextWindowSource {
+    match source {
+        wire::ContextWindowSource::Catalog => lingxi_core::host::ModelContextWindowSource::Catalog,
+        wire::ContextWindowSource::Observation => {
+            lingxi_core::host::ModelContextWindowSource::Observation
+        }
+        wire::ContextWindowSource::Explicit => {
+            lingxi_core::host::ModelContextWindowSource::Explicit
+        }
+        wire::ContextWindowSource::Unknown => lingxi_core::host::ModelContextWindowSource::Unknown,
+    }
+}
+
 pub fn builtin_presets() -> BuiltinCatalog {
     let mut pricing = PricingCatalog::empty();
     let mut providers: Vec<ProviderProfile> = lingxi_llm_client::builtin_providers()
@@ -45,6 +60,8 @@ pub fn builtin_presets() -> BuiltinCatalog {
                         serde_json::to_value(&model.metadata).expect("metadata serializes"),
                     )
                     .expect("model metadata contracts agree");
+                    metadata.context_window_source =
+                        context_window_source(model.metadata.context_window_source);
                     let billing = model.billing_mode_on(&profile.pricing);
                     let billing_mode = billing_mode(billing);
                     let rates = model.pricing.as_ref();

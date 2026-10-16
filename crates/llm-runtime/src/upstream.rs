@@ -34,6 +34,21 @@ pub(crate) fn provider_name(provider: &ProviderId) -> &str {
     }
 }
 
+fn context_window_source(
+    source: lingxi_core::host::ModelContextWindowSource,
+) -> wire::ContextWindowSource {
+    match source {
+        lingxi_core::host::ModelContextWindowSource::Catalog => wire::ContextWindowSource::Catalog,
+        lingxi_core::host::ModelContextWindowSource::Observation => {
+            wire::ContextWindowSource::Observation
+        }
+        lingxi_core::host::ModelContextWindowSource::Explicit => {
+            wire::ContextWindowSource::Explicit
+        }
+        lingxi_core::host::ModelContextWindowSource::Unknown => wire::ContextWindowSource::Unknown,
+    }
+}
+
 pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile, LlmError> {
     let mut value = json!({
         "provider_id":provider_name(&profile.provider_id), "profile_name":profile.profile_name,
@@ -60,6 +75,10 @@ pub(crate) fn profile(profile: &ProviderProfile) -> Result<wire::ProviderProfile
         value["signing"] = serde_json::to_value(signing).map_err(invalid)?;
     }
     let mut projected: wire::ProviderProfile = serde_json::from_value(value).map_err(invalid)?;
+    for (model, host_model) in projected.models.iter_mut().zip(&profile.models) {
+        model.metadata.context_window_source =
+            context_window_source(host_model.metadata.context_window_source);
+    }
     let builtin = if profile.wire_profile.is_none() {
         client::builtin_providers()
             .map_err(invalid)?
@@ -1118,6 +1137,55 @@ mod upgrade_tests {
                 .effort
                 .default,
             Some(wire::ReasoningEffort::High)
+        );
+    }
+
+    #[test]
+    fn context_window_source_survives_host_to_sdk_projection() {
+        let mut host = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "anthropic")
+            .unwrap();
+        let opus_index = host
+            .models
+            .iter()
+            .position(|model| model.request_model == "claude-opus-4-6")
+            .expect("built-in Opus 4.6 row");
+        assert_eq!(
+            host.models[opus_index].metadata.context_window_source,
+            lingxi_core::host::ModelContextWindowSource::Catalog
+        );
+        assert!(!serde_json::to_value(&host.models[opus_index].metadata)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("contextWindowSource"));
+        assert_eq!(
+            profile(&host)
+                .unwrap()
+                .models
+                .iter()
+                .find(|model| model.request_model == "claude-opus-4-6")
+                .unwrap()
+                .metadata
+                .context_window_source,
+            wire::ContextWindowSource::Catalog
+        );
+
+        host.models[opus_index].metadata.context_window_source =
+            lingxi_core::host::ModelContextWindowSource::Explicit;
+        assert_eq!(
+            profile(&host)
+                .unwrap()
+                .models
+                .iter()
+                .find(|model| model.request_model == "claude-opus-4-6")
+                .unwrap()
+                .metadata
+                .context_window_source,
+            wire::ContextWindowSource::Explicit,
+            "the host's selected model source overrides the retained catalog source"
         );
     }
 

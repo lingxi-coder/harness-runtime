@@ -1510,6 +1510,20 @@ pub struct ModelPricing {
     pub source: Option<String>,
 }
 
+/// Origin of a selected model's raw context-window value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ModelContextWindowSource {
+    /// The SDK's built-in provider catalog supplied the value.
+    Catalog,
+    /// The selected provider's live model directory supplied the value.
+    Observation,
+    /// A caller or explicit model setting supplied the value.
+    Explicit,
+    /// The value's origin is not known.
+    #[default]
+    Unknown,
+}
+
 /// Published, provider-specific model facts used by every model picker.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1535,6 +1549,9 @@ pub struct ModelMetadata {
     pub output_modalities: Vec<String>,
     #[serde(default)]
     pub context_window_tokens: Option<u64>,
+    /// Internal provenance for `context_window_tokens`; not part of host JSON.
+    #[serde(skip)]
+    pub context_window_source: ModelContextWindowSource,
     #[serde(default)]
     pub max_input_tokens: Option<u64>,
     #[serde(default)]

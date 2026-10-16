@@ -826,7 +826,11 @@ fn parse_model_entry(
                         .collect()
                 })
                 .unwrap_or_default();
-            let metadata = obj
+            let has_explicit_context_window = obj
+                .get("metadata")
+                .and_then(Value::as_object)
+                .is_some_and(|metadata| metadata.contains_key("contextWindowTokens"));
+            let mut metadata = obj
                 .get("metadata")
                 .cloned()
                 .map(serde_json::from_value::<lingxi_core::host::ModelMetadata>)
@@ -837,6 +841,10 @@ fn parse_model_entry(
                 .unwrap_or_else(|| {
                     native_provider_model_metadata(provider_kind, id).unwrap_or_default()
                 });
+            if has_explicit_context_window {
+                metadata.context_window_source =
+                    lingxi_core::host::ModelContextWindowSource::Explicit;
+            }
             if let Some(context) = &metadata.context {
                 context.validate()?;
             }
@@ -1085,6 +1093,20 @@ fn anthropic_metadata(model: &str) -> lingxi_core::host::ModelMetadata {
     let mut metadata: lingxi_core::host::ModelMetadata =
         serde_json::from_value(serde_json::to_value(&row.metadata).expect("metadata serializes"))
             .expect("metadata contracts agree");
+    metadata.context_window_source = match row.metadata.context_window_source {
+        lingxi_llm_client::protocol::ContextWindowSource::Catalog => {
+            lingxi_core::host::ModelContextWindowSource::Catalog
+        }
+        lingxi_llm_client::protocol::ContextWindowSource::Observation => {
+            lingxi_core::host::ModelContextWindowSource::Observation
+        }
+        lingxi_llm_client::protocol::ContextWindowSource::Explicit => {
+            lingxi_core::host::ModelContextWindowSource::Explicit
+        }
+        lingxi_llm_client::protocol::ContextWindowSource::Unknown => {
+            lingxi_core::host::ModelContextWindowSource::Unknown
+        }
+    };
     metadata.pricing = row
         .pricing
         .as_ref()
@@ -1328,6 +1350,10 @@ mod tests {
         assert_eq!(opus.request_model, "claude-opus-5-5");
         assert_eq!(opus.billing_model, "claude-opus-5-5");
         assert_eq!(opus.metadata.context_window_tokens, Some(1_000_000));
+        assert_eq!(
+            opus.metadata.context_window_source,
+            lingxi_core::host::ModelContextWindowSource::Catalog
+        );
         assert_eq!(opus.metadata.max_output_tokens, Some(128_000));
         let opus_pricing = opus.metadata.pricing.as_ref().expect("official pricing");
         assert_eq!(opus_pricing.input_per_million, Some(4.0));
@@ -1876,6 +1902,10 @@ mod tests {
         let model = &profile.models[0];
         assert_eq!(model.metadata.status.as_deref(), Some("beta"));
         assert_eq!(model.metadata.context_window_tokens, Some(128_000));
+        assert_eq!(
+            model.metadata.context_window_source,
+            lingxi_core::host::ModelContextWindowSource::Explicit
+        );
         assert_eq!(model.metadata.max_input_tokens, None);
         assert!(model.capabilities.vision);
     }
