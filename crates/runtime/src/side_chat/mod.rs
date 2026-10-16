@@ -2455,14 +2455,25 @@ mod tests {
 
         let replayed = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let event = sink.0.lock().await.iter().find_map(|event| match event {
+                let replay = manager.snapshot(&id).await.unwrap();
+                let completed = replay.iter().any(|event| {
+                    matches!(
+                        event,
+                        ClientEvent::SlashCommandResult {
+                            turn_id: Some(42),
+                            is_error: false,
+                            ..
+                        }
+                    )
+                });
+                let event = replay.iter().find_map(|event| match event {
                     ClientEvent::MessageComplete {
                         message: Some(message),
                         ..
                     } if message.role == "user" => Some(message.clone()),
                     _ => None,
                 });
-                if let Some(message) = event {
+                if let Some(message) = event.filter(|_| completed) {
                     break message;
                 }
                 tokio::task::yield_now().await;
