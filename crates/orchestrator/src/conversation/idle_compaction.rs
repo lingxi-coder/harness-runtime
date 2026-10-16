@@ -169,9 +169,7 @@ fn idle_timer_is_late(now_ms: u64, fire_at_ms: u64) -> bool {
 fn rate_limit_status_allows_idle_compaction(
     info: Option<llm_runtime::model::rate_limit::RateLimitInfo>,
 ) -> bool {
-    info.is_none_or(|info| {
-        info.status.as_deref().unwrap_or("allowed") == "allowed"
-    })
+    info.is_none_or(|info| info.status.as_deref().unwrap_or("allowed") == "allowed")
 }
 
 impl ConversationOrchestrator {
@@ -616,7 +614,7 @@ mod tests {
         assert!(history.iter().any(|message| matches!(
             message,
             lingxi_core::types::ConversationMessage::System { content, .. }
-                if content.string_at("").as_deref() == Some(compaction::BOUNDARY_CONTENT)
+                if content.string_at("") == Some(compaction::BOUNDARY_CONTENT)
         )));
         let trigger = history.iter().find_map(|message| match message {
             lingxi_core::types::ConversationMessage::System {
