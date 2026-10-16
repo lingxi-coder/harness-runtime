@@ -621,7 +621,6 @@ mod regressions {
             panic!("expected a ToolResult block, got {:?}", dtos[1].blocks[0]);
         };
         assert_eq!(tool, "Edit", "the tool name is recovered from the call");
-        let display = display;
         assert_eq!(
             display.headline.as_deref(),
             Some("Added 1 line, removed 1 line")
