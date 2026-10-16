@@ -11588,15 +11588,9 @@ fn write_full_component_third_party_plugin(
     // `PluginManifest::components.workflows` for this by default-
     // directory discovery, same as commands/agents/skills.
     //
-    // ⚠️ The file stem and the script's `meta.name` are deliberately
-    // DIFFERENT (`build.js` vs `assemble`). `plugin/src/workflow.rs`'s own
-    // module doc states the rule this pins: workflow namespacing is
-    // "`<plugin-name>:<meta.name>` … by the script's OWN claimed
-    // `meta.name`, not by its filename, unlike commands/agents/skills".
-    // With both spelled `build` the assertion below would be satisfied by
-    // a filename-derived stand-in name — exactly the fallback
-    // `WorkflowInventoryEntry`'s doc says must NOT exist — so the fixture
-    // must vary along the axis the code actually reads.
+    // The file stem and script's `meta.name` deliberately differ
+    // (`build.js` vs `assemble`). The live registry assertion below pins
+    // registration under the script-declared name, not the filename.
     std::fs::create_dir_all(dir.join("workflows")).unwrap();
     std::fs::write(
         dir.join("workflows").join("build.js"),
@@ -11990,24 +11984,5 @@ async fn desktop_loads_a_third_party_plugin_end_to_end() {
         1,
         "the manifest the composition root's bootstrap loop consumes must carry \
              the shipped workflow script"
-    );
-    let inventory = plugin::build_plugin_workflow_inventory(
-        &manifest_at_boot.name,
-        &manifest_at_boot.components.workflows,
-    )
-    .await;
-    // The fixture's file stem (`build`) and its `meta.name` (`assemble`)
-    // differ, so this equality is only satisfiable by reading the script's
-    // own declared name — the axis `plugin/src/workflow.rs` documents.
-    // A `None` fqn (extraction failed) collapses the vec to empty and also
-    // fails, as does a filename-derived `acmeplugin:build`.
-    assert_eq!(
-        inventory
-            .iter()
-            .filter_map(|e| e.fqn.as_deref())
-            .collect::<Vec<_>>(),
-        vec!["acmeplugin:assemble"],
-        "the discovered script's own meta.name must namespace to acmeplugin:assemble \
-             (NOT the file stem `build`); got {inventory:?}"
     );
 }

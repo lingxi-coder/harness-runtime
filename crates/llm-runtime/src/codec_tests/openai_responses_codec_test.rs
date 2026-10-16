@@ -655,7 +655,6 @@ fn codex_responses_options_encode_extra_request_fields() {
         prompt_cache_key: Some("cache-key".to_string()),
         client_metadata,
         store: None,
-        previous_response_id: None,
         generate: None,
     };
 

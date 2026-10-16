@@ -336,7 +336,7 @@ const WRITE_PIVOT_TOOL_NAMES: &[&str] = &["Edit", "Write", "MultiEdit", "Noteboo
 /// Lines = `- {name}: {description}` joined by `\n`. EMPTY short-circuit: 0
 /// skills ⇒ `None` (TS `if (attachment.skills.length === 0) return []`). The body
 /// is wrapped in `<system-reminder>\n{body}\n</system-reminder>` (port
-/// envelope-ownership convention, mirroring `render_surfacing_block` /
+/// envelope-ownership convention, mirroring `render_surfacing_messages` /
 /// `skill_listing`; byte-equivalent to the TS `wrapMessagesInSystemReminder([…])`
 /// of one `isMeta` user message).
 #[must_use]

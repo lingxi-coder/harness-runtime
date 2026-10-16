@@ -1701,44 +1701,6 @@ impl ConversationOrchestrator {
             .map_or_else(|_| self.cwd.clone(), |g| g.clone())
     }
 
-    /// Retarget the shared transcript writer for a newly mounted session id
-    /// without relocating the previous session's file. Hot clear/resume uses
-    /// this after destination cost hydration succeeds and before publishing
-    /// the replacement conversation identity; ordinary `/cd` continues to use
-    /// [`Self::retarget_transcript_for_cwd`], which performs a relocation.
-    pub async fn retarget_transcript_for_session(
-        &self,
-        session_id: lingxi_core::types::SessionId,
-    ) -> Result<Option<std::path::PathBuf>, String> {
-        let Some(writer) = self.transcript.jsonl_writer.as_ref() else {
-            return Ok(None);
-        };
-        let Some(config_home) = self.config_home.as_ref() else {
-            return Ok(Some(writer.active_path()));
-        };
-        let target = session::jsonl::path::session_path(
-            config_home,
-            &self.current_cwd().to_string_lossy(),
-            &session_id.as_uuid().to_string(),
-        );
-        // Compatibility helper for direct/legacy callers. Production hot
-        // clear/resume captures the destination authority first and uses
-        // `activate_session_target_with_durable_lock` inside its owned commit,
-        // alongside the prepared cost token and conversation identity.
-        if writer.durable_transcript_enabled() {
-            writer
-                .activate_session_target(session_id, target.clone(), self.current_cwd())
-                .map_err(|error| {
-                    format!("activate transcript for session {session_id}: {error}")
-                })?;
-        } else {
-            // Compatibility writers have no cross-process/session authority;
-            // retain their historical in-process retarget behavior.
-            writer.retarget(target.clone()).await;
-        }
-        Ok(Some(target))
-    }
-
     /// Reflect a Fusion terminal that was already persisted by the host-owned
     /// durable recorder into the live history, without appending a second
     /// transcript row.  The recorder writes the immutable JSONL envelope first

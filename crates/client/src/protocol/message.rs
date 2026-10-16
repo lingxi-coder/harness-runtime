@@ -5,8 +5,7 @@
 //! need so a completed message and a resumed scrollback are reproducible (plan
 //! F1-02). Tool payloads are JSON **Strings** (`input_json`/`result_json`) so
 //! `serde_json::Value` never enters the contract crate (governing decision
-//! §0.4); the diff fields (`old_string`/`new_string`/`file_path`) mirror the
-//! TUI `UserToolResult` at `tui/src/state.rs:73-89`.
+//! §0.4); tool-result display is carried as a pre-derived structured DTO.
 
 use crate::protocol::text::ClientTextDto;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -160,14 +159,12 @@ pub enum MessageBlockDto {
         tool: String,
         /// Tool input as a JSON String.
         input_json: String,
-        /// Pre-derived header. Absent on an older engine.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        header: Option<crate::protocol::tool_display::ToolHeaderDto>,
+        /// Required host-derived header for this tool invocation.
+        header: crate::protocol::tool_display::ToolHeaderDto,
     },
     /// A tool result. `result_json` is the tool output lowered to a JSON
-    /// **String** (decision §0.4). The diff fields mirror the TUI
-    /// `UserToolResult` carried at `tui/src/state.rs:73-89` and are `None` for
-    /// non-diff tools.
+    /// **String** (decision §0.4); `display` carries its required structured
+    /// rendering information.
     ToolResult {
         /// Correlator matching the paired [`MessageBlockDto::ToolUse`].
         id: String,
@@ -177,22 +174,9 @@ pub enum MessageBlockDto {
         result_json: String,
         /// Whether the tool reported failure.
         is_error: bool,
-        /// Pre-edit text for diff tools (`old_string` for Edit). `None` for
-        /// non-diff tools.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        old_string: Option<String>,
-        /// Post-edit text for diff tools (`new_string` for Edit; `content` for
-        /// Write). `None` for non-diff tools.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        new_string: Option<String>,
-        /// Edited file path (drives diff syntax language). `None` for non-diff
-        /// tools.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        file_path: Option<String>,
-        /// Pre-derived `⎿` block. Absent on an older engine. Supersedes the
-        /// three legacy diff fields above, which carry only the raw pair.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        display: Option<crate::protocol::tool_display::ToolResultDisplayDto>,
+        /// Required host-derived `⎿` block used to render this tool result.
+        /// Its `diff` member is absent when the tool has no structured diff.
+        display: crate::protocol::tool_display::ToolResultDisplayDto,
     },
     /// An inline visualization an assistant placed with a reference line.
     /// `None` renders as an "unavailable" card. Appended to preserve UniFFI
@@ -229,22 +213,14 @@ enum MessageBlockDtoWire {
         id: String,
         tool: String,
         input_json: String,
-        #[serde(default)]
-        header: Option<crate::protocol::tool_display::ToolHeaderDto>,
+        header: crate::protocol::tool_display::ToolHeaderDto,
     },
     ToolResult {
         id: String,
         tool: String,
         result_json: String,
         is_error: bool,
-        #[serde(default)]
-        old_string: Option<String>,
-        #[serde(default)]
-        new_string: Option<String>,
-        #[serde(default)]
-        file_path: Option<String>,
-        #[serde(default)]
-        display: Option<crate::protocol::tool_display::ToolResultDisplayDto>,
+        display: crate::protocol::tool_display::ToolResultDisplayDto,
     },
     Visualization {
         #[serde(default)]
@@ -289,18 +265,12 @@ impl From<MessageBlockDtoWire> for MessageBlockDto {
                 tool,
                 result_json,
                 is_error,
-                old_string,
-                new_string,
-                file_path,
                 display,
             } => Self::ToolResult {
                 id,
                 tool,
                 result_json,
                 is_error,
-                old_string,
-                new_string,
-                file_path,
                 display,
             },
             MessageBlockDtoWire::Visualization { reference } => Self::Visualization { reference },

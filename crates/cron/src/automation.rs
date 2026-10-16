@@ -161,9 +161,16 @@ pub async fn run_due_automations(
         let clock = clock.clone();
         pending.push(Box::pin(async move {
             let result = firer.fire_automation(&request).await;
-            if finish_automation_run(fs.as_ref(), root, &request, &result, epoch(clock.now())).await
+            match finish_automation_run_checked(
+                fs.as_ref(),
+                root,
+                &request,
+                &result,
+                epoch(clock.now()),
+            )
+            .await
             {
-                Some(FiredJob {
+                Ok(AutomationFinishDisposition::Terminal) => Some(FiredJob {
                     id,
                     prompt: request.task.prompt,
                     result_text: result.as_ref().ok().map(|r| r.summary.clone()),
@@ -171,9 +178,16 @@ pub async fn run_due_automations(
                         Ok(_) => FireStatus::Ok,
                         Err(error) => FireStatus::Failed(error),
                     },
-                })
-            } else {
-                None
+                }),
+                Ok(
+                    AutomationFinishDisposition::Queued | AutomationFinishDisposition::Superseded,
+                ) => None,
+                Err(error) => {
+                    tracing::warn!(
+                        "cron: failed to persist automation completion for {id}: {error}"
+                    );
+                    None
+                }
             }
         }));
     }
@@ -358,20 +372,6 @@ pub enum AutomationFinishDisposition {
     Queued,
     /// The task/run was removed, already completed, or belongs to another claim.
     Superseded,
-}
-
-/// Compatibility helper for callers interested only in a newly persisted terminal.
-pub async fn finish_automation_run(
-    fs: &dyn FileSystem,
-    root: &Path,
-    request: &AutomationRunRequest,
-    result: &Result<AutomationRunResult, String>,
-    now: u64,
-) -> bool {
-    matches!(
-        finish_automation_run_checked(fs, root, request, result, now).await,
-        Ok(AutomationFinishDisposition::Terminal)
-    )
 }
 
 /// Merge a host result into the latest task without overwriting concurrent edits.

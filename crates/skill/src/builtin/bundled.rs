@@ -44,7 +44,3 @@ pub(crate) const BUILTIN_DESKTOP: &[BundledSkill] = &[
         references: &[],
     },
 ];
-
-/// Mobile has no bundled skills of its own. They are registered from the
-/// verified Plugin package by the mobile composition root.
-pub(crate) const BUILTIN_MOBILE: &[BundledSkill] = &[];

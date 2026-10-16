@@ -73,7 +73,7 @@ async fn bridge_writes_lockfile_then_round_trips_ws_upgrade() {
 
     // 1. Lockfile exists on disk with the auth token we expect.
     assert!(path.exists(), "lockfile must exist after start");
-    let (body, port_from_filename) = IdeLockfile::read(&path).expect("read lockfile");
+    let (body, port_from_filename) = IdeLockfile::read_secure(&path).expect("read lockfile");
     assert_eq!(
         port_from_filename, port,
         "filename port must match bind port"

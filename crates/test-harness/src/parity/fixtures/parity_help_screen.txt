@@ -66,6 +66,7 @@ Commands:
   /stop                 Stop this background session; transcript and worktree are kept
   /subtask              Send a subagent off with your full context; its result comes back here
   /tasks                View and manage everything running in the background
+  /team-onboarding      Help teammates ramp on Claude Code with a guide from your usage
   /terminal-setup       Install Shift+Enter key binding for newlines
   /theme                Change the theme
   /tui                  Set the terminal UI renderer (default | fullscreen)

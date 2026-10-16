@@ -149,7 +149,7 @@ fn bridge_lockfile_writes_to_bridge_dir() {
     );
 
     // Round-trips with the distinct bridge ideName and a real auth token.
-    let (body, port) = IdeLockfile::read(&path).unwrap();
+    let (body, port) = IdeLockfile::read_secure(&path).unwrap();
     assert_eq!(port, 40740);
     assert_eq!(body.transport, "ws");
     assert_eq!(body.ide_name, BRIDGE_IDE_NAME);

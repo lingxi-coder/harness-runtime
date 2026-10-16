@@ -768,7 +768,7 @@ pub fn core_description(name: &str) -> &'static str {
 /// in-process and in parallel, so without ONE shared lock a mutation here can
 /// race a concurrent render in another module and intermittently drop a command
 /// (e.g. `/login`) — the latent flake behind `every_visible_command_appears_once`
-/// / `output_has_exactly_76_lines_at_default_native_factory_gates`. `pub(crate)` so
+/// / `output_has_exactly_77_lines_at_default_native_factory_gates`. `pub(crate)` so
 /// help_render can lock it too.
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

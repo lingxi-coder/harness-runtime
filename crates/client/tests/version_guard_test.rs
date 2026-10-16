@@ -424,10 +424,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::ToolUseStarted.id", "String");
     put("ClientEvent::ToolUseStarted.tool", "String");
     put("ClientEvent::ToolUseStarted.input_json", "String");
-    put(
-        "ClientEvent::ToolUseStarted.header",
-        "Option<ToolHeaderDto>",
-    );
+    put("ClientEvent::ToolUseStarted.header", "ToolHeaderDto");
 
     put("ClientEvent::ToolHeartbeat", "tool_heartbeat");
     put("ClientEvent::ToolHeartbeat.id", "String");
@@ -438,10 +435,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::ToolUseResult.id", "String");
     put("ClientEvent::ToolUseResult.tool", "String");
     put("ClientEvent::ToolUseResult.result_json", "String");
-    put(
-        "ClientEvent::ToolUseResult.display",
-        "Option<ToolResultDisplayDto>",
-    );
+    put("ClientEvent::ToolUseResult.display", "ToolResultDisplayDto");
     put("ClientEvent::ToolUseResult.is_error", "bool");
 
     put("ClientEvent::MessageComplete", "message_complete");
@@ -1515,7 +1509,7 @@ fn current_contract_index() -> ContractIndex {
     put("MessageBlockDto::ToolUse.id", "String");
     put("MessageBlockDto::ToolUse.tool", "String");
     put("MessageBlockDto::ToolUse.input_json", "String");
-    put("MessageBlockDto::ToolUse.header", "Option<ToolHeaderDto>");
+    put("MessageBlockDto::ToolUse.header", "ToolHeaderDto");
 
     put("MessageBlockDto::ToolResult", "tool_result");
     put("MessageBlockDto::ToolResult.id", "String");
@@ -1527,7 +1521,7 @@ fn current_contract_index() -> ContractIndex {
     put("MessageBlockDto::ToolResult.file_path", "Option<String>");
     put(
         "MessageBlockDto::ToolResult.display",
-        "Option<ToolResultDisplayDto>",
+        "ToolResultDisplayDto",
     );
     put("MessageBlockDto::Visualization", "visualization");
     put(

@@ -3597,7 +3597,7 @@ impl StreamingTurnDriver<'_> {
                 crate::turn_loop::execute_one_turn_with_recovery_tracked(
                     orch,
                     system_prompt.as_ref(),
-                    Some(&mut loop_state.recovery),
+                    &mut loop_state.recovery,
                     Some((
                         &loop_state.mod_turn_id,
                         loop_state.turn_count.saturating_sub(1),

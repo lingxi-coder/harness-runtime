@@ -866,9 +866,9 @@ pub(super) async fn managed_force_login_org_pin(
 /// Fold the MANAGED (`policySettings`) raw tiers into telemetry env overrides.
 ///
 /// This preserves the enterprise provenance of OTEL-related keys without
-/// mutating the process environment. The canonical `env` object overrides the
-/// legacy root-level fallback within each tier. Unknown or non-scalar values
-/// are ignored; later managed tiers override earlier ones.
+/// mutating the process environment. Only the settings `env` object supplies
+/// overrides. Unknown or non-scalar values are ignored; later managed tiers
+/// override earlier ones.
 pub async fn managed_otel_env_overrides(
     cfg: &super::DesktopConfig,
 ) -> std::collections::BTreeMap<String, String> {
@@ -961,10 +961,6 @@ pub(super) fn fold_managed_otel_env_overrides(
             continue;
         };
 
-        // Legacy root-level values remain a compatibility fallback. The
-        // canonical managed-settings shape nests environment variables under
-        // `env`; applying it second makes `env` win within the same tier.
-        insert_scalar_values(&map, KEYS, &mut out);
         if let Some(serde_json::Value::Object(env)) = map.get("env") {
             insert_scalar_values(env, KEYS, &mut out);
         }

@@ -165,4 +165,7 @@
 /// the SetModel/NewSession model-selection fields. JSON remains string-shaped,
 /// while the generated native layouts change. Side Chat variants append after
 /// the protocol-25 frozen prefixes and preserve all existing native ordinals.
-pub const CLIENT_PROTOCOL_VERSION: &str = "25.0.0";
+/// Version 26 removes the duplicated legacy raw diff fields from ToolResult and
+/// requires host-derived `header` / `display` projections on tool blocks and
+/// tool events. `ToolResultDisplayDto.diff` remains optional for non-diff tools.
+pub const CLIENT_PROTOCOL_VERSION: &str = "26.0.0";

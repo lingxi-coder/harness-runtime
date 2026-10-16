@@ -43,6 +43,8 @@ const NATIVE_UNKNOWN_COMMAND_NAMES: &[&str] = &[
     "init",
     "security-review",
 ];
+const NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT: usize = 41;
+const LOCAL_POLICY_GATED_PROMPT_ROW_COUNT: usize = 2;
 const NATIVE_UNKNOWN_ATTACHMENT_ORDER: &[&str] = &[
     "environment",
     "model",
@@ -1079,6 +1081,7 @@ async fn native_295_commands_fixture_replay_body() {
                 .expect("parse Native typed fallback attachment");
             let native_names =
                 transcript_string_array(&native_attachment, "/attachment/availableCommandNames");
+            assert_eq!(NATIVE_UNKNOWN_COMMAND_NAMES.len(), 13);
             assert_eq!(
                 native_names,
                 NATIVE_UNKNOWN_COMMAND_NAMES
@@ -1127,11 +1130,12 @@ async fn native_295_commands_fixture_replay_body() {
                     .iter()
                     .map(|name| (*name).to_owned())
                     .collect::<Vec<_>>(),
-                "Harness command catalog must match the captured Native 2.1.295 list; differences remain a strict parity failure"
+                "Harness model-invocable prompt names must match the captured Native 2.1.295 list; differences remain a strict parity failure"
             );
             assert_eq!(
-                current_catalog.available_command_count, 41,
-                "Harness command catalog count must match Native 2.1.295"
+                current_catalog.available_command_count,
+                NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT + LOCAL_POLICY_GATED_PROMPT_ROW_COUNT,
+                "the local Host context sets insights_policy_gate/team_onboarding_policy_gate=Some(true); Native effective policy is not captured, so this is an allowed local-context difference, not Native byte parity"
             );
 
             let reminder_marker = "The user's message starts with the slash command";
@@ -1183,6 +1187,17 @@ async fn native_295_commands_fixture_replay_body() {
                 "the model request contains exactly one copy of the fallback reminder"
             );
             let outbound_reminder = outbound_reminders[0].text_content();
+            let native_reminder = &native_texts[native_index(
+                "The user's message starts with the slash command /__native_unknown_295__",
+            )];
+            assert_eq!(native_reminder.matches("and 28 more").count(), 1);
+            let expected_local_reminder =
+                native_reminder.replacen("and 28 more", "and 30 more", 1);
+            assert_eq!(
+                outbound_reminder,
+                expected_local_reminder,
+                "only the derived remainder count reflects the two explicit local policy rows; all other reminder bytes remain source-aligned"
+            );
             let harness_prompt_index = transcript_prompt_index(&harness_jsonl, case.prompt)
                 .expect("Harness JSONL persists the exact unknown-command prompt");
             let harness_fallback_index =

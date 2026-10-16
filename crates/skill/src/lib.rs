@@ -29,9 +29,7 @@ pub mod model;
 pub mod prefetch;
 pub mod registry;
 
-pub use builtin::{
-    desktop_builtin_skill, desktop_builtin_skill_content, register_desktop, register_mobile,
-};
+pub use builtin::{desktop_builtin_skill, desktop_builtin_skill_content, register_desktop};
 pub use conditional::{is_conditional, ConditionalSkills};
 pub use frontmatter::{parse_skill_markdown, SkillLoadError};
 pub use listing::{

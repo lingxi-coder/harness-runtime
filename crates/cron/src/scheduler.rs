@@ -4480,8 +4480,8 @@ mod scheduler_tick_tests {
         let first = crate::claim_automation_run(fs.as_ref(), root, "review-task", now, None)
             .await
             .unwrap();
-        assert!(
-            !crate::finish_automation_run(
+        assert_eq!(
+            crate::finish_automation_run_checked(
                 fs.as_ref(),
                 root,
                 &first,
@@ -4489,9 +4489,11 @@ mod scheduler_tick_tests {
                 NOW * 1000
             )
             .await
+            .unwrap(),
+            crate::AutomationFinishDisposition::Queued,
         );
-        assert!(
-            !crate::finish_automation_run(
+        assert_eq!(
+            crate::finish_automation_run_checked(
                 fs.as_ref(),
                 root,
                 &first,
@@ -4499,6 +4501,8 @@ mod scheduler_tick_tests {
                 NOW * 1000
             )
             .await
+            .unwrap(),
+            crate::AutomationFinishDisposition::Superseded,
         );
         assert!(
             crate::bind_automation_run_session(fs.as_ref(), root, &first, "stale-chat")
@@ -4510,8 +4514,8 @@ mod scheduler_tick_tests {
             .unwrap();
         assert_eq!(first.run_id, retry.run_id);
         assert!(retry.claim_generation > first.claim_generation);
-        assert!(
-            !crate::finish_automation_run(
+        assert_eq!(
+            crate::finish_automation_run_checked(
                 fs.as_ref(),
                 root,
                 &first,
@@ -4519,6 +4523,8 @@ mod scheduler_tick_tests {
                 NOW * 1000
             )
             .await
+            .unwrap(),
+            crate::AutomationFinishDisposition::Superseded,
         );
         assert!(
             crate::bind_automation_run_session(fs.as_ref(), root, &first, "stale-chat")
@@ -4535,8 +4541,8 @@ mod scheduler_tick_tests {
         )
         .await
         .unwrap();
-        assert!(
-            !crate::finish_automation_run(
+        assert_eq!(
+            crate::finish_automation_run_checked(
                 fs.as_ref(),
                 root,
                 &retry,
@@ -4544,6 +4550,8 @@ mod scheduler_tick_tests {
                 NOW * 1000
             )
             .await
+            .unwrap(),
+            crate::AutomationFinishDisposition::Superseded,
         );
         assert!(crate::bind_automation_run_session(
             fs.as_ref(),
@@ -4688,8 +4696,8 @@ mod scheduler_tick_tests {
                 .await
                 .unwrap();
             }
-            assert!(
-                crate::finish_automation_run(
+            assert_eq!(
+                crate::finish_automation_run_checked(
                     fs.as_ref(),
                     root,
                     &request,
@@ -4697,6 +4705,8 @@ mod scheduler_tick_tests {
                     (NOW + 180) * 1000
                 )
                 .await
+                .unwrap(),
+                crate::AutomationFinishDisposition::Terminal,
             );
             let doc = crate::parse_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());
             let config = doc.tasks[0].automation.as_ref().unwrap();
@@ -4733,8 +4743,8 @@ mod scheduler_tick_tests {
                 .await
                 .is_none()
         );
-        assert!(
-            !crate::finish_automation_run(
+        assert_eq!(
+            crate::finish_automation_run_checked(
                 fs.as_ref(),
                 root,
                 &first,
@@ -4742,14 +4752,16 @@ mod scheduler_tick_tests {
                 NOW * 1000
             )
             .await
+            .unwrap(),
+            crate::AutomationFinishDisposition::Queued,
         );
         let retry = crate::claim_automation_run_now_at(fs.as_ref(), root, "review-task", now, 123)
             .await
             .unwrap();
         assert_eq!(retry.run_id, first.run_id);
         assert_eq!(retry.claim_generation, first.claim_generation + 1);
-        assert!(
-            crate::finish_automation_run(
+        assert_eq!(
+            crate::finish_automation_run_checked(
                 fs.as_ref(),
                 root,
                 &retry,
@@ -4760,6 +4772,8 @@ mod scheduler_tick_tests {
                 NOW * 1000
             )
             .await
+            .unwrap(),
+            crate::AutomationFinishDisposition::Terminal,
         );
         assert!(
             crate::claim_automation_run_now_at(fs.as_ref(), root, "review-task", now, 123)
@@ -4784,8 +4798,8 @@ mod scheduler_tick_tests {
             let legacy = crate::claim_automation_run_now(fs.as_ref(), root, "review-task", now)
                 .await
                 .unwrap();
-            assert!(
-                !crate::finish_automation_run(
+            assert_eq!(
+                crate::finish_automation_run_checked(
                     fs.as_ref(),
                     root,
                     &legacy,
@@ -4793,6 +4807,8 @@ mod scheduler_tick_tests {
                     NOW * 1000
                 )
                 .await
+                .unwrap(),
+                crate::AutomationFinishDisposition::Queued,
             );
             let adopted =
                 crate::claim_automation_run_now_at(fs.as_ref(), root, "review-task", now, host_at)
@@ -4803,8 +4819,8 @@ mod scheduler_tick_tests {
             let run = &doc.tasks[0].automation.as_ref().unwrap().runs[0];
             assert_eq!(run.scheduled_at, NOW * 1000);
             assert_eq!(run.manual_occurrence_at, Some(host_at));
-            assert!(
-                !crate::finish_automation_run(
+            assert_eq!(
+                crate::finish_automation_run_checked(
                     fs.as_ref(),
                     root,
                     &adopted,
@@ -4812,6 +4828,8 @@ mod scheduler_tick_tests {
                     NOW * 1000
                 )
                 .await
+                .unwrap(),
+                crate::AutomationFinishDisposition::Queued,
             );
             assert!(crate::claim_automation_run_now_at(
                 fs.as_ref(),
@@ -4827,8 +4845,8 @@ mod scheduler_tick_tests {
                     .await
                     .unwrap();
             assert_eq!(retry.run_id, legacy.run_id);
-            assert!(
-                crate::finish_automation_run(
+            assert_eq!(
+                crate::finish_automation_run_checked(
                     fs.as_ref(),
                     root,
                     &retry,
@@ -4839,6 +4857,8 @@ mod scheduler_tick_tests {
                     NOW * 1000
                 )
                 .await
+                .unwrap(),
+                crate::AutomationFinishDisposition::Terminal,
             );
             assert!(crate::claim_automation_run_now_at(
                 fs.as_ref(),
@@ -5004,8 +5024,8 @@ mod scheduler_tick_tests {
         )
         .await
         .unwrap();
-        assert!(
-            crate::finish_automation_run(
+        assert_eq!(
+            crate::finish_automation_run_checked(
                 fs.as_ref(),
                 root,
                 &request,
@@ -5016,6 +5036,8 @@ mod scheduler_tick_tests {
                 NOW * 1000
             )
             .await
+            .unwrap(),
+            crate::AutomationFinishDisposition::Terminal,
         );
         let doc =
             crate::tasks_file::parse_automation_tasks(&fs.get(AUTOMATION_PATH).await.unwrap());

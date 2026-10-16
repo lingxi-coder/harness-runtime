@@ -2,7 +2,7 @@
 //! (and any platform command handlers registered directly in the composition
 //! roots):
 //!
-//! - [`names`] — the locked 82-name table (`BUILTIN_COMMAND_NAMES`),
+//! - [`names`] — the locked 83-name table (`BUILTIN_COMMAND_NAMES`),
 //!   the 18-name core list (`BUILTIN_CORE_NAMES`), `core_description`, the
 //!   bucket-(d) `INTENTIONALLY_DISABLED_COMMANDS` audit table, and its STUB.6
 //!   refinement into `CORRECT_BY_DESIGN_STUBS` (faithful) vs

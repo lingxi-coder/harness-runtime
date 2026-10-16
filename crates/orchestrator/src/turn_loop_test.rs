@@ -419,9 +419,7 @@ mod read_file_state_tests {
         mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
         NoOpPermissionGate, StaticMemoryProvider,
     };
-    use crate::turn_loop::{
-        dispatch_tool_uses, dispatch_tool_uses_tracked_deferred, execute_one_turn,
-    };
+    use crate::turn_loop::{dispatch_tool_uses, dispatch_tool_uses_tracked_deferred};
     use crate::OrchestratorConfig;
     use async_trait::async_trait;
     use hooks::definition::{HookDefinition, HookExecutor as DefHookExecutor, HookSource};
@@ -4272,7 +4270,16 @@ mod read_file_state_tests {
         );
 
         assert!(matches!(
-            execute_one_turn(&orch, None).await.expect("turn step"),
+            crate::turn_loop::execute_one_turn_with_recovery_tracked(
+                &orch,
+                None,
+                &mut crate::turn_loop::RecoveryState::default(),
+                None,
+                0
+            )
+            .await
+            .expect("turn step")
+            .0,
             crate::turn_loop::TurnStepOutcome::Continue(_)
         ));
         assert!(
@@ -4679,7 +4686,7 @@ mod read_file_state_tests {
 
     #[tokio::test]
     async fn batched_turn_forwards_wire_tools_to_messages_create() {
-        // End-to-end (batched leg): `execute_one_turn` must build the registry's
+        // End-to-end (batched leg): `execute_one_turn_with_recovery_tracked` must build the registry's
         // wire tools and pass them to `messages_create`. A no-tool `end_turn`
         // response terminates the step after a single round-trip. (The streaming
         // leg's twin is `streaming_concurrent_tools_test`.)
@@ -4708,7 +4715,16 @@ mod read_file_state_tests {
             cwd,
         );
 
-        let _ = execute_one_turn(&orch, None).await.expect("turn step");
+        let _ = crate::turn_loop::execute_one_turn_with_recovery_tracked(
+            &orch,
+            None,
+            &mut crate::turn_loop::RecoveryState::default(),
+            None,
+            0,
+        )
+        .await
+        .expect("turn step")
+        .0;
 
         let captured = api.captured_tools().await;
         assert_eq!(captured.len(), 1, "exactly one messages_create round-trip");
@@ -5157,7 +5173,7 @@ mod read_file_state_tests {
 }
 // ============================================================================
 // A1: max_output_tokens recovery (multi-turn nudge + escalation/exhaustion).
-// Drives `execute_one_turn_with_recovery` directly with a `max_tokens`-scripted
+// Drives `execute_one_turn_with_recovery_tracked` directly with a `max_tokens`-scripted
 // MockApiClient and asserts the nudge injection, counter increments, and
 // disposition (Continue while under the limit; Ended on exhaustion).
 // ============================================================================
@@ -5171,8 +5187,8 @@ mod max_output_tokens_recovery_tests {
         NoOpPermissionGate, StaticMemoryProvider,
     };
     use crate::turn_loop::{
-        execute_one_turn_with_recovery, NativeQueryTransition, RecoveryState, TurnStepOutcome,
-        MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
+        execute_one_turn_with_recovery_tracked, NativeQueryTransition, RecoveryState,
+        TurnStepOutcome, MAX_OUTPUT_TOKENS_RECOVERY_LIMIT, MAX_OUTPUT_TOKENS_RECOVERY_NUDGE,
         TEST_RECOVERY_OUTPUT_BUDGET,
     };
     use crate::OrchestratorConfig;
@@ -5334,9 +5350,10 @@ mod max_output_tokens_recovery_tests {
         let orch = orch_with_responses(vec![max_tokens_response()]);
         let mut state = RecoveryState::default();
 
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("turn step");
+            .expect("turn step")
+            .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert_eq!(state.max_output_tokens_recovery_count, 1);
         assert_eq!(state.max_output_tokens_override, None);
@@ -5410,9 +5427,10 @@ mod max_output_tokens_recovery_tests {
         let mut state = RecoveryState::default();
 
         assert!(matches!(
-            execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
                 .await
-                .expect("max_tokens step"),
+                .expect("max_tokens step")
+                .0,
             TurnStepOutcome::Continue(NativeQueryTransition::InPlaceRetry)
         ));
         assert!(state.retry_generation.is_none());
@@ -5432,9 +5450,10 @@ mod max_output_tokens_recovery_tests {
         }));
 
         assert!(matches!(
-            execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
                 .await
-                .expect("resumed request"),
+                .expect("resumed request")
+                .0,
             TurnStepOutcome::Ended { .. }
         ));
         let requests = api.captured_requests().await;
@@ -5520,9 +5539,10 @@ mod max_output_tokens_recovery_tests {
         let mut state = RecoveryState::default();
 
         assert!(matches!(
-            execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
                 .await
-                .expect("max_tokens step"),
+                .expect("max_tokens step")
+                .0,
             TurnStepOutcome::Continue(NativeQueryTransition::InPlaceRetry)
         ));
         assert!(state.resume_incomplete_thinking_next_request.is_none());
@@ -5546,9 +5566,10 @@ mod max_output_tokens_recovery_tests {
         )));
 
         assert!(matches!(
-            execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
                 .await
-                .expect("frozen-budget retry ends"),
+                .expect("frozen-budget retry ends")
+                .0,
             TurnStepOutcome::Ended { .. }
         ));
         let requests = api.captured_requests().await;
@@ -5593,9 +5614,10 @@ mod max_output_tokens_recovery_tests {
         .with_jsonl_writer(writer);
 
         let mut state = RecoveryState::default();
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("turn step");
+            .expect("turn step")
+            .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
 
         let contents = tokio::fs::read_to_string(&session_path)
@@ -5629,16 +5651,18 @@ mod max_output_tokens_recovery_tests {
         };
 
         // count 1 → 2
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert_eq!(state.max_output_tokens_recovery_count, 2);
 
         // count 2 → 3 (still < limit, so still nudges)
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert_eq!(state.max_output_tokens_recovery_count, 3);
 
@@ -5672,9 +5696,10 @@ mod max_output_tokens_recovery_tests {
         };
 
         let len_before = history(&orch).await.len();
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         let final_message_id = match step {
             TurnStepOutcome::Ended {
                 stop_reason,
@@ -5768,9 +5793,10 @@ mod max_output_tokens_recovery_tests {
         let mut state = RecoveryState::default();
         let len_before = history(&orch).await.len();
 
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         match step {
             TurnStepOutcome::Ended { stop_reason, .. } => {
                 assert_eq!(stop_reason, "model_context_window_exceeded");
@@ -5844,9 +5870,10 @@ mod max_output_tokens_recovery_tests {
         let mut state = RecoveryState::default();
         let len_before = history(&orch).await.len();
 
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         let final_message_id = match step {
             TurnStepOutcome::Ended {
                 stop_reason,
@@ -5931,9 +5958,10 @@ mod max_output_tokens_recovery_tests {
         )]);
         let mut state = RecoveryState::default();
 
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         match step {
             TurnStepOutcome::Ended { stop_reason, .. } => assert_eq!(stop_reason, "end_turn"),
             TurnStepOutcome::Continue(_) => panic!("expected Ended"),
@@ -5977,9 +6005,10 @@ mod max_output_tokens_recovery_tests {
     async fn unknown_budget_never_arms_fixed_escalation() {
         let orch = orch_with_responses_escalating(vec![max_tokens_response()]);
         let mut state = RecoveryState::default();
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert_eq!(state.max_output_tokens_override, None);
         assert!(!state.max_output_tokens_escalated);
@@ -6015,9 +6044,10 @@ mod max_output_tokens_recovery_tests {
             ..Default::default()
         };
 
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("turn step");
+            .expect("turn step")
+            .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
         let requests = api.captured_requests().await;
         let [crate::OrchestratorApiRequest::Main(request)] = requests.as_slice() else {
@@ -6042,26 +6072,6 @@ mod max_output_tokens_recovery_tests {
             "nudge appended after the escalation was exhausted"
         );
     }
-
-    /// The legacy 2-arg shim (`recovery = None`) preserves the bare behavior:
-    /// `max_tokens` falls through to Continue WITHOUT injecting a nudge — the
-    /// cancelable REPL driver depends on this no-op.
-    #[tokio::test]
-    async fn legacy_shim_does_not_recover_on_max_tokens() {
-        let orch = orch_with_responses(vec![max_tokens_response()]);
-        let step = crate::turn_loop::execute_one_turn(&orch, None)
-            .await
-            .expect("step");
-        assert!(matches!(step, TurnStepOutcome::Continue(_)));
-        let h = history(&orch).await;
-        // Only the assistant message; no nudge appended by the shim.
-        assert!(!h.iter().any(|m| matches!(
-            m,
-            ConversationMessage::User { content, .. }
-                if matches!(content.first(), Some(ContentBlock::Text { text, .. })
-                    if text == MAX_OUTPUT_TOKENS_RECOVERY_NUDGE)
-        )));
-    }
 }
 // ============================================================================
 // #77 malformed-tool-use retry + #78 thinking-only nudge (BATCHED path).
@@ -6077,7 +6087,7 @@ mod malformed_and_thinking_only_tests {
         NoOpPermissionGate, StaticMemoryProvider,
     };
     use crate::turn_loop::{
-        execute_one_turn, execute_one_turn_with_recovery, prior_assistant_used_structured_output,
+        execute_one_turn_with_recovery_tracked, prior_assistant_used_structured_output,
         RecoveryState, TurnStepOutcome, MALFORMED_TOOL_USE_RETRY_FAILED,
         MALFORMED_TOOL_USE_RETRY_NUDGE, STRUCTURED_OUTPUT_TOOL_NAME, THINKING_ONLY_NUDGE,
     };
@@ -6186,9 +6196,10 @@ mod malformed_and_thinking_only_tests {
             ..Default::default()
         };
 
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert!(state.malformed_tool_use_retried, "guard armed");
         assert_eq!(
@@ -6226,9 +6237,10 @@ mod malformed_and_thinking_only_tests {
         ]);
         let mut state = RecoveryState::default();
         for _ in 0..3 {
-            let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
                 .await
-                .expect("step");
+                .expect("step")
+                .0;
             assert!(matches!(step, TurnStepOutcome::Continue(_)));
         }
         assert!(state.malformed_tool_use_retried);
@@ -6246,9 +6258,10 @@ mod malformed_and_thinking_only_tests {
             ..Default::default()
         };
 
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         let final_message_id = match step {
             TurnStepOutcome::Ended {
                 stop_reason,
@@ -6301,27 +6314,12 @@ mod malformed_and_thinking_only_tests {
         let orch = orch_with_responses(vec![resp]);
         let mut state = RecoveryState::default();
 
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert!(!state.malformed_tool_use_retried, "guard NOT armed");
-        let h = history(&orch).await;
-        assert!(!h.iter().any(|m| matches!(
-            m,
-            ConversationMessage::User { content, .. }
-                if matches!(content.first(), Some(ContentBlock::Text { text, .. })
-                    if text == MALFORMED_TOOL_USE_RETRY_NUDGE)
-        )));
-    }
-
-    /// The legacy shim (`recovery == None`) keeps the historical `_ => Continue`
-    /// no-op on a malformed `tool_use` — no nudge.
-    #[tokio::test]
-    async fn legacy_shim_does_not_handle_malformed_tool_use() {
-        let orch = orch_with_responses(vec![malformed_tool_use_response()]);
-        let step = execute_one_turn(&orch, None).await.expect("step");
-        assert!(matches!(step, TurnStepOutcome::Continue(_)));
         let h = history(&orch).await;
         assert!(!h.iter().any(|m| matches!(
             m,
@@ -6474,9 +6472,10 @@ mod malformed_and_thinking_only_tests {
         let orch = orch_with_responses(vec![thinking_only_response("end_turn")]);
         let mut state = RecoveryState::default();
 
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert!(state.thinking_only_nudged, "guard armed");
         let h = history(&orch).await;
@@ -6500,9 +6499,10 @@ mod malformed_and_thinking_only_tests {
                 stop_reason,
             )]);
             let mut state = RecoveryState::default();
-            let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+            let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
                 .await
-                .expect("step");
+                .expect("step")
+                .0;
             assert!(
                 matches!(step, TurnStepOutcome::Ended { .. }),
                 "stop reason {stop_reason:?} must terminate the turn"
@@ -6514,9 +6514,10 @@ mod malformed_and_thinking_only_tests {
     async fn thinking_only_retry_drops_the_rejected_attempt() {
         let orch = orch_with_responses(vec![thinking_only_response("end_turn")]);
         let mut state = RecoveryState::default();
-        execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         let h = history(&orch).await;
         assert!(
             !h.iter()
@@ -6532,9 +6533,10 @@ mod malformed_and_thinking_only_tests {
         let orch = orch_with_responses(vec![thinking_only_response("stop_sequence")]);
         let mut state = RecoveryState::default();
 
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert!(state.thinking_only_nudged);
         let h = history(&orch).await;
@@ -6556,9 +6558,10 @@ mod malformed_and_thinking_only_tests {
             ..Default::default()
         };
 
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         match step {
             TurnStepOutcome::Ended { stop_reason, .. } => assert_eq!(stop_reason, "end_turn"),
             TurnStepOutcome::Continue(_) => panic!("expected Ended once already nudged"),
@@ -6581,9 +6584,10 @@ mod malformed_and_thinking_only_tests {
         let orch = orch_with_responses(vec![resp]);
         let mut state = RecoveryState::default();
 
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         assert!(matches!(step, TurnStepOutcome::Ended { .. }));
         assert!(!state.thinking_only_nudged);
         let h = history(&orch).await;
@@ -6604,25 +6608,12 @@ mod malformed_and_thinking_only_tests {
         let orch = orch_with_responses(vec![resp]);
         let mut state = RecoveryState::default();
 
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .expect("step");
+            .expect("step")
+            .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert!(state.thinking_only_nudged);
-    }
-
-    /// The legacy shim (`recovery == None`) does NOT nudge on a thinking-only
-    /// `end_turn`; it ends the turn as before.
-    #[tokio::test]
-    async fn legacy_shim_does_not_handle_thinking_only() {
-        let orch = orch_with_responses(vec![thinking_only_response("end_turn")]);
-        let step = execute_one_turn(&orch, None).await.expect("step");
-        match step {
-            TurnStepOutcome::Ended { stop_reason, .. } => assert_eq!(stop_reason, "end_turn"),
-            TurnStepOutcome::Continue(_) => panic!("legacy shim should end on end_turn"),
-        }
-        let h = history(&orch).await;
-        assert_ne!(last_user_text(&h).as_deref(), Some(THINKING_ONLY_NUDGE));
     }
 }
 /// HOOK.1 / HOOK.2 / HOOK.3 — `PreToolUse` hook behaviors surfaced by the turn
@@ -6636,8 +6627,8 @@ mod pre_tool_hook_tests {
         PermissionDecisionSource, PermissionGate, PermissionResolution, StaticMemoryProvider,
     };
     use crate::turn_loop::{
-        dispatch_tool_uses_tracked, dispatch_tool_uses_tracked_deferred, execute_one_turn,
-        run_post_tool_batch_hooks, run_post_tool_batch_hooks_after_turn_end, TurnStepOutcome,
+        dispatch_tool_uses_tracked, dispatch_tool_uses_tracked_deferred, run_post_tool_batch_hooks,
+        run_post_tool_batch_hooks_after_turn_end, TurnStepOutcome,
     };
     use crate::{ConversationOutcome, OrchestratorConfig};
     use async_trait::async_trait;
@@ -8376,7 +8367,16 @@ mod pre_tool_hook_tests {
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
         );
-        let _ = execute_one_turn(&orch, None).await.expect("turn step");
+        let _ = crate::turn_loop::execute_one_turn_with_recovery_tracked(
+            &orch,
+            None,
+            &mut crate::turn_loop::RecoveryState::default(),
+            None,
+            0,
+        )
+        .await
+        .expect("turn step")
+        .0;
         let s = orch.session.lock().await;
         // Find the injected expanded-skill-prompt message in history.
         let injected = s
@@ -8419,7 +8419,16 @@ mod pre_tool_hook_tests {
             Arc::new(crate::test_support::NoOpPermissionGate),
             vec![api_resp],
         );
-        let _ = execute_one_turn(&orch, None).await.expect("turn step");
+        let _ = crate::turn_loop::execute_one_turn_with_recovery_tracked(
+            &orch,
+            None,
+            &mut crate::turn_loop::RecoveryState::default(),
+            None,
+            0,
+        )
+        .await
+        .expect("turn step")
+        .0;
         let s = orch.session.lock().await;
         assert!(
             s.injected_message_sources.is_empty(),
@@ -8439,7 +8448,7 @@ mod pre_tool_hook_tests {
         );
     }
 
-    /// End-to-end through `execute_one_turn`: the injected message lands in
+    /// End-to-end through the tracked turn step: the injected message lands in
     /// history IMMEDIATELY AFTER this turn's tool_result user message, in order.
     #[tokio::test]
     async fn new_messages_appended_to_history_after_tool_result() {
@@ -8464,7 +8473,16 @@ mod pre_tool_hook_tests {
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
         );
-        let _ = execute_one_turn(&orch, None).await.expect("turn step");
+        let _ = crate::turn_loop::execute_one_turn_with_recovery_tracked(
+            &orch,
+            None,
+            &mut crate::turn_loop::RecoveryState::default(),
+            None,
+            0,
+        )
+        .await
+        .expect("turn step")
+        .0;
         let h = orch.session.lock().await.history.clone();
         // Locate the tool_result user message; the very next message must be the
         // injected expanded-skill-prompt user message.
@@ -8775,7 +8793,17 @@ mod pre_tool_hook_tests {
             Arc::new(crate::test_support::NoOpPermissionGate),
             vec![api_resp],
         );
-        match execute_one_turn(&orch, None).await.expect("turn step") {
+        match crate::turn_loop::execute_one_turn_with_recovery_tracked(
+            &orch,
+            None,
+            &mut crate::turn_loop::RecoveryState::default(),
+            None,
+            0,
+        )
+        .await
+        .expect("turn step")
+        .0
+        {
             TurnStepOutcome::Ended { stop_reason, .. } => {
                 assert_eq!(stop_reason, "hook_stopped");
             }
@@ -8801,7 +8829,16 @@ mod pre_tool_hook_tests {
             vec![api_resp],
         );
         assert!(matches!(
-            execute_one_turn(&orch, None).await.expect("turn step"),
+            crate::turn_loop::execute_one_turn_with_recovery_tracked(
+                &orch,
+                None,
+                &mut crate::turn_loop::RecoveryState::default(),
+                None,
+                0
+            )
+            .await
+            .expect("turn step")
+            .0,
             TurnStepOutcome::Continue(_)
         ));
     }
@@ -8823,7 +8860,17 @@ mod pre_tool_hook_tests {
         bus.attach_sink(sink.clone()).await;
         let orch = orch_with_mcp_end_turn(api.clone(), output, bus, false);
 
-        match execute_one_turn(&orch, None).await.expect("turn step") {
+        match crate::turn_loop::execute_one_turn_with_recovery_tracked(
+            &orch,
+            None,
+            &mut crate::turn_loop::RecoveryState::default(),
+            None,
+            0,
+        )
+        .await
+        .expect("turn step")
+        .0
+        {
             TurnStepOutcome::Ended {
                 stop_reason,
                 allow_budget_continuation,
@@ -8920,7 +8967,16 @@ mod pre_tool_hook_tests {
         let orch = orch_with_mcp_end_turn(api, Arc::new(MockOutputStream::new()), bus, true);
 
         assert!(matches!(
-            execute_one_turn(&orch, None).await.expect("turn step"),
+            crate::turn_loop::execute_one_turn_with_recovery_tracked(
+                &orch,
+                None,
+                &mut crate::turn_loop::RecoveryState::default(),
+                None,
+                0
+            )
+            .await
+            .expect("turn step")
+            .0,
             TurnStepOutcome::Continue(_)
         ));
         assert!(
@@ -9010,7 +9066,16 @@ mod pre_tool_hook_tests {
         let orch = orch_with_mcp_end_turn(api, Arc::new(MockOutputStream::new()), bus, false);
 
         assert!(matches!(
-            execute_one_turn(&orch, None).await.expect("turn step"),
+            crate::turn_loop::execute_one_turn_with_recovery_tracked(
+                &orch,
+                None,
+                &mut crate::turn_loop::RecoveryState::default(),
+                None,
+                0
+            )
+            .await
+            .expect("turn step")
+            .0,
             TurnStepOutcome::Ended {
                 tool_requested_end: true,
                 ..
@@ -9064,7 +9129,16 @@ mod pre_tool_hook_tests {
         let orch = orch_with_refreshing_mcp_tool(api, bus, 0, 2);
 
         assert!(matches!(
-            execute_one_turn(&orch, None).await.expect("turn step"),
+            crate::turn_loop::execute_one_turn_with_recovery_tracked(
+                &orch,
+                None,
+                &mut crate::turn_loop::RecoveryState::default(),
+                None,
+                0
+            )
+            .await
+            .expect("turn step")
+            .0,
             TurnStepOutcome::Continue(_)
         ));
 

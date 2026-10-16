@@ -1068,7 +1068,7 @@ impl ConversationOrchestrator {
             let (step, output_tokens) = execute_one_turn_with_recovery_tracked(
                 self,
                 system_prompt.as_ref(),
-                Some(&mut state.recovery),
+                &mut state.recovery,
                 Some((&state.mod_turn_id, state.turn_count.saturating_sub(1))),
                 state.native_query_depth,
             )
@@ -3129,10 +3129,8 @@ impl ConversationOrchestrator {
         // #2 (main-loop parity): the cancelable driver is recovery- AND
         // budget-aware, identical to the non-cancelable [`Self::run_turn`]
         // batched loop, with cancellation passed into each turn step.
-        // The legacy no-recovery shim ([`execute_one_turn`]) is no longer used
-        // here: a `max_tokens` stop_reason now drives the A1 multi-turn recovery
-        // nudge (and exhaustion-ends) exactly as the main batched path does,
-        // rather than legacy-continuing without the nudge.
+        // A `max_tokens` stop_reason now drives the A1 multi-turn recovery nudge
+        // (and exhaustion-ends) exactly as the main batched path does.
         // hooks B4: Stop-hook re-entry guard (cancelable twin).
         // #2 consecutive Stop-hook block counter (binary `stopHookBlockingCount`):
         // bumped per block; ends the turn via the cap once it would exceed
@@ -3191,7 +3189,7 @@ impl ConversationOrchestrator {
                 execute_one_turn_with_recovery_tracked(
                     self,
                     system_prompt.as_ref(),
-                    Some(&mut state.recovery),
+                    &mut state.recovery,
                     Some((&state.mod_turn_id, state.turn_count.saturating_sub(1))),
                     state.native_query_depth,
                 ),

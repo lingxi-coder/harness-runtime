@@ -1272,27 +1272,6 @@ impl DiscoveryCacheStore {
         Self { root: root.into() }
     }
 
-    /// Legacy helper for older tests: a stable SHA-256 over `{name, transport
-    /// kind, url, headers}`. Production discovery-cache partitioning now uses
-    /// [`logical_cache_key`] instead.
-    #[must_use]
-    pub fn cache_key(name: &str, spec: &McpTransportSpec) -> String {
-        use sha2::{Digest, Sha256};
-        let (kind, url, headers_json) = match spec {
-            McpTransportSpec::Sse { url, headers, .. }
-            | McpTransportSpec::Http { url, headers, .. } => (
-                spec.kind(),
-                url.as_str(),
-                serde_json::to_string(headers).unwrap_or_default(),
-            ),
-            other => (other.kind(), "", String::new()),
-        };
-        let material = format!("{name}\0{kind}\0{url}\0{headers_json}");
-        let mut hasher = Sha256::new();
-        hasher.update(material.as_bytes());
-        format!("{:x}", hasher.finalize())
-    }
-
     fn entry_path(&self, key: &str) -> std::path::PathBuf {
         self.root.join(format!("{key}.json"))
     }
@@ -2805,15 +2784,6 @@ mod tests {
 
         assert_eq!(root_mode, 0o700);
         assert_eq!(entry_mode, 0o600);
-    }
-
-    #[test]
-    fn cache_key_is_stable_and_distinguishes_url() {
-        let a = DiscoveryCacheStore::cache_key("srv", &http_spec("https://a.example", None));
-        let b = DiscoveryCacheStore::cache_key("srv", &http_spec("https://b.example", None));
-        let a_again = DiscoveryCacheStore::cache_key("srv", &http_spec("https://a.example", None));
-        assert_eq!(a, a_again);
-        assert_ne!(a, b);
     }
 
     #[test]

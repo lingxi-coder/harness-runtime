@@ -224,32 +224,6 @@ impl CompactionOrchestrator {
         self.autocompact_threshold()
     }
 
-    /// Run one full orchestrator pass with a **fresh** tracking state.
-    ///
-    /// Thin wrapper over [`Self::process_iteration_tracked`] that starts from a
-    /// default [`AutoCompactTrackingState`] (zero consecutive failures), so the
-    /// circuit breaker never short-circuits on this path. This is the automatic
-    /// compatibility wrapper; explicit `/compact` uses [`Self::process_forced`]
-    /// so it bypasses the automatic token threshold and summarizes full history.
-    ///
-    /// `snip_tokens_freed_already` lets the caller report snip work done outside
-    /// this entry point; it is folded into the freed total and the
-    /// should-auto-compact subtraction.
-    ///
-    /// # Errors
-    ///
-    /// Propagates [`CompactionError`] from the autocompact layer when it fires
-    /// and fails.
-    pub async fn process_iteration(
-        &self,
-        messages: Vec<ConversationMessage>,
-        snip_tokens_freed_already: u64,
-    ) -> Result<IterationCompactionResult, CompactionError> {
-        let mut tracking = AutoCompactTrackingState::default();
-        self.process_iteration_tracked(messages, snip_tokens_freed_already, &mut tracking)
-            .await
-    }
-
     /// Run a user-requested `/compact` pass unconditionally.
     ///
     /// Manual compaction is deliberately separate from the automatic
@@ -508,7 +482,7 @@ impl CompactionOrchestrator {
         // `SnipCompactor::snip` means snip cannot drive a genuinely-oversized
         // history below the threshold on its own, so autocompact still
         // escalates when warranted (this preserves the manual `/compact`
-        // outcome — see `process_iteration`).
+        // outcome — see `process_iteration_tracked`).
         if history_snip_enabled() {
             let current_tokens = crate::grouping::estimate_tokens_for_range(&messages);
             let snip = SnipCompactor::snip(messages, current_tokens, self.autocompact_threshold());
@@ -1141,16 +1115,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_iteration_wrapper_uses_fresh_tracking() {
-        // The thin wrapper starts from a fresh tracking state, so even after
-        // (hypothetical) prior failures elsewhere it always attempts autocompact
-        // when over threshold. Threshold 0 + default autocompactor → success.
+    async fn process_iteration_tracked_accepts_fresh_tracking_state() {
+        // A caller-provided fresh state allows the automatic pass to proceed.
+        // Threshold 0 + default autocompactor → success.
         let orch = order_orchestrator(0);
         let msgs = vec![long_user(0), long_user(1)];
         let res = orch
-            .process_iteration(msgs, 0)
+            .process_iteration_tracked(msgs, 0, &mut AutoCompactTrackingState::default())
             .await
-            .expect("wrapper succeeds");
+            .expect("tracked pass succeeds");
         assert!(res.was_compacted);
         assert!(res.layers_applied.contains(&CompactionLayer::Autocompact));
     }

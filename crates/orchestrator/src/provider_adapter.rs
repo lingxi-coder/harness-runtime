@@ -2539,7 +2539,7 @@ mod tests {
                 false,
                 Vec::new(),
                 Vec::new(),
-                None,
+                Some(4096),
                 Vec::new(),
                 Default::default(),
                 Default::default(),
@@ -2555,7 +2555,9 @@ mod tests {
             model_source.string_units(""),
             "scheduled API input must keep the exact source until SDK finalization"
         );
-        let _ = crate::scheduled_turn::SETTINGS
+        // The malformed source has no catalog row during SDK preflight, so
+        // supply the required Messages output budget explicitly.
+        let stream_error = crate::scheduled_turn::SETTINGS
             .scope(
                 settings,
                 StreamingApiClient::stream_with_effort_override(
@@ -2565,7 +2567,7 @@ mod tests {
                     None,
                     Vec::new(),
                     Vec::new(),
-                    None,
+                    Some(4096),
                     None,
                     Vec::new(),
                     "sdk",
@@ -2578,7 +2580,17 @@ mod tests {
                     Some(model_source),
                 ),
             )
-            .await;
+            .await
+            .err()
+            .expect("the fake transport records the request before returning its sentinel error");
+        assert!(
+            matches!(
+                &stream_error,
+                LlmError::InvalidRequest { message }
+                    if message == "open_stream not scripted (FakeTransport)"
+            ),
+            "expected the fake transport sentinel after capture, got {stream_error:?}"
+        );
         let request = transport.seen.lock().unwrap()[0].body_json.clone();
         // Native PGn/t1e sanitizes only the outgoing generation payload.
         // The API-input assertion above protects the distinct original source.

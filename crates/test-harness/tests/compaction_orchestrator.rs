@@ -1,5 +1,6 @@
 //! Regression tests for compaction orchestrator.
 
+use compaction::thresholds::AutoCompactTrackingState;
 use compaction::{CompactionLayer, CompactionOrchestrator};
 use lingxi_core::types::{ConversationMessage, MessageId};
 
@@ -13,6 +14,9 @@ async fn over_threshold_triggers_autocompact() {
             format!("turn-{i} a very long padding string to inflate tokens beyond the threshold"),
         ));
     }
-    let r = orch.process_iteration(messages, 0).await.unwrap();
+    let r = orch
+        .process_iteration_tracked(messages, 0, &mut AutoCompactTrackingState::default())
+        .await
+        .unwrap();
     assert!(r.layers_applied.contains(&CompactionLayer::Autocompact));
 }

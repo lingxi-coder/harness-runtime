@@ -4,7 +4,7 @@
 //! query; the result is awaited just before assembling the next prompt.
 //!
 //! P0.1: the pending handle resolves to a `Vec<`[`SurfacedMemory`]`>` — the
-//! exact shape [`crate::surfacing::render_surfacing_block`] renders — so the
+//! exact shape [`crate::surfacing::render_surfacing_messages`] renders — so the
 //! orchestrator's `relevant_memory_reminder_messages` can await this handle and
 //! render the surfaced block with no further disk work.
 //!

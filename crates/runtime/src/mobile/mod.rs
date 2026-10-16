@@ -33,7 +33,6 @@ use command_api::builtins::{
     register_core_batch_4, register_core_batch_5,
 };
 use lingxi_core::host::{AuthHandle, OrchestratorHandle};
-use skill::SkillRegistry;
 use std::sync::Arc;
 use tool_api::{BuiltinToolContext, ToolRegistry};
 use tool_ui::ask_user_question::AskUserQuestionResolver;
@@ -446,16 +445,6 @@ mod android_ui_registration_tests {
         #[cfg(not(feature = "android-computer-use"))]
         assert!(registry.find_by_name("android_use").is_none());
     }
-}
-
-/// Assemble the mobile builtin **skill** registry.
-///
-/// Plugin skills are not bundled here: the plugin registry is their only source.
-#[must_use]
-pub fn mobile_skill_registry() -> SkillRegistry {
-    let mut reg = SkillRegistry::new();
-    skill::register_mobile(&mut reg);
-    reg
 }
 
 /// Assemble the mobile slash-command registry: the core handlers plus the

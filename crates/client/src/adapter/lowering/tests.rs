@@ -534,10 +534,10 @@ mod regressions {
                     id: tu.to_string(),
                     tool: "Read".to_string(),
                     input_json: value_to_json_string(&serde_json::json!({"file_path": "/tmp/x"})),
-                    header: Some(crate::adapter::tool_display::lower_tool_header(
+                    header: crate::adapter::tool_display::lower_tool_header(
                         "Read",
                         &serde_json::json!({"file_path": "/tmp/x"}),
-                    )),
+                    ),
                 },
             ]
         );
@@ -570,12 +570,10 @@ mod regressions {
     }
 
     /// REGRESSION: a resumed `ToolResult` used to lower with an EMPTY tool
-    /// name and all-`None` diff fields, because `lower_content_block` was
-    /// per-block and context-free. That made the iOS client render
-    /// `chat_tool_returned %@` as "工具  返回" and left its diff view — which
-    /// gates on `old_string`/`new_string`/`file_path` — permanently
-    /// unreachable. The call is in assistant message N and the result in user
-    /// message N+1, so nothing short of a transcript-wide index can pair them.
+    /// name and no structured diff, because `lower_content_block` was
+    /// per-block and context-free. That left the iOS result headline and diff
+    /// view unavailable. The call is in assistant message N and the result in
+    /// user message N+1, so nothing short of a transcript-wide index can pair them.
     #[test]
     fn lower_transcript_pairs_a_tool_result_with_its_call_across_messages() {
         use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
@@ -619,22 +617,11 @@ mod regressions {
         ];
 
         let dtos = lower_transcript(&history);
-        let MessageBlockDto::ToolResult {
-            tool,
-            old_string,
-            new_string,
-            file_path,
-            display,
-            ..
-        } = &dtos[1].blocks[0]
-        else {
+        let MessageBlockDto::ToolResult { tool, display, .. } = &dtos[1].blocks[0] else {
             panic!("expected a ToolResult block, got {:?}", dtos[1].blocks[0]);
         };
         assert_eq!(tool, "Edit", "the tool name is recovered from the call");
-        assert_eq!(old_string.as_deref(), Some("fn a() {}\n"));
-        assert_eq!(new_string.as_deref(), Some("fn b() {}\n"));
-        assert_eq!(file_path.as_deref(), Some("/tmp/x.rs"));
-        let display = display.as_ref().expect("a display block");
+        let display = display;
         assert_eq!(
             display.headline.as_deref(),
             Some("Added 1 line, removed 1 line")
@@ -738,13 +725,7 @@ mod regressions {
                 panic!("expected a ToolResult block");
             };
             let MessageBlockDto::ToolResult {
-                id,
-                tool,
-                is_error,
-                old_string,
-                new_string,
-                file_path,
-                ..
+                id, tool, is_error, ..
             } = &seeded[1].blocks[0]
             else {
                 panic!("expected a ToolResult block");
@@ -754,9 +735,6 @@ mod regressions {
                 tool: tool.clone(),
                 result_json: value_to_json_string(&data),
                 is_error: *is_error,
-                old_string: old_string.clone(),
-                new_string: new_string.clone(),
-                file_path: file_path.clone(),
                 display: display.clone(),
             }
         });
@@ -809,7 +787,7 @@ mod regressions {
             let MessageBlockDto::ToolResult { display, .. } = &dtos[1].blocks[0] else {
                 panic!("expected a ToolResult block");
             };
-            display.clone().expect("a display block")
+            display.clone()
         };
 
         let bash_id = ToolUseId::new();
@@ -866,18 +844,11 @@ mod regressions {
             turn_origin: None,
         }];
         let dtos = lower_transcript(&history);
-        let MessageBlockDto::ToolResult {
-            tool,
-            old_string,
-            new_string,
-            file_path,
-            ..
-        } = &dtos[0].blocks[0]
-        else {
+        let MessageBlockDto::ToolResult { tool, display, .. } = &dtos[0].blocks[0] else {
             panic!("expected a ToolResult block");
         };
         assert!(tool.is_empty());
-        assert!(old_string.is_none() && new_string.is_none() && file_path.is_none());
+        assert!(display.diff.is_none());
     }
 
     #[test]

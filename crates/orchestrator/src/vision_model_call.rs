@@ -855,10 +855,15 @@ mod tests {
             session.history.push(user_message);
         }
 
-        let _ =
-            crate::turn_loop::execute_one_turn_with_recovery_tracked(&orch, None, None, None, 0)
-                .await
-                .expect("turn succeeds");
+        let _ = crate::turn_loop::execute_one_turn_with_recovery_tracked(
+            &orch,
+            None,
+            &mut crate::turn_loop::RecoveryState::default(),
+            None,
+            0,
+        )
+        .await
+        .expect("turn succeeds");
 
         let calls = api.captured_msgs().await;
         assert_eq!(calls.len(), 1);

@@ -312,7 +312,7 @@ pub(crate) const THINKING_ONLY_NUDGE: &str = "[Your previous response had no vis
 const CANCEL_MESSAGE: &str = "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.";
 
 /// Per-conversation recovery bookkeeping carried by the turn drivers in
-/// `conversation.rs` and threaded `&mut` into [`execute_one_turn_with_recovery`].
+/// `conversation.rs` and threaded `&mut` into [`execute_one_turn_with_recovery_tracked`].
 ///
 /// Mirrors the TS recovery sub-state on `query.ts`'s loop `State`
 /// (`maxOutputTokensRecoveryCount`, `maxOutputTokensOverride`). One instance
@@ -447,7 +447,8 @@ pub(crate) enum TurnStepOutcome {
     },
 }
 
-/// Execute one `messages_create_non_stream` round-trip + tool dispatches.
+/// Execute one `messages_create_non_stream` round-trip + tool dispatches and
+/// return the output-token count (`response.usage.output_tokens`).
 ///
 /// `system` is the assembled system prompt for the conversation (built
 /// once by `ConversationOrchestrator::try_run_turn`). It is passed
@@ -455,69 +456,16 @@ pub(crate) enum TurnStepOutcome {
 /// per turn-step — the prompt is stable across the conversation lifetime
 /// (see M5-03 plan "Out of scope" note: SSE M5-04 will not re-assemble
 /// per turn-step either).
-// Retained as a test-only convenience: the legacy no-recovery shim. As of #2
-// (main-loop parity) the cancelable REPL driver no longer uses it — it now
-// calls the recovery-aware [`execute_one_turn_with_recovery_tracked`] like the
-// main batched [`ConversationOrchestrator::run_turn`] loop. The in-file
-// `#[cfg(test)]` suites still drive this clean-signature wrapper, so it is kept
-// (not `#[cfg(test)]`-gated, to preserve the intra-doc links from the live
-// `_tracked` function).
-#[allow(dead_code)]
-pub(crate) async fn execute_one_turn(
-    orch: &ConversationOrchestrator,
-    system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
-) -> Result<TurnStepOutcome, OrchestratorError> {
-    // Backward-compatible shim: no recovery state → legacy disposition
-    // (any non-`end_turn` stop_reason Continues). Used by the in-file tests.
-    // The recovery-aware drivers call [`execute_one_turn_with_recovery`] with a
-    // live `RecoveryState`.
-    execute_one_turn_with_recovery(orch, system, None).await
-}
-
-/// Recovery-aware twin of [`execute_one_turn`].
-///
-/// When `recovery` is `Some`, a `max_tokens` `stop_reason` triggers the A1
-/// multi-turn nudge: while the consecutive recovery count is below
-/// [`MAX_OUTPUT_TOKENS_RECOVERY_LIMIT`], a byte-exact "resume directly" meta
-/// user message ([`MAX_OUTPUT_TOKENS_RECOVERY_NUDGE`]) is appended to history,
-/// the counter is incremented, and the step returns
-/// [`TurnStepOutcome::Continue`] (1:1 with TS `query.ts:1223-1252`). When the
-/// count has reached the limit, the turn ends with `stop_reason = "max_tokens"`
-/// (TS `query.ts:1254-1255` surfaces the withheld error). When `recovery` is
-/// `None`, the `max_tokens` path falls through to the legacy disposition
-/// (Continue), preserving the legacy disposition.
-///
-/// Test-only as of #2: the production drivers all call the `_tracked` variant
-/// directly. Retained (not `#[cfg(test)]`) so intra-doc links resolve in the
-/// normal doc build.
-#[allow(dead_code)]
-pub(crate) async fn execute_one_turn_with_recovery(
-    orch: &ConversationOrchestrator,
-    system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
-    recovery: Option<&mut RecoveryState>,
-) -> Result<TurnStepOutcome, OrchestratorError> {
-    // Drop the per-call output-token count (A3 callers use the `_tracked`
-    // variant). Preserves the historical signature for every existing caller.
-    Ok(
-        execute_one_turn_with_recovery_tracked(orch, system, recovery, None, 0)
-            .await?
-            .0,
-    )
-}
-
-/// A3 twin of [`execute_one_turn_with_recovery`] that ALSO returns this turn
-/// step's output-token count (`response.usage.output_tokens`).
 ///
 /// The token-budget continuation loop (`conversation.rs`) accumulates these
 /// into `global_turn_tokens` and feeds the running total to
 /// [`crate::token_budget::check_token_budget`] — mirroring TS
-/// `getTurnOutputTokens()`. The plain
-/// [`execute_one_turn_with_recovery`] wrapper drops the count so existing
-/// callers (the cancelable REPL driver + in-file tests) are unchanged.
+/// `getTurnOutputTokens()`. Each caller passes the `RecoveryState` owned by
+/// its current user turn.
 pub(crate) fn execute_one_turn_with_recovery_tracked<'a>(
     orch: &'a ConversationOrchestrator,
     system: Option<&'a lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
-    recovery: Option<&'a mut RecoveryState>,
+    recovery: &'a mut RecoveryState,
     mod_step: Option<(&'a str, u32)>,
     query_depth: u32,
 ) -> futures::future::BoxFuture<'a, Result<(TurnStepOutcome, u64), OrchestratorError>> {
@@ -536,7 +484,7 @@ pub(crate) fn execute_one_turn_with_recovery_tracked<'a>(
 async fn execute_one_turn_with_recovery_tracked_impl(
     orch: &ConversationOrchestrator,
     system: Option<&lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput>,
-    mut recovery: Option<&mut RecoveryState>,
+    recovery: &mut RecoveryState,
     mod_step: Option<(&str, u32)>,
     query_depth: u32,
 ) -> Result<(TurnStepOutcome, u64), OrchestratorError> {
@@ -586,35 +534,31 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     let date_change_reminder = prepared.date_change_reminder;
 
     let mut system_override = None;
-    if let Some(state) = recovery.as_deref_mut() {
-        if let Some(frozen) = state.retry_generation.take() {
-            let latest_user = |messages: &[ConversationMessage]| {
-                messages
-                    .iter()
-                    .rev()
-                    .find(|m| matches!(m, ConversationMessage::User { is_meta: false, .. }))
-                    .map(ConversationMessage::id)
-            };
-            if latest_user(&history_snapshot) == latest_user(&frozen.messages)
-                && model == frozen.model
-                && model_profile == frozen.profile
-            {
-                history_snapshot = frozen.messages;
-                tools = frozen.tools;
-                skip_global_cache_for_system_prompt = frozen.skip_global_cache;
-                system_override = Some(frozen.system);
-            } else {
-                state.max_output_tokens_override = None;
-            }
+    if let Some(frozen) = recovery.retry_generation.take() {
+        let latest_user = |messages: &[ConversationMessage]| {
+            messages
+                .iter()
+                .rev()
+                .find(|m| matches!(m, ConversationMessage::User { is_meta: false, .. }))
+                .map(ConversationMessage::id)
+        };
+        if latest_user(&history_snapshot) == latest_user(&frozen.messages)
+            && model == frozen.model
+            && model_profile == frozen.profile
+        {
+            history_snapshot = frozen.messages;
+            tools = frozen.tools;
+            skip_global_cache_for_system_prompt = frozen.skip_global_cache;
+            system_override = Some(frozen.system);
+        } else {
+            recovery.max_output_tokens_override = None;
         }
     }
     let system = system_override.as_ref().map_or(system, Option::as_ref);
     // REC.A1: consume the one-shot escalated `max_tokens` override (armed by a
     // prior `max_tokens` recovery via `handle_max_output_tokens`). TAKE it so it
     // applies to EXACTLY this call and never leaks to the next turn.
-    let max_tokens_override = recovery
-        .as_deref_mut()
-        .and_then(|r| r.max_output_tokens_override.take());
+    let max_tokens_override = recovery.max_output_tokens_override.take();
     // #5: wall-clock the API round-trip (incl. any in-adapter retries + the PTL
     // reactive-recovery tail) so the CostTracker records a REAL duration instead
     // of `Duration::ZERO`. Paired with `orch.api.last_retry_count()` below.
@@ -658,37 +602,33 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     } else {
         None
     };
-    if let Some(state) = recovery.as_deref_mut() {
-        if mod_host.is_none() {
-            state.apply_native_thinking_resume_intent(
-                &model,
-                model_profile.as_deref(),
-                &mut native_anthropic_request_context,
-            );
-        } else {
-            state.resume_incomplete_thinking_next_request = None;
-        }
+    if mod_host.is_none() {
+        recovery.apply_native_thinking_resume_intent(
+            &model,
+            model_profile.as_deref(),
+            &mut native_anthropic_request_context,
+        );
+    } else {
+        recovery.resume_incomplete_thinking_next_request = None;
     }
     crate::prompt::async_hook_response::retain_current_async_hook_reminders(
         &mut history_snapshot,
         &mut turn_reminders,
         &mut guarded_async_hook_reminders,
     );
-    if let Some(state) = recovery.as_deref_mut() {
-        state.last_generation = if mod_host.is_none() {
-            Some(crate::output_recovery::FrozenGeneration {
-                model: model.clone(),
-                profile: model_profile.clone(),
-                system: system.cloned(),
-                messages: history_snapshot.clone(),
-                tools: tools.clone(),
-                skip_global_cache: skip_global_cache_for_system_prompt,
-                thinking_resumption_host_facts: thinking_resumption_host_facts.clone(),
-            })
-        } else {
-            None
-        };
-    }
+    recovery.last_generation = if mod_host.is_none() {
+        Some(crate::output_recovery::FrozenGeneration {
+            model: model.clone(),
+            profile: model_profile.clone(),
+            system: system.cloned(),
+            messages: history_snapshot.clone(),
+            tools: tools.clone(),
+            skip_global_cache: skip_global_cache_for_system_prompt,
+            thinking_resumption_host_facts: thinking_resumption_host_facts.clone(),
+        })
+    } else {
+        None
+    };
     let turn_step_input_history = history_snapshot.clone();
     let computer_projection =
         crate::native_computer::prepare_projection(orch, &model, model_profile.as_deref(), &tools)
@@ -1232,7 +1172,7 @@ async fn execute_one_turn_with_recovery_tracked_impl(
             orch,
             visible,
             if final_response {
-                recovery.as_deref_mut()
+                Some(&mut *recovery)
             } else {
                 None
             },

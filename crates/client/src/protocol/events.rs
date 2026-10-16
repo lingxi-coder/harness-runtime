@@ -149,8 +149,7 @@ define_client_event! {
         id: String,
         tool: String,
         input_json: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        header: Option<crate::protocol::tool_display::ToolHeaderDto>,
+        header: crate::protocol::tool_display::ToolHeaderDto,
     },
 
     ToolHeartbeat {
@@ -164,8 +163,7 @@ define_client_event! {
         tool: String,
         result_json: String,
         is_error: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        display: Option<crate::protocol::tool_display::ToolResultDisplayDto>,
+        display: crate::protocol::tool_display::ToolResultDisplayDto,
     },
 
     MessageComplete {

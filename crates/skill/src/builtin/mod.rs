@@ -1,28 +1,15 @@
-//! Compiled-in builtin skill templates plus the `register_desktop` /
-//! `register_mobile` entry points the composition roots
-//! (`apps/engine-{desktop,mobile}`) call to assemble their skill set.
-//!
-//! Mobile product skills are file-backed Plugin components. The mobile
-//! entry point remains as an empty compatibility seam so hosts can assemble
-//! the shared registry without a second bundled source of truth.
+//! Compiled-in desktop builtin skill templates and their registration entry point.
 
 mod bundled;
 
 use crate::model::{LoadedFrom, SkillSource};
 use crate::{parse_skill_markdown, Skill, SkillRegistry};
-use bundled::{BundledSkill, BUILTIN_DESKTOP, BUILTIN_MOBILE};
+use bundled::{BundledSkill, BUILTIN_DESKTOP};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
 /// Register the desktop builtin skill set into `reg`.
 pub fn register_desktop(reg: &mut SkillRegistry) {
     register_slice(reg, BUILTIN_DESKTOP);
-}
-
-/// Register mobile bundled skills. Product skills are intentionally not
-/// bundled; the mobile composition root loads them from the verified Plugin
-/// package through `PluginManager`.
-pub fn register_mobile(reg: &mut SkillRegistry) {
-    register_slice(reg, BUILTIN_MOBILE);
 }
 
 /// Return a parsed desktop builtin skill by its registered name. Command
@@ -111,17 +98,6 @@ mod tests {
             .content
             .string_at("")
             .is_some_and(|content| content.contains("anthropic.Timeout")));
-    }
-
-    #[test]
-    fn mobile_registry_contains_no_bundled_plugin_skills() {
-        let mut r = SkillRegistry::new();
-        register_mobile(&mut r);
-        assert!(
-            r.is_empty(),
-            "product skills must come from the Plugin registry"
-        );
-        assert!(BUILTIN_MOBILE.is_empty());
     }
 
     #[test]

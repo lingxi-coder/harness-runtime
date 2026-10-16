@@ -57,7 +57,7 @@ async fn production_loader_threads_nested_managed_env_into_otel_config() {
 }
 
 #[test]
-fn nested_env_overrides_legacy_root_within_the_same_tier() {
+fn only_nested_env_supplies_overrides() {
     let tiers = vec![r#"{
             "LINGXI_ENABLE_TELEMETRY": false,
             "OTEL_SERVICE_NAME": "legacy",
@@ -119,7 +119,7 @@ fn later_managed_tier_wins_and_enhanced_beta_is_allowlisted() {
 }
 
 #[test]
-fn legacy_root_remains_supported_and_non_scalars_are_ignored() {
+fn root_keys_and_nested_non_scalars_are_ignored() {
     let tiers = vec![r#"{
             "OTEL_SERVICE_NAME": "legacy",
             "OTEL_TRACES_EXPORTER": ["otlp"],
@@ -131,12 +131,7 @@ fn legacy_root_remains_supported_and_non_scalars_are_ignored() {
     .to_string()];
 
     let values = super::fold_managed_otel_env_overrides(&tiers);
-    assert_eq!(
-        values
-            .get(telemetry::otel::config::ENV_SERVICE_NAME)
-            .map(String::as_str),
-        Some("legacy")
-    );
+    assert!(!values.contains_key(telemetry::otel::config::ENV_SERVICE_NAME));
     assert!(!values.contains_key(telemetry::otel::config::ENV_TRACES_EXPORTER));
     assert!(!values.contains_key(telemetry::otel::config::ENV_LOGS_EXPORTER));
     assert!(!values.contains_key("NOT_AN_OTEL_KEY"));
