@@ -30,8 +30,7 @@ pub trait OutputSink: Send + Sync {
     /// Emit a `turn_start` marker. No-op in plain mode.
     async fn turn_start(&self);
     /// Emit a `turn_end` marker with stop reason + cost. No-op in plain
-    /// mode (the orchestrator's `OutputStream::emit_end_turn` already
-    /// prints to stdout there).
+    /// mode except that it terminates emitted assistant text with one newline.
     async fn turn_end(&self, stop_reason: &str, total_usd: f64, in_tokens: u64, out_tokens: u64);
     /// Emit a tool-call announcement.
     async fn tool_call(&self, tool: &str, input: &serde_json::Value);
@@ -63,25 +62,55 @@ pub trait OutputSink: Send + Sync {
 pub struct PlainSink {
     out: Output,
     err: Output,
+    text_state: tokio::sync::Mutex<PlainTextState>,
+}
+
+#[derive(Default)]
+struct PlainTextState {
+    wrote_text: bool,
+    ends_with_newline: bool,
 }
 
 impl PlainSink {
     /// Construct a sink using the host-provided stdout and diagnostic writers.
     #[must_use]
     pub fn new(out: Output, err: Output) -> Self {
-        Self { out, err }
+        Self {
+            out,
+            err,
+            text_state: tokio::sync::Mutex::new(PlainTextState::default()),
+        }
+    }
+
+    async fn write_line(&self, line: &str) {
+        let mut state = self.text_state.lock().await;
+        if self.out.write_line(line).await.is_ok() {
+            state.ends_with_newline = true;
+        }
     }
 }
 
 #[async_trait]
 impl OutputSink for PlainSink {
     async fn text(&self, s: &str) {
-        let _ = self.out.write_record(s.as_bytes()).await;
+        let mut state = self.text_state.lock().await;
+        if self.out.write_record(s.as_bytes()).await.is_ok() && !s.is_empty() {
+            state.wrote_text = true;
+            state.ends_with_newline = s.ends_with('\n');
+        }
     }
-    async fn turn_start(&self) {}
-    async fn turn_end(&self, _r: &str, _u: f64, _i: u64, _o: u64) {}
+    async fn turn_start(&self) {
+        *self.text_state.lock().await = PlainTextState::default();
+    }
+    async fn turn_end(&self, _r: &str, _u: f64, _i: u64, _o: u64) {
+        let mut state = self.text_state.lock().await;
+        if state.wrote_text && !state.ends_with_newline {
+            let _ = self.out.write_record(b"\n").await;
+        }
+        *state = PlainTextState::default();
+    }
     async fn tool_call(&self, tool: &str, _input: &serde_json::Value) {
-        let _ = self.out.write_line(&format!("[tool: {tool}]")).await;
+        self.write_line(&format!("[tool: {tool}]")).await;
     }
     async fn tool_result(&self, _tool: &str, _result: &serde_json::Value) {
         if self.err.is_terminal() {
@@ -98,10 +127,10 @@ impl OutputSink for PlainSink {
         }
     }
     async fn command_output(&self, _name: &str, display: &str) {
-        let _ = self.out.write_line(display).await;
+        self.write_line(display).await;
     }
     async fn mod_log(&self, plugin: &str, text: &str) {
-        let _ = self.out.write_line(&format!("{plugin}: {text}")).await;
+        self.write_line(&format!("{plugin}: {text}")).await;
     }
     async fn error(&self, _code: &str, message: &str) {
         let _ = self.err.write_line(&format!("lingxi-cli: {message}")).await;
@@ -273,6 +302,58 @@ mod tests {
             Output::new(tokio::io::sink()),
         );
         sink.command_output("clear", "Conversation cleared.").await;
+    }
+
+    #[tokio::test]
+    async fn plain_sink_terminates_text_output_once_at_turn_end() {
+        use tokio::io::AsyncReadExt;
+
+        for (chunks, expected) in [
+            (
+                vec!["fixed native ", "stub result"],
+                "fixed native stub result\n",
+            ),
+            (
+                vec!["fixed native stub result\n"],
+                "fixed native stub result\n",
+            ),
+        ] {
+            let (writer, mut reader) = tokio::io::duplex(256);
+            let sink = PlainSink::new(Output::new(writer), Output::new(tokio::io::sink()));
+            sink.turn_start().await;
+            for chunk in chunks {
+                sink.text(chunk).await;
+            }
+            sink.turn_end("end_turn", 0.0, 0, 0).await;
+            drop(sink);
+
+            let mut actual = Vec::new();
+            reader
+                .read_to_end(&mut actual)
+                .await
+                .expect("read complete plain text output");
+            assert_eq!(actual, expected.as_bytes());
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_sink_line_output_marks_the_stdout_terminator() {
+        use tokio::io::AsyncReadExt;
+
+        let (writer, mut reader) = tokio::io::duplex(256);
+        let sink = PlainSink::new(Output::new(writer), Output::new(tokio::io::sink()));
+        sink.turn_start().await;
+        sink.text("assistant text").await;
+        sink.tool_call("Read", &serde_json::Value::Null).await;
+        sink.turn_end("end_turn", 0.0, 0, 0).await;
+        drop(sink);
+
+        let mut actual = Vec::new();
+        reader
+            .read_to_end(&mut actual)
+            .await
+            .expect("read complete plain text output");
+        assert_eq!(actual, b"assistant text[tool: Read]\n");
     }
 
     #[tokio::test]
