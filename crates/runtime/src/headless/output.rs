@@ -136,7 +136,8 @@ impl OutputSink for PlainSink {
         self.write_line(display).await;
     }
     async fn mod_log(&self, plugin: &str, text: &Utf16JsonProjection) {
-        self.write_line(&format!("{plugin}: {}", display_projection(text))).await;
+        self.write_line(&format!("{plugin}: {}", display_projection(text)))
+            .await;
     }
     async fn error(&self, _code: &str, message: &str) {
         let _ = self.err.write_line(&format!("lingxi-cli: {message}")).await;
@@ -374,7 +375,11 @@ mod tests {
         let sink = PlainSink::new(Output::new(writer), Output::new(tokio::io::sink()));
         sink.turn_start().await;
         sink.text("assistant text").await;
-        sink.tool_call("Read", &serde_json::Value::Null).await;
+        sink.tool_call(
+            "Read",
+            &Utf16JsonProjection::from_serde_value(&serde_json::Value::Null),
+        )
+        .await;
         sink.turn_end("end_turn", 0.0, 0, 0).await;
         drop(sink);
 

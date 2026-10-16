@@ -6034,9 +6034,10 @@ mod max_output_tokens_recovery_tests {
             PathBuf::from("/tmp"),
         );
         let mut state = RecoveryState::default();
-        let step = execute_one_turn_with_recovery(&orch, None, Some(&mut state))
+        let step = execute_one_turn_with_recovery_tracked(&orch, None, &mut state, None, 0)
             .await
-            .unwrap();
+            .unwrap()
+            .0;
         assert!(matches!(step, TurnStepOutcome::Continue(_)));
         assert_eq!(state.max_output_tokens_override, Some(16000));
         assert!(

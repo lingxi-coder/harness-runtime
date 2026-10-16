@@ -1802,7 +1802,6 @@ async fn workflow_agent_progress_keeps_provider_qualified_model() {
         Arc::new(AnalyticsBus::new()),
         None,
         None,
-        None,
     )
     .await
     .expect("workflow runs to completion");
@@ -1852,7 +1851,6 @@ async fn workflow_emits_queued_progress_for_waiting_parallel_agents_before_slots
                 NestedConfig::default(),
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 Arc::new(AnalyticsBus::new()),
-                None,
                 None,
                 None,
             )
@@ -1956,7 +1954,6 @@ async fn workflow_rejected_agent_type_emits_no_queued_progress() {
         NestedConfig::default(),
         Arc::new(std::sync::atomic::AtomicBool::new(false)),
         Arc::new(AnalyticsBus::new()),
-        None,
         None,
         None,
     )
