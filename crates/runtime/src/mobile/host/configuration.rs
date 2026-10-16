@@ -107,6 +107,9 @@ pub struct MobileConfig {
     pub insights_source_executor: Option<Arc<dyn crate::insights::InsightsSourceExecutor>>,
     /// Explicit local host policy verdict for Insights. Unknown remains unavailable.
     pub insights_policy_gate: Option<bool>,
+    /// Explicit local host policy verdict for `/team-onboarding`. Mobile applies
+    /// its local default only when this value is absent; explicit false denies.
+    pub team_onboarding_policy_gate: Option<bool>,
 }
 
 impl std::fmt::Debug for MobileConfig {
@@ -154,6 +157,10 @@ impl std::fmt::Debug for MobileConfig {
             .field("vision_delegation_enabled", &self.vision_delegation_enabled)
             .field("insights_policy_gate", &self.insights_policy_gate)
             .field(
+                "team_onboarding_policy_gate",
+                &self.team_onboarding_policy_gate,
+            )
+            .field(
                 "insights_source_executor",
                 if self.insights_source_executor.is_some() {
                     &"Some(<executor>)"
@@ -194,6 +201,7 @@ impl Default for MobileConfig {
             vision_delegation_enabled: true,
             insights_source_executor: None,
             insights_policy_gate: None,
+            team_onboarding_policy_gate: None,
         }
     }
 }

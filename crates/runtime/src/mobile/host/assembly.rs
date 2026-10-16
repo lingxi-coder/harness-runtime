@@ -2678,6 +2678,22 @@ pub(super) async fn build_mobile_inner_with_ask(
             command_api::builtins::register_insights_command(&mut reg, provider);
         }
     }
+    let team_onboarding_availability = command_api::builtins::TeamOnboardingCommandAvailability {
+        workspace_available: Some(cfg.cwd.is_dir() && cfg.workspace_trusted),
+        // Mobile is a local, app-private host. A missing fact uses its
+        // explicit local default; a supplied false verdict remains a deny.
+        allow_team_onboarding: cfg.team_onboarding_policy_gate.or(Some(true)),
+    };
+    if team_onboarding_availability.is_available() {
+        let provider: Arc<dyn command_api::builtins::TeamOnboardingPromptProvider> = Arc::new(
+            crate::team_onboarding::LocalTeamOnboardingPromptProvider::new(
+                cfg.lingxi_home.clone(),
+                cfg.cwd.clone(),
+                team_onboarding_availability,
+            ),
+        );
+        command_api::builtins::register_team_onboarding_command(&mut reg, provider);
+    }
     reg.register_builtin_handler(Arc::new(
         command_api::builtins::VersionHandler::with_build_info(cfg.build_info),
     ));

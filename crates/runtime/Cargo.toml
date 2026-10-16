@@ -74,6 +74,7 @@ desktop = [
     "dep:tool-task",
     "dep:tool-web",
     "tool-web/web-markdown",
+    "dep:url",
     "dep:tool-plan",
     "dep:tool-meta",
     "dep:tool-cron",

@@ -950,16 +950,35 @@ pub async fn build_with_credential_stack(
         &cwd,
         proxy_auth_global_config_path.as_deref(),
     );
-    // Local CLI hosts derive this local verdict from their existing workspace
-    // trust policy. Product/bridge hosts pass an explicit allowInsights value.
-    // Other hosts preserve unknown as None; permission mode is unrelated.
+    // Native 2.1.295's `allow_insights` policy defaults to allowed for a fresh
+    // third-party gateway without a HIPAA restriction. Workspace trust is a
+    // separate `requires.workspace` condition enforced before the report
+    // provider runs; it must not be used to rewrite the policy verdict. Product
+    // and bridge hosts may supply an explicit allowInsights value, including
+    // false. Other hosts preserve unknown as None.
+    //
+    // Source: `acceptance/source-alignment-295-r31/native-policy-source/
+    // src_194447854.js` (`Dbo`, policyGate `allow_insights`) and
+    // `skill-display-name-source/src_192325571.js` (`gjn` policy predicate).
     let native_insights_policy_gate = cfg.insights_policy_gate.or_else(|| {
         matches!(
             cfg.session_composition(),
             super::DesktopSessionComposition::InteractiveCli
                 | super::DesktopSessionComposition::HeadlessCli
         )
-        .then_some(workspace_trusted)
+        .then_some(true)
+    });
+    // Local CLI compositions use the source's ordinary local-default allow
+    // policy; external transports keep the fact unknown unless their host
+    // explicitly supplies it. Workspace trust remains a separate invocation
+    // requirement and never rewrites this policy fact.
+    let native_team_onboarding_policy_gate = cfg.team_onboarding_policy_gate.or_else(|| {
+        matches!(
+            cfg.session_composition(),
+            super::DesktopSessionComposition::InteractiveCli
+                | super::DesktopSessionComposition::HeadlessCli
+        )
+        .then_some(true)
     });
     let proxy_auth_workspace_trust_provider: Arc<dyn Fn() -> bool + Send + Sync> = {
         let host_trusted = cfg.host_workspace_trusted;
@@ -6175,6 +6194,26 @@ pub async fn build_with_credential_stack(
             "Insights remains a metadata stub because workspace or local policy is unavailable"
         );
     }
+    let team_onboarding_availability = command_api::builtins::TeamOnboardingCommandAvailability {
+        workspace_available: Some(cfg.cwd.is_dir() && workspace_trusted),
+        allow_team_onboarding: native_team_onboarding_policy_gate,
+    };
+    if team_onboarding_availability.is_available() {
+        let provider: Arc<dyn command_api::builtins::TeamOnboardingPromptProvider> = Arc::new(
+            crate::team_onboarding::LocalTeamOnboardingPromptProvider::new(
+                cfg.lingxi_home.clone(),
+                cfg.cwd.clone(),
+                team_onboarding_availability,
+            ),
+        );
+        if !command_api::builtins::register_team_onboarding_command(&mut reg, provider) {
+            tracing::debug!("Team onboarding host facts changed before command registration");
+        }
+    } else {
+        tracing::debug!(
+            "Team onboarding remains unavailable because workspace or local policy is unavailable"
+        );
+    }
     if cfg.inline_visualization {
         crate::inline_visualization::register_skill(
             &mut reg,
@@ -7194,6 +7233,7 @@ pub async fn build_with_credential_stack(
         // P1-08 runtime `/add-dir` live-effect handles (captured before the
         // orchestrator builder consumed the originals).
         native_insights_policy_gate,
+        native_team_onboarding_policy_gate,
         session_cwd: runtime_session_cwd,
         mcp_registry: runtime_mcp_registry,
         ide_handle,

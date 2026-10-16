@@ -2692,6 +2692,8 @@ pub struct DesktopRuntime {
     /// Read/Edit/Write/Glob/Grep/NotebookEdit without a reboot.
     /// Local policy verdict captured at assembly for the strict Insights gate.
     pub native_insights_policy_gate: Option<bool>,
+    /// Local policy verdict captured at assembly for `/team-onboarding`.
+    pub native_team_onboarding_policy_gate: Option<bool>,
     pub session_cwd: Arc<SessionCwd>,
     /// (P1-08 runtime `/add-dir`) The live MCP registry. The CLI `/add-dir`
     /// effect calls `add_root(...)` + `notify_roots_list_changed_all()` on it so

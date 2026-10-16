@@ -119,7 +119,7 @@ fn native_builtin_metadata(name: &str) -> (Option<crate::model::NativeCommandTyp
         // Native prompt rows. `statusline` is the only mapped row with
         // `disableNonInteractive: true`; the other prompt properties omit it.
         "statusline" => (Some(Prompt), true, false),
-        "init" | "insights" | "security-review" => (Some(Prompt), false, false),
+        "init" | "insights" | "security-review" | "team-onboarding" => (Some(Prompt), false, false),
         // Native local-jsx objects are excluded by MPe regardless of their
         // other UI-only flags.
         "autofix-pr" | "background" | "branch" | "brief" | "btw" | "bug" | "cd" | "chrome"
@@ -272,8 +272,9 @@ pub fn register_core_batch_4(
 
 /// Register the four remaining handle-free builtin slash commands.
 ///
-/// `/insights` is intentionally excluded: it requires a live runtime-owned
-/// report provider and is installed by [`register_insights_command`]. The
+/// `/insights` and `/team-onboarding` are intentionally excluded: each
+/// requires a live runtime-owned local-data provider and is installed by its
+/// corresponding `register_*_command` function. The
 /// Native bundled prompts `/commit` and `/doctor` are registered by
 /// [`crate::builtins::register_bundled_skills`] instead; `/commit-push-pr` and
 /// `/init-verifiers` have no reachable 2.1.295 command-pool producer.
@@ -575,10 +576,10 @@ mod registry_tests {
     use crate::model::CommandResult;
 
     #[test]
-    fn register_all_registers_exactly_82_native_builtin_names() {
+    fn register_all_registers_exactly_83_native_builtin_names() {
         let mut reg = CommandRegistry::new();
         register_all_builtin_commands(&mut reg);
-        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 82);
+        assert_eq!(BUILTIN_COMMAND_NAMES.len(), 83);
         for name in BUILTIN_COMMAND_NAMES {
             assert!(
                 reg.resolve(&(*name).into()).is_some(),
