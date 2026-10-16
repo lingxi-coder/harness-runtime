@@ -169,7 +169,7 @@ fn idle_timer_is_late(now_ms: u64, fire_at_ms: u64) -> bool {
 fn rate_limit_status_allows_idle_compaction(
     info: Option<llm_runtime::model::rate_limit::RateLimitInfo>,
 ) -> bool {
-    info.map_or(true, |info| {
+    info.is_none_or(|info| {
         info.status.as_deref().unwrap_or("allowed") == "allowed"
     })
 }
