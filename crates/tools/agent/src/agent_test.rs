@@ -1728,8 +1728,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         // Keep the parent profile valid so only the trusted session is missing.
         ctx.options.model_profile = Some("openai".into());
         let error = <AgentTool as Tool>::call(&tool, input, ctx, fresh_tx())
-        .await
-        .unwrap_err();
+            .await
+            .unwrap_err();
 
         assert!(
             matches!(&error, ToolError::Internal(message)
