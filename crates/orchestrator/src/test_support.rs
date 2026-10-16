@@ -100,6 +100,8 @@ pub struct MockApiClient {
     model_listings: std::sync::Mutex<Vec<lingxi_core::host::ModelListing>>,
     effort_snapshot: std::sync::Mutex<Option<lingxi_core::host::effort::EffortCommandSnapshot>>,
     native_mid_system_supported: std::sync::Mutex<bool>,
+    native_mid_tool_change_supported: std::sync::Mutex<Option<bool>>,
+    native_tool_change_feature_gates: std::sync::Mutex<(bool, bool)>,
     native_request_protocol: std::sync::Mutex<Option<llm_runtime::ProtocolFamily>>,
     native_request_first_party: std::sync::Mutex<bool>,
     recovery_budget: Option<u32>,
@@ -157,6 +159,8 @@ impl MockApiClient {
             model_listings: std::sync::Mutex::new(Vec::new()),
             effort_snapshot: std::sync::Mutex::new(None),
             native_mid_system_supported: std::sync::Mutex::new(false),
+            native_mid_tool_change_supported: std::sync::Mutex::new(None),
+            native_tool_change_feature_gates: std::sync::Mutex::new((false, false)),
             native_request_protocol: std::sync::Mutex::new(None),
             native_request_first_party: std::sync::Mutex::new(false),
             recovery_budget: None,
@@ -166,6 +170,14 @@ impl MockApiClient {
     /// Set the test route's Native mid-conversation system capability.
     pub fn set_native_mid_system_supported(&self, supported: bool) {
         *self.native_mid_system_supported.lock().unwrap() = supported;
+    }
+
+    pub fn set_native_mid_tool_change_supported(&self, supported: Option<bool>) {
+        *self.native_mid_tool_change_supported.lock().unwrap() = supported;
+    }
+
+    pub fn set_native_tool_change_feature_gates(&self, mctc: bool, inline_tools: bool) {
+        *self.native_tool_change_feature_gates.lock().unwrap() = (mctc, inline_tools);
     }
 
     /// Set exact route facts used by Native-only request-context tests.
@@ -286,6 +298,18 @@ impl OrchestratorApiClient for MockApiClient {
         _profile: Option<&str>,
     ) -> bool {
         *self.native_mid_system_supported.lock().unwrap()
+    }
+
+    fn native_mid_conversation_tool_change_supported(
+        &self,
+        _model: &str,
+        _profile: Option<&str>,
+    ) -> Option<bool> {
+        *self.native_mid_tool_change_supported.lock().unwrap()
+    }
+
+    fn native_tool_change_feature_gates(&self) -> (bool, bool) {
+        *self.native_tool_change_feature_gates.lock().unwrap()
     }
     fn next_output_budget(
         &self,

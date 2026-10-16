@@ -753,6 +753,7 @@ fn spawn_query(
             .query(SideQueryRequest {
                 model_source: None,
                 model_attempt: None,
+                api_attempts_left: None,
                 native_prompt_context: None,
                 model: packet.model.clone(),
                 profile: packet.profile.clone(),

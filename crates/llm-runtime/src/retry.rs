@@ -38,6 +38,7 @@ impl RetryPolicy {
             | LlmError::PermissionDenied { .. }
             | LlmError::InvalidRequest { .. }
             | LlmError::RequestDispatchRejected { .. }
+            | LlmError::ApiAttemptsExhausted
             | LlmError::QuotaExceeded
             | LlmError::ContextOverflow { .. }
             | LlmError::InputBudgetExceeded { .. }

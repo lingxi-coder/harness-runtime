@@ -85,6 +85,16 @@ fn native_success() -> ProviderResponse {
     )
 }
 
+fn retryable_api_error() -> ProviderResponse {
+    ProviderResponse::json(
+        503,
+        serde_json::json!({
+            "type": "error",
+            "error": {"type": "api_error", "message": "temporarily unavailable"}
+        }),
+    )
+}
+
 fn service(transport: Arc<ScriptedNativeTransport>) -> ApiService {
     let client = Arc::new(
         ModelRuntime::from_config(ClientConfig {
@@ -346,4 +356,33 @@ async fn native_type_retry_is_one_shot_outside_zero_and_one_retry_budgets() {
         request_thinking_type(&requests[2]).as_deref(),
         Some("adaptive")
     );
+}
+
+#[tokio::test]
+async fn operation_api_attempt_budget_counts_only_physical_dispatches() {
+    let transport = ScriptedNativeTransport::new(vec![retryable_api_error(), native_success()]);
+    let mut service = service(transport.clone());
+    service.settings_backoff_ms = Some(0);
+    let budget = crate::ApiAttemptsLeft::new(1);
+    let mut request = main_request();
+    request.execution.api_attempts_left = Some(budget.clone());
+
+    let error = service
+        .drive_non_stream(request, retry_control(3), DispatchHeaderState::default())
+        .await
+        .expect_err("the retry must stop before dispatch when the operation budget is empty");
+
+    assert!(matches!(error, LlmError::ApiAttemptsExhausted));
+    assert_eq!(error.to_string(), "Not sent: no API attempts left");
+    assert_eq!(
+        ApiService::error_kind(&error),
+        "api_request_attempts_exhausted"
+    );
+    assert_eq!(ApiService::status_of(&error), None);
+    assert_eq!(
+        transport.requests().len(),
+        1,
+        "only the first request reached transport"
+    );
+    assert_eq!(budget.remaining(), 0);
 }

@@ -2197,10 +2197,18 @@ async fn run_slash_command_with_budget(
                 }
             }
         }
-        SlashDispatchResult::Unknown { name, .. } => {
+        SlashDispatchResult::Unknown {
+            name, suggestion, ..
+        } => {
             let catalog = runtime.headless_command_catalog().await;
-            let reminder = command_api::render_unknown_command_reminder(&name, &catalog);
-            let attachment = unknown_command_fallback_attachment(&name, &catalog, reminder.clone());
+            let reminder =
+                command_api::render_unknown_command_reminder(&name, suggestion.as_ref(), &catalog);
+            let attachment = unknown_command_fallback_attachment(
+                &name,
+                suggestion.as_ref(),
+                &catalog,
+                reminder.clone(),
+            );
             Box::pin(run_fallback_prompt_turn(
                 runtime,
                 input.clone(),
@@ -2239,20 +2247,29 @@ async fn run_slash_command_with_budget(
 
 fn unknown_command_fallback_attachment(
     command_name: &Utf16JsonProjection,
+    suggestion: Option<&Utf16JsonProjection>,
     catalog: &command_api::HeadlessCommandCatalog,
     rendered: Utf16JsonProjection,
 ) -> orchestrator::RequestContextTranscriptAttachment {
-    let available_names = Utf16JsonProjection::array(catalog.prompt_command_names.clone())
-        .expect("command catalog names form a JSON array");
+    let available_names = Utf16JsonProjection::array(
+        command_api::native_unknown_command_fallback_available_names(catalog),
+    )
+    .expect("command catalog names form a JSON array");
     let available_count = Utf16JsonProjection::parse(&catalog.available_command_count.to_string())
         .expect("command count is a JSON number");
-    let payload = Utf16JsonProjection::object(vec![
+    let mut fields = vec![
         ("type".to_owned(), "unknown_command_fallback".into()),
         ("commandName".to_owned(), command_name.clone()),
+    ];
+    if let Some(suggestion) = command_api::native_unknown_command_fallback_suggestion(suggestion) {
+        fields.push(("suggestion".to_owned(), suggestion));
+    }
+    fields.extend([
         ("availableCommandNames".to_owned(), available_names),
         ("availableCommandCount".to_owned(), available_count),
-    ])
-    .expect("unknown command fallback is a JSON object");
+    ]);
+    let payload =
+        Utf16JsonProjection::object(fields).expect("unknown command fallback is a JSON object");
     let rendered = Utf16JsonProjection::object(vec![("content".to_owned(), rendered)])
         .and_then(|line| Utf16JsonProjection::array(vec![line]))
         .expect("unknown command rendered view is a content array");

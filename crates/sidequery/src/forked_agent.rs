@@ -69,6 +69,9 @@ pub enum ForkPurpose {
 pub struct ForkedAgentRequest {
     /// Prompt messages appended after the cache-safe prefix.
     pub prompt_messages: Vec<ConversationMessage>,
+    /// Native operation budget shared across every compaction prefix and
+    /// summary fallback request issued by this forked operation.
+    pub api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
     /// Snapshot of the parent's prompt prefix to replay verbatim.
     pub cache_safe_params: CacheSafeParams,
     /// Free-form label used in logs (`compaction`, `supervisor`, ...).
@@ -304,6 +307,7 @@ impl ForkedAgentRunner {
 
         let mut request = SideQueryRequest {
             model_attempt: None,
+            api_attempts_left: req.api_attempts_left.clone(),
             native_prompt_context: None,
             model,
             profile: cp.tool_use_options.model_profile.clone(),
@@ -565,6 +569,7 @@ mod tests {
         max_output_tokens: Option<u32>,
     ) -> ForkedAgentRequest {
         ForkedAgentRequest {
+            api_attempts_left: None,
             prompt_messages: prompt,
             cache_safe_params: CacheSafeParams {
                 system_prompt: Arc::new(Utf16JsonProjection::from("PARENT SYSTEM PROMPT")),

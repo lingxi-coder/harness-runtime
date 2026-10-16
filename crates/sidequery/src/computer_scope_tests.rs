@@ -95,6 +95,7 @@ async fn direct_plain_and_strict_queries_ignore_the_parent_computer_continuation
                     model_source: None,
                     enable_prompt_caching: false,
                     model_attempt: None,
+                    api_attempts_left: None,
                     native_prompt_context: None,
                     model: "model".into(),
                     profile: Some("test".into()),
@@ -220,6 +221,7 @@ async fn session_compaction_fork_preserves_typed_attachment_bytes_and_function_c
                     model_source: None,
                     enable_prompt_caching: false,
                     model_attempt: None,
+                    api_attempts_left: None,
                     native_prompt_context: None,
                     model: "model".into(),
                     profile: Some("test".into()),
@@ -244,6 +246,7 @@ async fn session_compaction_fork_preserves_typed_attachment_bytes_and_function_c
             assert!(estimate.serialized_bytes > 0);
             let result = runner
                 .run(ForkedAgentRequest {
+                    api_attempts_left: None,
                     prompt_messages: vec![user("summarize all context")],
                     cache_safe_params: CacheSafeParams {
                         model_source: None,

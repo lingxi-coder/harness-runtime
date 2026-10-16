@@ -612,6 +612,7 @@ impl WebFetchTool {
         let req = SideQueryRequest {
             model_source: None,
             model_attempt: None,
+            api_attempts_left: None,
             native_prompt_context: None,
             model: self.apply_model(),
             profile: None,

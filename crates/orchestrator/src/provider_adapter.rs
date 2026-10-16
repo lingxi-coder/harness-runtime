@@ -376,6 +376,10 @@ impl OrchestratorApiClient for ProviderApiAdapter {
             .native_mid_conversation_tool_change_supported(model, profile)
     }
 
+    fn native_tool_change_feature_gates(&self) -> (bool, bool) {
+        self.service.native_tool_change_feature_gates()
+    }
+
     fn next_output_budget(
         &self,
         model: &str,

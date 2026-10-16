@@ -153,6 +153,12 @@ pub trait OrchestratorApiClient: Send + Sync {
         None
     }
 
+    /// Process-local Native MCTC and inline-tools gates sampled by the
+    /// selected host service for this request. Unwired clients fail closed.
+    fn native_tool_change_feature_gates(&self) -> (bool, bool) {
+        (false, false)
+    }
+
     /// Inspect the selected credential's redacted origin without executing auth.
     async fn credential_source(
         &self,
@@ -953,6 +959,7 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
                 | LlmError::MediaDelegationPartial { .. } => (Some("invalid_request"), None),
                 LlmError::MalformedToolInput { .. }
                 | LlmError::RequestDispatchRejected { .. }
+                | LlmError::ApiAttemptsExhausted
                 | LlmError::CostUnavailable { .. }
                 | LlmError::UnsupportedCapability { .. }
                 | LlmError::SettingsSource { .. } => (Some("unknown"), None),

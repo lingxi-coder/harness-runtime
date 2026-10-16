@@ -726,6 +726,7 @@ impl InsightsSideQueryExecutor {
                 // Native bze defaults enablePromptCaching to false.
                 enable_prompt_caching: false,
                 model_attempt: None,
+                api_attempts_left: None,
                 model: selected.model,
                 model_source: selected.model_source,
                 profile: selected.profile,

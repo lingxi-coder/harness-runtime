@@ -1277,6 +1277,7 @@ impl ConversationOrchestrator {
         };
         let request = sidequery::SideQueryRequest {
             model_attempt: None,
+            api_attempts_left: None,
             native_prompt_context: None,
             model_source: request_model_source,
             typed_attachment_ids: std::collections::HashSet::new(),
@@ -1452,6 +1453,7 @@ impl ConversationOrchestrator {
             messages.extend(trailing);
         }
         let mut request = sidequery::ForkedAgentRequest {
+            api_attempts_left: None,
             prompt_messages: vec![ConversationMessage::User {
                 api_message_override: None,
                 id: MessageId::new(),
@@ -1928,6 +1930,7 @@ impl ConversationOrchestrator {
         }
 
         let req = sidequery::ForkedAgentRequest {
+            api_attempts_left: None,
             prompt_messages: vec![ConversationMessage::user(
                 MessageId::new(),
                 Self::RECAP_PROMPT.to_string(),
@@ -1981,6 +1984,7 @@ impl ConversationOrchestrator {
             return Ok(None);
         }
         let req = sidequery::ForkedAgentRequest {
+            api_attempts_left: None,
             prompt_messages: vec![ConversationMessage::user(
                 MessageId::new(),
                 Self::SESSION_NAME_PROMPT.to_string(),
@@ -2082,6 +2086,7 @@ impl ConversationOrchestrator {
             *content = vec![source_answer_block(&wrapped)];
         }
         let req = sidequery::ForkedAgentRequest {
+            api_attempts_left: None,
             prompt_messages: vec![message],
             cache_safe_params: params,
             fork_label: "side_question".into(),

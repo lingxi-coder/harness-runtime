@@ -565,9 +565,8 @@ impl CommandRegistry {
     /// then `kjs` measures availability before the prompt-type and
     /// `disableModelInvocation` gates used for the names list.
     #[must_use]
-    pub fn headless_command_catalog(&self) -> crate::model::HeadlessCommandCatalog {
-        let available = self
-            .native_source_ordered_commands()
+    fn native_headless_available_commands(&self) -> Vec<&SlashCommand> {
+        self.native_source_ordered_commands()
             .into_iter()
             // Native `bge`'s `MPe` admits exactly prompt rows with
             // `!disableNonInteractive` or local rows with
@@ -575,16 +574,55 @@ impl CommandRegistry {
             // Native command row.
             .filter(|command| command.native_non_interactive_admission() == Some(true))
             .filter(|command| self.native_headless_command_available(command))
-            .collect::<Vec<_>>();
+            .collect()
+    }
+
+    pub fn headless_command_catalog(&self) -> crate::model::HeadlessCommandCatalog {
+        let available = self.native_headless_available_commands();
         let prompt_command_names = available
             .iter()
             .filter(|command| native_prompt_model_invocable(command))
-            .map(|command| command.name.clone())
+            .map(|command| native_user_facing_name(command).clone())
             .collect();
         crate::model::HeadlessCommandCatalog {
             prompt_command_names,
             available_command_count: available.len(),
         }
+    }
+
+    /// Find Native's headless unknown-command suggestion from the same prompt
+    /// rows and source order used by [`Self::headless_command_catalog`].
+    /// Candidate names and aliases stay raw here; `kKe` sanitization belongs
+    /// to the renderer after Native's nearest-name choice has been made.
+    pub(crate) fn headless_unknown_command_suggestion(
+        &self,
+        unknown_name: &Utf16JsonProjection,
+    ) -> Option<Utf16JsonProjection> {
+        let unknown_units = unknown_name.string_units("")?;
+        let available = self.native_headless_available_commands();
+        let mut best_distance = NATIVE_SUGGESTION_MAX_DISTANCE + 1;
+        let mut best = None;
+        for command in available
+            .iter()
+            .filter(|command| native_prompt_model_invocable(command))
+        {
+            let command = *command;
+            consider_native_suggestion_candidate(
+                &unknown_units,
+                native_user_facing_name(command),
+                &mut best_distance,
+                &mut best,
+            );
+            for alias in &command.aliases {
+                consider_native_suggestion_candidate(
+                    &unknown_units,
+                    alias,
+                    &mut best_distance,
+                    &mut best,
+                );
+            }
+        }
+        best
     }
 
     fn native_headless_command_available(&self, command: &SlashCommand) -> bool {
@@ -928,6 +966,89 @@ fn is_native_policy_prompt_row(command: &SlashCommand) -> bool {
 
 fn native_prompt_model_invocable(command: &&SlashCommand) -> bool {
     command.is_prompt() && !command.disable_model_invocation
+}
+
+fn native_user_facing_name(command: &SlashCommand) -> &Utf16JsonProjection {
+    command.user_facing_name.as_ref().unwrap_or(&command.name)
+}
+
+const NATIVE_SUGGESTION_MAX_DISTANCE: usize = 2;
+
+fn consider_native_suggestion_candidate(
+    unknown: &[u16],
+    candidate: &Utf16JsonProjection,
+    best_distance: &mut usize,
+    best: &mut Option<Utf16JsonProjection>,
+) {
+    let Some(candidate_units) = candidate.string_units("") else {
+        return;
+    };
+    if unknown.len().abs_diff(candidate_units.len()) > NATIVE_SUGGESTION_MAX_DISTANCE {
+        return;
+    }
+    let distance = native_suggestion_edit_distance(unknown, &candidate_units);
+    // Native nse uses a strict less-than update, so equal-distance ties retain
+    // the first name or alias in source order.
+    if distance < *best_distance {
+        *best_distance = distance;
+        *best = Some(candidate.clone());
+    }
+}
+
+/// Native 2.1.295 tZ: bounded optimal-string-alignment distance over JavaScript
+/// UTF-16 code units, including one-cost adjacent transposition.
+fn native_suggestion_edit_distance(left: &[u16], right: &[u16]) -> usize {
+    let maximum = NATIVE_SUGGESTION_MAX_DISTANCE;
+    let beyond_maximum = maximum + 1;
+    if left.len().abs_diff(right.len()) > maximum {
+        return beyond_maximum;
+    }
+
+    let mut two_rows_back = vec![beyond_maximum; right.len() + 2];
+    let mut previous = vec![beyond_maximum; right.len() + 2];
+    let mut current = vec![beyond_maximum; right.len() + 2];
+    for column in 0..=right.len().min(maximum) {
+        previous[column] = column;
+    }
+
+    for row in 1..=left.len() {
+        let first_column = 1.max(row.saturating_sub(maximum));
+        let last_column = right.len().min(row.saturating_add(maximum));
+        current[first_column - 1] = if first_column == 1 {
+            row.min(beyond_maximum)
+        } else {
+            beyond_maximum
+        };
+        let mut row_minimum = current[first_column - 1];
+        for column in first_column..=last_column {
+            let deletion = previous[column].saturating_add(1).min(beyond_maximum);
+            let insertion = current[column - 1].saturating_add(1).min(beyond_maximum);
+            let substitution = previous[column - 1]
+                .saturating_add(usize::from(left[row - 1] != right[column - 1]))
+                .min(beyond_maximum);
+            let mut distance = deletion.min(insertion).min(substitution);
+            if row > 1
+                && column > 1
+                && left[row - 1] == right[column - 2]
+                && left[row - 2] == right[column - 1]
+            {
+                distance = distance.min(
+                    two_rows_back[column - 2]
+                        .saturating_add(1)
+                        .min(beyond_maximum),
+                );
+            }
+            current[column] = distance;
+            row_minimum = row_minimum.min(distance);
+        }
+        current[last_column + 1] = beyond_maximum;
+        if row_minimum > maximum {
+            return beyond_maximum;
+        }
+        std::mem::swap(&mut two_rows_back, &mut previous);
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
 }
 
 fn native_command_source_rank(command: &SlashCommand) -> (u8, u8) {
@@ -1971,7 +2092,7 @@ mod tests {
             prompt_command_names: vec!["first".into(), "second".into()],
             available_command_count: 5,
         };
-        let rendered = crate::model::render_unknown_command_reminder(&unknown, &catalog);
+        let rendered = crate::model::render_unknown_command_reminder(&unknown, None, &catalog);
         let text = rendered.string_at("").unwrap();
         assert!(text.contains(
             "The user's message starts with a slash command, but no command with that name is available"
@@ -1998,7 +2119,8 @@ mod tests {
             ],
             available_command_count: 8,
         };
-        let rendered = crate::model::render_unknown_command_reminder(&"missing".into(), &catalog);
+        let rendered =
+            crate::model::render_unknown_command_reminder(&"missing".into(), None, &catalog);
         let text = rendered.string_at("").unwrap();
         assert!(text.contains("/valid-name_1:2.test"));
         assert!(text.contains(&format!("/{max_length}")));
@@ -2014,6 +2136,7 @@ mod tests {
         let invalid_names = vec!["skill.alpha+beta".into(), "skill-🧪-probe".into()];
         let singular = crate::model::render_unknown_command_reminder(
             &"missing".into(),
+            None,
             &crate::model::HeadlessCommandCatalog {
                 prompt_command_names: invalid_names.clone(),
                 available_command_count: 1,
@@ -2025,6 +2148,7 @@ mod tests {
             .contains("This session has 1 slash command, but none can be named here."));
         let plural = crate::model::render_unknown_command_reminder(
             &"missing".into(),
+            None,
             &crate::model::HeadlessCommandCatalog {
                 prompt_command_names: invalid_names,
                 available_command_count: 2,
@@ -2036,6 +2160,7 @@ mod tests {
             .contains("This session has 2 slash commands, but none can be named here."));
         let empty = crate::model::render_unknown_command_reminder(
             &"missing".into(),
+            None,
             &crate::model::HeadlessCommandCatalog::default(),
         );
         assert!(empty
@@ -2045,11 +2170,253 @@ mod tests {
     }
 
     #[test]
+    fn headless_suggestion_uses_user_facing_names_aliases_and_first_tie() {
+        use lingxi_core::types::SettingsScope;
+        use std::path::PathBuf;
+
+        let prompt = |canonical: &str, display: &str, aliases: &[&str]| SlashCommand {
+            name: canonical.into(),
+            description: "prompt".into(),
+            source: CommandSource::Settings(SettingsScope::Project),
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from(format!("/commands/{canonical}.md")),
+                frontmatter: Default::default(),
+                prompt_template: String::new().into(),
+            },
+            native_type: Some(crate::model::NativeCommandType::Prompt),
+            user_facing_name: Some(display.into()),
+            aliases: aliases.iter().map(|alias| (*alias).into()).collect(),
+            ..SlashCommand::default()
+        };
+        let mut registry = CommandRegistry::new();
+        registry.register_command(prompt("canonical-first", "bat", &["mat"]));
+        registry.register_command(prompt("canonical-second", "can", &[]));
+        registry.register_command(prompt("canonical-third", "canonical", &["comet"]));
+
+        let catalog = registry.headless_command_catalog();
+        assert_eq!(
+            catalog
+                .prompt_command_names
+                .iter()
+                .map(|name| name.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            ["bat", "can", "canonical"]
+        );
+        assert_eq!(
+            registry
+                .headless_unknown_command_suggestion(&"cat".into())
+                .and_then(|name| name.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("bat"),
+            "equal edit-distance ties keep the first name before its alias and later names"
+        );
+        assert_eq!(
+            registry
+                .headless_unknown_command_suggestion(&"comex".into())
+                .and_then(|name| name.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("comet"),
+            "Native searches aliases immediately after each user-facing command name"
+        );
+        assert!(registry
+            .headless_unknown_command_suggestion(&"zzzzzz".into())
+            .is_none());
+    }
+
+    #[test]
+    fn native_suggestion_uses_utf16_code_units_and_adjacent_transposition() {
+        let emoji_a = "🧪".encode_utf16().collect::<Vec<_>>();
+        let emoji_b = "😀".encode_utf16().collect::<Vec<_>>();
+        assert_eq!(native_suggestion_edit_distance(&emoji_a, &emoji_b), 2);
+        assert_eq!(native_suggestion_edit_distance(&[0xd800], &[0xd801]), 1);
+        assert_eq!(
+            native_suggestion_edit_distance(
+                &"clera".encode_utf16().collect::<Vec<_>>(),
+                &"clear".encode_utf16().collect::<Vec<_>>()
+            ),
+            1
+        );
+        assert_eq!(
+            native_suggestion_edit_distance(
+                &"abcdef".encode_utf16().collect::<Vec<_>>(),
+                &"uvwxyz".encode_utf16().collect::<Vec<_>>()
+            ),
+            3
+        );
+    }
+
+    #[test]
+    fn headless_suggestion_matches_native_295_utf16_candidate_vectors() {
+        use lingxi_core::types::SettingsScope;
+        use std::path::PathBuf;
+
+        let prompt = |canonical: &str,
+                      display: Utf16JsonProjection,
+                      aliases: Vec<Utf16JsonProjection>| SlashCommand {
+            name: canonical.into(),
+            description: "prompt".into(),
+            source: CommandSource::Settings(SettingsScope::Project),
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from(format!("/commands/{canonical}.md")),
+                frontmatter: Default::default(),
+                prompt_template: String::new().into(),
+            },
+            native_type: Some(crate::model::NativeCommandType::Prompt),
+            user_facing_name: Some(display),
+            aliases,
+            ..SlashCommand::default()
+        };
+
+        let mut registry = CommandRegistry::new();
+        registry.register_command(prompt("clear", "clear".into(), Vec::new()));
+        registry.register_command(prompt("book", "book".into(), Vec::new()));
+        assert_eq!(
+            registry
+                .headless_unknown_command_suggestion(&"clera".into())
+                .and_then(|name| name.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("clear"),
+            "Native counts the adjacent transposition as one edit"
+        );
+        assert_eq!(
+            registry
+                .headless_unknown_command_suggestion(&"boook".into())
+                .and_then(|name| name.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("book"),
+            "repeated characters use ordinary insertion distance"
+        );
+        assert_eq!(
+            registry
+                .headless_unknown_command_suggestion(&"Clear".into())
+                .and_then(|name| name.string_at("").map(str::to_owned))
+                .as_deref(),
+            Some("clear"),
+            "comparison is case-sensitive with no case-folding"
+        );
+        assert!(registry
+            .headless_unknown_command_suggestion(&"CLEAR".into())
+            .is_none());
+
+        let lone_surrogate =
+            Utf16JsonProjection::root_string("a�".into(), vec![b'a' as u16, 0xd800]).unwrap();
+        let mut utf16_registry = CommandRegistry::new();
+        utf16_registry.register_command(prompt("lone-surrogate", lone_surrogate, Vec::new()));
+        let suggestion = utf16_registry
+            .headless_unknown_command_suggestion(&"a".into())
+            .expect("one inserted UTF-16 code unit is within the native threshold");
+        assert_eq!(suggestion.string_units(""), Some(vec![b'a' as u16, 0xd800]));
+
+        let mut supplementary_registry = CommandRegistry::new();
+        supplementary_registry.register_command(prompt("emoji", "😀".into(), Vec::new()));
+        let supplementary = supplementary_registry
+            .headless_unknown_command_suggestion(&"🧪".into())
+            .expect("two changed UTF-16 code units are within the native threshold");
+        assert_eq!(supplementary.string_at(""), Some("😀"));
+        assert_eq!(
+            native_suggestion_edit_distance(
+                &"🧪".encode_utf16().collect::<Vec<_>>(),
+                &supplementary.string_units("").unwrap()
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn unsafe_nearest_candidate_is_selected_then_hidden_by_native_renderer() {
+        use lingxi_core::types::SettingsScope;
+        use std::path::PathBuf;
+
+        let prompt = |canonical: &str, display: &str| SlashCommand {
+            name: canonical.into(),
+            description: "prompt".into(),
+            source: CommandSource::Settings(SettingsScope::Project),
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from(format!("/commands/{canonical}.md")),
+                frontmatter: Default::default(),
+                prompt_template: String::new().into(),
+            },
+            native_type: Some(crate::model::NativeCommandType::Prompt),
+            user_facing_name: Some(display.into()),
+            ..SlashCommand::default()
+        };
+        let mut registry = CommandRegistry::new();
+        registry.register_command(prompt("canonical-unsafe", "zeta+"));
+        registry.register_command(prompt("canonical-safe", "zeta-"));
+
+        let suggestion = registry
+            .headless_unknown_command_suggestion(&"zeta".into())
+            .expect("the first equal-distance native candidate is selected");
+        assert_eq!(suggestion.string_at(""), Some("zeta+"));
+        let catalog = registry.headless_command_catalog();
+        assert_eq!(
+            catalog
+                .prompt_command_names
+                .iter()
+                .map(|name| name.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            ["zeta+", "zeta-"]
+        );
+        let rendered = crate::model::render_unknown_command_reminder(
+            &"zeta".into(),
+            Some(&suggestion),
+            &catalog,
+        );
+        let text = rendered.string_at("").unwrap();
+        assert!(!text.contains("The closest available command is"));
+        assert!(text.contains("/zeta-, and 1 more."));
+    }
+
+    #[test]
+    fn unknown_reminder_renders_only_native_safe_suggestions() {
+        let catalog = crate::model::HeadlessCommandCatalog {
+            prompt_command_names: vec!["run".into()],
+            available_command_count: 1,
+        };
+        let safe = crate::model::render_unknown_command_reminder(
+            &"rnu".into(),
+            Some(&"run".into()),
+            &catalog,
+        );
+        assert!(safe
+            .string_at("")
+            .unwrap()
+            .contains("The closest available command is /run. Ask the user before running it."));
+
+        let unsafe_suggestion =
+            Utf16JsonProjection::root_string("b�".into(), vec![b'b' as u16, 0xd800]).unwrap();
+        let unsafe_suggestion_rendered = crate::model::render_unknown_command_reminder(
+            &"rnu".into(),
+            Some(&unsafe_suggestion),
+            &catalog,
+        );
+        assert!(!unsafe_suggestion_rendered
+            .string_at("")
+            .unwrap()
+            .contains("The closest available command is"));
+        assert!(!unsafe_suggestion_rendered
+            .string_units("")
+            .unwrap()
+            .contains(&0xd800));
+
+        let punctuation = crate::model::render_unknown_command_reminder(
+            &"rnu".into(),
+            Some(&"run+".into()),
+            &catalog,
+        );
+        assert!(!punctuation
+            .string_at("")
+            .unwrap()
+            .contains("The closest available command is"));
+    }
+
+    #[test]
     fn unknown_reminder_accepts_command_name_at_256_utf16_units_only() {
         let max_length = "a".repeat(256);
         let too_long = "b".repeat(257);
         let max_rendered = crate::model::render_unknown_command_reminder(
             &max_length.clone().into(),
+            None,
             &crate::model::HeadlessCommandCatalog::default(),
         );
         let max_text = max_rendered.string_at("").unwrap();
@@ -2057,6 +2424,7 @@ mod tests {
 
         let too_long_rendered = crate::model::render_unknown_command_reminder(
             &too_long.clone().into(),
+            None,
             &crate::model::HeadlessCommandCatalog::default(),
         );
         let too_long_text = too_long_rendered.string_at("").unwrap();
@@ -2074,7 +2442,8 @@ mod tests {
                 .collect(),
             available_command_count: 43,
         };
-        let rendered = crate::model::render_unknown_command_reminder(&"missing".into(), &catalog);
+        let rendered =
+            crate::model::render_unknown_command_reminder(&"missing".into(), None, &catalog);
         let text = rendered.string_at("").unwrap();
         assert!(text.contains("/prompt-0, /prompt-1"));
         assert!(text.contains("/prompt-39, /prompt-40, and 2 more."));

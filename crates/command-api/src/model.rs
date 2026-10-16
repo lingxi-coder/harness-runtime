@@ -384,16 +384,13 @@ pub struct HeadlessCommandCatalog {
 #[must_use]
 pub fn render_unknown_command_reminder(
     command_name: &Utf16JsonProjection,
+    suggestion: Option<&Utf16JsonProjection>,
     catalog: &HeadlessCommandCatalog,
 ) -> Utf16JsonProjection {
     use PromptPart::{Source, Text};
 
     let command_name_is_safe = is_native_reminder_command_name(command_name);
-    let listed = catalog
-        .prompt_command_names
-        .iter()
-        .filter(|name| is_native_reminder_command_name(name))
-        .collect::<Vec<_>>();
+    let listed = native_unknown_command_fallback_available_names(catalog);
     let remaining = catalog.available_command_count.saturating_sub(listed.len());
     let remaining_count = remaining.to_string();
     let mut parts = vec![Text("<system-reminder>\n")];
@@ -407,6 +404,11 @@ pub fn render_unknown_command_reminder(
         parts.push(Text(
             "The user's message starts with a slash command, but no command with that name is available in this session, so it did not run. ",
         ));
+    }
+    if let Some(suggestion) = native_unknown_command_fallback_suggestion(suggestion) {
+        parts.push(Text("The closest available command is /"));
+        parts.push(Source(&suggestion));
+        parts.push(Text(". Ask the user before running it. "));
     }
 
     if listed.is_empty() {
@@ -443,6 +445,34 @@ pub fn render_unknown_command_reminder(
         " Treat the message as a plain request and do the task with the tools you have. If the task needs that command, tell the user it is not installed in this session. The user can add it as an organization plugin or a project skill. Do not give installation steps you are not sure of. Do not say the command ran.\n</system-reminder>",
     ));
     source_concat(parts)
+}
+
+/// Native `et` filters display names with `kKe` before taking its first 40;
+/// `OWr` renders this supplied list and computes the remainder from the raw
+/// available count. Keep that projection at the fallback boundary so both the
+/// reminder and its transcript attachment receive the same names.
+#[must_use]
+pub fn native_unknown_command_fallback_available_names(
+    catalog: &HeadlessCommandCatalog,
+) -> Vec<Utf16JsonProjection> {
+    catalog
+        .prompt_command_names
+        .iter()
+        .filter(|name| is_native_reminder_command_name(name))
+        .take(40)
+        .cloned()
+        .collect()
+}
+
+/// Native `et` omits an unsafe nearest candidate after selection; it does not
+/// continue searching for a safer, farther name.
+#[must_use]
+pub fn native_unknown_command_fallback_suggestion(
+    suggestion: Option<&Utf16JsonProjection>,
+) -> Option<Utf16JsonProjection> {
+    suggestion
+        .filter(|name| is_native_reminder_command_name(name))
+        .cloned()
 }
 
 /// Native 2.1.295 kKe: names shown in an unknown-command reminder must be at

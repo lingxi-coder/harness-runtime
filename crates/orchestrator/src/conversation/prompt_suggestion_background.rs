@@ -327,6 +327,7 @@ impl ConversationOrchestrator {
                             .main_model_source_for_request(&query_model, query_profile.as_deref())
                             .await,
                         model_attempt: None,
+                        api_attempts_left: None,
                         native_prompt_context: None,
                         model: query_model.clone(),
                         profile: query_profile.clone(),

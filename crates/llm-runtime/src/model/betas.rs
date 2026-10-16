@@ -61,6 +61,9 @@ pub const PER_TURN_CONTROL: &str = "per-turn-control-2026-07-01";
 /// Native main-request beta for admitted mid-conversation tool changes.
 pub const MID_CONVERSATION_TOOL_CHANGES: &str =
     lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges.header();
+/// Native's additional inline tool-definition beta (`p_`), admitted only after
+/// the MCTC gate and Native's request-local inline-tools gate.
+pub const INLINE_TOOLS_BETA: &str = "inline-tools-2026-09-15";
 /// Native safeguard beta paired with an admitted server-classifier context.
 pub const DANGEROUS_TOOL_USE: &str = "dangerous-tool-use-2026-09-03";
 /// Connector-text summarization (`ewt`, `pewter_owl_header` flag — never emitted).
@@ -142,6 +145,8 @@ pub struct BetaContext {
     pub per_turn_control: bool,
     /// Native admitted mid-conversation tool-change beta for this request.
     pub mid_conversation_tool_changes: bool,
+    /// Native admitted the additional inline-tools beta for this request.
+    pub inline_tools: bool,
     /// Native AFK beta after route admission and session/conversation latches.
     pub afk_mode: bool,
     /// Native admitted server-classifier safeguard beta for this request.
@@ -170,6 +175,7 @@ impl BetaContext {
             effort: false,
             per_turn_control: false,
             mid_conversation_tool_changes: false,
+            inline_tools: false,
             afk_mode: false,
             dangerous_tool_use: false,
             structured_output: false,
@@ -216,6 +222,12 @@ impl BetaContext {
     #[must_use]
     pub fn with_mid_conversation_tool_changes(mut self, on: bool) -> Self {
         self.mid_conversation_tool_changes = on;
+        self
+    }
+
+    #[must_use]
+    pub fn with_inline_tools(mut self, on: bool) -> Self {
+        self.inline_tools = on;
         self
     }
 
@@ -420,6 +432,26 @@ pub(crate) fn native_mid_conversation_tool_change_supported(
         baked_capability,
         lingxi_core::host::model_capabilities::is_known_model_id(&canonical),
     )
+}
+
+/// Combine the process-local Native MCTC and inline feature inputs after they
+/// have been sampled for one logical request. Route and model capability are
+/// checked separately by the caller. `inline_tools_env` preserves the
+/// distinction between an unset override and an explicit false value.
+pub(crate) fn native_tool_change_feature_gates_for_inputs(
+    b6_disabled: bool,
+    foamy_spring_enabled: bool,
+    session_profile_active: bool,
+    inline_tools_env: Option<&str>,
+    brisk_meadow_enabled: bool,
+) -> (bool, bool) {
+    let mid_conversation_tool_changes = !b6_disabled && foamy_spring_enabled;
+    let inline_tools = mid_conversation_tool_changes
+        && !session_profile_active
+        && inline_tools_env
+            .map(crate::structured_output::bool_value)
+            .unwrap_or(brisk_meadow_enabled);
+    (mid_conversation_tool_changes, inline_tools)
 }
 
 fn native_mid_conversation_tool_change_supported_with_inputs(
@@ -698,6 +730,14 @@ fn model_betas_in(
         && ctx.mid_conversation_tool_changes
     {
         betas.push(MID_CONVERSATION_TOOL_CHANGES);
+    }
+    if first_party
+        && ctx.request_kind
+            == lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main
+        && ctx.mid_conversation_tool_changes
+        && ctx.inline_tools
+    {
+        betas.push(INLINE_TOOLS_BETA);
     }
     if ctx.effort {
         betas.push(EFFORT);
@@ -1055,6 +1095,7 @@ mod tests {
             )
             .with_per_turn_control(true)
             .with_mid_conversation_tool_changes(true)
+            .with_inline_tools(true)
             .with_effort(true)
             .with_dangerous_tool_use(true);
         let assembled =
@@ -1067,16 +1108,42 @@ mod tests {
         let header = headers.get("anthropic-beta").unwrap().clone();
         let per_turn = header.find(PER_TURN_CONTROL).unwrap();
         let tool_changes = header.find(MID_CONVERSATION_TOOL_CHANGES).unwrap();
+        let inline_tools = header.find(INLINE_TOOLS_BETA).unwrap();
         let effort = header.find(EFFORT).unwrap();
         let dangerous = header.find(DANGEROUS_TOOL_USE).unwrap();
         assert!(
-            per_turn < tool_changes && tool_changes < effort && effort < dangerous,
+            per_turn < tool_changes
+                && tool_changes < inline_tools
+                && inline_tools < effort
+                && effort < dangerous,
             "{header}"
         );
+
+        let mctc_only = BetaContext::for_model("claude-sonnet-5-5")
+            .with_request_kind(
+                lingxi_llm_client::providers::anthropic::request_policy::AnthropicRequestKind::Main,
+            )
+            .with_mid_conversation_tool_changes(true);
+        let mctc_only_header =
+            assemble_beta_header(Provider::Anthropic, Endpoint::MessagesCreate, &mctc_only);
+        assert!(mctc_only_header.contains(MID_CONVERSATION_TOOL_CHANGES));
+        assert!(!mctc_only_header.contains(INLINE_TOOLS_BETA));
+
+        let orphaned_inline = mctc_only
+            .clone()
+            .with_inline_tools(true)
+            .with_mid_conversation_tool_changes(false);
+        let orphaned_inline_header = assemble_beta_header(
+            Provider::Anthropic,
+            Endpoint::MessagesCreate,
+            &orphaned_inline,
+        );
+        assert!(!orphaned_inline_header.contains(INLINE_TOOLS_BETA));
 
         let foundry_header =
             assemble_beta_header(Provider::Foundry, Endpoint::MessagesCreate, &context);
         assert!(foundry_header.contains(MID_CONVERSATION_TOOL_CHANGES));
+        assert!(foundry_header.contains(INLINE_TOOLS_BETA));
         assert!(foundry_header.contains(DANGEROUS_TOOL_USE));
 
         let side_query = BetaContext::for_model("claude-sonnet-5-5")
@@ -1088,10 +1155,12 @@ mod tests {
         let side_header =
             assemble_beta_header(Provider::Anthropic, Endpoint::MessagesCreate, &side_query);
         assert!(!side_header.contains(MID_CONVERSATION_TOOL_CHANGES));
+        assert!(!side_header.contains(INLINE_TOOLS_BETA));
         assert!(!side_header.contains(DANGEROUS_TOOL_USE));
         let count_header =
             assemble_beta_header(Provider::Anthropic, Endpoint::CountTokens, &context);
         assert!(!count_header.contains(MID_CONVERSATION_TOOL_CHANGES));
+        assert!(!count_header.contains(INLINE_TOOLS_BETA));
         assert!(!count_header.contains(DANGEROUS_TOOL_USE));
 
         lingxi_llm_client::providers::anthropic::request_policy::merge_beta_header(
@@ -1171,6 +1240,7 @@ mod tests {
             MID_CONVERSATION_TOOL_CHANGES,
             "mid-conversation-tool-changes-2026-07-01"
         );
+        assert_eq!(INLINE_TOOLS_BETA, "inline-tools-2026-09-15");
         assert_eq!(DANGEROUS_TOOL_USE, "dangerous-tool-use-2026-09-03");
         assert_eq!(AFK_MODE, "afk-mode-2026-01-31");
         assert_eq!(ADVISOR_TOOL, "advisor-tool-2026-03-01");
@@ -1366,6 +1436,49 @@ mod tests {
             Some(false),
             None,
         ));
+    }
+
+    #[test]
+    fn native_tool_change_feature_gates_keep_mctc_and_inline_inputs_distinct() {
+        assert_eq!(
+            native_tool_change_feature_gates_for_inputs(false, true, false, None, false),
+            (true, false),
+            "brisk-meadow is the unset inline override fallback"
+        );
+        assert_eq!(
+            native_tool_change_feature_gates_for_inputs(false, true, false, Some("true"), false),
+            (true, true)
+        );
+        assert_eq!(
+            native_tool_change_feature_gates_for_inputs(false, true, false, Some(" YES "), false,),
+            (true, true),
+            "the explicit override uses the existing structured_output::bool_value parser"
+        );
+        assert_eq!(
+            native_tool_change_feature_gates_for_inputs(false, true, false, Some("false"), true),
+            (true, false),
+            "an explicit false override wins over the server flag"
+        );
+        assert_eq!(
+            native_tool_change_feature_gates_for_inputs(false, true, false, Some("off"), true),
+            (true, false),
+            "unrecognized explicit values use the existing boolean helper's false result"
+        );
+        assert_eq!(
+            native_tool_change_feature_gates_for_inputs(false, true, true, Some("true"), true),
+            (true, false),
+            "a session profile disables only the additional inline gate"
+        );
+        assert_eq!(
+            native_tool_change_feature_gates_for_inputs(true, true, false, Some("true"), true),
+            (false, false),
+            "B6 suppresses both experimental beta gates"
+        );
+        assert_eq!(
+            native_tool_change_feature_gates_for_inputs(false, false, false, Some("true"), true),
+            (false, false),
+            "the foamy-spring MCTC gate is required before inline tools"
+        );
     }
 
     #[test]

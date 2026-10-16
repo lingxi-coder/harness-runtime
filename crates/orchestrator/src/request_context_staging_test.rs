@@ -3110,3 +3110,129 @@ fn a_new_prompt_does_not_adopt_the_previous_prompts_nar_staging() {
             .await;
     });
 }
+
+#[tokio::test]
+async fn prepared_native_tool_addition_obeys_mctc_and_inline_gate_snapshot() {
+    run_with_large_stack(|| async {
+        let root = tempfile::tempdir().unwrap();
+        let cwd = root.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let transcript = root.path().join("prepared-inline-gate.jsonl");
+        let filesystem: Arc<dyn FileSystem> =
+            Arc::new(PosixFileSystem::new(root.path().to_owned()));
+
+        for (profile, mctc_gate, inline_gate, expected_tool_kind) in [
+            ("native-mctc-off", false, false, None),
+            ("native-inline-off", true, false, Some("tool_reference")),
+            ("native-inline-on", true, true, Some("tool_definition")),
+        ] {
+            let api = Arc::new(MockApiClient::new(Vec::new()));
+            api.set_native_request_route(
+                Some(llm_runtime::ProtocolFamily::AnthropicMessages),
+                true,
+            );
+            api.set_native_mid_system_supported(true);
+            api.set_native_mid_tool_change_supported(Some(true));
+            api.set_native_tool_change_feature_gates(mctc_gate, inline_gate);
+
+            let tool = Arc::new(SkillListingGateTool { name: "Probe" });
+            let expected_schema = tool.input_schema().clone();
+            let mut registry = ToolRegistry::new();
+            registry.register_builtin(tool);
+            let orchestrator = orchestrator_with_api_and_tools(
+                &cwd,
+                &transcript,
+                filesystem.clone(),
+                api,
+                Arc::new(registry),
+            );
+
+            let prompt_id = MessageId::new();
+            let base_row = staged_system_attachment("environment", "environment snapshot");
+            let deferred_row = PromptIngressAttachment {
+                message: ConversationMessage::user_meta(
+                    MessageId::new(),
+                    "deferred tool fixture".into(),
+                ),
+                payload: Utf16JsonProjection::parse(
+                    r#"{"type":"deferred_tools_delta","surfacedNames":["Probe"],"restoredNames":[],"retractedTools":[],"toolSearchAbsent":true}"#,
+                )
+                .unwrap(),
+                rendered: Utf16JsonProjection::parse("[]").unwrap(),
+            };
+
+            REQUEST_CONTEXT
+                .scope(request_prompt_context(prompt_id), async {
+                    REQUEST_CONTEXT.with(|context| {
+                        *context
+                            .staged_ingress_attachments
+                            .lock()
+                            .unwrap() = Some(vec![base_row.clone()]);
+                    });
+                    assert!(cache_prompt_ingress_producer_rows(
+                        &orchestrator,
+                        "deferred_tools_delta",
+                        vec![deferred_row.clone()],
+                    )
+                    .await
+                    .is_some());
+
+                    let prepared = orchestrator
+                        .prepare_turn_step(ModelCallPath::Batched, None, true, true, None)
+                        .await
+                        .expect("the actual Native request preparation completes");
+                    let addition = prepared.snapshot.iter().find_map(|message| {
+                        let ConversationMessage::System {
+                            api_system: Some(api_system),
+                            ..
+                        } = message
+                        else {
+                            return None;
+                        };
+                        api_system.content.iter().find_map(|block| {
+                            let ContentBlock::ProviderContent { protocol, value } = block else {
+                                return None;
+                            };
+                            (protocol == "anthropic_messages"
+                                && value.string_at("/type") == Some("tool_addition"))
+                            .then_some(value)
+                        })
+                    });
+                    assert_eq!(
+                        addition
+                            .as_ref()
+                            .and_then(|value| value.string_at("/tool/type")),
+                        expected_tool_kind,
+                        "{profile}: MCTC gates the row and the inline gate selects definition vs reference"
+                    );
+                    if inline_gate {
+                        assert_eq!(
+                            addition
+                                .unwrap()
+                                .subprojection("/tool/definition/input_schema")
+                                .unwrap(),
+                            expected_schema,
+                            "the inline definition keeps the exact current source schema"
+                        );
+                    } else if mctc_gate {
+                        assert!(
+                            addition
+                                .unwrap()
+                                .at_pointer("/tool/definition")
+                                .is_none(),
+                            "the references-only path must not leak a tool schema"
+                        );
+                    }
+                    let request_facts = prepared
+                        .native_anthropic_request_context
+                        .expect("the selected Anthropic route carries Native request facts");
+                    assert_eq!(
+                        request_facts.mid_conversation_tool_changes_feature_gate,
+                        mctc_gate
+                    );
+                    assert_eq!(request_facts.inline_tools_feature_gate, inline_gate);
+                })
+                .await;
+        }
+    });
+}

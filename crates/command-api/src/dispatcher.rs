@@ -763,9 +763,11 @@ impl RegistrySlashDispatcher {
                     prompt: raw.clone(),
                 };
             }
+            let suggestion = reg.headless_unknown_command_suggestion(&unknown_name);
             return SlashDispatchResult::Unknown {
                 display: Self::unknown_command_literal(&unknown_name),
                 name: unknown_name,
+                suggestion,
             };
         };
 
@@ -779,6 +781,7 @@ impl RegistrySlashDispatcher {
                     PromptPart::Source(&parsed.name),
                     PromptPart::Text(" is unavailable in Side Chat"),
                 ]),
+                suggestion: None,
             };
         }
 
@@ -789,6 +792,7 @@ impl RegistrySlashDispatcher {
             return SlashDispatchResult::Unknown {
                 name: parsed.name.clone(),
                 display: Self::unknown_command_literal(&parsed.name),
+                suggestion: None,
             };
         }
 
@@ -975,6 +979,7 @@ impl RegistrySlashDispatcher {
                 None => SlashDispatchResult::Unknown {
                     name: parsed.name.clone(),
                     display: Self::unknown_command_literal(&parsed.name),
+                    suggestion: None,
                 },
             };
         }
@@ -1199,6 +1204,7 @@ impl RegistrySlashDispatcher {
             return SlashDispatchResult::Unknown {
                 name: parsed.name.clone(),
                 display: Self::unknown_command_literal(&parsed.name),
+                suggestion: None,
             };
         };
 
@@ -1842,6 +1848,7 @@ mod tests {
             SlashDispatchResult::Unknown {
                 name: Ujp::from("missing-command"),
                 display: "Unknown command: /missing-command".into(),
+                suggestion: None,
             }
         );
     }
@@ -2431,11 +2438,63 @@ mod tests {
             )
             .await;
         match result {
-            SlashDispatchResult::Unknown { name, display } => {
+            SlashDispatchResult::Unknown {
+                name,
+                display,
+                suggestion,
+            } => {
                 assert_eq!(name.string_at(""), Some("notacommand"));
                 assert_eq!(display_text(&display), "Unknown command: /notacommand");
+                assert!(suggestion.is_none());
             }
             other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_command_carries_native_name_alias_and_tie_suggestion() {
+        use lingxi_core::types::SettingsScope;
+        use std::path::PathBuf;
+
+        let prompt = |canonical: &str, display: &str, aliases: &[&str]| SlashCommand {
+            name: canonical.into(),
+            description: "prompt".into(),
+            source: CommandSource::Settings(SettingsScope::Project),
+            kind: SlashCommandKind::Markdown {
+                file_path: PathBuf::from(format!("/commands/{canonical}.md")),
+                frontmatter: Default::default(),
+                prompt_template: String::new().into(),
+            },
+            native_type: Some(crate::model::NativeCommandType::Prompt),
+            user_facing_name: Some(display.into()),
+            aliases: aliases.iter().map(|alias| (*alias).into()).collect(),
+            ..SlashCommand::default()
+        };
+        let mut registry = CommandRegistry::new();
+        registry.register_command(prompt("canonical-first", "bat", &["comet"]));
+        registry.register_command(prompt("canonical-second", "mat", &[]));
+        let dispatcher = RegistrySlashDispatcher::new(Arc::new(RwLock::new(registry)));
+
+        for (input, expected) in [
+            ("/cat", Some("bat")),
+            ("/comex", Some("comet")),
+            ("/zzzzzz", None),
+        ] {
+            match dispatcher
+                .dispatch(input.into(), lingxi_core::host::CancellationToken::new())
+                .await
+            {
+                SlashDispatchResult::Unknown { suggestion, .. } => {
+                    assert_eq!(
+                        suggestion
+                            .and_then(|name| name.string_at("").map(str::to_owned))
+                            .as_deref(),
+                        expected,
+                        "input {input}"
+                    );
+                }
+                other => panic!("expected Unknown for {input}, got {other:?}"),
+            }
         }
     }
 
@@ -2478,9 +2537,14 @@ mod tests {
             )
             .await
         {
-            SlashDispatchResult::Unknown { name, display } => {
+            SlashDispatchResult::Unknown {
+                name,
+                display,
+                suggestion,
+            } => {
                 assert_eq!(name.string_at(""), Some("checkup"));
                 assert_eq!(display_text(&display), "Unknown command: /checkup");
+                assert!(suggestion.is_none());
             }
             other => panic!("expected Unknown for gated /checkup, got {other:?}"),
         }
@@ -2528,9 +2592,14 @@ mod tests {
             .dispatch("/CLEAR".into(), lingxi_core::host::CancellationToken::new())
             .await;
         match result {
-            SlashDispatchResult::Unknown { name, display } => {
+            SlashDispatchResult::Unknown {
+                name,
+                display,
+                suggestion,
+            } => {
                 assert_eq!(name.string_at(""), Some("CLEAR"));
                 assert_eq!(display_text(&display), "Unknown command: /CLEAR");
+                assert!(suggestion.is_none());
             }
             other => panic!("expected Unknown for /CLEAR, got {other:?}"),
         }

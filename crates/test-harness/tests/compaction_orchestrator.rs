@@ -15,7 +15,7 @@ async fn over_threshold_triggers_autocompact() {
         ));
     }
     let r = orch
-        .process_iteration_tracked(messages, 0, &mut AutoCompactTrackingState::default())
+        .process_iteration_tracked(messages, 0, &mut AutoCompactTrackingState::default(), None)
         .await
         .unwrap();
     assert!(r.layers_applied.contains(&CompactionLayer::Autocompact));

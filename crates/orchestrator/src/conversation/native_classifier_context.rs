@@ -21,11 +21,14 @@ const NATIVE_CLASSIFIER_DIRECTORY_LIMIT: usize = 16;
 
 /// Build Native request facts independently from the optional server-classifier
 /// context. AutoMode permission state controls AFK and classifier admission;
-/// MCTC remains a provider/model beta decision in llm-runtime.
+/// the MCTC route and process-local feature snapshot remain separate facts for
+/// the runtime's later model and refusal checks.
 pub(crate) async fn request_context(
     snapshot: Option<PermissionPolicySnapshot>,
     server_classifier_route: bool,
     mid_conversation_tool_changes_route: bool,
+    mid_conversation_tool_changes_feature_gate: bool,
+    inline_tools_feature_gate: bool,
     query_source: &str,
 ) -> Option<NativeAnthropicRequestContext> {
     let mut request_context = NativeAnthropicRequestContext {
@@ -33,6 +36,8 @@ pub(crate) async fn request_context(
         // runtime still applies Native's model, feature, and sticky
         // beta-rejection gates before emitting this beta.
         mid_conversation_tool_changes: mid_conversation_tool_changes_route,
+        mid_conversation_tool_changes_feature_gate,
+        inline_tools_feature_gate,
         ..NativeAnthropicRequestContext::default()
     };
     let Some(snapshot) = snapshot else {
@@ -1244,12 +1249,14 @@ mod tests {
             .map(|needle| source.find(needle).expect("field is present"))
             .collect();
         assert!(positions.windows(2).all(|window| window[0] < window[1]));
-        let context = request_context(Some(snapshot), true, true, "repl_main_thread")
+        let context = request_context(Some(snapshot), true, true, true, false, "repl_main_thread")
             .await
             .unwrap();
         assert!(context.server_classifier.is_some());
         assert!(context.afk_mode);
         assert!(context.mid_conversation_tool_changes);
+        assert!(context.mid_conversation_tool_changes_feature_gate);
+        assert!(!context.inline_tools_feature_gate);
     }
 
     #[tokio::test]
@@ -1262,9 +1269,16 @@ mod tests {
         let mut snapshot = admitted_plan_snapshot(&cwd, &home);
         snapshot.classifier_host_capabilities.diskless = true;
 
-        let request_context = request_context(Some(snapshot), true, false, "repl_main_thread")
-            .await
-            .unwrap();
+        let request_context = request_context(
+            Some(snapshot),
+            true,
+            false,
+            false,
+            false,
+            "repl_main_thread",
+        )
+        .await
+        .unwrap();
         let serialized = request_context
             .server_classifier
             .as_ref()
@@ -1314,13 +1328,15 @@ mod tests {
         let mut snapshot = admitted_plan_snapshot(&cwd, &home);
         snapshot.active_auto_mode = false;
 
-        let context = request_context(Some(snapshot), true, true, "repl_main_thread")
+        let context = request_context(Some(snapshot), true, true, true, false, "repl_main_thread")
             .await
             .unwrap();
 
         assert!(context.server_classifier.is_none());
         assert!(!context.afk_mode);
         assert!(context.mid_conversation_tool_changes);
+        assert!(context.mid_conversation_tool_changes_feature_gate);
+        assert!(!context.inline_tools_feature_gate);
     }
 
     #[test]
@@ -1364,7 +1380,7 @@ mod tests {
         snapshot.permission_mode = "auto".to_owned();
         snapshot.native_auto_mode_circuit_broken = true;
 
-        let context = request_context(Some(snapshot), true, true, "repl_main_thread")
+        let context = request_context(Some(snapshot), true, true, true, false, "repl_main_thread")
             .await
             .unwrap();
 

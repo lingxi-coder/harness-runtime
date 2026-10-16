@@ -4,8 +4,93 @@
 //! authority or carry account identity across sessions. This context is never
 //! forwarded to a provider; selected account scopes are passed as SDK options.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+
+/// Native's optional operation-scoped `apiAttemptsLeft` counter.
+///
+/// Clones share one count so compaction prefix retries, summary fallback, and
+/// the SDK dispatches they issue all spend from the same operation. `None` at
+/// the request boundary means unlimited; a budget constructed with zero
+/// rejects before the first physical dispatch.
+#[derive(Clone)]
+pub struct ApiAttemptsLeft {
+    remaining: Arc<AtomicU32>,
+}
+
+impl ApiAttemptsLeft {
+    /// Create a finite operation budget.
+    #[must_use]
+    pub fn new(count: u32) -> Self {
+        Self {
+            remaining: Arc::new(AtomicU32::new(count)),
+        }
+    }
+
+    /// Number of physical dispatches still available to the operation.
+    #[must_use]
+    pub fn remaining(&self) -> u32 {
+        self.remaining.load(Ordering::Acquire)
+    }
+
+    /// Whether `other` belongs to the same logical operation budget.
+    #[must_use]
+    pub fn shares_scope_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.remaining, &other.remaining)
+    }
+
+    pub(crate) fn reserve(&self) -> Option<ApiAttemptReservation> {
+        self.remaining
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                if remaining == 0 {
+                    None
+                } else {
+                    Some(remaining - 1)
+                }
+            })
+            .ok()?;
+        Some(ApiAttemptReservation {
+            remaining: Arc::clone(&self.remaining),
+            committed: false,
+        })
+    }
+}
+
+impl std::fmt::Debug for ApiAttemptsLeft {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ApiAttemptsLeft")
+            .field("remaining", &self.remaining())
+            .finish()
+    }
+}
+
+impl PartialEq for ApiAttemptsLeft {
+    fn eq(&self, other: &Self) -> bool {
+        self.shares_scope_with(other)
+    }
+}
+
+impl Eq for ApiAttemptsLeft {}
+
+pub(crate) struct ApiAttemptReservation {
+    remaining: Arc<AtomicU32>,
+    committed: bool,
+}
+
+impl ApiAttemptReservation {
+    pub(crate) fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for ApiAttemptReservation {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.remaining.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+}
 
 type AdmissionCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 
@@ -199,6 +284,9 @@ impl PartialEq for RequestCredentials {
 /// recovery scope; it does not authorize another physical dispatch.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ExecutionContext {
+    /// Optional operation-wide physical API attempt budget. Host-only; never
+    /// serialized into provider input. Cloned retry requests share its count.
+    pub api_attempts_left: Option<ApiAttemptsLeft>,
     /// Preserve automatic manual-thinking intent until SDK attempt preparation.
     pub automatic_thinking_budget: bool,
     /// Trusted main/origin session captured before provider preparation.
@@ -363,7 +451,7 @@ impl ExecutionContext {
 
 #[cfg(test)]
 mod tests {
-    use super::{RequestDispatchAdmission, RequestDispatchObserver};
+    use super::{ApiAttemptsLeft, RequestDispatchAdmission, RequestDispatchObserver};
     use std::collections::HashSet;
     use std::sync::Arc;
 
@@ -393,6 +481,35 @@ mod tests {
         let stale_id = lingxi_core::types::MessageId::new();
         let admission = RequestDispatchAdmission::for_message_sources([(stale_id, check(false))]);
         assert!(!admission.is_admitted());
+    }
+
+    #[test]
+    fn api_attempt_reservation_refunds_only_before_dispatch_commit() {
+        let budget = ApiAttemptsLeft::new(1);
+        let clone = budget.clone();
+        assert!(budget.shares_scope_with(&clone));
+
+        let reservation = budget.reserve().expect("one physical attempt available");
+        assert_eq!(budget.remaining(), 0);
+        drop(reservation);
+        assert_eq!(clone.remaining(), 1, "pre-dispatch rejection refunds it");
+
+        budget
+            .reserve()
+            .expect("refunded attempt is available")
+            .commit();
+        assert_eq!(budget.remaining(), 0, "dispatched attempts stay spent");
+        assert!(budget.reserve().is_none());
+    }
+
+    #[test]
+    fn api_attempt_budgets_are_independent_and_zero_blocks_first_dispatch() {
+        let zero = ApiAttemptsLeft::new(0);
+        let independent = ApiAttemptsLeft::new(1);
+        assert!(!zero.shares_scope_with(&independent));
+        assert!(zero.reserve().is_none());
+        assert_eq!(zero.remaining(), 0);
+        assert_eq!(independent.remaining(), 1);
     }
 
     #[test]

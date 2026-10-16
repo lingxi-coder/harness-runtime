@@ -290,6 +290,76 @@ async fn streaming_typed_thinking_400_retries_once_with_zero_ordinary_retries() 
 }
 
 #[tokio::test]
+async fn streaming_dispatch_spends_one_operation_api_attempt() {
+    let transport = NativeDispatchTransport::new(
+        Vec::new(),
+        vec![StreamPlan {
+            status: 200,
+            headers: BTreeMap::new(),
+            frames: anthropic_success_frames(),
+        }],
+    );
+    let service = native_service(transport.clone());
+    let budget = crate::ApiAttemptsLeft::new(1);
+    let mut request = main_request(
+        4096,
+        crate::model::thinking_state::ThinkingState::new(
+            crate::model::thinking::ThinkingConfig::Adaptive,
+        ),
+    );
+    request.stream = true;
+    request.execution.api_attempts_left = Some(budget.clone());
+
+    let mut stream = service.stream_request(request).await.expect("stream opens");
+    while let Some(event) = stream.next().await {
+        event.expect("successful stream event");
+    }
+
+    assert_eq!(transport.requests().len(), 1);
+    assert_eq!(budget.remaining(), 0);
+}
+
+#[tokio::test]
+async fn exhausted_stream_budget_stops_before_transport_with_typed_error() {
+    let transport = NativeDispatchTransport::new(
+        Vec::new(),
+        vec![StreamPlan {
+            status: 200,
+            headers: BTreeMap::new(),
+            frames: anthropic_success_frames(),
+        }],
+    );
+    let mut service = native_service(transport.clone());
+    service.settings_max_retries = Some(0);
+    let budget = crate::ApiAttemptsLeft::new(0);
+    let mut request = main_request(
+        4096,
+        crate::model::thinking_state::ThinkingState::new(
+            crate::model::thinking::ThinkingConfig::Adaptive,
+        ),
+    );
+    request.stream = true;
+    request.execution.api_attempts_left = Some(budget.clone());
+
+    let error = match service.stream_request(request).await {
+        Err(error) => error,
+        Ok(mut stream) => loop {
+            match stream.next().await {
+                Some(Err(error)) => break error,
+                Some(Ok(_)) => {}
+                None => panic!("exhausted stream budget ended without an error"),
+            }
+        },
+    };
+
+    assert!(matches!(error, LlmError::ApiAttemptsExhausted));
+    assert_eq!(error.to_string(), "Not sent: no API attempts left");
+    assert_eq!(ApiService::status_of(&error), None);
+    assert_eq!(transport.requests().len(), 0);
+    assert_eq!(budget.remaining(), 0);
+}
+
+#[tokio::test]
 async fn native_manual_floor_carries_resolved_output_provenance_to_the_sdk() {
     let transport = NativeDispatchTransport::new(vec![native_success()], Vec::new());
     let service = native_service(transport.clone());

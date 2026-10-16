@@ -1727,6 +1727,7 @@ impl ConversationOrchestrator {
                                     &split.to_summarize,
                                     instructions.as_ref(),
                                     direction,
+                                    None,
                                 ) => result.map_err(|error| {
                                     hooks::mods::ModError::Native(Self::summarize_error(error))
                                 })?,
@@ -2013,6 +2014,7 @@ impl ConversationOrchestrator {
                                 result = compactor.process_forced(
                                     source_messages.clone(),
                                     instructions.as_ref(),
+                                    None,
                                 ) => result.map_err(|error| {
                                     hooks::mods::ModError::Native(Self::summarize_error(error))
                                 })?,
@@ -3726,6 +3728,7 @@ impl ConversationOrchestrator {
                     instructions.as_ref(),
                     last_assistant_at,
                     std::time::SystemTime::now(),
+                    None,
                 );
                 let result = if let Some(cancel) = cancel {
                     tokio::select! {

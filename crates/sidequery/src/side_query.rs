@@ -72,6 +72,10 @@ pub struct SideQueryRequest {
     /// Host-owned registered logical call; request JSON cannot supply it.
     #[serde(skip)]
     pub model_attempt: Option<lingxi_core::host::ModelAttemptContext>,
+    /// Operation-scoped physical API attempt budget. It is consumed by the
+    /// runtime dispatch path and never serialized into side-query JSON.
+    #[serde(skip)]
+    pub api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
     /// Model id (e.g. `claude-haiku-4-5`).
     pub model: String,
     /// Host-local exact Native model source used only when the parent route
@@ -366,6 +370,7 @@ mod source_system_prompt_tests {
         SideQueryRequest {
             enable_prompt_caching: false,
             model_attempt: None,
+            api_attempts_left: None,
             native_prompt_context: None,
             model: "model".into(),
             model_source: None,

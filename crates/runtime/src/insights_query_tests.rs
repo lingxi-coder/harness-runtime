@@ -534,6 +534,7 @@ fn insights_request(
     SideQueryRequest {
         enable_prompt_caching: false,
         model_attempt: None,
+        api_attempts_left: None,
         native_prompt_context,
         model: "claude-haiku-4-5".into(),
         model_source: None,

@@ -296,6 +296,7 @@ impl SessionMemoryExtractor {
         cache_safe_params: CacheSafeParams,
     ) -> Result<Utf16JsonProjection, MemoryError> {
         let request = ForkedAgentRequest {
+            api_attempts_left: None,
             prompt_messages: vec![ConversationMessage::user(
                 MessageId::new(),
                 SESSION_MEMORY_EXTRACTION_PROMPT.to_string(),

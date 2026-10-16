@@ -633,6 +633,7 @@ impl SideQueryClient for ProviderSideQueryClient {
             apply_exact_model_source(&mut canonical, model_source.as_ref())?;
             canonical.execution.enable_prompt_caching = Some(request.enable_prompt_caching);
             canonical.execution.model_attempt = request.model_attempt;
+            canonical.execution.api_attempts_left = request.api_attempts_left;
             canonical.execution.fork_point_message_id = options.fork_point_message_id;
             let explicit_system_blocks = options.system_blocks.is_some();
             if let Some(system_blocks) = options.system_blocks {
@@ -738,6 +739,7 @@ impl SideQueryClient for ProviderSideQueryClient {
                 context.input_protocol = Some(family);
                 context.capture_retry_count = true;
                 context.query_source = Some(query_source);
+                context.api_attempts_left = request.api_attempts_left;
                 context.message_json_string_overrides = overrides;
                 context
             },
@@ -1296,6 +1298,7 @@ mod tests {
         SideQueryRequest {
             enable_prompt_caching: false,
             model_attempt: None,
+            api_attempts_left: None,
             native_prompt_context: None,
             model: "claude-haiku-4-5".into(),
             model_source: None,

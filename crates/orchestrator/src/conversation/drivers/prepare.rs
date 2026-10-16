@@ -297,6 +297,33 @@ impl ConversationOrchestrator {
         let prepared_call = self
             .prepare_model_call_snapshot(path, system, user_cancel)
             .await?;
+        let first_party_anthropic = self
+            .api
+            .is_first_party_route(&prepared_call.model, prepared_call.model_profile.as_deref());
+        let protocol = self
+            .api
+            .protocol_for_model(&prepared_call.model, prepared_call.model_profile.as_deref());
+        let native_classifier_route = protocol.as_ref().is_some_and(|protocol| {
+            super::super::native_classifier_context::supports_native_classifier_route(
+                protocol,
+                first_party_anthropic,
+            )
+        });
+        let native_request_route = protocol.as_ref().is_some_and(
+            super::super::native_classifier_context::supports_native_request_context_route,
+        );
+        let mid_conversation_tool_changes_route = protocol.as_ref().is_some_and(|protocol| {
+            super::super::native_classifier_context::supports_native_mid_conversation_tool_changes_route(
+                protocol,
+                first_party_anthropic,
+            )
+        });
+        let (mid_conversation_tool_changes_feature_gate, inline_tools_feature_gate) =
+            if mid_conversation_tool_changes_route {
+                self.api.native_tool_change_feature_gates()
+            } else {
+                (false, false)
+            };
         let mut snapshot = prepared_call.history_snapshot;
         // The current Native NAr batch remains task-local until accepted request
         // assembly. Keep its identities out of this earlier history snapshot;
@@ -518,6 +545,7 @@ impl ConversationOrchestrator {
                 "native_tool_changes",
                 || {
                     if !mctc_supported
+                        || !mid_conversation_tool_changes_feature_gate
                         || beta_rejections.rejected(mctc_beta)
                         || beta_rejections.rejected(mcs_beta)
                         || latches.tool_change_header_refused
@@ -529,7 +557,11 @@ impl ConversationOrchestrator {
                         .filter_map(|row| {
                             super::super::reminders_impl::native_tool_change_api_system_message(
                                 row,
-                                &complete_wire_tools,
+                                if inline_tools_feature_gate {
+                                    &complete_wire_tools
+                                } else {
+                                    &[]
+                                },
                             )
                         })
                         .collect()
@@ -551,6 +583,7 @@ impl ConversationOrchestrator {
             prepared_call.model_profile.as_deref(),
         ) == Some(true);
         let surface_late_tool_additions = mctc_supported
+            && mid_conversation_tool_changes_feature_gate
             && !projection_beta_rejections.rejected(mctc_beta)
             && !projection_beta_rejections.rejected(mcs_beta)
             && !projection_latches.tool_change_header_refused
@@ -615,6 +648,7 @@ impl ConversationOrchestrator {
             let use_tool_search = self.tools.deferral().request_supported()
                 && wire_tools.iter().any(|tool| tool.name == "ToolSearch");
             let mctc_blocks_eligible = mctc_supported
+                && mid_conversation_tool_changes_feature_gate
                 && !beta_rejections.rejected(mctc_beta)
                 && !beta_rejections.rejected(mcs_beta)
                 && !latches.tool_change_header_refused
@@ -936,32 +970,13 @@ impl ConversationOrchestrator {
         // Native's server classifier is attached only to the selected
         // first-party Anthropic or Foundry Claude route. Resolve provider
         // identity instead of inferring eligibility from the model string.
-        let first_party_anthropic = self
-            .api
-            .is_first_party_route(&prepared_call.model, prepared_call.model_profile.as_deref());
-        let protocol = self
-            .api
-            .protocol_for_model(&prepared_call.model, prepared_call.model_profile.as_deref());
-        let native_classifier_route = protocol.as_ref().is_some_and(|protocol| {
-            super::super::native_classifier_context::supports_native_classifier_route(
-                protocol,
-                first_party_anthropic,
-            )
-        });
-        let native_request_route = protocol.as_ref().is_some_and(
-            super::super::native_classifier_context::supports_native_request_context_route,
-        );
-        let mid_conversation_tool_changes_route = protocol.as_ref().is_some_and(|protocol| {
-            super::super::native_classifier_context::supports_native_mid_conversation_tool_changes_route(
-                protocol,
-                first_party_anthropic,
-            )
-        });
         let native_anthropic_request_context = if native_request_route {
             super::super::native_classifier_context::request_context(
                 self.perms.permission_policy_snapshot(),
                 native_classifier_route,
                 mid_conversation_tool_changes_route,
+                mid_conversation_tool_changes_feature_gate,
+                inline_tools_feature_gate,
                 &self.config.query_source,
             )
             .await

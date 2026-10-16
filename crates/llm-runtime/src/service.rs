@@ -2196,6 +2196,34 @@ fn extra_metadata_object_uncached() -> Option<serde_json::Map<String, serde_json
 }
 
 impl ApiService {
+    /// Sample Native's process-local MCTC and inline-tools gates for one
+    /// logical request. Callers retain the result in the trusted request
+    /// context so preparation, beta generation, and SDK encoding share it.
+    pub fn native_tool_change_feature_gates(&self) -> (bool, bool) {
+        let b6_disabled = crate::model::thinking_binding_controls::native_b6_disabled();
+        let foamy_spring_enabled = telemetry::feature_flags::flag_bool("tengu_foamy_spring", true);
+        let session_profile_active =
+            std::env::var_os("CCR_SESSION_PROFILE").is_some_and(|value| !value.is_empty());
+        let inline_tools_env = std::env::var_os("CLAUDE_CODE_INLINE_TOOLS")
+            .map(|value| value.to_str().map(str::to_owned).unwrap_or_default());
+        let brisk_meadow_enabled = if !b6_disabled
+            && foamy_spring_enabled
+            && !session_profile_active
+            && inline_tools_env.is_none()
+        {
+            telemetry::feature_flags::flag_bool("tengu_brisk_meadow", false)
+        } else {
+            false
+        };
+        crate::model::betas::native_tool_change_feature_gates_for_inputs(
+            b6_disabled,
+            foamy_spring_enabled,
+            session_profile_active,
+            inline_tools_env.as_deref(),
+            brisk_meadow_enabled,
+        )
+    }
+
     pub fn hosted_search_route(
         &self,
         model: &str,
@@ -4219,6 +4247,24 @@ impl ApiService {
         };
         let automatic_effort = supported && !explicit_effort && selected_is_string;
         let beta_model_identity = self.model_unsupported_identity(prepared);
+        let native_mctc_admitted = native_request_facts.is_some_and(|facts| {
+            facts.mid_conversation_tool_changes
+                && facts.mid_conversation_tool_changes_feature_gate
+        }) && self
+            .native_mid_conversation_tool_change_supported(
+                &prepared.route.resolved_route.request_model,
+                Some(&prepared.route.resolved_route.profile_name),
+            ) == Some(true)
+            && !prepared.beta_rejection_state.rejected(
+                lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges,
+            )
+            && !lingxi_llm_client::providers::anthropic::beta_repair::ModelUnsupportedBetaRejections::for_process()
+                .rejected(
+                    &beta_model_identity,
+                    lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges,
+                );
+        let native_inline_tools_admitted = native_mctc_admitted
+            && native_request_facts.is_some_and(|facts| facts.inline_tools_feature_gate);
         BetaContext::for_model(&model)
             .with_interactive(interactive)
             .with_show_thinking_summaries(
@@ -4227,23 +4273,8 @@ impl ApiService {
             .with_fast_mode(fast_mode)
             .with_effort(automatic_effort)
             .with_per_turn_control(native_per_turn_control)
-            .with_mid_conversation_tool_changes(
-                native_request_facts.is_some_and(|facts| facts.mid_conversation_tool_changes)
-                    && self
-                        .native_mid_conversation_tool_change_supported(
-                            &prepared.route.resolved_route.request_model,
-                            Some(&prepared.route.resolved_route.profile_name),
-                        )
-                        == Some(true)
-                    && !prepared.beta_rejection_state.rejected(
-                        lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges,
-                    )
-                    && !lingxi_llm_client::providers::anthropic::beta_repair::ModelUnsupportedBetaRejections::for_process()
-                        .rejected(
-                            &beta_model_identity,
-                            lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges,
-                        ),
-            )
+            .with_mid_conversation_tool_changes(native_mctc_admitted)
+            .with_inline_tools(native_inline_tools_admitted)
             .with_afk_mode(native_afk_mode)
             .with_dangerous_tool_use(
                 native_request_facts.is_some_and(|facts| facts.server_classifier.is_some()),
@@ -6485,6 +6516,7 @@ impl ApiService {
             // llm-runtime-only classes — no api-client analogue; use descriptive names.
             LlmError::InvalidRequest { .. } => "invalid_request",
             LlmError::RequestDispatchRejected { .. } => "request_dispatch_rejected",
+            LlmError::ApiAttemptsExhausted => "api_request_attempts_exhausted",
             LlmError::QuotaExceeded => "quota_exceeded",
             LlmError::ModelUnavailable => "model_unavailable",
             LlmError::CostUnavailable { .. } => "cost_unavailable",
@@ -7352,7 +7384,8 @@ impl ApiService {
             | LlmError::MediaDelegationUnavailable { .. }
             | LlmError::MediaDelegationPartial { .. }
             | LlmError::SettingsSource { .. }
-            | LlmError::RequestDispatchRejected { .. } => None,
+            | LlmError::RequestDispatchRejected { .. }
+            | LlmError::ApiAttemptsExhausted => None,
             LlmError::ProviderErrorText { .. } | LlmError::ProxyAuthHelperRetry { .. } => {
                 unreachable!("classification_source removes carrier wrappers")
             }
@@ -7619,8 +7652,10 @@ impl ApiService {
             let dispatch_started = tokio::time::Instant::now();
             let admission = req.execution.request_dispatch_admission.clone();
             let dispatch_observer = req.execution.request_dispatch_observer.clone();
+            let api_attempts_left = req.execution.api_attempts_left.clone();
             let mut admission_rejected = false;
             let mut dispatch_callback_rejected = false;
+            let mut callback_error = None;
             let cache_snapshot = crate::prompt_cache::snapshot_prepared(&prepared);
             let mctc_header_sent = Self::request_beta_tokens(&prepared).iter().any(|beta| {
                 beta == lingxi_llm_client::providers::anthropic::beta_repair::Beta::MidConversationToolChanges.header()
@@ -7652,6 +7687,7 @@ impl ApiService {
                     });
                 }
                 prepared.before_computer_submit().await?;
+                let mut api_attempt_reservation = None;
                 let received = call
                     .dispatch_once_with(|| {
                         if admission
@@ -7664,9 +7700,22 @@ impl ApiService {
                                 message: "host rejected request dispatch admission".into(),
                             }));
                         }
+                        if let Some(budget) = api_attempts_left.as_ref() {
+                            let Some(reservation) = budget.reserve() else {
+                                dispatch_callback_rejected = true;
+                                callback_error = Some(LlmError::ApiAttemptsExhausted);
+                                return Err(crate::execution::wire_error(
+                                    LlmError::ApiAttemptsExhausted,
+                                ));
+                            };
+                            api_attempt_reservation = Some(reservation);
+                        }
                         if let Err(error) = attempt.mark_dispatched() {
                             dispatch_callback_rejected = true;
                             return Err(crate::execution::wire_error(error));
+                        }
+                        if let Some(reservation) = api_attempt_reservation.take() {
+                            reservation.commit();
                         }
                         if mctc_header_sent {
                             if let Some(scope) = thinking_recovery_scope.as_ref() {
@@ -7680,8 +7729,15 @@ impl ApiService {
                         crate::prompt_cache::observe_snapshot(cache_snapshot.clone());
                         Ok(())
                     })
-                    .await
-                    .map_err(crate::upstream::error)?;
+                    .await;
+                let received = match received {
+                    Ok(received) => received,
+                    Err(error) => {
+                        return Err(callback_error
+                            .take()
+                            .unwrap_or_else(|| crate::upstream::error(error)));
+                    }
+                };
                 received.collect().await.map_err(crate::upstream::error)
             };
             let resp_result = match remaining {
@@ -9300,6 +9356,7 @@ impl ApiService {
             let mut attempt = crate::model_attempt::WireAttempt::new(None);
             let admission = req.execution.request_dispatch_admission.clone();
             let dispatch_observer = req.execution.request_dispatch_observer.clone();
+            let api_attempts_left = req.execution.api_attempts_left.clone();
             let mut admission_rejected = false;
 
             // Open stream through the prepared-call path so injected headers are
@@ -9371,7 +9428,18 @@ impl ApiService {
                                     message: "host rejected request dispatch admission".into(),
                                 });
                             }
+                            let api_attempt_reservation = match api_attempts_left.as_ref() {
+                                Some(budget) => Some(
+                                    budget
+                                        .reserve()
+                                        .ok_or(LlmError::ApiAttemptsExhausted)?,
+                                ),
+                                None => None,
+                            };
                             attempt.mark_dispatched()?;
+                            if let Some(reservation) = api_attempt_reservation {
+                                reservation.commit();
+                            }
                             if mctc_header_sent {
                                 if let Some(scope) = thinking_recovery_scope.as_ref() {
                                     scope.mark_mid_conversation_tool_changes_sent();

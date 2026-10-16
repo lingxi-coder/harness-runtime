@@ -572,12 +572,17 @@ async fn unknown_command_uses_locked_literal() {
         )
         .await;
     match outcome {
-        SlashDispatchResult::Unknown { name, display } => {
+        SlashDispatchResult::Unknown {
+            name,
+            display,
+            suggestion,
+        } => {
             assert_eq!(name.string_at(""), Some("definitely-not-a-real-command"));
             assert_eq!(
                 display.string_at(""),
                 Some("Unknown command: /definitely-not-a-real-command")
             );
+            assert!(suggestion.is_none());
         }
         other => panic!("expected Unknown, got {other:?}"),
     }

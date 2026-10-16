@@ -54,6 +54,7 @@ fn response(text: Option<&str>, tool: bool) -> SideQueryResponse {
 }
 fn request() -> ForkedAgentRequest {
     ForkedAgentRequest {
+        api_attempts_left: None,
         prompt_messages: vec![ConversationMessage::user(
             MessageId::new(),
             "predict my next prompt".into(),

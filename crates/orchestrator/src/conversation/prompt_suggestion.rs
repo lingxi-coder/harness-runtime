@@ -639,6 +639,7 @@ impl ConversationOrchestrator {
             runner,
             session_id,
             request: sidequery::ForkedAgentRequest {
+                api_attempts_left: None,
                 prompt_messages: vec![ConversationMessage::user(
                     MessageId::new(),
                     Self::PROMPT_SUGGESTION_PROMPT.into(),

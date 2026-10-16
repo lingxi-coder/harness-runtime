@@ -2309,6 +2309,7 @@ fn classify_api_error_generic_variants_are_unknown_no_status() {
         OrchestratorError::MaxBudgetReached {
             budget_nano_usd: 5_000_000_000,
         },
+        OrchestratorError::ApiCall(llm_runtime::LlmError::ApiAttemptsExhausted),
     ] {
         let env = classify_api_error(&e);
         assert_eq!(env.error, Some("unknown"), "{e:?}");

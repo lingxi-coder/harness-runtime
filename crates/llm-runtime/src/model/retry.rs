@@ -719,6 +719,7 @@ pub fn next_step_with_backoff(
         | LlmError::OAuthRefreshDead
         | LlmError::PermissionDenied { .. }
         | LlmError::RequestDispatchRejected { .. }
+        | LlmError::ApiAttemptsExhausted
         | LlmError::ContextOverflow { .. }
         | LlmError::InputBudgetExceeded { .. }
         | LlmError::RequestTooLarge

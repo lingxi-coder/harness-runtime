@@ -69,6 +69,7 @@ impl MemorySelector {
         let req = SideQueryRequest {
             model_source: None,
             model_attempt: None,
+            api_attempts_left: None,
             native_prompt_context: None,
             model: model.to_string(),
             profile: profile.map(str::to_string),

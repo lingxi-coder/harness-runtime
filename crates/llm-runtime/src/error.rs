@@ -178,6 +178,11 @@ pub enum LlmError {
         /// Whether this logical drive admitted an earlier physical attempt.
         prior_dispatch: bool,
     },
+    /// The operation's explicit API-attempt budget was exhausted before this
+    /// provider dispatch. This is terminal and has no HTTP status because no
+    /// request was sent.
+    #[error("Not sent: no API attempts left")]
+    ApiAttemptsExhausted,
     /// The request did not complete within the timeout.
     ///
     /// Split from [`Self::Transport`] because the oracle's `x2()` cause-chain

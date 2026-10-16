@@ -60,6 +60,9 @@ pub enum SlashDispatchResult {
         name: Utf16JsonProjection,
         /// The locked `"Unknown command: /{name}"` literal, retaining name units.
         display: Utf16JsonProjection,
+        /// Native's nearest Headless prompt name or alias when it is within two
+        /// edits. The reminder renderer applies Native's display-safety filter.
+        suggestion: Option<Utf16JsonProjection>,
     },
 }
 

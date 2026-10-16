@@ -26,6 +26,7 @@ use crate::thresholds::{
 use cost::Usage;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage};
+use llm_runtime::ApiAttemptsLeft;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
@@ -248,6 +249,7 @@ impl CompactionOrchestrator {
         &self,
         messages: Vec<ConversationMessage>,
         custom_instructions: Option<&Utf16JsonProjection>,
+        api_attempts_left: Option<ApiAttemptsLeft>,
     ) -> Result<IterationCompactionResult, CompactionError> {
         if crate::grouping::group_messages_by_api_round(&messages).len() < 2 {
             return Err(CompactionError::NotEnoughMessages);
@@ -256,7 +258,7 @@ impl CompactionOrchestrator {
         let media_analysis_to_preserve = media_analysis_messages(&messages);
         let result = self
             .auto
-            .compact_manual_with_instructions(messages, custom_instructions)
+            .compact_manual_with_instructions(messages, custom_instructions, api_attempts_left)
             .await?;
         let total_tokens_freed = result
             .pre_compact_token_count
@@ -302,13 +304,14 @@ impl CompactionOrchestrator {
         summarized: &[ConversationMessage],
         custom_instructions: Option<&Utf16JsonProjection>,
         direction: crate::prompt::SummarizeDirection,
+        api_attempts_left: Option<ApiAttemptsLeft>,
     ) -> Result<IterationCompactionResult, CompactionError> {
         // Vision sidecars from the SUMMARIZED half only: the kept half still
         // carries its own, and `apply_post_compact` de-duplicates against it.
         let media_analysis_to_preserve = media_analysis_messages(summarized);
         let result = self
             .auto
-            .summarize_selection(context, custom_instructions, direction)
+            .summarize_selection(context, custom_instructions, direction, api_attempts_left)
             .await?;
         let total_tokens_freed = result
             .pre_compact_token_count
@@ -340,6 +343,7 @@ impl CompactionOrchestrator {
         tracking: &mut AutoCompactTrackingState,
         custom_instructions: Option<&Utf16JsonProjection>,
         initial_token_gap: Option<u64>,
+        api_attempts_left: Option<ApiAttemptsLeft>,
     ) -> Result<IterationCompactionResult, CompactionError> {
         let rapid_refill = rapid_refill_count(tracking);
         if rapid_refill >= MAX_CONSECUTIVE_RAPID_REFILLS {
@@ -363,7 +367,12 @@ impl CompactionOrchestrator {
         let media_analysis_to_preserve = media_analysis_messages(&messages);
         let result = self
             .auto
-            .compact_reactive_with_instructions(messages, custom_instructions, initial_token_gap)
+            .compact_reactive_with_instructions(
+                messages,
+                custom_instructions,
+                initial_token_gap,
+                api_attempts_left,
+            )
             .await;
         let result = match result {
             Ok(result) => result,
@@ -427,12 +436,14 @@ impl CompactionOrchestrator {
         messages: Vec<ConversationMessage>,
         snip_tokens_freed_already: u64,
         tracking: &mut AutoCompactTrackingState,
+        api_attempts_left: Option<ApiAttemptsLeft>,
     ) -> Result<IterationCompactionResult, CompactionError> {
         self.process_iteration_tracked_with_instructions(
             messages,
             snip_tokens_freed_already,
             tracking,
             None,
+            api_attempts_left,
         )
         .await
     }
@@ -447,6 +458,7 @@ impl CompactionOrchestrator {
         snip_tokens_freed_already: u64,
         tracking: &mut AutoCompactTrackingState,
         custom_instructions: Option<&Utf16JsonProjection>,
+        api_attempts_left: Option<ApiAttemptsLeft>,
     ) -> Result<IterationCompactionResult, CompactionError> {
         self.process_iteration_tracked_with_instructions_and_timing(
             messages,
@@ -455,6 +467,7 @@ impl CompactionOrchestrator {
             custom_instructions,
             None,
             SystemTime::now(),
+            api_attempts_left,
         )
         .await
     }
@@ -471,6 +484,7 @@ impl CompactionOrchestrator {
         custom_instructions: Option<&Utf16JsonProjection>,
         last_assistant_at: Option<SystemTime>,
         now: SystemTime,
+        api_attempts_left: Option<ApiAttemptsLeft>,
     ) -> Result<IterationCompactionResult, CompactionError> {
         let media_analysis_to_preserve = media_analysis_messages(&messages);
         let mut layers = Vec::new();
@@ -597,7 +611,11 @@ impl CompactionOrchestrator {
         } else if over_threshold && !breaker_tripped {
             match self
                 .auto
-                .compact_with_instructions(messages.clone(), custom_instructions)
+                .compact_with_instructions(
+                    messages.clone(),
+                    custom_instructions,
+                    api_attempts_left.clone(),
+                )
                 .await
             {
                 Ok(result) => {
@@ -880,7 +898,7 @@ mod tests {
         ];
 
         let result = orch
-            .process_forced(messages, None)
+            .process_forced(messages, None, None)
             .await
             .expect("manual compact must run below the auto threshold");
 
@@ -892,7 +910,7 @@ mod tests {
     async fn forced_compact_rejects_history_without_a_completed_reply() {
         let orch = forced_orchestrator(0).await;
         let err = orch
-            .process_forced(vec![long_user(0)], None)
+            .process_forced(vec![long_user(0)], None, None)
             .await
             .expect_err("a lone user message is not enough");
         assert!(matches!(err, CompactionError::NotEnoughMessages));
@@ -904,7 +922,7 @@ mod tests {
     async fn forced_compact_summarizes_one_complete_exchange() {
         let orch = forced_orchestrator(u64::MAX).await;
         let result = orch
-            .process_forced(vec![long_user(0), assistant("only reply")], None)
+            .process_forced(vec![long_user(0), assistant("only reply")], None, None)
             .await
             .expect("286 summarize_all covers one complete exchange");
         assert!(result.was_compacted);
@@ -927,6 +945,7 @@ mod tests {
                     long_user(1),
                     assistant("second reply"),
                 ],
+                None,
                 None,
             )
             .await
@@ -1046,7 +1065,7 @@ mod tests {
         // 3 consecutive Err from the failing mock summarizer.
         for expected in 1..=3u32 {
             let r = orch
-                .process_iteration_tracked(msgs.clone(), 0, &mut tracking)
+                .process_iteration_tracked(msgs.clone(), 0, &mut tracking, None)
                 .await;
             assert!(r.is_err(), "attempt {expected} should fail");
             assert_eq!(
@@ -1058,7 +1077,7 @@ mod tests {
         // 4th call: breaker tripped → short-circuit, no summarizer call, Ok with
         // was_compacted=false.
         let res = orch
-            .process_iteration_tracked(msgs.clone(), 0, &mut tracking)
+            .process_iteration_tracked(msgs.clone(), 0, &mut tracking, None)
             .await
             .expect("breaker short-circuits to Ok, not Err");
         assert!(
@@ -1085,7 +1104,7 @@ mod tests {
         let msgs = vec![long_user(0), long_user(1), long_user(2)];
 
         let res = orch
-            .process_iteration_tracked(msgs, 0, &mut tracking)
+            .process_iteration_tracked(msgs, 0, &mut tracking, None)
             .await
             .expect("under threshold → Ok");
 
@@ -1113,7 +1132,7 @@ mod tests {
         let msgs = vec![long_user(0), long_user(1)];
 
         let res = orch
-            .process_iteration_tracked(msgs, 0, &mut tracking)
+            .process_iteration_tracked(msgs, 0, &mut tracking, None)
             .await
             .expect("default autocompactor succeeds");
 
@@ -1133,7 +1152,7 @@ mod tests {
         let orch = order_orchestrator(0);
         let msgs = vec![long_user(0), long_user(1)];
         let res = orch
-            .process_iteration_tracked(msgs, 0, &mut AutoCompactTrackingState::default())
+            .process_iteration_tracked(msgs, 0, &mut AutoCompactTrackingState::default(), None)
             .await
             .expect("tracked pass succeeds");
         assert!(res.was_compacted);
@@ -1156,6 +1175,7 @@ mod tests {
                 None,
                 last,
                 now,
+                None,
             )
             .await
             .expect("first microcompact pass succeeds");
@@ -1167,6 +1187,7 @@ mod tests {
                 None,
                 last,
                 now,
+                None,
             )
             .await
             .expect("second microcompact pass succeeds");
@@ -1192,7 +1213,12 @@ mod tests {
         let msgs = microcompactable_messages();
 
         let result = orch
-            .process_iteration_tracked(msgs.clone(), 0, &mut AutoCompactTrackingState::default())
+            .process_iteration_tracked(
+                msgs.clone(),
+                0,
+                &mut AutoCompactTrackingState::default(),
+                None,
+            )
             .await
             .expect("legacy timing no-op succeeds");
 
@@ -1250,7 +1276,7 @@ mod tests {
             let mut tracking = AutoCompactTrackingState::default();
             let msgs: Vec<_> = (0..40).map(long_user).collect();
 
-            let res = block_on(orch.process_iteration_tracked(msgs, 0, &mut tracking))
+            let res = block_on(orch.process_iteration_tracked(msgs, 0, &mut tracking, None))
                 .expect("over threshold → autocompact succeeds");
 
             assert!(
@@ -1274,7 +1300,7 @@ mod tests {
             let mut tracking = AutoCompactTrackingState::default();
             let msgs: Vec<_> = (0..40).map(long_user).collect();
 
-            let res = block_on(orch.process_iteration_tracked(msgs, 0, &mut tracking))
+            let res = block_on(orch.process_iteration_tracked(msgs, 0, &mut tracking, None))
                 .expect("over threshold → autocompact succeeds");
 
             assert!(
@@ -1331,7 +1357,7 @@ mod tests {
 
         // This pass: rapid_refill_count = 2 + 1 = 3 >= MAX → breaker trips.
         let res = orch
-            .process_iteration_tracked(msgs, 0, &mut tracking)
+            .process_iteration_tracked(msgs, 0, &mut tracking, None)
             .await
             .expect("breaker trips to Ok, not Err");
 
@@ -1363,7 +1389,7 @@ mod tests {
         };
 
         let res = orch
-            .process_iteration_tracked(msgs, 0, &mut tracking)
+            .process_iteration_tracked(msgs, 0, &mut tracking, None)
             .await
             .expect("normal compact");
 
@@ -1390,7 +1416,7 @@ mod tests {
             ..Default::default()
         };
         let r1 = orch
-            .process_iteration_tracked(msgs.clone(), 0, &mut tracking)
+            .process_iteration_tracked(msgs.clone(), 0, &mut tracking, None)
             .await
             .expect("first refill compacts");
         assert!(r1.was_compacted);
@@ -1401,7 +1427,7 @@ mod tests {
         // first compact): kho = 1 + 1 = 2 → still below breaker → compacts,
         // carries 2.
         let r2 = orch
-            .process_iteration_tracked(msgs, 0, &mut tracking)
+            .process_iteration_tracked(msgs, 0, &mut tracking, None)
             .await
             .expect("second refill compacts");
         assert!(r2.was_compacted);

@@ -122,6 +122,7 @@ async fn classifier_keeps_each_system_cache_control_without_implicit_prompt_rewr
                     model_source: None,
                     enable_prompt_caching: false,
                     model_attempt: None,
+                    api_attempts_left: None,
                     native_prompt_context: None,
                     model: "claude-haiku-4-5".into(),
                     profile: Some("classifier".into()),

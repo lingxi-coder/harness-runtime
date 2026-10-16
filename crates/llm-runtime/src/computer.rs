@@ -620,6 +620,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_execute_budget_rejection_restores_computer_receipt() {
+        let config: crate::ClientConfig = serde_json::from_value(json!({"providers":[{
+            "provider_id":"anthropic_first_party", "profile_name":"test", "base_url":"https://api.anthropic.com", "protocol":"anthropic_messages", "auth":"none", "credential":{"type":"none"},
+            "models":[{"display_model":"model","request_model":"model","billing_model":"model","capabilities":{"streaming":true,"tools":false,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
+        }]})).unwrap();
+        let client = crate::ModelRuntime::from_config(config).unwrap();
+        let journal = Arc::new(Journal::default());
+        let mut request = crate::LlmRequest::new("model").with_user_text("test");
+        request.input.max_tokens = Some(4096);
+        request.execution.computer_submission = Some(submission(journal.clone()));
+        request.execution.api_attempts_left = Some(crate::ApiAttemptsLeft::new(0));
+        let transport = Arc::new(ReceiptTransport::default());
+
+        let error = client
+            .execute(&request, transport.clone())
+            .await
+            .expect_err("an exhausted budget rejects before transport");
+
+        assert!(matches!(error, LlmError::ApiAttemptsExhausted));
+        assert_eq!(transport.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let receipt = journal.receipt("receipt-1").await.unwrap().unwrap();
+        assert_eq!(
+            receipt.stage,
+            lingxi_core::host::NativeReceiptStage::NotSubmitted
+        );
+        assert_eq!(receipt.submission_attempt, 1);
+    }
+
+    #[tokio::test]
+    async fn direct_stream_budget_rejection_restores_computer_receipt() {
+        let config: crate::ClientConfig = serde_json::from_value(json!({"providers":[{
+            "provider_id":"anthropic_first_party", "profile_name":"test", "base_url":"https://api.anthropic.com", "protocol":"anthropic_messages", "auth":"none", "credential":{"type":"none"},
+            "models":[{"display_model":"model","request_model":"model","billing_model":"model","capabilities":{"streaming":true,"tools":false,"vision":false,"documents":false,"reasoning":false,"structured_output":false}}]
+        }]})).unwrap();
+        let client = crate::ModelRuntime::from_config(config).unwrap();
+        let journal = Arc::new(Journal::default());
+        let mut request = crate::LlmRequest::new("model").with_user_text("test");
+        request.input.max_tokens = Some(4096);
+        request.stream = true;
+        request.execution.computer_submission = Some(submission(journal.clone()));
+        request.execution.api_attempts_left = Some(crate::ApiAttemptsLeft::new(0));
+        let transport = Arc::new(ReceiptTransport::default());
+
+        let error = match client.execute_stream(&request, transport.clone()).await {
+            Err(error) => error,
+            Ok(_) => panic!("an exhausted budget must reject before transport"),
+        };
+
+        assert!(matches!(error, LlmError::ApiAttemptsExhausted));
+        assert_eq!(transport.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let receipt = journal.receipt("receipt-1").await.unwrap().unwrap();
+        assert_eq!(
+            receipt.stage,
+            lingxi_core::host::NativeReceiptStage::NotSubmitted
+        );
+        assert_eq!(receipt.submission_attempt, 1);
+    }
+
+    #[tokio::test]
     async fn rejected_dispatch_admission_preserves_unsubmitted_receipts_for_both_drivers() {
         for stream in [false, true] {
             let config: crate::ClientConfig = serde_json::from_value(json!({"providers":[{

@@ -13627,6 +13627,7 @@ mod tests {
         request.opts.max_output_tokens = Some(4096);
         request.opts.native_anthropic_request_context = Some(NativeAnthropicRequestContext {
             mid_conversation_tool_changes: true,
+            mid_conversation_tool_changes_feature_gate: true,
             ..Default::default()
         });
         request.opts.fallback = crate::FallbackPolicy::Disabled;
@@ -13665,6 +13666,7 @@ mod tests {
         same_model_request.opts.native_anthropic_request_context =
             Some(NativeAnthropicRequestContext {
                 mid_conversation_tool_changes: true,
+                mid_conversation_tool_changes_feature_gate: true,
                 ..Default::default()
             });
         same_model_service
@@ -13696,6 +13698,7 @@ mod tests {
         other_model_request.opts.native_anthropic_request_context =
             Some(NativeAnthropicRequestContext {
                 mid_conversation_tool_changes: true,
+                mid_conversation_tool_changes_feature_gate: true,
                 ..Default::default()
             });
         other_model_service
@@ -13730,6 +13733,7 @@ mod tests {
         foundry_request.opts.native_anthropic_request_context =
             Some(NativeAnthropicRequestContext {
                 mid_conversation_tool_changes: true,
+                mid_conversation_tool_changes_feature_gate: true,
                 ..Default::default()
             });
         foundry_service
@@ -13737,6 +13741,138 @@ mod tests {
             .await
             .expect("same canonical model remains eligible on another provider route");
         assert!(foundry_transport.seen_headers(0)["anthropic-beta"].contains(mctc));
+    }
+
+    #[tokio::test]
+    async fn native_295_mctc_and_inline_beta_gates_are_independent_in_main_headers() {
+        use lingxi_llm_client::NativeAnthropicRequestContext;
+        use lingxi_llm_client::providers::anthropic::beta_repair::Beta;
+
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = CacheEnvRestore::clear(&[
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
+            "DISABLE_INTERLEAVED_THINKING",
+        ]);
+        assert!(
+            !lingxi_core::host::compliance_taints::is_tainted("hipaa"),
+            "this fixture requires the initialized-empty compliance taint state"
+        );
+
+        let mctc = Beta::MidConversationToolChanges.header();
+        let inline_tools = "inline-tools-2026-09-15";
+        for (profile, mctc_gate, inline_gate, expect_mctc, expect_inline) in [
+            ("native-gate-off", false, false, false, false),
+            ("native-mctc-only", true, false, true, false),
+            ("native-inline-on", true, true, true, true),
+        ] {
+            let model = "claude-sonnet-5-5-r62-feature-gate";
+            let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+            let service = make_adapter_for_protocol_with_transport(
+                ProtocolFamily::AnthropicMessages,
+                ProviderId::AnthropicFirstParty,
+                "https://api.anthropic.com",
+                profile,
+                model,
+                transport.clone(),
+            )
+            .with_native_anthropic_endpoint("https://api.anthropic.com");
+            let mut request = crate::MessagesCreateRequest::new(
+                model,
+                Some(profile.to_owned()),
+                None,
+                vec![text_user_msg("Return marker.")],
+                vec![],
+            );
+            request.opts.max_output_tokens = Some(4096);
+            request.opts.native_anthropic_request_context = Some(NativeAnthropicRequestContext {
+                mid_conversation_tool_changes: true,
+                mid_conversation_tool_changes_feature_gate: mctc_gate,
+                inline_tools_feature_gate: inline_gate,
+                ..Default::default()
+            });
+
+            service
+                .messages_create(request)
+                .await
+                .expect("the selected Native feature gate does not prevent dispatch");
+
+            let header = &transport.seen_headers(0)["anthropic-beta"];
+            assert_eq!(header.contains(mctc), expect_mctc, "{profile}: {header}");
+            assert_eq!(
+                header.contains(inline_tools),
+                expect_inline,
+                "{profile}: {header}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn native_295_mctc_and_inline_beta_gates_apply_to_foundry_main_route() {
+        use lingxi_llm_client::NativeAnthropicRequestContext;
+        use lingxi_llm_client::providers::anthropic::beta_repair::Beta;
+
+        let _guard = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _env = CacheEnvRestore::clear(&[
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_FORCE_MID_CONVERSATION_SYSTEM",
+            "DISABLE_INTERLEAVED_THINKING",
+        ]);
+        assert!(
+            !lingxi_core::host::compliance_taints::is_tainted("hipaa"),
+            "this fixture requires the initialized-empty compliance taint state"
+        );
+
+        let mctc = Beta::MidConversationToolChanges.header();
+        let inline_tools = "inline-tools-2026-09-15";
+        for (profile, inline_gate, expect_inline) in [
+            ("foundry-mctc-only", false, false),
+            ("foundry-inline-on", true, true),
+        ] {
+            let model = "claude-sonnet-5-5-r62-foundry-feature-gate";
+            let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+            let service = make_adapter_for_protocol_with_transport(
+                ProtocolFamily::FoundryClaude,
+                ProviderId::OpenAICompatible {
+                    name: "foundry-claude".to_owned(),
+                },
+                "https://example.services.ai.azure.com/anthropic",
+                profile,
+                model,
+                transport.clone(),
+            );
+            let mut request = crate::MessagesCreateRequest::new(
+                model,
+                Some(profile.to_owned()),
+                None,
+                vec![text_user_msg("Return marker.")],
+                vec![],
+            );
+            request.opts.max_output_tokens = Some(4096);
+            request.opts.native_anthropic_request_context = Some(NativeAnthropicRequestContext {
+                mid_conversation_tool_changes: true,
+                mid_conversation_tool_changes_feature_gate: true,
+                inline_tools_feature_gate: inline_gate,
+                ..Default::default()
+            });
+
+            service
+                .messages_create(request)
+                .await
+                .expect("the selected Foundry feature gates do not prevent dispatch");
+
+            let header = &transport.seen_headers(0)["anthropic-beta"];
+            assert!(header.contains(mctc), "{profile}: {header}");
+            assert_eq!(
+                header.contains(inline_tools),
+                expect_inline,
+                "{profile}: {header}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -13882,6 +14018,7 @@ mod tests {
         request.execution.native_anthropic_request_context = Some(NativeAnthropicRequestContext {
             afk_mode: true,
             mid_conversation_tool_changes: true,
+            mid_conversation_tool_changes_feature_gate: true,
             ..Default::default()
         });
         let mut stream = service
@@ -14230,7 +14367,6 @@ mod tests {
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(crate::structured_output::bool_value);
             let mctc_route = matches!(input["provider"].as_str(), Some("firstParty" | "foundry"));
-            let mctc_model = matches!(model, "claude-sonnet-5-5" | "claude-fable-5-1");
             let afk_route = match input["provider"].as_str() {
                 // Native Gyo requires vh() for direct Anthropic, including its
                 // experimental-beta gate.
@@ -14266,12 +14402,12 @@ mod tests {
                     server_classifier,
                     resume_incomplete_thinking: false,
                     afk_mode: permission_mode == "auto" && afk_route,
-                    // In 2.1.295 V$n() defaults true. These recorded models
-                    // pass the Native model capability gate; vh() still
-                    // excludes disabled experimental betas and HIPAA routes.
-                    mid_conversation_tool_changes: mctc_route
-                        && mctc_model
+                    // Route and B6 remain explicit request facts; model
+                    // capability and refusal state are checked by the service.
+                    mid_conversation_tool_changes: mctc_route,
+                    mid_conversation_tool_changes_feature_gate: mctc_route
                         && !experimental_betas_disabled,
+                    inline_tools_feature_gate: false,
                 });
             let mut prepared = adapter
                 .client

@@ -189,8 +189,10 @@ impl Autocompactor {
     pub async fn compact(
         &self,
         messages: Vec<ConversationMessage>,
+        api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
     ) -> Result<CompactionResult, CompactionError> {
-        self.compact_with_instructions(messages, None).await
+        self.compact_with_instructions(messages, None, api_attempts_left)
+            .await
     }
 
     /// Compact `messages`, appending optional caller/hook instructions to the
@@ -205,9 +207,17 @@ impl Autocompactor {
         &self,
         messages: Vec<ConversationMessage>,
         custom_instructions: Option<&Utf16JsonProjection>,
+        api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
     ) -> Result<CompactionResult, CompactionError> {
-        self.compact_impl(messages, custom_instructions, false, None, None)
-            .await
+        self.compact_impl(
+            messages,
+            custom_instructions,
+            false,
+            None,
+            None,
+            api_attempts_left,
+        )
+        .await
     }
 
     /// Run the explicit `/compact` manual path.
@@ -222,9 +232,17 @@ impl Autocompactor {
         &self,
         messages: Vec<ConversationMessage>,
         custom_instructions: Option<&Utf16JsonProjection>,
+        api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
     ) -> Result<CompactionResult, CompactionError> {
-        self.compact_impl(messages, custom_instructions, true, None, None)
-            .await
+        self.compact_impl(
+            messages,
+            custom_instructions,
+            true,
+            None,
+            None,
+            api_attempts_left,
+        )
+        .await
     }
 
     /// Summarize ONE SIDE of a `/rewind` message-selector split — oracle `zir`.
@@ -247,6 +265,7 @@ impl Autocompactor {
         context: Vec<ConversationMessage>,
         custom_instructions: Option<&Utf16JsonProjection>,
         direction: crate::prompt::SummarizeDirection,
+        api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
     ) -> Result<CompactionResult, CompactionError> {
         if !self
             .forked_runner
@@ -266,8 +285,15 @@ impl Autocompactor {
             // continuation would be addressed to nobody.
             suppress_follow_up_questions: false,
         };
-        self.compact_impl(context, custom_instructions, false, None, Some(overrides))
-            .await
+        self.compact_impl(
+            context,
+            custom_instructions,
+            false,
+            None,
+            Some(overrides),
+            api_attempts_left,
+        )
+        .await
     }
 
     /// Rescue a provider overflow, preserving recent rounds and using the
@@ -277,9 +303,17 @@ impl Autocompactor {
         messages: Vec<ConversationMessage>,
         custom_instructions: Option<&Utf16JsonProjection>,
         initial_token_gap: Option<u64>,
+        api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
     ) -> Result<CompactionResult, CompactionError> {
-        self.compact_impl(messages, custom_instructions, true, initial_token_gap, None)
-            .await
+        self.compact_impl(
+            messages,
+            custom_instructions,
+            true,
+            initial_token_gap,
+            None,
+            api_attempts_left,
+        )
+        .await
     }
 
     async fn compact_impl(
@@ -289,6 +323,7 @@ impl Autocompactor {
         preserve_tail: bool,
         initial_token_gap: Option<u64>,
         selector: Option<SelectorSummarize>,
+        api_attempts_left: Option<llm_runtime::ApiAttemptsLeft>,
     ) -> Result<CompactionResult, CompactionError> {
         let pre = crate::grouping::estimate_tokens_for_range(&messages);
         if preserve_tail
@@ -424,6 +459,7 @@ impl Autocompactor {
                     summarize.clone()
                 };
                 let req = ForkedAgentRequest {
+                    api_attempts_left: api_attempts_left.clone(),
                     prompt_messages: vec![summary_request.clone()],
                     cache_safe_params: cache_params.clone(),
                     fork_label: if preserve_tail {
@@ -461,6 +497,14 @@ impl Autocompactor {
                             if matches!(
                                 error.classification_source(),
                                 llm_runtime::LlmError::ContextOverflow { .. }
+                            ) =>
+                        {
+                            false
+                        }
+                        Err(sidequery::ForkError::Api(sidequery::SideQueryError::Api(error)))
+                            if matches!(
+                                error.classification_source(),
+                                llm_runtime::LlmError::ApiAttemptsExhausted
                             ) =>
                         {
                             false
@@ -1172,7 +1216,7 @@ mod tests {
         .await;
 
         let result = compactor
-            .compact(vec![user_msg("hello"), user_msg("world")])
+            .compact(vec![user_msg("hello"), user_msg("world")], None)
             .await
             .expect("wired compact succeeds");
 
@@ -1218,7 +1262,7 @@ mod tests {
         let (compactor, client) = wired("<summary>ok</summary>", vec![user_msg("PREFIX-A")]).await;
 
         compactor
-            .compact(vec![user_msg("CURRENT-HISTORY")])
+            .compact(vec![user_msg("CURRENT-HISTORY")], None)
             .await
             .expect("wired compact succeeds");
 
@@ -1267,7 +1311,7 @@ mod tests {
         slot.save(params).await;
 
         let result = Autocompactor::with_forked_runner(runner, slot)
-            .compact(vec![user_msg("hello"), user_msg("world")])
+            .compact(vec![user_msg("hello"), user_msg("world")], None)
             .await
             .expect("wired compact succeeds");
 
@@ -1283,7 +1327,7 @@ mod tests {
         let focus = Utf16JsonProjection::from("Focus on the Rust changes");
 
         compactor
-            .compact_with_instructions(vec![user_msg("current")], Some(&focus))
+            .compact_with_instructions(vec![user_msg("current")], Some(&focus), None)
             .await
             .expect("wired compact succeeds");
 
@@ -1312,7 +1356,7 @@ mod tests {
         let (compactor, client) = wired("<summary>ok</summary>", history.clone()).await;
 
         let result = compactor
-            .compact_manual_with_instructions(history.clone(), None)
+            .compact_manual_with_instructions(history.clone(), None, None)
             .await
             .expect("manual compact succeeds");
 
@@ -1354,11 +1398,11 @@ mod tests {
             let (compactor, client) = wired("<summary>one round</summary>", history.clone()).await;
             let result = if reactive {
                 compactor
-                    .compact_reactive_with_instructions(history.clone(), Some(&focus), None)
+                    .compact_reactive_with_instructions(history.clone(), Some(&focus), None, None)
                     .await
             } else {
                 compactor
-                    .compact_manual_with_instructions(history.clone(), Some(&focus))
+                    .compact_manual_with_instructions(history.clone(), Some(&focus), None)
                     .await
             }
             .expect("286 summarizes one complete exchange");
@@ -1393,7 +1437,7 @@ mod tests {
         let history = vec![user_msg("q1"), assistant_text("reply")];
         let (compactor, _) = wired_source(response, history.clone()).await;
         let result = compactor
-            .compact_manual_with_instructions(history, None)
+            .compact_manual_with_instructions(history, None, None)
             .await
             .expect("source-backed summary compacts");
 
@@ -1472,7 +1516,12 @@ mod tests {
             *client.texts.lock().unwrap() = responses.into();
             compactor.config.allow_fallback = case["allowFallback"].as_bool().unwrap_or(true);
             let result = compactor
-                .compact_reactive_with_instructions(history, None, case["initialTokenGap"].as_u64())
+                .compact_reactive_with_instructions(
+                    history,
+                    None,
+                    case["initialTokenGap"].as_u64(),
+                    None,
+                )
                 .await;
             let expected = &case["expected"];
             let requests = client
@@ -1567,7 +1616,7 @@ mod tests {
         ];
         let (compactor, client) = wired("<summary>first exchange</summary>", history.clone()).await;
         let result = compactor
-            .compact_manual_with_instructions(history.clone(), None)
+            .compact_manual_with_instructions(history.clone(), None, None)
             .await
             .unwrap();
         assert_eq!(result.messages_to_preserve, history[3..]);
@@ -1623,7 +1672,7 @@ mod tests {
             let (compactor, client) = wired("unused", history.clone()).await;
             assert!(matches!(
                 compactor
-                    .compact_manual_with_instructions(history, None)
+                    .compact_manual_with_instructions(history, None, None)
                     .await,
                 Err(CompactionError::NotEnoughMessages)
             ));
@@ -1634,7 +1683,7 @@ mod tests {
         compactor.config.allow_fallback = false;
         assert!(matches!(
             compactor
-                .compact_manual_with_instructions(history, None)
+                .compact_manual_with_instructions(history, None, None)
                 .await,
             Err(CompactionError::NotEnoughMessages)
         ));
@@ -1658,7 +1707,7 @@ mod tests {
         )
         .await;
         let result = compactor
-            .compact_manual_with_instructions(history.clone(), None)
+            .compact_manual_with_instructions(history.clone(), None, None)
             .await
             .unwrap();
         let requests = client.seen.lock().unwrap();
@@ -1680,7 +1729,7 @@ mod tests {
             wired_seq(vec!["Prompt is too long".into(); 4], history.clone()).await;
         assert!(matches!(
             compactor
-                .compact_manual_with_instructions(history, None)
+                .compact_manual_with_instructions(history, None, None)
                 .await,
             Err(CompactionError::MaxRetriesExceeded)
         ));
@@ -1700,7 +1749,7 @@ mod tests {
         let (compactor, client) = wired("unused", history.clone()).await;
         assert!(matches!(
             compactor
-                .compact_manual_with_instructions(history, None)
+                .compact_manual_with_instructions(history, None, None)
                 .await,
             Err(CompactionError::NotEnoughMessages)
         ));
@@ -1734,7 +1783,7 @@ mod tests {
         for direction in [SummarizeDirection::UpTo, SummarizeDirection::From] {
             let (compactor, client) = wired("<summary>ok</summary>", vec![]).await;
             compactor
-                .summarize_selection(vec![user_msg("history")], None, direction)
+                .summarize_selection(vec![user_msg("history")], None, direction, None)
                 .await
                 .expect("wired summarize succeeds");
             let sent = client.seen.lock().unwrap().clone().expect("client called");
@@ -1764,6 +1813,7 @@ mod tests {
                 vec![user_msg("history")],
                 Some(&focus),
                 SummarizeDirection::From,
+                None,
             )
             .await
             .expect("wired summarize succeeds");
@@ -1787,7 +1837,12 @@ mod tests {
         use crate::prompt::SummarizeDirection;
         let (compactor, _client) = wired("<summary>ok</summary>", vec![]).await;
         let result = compactor
-            .summarize_selection(vec![user_msg("history")], None, SummarizeDirection::UpTo)
+            .summarize_selection(
+                vec![user_msg("history")],
+                None,
+                SummarizeDirection::UpTo,
+                None,
+            )
             .await
             .expect("wired summarize succeeds");
         let text = result.summary_messages[0].text_content();
@@ -1816,6 +1871,7 @@ mod tests {
                 vec![user_msg("q"), assistant_text("answer")],
                 None,
                 SummarizeDirection::From,
+                None,
             )
             .await
             .expect_err("an unwired summarizer must fail, not stub a summary");
@@ -1828,7 +1884,11 @@ mod tests {
     #[tokio::test]
     async fn manual_compact_without_a_real_client_never_returns_fake_success() {
         let err = Autocompactor::new()
-            .compact_manual_with_instructions(vec![user_msg("q"), assistant_text("answer")], None)
+            .compact_manual_with_instructions(
+                vec![user_msg("q"), assistant_text("answer")],
+                None,
+                None,
+            )
             .await
             .expect_err("manual compact requires a real summarizer");
         assert!(err.to_string().contains("no forked summarizer wired"));
@@ -1847,7 +1907,7 @@ mod tests {
         ];
         let (compactor, _client) = wired("", history.clone()).await;
         let err = compactor
-            .compact_manual_with_instructions(history, None)
+            .compact_manual_with_instructions(history, None, None)
             .await
             .expect_err("an empty model response is not a compact summary");
         assert!(err
@@ -1860,7 +1920,7 @@ mod tests {
         // A model that ignored the <analysis>/<summary> structure still yields
         // a valid continuation message (formatCompactSummary passthrough).
         let (compactor, _client) = wired("plain summary text", vec![]).await;
-        let result = compactor.compact(vec![user_msg("x")]).await.unwrap();
+        let result = compactor.compact(vec![user_msg("x")], None).await.unwrap();
         let text = result.summary_messages[0].text_content();
         assert!(text.contains("plain summary text"));
         assert!(text.contains("Continue the conversation from where it left off"));
@@ -1878,7 +1938,7 @@ mod tests {
         let compactor = Autocompactor::with_forked_runner(runner, slot);
 
         let err = compactor
-            .compact(vec![user_msg("x")])
+            .compact(vec![user_msg("x")], None)
             .await
             .expect_err("empty slot surfaces an error");
         match err {
@@ -1898,7 +1958,7 @@ mod tests {
         // built through the SAME continuation pipeline, with NO `[stub-summary]`.
         let compactor = Autocompactor::new();
         let result = compactor
-            .compact(vec![user_msg("a"), user_msg("b")])
+            .compact(vec![user_msg("a"), user_msg("b")], None)
             .await
             .expect("fallback compact succeeds");
 
@@ -1965,7 +2025,7 @@ mod tests {
         .await;
 
         let result = compactor
-            .compact(prefix)
+            .compact(prefix, None)
             .await
             .expect("PTL retry then success");
 
@@ -2001,7 +2061,7 @@ mod tests {
             wired_seq(vec!["Prompt is too long".into(); 6], prefix.clone()).await;
 
         let err = compactor
-            .compact(prefix)
+            .compact(prefix, None)
             .await
             .expect_err("PTL exhaustion must error");
         assert!(
@@ -2041,7 +2101,7 @@ mod tests {
         ];
         let (compactor, _) = wired("\u{feff} \n\t", history.clone()).await;
         let error = compactor
-            .compact_manual_with_instructions(history, None)
+            .compact_manual_with_instructions(history, None, None)
             .await
             .unwrap_err();
         assert_eq!(error.to_string(), "summarization produced empty response");
@@ -2066,7 +2126,7 @@ mod tests {
         )
         .await;
         let result = compactor
-            .compact_manual_with_instructions(history, None)
+            .compact_manual_with_instructions(history, None, None)
             .await
             .unwrap();
         let requests = client.seen.lock().unwrap();
@@ -2106,7 +2166,7 @@ mod tests {
         ];
         let (compactor, client) = wired("<summary>ok</summary>", history.clone()).await;
         let result = compactor
-            .compact_reactive_with_instructions(history, None, Some(u64::MAX))
+            .compact_reactive_with_instructions(history, None, Some(u64::MAX), None)
             .await
             .unwrap();
         assert_eq!(result.messages_to_preserve.len(), 3);
@@ -2148,7 +2208,7 @@ mod tests {
             Ok("<summary>ok</summary>".into()),
         ]);
         let result = compactor
-            .compact_manual_with_instructions(history, None)
+            .compact_manual_with_instructions(history, None, None)
             .await
             .unwrap();
         let requests = client.seen.lock().unwrap();
@@ -2187,10 +2247,10 @@ mod tests {
                 ]);
                 let result = if manual {
                     compactor
-                        .compact_manual_with_instructions(history.clone(), None)
+                        .compact_manual_with_instructions(history.clone(), None, None)
                         .await
                 } else {
-                    compactor.compact(history.clone()).await
+                    compactor.compact(history.clone(), None).await
                 }
                 .unwrap();
                 let requests = client.seen.lock().unwrap();
@@ -2242,7 +2302,7 @@ mod tests {
         *client.texts.lock().unwrap() =
             VecDeque::from(vec![Err(llm_runtime::LlmError::RequestTooLarge); 2]);
         let error = compactor
-            .compact_manual_with_instructions(history, None)
+            .compact_manual_with_instructions(history, None, None)
             .await
             .unwrap_err();
         assert!(matches!(error, CompactionError::MediaUnstrippable));
@@ -2260,18 +2320,83 @@ mod tests {
             assistant_text("a3"),
         ];
         let (compactor, client) = wired_seq(Vec::new(), history.clone()).await;
+        let api_attempts_left = llm_runtime::ApiAttemptsLeft::new(2);
         *client.texts.lock().unwrap() = VecDeque::from(vec![
             Err(llm_runtime::LlmError::ContextOverflow { token_gap: 1 }),
             Ok("<summary>ok</summary>".into()),
         ]);
         let result = compactor
-            .compact_manual_with_instructions(history, None)
+            .compact_manual_with_instructions(history, None, Some(api_attempts_left.clone()))
             .await
             .unwrap();
         assert_eq!(result.messages_to_preserve.len(), 3);
+        let seen = client.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].messages[0].text_content(), "oldest");
+        for request in seen.iter() {
+            assert!(request
+                .api_attempts_left
+                .as_ref()
+                .is_some_and(|budget| budget.shares_scope_with(&api_attempts_left)));
+        }
+    }
+
+    #[tokio::test]
+    async fn summarize_all_retry_keeps_the_operation_api_budget() {
+        let history = vec![user_msg(&"q".repeat(5_000)), assistant_text("only reply")];
+        let (compactor, client) = wired_seq(Vec::new(), history.clone()).await;
+        let api_attempts_left = llm_runtime::ApiAttemptsLeft::new(2);
+        *client.texts.lock().unwrap() = VecDeque::from(vec![
+            Err(llm_runtime::LlmError::ContextOverflow { token_gap: 1 }),
+            Ok("<summary>retry ok</summary>".into()),
+        ]);
+
+        compactor
+            .compact_reactive_with_instructions(
+                history,
+                None,
+                Some(1),
+                Some(api_attempts_left.clone()),
+            )
+            .await
+            .expect("summarize-all overflow retry succeeds");
+
+        let seen = client.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen.iter().all(|request| request
+            .api_attempts_left
+            .as_ref()
+            .is_some_and(|budget| budget.shares_scope_with(&api_attempts_left))));
+    }
+
+    #[tokio::test]
+    async fn exhausted_budget_is_not_retried_as_opening_summary_fallback() {
+        let history = vec![user_msg(&"q".repeat(400_000)), assistant_text("reply")];
+        let (compactor, client) = wired_seq(Vec::new(), history.clone()).await;
+        *client.texts.lock().unwrap() =
+            VecDeque::from(vec![Err(llm_runtime::LlmError::ApiAttemptsExhausted)]);
+
+        let error = compactor
+            .compact_reactive_with_instructions(
+                history,
+                None,
+                Some(1),
+                Some(llm_runtime::ApiAttemptsLeft::new(0)),
+            )
+            .await
+            .expect_err("budget exhaustion is terminal for the operation");
+
+        assert!(matches!(
+            error,
+            CompactionError::Api(llm_runtime::LlmError::ApiAttemptsExhausted)
+        ));
+        let seen = client.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "no opening-summary fallback is attempted");
+        assert_eq!(seen[0].messages.len(), 2, "opening history plus prompt");
         assert_eq!(
-            client.seen.lock().unwrap()[1].messages[0].text_content(),
-            "oldest"
+            seen[0].messages[0].text_content().len(),
+            400_000,
+            "the opening-round request was selected"
         );
     }
 
@@ -2284,7 +2409,7 @@ mod tests {
             assistant_text("a2"),
         ];
         let (compactor, client) = wired("<summary>all</summary>", history.clone()).await;
-        let result = compactor.compact(history.clone()).await.unwrap();
+        let result = compactor.compact(history.clone(), None).await.unwrap();
         let request = client.seen.lock().unwrap();
         assert_eq!(request.as_ref().unwrap().messages[..history.len()], history);
         assert!(result.messages_to_preserve.is_empty());
@@ -2306,7 +2431,7 @@ mod tests {
         let (compactor, _client) = wired("<summary>S</summary>", prefix.clone()).await;
 
         let result = compactor
-            .compact_manual_with_instructions(prefix, None)
+            .compact_manual_with_instructions(prefix, None, None)
             .await
             .expect("wired compact");
 
@@ -2348,7 +2473,7 @@ mod tests {
         let (compactor, client) = wired("<summary>S</summary>", prefix.clone()).await;
 
         let result = compactor
-            .compact_manual_with_instructions(prefix.clone(), None)
+            .compact_manual_with_instructions(prefix.clone(), None, None)
             .await
             .expect("compact");
         let keep = result.messages_to_preserve.len();
@@ -2378,7 +2503,7 @@ mod tests {
         let prefix = vec![user_msg("only one user message")];
         let (compactor, _client) = wired("<summary>S</summary>", prefix.clone()).await;
 
-        let result = compactor.compact(prefix).await.expect("compact");
+        let result = compactor.compact(prefix, None).await.expect("compact");
         assert!(
             result.messages_to_preserve.is_empty(),
             "short conversation must NOT preserve a tail"
@@ -2398,7 +2523,7 @@ mod tests {
         let prefix = vec![user_msg("a"), user_msg("b"), assistant_text("only reply")];
         let (compactor, _client) = wired("<summary>S</summary>", prefix.clone()).await;
 
-        let result = compactor.compact(prefix).await.expect("compact");
+        let result = compactor.compact(prefix, None).await.expect("compact");
         assert!(
             result.messages_to_preserve.is_empty(),
             "a prefix with no assistant message cannot partial-compact"

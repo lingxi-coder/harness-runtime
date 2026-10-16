@@ -290,6 +290,7 @@ mod tests {
 
     fn fork_request() -> sidequery::ForkedAgentRequest {
         sidequery::ForkedAgentRequest {
+            api_attempts_left: None,
             prompt_messages: Vec::new(),
             cache_safe_params: sidequery::CacheSafeParams {
                 system_prompt: Arc::new(lingxi_core::types::utf16_json::Utf16JsonProjection::from(

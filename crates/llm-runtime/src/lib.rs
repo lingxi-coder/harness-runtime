@@ -53,8 +53,8 @@ mod execution;
 mod execution_context;
 mod structured_output;
 pub use execution_context::{
-    ExecutionContext, PendingPromptCacheObservation, PromptCacheRequestContext, RequestCredentials,
-    RequestDispatchAdmission, RequestDispatchObserver,
+    ApiAttemptsLeft, ExecutionContext, PendingPromptCacheObservation, PromptCacheRequestContext,
+    RequestCredentials, RequestDispatchAdmission, RequestDispatchObserver,
 };
 pub mod auth;
 pub mod fusion_hints;

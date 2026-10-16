@@ -1373,6 +1373,7 @@ impl ModelRuntime {
 
         Ok(PreparedLlmCall {
             request_session_id: request.execution.request_session_id.clone(),
+            api_attempts_left: request.execution.api_attempts_left.clone(),
             computer_binding,
             computer_submission: request.execution.computer_submission.clone(),
             server_fallback_lane: None,
@@ -1476,13 +1477,37 @@ impl ModelRuntime {
         prepared.before_computer_submit().await?;
         let call = prepared.wire_call.take().expect("sealed");
         let raw = transport.clone();
-        let collected = call
-            .dispatch_once_using(raw.as_ref(), || Ok(()))
-            .await
-            .map_err(crate::upstream::error)?
-            .collect()
-            .await
-            .map_err(crate::upstream::error)?;
+        let api_attempts_left = request.execution.api_attempts_left.clone();
+        let mut callback_error = None;
+        let received = call
+            .dispatch_once_using(raw.as_ref(), || {
+                let reservation = if let Some(budget) = api_attempts_left.as_ref() {
+                    let Some(reservation) = budget.reserve() else {
+                        callback_error = Some(LlmError::ApiAttemptsExhausted);
+                        return Err(crate::execution::wire_error(LlmError::ApiAttemptsExhausted));
+                    };
+                    Some(reservation)
+                } else {
+                    None
+                };
+                if let Some(reservation) = reservation {
+                    reservation.commit();
+                }
+                Ok(())
+            })
+            .await;
+        let received = match received {
+            Ok(received) => received,
+            Err(error) => {
+                if callback_error.is_some() {
+                    if let Some(submission) = prepared.computer_submission.as_ref() {
+                        submission.not_submitted().await?;
+                    }
+                }
+                return Err(callback_error.unwrap_or_else(|| crate::upstream::error(error)));
+            }
+        };
+        let collected = received.collect().await.map_err(crate::upstream::error)?;
         let decoded = crate::execution::decode(&collected);
         collected.finish().await;
         decoded
@@ -1511,10 +1536,36 @@ impl ModelRuntime {
         self.seal_prepared(&mut prepared).await?;
         prepared.before_computer_submit().await?;
         let call = prepared.wire_call.take().expect("sealed");
+        let api_attempts_left = request.execution.api_attempts_left.clone();
+        let mut callback_error = None;
         let received = call
-            .dispatch_once_using(transport.as_ref(), || Ok(()))
-            .await
-            .map_err(crate::upstream::error)?;
+            .dispatch_once_using(transport.as_ref(), || {
+                let reservation = if let Some(budget) = api_attempts_left.as_ref() {
+                    let Some(reservation) = budget.reserve() else {
+                        callback_error = Some(LlmError::ApiAttemptsExhausted);
+                        return Err(crate::execution::wire_error(LlmError::ApiAttemptsExhausted));
+                    };
+                    Some(reservation)
+                } else {
+                    None
+                };
+                if let Some(reservation) = reservation {
+                    reservation.commit();
+                }
+                Ok(())
+            })
+            .await;
+        let received = match received {
+            Ok(received) => received,
+            Err(error) => {
+                if callback_error.is_some() {
+                    if let Some(submission) = prepared.computer_submission.as_ref() {
+                        submission.not_submitted().await?;
+                    }
+                }
+                return Err(callback_error.unwrap_or_else(|| crate::upstream::error(error)));
+            }
+        };
         model_stream(received).await
     }
     pub async fn preconnect_websocket(
@@ -1673,14 +1724,40 @@ impl ModelRuntime {
             .await
             .map_err(|error| crate::execution::restore_error(error, &prepared.host_failure))?;
         prepared.before_computer_submit().await?;
+        let api_attempts_left = prepared.api_attempts_left.clone();
+        let mut callback_rejected = false;
+        let mut callback_error = None;
+        let dispatch = || {
+            let reservation = match api_attempts_left.as_ref() {
+                Some(budget) => match budget.reserve() {
+                    Some(reservation) => Some(reservation),
+                    None => {
+                        callback_rejected = true;
+                        callback_error = Some(LlmError::ApiAttemptsExhausted);
+                        return Err(crate::execution::wire_error(LlmError::ApiAttemptsExhausted));
+                    }
+                },
+                None => None,
+            };
+            if let Some(reservation) = reservation {
+                reservation.commit();
+            }
+            Ok(())
+        };
         let received = if websocket {
             session
-                .dispatch_using(call, || Ok(()), Some(raw.as_ref()))
+                .dispatch_using(call, dispatch, Some(raw.as_ref()))
                 .await
         } else {
-            call.dispatch_once_using(raw.as_ref(), || Ok(())).await
+            call.dispatch_once_using(raw.as_ref(), dispatch).await
+        };
+        if callback_rejected {
+            if let Some(submission) = prepared.computer_submission.as_ref() {
+                submission.not_submitted().await?;
+            }
         }
-        .map_err(crate::upstream::error)?;
+        let received = received
+            .map_err(|error| callback_error.unwrap_or_else(|| crate::upstream::error(error)))?;
         Ok((prepared, received))
     }
 
@@ -2063,6 +2140,7 @@ impl PlannedNativeBetaContext {
 
 pub struct PreparedLlmCall {
     pub(crate) request_session_id: Option<String>,
+    pub(crate) api_attempts_left: Option<crate::ApiAttemptsLeft>,
     pub(crate) computer_binding: Option<lingxi_core::host::NativeContinuationBinding>,
     pub(crate) computer_submission: Option<Arc<crate::computer::ComputerReceiptSubmission>>,
     pub(crate) server_fallback_lane:
@@ -2466,9 +2544,11 @@ impl ModelRuntime {
                 message: "request must be sealed before dispatch".into(),
             })?;
         let mut callback_rejected = false;
+        let mut callback_error = None;
         let mark = || {
             on_dispatch().map_err(|error| {
                 callback_rejected = true;
+                callback_error = Some(error.clone());
                 crate::execution::wire_error(error)
             })
         };
@@ -2483,7 +2563,8 @@ impl ModelRuntime {
                 submission.not_submitted().await?;
             }
         }
-        let received = received.map_err(crate::upstream::error)?;
+        let received = received
+            .map_err(|error| callback_error.unwrap_or_else(|| crate::upstream::error(error)))?;
         Ok((prepared, received))
     }
 }

@@ -137,9 +137,14 @@ async fn unknown_command_path() {
         )
         .await;
     match outcome {
-        SlashDispatchResult::Unknown { name, display } => {
+        SlashDispatchResult::Unknown {
+            name,
+            display,
+            suggestion,
+        } => {
             assert_eq!(name, "zzz-fake".into());
             assert_eq!(display, "Unknown command: /zzz-fake".into());
+            assert!(suggestion.is_none());
         }
         other => panic!("expected Unknown, got {other:?}"),
     }

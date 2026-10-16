@@ -2,6 +2,118 @@ use super::*;
 use super::{fusion::*, lifecycle::*};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::path::PathBuf;
+
+#[test]
+fn unknown_command_attachment_omits_absent_suggestion_and_preserves_source_units() {
+    let catalog = command_api::HeadlessCommandCatalog {
+        prompt_command_names: vec!["clear".into()],
+        available_command_count: 1,
+    };
+    let command_name = Utf16JsonProjection::root_string(
+        "clera�".into(),
+        vec![
+            b'c' as u16,
+            b'l' as u16,
+            b'e' as u16,
+            b'r' as u16,
+            b'a' as u16,
+            0xd800,
+        ],
+    )
+    .unwrap();
+    let rendered = Utf16JsonProjection::from("reminder");
+
+    let without_suggestion =
+        unknown_command_fallback_attachment(&command_name, None, &catalog, rendered.clone());
+    assert_eq!(
+        without_suggestion.payload.string_units("/commandName"),
+        Some(vec![
+            b'c' as u16,
+            b'l' as u16,
+            b'e' as u16,
+            b'r' as u16,
+            b'a' as u16,
+            0xd800
+        ])
+    );
+    assert!(without_suggestion
+        .payload
+        .at_pointer("/suggestion")
+        .is_none());
+    assert!(!without_suggestion
+        .payload
+        .to_json_string()
+        .unwrap()
+        .contains("\"suggestion\":null"));
+
+    let safe_suggestion = Utf16JsonProjection::from("clear");
+    let with_suggestion = unknown_command_fallback_attachment(
+        &command_name,
+        Some(&safe_suggestion),
+        &catalog,
+        rendered.clone(),
+    );
+    assert_eq!(
+        with_suggestion.payload.string_at("/suggestion"),
+        Some("clear")
+    );
+
+    let unsafe_suggestion =
+        Utf16JsonProjection::root_string("b�".into(), vec![b'b' as u16, 0xd800]).unwrap();
+    let unsafe_attachment = unknown_command_fallback_attachment(
+        &command_name,
+        Some(&unsafe_suggestion),
+        &catalog,
+        rendered,
+    );
+    assert!(unsafe_attachment
+        .payload
+        .at_pointer("/suggestion")
+        .is_none());
+    assert!(!unsafe_attachment
+        .payload
+        .to_json_string()
+        .unwrap()
+        .contains("\"suggestion\""));
+}
+
+#[test]
+fn unknown_command_attachment_filters_then_caps_names_but_keeps_raw_count() {
+    let mut names = vec!["unsafe+name".into()];
+    names.extend((0..41).map(|index| format!("prompt-{index}").into()));
+    let catalog = command_api::HeadlessCommandCatalog {
+        prompt_command_names: names,
+        available_command_count: 43,
+    };
+    let attachment = unknown_command_fallback_attachment(
+        &Utf16JsonProjection::from("missing"),
+        None,
+        &catalog,
+        Utf16JsonProjection::from("reminder"),
+    );
+    let names = attachment
+        .payload
+        .at_pointer("/availableCommandNames")
+        .unwrap();
+    assert_eq!(names.array_len(), Some(40));
+    assert_eq!(
+        names.get_index(0).and_then(|value| value.as_str()),
+        Some("prompt-0")
+    );
+    assert_eq!(
+        names.get_index(39).and_then(|value| value.as_str()),
+        Some("prompt-39")
+    );
+    assert!(attachment
+        .payload
+        .at_pointer("/availableCommandNames/40")
+        .is_none());
+    assert_eq!(
+        attachment.payload.number_at("/availableCommandCount"),
+        Some(43.0)
+    );
+}
+
 #[test]
 fn stream_compact_recognition_preserves_focus_without_matching_other_commands() {
     assert_eq!(compact_command_instructions("/compact"), Some(""));
