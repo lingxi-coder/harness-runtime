@@ -214,8 +214,8 @@ impl OutputSink for RecordingFusionSink {
     async fn text(&self, _s: &str) {}
     async fn turn_start(&self) {}
     async fn turn_end(&self, _r: &str, _u: f64, _i: u64, _o: u64) {}
-    async fn tool_call(&self, _tool: &str, _input: &serde_json::Value) {}
-    async fn tool_result(&self, _tool: &str, _result: &serde_json::Value) {}
+    async fn tool_call(&self, _tool: &str, _input: &Utf16JsonProjection) {}
+    async fn tool_result(&self, _tool: &str, _result: &Utf16JsonProjection) {}
     async fn tool_heartbeat(&self, _id: &str, _tool: &str, _elapsed_ms: u64) {}
     async fn command_output(&self, name: &str, display: &str) {
         self.outputs
@@ -223,7 +223,7 @@ impl OutputSink for RecordingFusionSink {
             .await
             .push((name.to_string(), display.to_string()));
     }
-    async fn mod_log(&self, _plugin: &str, _text: &str) {}
+    async fn mod_log(&self, _plugin: &str, _text: &Utf16JsonProjection) {}
     async fn error(&self, code: &str, message: &str) {
         self.errors
             .lock()
