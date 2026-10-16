@@ -1961,7 +1961,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_reminder_keeps_source_units_and_native_remainder_count() {
+    fn unknown_reminder_omits_unsafe_unknown_name_and_keeps_native_remainder_count() {
         let unknown = Utf16JsonProjection::root_string(
             "unknown�".into(),
             ["unknown".encode_utf16().collect::<Vec<_>>(), vec![0xd800]].concat(),
@@ -1972,33 +1972,113 @@ mod tests {
             available_command_count: 5,
         };
         let rendered = crate::model::render_unknown_command_reminder(&unknown, &catalog);
-        let expected_prefix =
-            "<system-reminder>\nThe user's message starts with the slash command /unknown"
-                .encode_utf16()
-                .collect::<Vec<_>>();
-        let rendered_units = rendered.string_units("").unwrap();
-        assert!(rendered_units.starts_with(&expected_prefix));
-        assert_eq!(
-            rendered_units[expected_prefix.len()],
-            0xd800,
-            "the unknown name's source unit is preserved"
-        );
-        assert!(rendered.string_at("").unwrap().contains("and 3 more."));
+        let text = rendered.string_at("").unwrap();
+        assert!(text.contains(
+            "The user's message starts with a slash command, but no command with that name is available"
+        ));
+        assert!(text.contains("/first, /second, and 3 more."));
+        assert!(!text.contains("unknown"));
+        assert!(!rendered.string_units("").unwrap().contains(&0xd800));
     }
 
     #[test]
-    fn unknown_reminder_lists_at_most_forty_names_in_source_order() {
+    fn unknown_reminder_filters_names_by_native_ascii_and_utf16_length() {
+        let max_length = "a".repeat(256);
+        let too_long = "b".repeat(257);
+        let lone_surrogate =
+            Utf16JsonProjection::root_string("bad�".into(), vec![b'b' as u16, 0xd800]).unwrap();
+        let catalog = crate::model::HeadlessCommandCatalog {
+            prompt_command_names: vec![
+                "valid-name_1:2.test".into(),
+                "skill.alpha+beta".into(),
+                "skill-🧪-probe".into(),
+                max_length.clone().into(),
+                too_long.clone().into(),
+                lone_surrogate,
+            ],
+            available_command_count: 8,
+        };
+        let rendered = crate::model::render_unknown_command_reminder(&"missing".into(), &catalog);
+        let text = rendered.string_at("").unwrap();
+        assert!(text.contains("/valid-name_1:2.test"));
+        assert!(text.contains(&format!("/{max_length}")));
+        assert!(!text.contains("skill.alpha+beta"));
+        assert!(!text.contains("skill-🧪-probe"));
+        assert!(!text.contains(&format!("/{too_long}")));
+        assert!(text.contains("and 6 more."));
+        assert!(!rendered.string_units("").unwrap().contains(&0xd800));
+    }
+
+    #[test]
+    fn unknown_reminder_uses_native_empty_safe_name_messages() {
+        let invalid_names = vec!["skill.alpha+beta".into(), "skill-🧪-probe".into()];
+        let singular = crate::model::render_unknown_command_reminder(
+            &"missing".into(),
+            &crate::model::HeadlessCommandCatalog {
+                prompt_command_names: invalid_names.clone(),
+                available_command_count: 1,
+            },
+        );
+        assert!(singular
+            .string_at("")
+            .unwrap()
+            .contains("This session has 1 slash command, but none can be named here."));
+        let plural = crate::model::render_unknown_command_reminder(
+            &"missing".into(),
+            &crate::model::HeadlessCommandCatalog {
+                prompt_command_names: invalid_names,
+                available_command_count: 2,
+            },
+        );
+        assert!(plural
+            .string_at("")
+            .unwrap()
+            .contains("This session has 2 slash commands, but none can be named here."));
+        let empty = crate::model::render_unknown_command_reminder(
+            &"missing".into(),
+            &crate::model::HeadlessCommandCatalog::default(),
+        );
+        assert!(empty
+            .string_at("")
+            .unwrap()
+            .contains("No slash commands are available in this session."));
+    }
+
+    #[test]
+    fn unknown_reminder_accepts_command_name_at_256_utf16_units_only() {
+        let max_length = "a".repeat(256);
+        let too_long = "b".repeat(257);
+        let max_rendered = crate::model::render_unknown_command_reminder(
+            &max_length.clone().into(),
+            &crate::model::HeadlessCommandCatalog::default(),
+        );
+        let max_text = max_rendered.string_at("").unwrap();
+        assert!(max_text.contains(&format!("slash command /{max_length}, but no command")));
+
+        let too_long_rendered = crate::model::render_unknown_command_reminder(
+            &too_long.clone().into(),
+            &crate::model::HeadlessCommandCatalog::default(),
+        );
+        let too_long_text = too_long_rendered.string_at("").unwrap();
+        assert!(too_long_text.contains(
+            "The user's message starts with a slash command, but no command with that name is available"
+        ));
+        assert!(!too_long_text.contains(&too_long));
+    }
+
+    #[test]
+    fn unknown_reminder_lists_all_safe_names_in_source_order() {
         let catalog = crate::model::HeadlessCommandCatalog {
             prompt_command_names: (0..41)
                 .map(|index| format!("prompt-{index}").into())
                 .collect(),
-            available_command_count: 42,
+            available_command_count: 43,
         };
         let rendered = crate::model::render_unknown_command_reminder(&"missing".into(), &catalog);
         let text = rendered.string_at("").unwrap();
         assert!(text.contains("/prompt-0, /prompt-1"));
-        assert!(text.contains("/prompt-39, and 2 more."));
-        assert!(!text.contains("/prompt-40"));
+        assert!(text.contains("/prompt-39, /prompt-40, and 2 more."));
+        assert!(!text.contains("/prompt-41"));
     }
 
     #[test]

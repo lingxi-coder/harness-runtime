@@ -388,45 +388,80 @@ pub fn render_unknown_command_reminder(
 ) -> Utf16JsonProjection {
     use PromptPart::{Source, Text};
 
-    const MAX_LISTED_COMMANDS: usize = 40;
+    let command_name_is_safe = is_native_reminder_command_name(command_name);
     let listed = catalog
         .prompt_command_names
         .iter()
-        .take(MAX_LISTED_COMMANDS)
+        .filter(|name| is_native_reminder_command_name(name))
         .collect::<Vec<_>>();
-    let mut parts = vec![
-        Text("<system-reminder>\nThe user's message starts with the slash command /"),
-        Source(command_name),
-        Text(
-            ", but no command with that name is available in this session, so it did not run. Slash commands available in this session: ",
-        ),
-    ];
-    let mut names = Vec::new();
-    for name in listed {
-        let mut units = vec![b'/' as u16];
-        units.extend(name.string_units("").unwrap_or_default());
-        names.push(source_from_units(units));
-    }
-    for (index, name) in names.iter().enumerate() {
-        if index > 0 {
-            parts.push(Text(", "));
-        }
-        parts.push(Source(name));
-    }
-    let remaining = catalog.available_command_count.saturating_sub(names.len());
+    let remaining = catalog.available_command_count.saturating_sub(listed.len());
     let remaining_count = remaining.to_string();
-    if remaining > 0 {
-        if !names.is_empty() {
-            parts.push(Text(", "));
+    let mut parts = vec![Text("<system-reminder>\n")];
+    if command_name_is_safe {
+        parts.push(Text("The user's message starts with the slash command /"));
+        parts.push(Source(command_name));
+        parts.push(Text(
+            ", but no command with that name is available in this session, so it did not run. ",
+        ));
+    } else {
+        parts.push(Text(
+            "The user's message starts with a slash command, but no command with that name is available in this session, so it did not run. ",
+        ));
+    }
+
+    if listed.is_empty() {
+        if remaining == 0 {
+            parts.push(Text("No slash commands are available in this session."));
+        } else {
+            parts.push(Text("This session has "));
+            parts.push(Text(&remaining_count));
+            parts.push(Text(" slash "));
+            parts.push(Text(if remaining == 1 {
+                "command"
+            } else {
+                "commands"
+            }));
+            parts.push(Text(", but none can be named here."));
         }
-        parts.push(Text("and "));
-        parts.push(Text(&remaining_count));
-        parts.push(Text(" more"));
+    } else {
+        parts.push(Text("Slash commands available in this session: "));
+        for (index, name) in listed.iter().enumerate() {
+            if index > 0 {
+                parts.push(Text(", "));
+            }
+            parts.push(Text("/"));
+            parts.push(Source(name));
+        }
+        if remaining > 0 {
+            parts.push(Text(", and "));
+            parts.push(Text(&remaining_count));
+            parts.push(Text(" more"));
+        }
+        parts.push(Text("."));
     }
     parts.push(Text(
-        ". Treat the message as a plain request and do the task with the tools you have. If the task needs that command, tell the user it is not installed in this session. The user can add it as an organization plugin or a project skill. Do not give installation steps you are not sure of. Do not say the command ran.\n</system-reminder>",
+        " Treat the message as a plain request and do the task with the tools you have. If the task needs that command, tell the user it is not installed in this session. The user can add it as an organization plugin or a project skill. Do not give installation steps you are not sure of. Do not say the command ran.\n</system-reminder>",
     ));
     source_concat(parts)
+}
+
+/// Native 2.1.295 kKe: names shown in an unknown-command reminder must be at
+/// most 256 UTF-16 code units and contain only ASCII letters, digits, `_`,
+/// `:`, `.`, or `-`.
+fn is_native_reminder_command_name(name: &Utf16JsonProjection) -> bool {
+    let Some(units) = name.string_units("") else {
+        return false;
+    };
+    !units.is_empty()
+        && units.len() <= 256
+        && units.iter().all(|unit| is_native_reminder_name_unit(*unit))
+}
+
+fn is_native_reminder_name_unit(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x30..=0x39 | 0x41..=0x5a | 0x5f | 0x2d | 0x2e | 0x3a | 0x61..=0x7a
+    )
 }
 
 fn deserialize_prompt_template<'de, D>(deserializer: D) -> Result<Utf16JsonProjection, D::Error>
