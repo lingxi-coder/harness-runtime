@@ -567,7 +567,7 @@ mod tests {
             crate::test_support::noop_hook_executor(),
             Arc::new(crate::test_support::NoOpPermissionGate),
             Arc::new(crate::test_support::MockOutputStream::new()),
-            Arc::new(crate::prompt::StaticMemoryProvider::empty()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
             std::env::temp_dir(),
         )
         .with_compaction(compactor)
@@ -641,7 +641,7 @@ mod tests {
             crate::test_support::noop_hook_executor(),
             Arc::new(crate::test_support::NoOpPermissionGate),
             Arc::new(crate::test_support::MockOutputStream::new()),
-            Arc::new(crate::prompt::StaticMemoryProvider::empty()),
+            Arc::new(crate::test_support::StaticMemoryProvider::empty()),
             std::env::temp_dir(),
         )
         .with_compaction(compactor)
@@ -725,7 +725,7 @@ mod tests {
                 Arc::new(hook_executor),
                 Arc::new(crate::test_support::NoOpPermissionGate),
                 Arc::new(crate::test_support::MockOutputStream::new()),
-                Arc::new(crate::prompt::StaticMemoryProvider::empty()),
+                Arc::new(crate::test_support::StaticMemoryProvider::empty()),
                 std::env::temp_dir(),
             )
             .with_compaction(compactor)
@@ -835,7 +835,7 @@ mod tests {
                 crate::test_support::noop_hook_executor(),
                 Arc::new(crate::test_support::NoOpPermissionGate),
                 output.clone(),
-                Arc::new(crate::prompt::StaticMemoryProvider::empty()),
+                Arc::new(crate::test_support::StaticMemoryProvider::empty()),
                 dir.path().to_path_buf(),
             )
             .with_hook_registry(Arc::new(tokio::sync::RwLock::new(registry)))

@@ -4521,7 +4521,7 @@ mod current_prompt_upe_scope_tests {
                 }),
             ),
         );
-        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
         assert_eq!(
             waiting_admissions.load(std::sync::atomic::Ordering::SeqCst),
             0
@@ -4591,7 +4591,7 @@ mod current_prompt_upe_scope_tests {
                 waiting_admissions_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }),
         ));
-        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
+        assert!(futures::poll!(waiting.as_mut()).is_pending());
         assert_eq!(
             waiting_admissions.load(std::sync::atomic::Ordering::SeqCst),
             0
