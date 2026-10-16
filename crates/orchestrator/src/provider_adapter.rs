@@ -4695,7 +4695,9 @@ mod tests {
 
         for (host_source, sdk_source) in [
             (HostSource::Explicit, SdkSource::Explicit),
-            (HostSource::Unknown, SdkSource::Unknown),
+            // A direct caller-supplied window has no catalog provenance; the
+            // SDK resolves that known raw value as explicit input.
+            (HostSource::Unknown, SdkSource::Explicit),
         ] {
             let mut override_opus = opus.clone();
             override_opus.metadata.context_window_source = host_source;
