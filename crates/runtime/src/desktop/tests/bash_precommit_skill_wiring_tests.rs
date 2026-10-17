@@ -60,9 +60,10 @@ async fn eligible_skill_provenance_matches_native_precommit_fixture() {
                 // The 2.1.286 fixture predates `rQ`. Model the concrete 2.1.295
                 // source case where PolicyVerdictState exists but
                 // rememberedCoreSkills is nullish: Native then uses its fixed
-                // remembered-core catalog, which includes code-review. This
-                // keeps the builtin gate active for unremembered skills while
-                // exercising the source-backed allow path for this fixture.
+                // remembered-core catalog, which includes code-review. The
+                // explicit non-allow verdict keeps the builtin gate active for
+                // unremembered skills while exercising that fallback.
+                native_settings.allow_bundled_skills = Some(false);
                 native_settings.policy_remembered_core_skills = Some(None);
             }
             let settings_loader = Arc::new(move || Ok(native_settings.clone()));
@@ -149,7 +150,7 @@ async fn desktop_skill_listing_uses_native_catalog_overrides_and_usage_snapshot(
     hidden.native_type = Some(command_api::NativeCommandType::Prompt);
     let mut ordinary = command("ordinary", "skills");
     ordinary.native_type = Some(command_api::NativeCommandType::Prompt);
-    let mut builtin = command("builtin-prompt", "skills");
+    let mut builtin = command("builtin-prompt", "builtin");
     builtin.source = CommandSource::Builtin;
     builtin.native_type = Some(command_api::NativeCommandType::Prompt);
     let mut plugin = command("plugin-off", "plugin");
@@ -177,6 +178,7 @@ async fn desktop_skill_listing_uses_native_catalog_overrides_and_usage_snapshot(
         policy: None,
         flag: None,
         disable_bundled_skills: false,
+        allow_bundled_skills: None,
         policy_remembered_core_skills: None,
         budget: SkillListingBudgetSettings {
             budget_fraction: Some(0.12),
@@ -201,7 +203,13 @@ async fn desktop_skill_listing_uses_native_catalog_overrides_and_usage_snapshot(
             .iter()
             .map(|entry| entry.name.string_at("").unwrap())
             .collect::<Vec<_>>(),
-        vec!["verify", "short-entry", "ordinary", "plugin-off"]
+        vec![
+            "verify",
+            "short-entry",
+            "ordinary",
+            "builtin-prompt",
+            "plugin-off"
+        ]
     );
     assert_eq!(
         entries[0].display_name.string_at(""),
@@ -214,6 +222,12 @@ async fn desktop_skill_listing_uses_native_catalog_overrides_and_usage_snapshot(
     );
     assert!(entries[0].is_name_only);
     assert!(entries[0].priority > 0.0);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.name.string_at("") == Some("builtin-prompt")),
+        "unresolved local policy uses the Native cold-cache allow default"
+    );
     let plugin_entry = entries
         .iter()
         .find(|entry| entry.name.string_at("") == Some("plugin-off"))

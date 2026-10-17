@@ -2364,6 +2364,14 @@ mod tests {
             .unwrap()
             .split(", ")
             .any(|name| name == "deep-research"));
+        let deep_research = catalog
+            .iter()
+            .find(|workflow| workflow.name.string_at("") == Some("deep-research"))
+            .expect("cold-cache default admits the compiled workflow");
+        assert!(
+            deep_research.disable_model_invocation,
+            "model invocation remains independently disabled by the workflow's manual-only source fact"
+        );
     }
 
     #[test]
@@ -2434,12 +2442,12 @@ mod tests {
     }
 
     #[test]
-    fn builtin_catalog_gate_is_independent_from_dynamic_workflow_gates() {
+    fn explicit_builtin_allowlist_is_independent_from_dynamic_workflow_gates() {
         let _guard = ENV_LOCK.lock().unwrap();
         std::env::remove_var("LINGXI_DISABLE_WORKFLOWS");
 
-        let no_policy_verdict = tool(None).with_allowed_builtin_workflow_names(Vec::new());
-        assert!(no_policy_verdict
+        let explicit_deny = tool(None).with_allowed_builtin_workflow_names(Vec::new());
+        assert!(explicit_deny
             .refresh_workflow_catalog(Path::new("."))
             .is_empty());
 

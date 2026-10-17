@@ -5103,13 +5103,22 @@ pub async fn build_with_credential_stack(
             .with_disable_workflows(managed_disable_workflows)
             .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
             .with_session_enabled(workflow_session_enabled)
-            .with_allowed_builtin_workflow_names(Vec::new())
             // §14 — the SAME registry the launcher above holds, so
             // `validate_input` and `launch` agree on what resolves.
             .with_plugin_workflows(plugin_workflow_registry.clone())
             // Route the nested `Read` check through the same enforcing gate as
             // the main turn, including its interactive/headless behavior.
             .with_permission_gate(perms.clone());
+        if !crate::bundled_skills_policy::bundled_workflows_admitted(
+            workflow_settings.disable_bundled_skills == Some(true),
+            None,
+        ) {
+            // Native cold-cache policy admits the compiled workflow. Keep the
+            // explicit empty set only when a local setting or env kill switch
+            // disables bundled skills/workflows.
+            workflow_tool_builder =
+                workflow_tool_builder.with_allowed_builtin_workflow_names(Vec::new());
+        }
         if let Some(policy) = boot_permission_policy.clone() {
             workflow_tool_builder = workflow_tool_builder.with_permission_policy(policy);
         }

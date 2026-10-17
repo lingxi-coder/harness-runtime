@@ -658,16 +658,18 @@ fn mobile_skill_listing_provider_with_settings(
                         };
                         let is_builtin_prompt = c.source == CommandSource::Builtin;
                         let disable_bundled_skills =
-                            std::env::var_os("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS")
-                                .is_some_and(|value| !value.is_empty())
-                                || effective_settings.as_ref().is_some_and(|settings| {
+                            crate::bundled_skills_policy::bundled_skills_disabled(
+                                effective_settings.as_ref().is_some_and(|settings| {
                                     settings.disable_bundled_skills == Some(true)
-                                });
+                                }),
+                            );
                         let builtin_gate_active = is_builtin_prompt
                             && native_builtin_skill_gate_active(
                                 &c.name,
                                 disable_bundled_skills,
-                                false,
+                                crate::bundled_skills_policy::local_policy_allows_bundled_skills(
+                                    None,
+                                ),
                                 Some(&[]),
                             );
                         let mode = native_skill_listing_mode(

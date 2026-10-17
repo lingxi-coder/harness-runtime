@@ -1028,6 +1028,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     // enabled, matching Claude Code's default-on session gate when no launch /
     // experiment policy disables it.
     let mut workflow_session_enabled = true;
+    // Scalar override across the admitted user → project → local tiers.
+    let mut disable_bundled_skills = false;
     // (#3 shell-expansion) Capture the boot `Arc<PermissionPolicy>` before it is
     // consumed by `PolicyPermissionGate::new`, so `tool_ctx.permission_policy`
     // shares the SAME base policy the model-facing gate enforces (the prompt
@@ -1270,6 +1272,12 @@ pub(super) async fn build_mobile_inner_with_ask(
                         .and_then(serde_json::Value::as_bool)
                     {
                         workflow_session_enabled = b;
+                    }
+                    if let Some(b) = v
+                        .get("disableBundledSkills")
+                        .and_then(serde_json::Value::as_bool)
+                    {
+                        disable_bundled_skills = b;
                     }
                 }
                 additional_working_dirs.extend_from_source(
@@ -2256,27 +2264,31 @@ pub(super) async fn build_mobile_inner_with_ask(
         workflow_policy_enabled && workflow_session_enabled,
         !workflow_policy_enabled,
     );
+    let mut workflow_tool_builder = tool_workflow::WorkflowTool::new(Some(
+        workflow_launcher.clone() as Arc<dyn tool_workflow::WorkflowLauncher>,
+    ))
+    .with_current_cwd(workflow_cwd)
+    .with_size_guideline_state(workflow_size_guideline_state.clone())
+    .with_size_guideline_source(
+        workflow_size_guideline,
+        false,
+        workflow_size_guideline_is_default,
+    )
+    .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
+    .with_session_enabled(workflow_session_enabled);
+    if !crate::bundled_skills_policy::bundled_workflows_admitted(disable_bundled_skills, None) {
+        workflow_tool_builder =
+            workflow_tool_builder.with_allowed_builtin_workflow_names(Vec::new());
+    }
     let workflow_tool = Arc::new(
-        tool_workflow::WorkflowTool::new(Some(
-            workflow_launcher.clone() as Arc<dyn tool_workflow::WorkflowLauncher>
-        ))
-        .with_current_cwd(workflow_cwd)
-        .with_size_guideline_state(workflow_size_guideline_state.clone())
-        .with_size_guideline_source(
-            workflow_size_guideline,
-            false,
-            workflow_size_guideline_is_default,
-        )
-        .with_dynamic_workflows_gate(dynamic_workflows_gate.clone())
-        .with_session_enabled(workflow_session_enabled)
-        .with_allowed_builtin_workflow_names(Vec::new())
-        .with_plugin_workflows(plugin_workflow_registry.clone())
-        .with_permission_gate(perms.clone())
-        .with_permission_policy(
-            boot_permission_policy
-                .clone()
-                .expect("mobile workflow permission policy is always wired"),
-        ),
+        workflow_tool_builder
+            .with_plugin_workflows(plugin_workflow_registry.clone())
+            .with_permission_gate(perms.clone())
+            .with_permission_policy(
+                boot_permission_policy
+                    .clone()
+                    .expect("mobile workflow permission policy is always wired"),
+            ),
     );
     *workflow_tool_slot.write().await = Some(workflow_tool.clone());
     tools.register_builtin(workflow_tool.clone());

@@ -5685,12 +5685,14 @@ struct NativeSkillListingSettings {
     policy: Option<lingxi_core::settings::SkillOverrides>,
     flag: Option<lingxi_core::settings::SkillOverrides>,
     disable_bundled_skills: bool,
-    /// `None` means this host has no PolicyVerdictState, so Native's `eRs()`
-    /// supplies an empty array. `Some(None)` means a verdict exists but its
-    /// remembered-core list is nullish, so Native falls back to its fixed
-    /// remembered-core catalog. `Some(Some(...))` is the actual remembered
-    /// list. Current Desktop composition only supplies the no-verdict case;
-    /// the nested states are also used to exercise the source-defined fallback.
+    /// Resolved local `allow_bundled_skills` verdict when one is available.
+    /// `None` uses Native's local cold-cache default (`onCacheMiss: "allow"`).
+    allow_bundled_skills: Option<bool>,
+    /// `None` means no remembered-core names are available; `Some(None)`
+    /// means the resolved verdict has a nullish list and Native falls back
+    /// to its fixed remembered-core catalog. `Some(Some(...))` is the
+    /// actual remembered list. The cold-cache allow default does not consult
+    /// this list; it matters only for an explicit non-allow verdict.
     policy_remembered_core_skills:
         Option<Option<Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>>>,
     budget: orchestrator::prompt::skill_listing::SkillListingBudgetSettings,
@@ -5792,10 +5794,10 @@ impl NativeSkillListingSettings {
             && command.source == command_api::CommandSource::Builtin
             && orchestrator::prompt::skill_listing::native_builtin_skill_gate_active(
                 &entry.name,
-                self.disable_bundled_skills
-                    || std::env::var_os("CLAUDE_CODE_DISABLE_BUNDLED_SKILLS")
-                        .is_some_and(|value| !value.is_empty()),
-                false,
+                crate::bundled_skills_policy::bundled_skills_disabled(self.disable_bundled_skills),
+                crate::bundled_skills_policy::local_policy_allows_bundled_skills(
+                    self.allow_bundled_skills,
+                ),
                 remembered_core_skills,
             );
         orchestrator::prompt::skill_listing::native_skill_listing_mode(
@@ -5869,6 +5871,7 @@ fn load_native_skill_listing_settings(
         policy: policy.skill_overrides,
         flag: flag.skill_overrides,
         disable_bundled_skills: effective.disable_bundled_skills.unwrap_or(false),
+        allow_bundled_skills: None,
         policy_remembered_core_skills: None,
         budget: orchestrator::prompt::skill_listing::SkillListingBudgetSettings {
             budget_fraction: effective.skill_listing_budget_fraction,

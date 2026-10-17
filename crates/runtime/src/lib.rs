@@ -25,6 +25,8 @@ pub mod models;
 pub use audio_runtime as audio;
 
 #[cfg(any(feature = "desktop", feature = "mobile"))]
+mod bundled_skills_policy;
+#[cfg(any(feature = "desktop", feature = "mobile"))]
 mod effort_settings;
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 mod fast_settings;
