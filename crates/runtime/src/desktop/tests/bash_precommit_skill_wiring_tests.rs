@@ -207,8 +207,8 @@ async fn desktop_skill_listing_uses_native_catalog_overrides_and_usage_snapshot(
             "verify",
             "short-entry",
             "ordinary",
-            "builtin-prompt",
-            "plugin-off"
+            "plugin-off",
+            "builtin-prompt"
         ]
     );
     assert_eq!(
