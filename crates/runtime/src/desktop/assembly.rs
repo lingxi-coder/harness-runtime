@@ -5110,7 +5110,7 @@ pub async fn build_with_credential_stack(
             // the main turn, including its interactive/headless behavior.
             .with_permission_gate(perms.clone());
         if !crate::bundled_skills_policy::bundled_workflows_admitted(
-            workflow_settings.disable_bundled_skills == Some(true),
+            workflow_settings.settings.disable_bundled_skills == Some(true),
             None,
         ) {
             // Native cold-cache policy admits the compiled workflow. Keep the
