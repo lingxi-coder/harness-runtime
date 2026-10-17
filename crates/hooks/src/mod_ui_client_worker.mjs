@@ -213,23 +213,14 @@ const SERIALIZE_TREE = new Script(`
           : onInput === undefined ? undefined : onInput(event?.value, event);
       } else if (type === 'Markdown') {
         const onLinkPress = own(props, 'onLinkPress');
-        const pressableLinks = own(props, 'pressableLinks');
-        const key = own(props, 'key');
         if (children !== undefined && (!Array.isArray(children) || children.length > 0)) {
           fail('Markdown does not accept children');
         }
         if (onLinkPress !== undefined && typeof onLinkPress !== 'function') {
           fail('Markdown onLinkPress must be a function');
         }
-        if (pressableLinks !== undefined && onLinkPress === undefined) {
-          fail('Markdown pressableLinks require onLinkPress');
-        }
-        if (onLinkPress !== undefined && (typeof key !== 'string' || key.length === 0)) {
-          fail('Markdown onLinkPress requires a non-empty key');
-        }
         if (onLinkPress !== undefined) {
-          callbackKeys = ['onLinkPress'];
-          callback = event => onLinkPress(event?.link, event);
+          fail('a Markdown with onLinkPress inside the tree; a surface module answers its own pointer with surface.onPointer');
         }
       }
       if (callbackKeys.length > 0 && props === undefined) fail(type + ' requires a callback');

@@ -87,11 +87,16 @@ fn public_client_tree_projection(
 
         let node_type = value.string_at("/type").unwrap_or_default();
         let requires_private_press = matches!(node_type, "Button" | "Input" | "Select");
-        let may_have_private_press = requires_private_press || node_type == "Markdown";
         let held_key = "held".encode_utf16().collect::<Vec<_>>();
         let children_key = "children".encode_utf16().collect::<Vec<_>>();
         let press_key = "press".encode_utf16().collect::<Vec<_>>();
-        let held = may_have_private_press
+        if node_type == "Markdown"
+            && (value.subprojection_property_units(&held_key).is_ok()
+                || value.subprojection_property_units(&press_key).is_ok())
+        {
+            return None;
+        }
+        let held = requires_private_press
             .then(|| value.subprojection_property_units(&held_key).ok())
             .flatten();
         let handle = if let Some(held) = &held {
@@ -125,7 +130,7 @@ fn public_client_tree_projection(
             .ok()?;
         let mut fields = Vec::with_capacity(entries.len());
         for entry in entries {
-            if may_have_private_press && entry.code_units == held_key {
+            if requires_private_press && entry.code_units == held_key {
                 if let Some(press) = press.take() {
                     fields.push((press_key.clone(), press));
                 }
@@ -5185,6 +5190,21 @@ mod tests {
                 })),
             )
             .is_none());
+        assert!(
+            host.frame_for_worker_result(
+                "runtime-1",
+                4,
+                "plugin",
+                &host_generated_json(json!({
+                    "tree":{"type":"Markdown","props":{"key":"links","text":"docs"},"held":8},
+                    "hasPointerListener":false,
+                    "hasKeyListener":false,
+                    "frameSequence":3,
+                })),
+            )
+            .is_none(),
+            "Client Markdown cannot carry a private held handle"
+        );
         assert!(host
             .frame_for_worker_result(
                 "runtime-1",
@@ -5200,9 +5220,9 @@ mod tests {
     }
 
     #[test]
-    fn client_tree_projection_lowers_private_handles_without_losing_utf16_or_key_order() {
+    fn client_tree_projection_lowers_private_handles_and_rejects_markdown_handles() {
         let tree = Utf16JsonProjection::parse(
-            r#"{"type":"Box","props":{"label":"\ud800"},"children":[[{"type":"Input","props":{"key":"q\ud800","value":"v\ud800"},"held":7,"children":[]}],{"type":"Markdown","props":{"key":"links","text":"docs"},"held":8,"children":[]},{"type":"Markdown","props":{"key":"plain","text":"plain"},"children":[]},{"type":"Text","props":{},"children":["text:\ud800"]}]}"#,
+            r#"{"type":"Box","props":{"label":"\ud800"},"children":[[{"type":"Input","props":{"key":"q\ud800","value":"v\ud800"},"held":7,"children":[]}],{"type":"Markdown","props":{"key":"links","text":"docs","pressableLinks":["https://example.test"]},"children":[]},{"type":"Markdown","props":{"key":"plain","text":"plain"},"children":[]},{"type":"Text","props":{},"children":["text:\ud800"]}]}"#,
         )
         .unwrap();
 
@@ -5225,8 +5245,12 @@ mod tests {
             Some("review")
         );
         assert_eq!(public.number_at("/children/0/0/press/handle"), Some(7.0));
-        assert_eq!(public.number_at("/children/1/press/handle"), Some(8.0));
+        assert_eq!(
+            public.string_units("/children/1/props/pressableLinks/0"),
+            Some("https://example.test".encode_utf16().collect())
+        );
         assert!(public.subprojection("/children/0/0/held").is_err());
+        assert!(public.subprojection("/children/1/press").is_err());
         assert!(public.subprojection("/children/1/held").is_err());
         assert!(public.subprojection("/children/2/press").is_err());
         assert!(public.subprojection("/children/2/held").is_err());
@@ -5257,6 +5281,15 @@ mod tests {
         )
         .unwrap();
         assert!(public_client_tree_projection(&conflicting_press, "review").is_none());
+        let markdown_held =
+            Utf16JsonProjection::parse(r#"{"type":"Markdown","props":{"text":"docs"},"held":8}"#)
+                .unwrap();
+        assert!(public_client_tree_projection(&markdown_held, "review").is_none());
+        let markdown_press = Utf16JsonProjection::parse(
+            r#"{"type":"Markdown","props":{"text":"docs"},"press":{"plugin":"review","handle":8}}"#,
+        )
+        .unwrap();
+        assert!(public_client_tree_projection(&markdown_press, "review").is_none());
     }
 
     #[test]
@@ -5327,8 +5360,7 @@ mod tests {
                   h(Select, { key: 'mode', value: 'fast', options: [{ value: 'fast' }],
                     onSelect: (value, event) => surface.post({ title: `Select ${event.value}: ${value}` }) }),
                   h(Markdown, { key: 'links', text: '[docs](https://example.test)',
-                    pressableLinks: ['https://example.test'],
-                    onLinkPress: (link, event) => surface.post({ title: `Markdown link ${event.link.href}: ${link.href}` }) }),
+                    pressableLinks: ['https://example.test'] }),
                 ] });
               }
             "#,
@@ -5520,7 +5552,7 @@ mod tests {
         assert!(input_node["props"].get("onSubmit").is_none());
         assert!(input_node["props"].get("onInput").is_none());
         assert!(input_node["props"].get("onEvent").is_none());
-        for key in ["submit", "mode", "links"] {
+        for key in ["submit", "mode"] {
             let node = tree_node_with_key(mounted_tree, key)
                 .unwrap_or_else(|| panic!("rendered {key} node exists"));
             assert_eq!(node["press"]["plugin"], "review");
@@ -5533,6 +5565,15 @@ mod tests {
         let markdown_node = tree_node_with_key(mounted_tree, "links").unwrap();
         assert!(markdown_node["props"].get("onLinkPress").is_none());
         assert!(markdown_node["props"].get("onEvent").is_none());
+        assert_eq!(
+            markdown_node["props"]["pressableLinks"],
+            json!(["https://example.test"]),
+            "Native Client exportTree preserves pressableLinks as plain props"
+        );
+        assert!(
+            markdown_node.get("press").is_none(),
+            "Native Client Markdown has no held callback"
+        );
 
         let uncommitted_client_press = host
             .dispatch_client_ui_control(
@@ -5699,35 +5740,10 @@ mod tests {
         .await;
         assert!(tree_press_handle_for_key(&selected_input_frame["tree"], "mode").is_some());
 
-        let markdown_handle = tree_press_handle_for_key(&selected_input_frame["tree"], "links")
-            .expect("rendered link Markdown exposes its public press handle");
-        let markdown_callback = host
-            .dispatch_client_ui_operation(
-                host_generated_json(json!({
-                    "type":"runHeld",
-                    "runtimeId":runtime_id,
-                    "render_revision":revision,
-                    "handle":markdown_handle,
-                    "event":{"link":{"href":"https://example.test"}},
-                })),
-                session.as_ref(),
-            )
-            .await
-            .unwrap();
-        assert!(test_value(&markdown_callback).get("tree").is_some());
-        let markdown_input_frame = wait_for_client_frame(
-            &session_impl,
-            &runtime_id,
-            "Markdown onLinkPress post",
-            |frame| {
-                tree_contains_text(
-                    &frame["tree"],
-                    "Markdown link https://example.test: https://example.test",
-                )
-            },
-        )
-        .await;
-        assert!(tree_press_handle_for_key(&markdown_input_frame["tree"], "links").is_some());
+        assert!(
+            tree_press_handle_for_key(&selected_input_frame["tree"], "links").is_none(),
+            "Native Client Markdown does not expose a held handle"
+        );
 
         let selected_event = host
             .dispatch_client_ui_control(

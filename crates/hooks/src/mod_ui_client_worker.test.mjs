@@ -127,7 +127,7 @@ test('mounts a module graph into a bounded VM tree and routes held, pointer, key
   manager.dispose();
 });
 
-test('Client worker mirrors Native Button, Input, Select and Markdown callback adapters', async () => {
+test('Client worker mirrors Native Button, Input and Select adapters and keeps Markdown unheld', async () => {
   const events = [];
   const manager = new ClientSurfaceManager({ send: message => events.push(message) });
   const mounted = await manager.mount(mountOptions({
@@ -149,7 +149,7 @@ test('Client worker mirrors Native Button, Input, Select and Markdown callback a
           h(Markdown, {
             key: 'links', text: '[docs](https://example.test)',
             pressableLinks: ['https://example.test'],
-            onLinkPress: (link, event) => surface.post({ callback: 'link', href: link.href, eventHref: event.link.href }),
+            onLinkPress: undefined,
           }),
           h(Input, {
             key: 'optional-input', onInput: undefined,
@@ -161,7 +161,7 @@ test('Client worker mirrors Native Button, Input, Select and Markdown callback a
   }));
 
   assert.deepEqual(mounted.tree.children.map(node => node.type), ['Button', 'Input', 'Select', 'Markdown', 'Input']);
-  assert.deepEqual(mounted.tree.children.map(node => node.held), [1, 2, 3, 4, 5]);
+  assert.deepEqual(mounted.tree.children.map(node => node.held), [1, 2, 3, undefined, 4]);
   for (const node of mounted.tree.children) {
     for (const callback of ['onPress', 'onSubmit', 'onInput', 'onSelect', 'onLinkPress', 'onEvent']) {
       assert.equal(Object.hasOwn(node.props, callback), false, `${node.type} callback ${callback} is not serialized`);
@@ -169,13 +169,16 @@ test('Client worker mirrors Native Button, Input, Select and Markdown callback a
   }
 
   const [button, input, select, markdown, optionalInput] = mounted.tree.children;
+  assert.deepEqual(markdown.props, {
+    key: 'links', text: '[docs](https://example.test)',
+    pressableLinks: ['https://example.test'],
+  }, 'native Client exportTree keeps pressableLinks as data without a callback');
+  assert.equal(Object.hasOwn(markdown, 'held'), false,
+    'Native Client does not expose a Markdown held callback');
   assert.equal(manager.runHeld(mounted.runtimeId, button.held, { kind: 'press' }), true);
   assert.equal(manager.runHeld(mounted.runtimeId, input.held, { kind: 'change', value: ' typed ' }), true);
   assert.equal(manager.runHeld(mounted.runtimeId, input.held, { kind: 'submit', value: ' answer ' }), true);
   assert.equal(manager.runHeld(mounted.runtimeId, select.held, { value: 'fast' }), true);
-  assert.equal(manager.runHeld(mounted.runtimeId, markdown.held, {
-    link: { href: 'https://example.test' },
-  }), true);
   assert.equal(manager.runHeld(mounted.runtimeId, optionalInput.held, {
     kind: 'change', value: 'ignored without optional onInput',
   }), true, 'an explicitly undefined optional onInput is treated as absent');
@@ -184,13 +187,12 @@ test('Client worker mirrors Native Button, Input, Select and Markdown callback a
     { callback: 'input', value: ' typed ', kind: 'change' },
     { callback: 'submit', value: ' answer ', kind: 'submit' },
     { callback: 'select', value: 'fast', eventValue: 'fast' },
-    { callback: 'link', href: 'https://example.test', eventHref: 'https://example.test' },
   ]);
 
   for (const [runtimeId, body, message] of [
     ['legacy-input-event', `h(Input, { key: 'query', onEvent() {} })`, 'Input does not accept onEvent'],
     ['legacy-select-event', `h(Select, { key: 'mode', onEvent() {} })`, 'Select does not accept onEvent'],
-    ['markdown-without-handler', `h(Markdown, { key: 'links', pressableLinks: [] })`, 'Markdown pressableLinks require onLinkPress'],
+    ['markdown-with-on-link-press', `h(Markdown, { key: 'links', text: 'link', onLinkPress() {} })`, 'a Markdown with onLinkPress inside the tree; a surface module answers its own pointer with surface.onPointer'],
   ]) {
     await assert.rejects(manager.mount(mountOptions({
       runtimeId,
