@@ -50,23 +50,29 @@ fn fresh(
     std::fs::create_dir_all(cwd.join(".git")).expect("git marker");
     std::fs::create_dir_all(&lingxi_home).expect("lingxi home");
 
-    let mut reg = CommandRegistry::new();
-    register_all_builtin_commands(&mut reg);
-    let handle: Arc<MockOrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
+    // The live handlers hold Weak references to this exact registry. Keep this
+    // Arc alive through dispatch, just as the application composition root does.
     let shared: Arc<RwLock<CommandRegistry>> = Arc::new(RwLock::new(CommandRegistry::new()));
-    register_core_batch_8(
-        &mut reg,
-        handle.clone(),
-        shared,
-        cwd,
-        lingxi_home,
-        None,
-        home,
-        Vec::new(),
-        false,
-        false,
-    );
-    let d = RegistrySlashDispatcher::new(Arc::new(RwLock::new(reg)));
+    let handle: Arc<MockOrchestratorHandle> = Arc::new(MockOrchestratorHandle::new());
+    {
+        let mut reg = shared
+            .try_write()
+            .expect("fresh command registry must be unlocked while building the fixture");
+        register_all_builtin_commands(&mut reg);
+        register_core_batch_8(
+            &mut reg,
+            handle.clone(),
+            shared.clone(),
+            cwd,
+            lingxi_home,
+            None,
+            home,
+            Vec::new(),
+            false,
+            false,
+        );
+    }
+    let d = RegistrySlashDispatcher::new(shared);
     (d, handle, root)
 }
 
