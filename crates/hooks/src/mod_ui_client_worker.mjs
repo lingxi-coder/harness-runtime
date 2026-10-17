@@ -116,61 +116,55 @@ const SERIALIZE_TREE = new Script(`
     let nodeCount = 0;
     const allowed = new Set(${JSON.stringify(ELEMENTS)});
     const fail = message => { throw new TypeError(message); };
-    const own = (object, key) => {
-      const descriptor = Object.getOwnPropertyDescriptor(object, key);
-      if (!descriptor) return undefined;
-      if (!Object.hasOwn(descriptor, 'value')) fail('accessor properties are not plain data');
-      return descriptor.value;
-    };
-    const isPlainObject = value => {
-      if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-      const prototype = Object.getPrototypeOf(value);
-      return prototype === null || Object.getPrototypeOf(prototype) === null;
-    };
-    const copyJson = (value, depth = 0, counter = { values: 0 }) => {
-      if (depth > ${MAX_DATA_DEPTH}) fail('plain data exceeds its ${MAX_DATA_DEPTH} level nesting limit');
+    const copyJson = (value, depth = 0, counter = { values: 0 }, omittedKeys = null) => {
       counter.values += 1;
-      if (counter.values > ${MAX_DATA_VALUES}) fail('plain data exceeds its ${MAX_DATA_VALUES} value limit');
-      if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
-      if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-      if (value === undefined || typeof value === 'function') return undefined;
-      if (typeof value === 'bigint' || typeof value === 'symbol') fail('value is not JSON data');
+      if (counter.values > ${MAX_DATA_VALUES}) fail('props of more than ' + ${MAX_DATA_VALUES} + ' values');
+      if (value === null) return null;
+      const kind = typeof value;
+      if (kind === 'string' || kind === 'boolean') return value;
+      if (kind === 'number') return Number.isFinite(value) ? value : null;
+      if (kind !== 'object') return undefined;
+      if (depth > ${MAX_DATA_DEPTH}) fail('props nesting deeper than ' + ${MAX_DATA_DEPTH});
       if (Array.isArray(value)) {
+        if (value.length > ${MAX_DATA_VALUES} - counter.values) {
+          fail('props of more than ' + ${MAX_DATA_VALUES} + ' values');
+        }
         const result = [];
         for (let index = 0; index < value.length; index += 1) {
-          if (!Object.hasOwn(value, index)) fail('sparse arrays are not plain data');
-          const child = copyJson(own(value, String(index)), depth + 1, counter);
+          if (!(index in value)) fail('props with a hole in an array');
+          const child = copyJson(value[index], depth + 1, counter);
           result.push(child === undefined ? null : child);
-        }
-        for (const key of Reflect.ownKeys(value)) {
-          if (key !== 'length' && !(typeof key === 'string' && /^(0|[1-9]\\d*)$/.test(key))) {
-            fail('arrays with extra properties are not plain data');
-          }
         }
         return result;
       }
-      if (!isPlainObject(value)) fail('value is not plain JSON data');
-      const result = Object.create(null);
-      for (const key of Reflect.ownKeys(value)) {
-        if (typeof key !== 'string') fail('symbol keys are not plain data');
-        const child = copyJson(own(value, key), depth + 1, counter);
-        if (child !== undefined) result[key] = child;
+      const result = {};
+      for (const key of Object.keys(value)) {
+        if (depth === 0 && omittedKeys?.includes(key)) continue;
+        const child = copyJson(value[key], depth + 1, counter);
+        if (child !== undefined) {
+          Object.defineProperty(result, key, {
+            value: child, enumerable: true, writable: true, configurable: true,
+          });
+        }
       }
       return result;
     };
     const copyNode = (value, depth) => {
-      if (depth > ${MAX_TREE_DEPTH}) fail('surface tree exceeds its ${MAX_TREE_DEPTH} level limit');
+      if (typeof value === 'string') return value;
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+        fail('a child that is neither a string nor an element');
+      }
       nodeCount += 1;
       if (nodeCount > ${MAX_TREE_NODES}) fail('surface tree exceeds its ${MAX_TREE_NODES} node limit');
-      if (!isPlainObject(value)) fail('surface tree child must be an element object');
-      const type = own(value, 'type');
-      const children = own(value, 'children');
+      if (depth > ${MAX_TREE_DEPTH}) fail('surface tree exceeds its ${MAX_TREE_DEPTH} level limit');
+      const type = value.type;
       if (type === 'Fragment') {
+        const children = value.children;
         if (!Array.isArray(children)) fail('surface Fragment children must be an array');
         const flattened = [];
         for (let index = 0; index < children.length; index += 1) {
           if (!Object.hasOwn(children, index)) fail('surface tree contains a sparse children array');
-          const child = own(children, String(index));
+          const child = children[index];
           if (typeof child === 'string') flattened.push(child);
           else {
             const copied = copyNode(child, depth + 1);
@@ -182,38 +176,54 @@ const SERIALIZE_TREE = new Script(`
       if (typeof type !== 'string' || !allowed.has(type)) fail('surface tree contains an unsupported element');
       const result = Object.create(null);
       result.type = type;
-      const props = own(value, 'props');
-      if (props !== undefined && !isPlainObject(props)) fail(type + ' props must be a plain object');
+      const props = value.props;
       let callbackKeys = [];
       let callback;
-      if (type === 'Button') callbackKeys = ['onPress'];
-      else if (type === 'Select') {
+      let markdownChildren;
+      let markdownChildrenRead = false;
+      if (type === 'Button') {
+        callbackKeys = ['onPress'];
+        if (props !== undefined && (props === null || typeof props !== 'object' || Array.isArray(props))) {
+          fail('Button props must be a plain object');
+        }
+        callback = props?.onPress;
+      } else if (type === 'Select') {
         if (props === undefined) fail('Select requires onSelect');
+        if (props === null || typeof props !== 'object' || Array.isArray(props)) {
+          fail('Select props must be a plain object');
+        }
         if (Object.hasOwn(props, 'onEvent')) fail('Select does not accept onEvent');
-        const onSelect = own(props, 'onSelect');
-        if (typeof onSelect !== 'function') fail('Select requires an onSelect callback');
+        const children = value.children;
         if (children !== undefined && (!Array.isArray(children) || children.length > 0)) {
           fail('Select does not accept children');
         }
+        const onSelect = props.onSelect;
+        if (typeof onSelect !== 'function') fail('Select requires an onSelect callback');
         callbackKeys = ['onSelect'];
         callback = event => onSelect(event?.value, event);
       } else if (type === 'Input') {
         if (props === undefined) fail('Input requires onSubmit');
+        if (props === null || typeof props !== 'object' || Array.isArray(props)) {
+          fail('Input props must be a plain object');
+        }
         if (Object.hasOwn(props, 'onEvent')) fail('Input does not accept onEvent');
+        const children = value.children;
         if (children !== undefined && (!Array.isArray(children) || children.length > 0)) {
           fail('Input does not accept children');
         }
-        const onSubmit = own(props, 'onSubmit');
-        const onInput = own(props, 'onInput');
+        const onSubmit = props.onSubmit;
+        const onInput = props.onInput;
         if (typeof onSubmit !== 'function') fail('Input requires an onSubmit callback');
         if (onInput !== undefined && typeof onInput !== 'function') fail('Input onInput must be a function');
-        callbackKeys = onInput === undefined ? ['onSubmit'] : ['onSubmit', 'onInput'];
+        callbackKeys = ['onSubmit', 'onInput'];
         callback = event => event?.kind === 'submit'
           ? onSubmit(event.value, event)
           : onInput === undefined ? undefined : onInput(event?.value, event);
       } else if (type === 'Markdown') {
-        const onLinkPress = own(props, 'onLinkPress');
-        if (children !== undefined && (!Array.isArray(children) || children.length > 0)) {
+        const onLinkPress = props == null ? undefined : props.onLinkPress;
+        markdownChildren = value.children;
+        markdownChildrenRead = true;
+        if (markdownChildren !== undefined && (!Array.isArray(markdownChildren) || markdownChildren.length > 0)) {
           fail('Markdown does not accept children');
         }
         if (onLinkPress !== undefined && typeof onLinkPress !== 'function') {
@@ -225,34 +235,21 @@ const SERIALIZE_TREE = new Script(`
       }
       if (callbackKeys.length > 0 && props === undefined) fail(type + ' requires a callback');
       if (props !== undefined) {
-        const cleanProps = Object.create(null);
-        for (const key of Reflect.ownKeys(props)) {
-          if (typeof key !== 'string') fail(type + ' props cannot contain symbol keys');
-          if (key === 'children') continue;
-          const prop = own(props, key);
-          if (callbackKeys.includes(key)) {
-            if (typeof prop !== 'function') fail(type + ' event callback must be a function');
-            if (type === 'Button') callback = prop;
-            continue;
-          }
-          const copied = copyJson(prop);
-          if (copied !== undefined) cleanProps[key] = copied;
-        }
-        result.props = cleanProps;
+        result.props = copyJson(props, 0, { values: 0 }, callbackKeys);
       }
       if ((type === 'Button' || type === 'Select') && typeof callback !== 'function') {
         fail(type + ' requires its event callback');
       }
-      const hover = own(value, 'hover');
+      const hover = value.hover;
       if (hover !== undefined) result.hover = copyJson(hover);
       if (callback !== undefined) result.held = bridge.hold(callback);
       if (type === 'Input' || type === 'Select') return result;
+      const children = markdownChildrenRead ? markdownChildren : value.children;
       if (children !== undefined) {
         if (!Array.isArray(children)) fail(type + ' children must be an array');
         const cleanChildren = [];
         for (let index = 0; index < children.length; index += 1) {
-          if (!Object.hasOwn(children, index)) fail('surface tree contains a sparse children array');
-          const child = own(children, String(index));
+          const child = children[index];
           if (typeof child === 'string') cleanChildren.push(child);
           else {
             const copied = copyNode(child, depth + 1);

@@ -235,6 +235,100 @@ test('Client tree JSON matches Native exportTree field order and Input/Select om
   manager.dispose();
 });
 
+test('Client plain-tree copy matches Native enumerable data and property budgets', async () => {
+  const manager = new ClientSurfaceManager({ send() {} });
+  const mounted = await manager.mount(mountOptions({
+    runtimeId: 'native-plain-copy',
+    source: `export function Board(_props, surface) { return surface.elements.Text({ children: 'ready' }); }`,
+  }));
+  const instance = manager.runtimeInstances.get(mounted.runtimeId);
+  assert(instance);
+  const invoke = new Script('(serializeTree, tree, bridge) => serializeTree(tree, bridge)')
+    .runInContext(instance.environment.context);
+  let nextHandle = 0;
+  const serialize = tree => invoke(instance.environment.serializeTree, tree, {
+    hold() { nextHandle += 1; return nextHandle; },
+  });
+
+  assert.equal(
+    serialize({ type: 'Text', props: { children: { source: 'metadata' } } }),
+    '{"type":"Text","props":{"children":{"source":"metadata"}}}',
+    'raw Text props.children is metadata and is preserved independently of tree children',
+  );
+
+  let getterReads = 0;
+  const array = [undefined, () => {}, 1n, Symbol('array-value'), 'kept'];
+  array.extra = 'ignored';
+  array[Symbol('array-key')] = 'ignored';
+  const inheritedArray = new Array(1);
+  const arrayPrototype = Object.create(Array.prototype);
+  Object.defineProperty(arrayPrototype, '0', { value: 'inherited', enumerable: true });
+  Object.setPrototypeOf(inheritedArray, arrayPrototype);
+  inheritedArray.extra = 'ignored';
+  const props = Object.create({ inherited: 'ignored' });
+  Object.defineProperties(props, {
+    visible: { enumerable: true, value: 7 },
+    read: { enumerable: true, get() { getterReads += 1; return 'got'; } },
+    bigint: { enumerable: true, value: 1n },
+    symbol: { enumerable: true, value: Symbol('object-value') },
+    callback: { enumerable: true, value() {} },
+    array: { enumerable: true, value: array },
+    inheritedArray: { enumerable: true, value: inheritedArray },
+    nullable: { enumerable: true, value: null },
+    missing: { enumerable: true, value: undefined },
+    nonfinite: { enumerable: true, value: Infinity },
+    toJSON: { enumerable: true, value() { throw new Error('toJSON must not run'); } },
+    hidden: { enumerable: false, get() { throw new Error('non-enumerable getter must not run'); } },
+  });
+  props[Symbol('object-key')] = 'ignored';
+  const node = Object.create({ type: 'inherited-type', props: { inherited: 'ignored' } });
+  node.type = 'Text';
+  node.props = props;
+  assert.equal(serialize(node),
+    '{"type":"Text","props":{"visible":7,"read":"got","array":[null,null,null,null,"kept"],"inheritedArray":["inherited"],"nullable":null,"nonfinite":null}}');
+  assert.equal(getterReads, 1, 'Object.keys properties are read once, including enumerable getters');
+
+  assert.equal(serialize('root string'), '"root string"', 'a root string is a valid Native tree');
+  assert.equal(serialize({ type: 'Text', props: 'plain' }), '{"type":"Text","props":"plain"}');
+  assert.equal(serialize({ type: 'Text', props: null }), '{"type":"Text","props":null}');
+  assert.equal(serialize({ type: 'Text', props: 1n }), '{"type":"Text"}', 'unsupported primitive props disappear');
+  assert.equal(serialize({ type: 'Text', props: Symbol('root') }), '{"type":"Text"}');
+
+  const inheritedChildren = new Array(1);
+  const childrenPrototype = Object.create(Array.prototype);
+  Object.defineProperty(childrenPrototype, '0', {
+    value: { type: 'Text', props: { label: 'inherited child' } }, enumerable: true,
+  });
+  Object.setPrototypeOf(inheritedChildren, childrenPrototype);
+  assert.equal(serialize({ type: 'Box', props: {}, children: inheritedChildren }),
+    '{"type":"Box","props":{},"children":[{"type":"Text","props":{"label":"inherited child"}}]}',
+    'Native reads children[i], including an inherited index');
+  assert.throws(() => serialize({ type: 'Box', props: {}, children: new Array(1) }),
+    error => error.message === 'a child that is neither a string nor an element');
+
+  assert.throws(() => serialize({ type: 'Text', props: { values: new Array(1) } }),
+    error => error.message === 'props with a hole in an array');
+  const tooDeep = (() => { let value = 'leaf'; for (let index = 0; index < 34; index += 1) value = { next: value }; return value; })();
+  assert.throws(() => serialize({ type: 'Text', props: tooDeep }),
+    error => error.message === 'props nesting deeper than 32');
+  const overBudget = { first: Array(9999).fill(0), second: Array(9999).fill(0) };
+  assert.throws(() => serialize({ type: 'Text', props: overBudget }),
+    error => error.message === 'props of more than 20000 values');
+
+  const inputAtBudget = serialize({
+    type: 'Input',
+    props: {
+      onSubmit() {}, onInput: undefined, query: 'q',
+      first: Array(9999).fill(0), second: Array(9997).fill(0),
+    },
+    children: [],
+  });
+  assert.equal(JSON.parse(inputAtBudget).held, nextHandle,
+    'both Input callback keys, including explicit undefined onInput, are excluded from Native props accounting');
+  assert.equal(Object.hasOwn(JSON.parse(inputAtBudget), 'children'), false);
+  manager.dispose();
+});
+
 test('frame sequences are generation-local and reject out-of-order frame delivery', async () => {
   const manager = new ClientSurfaceManager({ send() {} });
   const first = await manager.mount(mountOptions({
