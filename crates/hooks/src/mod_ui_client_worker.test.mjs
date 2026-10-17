@@ -601,11 +601,21 @@ test('prepared desktop ui.resolve constructors render a validated tree and route
   t.after(() => { if (!worker.killed) worker.kill(); });
 
   const pending = new Map();
+  const clientCoreEvents = [];
   const lines = createInterface({ input: worker.stdout, crlfDelay: Infinity });
   lines.on('line', line => {
     const frame = decodeModsIpcFrame(line);
     if (frame.kind === 'api.callers') {
       worker.stdin.write(`${encodeModsIpcFrame({ id: frame.id, kind: 'api.callers.result', callId: frame.callId })}\n`);
+      return;
+    }
+    if (frame.kind === 'next') {
+      clientCoreEvents.push(frame.input);
+      const result = { handled: true, element: frame.input.element };
+      if (Object.hasOwn(frame.input, 'value')) result.value = frame.input.value;
+      worker.stdin.write(`${encodeModsIpcFrame({
+        id: frame.id, kind: 'next.result', callId: frame.callId, result,
+      })}\n`);
       return;
     }
     if (frame.id !== 0 && frame.kind !== 'progress') {
@@ -865,6 +875,82 @@ test('prepared desktop ui.resolve constructors render a validated tree and route
   });
   assert.deepEqual(staleAfterRerender.result, { handled: false },
     'rerender revokes the previous Parent callback handle');
+
+  const clientEvent = (element, values = {}) => ({
+    plugin: 'desktop-plugin', element, component: 'Pane', requestId: 'client-render-1',
+    surface: 'desktop', ...values,
+  });
+  const clientContext = (event, input) => ({
+    kind: 'client-ui-action', plugin: input.plugin, clientKey: 'card',
+    component: input.component, requestId: input.requestId, surface: input.surface,
+    element: input.element, event,
+  });
+  const clientPressInput = clientEvent('client-button');
+  const clientPressed = await request(30, {
+    kind: 'dispatch', event: 'ui.press', pluginScope: 'desktop-plugin', input: clientPressInput,
+    pressToken: clientContext('ui.press', clientPressInput),
+  });
+  assert.equal(clientPressed.kind, 'result');
+  assert.deepEqual(clientPressed.result, { handled: true, element: 'client-button' },
+    'a host-admitted Client event returns its child key without looking up a Parent held action');
+
+  const emptyClientKey = await request(38, {
+    kind: 'dispatch', event: 'ui.press', pluginScope: 'desktop-plugin', input: clientPressInput,
+    pressToken: { ...clientContext('ui.press', clientPressInput), clientKey: '' },
+  });
+  assert.equal(emptyClientKey.kind, 'result');
+  assert.deepEqual(emptyClientKey.result, { handled: true, element: 'client-button' },
+    'the Host identity allows an empty Client root key');
+
+  const clientInput = clientEvent('client-query', { kind: 'change', value: ' typed ' });
+  const clientChanged = await request(31, {
+    kind: 'dispatch', event: 'ui.input', pluginScope: 'desktop-plugin', input: clientInput,
+    pressToken: clientContext('ui.input', clientInput),
+  });
+  assert.equal(clientChanged.kind, 'result');
+  assert.deepEqual(clientChanged.result, { handled: true, element: 'client-query', value: 'typed' });
+
+  const clientSelect = clientEvent('client-mode', { value: 'client-option' });
+  const clientSelected = await request(32, {
+    kind: 'dispatch', event: 'ui.select', pluginScope: 'desktop-plugin', input: clientSelect,
+    pressToken: clientContext('ui.select', clientSelect),
+  });
+  assert.equal(clientSelected.kind, 'result');
+  assert.deepEqual(clientSelected.result, {
+    handled: true, element: 'client-mode', value: 'client-option',
+  });
+
+  const wrongClientContext = await request(33, {
+    kind: 'dispatch', event: 'ui.input', pluginScope: 'desktop-plugin', input: clientInput,
+    pressToken: { ...clientContext('ui.input', clientInput), element: 'different-child' },
+  });
+  assert.equal(wrongClientContext.kind, 'error');
+  assert.match(wrongClientContext.message, /ui\.input has no valid private action token/);
+
+  const wrongClientScope = await request(37, {
+    kind: 'dispatch', event: 'ui.press', pluginScope: 'plugin-a', input: clientPressInput,
+    pressToken: clientContext('ui.press', clientPressInput),
+  });
+  assert.equal(wrongClientScope.kind, 'error');
+  assert.match(wrongClientScope.message, /ui\.press has no valid private action token/);
+
+  for (const [requestId, event, input] of [
+    [34, 'ui.press', clientPressInput],
+    [35, 'ui.input', clientInput],
+    [36, 'ui.select', clientSelect],
+  ]) {
+    const missingContext = await request(requestId, {
+      kind: 'dispatch', event, pluginScope: 'desktop-plugin', input,
+    });
+    assert.equal(missingContext.kind, 'error', `${event} without Host context is rejected`);
+    assert.ok(missingContext.message.includes(`${event} has no valid private action token`));
+  }
+  assert.deepEqual(clientCoreEvents.map(({ element, value }) => ({ element, value })), [
+    { element: 'client-button', value: undefined },
+    { element: 'client-button', value: undefined },
+    { element: 'client-query', value: 'typed' },
+    { element: 'client-mode', value: 'client-option' },
+  ], 'Client events reach the Host core with the child key and the rewritten value');
 
   const hiddenWithoutReveal = await request(14, {
     kind: 'dispatch', event: 'ui.render', input: {

@@ -2172,7 +2172,9 @@ impl ModHost {
             ("plugin".into(), exact_text_projection(identity.plugin())),
             (
                 "element".into(),
-                exact_string_projection(identity.key_units().to_vec()),
+                request
+                    .subprojection("/element")
+                    .map_err(|error| ModError::Protocol(error.to_string()))?,
             ),
             ("component".into(), plain_text_projection(component)),
             ("requestId".into(), exact_text_projection(site.request_id())),
@@ -2202,13 +2204,35 @@ impl ModHost {
         let reached = std::sync::Arc::new(StdMutex::new(None::<Utf16JsonProjection>));
         let reached_core = reached.clone();
         let plugin_for_dispatch = plugin.clone();
+        // Client control admission is based on the exact currently drawn
+        // Client identity. Keep that authorization distinct from the parent
+        // UI's private { plugin, handle } action token.
+        let client_action_context = Utf16JsonProjection::object(vec![
+            ("kind".into(), plain_text_projection("client-ui-action")),
+            ("plugin".into(), exact_text_projection(identity.plugin())),
+            (
+                "clientKey".into(),
+                exact_string_projection(identity.key_units().to_vec()),
+            ),
+            ("component".into(), plain_text_projection(component)),
+            ("requestId".into(), exact_text_projection(site.request_id())),
+            ("surface".into(), plain_text_projection(surface)),
+            (
+                "element".into(),
+                request
+                    .subprojection("/element")
+                    .map_err(|error| ModError::Protocol(error.to_string()))?,
+            ),
+            ("event".into(), plain_text_projection(hook_event)),
+        ])
+        .map_err(|error| ModError::Protocol(error.to_string()))?;
         let result = self
             .dispatch_plugin_scoped_ui_event(
                 hook_event,
                 &plugin_for_dispatch,
                 input,
                 session,
-                None,
+                Some(client_action_context),
                 move |forwarded| {
                     *lock(&reached_core) = forwarded.clone();
                     let mut response = host_generated_json(json!({"handled":true}));
@@ -5096,7 +5120,7 @@ mod tests {
         std::fs::write(
             &child,
             r#"
-              import { Box, Text, Button, h } from 'claude:surface-runtime';
+              import { Box, Text, Button, Input, Select, h } from 'claude:surface-runtime';
               type CardProps = { title: string; fail?: boolean; failRun?: boolean; timerFault?: boolean };
               export function Card(props: CardProps, surface: any) {
                 if (props.fail) throw new Error('client render exploded');
@@ -5115,6 +5139,8 @@ mod tests {
                       if (props.failRun) throw new Error('client press exploded');
                       surface.post({ title: 'pressed' });
                     } }),
+                  h(Input, { key: 'query', value: '', onEvent: () => {} }),
+                  h(Select, { key: 'mode', value: 'fast', options: [{ value: 'fast' }], onEvent: () => {} }),
                 ] });
               }
             "#,
@@ -5144,6 +5170,9 @@ mod tests {
                   handled: true,
                   props: { title: event.data.title },
                 }));
+                on('ui.press', (_$, event, next) => next(event));
+                on('ui.input', (_$, event, next) => next({ ...event, value: event.value.trim() }));
+                on('ui.select', (_$, event, next) => next({ ...event, value: `selected:${event.value}` }));
               }
             "#,
         )
@@ -5294,6 +5323,28 @@ mod tests {
         assert_eq!(test_value(&mount)["frameSequence"], 1);
         assert!(tree_contains_text(&test_value(&mount)["tree"], "initial"));
 
+        let uncommitted_client_press = host
+            .dispatch_client_ui_control(
+                host_generated_json(json!({
+                    "subtype":"ui_client_press",
+                    "plugin":"review",
+                    "component":"Pane",
+                    "instance_id":"pane-1",
+                    "client":"card",
+                    "module":client_module,
+                    "element":"submit",
+                    "event":{"type":"press"},
+                })),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            test_value(&uncommitted_client_press.response)["handled"],
+            false,
+            "a Client control is not admitted before its draw is committed"
+        );
+
         let committed = host
             .dispatch_client_ui_operation(
                 host_generated_json(json!({
@@ -5309,6 +5360,91 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(test_value(&committed)["handled"], true);
+
+        let client_press = |element: &str, event: Value| {
+            host_generated_json(json!({
+                "subtype":"ui_client_press",
+                "plugin":"review",
+                "component":"Pane",
+                "instance_id":"pane-1",
+                "client":"card",
+                "module":client_module,
+                "element":element,
+                "event":event,
+            }))
+        };
+        let pressed_event = host
+            .dispatch_client_ui_control(
+                client_press("submit", json!({"type":"press"})),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(test_value(&pressed_event.response)["handled"], true);
+        assert_eq!(
+            test_value(&pressed_event.response)["reached"]["element"],
+            "submit",
+            "the hook event uses the Client child key"
+        );
+
+        let changed_event = host
+            .dispatch_client_ui_control(
+                client_press(
+                    "query",
+                    json!({"type":"input","kind":"change","value":"  typed  "}),
+                ),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(test_value(&changed_event.response)["handled"], true);
+        assert_eq!(
+            test_value(&changed_event.response)["reached"]["element"],
+            "query"
+        );
+        assert_eq!(
+            test_value(&changed_event.response)["reached"]["value"],
+            "typed"
+        );
+
+        let selected_event = host
+            .dispatch_client_ui_control(
+                client_press("mode", json!({"type":"select","value":"fast"})),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(test_value(&selected_event.response)["handled"], true);
+        assert_eq!(
+            test_value(&selected_event.response)["reached"]["element"],
+            "mode"
+        );
+        assert_eq!(
+            test_value(&selected_event.response)["reached"]["value"],
+            "selected:fast"
+        );
+
+        let wrong_client = host
+            .dispatch_client_ui_control(
+                host_generated_json(json!({
+                    "subtype":"ui_client_press",
+                    "plugin":"review",
+                    "component":"Pane",
+                    "instance_id":"pane-1",
+                    "client":"other-card",
+                    "module":client_module,
+                    "element":"submit",
+                    "event":{"type":"press"},
+                })),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            test_value(&wrong_client.response)["handled"],
+            false,
+            "another Client key cannot borrow the committed draw"
+        );
 
         // `surface.post` fires during the first Client render, before mount
         // returns its runtime generation. The Host must queue and replay it.
@@ -5733,6 +5869,18 @@ mod tests {
             unload_invalidations[1]["uuid"]
         );
         assert!(host.client_ui.data.lock().unwrap().instances.is_empty());
+        let stale_after_unload = host
+            .dispatch_client_ui_control(
+                client_press("submit", json!({"type":"press"})),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            test_value(&stale_after_unload.response)["handled"],
+            false,
+            "a Client control from an unloaded draw is stale"
+        );
     }
 
     #[tokio::test]

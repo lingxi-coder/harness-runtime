@@ -2106,6 +2106,36 @@ function validParentPressToken(token) {
     && Number.isSafeInteger(token.handle) && token.handle > 0;
 }
 
+function validClientUiActionContext(context, eventName, event, pluginScope) {
+  const keys = ['kind', 'plugin', 'clientKey', 'component', 'requestId', 'surface', 'element', 'event'];
+  return context && typeof context === 'object' && !Array.isArray(context)
+    && Object.keys(context).length === keys.length
+    && keys.every(key => Object.hasOwn(context, key))
+    && context.kind === 'client-ui-action'
+    && typeof context.plugin === 'string' && context.plugin.length > 0
+    && pluginScope === context.plugin
+    && typeof context.clientKey === 'string' && context.clientKey.length <= 10_000
+    && typeof context.component === 'string' && context.component.length > 0
+    && typeof context.requestId === 'string' && context.requestId.length > 0
+    && context.surface === 'desktop'
+    && typeof context.element === 'string'
+    && ['ui.press', 'ui.input', 'ui.select'].includes(eventName)
+    && context.event === eventName
+    && event?.plugin === context.plugin
+    && event?.component === context.component
+    && event?.requestId === context.requestId
+    && event?.surface === context.surface
+    && event?.element === context.element;
+}
+
+function dispatchToHostCore(message, event) {
+  return new Promise((accept, reject) => {
+    const callId = nextCallId++;
+    pendingCore.set(callId, { requestId: message.id, event: message.event, accept, reject });
+    send({ id: message.id, kind: 'next', callId, input: event });
+  });
+}
+
 function flattenDesktopChildren(values, into = []) {
   for (const child of values) {
     if (child === null || child === undefined || typeof child === 'boolean') continue;
@@ -3363,6 +3393,7 @@ async function dispatch(message) {
   let uiRenderContext;
   let uiPressActionAvailable = true;
   let uiInputSelectActionAvailable = true;
+  let clientUiActionAvailable = false;
   if (message.event === 'ui.render') {
     const error = uiRenderArgumentError(message.input);
     if (error) throw new Error(`ui.render ${error}`);
@@ -3385,29 +3416,41 @@ async function dispatch(message) {
       && Number.isSafeInteger(token.handle) && token.handle > 0
       && typeof token.workerEpoch === 'string' && token.workerEpoch.length > 0
       && Number.isSafeInteger(token.renderRevision) && token.renderRevision > 0;
-    if (!validParentPressToken(token) && !terminalToken) {
+    const clientContext = validClientUiActionContext(
+      token, message.event, message.input, message.pluginScope,
+    );
+    if (!validParentPressToken(token) && !terminalToken && !clientContext) {
       throw new Error('ui.press has no valid private action token');
     }
+    clientUiActionAvailable = clientContext;
     if (message.input.surface === 'desktop') {
-      uiPressActionAvailable = validParentPressToken(token)
-        && uiPressInputAdmitted(message.input, token, message.pressHrefAdmitted);
+      uiPressActionAvailable = clientContext || (validParentPressToken(token)
+        && uiPressInputAdmitted(message.input, token, message.pressHrefAdmitted));
     }
   } else if (message.event === 'ui.input') {
     const error = uiInputArgumentError(message.input);
     if (error) throw new Error(error);
-    if (!validParentPressToken(message.pressToken)) {
+    const clientContext = validClientUiActionContext(
+      message.pressToken, message.event, message.input, message.pluginScope,
+    );
+    if (!validParentPressToken(message.pressToken) && !clientContext) {
       throw new Error('ui.input has no valid private action token');
     }
-    uiInputSelectActionAvailable = uiInputSelectActionMatches(
+    clientUiActionAvailable = clientContext;
+    uiInputSelectActionAvailable = clientContext || uiInputSelectActionMatches(
       message.input, message.pressToken, 'Input', undefined,
     );
   } else if (message.event === 'ui.select') {
     const error = uiSelectArgumentError(message.input);
     if (error) throw new Error(error);
-    if (!validParentPressToken(message.pressToken)) {
+    const clientContext = validClientUiActionContext(
+      message.pressToken, message.event, message.input, message.pluginScope,
+    );
+    if (!validParentPressToken(message.pressToken) && !clientContext) {
       throw new Error('ui.select has no valid private action token');
     }
-    uiInputSelectActionAvailable = uiInputSelectActionMatches(
+    clientUiActionAvailable = clientContext;
+    uiInputSelectActionAvailable = clientContext || uiInputSelectActionMatches(
       message.input, message.pressToken, 'Select', message.input.value,
     );
   } else if (message.event === 'prompt.fill' || message.event === 'prompt.suggest') {
@@ -3626,7 +3669,8 @@ async function dispatch(message) {
             returned = baseUiElements(event.surface, event.component) ?? Object.create(null);
           } else if (message.event === 'ui.press') {
             const token = message.pressToken;
-            const action = uiPressActions.get(uiPressActionKey(token));
+            const action = clientUiActionAvailable
+              ? undefined : uiPressActions.get(uiPressActionKey(token));
             const siteRevision = activeUiRenderRevisions.get(
               uiPressSiteKey(event.surface, event.component, event.requestId),
             );
@@ -3644,7 +3688,12 @@ async function dispatch(message) {
                 : action.workerEpoch === token.workerEpoch
                   && action.renderRevision === token.renderRevision
                   && siteRevision === token.renderRevision);
-            if (!matchesAction) {
+            if (clientUiActionAvailable) {
+              // A drawn Client control is admitted by the Host's exact Client
+              // identity check. It is not a parent UI held action and must not
+              // resolve through uiPressActions or $.action.run.
+              returned = await dispatchToHostCore(message, event);
+            } else if (!matchesAction) {
               returned = { handled: false };
             } else {
               const budget = makeBudget(hookBudgetMs);
@@ -3669,10 +3718,12 @@ async function dispatch(message) {
           } else if (message.event === 'ui.input' || message.event === 'ui.select') {
             const token = message.pressToken;
             const expectedType = message.event === 'ui.input' ? 'Input' : 'Select';
-            const matchesAction = uiInputSelectActionAvailable
+            const matchesAction = !clientUiActionAvailable && uiInputSelectActionAvailable
               && uiInputSelectActionMatches(event, token, expectedType,
                 message.event === 'ui.select' ? message.input.value : undefined);
-            if (!matchesAction) {
+            if (clientUiActionAvailable) {
+              returned = await dispatchToHostCore(message, event);
+            } else if (!matchesAction) {
               returned = { handled: false };
             } else {
               const action = uiPressActions.get(uiPressActionKey(token));
@@ -3692,11 +3743,7 @@ async function dispatch(message) {
               throw new Error('core: returned no { text } (a string)');
             }
           } else {
-            returned = await new Promise((accept, reject) => {
-              const callId = nextCallId++;
-              pendingCore.set(callId, { requestId: message.id, event: message.event, accept, reject });
-              send({ id: message.id, kind: 'next', callId, input: event });
-            });
+            returned = await dispatchToHostCore(message, event);
           }
           outcome = 'returned';
           return returned;
