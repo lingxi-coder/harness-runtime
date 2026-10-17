@@ -1990,12 +1990,9 @@ mod fork_dispatch_tests {
         let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
         let desc = SkillDescriptor {
             dynamic_body: Some(Arc::new(Capture(captured.clone()))),
-            ..prompt_desc("loop")
+            ..inline_desc("loop")
         };
-        let tool = SkillTool::with_loader(
-            shell_test_ctx(dummy_out()),
-            Arc::new(FixedLoader(Some(desc))),
-        );
+        let tool = SkillTool::with_loader(shell_test_ctx(out()), Arc::new(Loader(Some(desc))));
 
         let mut with_tools = fresh_ctx();
         with_tools.available_tool_names = Some(vec!["Skill".into(), "/workflow".into()]);

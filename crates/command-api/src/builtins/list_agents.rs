@@ -368,10 +368,8 @@ fn append_teammate_rows<'a>(
 fn native_teammate_field(value: Option<&Utf16JsonProjection>) -> Option<Utf16JsonProjection> {
     let source_units = value?.string_units("")?;
     let mut scalar_text = String::new();
-    for decoded in char::decode_utf16(source_units) {
-        if let Ok(character) = decoded {
-            scalar_text.push(character);
-        }
+    for character in char::decode_utf16(source_units).flatten() {
+        scalar_text.push(character);
     }
 
     let normalized = lingxi_core::host::display::sanitize_display_to(&scalar_text, usize::MAX);

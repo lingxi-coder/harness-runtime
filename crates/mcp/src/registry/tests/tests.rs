@@ -1066,7 +1066,10 @@ async fn plugin_server_owner_connect_and_last_unload_share_public_config_safely(
         .await
         .unwrap()
         .expect("registered owner can connect its plugin-scoped server");
-    assert_eq!(connected.0, name);
+    assert!(matches!(
+        connected,
+        PluginMcpConnectOutcome::Connected { ref server, .. } if server == name
+    ));
     assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 1);
 
     let first = registry
@@ -1087,6 +1090,104 @@ async fn plugin_server_owner_connect_and_last_unload_share_public_config_safely(
     assert!(last.removed_current_config);
     assert!(!registry.connections.read().await.contains_key(name));
     assert_eq!(mock.disconnect_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn plugin_policy_refusal_is_persisted_and_returned_to_the_owned_caller() {
+    let mock = Arc::new(BridgeMock::new(&[]));
+    let refusal = PluginMcpRefusal::new(
+        "safe_mode",
+        Utf16JsonProjection::from("Plugin MCP servers are disabled by safe mode."),
+    );
+    let registry = McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock.clone() as Arc<dyn RawConnectionProvider>,
+    )
+    .with_plugin_mcp_admission(Arc::new({
+        let refusal = refusal.clone();
+        move |_| Some(refusal.clone())
+    }));
+    let name = "plugin:demo:jira";
+    let mut config = cfg(name);
+    config.scope = ConfigScope::Dynamic;
+    config.metadata.agent_source = Some(crate::connection::McpAgentSource::Plugin);
+
+    // PluginManager's ordinary connect-all path still materializes the
+    // denied config in the registry so the subsequent trusted owner can be
+    // registered and an explicit `$.mcp.connect` can receive the refusal.
+    assert!(registry.connect(config.clone()).await.is_err());
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 0);
+    assert!(matches!(
+        registry.connections.read().await.get(name),
+        Some(McpConnectionState::Disconnected {
+            config: recorded,
+            last_error: Some(_),
+        }) if recorded.name == name
+    ));
+    assert!(
+        registry
+            .register_plugin_server_owner("demo@market", "jira", &config)
+            .await
+    );
+
+    let outcome = registry
+        .connect_plugin_server("demo@market", "jira")
+        .await
+        .unwrap();
+    match outcome {
+        Some(PluginMcpConnectOutcome::Refused(actual)) => assert_eq!(actual, refusal),
+        other => panic!("expected a typed policy refusal, got {other:?}"),
+    }
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 0);
+    assert!(registry
+        .plugin_server_for_owner("demo@market", "jira")
+        .await
+        .is_some());
+}
+
+#[tokio::test]
+async fn plugin_config_validation_and_disabled_state_precede_host_policy() {
+    let mock = Arc::new(BridgeMock::new(&[]));
+    let policy_calls = Arc::new(AtomicUsize::new(0));
+    let registry = McpRegistry::with_raw_conn(
+        mock.clone() as Arc<dyn McpTransport>,
+        mock.clone() as Arc<dyn RawConnectionProvider>,
+    )
+    .with_plugin_mcp_admission(Arc::new({
+        let policy_calls = Arc::clone(&policy_calls);
+        move |_| {
+            policy_calls.fetch_add(1, Ordering::SeqCst);
+            Some(PluginMcpRefusal::new(
+                "policy",
+                Utf16JsonProjection::from("host policy denied this server"),
+            ))
+        }
+    }));
+    let mut config = cfg("plugin:demo:invalid");
+    config.scope = ConfigScope::Dynamic;
+    config.disabled = true;
+    config.config_error = Some("invalid endpoint".into());
+    config.metadata.agent_source = Some(crate::connection::McpAgentSource::Plugin);
+
+    let config_error = registry.connect(config.clone()).await.unwrap_err();
+    assert!(config_error.to_string().contains("invalid endpoint"));
+    assert_eq!(policy_calls.load(Ordering::SeqCst), 0);
+
+    config.config_error = None;
+    assert!(registry
+        .connect(config)
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("turned off; turn it on in /mcp"));
+    assert_eq!(policy_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 0);
+
+    // The injected callback is only for plugin-sourced configs; ordinary MCP
+    // sources keep their established path.
+    registry.connect(cfg("ordinary")).await.unwrap();
+    assert_eq!(policy_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

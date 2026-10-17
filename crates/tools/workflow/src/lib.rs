@@ -494,8 +494,6 @@ where
     ))
 }
 
-/// Resolve relative to the process working directory. Production composition
-/// roots should use [`resolve_script_at`] with their live session cwd.
 // ── Save dynamic workflow (claude-code `eya` / `uQ_`, dialog mode:"save") ─────
 
 /// Where a saved workflow is written — the oracle's `scope` field of the "Save
@@ -1789,7 +1787,7 @@ impl Tool for WorkflowTool {
                 .map_err(|message| ValidationError(message.into()))?;
             resolved_script = None;
         } else if let Some(ref wf_name_units) = name_units {
-            if wf_name_units.contains(&(0 as u16)) {
+            if wf_name_units.contains(&0_u16) {
                 return Err(ValidationError(
                     "workflow name contains a NUL character".into(),
                 ));
@@ -3599,7 +3597,7 @@ mod tests {
         .unwrap();
 
         let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
-        let _ = registry.register(
+        registry.register(
             lingxi_core::types::PluginId::new(),
             vec![workflow::PluginWorkflowEntry {
                 qualified_name: "z-plugin:deploy".into(),
@@ -3608,7 +3606,7 @@ mod tests {
                 plugin_name: "z-plugin".into(),
             }],
         );
-        let _ = registry.register(
+        registry.register(
             lingxi_core::types::PluginId::new(),
             vec![workflow::PluginWorkflowEntry {
                 qualified_name: "a-plugin:deploy".into(),
@@ -3617,7 +3615,7 @@ mod tests {
                 plugin_name: "a-plugin".into(),
             }],
         );
-        let _ = registry.register(
+        registry.register(
             lingxi_core::types::PluginId::new(),
             vec![workflow::PluginWorkflowEntry {
                 qualified_name: "acme:shadow".into(),
@@ -3806,7 +3804,7 @@ mod tests {
         std::fs::write(&script_path, &script).unwrap();
 
         let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
-        let _ = registry.register(
+        registry.register(
             lingxi_core::types::PluginId::new(),
             vec![workflow::PluginWorkflowEntry {
                 qualified_name: "acme:deploy".into(),
@@ -3844,7 +3842,7 @@ mod tests {
         )
         .unwrap();
         let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
-        let _ = registry.register(
+        registry.register(
             lingxi_core::types::PluginId::new(),
             vec![workflow::PluginWorkflowEntry {
                 qualified_name: name.clone(),
@@ -4105,7 +4103,7 @@ mod tests {
         let script = named_workflow_script("create", "create via plugin");
         std::fs::write(&path, &script).unwrap();
         let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
-        let _ = registry.register(
+        registry.register(
             lingxi_core::types::PluginId::new(),
             vec![workflow::PluginWorkflowEntry {
                 qualified_name: "acme:create".into(),

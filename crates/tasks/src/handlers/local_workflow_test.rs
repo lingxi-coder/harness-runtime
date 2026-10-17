@@ -6,6 +6,7 @@ use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGua
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvokerError};
 use lingxi_core::host::{BudgetError, SubagentUsage};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use lingxi_core::types::PluginId;
 use serde_json::json;
 use std::any::Any;
 use std::collections::HashMap as StdHashMap;
@@ -48,11 +49,14 @@ async fn nested_name_resolves_plugin_snapshot_after_saved_miss() {
     let script =
         "export const meta = { name: 'nested', description: 'nested plugin' };\nreturn 7;\n";
     std::fs::write(&script_path, script).expect("seed plugin script");
-    registry.register(vec![plugin_workflow_entry(
-        "acme:nested",
-        script_path,
-        script.to_string(),
-    )]);
+    registry.register(
+        PluginId::new(),
+        vec![plugin_workflow_entry(
+            "acme:nested",
+            script_path,
+            script.to_string(),
+        )],
+    );
 
     let resolved =
         resolve_nested_script(&json!({"name": "acme:nested"}), Some(&fs), Some(&registry))
@@ -1398,24 +1402,31 @@ async fn unknown_agent_type_under_plugin_workflow_names_both_spellings() {
 /// given namespaced workflow names.
 fn nested_with_plugin_workflows(names: &[&str]) -> NestedConfig {
     let registry = workflow::PluginWorkflowRegistry::new();
-    registry.register(
-        names
-            .iter()
-            .map(|name| {
-                let (_, workflow_name) = name
-                    .split_once(':')
-                    .expect("fixture plugin workflow names are namespaced");
-                let script = format!(
-                    "export const meta = {{ name: '{workflow_name}', description: 'fixture' }};\n"
-                );
-                plugin_workflow_entry(
-                    name,
-                    std::path::PathBuf::from(format!("/plugins/{name}.js")),
-                    script,
-                )
-            })
-            .collect(),
-    );
+    let mut owner_by_plugin = StdHashMap::<String, usize>::new();
+    let mut owners = Vec::<(PluginId, Vec<workflow::PluginWorkflowEntry>)>::new();
+    for name in names {
+        let (plugin_name, workflow_name) = name
+            .split_once(':')
+            .expect("fixture plugin workflow names are namespaced");
+        let owner_index = if let Some(index) = owner_by_plugin.get(plugin_name) {
+            *index
+        } else {
+            let index = owners.len();
+            owner_by_plugin.insert(plugin_name.to_string(), index);
+            owners.push((PluginId::new(), Vec::new()));
+            index
+        };
+        let script =
+            format!("export const meta = {{ name: '{workflow_name}', description: 'fixture' }};\n");
+        owners[owner_index].1.push(plugin_workflow_entry(
+            name,
+            std::path::PathBuf::from(format!("/plugins/{name}.js")),
+            script,
+        ));
+    }
+    for (owner, entries) in owners {
+        registry.register(owner, entries);
+    }
     NestedConfig {
         plugin_workflows: Some(Arc::new(registry)),
         ..Default::default()
@@ -2244,11 +2255,14 @@ async fn workflow_runs_a_nested_name_from_plugin_workflow_registry() {
     std::fs::write(&script_path, script).unwrap();
 
     let registry = Arc::new(workflow::PluginWorkflowRegistry::new());
-    registry.register(vec![plugin_workflow_entry(
-        "acme:deploy",
-        script_path.clone(),
-        script.to_string(),
-    )]);
+    registry.register(
+        PluginId::new(),
+        vec![plugin_workflow_entry(
+            "acme:deploy",
+            script_path.clone(),
+            script.to_string(),
+        )],
+    );
 
     let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
     let spawner = Arc::new(EchoSpawner::default());

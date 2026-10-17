@@ -2254,23 +2254,24 @@ pub async fn build_with_credential_stack(
             continue;
         }
         if let Ok(raw) = tokio::fs::read_to_string(path).await {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Ok(value) = Utf16JsonProjection::parse(&raw) {
                 ordinary_mcp_policy_sources.push(value);
             }
         }
     }
-    if let Some(flag) = cfg
+    if let Some(source) = cfg
         .flag_settings
         .as_ref()
         .and_then(|settings| serde_json::to_value(settings).ok())
+        .and_then(|value| Utf16JsonProjection::from_serde_value(&value).ok())
     {
-        ordinary_mcp_policy_sources.push(flag);
+        ordinary_mcp_policy_sources.push(source);
     }
-    let managed_mcp_policy_sources: Vec<serde_json::Value> = managed_policy_layer
+    let managed_mcp_policy_sources: Vec<Utf16JsonProjection> = managed_policy_layer
         .iter()
-        .filter_map(|raw| serde_json::from_str(raw).ok())
+        .filter_map(|raw| Utf16JsonProjection::parse(raw).ok())
         .collect();
-    let effective_mcp_policy = mcp::enterprise_policy::McpPolicy::from_effective_settings(
+    let effective_mcp_policy = mcp::enterprise_policy::McpPolicy::from_effective_source_layers(
         &ordinary_mcp_policy_sources,
         &managed_mcp_policy_sources,
     );
@@ -3238,6 +3239,56 @@ pub async fn build_with_credential_stack(
             .collect()
     };
     let mcp_additional_roots = mcp::new_shared_roots(mcp_roots_seed);
+    // Keep plugin-owned MCP connections behind the same host policy facts as
+    // startup MCP composition. The owner API is the only plugin connect path;
+    // safe/bare/strict and managed-exclusive checks therefore run at connect
+    // time too, including a later `/reload-plugins`.
+    let plugin_mcp_policy_home = cfg.lingxi_home.clone();
+    let plugin_mcp_policy_cwd = cwd.clone();
+    let plugin_mcp_flag_settings = cfg
+        .flag_settings
+        .as_ref()
+        .and_then(|settings| serde_json::to_value(settings).ok());
+    let plugin_mcp_safe_mode = cfg.customization_gates.safe_mode;
+    let plugin_mcp_bare_mode = cfg.customization_gates.bare;
+    let plugin_mcp_strict_config = cfg.strict_mcp_config;
+    let plugin_mcp_setting_source_scope = cfg.setting_source_scope;
+    let plugin_mcp_admission: Arc<
+        dyn Fn(&mcp::McpServerConfig) -> Option<mcp::registry::PluginMcpRefusal> + Send + Sync,
+    > = Arc::new(move |config| {
+        let message = if plugin_mcp_safe_mode {
+            "This session runs in safe mode, which connects no plugin servers.".to_string()
+        } else if plugin_mcp_bare_mode {
+            "This session runs with --bare, which connects no plugin servers.".to_string()
+        } else if plugin_mcp_strict_config {
+            "This session runs with --strict-mcp-config, which connects no plugin servers."
+                .to_string()
+        } else if mcp::enterprise_policy::enterprise_mcp_active() {
+            "Your organization's managed MCP config has exclusive control over MCP servers in this session."
+                .to_string()
+        } else {
+            let policy = mcp::enterprise_policy::read_effective_mcp_policy_with_scope(
+                &plugin_mcp_policy_home,
+                &plugin_mcp_policy_cwd,
+                plugin_mcp_flag_settings.as_ref(),
+                plugin_mcp_setting_source_scope,
+            );
+            if mcp::enterprise_policy::is_server_allowed(config, &policy) {
+                return None;
+            }
+            format!(
+                "Your organization's MCP policy does not allow \"{}\".",
+                config.name
+            )
+        };
+        let message =
+            Utf16JsonProjection::root_string(message.clone(), message.encode_utf16().collect())
+                .expect("native plugin MCP refusal text is a valid UTF-16 string");
+        Some(mcp::registry::PluginMcpRefusal {
+            reason: "policy".to_string(),
+            message,
+        })
+    });
     let mcp_registry = Arc::new(
         mcp::McpRegistry::with_raw_conn(
             mcp_services.transport.clone(),
@@ -3246,6 +3297,7 @@ pub async fn build_with_credential_stack(
         .with_projects_session_host(projects_session_host)
         .with_json_schema_validator(json_schema_validator.clone())
         .with_hook_dispatcher(Some(elicitation_dispatcher))
+        .with_plugin_mcp_admission(plugin_mcp_admission)
         .with_discovery_cache_store(mcp::DiscoveryCacheStore::new(
             cfg.lingxi_home.join("mcp-discovery-cache"),
         ))

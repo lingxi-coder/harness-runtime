@@ -436,9 +436,9 @@ mod tests {
             local_agent("main", &main_id, "main-session", "running"),
         ];
         let names = reverse_agent_names(&[
-            ("old-name".into(), first_id.clone()),
+            ("old-name".into(), first_id),
             ("current-name".into(), first_id),
-            ("worker".into(), team_id.clone()),
+            ("worker".into(), team_id),
             ("lead".into(), main_id),
         ]);
         let team_names = HashSet::from(["worker".to_owned()]);
@@ -502,7 +502,7 @@ mod tests {
         let worker_id = AgentId::new();
         let worker = WorkerAgent {
             awaiting_plan_approval: false,
-            agent_id: worker_id.clone(),
+            agent_id: worker_id,
             agent_type: "Explore".into(),
             name: "live-worker".into(),
             parent_id: None,

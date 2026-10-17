@@ -80,7 +80,7 @@ fn the_allowlist_exempt_scopes_match_the_ported_rule() {
     let policy = mcp::enterprise_policy::McpPolicy {
         denied: None,
         allowed: Some(vec![mcp::enterprise_policy::McpServerMatcher {
-            server_name: Some("something-else".to_string()),
+            server_name: Some("something-else".into()),
             server_command: None,
             server_url: None,
         }]),

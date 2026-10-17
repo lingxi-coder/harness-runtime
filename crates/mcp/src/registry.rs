@@ -566,6 +566,49 @@ pub struct PluginMcpOwnerRemoval {
     pub removed_current_config: bool,
 }
 
+/// A host policy refusal for a plugin-owned MCP connection request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginMcpRefusal {
+    /// Stable host reason code returned to the Mods worker.
+    pub reason: String,
+    /// Source-preserving message returned to the Mods worker.
+    pub message: Utf16JsonProjection,
+}
+
+impl PluginMcpRefusal {
+    /// Build a refusal using the host's source-preserving message carrier.
+    #[must_use]
+    pub fn new(reason: impl Into<String>, message: Utf16JsonProjection) -> Self {
+        Self {
+            reason: reason.into(),
+            message,
+        }
+    }
+
+    fn as_mcp_error(&self) -> McpError {
+        McpError::Connection(self.message.clone())
+    }
+}
+
+/// Result of connecting a registered plugin-owned server.
+#[derive(Debug, Clone)]
+pub enum PluginMcpConnectOutcome {
+    /// The server connected under its existing public registry name.
+    Connected {
+        /// Existing public MCP server name.
+        server: String,
+        /// Registry connection generation.
+        connection_id: McpConnectionId,
+    },
+    /// The host denied the request before starting a transport connection.
+    Refused(PluginMcpRefusal),
+}
+
+/// Synchronous admission callback evaluated under the server lifecycle lock.
+/// It may reread local host policy files, but must not access the registry or
+/// perform network I/O.
+pub type PluginMcpAdmission = dyn Fn(&McpServerConfig) -> Option<PluginMcpRefusal> + Send + Sync;
+
 /// In-memory registry of every known MCP connection.
 pub struct McpRegistry {
     /// Map of server name to current state.
@@ -576,6 +619,9 @@ pub struct McpRegistry {
     pub connections: Arc<RwLock<HashMap<String, McpConnectionState>>>,
     /// Trusted plugin ownership sidecar for the existing public MCP slots.
     plugin_server_owners: Arc<RwLock<HashMap<(String, String), PluginMcpServerOwner>>>,
+    /// Host policy for plugin-owned dynamic servers. `None` keeps standalone
+    /// registries policy-neutral; production hosts inject their local policy.
+    plugin_mcp_admission: Option<Arc<PluginMcpAdmission>>,
     /// Synchronous mirror of claude-code 2.1.238's `eZf()`
     /// (`bdl(b7e()??[]).length>0`, `cc-238.js @229641619`) — "at least one MCP
     /// client is `type === "pending"`".
@@ -990,6 +1036,7 @@ impl McpRegistry {
         Self {
             connections: Arc::clone(&self.connections),
             plugin_server_owners: Arc::clone(&self.plugin_server_owners),
+            plugin_mcp_admission: self.plugin_mcp_admission.clone(),
             pending_servers: Arc::clone(&self.pending_servers),
             lifecycle_locks: Arc::clone(&self.lifecycle_locks),
             xaa_refresh_locks: Arc::clone(&self.xaa_refresh_locks),
@@ -1038,6 +1085,7 @@ impl McpRegistry {
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
             plugin_server_owners: Arc::new(RwLock::new(HashMap::new())),
+            plugin_mcp_admission: None,
             pending_servers: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lifecycle_locks: Arc::new(StdMutex::new(HashMap::new())),
             xaa_refresh_locks: Arc::new(StdMutex::new(HashMap::new())),
@@ -1298,6 +1346,17 @@ impl McpRegistry {
     ) -> Self {
         self.assert_configuration_mutable("with_projects_session_host");
         self.projects_session_host = Some(host);
+        self
+    }
+
+    /// Inject the owning host's plugin-MCP admission callback.
+    /// The callback is evaluated for plugin-sourced configs after structural
+    /// config validation and before any transport work. It may reread local
+    /// policy files, but must not access registry state or perform network I/O.
+    #[must_use]
+    pub fn with_plugin_mcp_admission(mut self, admission: Arc<PluginMcpAdmission>) -> Self {
+        self.assert_configuration_mutable("with_plugin_mcp_admission");
+        self.plugin_mcp_admission = Some(admission);
         self
     }
 
@@ -1870,7 +1929,7 @@ impl McpRegistry {
         &self,
         storage_id: &str,
         raw_server_key: &str,
-    ) -> Result<Option<(String, McpConnectionId)>, McpError> {
+    ) -> Result<Option<PluginMcpConnectOutcome>, McpError> {
         let owner_key = (storage_id.to_owned(), raw_server_key.to_owned());
         loop {
             let Some(initial) = self
@@ -1907,8 +1966,16 @@ impl McpRegistry {
                 }
                 state.config().clone()
             };
-            let connection_id = self.connect_locked(config.clone(), None).await?;
-            return Ok(Some((config.name, connection_id)));
+            let outcome = self
+                .connect_locked_with_plugin_outcome(config.clone(), None)
+                .await?;
+            return Ok(Some(match outcome {
+                Ok(connection_id) => PluginMcpConnectOutcome::Connected {
+                    server: config.name,
+                    connection_id,
+                },
+                Err(refusal) => PluginMcpConnectOutcome::Refused(refusal),
+            }));
         }
     }
 
@@ -2369,7 +2436,7 @@ impl McpRegistry {
 
         self.kick_pending_transport_cleanups().await;
         let result = self
-            .connect_locked_inner_with_guard(config.clone(), None, Some(&*guard))
+            .connect_locked_inner_with_guard(config.clone(), None, Some(&*guard), None)
             .await;
         match result {
             Ok(connection_id) => Ok(Some(connection_id)),
@@ -2497,10 +2564,32 @@ impl McpRegistry {
         config: McpServerConfig,
         table_key: Option<String>,
     ) -> Result<McpConnectionId, McpError> {
+        match self
+            .connect_locked_with_plugin_outcome(config, table_key)
+            .await?
+        {
+            Ok(connection_id) => Ok(connection_id),
+            Err(refusal) => Err(refusal.as_mcp_error()),
+        }
+    }
+
+    async fn connect_locked_with_plugin_outcome(
+        &self,
+        config: McpServerConfig,
+        table_key: Option<String>,
+    ) -> Result<Result<McpConnectionId, PluginMcpRefusal>, McpError> {
         self.freeze_configuration();
         self.kick_pending_transport_cleanups().await;
         let key = table_key.clone().unwrap_or_else(|| config.name.clone());
-        let result = self.connect_locked_inner(config.clone(), table_key).await;
+        let mut plugin_refusal = None;
+        let result = self
+            .connect_locked_inner_with_guard(
+                config.clone(),
+                table_key,
+                None,
+                Some(&mut plugin_refusal),
+            )
+            .await;
         if let Err(error) = &result {
             // A failed public connect must never strand the registry in
             // `Connecting`. Reconnect scheduling only considers disconnected
@@ -2515,16 +2604,11 @@ impl McpRegistry {
                 .insert(key.clone(), Self::connection_failure_state(config, error));
             self.clear_prompt_predecessors_for_key(&key).await;
         }
-        result
-    }
-
-    async fn connect_locked_inner(
-        &self,
-        config: McpServerConfig,
-        table_key: Option<String>,
-    ) -> Result<McpConnectionId, McpError> {
-        self.connect_locked_inner_with_guard(config, table_key, None)
-            .await
+        match (result, plugin_refusal) {
+            (Ok(connection_id), _) => Ok(Ok(connection_id)),
+            (Err(_), Some(refusal)) => Ok(Err(refusal)),
+            (Err(error), None) => Err(error),
+        }
     }
 
     async fn connect_locked_inner_with_guard(
@@ -2532,10 +2616,32 @@ impl McpRegistry {
         config: McpServerConfig,
         table_key: Option<String>,
         operation_guard: Option<&McpOperationGuard>,
+        plugin_refusal_out: Option<&mut Option<PluginMcpRefusal>>,
     ) -> Result<McpConnectionId, McpError> {
         let key = table_key.clone().unwrap_or_else(|| config.name.clone());
         self.remember_server_order(&key);
         Self::validate_connectable_config(&config)?;
+        if config.metadata.agent_source == Some(crate::connection::McpAgentSource::Plugin) {
+            let refusal = if config.disabled {
+                Some(PluginMcpRefusal::new(
+                    "disabled",
+                    Utf16JsonProjection::from(format!(
+                        "The MCP server \"{}\" is turned off; turn it on in /mcp.",
+                        config.name
+                    )),
+                ))
+            } else {
+                self.plugin_mcp_admission
+                    .as_ref()
+                    .and_then(|admission| admission(&config))
+            };
+            if let Some(refusal) = refusal {
+                if let Some(output) = plugin_refusal_out {
+                    *output = Some(refusal.clone());
+                }
+                return Err(refusal.as_mcp_error());
+            }
+        }
         if operation_guard.is_some_and(|guard| !guard()) {
             return Err(operation_guard_rejected());
         }

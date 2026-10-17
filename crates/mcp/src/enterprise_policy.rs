@@ -110,24 +110,20 @@ pub fn enterprise_mcp_active_at(path: &Path) -> bool {
 // allowlist URL entries whose expansion is UNSAFE fail closed (`dWu`).
 // ────────────────────────────────────────────────────────────────────────────
 
-use serde::Deserialize;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::Value;
 
 /// One allow/deny matcher entry (claude's `allowedMcpServers` /
 /// `deniedMcpServers` items). Any subset of the three keys may be present; the
 /// shape predicates `a3t`/`ZCn`/`ewn` test which is set.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct McpServerMatcher {
     /// `a3t`: match by server name.
-    #[serde(default)]
-    pub server_name: Option<String>,
+    pub server_name: Option<Utf16JsonProjection>,
     /// `ZCn`: match by the exact `[command, ...args]` array (env-expanded).
-    #[serde(default)]
-    pub server_command: Option<Vec<String>>,
+    pub server_command: Option<Vec<Utf16JsonProjection>>,
     /// `ewn`: match by URL (via the `UFr` glob).
-    #[serde(default)]
-    pub server_url: Option<String>,
+    pub server_url: Option<Utf16JsonProjection>,
 }
 
 /// The enterprise MCP allow/deny policy (`deniedMcpServers` / `allowedMcpServers`).
@@ -137,6 +133,118 @@ pub struct McpPolicy {
     pub denied: Option<Vec<McpServerMatcher>>,
     /// claude `allowedMcpServers` (absent ⇒ everything allowed).
     pub allowed: Option<Vec<McpServerMatcher>>,
+}
+
+fn projection_property(source: &Utf16JsonProjection, key: &str) -> Option<Utf16JsonProjection> {
+    source
+        .subprojection_property_units(&key.encode_utf16().collect::<Vec<_>>())
+        .ok()
+}
+
+fn projection_array_items(source: &Utf16JsonProjection) -> Option<Vec<Utf16JsonProjection>> {
+    let (_, entries) = source.array_entries()?;
+    entries
+        .into_iter()
+        .map(|(index, value)| {
+            (!value.is_undefined())
+                .then(|| source.subprojection(&format!("/{index}")).ok())
+                .flatten()
+        })
+        .collect()
+}
+
+fn projection_bool(source: &Utf16JsonProjection) -> Option<bool> {
+    source.at_pointer("")?.as_bool()
+}
+
+fn projection_string_units(source: &Utf16JsonProjection) -> Option<Vec<u16>> {
+    source.string_units("")
+}
+
+fn projection_string_equals(source: &Utf16JsonProjection, text: &str) -> bool {
+    source
+        .string_units("")
+        .is_some_and(|units| units.iter().copied().eq(text.encode_utf16()))
+}
+
+fn projection_string_to_usv(source: &Utf16JsonProjection) -> Option<String> {
+    Some(String::from_utf16_lossy(&source.string_units("")?))
+}
+
+fn is_js_trim_whitespace(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0009 | 0x000a | 0x000b | 0x000c | 0x000d | 0x0020 | 0x00a0 | 0x1680 | 0x2000
+            ..=0x200a | 0x2028 | 0x2029 | 0x202f | 0x205f | 0x3000 | 0xfeff
+    )
+}
+
+fn server_name_error_units(name: &[u16], kind: MatcherListKind) -> Option<&'static str> {
+    match kind {
+        MatcherListKind::Allowed => {
+            if name.is_empty()
+                || !name.iter().all(|unit| {
+                    if *unit > 0x7f {
+                        return false;
+                    }
+                    let byte = *unit as u8;
+                    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+                })
+            {
+                return Some(
+                    "Server name can only contain letters, numbers, hyphens, and underscores",
+                );
+            }
+        }
+        MatcherListKind::Denied => {
+            if name.is_empty() {
+                return Some("Server name must be non-empty");
+            }
+            let start = name.iter().position(|unit| !is_js_trim_whitespace(*unit));
+            let Some(start) = start else {
+                return Some("Server name must not be whitespace-only");
+            };
+            let end = name
+                .iter()
+                .rposition(|unit| !is_js_trim_whitespace(*unit))
+                .expect("start proves at least one non-whitespace unit")
+                + 1;
+            if start != 0 || end != name.len() {
+                return Some(
+                    "Server name has leading or trailing whitespace and will never match (names are compared verbatim)",
+                );
+            }
+        }
+    }
+    None
+}
+
+fn projection_type_name(value: &Utf16JsonProjection) -> &'static str {
+    let Some(root) = value.at_pointer("") else {
+        return "undefined";
+    };
+    if root.is_null() {
+        "null"
+    } else if root.as_str().is_some() {
+        "string"
+    } else if root.as_bool().is_some() {
+        "boolean"
+    } else if root.as_number().is_some() {
+        "number"
+    } else if root.array_len().is_some() {
+        "array"
+    } else if root.object_entries().is_some() {
+        "object"
+    } else {
+        "undefined"
+    }
+}
+
+fn invalid_projection_type(expected: &str, got: &Utf16JsonProjection) -> String {
+    format!(
+        "Invalid input: expected {expected}, received {}",
+        projection_type_name(got)
+    )
 }
 
 /// Fold `key`'s matcher-list entries across every source that DEFINES it,
@@ -151,22 +259,22 @@ pub struct McpPolicy {
 /// zod-mirrored per-element validation ([`parse_matcher_entry`]) is dropped,
 /// same as [`read_managed_mcp_policy_in`].
 fn accumulate_matcher_list<'a>(
-    sources: impl Iterator<Item = &'a Value>,
+    sources: impl Iterator<Item = &'a Utf16JsonProjection>,
     key: &str,
     kind: MatcherListKind,
 ) -> (bool, Vec<McpServerMatcher>) {
     let mut out = Vec::new();
     let mut present = false;
     for source in sources {
-        let Some(raw) = source.get(key) else {
+        let Some(raw) = projection_property(source, key) else {
             continue;
         };
         present = true;
-        let Some(entries) = raw.as_array() else {
+        let Some(entries) = projection_array_items(&raw) else {
             continue;
         };
         for entry in entries {
-            if let Ok(matcher) = parse_matcher_entry(entry, kind) {
+            if let Ok(matcher) = parse_matcher_entry(&entry, kind) {
                 if !out.contains(&matcher) {
                     out.push(matcher);
                 }
@@ -189,16 +297,18 @@ const ALLOW_MANAGED_MCP_SERVERS_ONLY_INVALID: &str = "\"allowManagedMcpServersOn
 /// as every other managed-settings field (a later tier's value replaces an
 /// earlier one wholesale, it does not merge); a present non-boolean value
 /// fails closed to `true`.
-fn allow_managed_mcp_servers_only(managed: &[Value]) -> bool {
+fn allow_managed_mcp_servers_only(managed: &[Utf16JsonProjection]) -> bool {
     let mut raw = None;
     for source in managed {
-        if let Some(v) = source.get("allowManagedMcpServersOnly") {
+        if let Some(v) = projection_property(source, "allowManagedMcpServersOnly") {
             raw = Some(v);
         }
     }
     match raw {
         None => false,
-        Some(Value::Bool(b)) => *b,
+        Some(v) if projection_bool(&v).is_some() => {
+            projection_bool(&v).expect("guarded by is_some")
+        }
         Some(_) => {
             tracing::warn!("allowManagedMcpServersOnly: {ALLOW_MANAGED_MCP_SERVERS_ONLY_INVALID}");
             true
@@ -229,6 +339,31 @@ impl McpPolicy {
     ///   honoured exactly like the oracle's default (unlocked) behaviour.
     #[must_use]
     pub fn from_effective_settings(ordinary: &[Value], managed: &[Value]) -> Self {
+        let ordinary = ordinary
+            .iter()
+            .map(|source| {
+                Utf16JsonProjection::from_serde_value(source)
+                    .expect("serde settings values fit the JSON projection")
+            })
+            .collect::<Vec<_>>();
+        let managed = managed
+            .iter()
+            .map(|source| {
+                Utf16JsonProjection::from_serde_value(source)
+                    .expect("serde managed settings values fit the JSON projection")
+            })
+            .collect::<Vec<_>>();
+        Self::from_effective_source_layers(&ordinary, &managed)
+    }
+
+    /// Compose policy from raw effective settings projections. This is the
+    /// authoritative path for settings sources whose JavaScript strings may
+    /// contain isolated UTF-16 units.
+    #[must_use]
+    pub fn from_effective_source_layers(
+        ordinary: &[Utf16JsonProjection],
+        managed: &[Utf16JsonProjection],
+    ) -> Self {
         let (denied_present, denied) = accumulate_matcher_list(
             ordinary.iter().chain(managed),
             "deniedMcpServers",
@@ -243,11 +378,11 @@ impl McpPolicy {
             // an empty allowlist.
             let mut allowed = None;
             for source in managed {
-                let Some(raw) = source.get("allowedMcpServers") else {
+                let Some(raw) = projection_property(source, "allowedMcpServers") else {
                     continue;
                 };
                 allowed = Some(
-                    raw.as_array()
+                    projection_array_items(&raw)
                         .map(|entries| {
                             entries
                                 .iter()
@@ -308,26 +443,84 @@ pub fn read_effective_mcp_policy(
     cwd: &Path,
     flag_settings: Option<&Value>,
 ) -> McpPolicy {
+    read_effective_mcp_policy_with_scope(lingxi_home, cwd, flag_settings, (true, true))
+}
+
+/// Reread only the ordinary settings sources admitted by the current host.
+/// Explicit flag settings and managed policy remain independent of file scope.
+#[must_use]
+pub fn read_effective_mcp_policy_with_scope(
+    lingxi_home: &Path,
+    cwd: &Path,
+    flag_settings: Option<&Value>,
+    source_scope: (bool, bool),
+) -> McpPolicy {
     let mut ordinary = Vec::new();
-    for path in [
-        lingxi_home.join("settings.json"),
-        cwd.join(branding::DOT_DIR).join("settings.json"),
-        cwd.join(branding::DOT_DIR).join("settings.local.json"),
+    let (include_user, include_project) = source_scope;
+    for (path, included) in [
+        (lingxi_home.join("settings.json"), include_user),
+        (
+            cwd.join(branding::DOT_DIR).join("settings.json"),
+            include_project,
+        ),
+        (
+            cwd.join(branding::DOT_DIR).join("settings.local.json"),
+            include_project,
+        ),
     ] {
+        if !included {
+            continue;
+        }
         if let Ok(raw) = std::fs::read_to_string(path) {
-            if let Ok(value) = serde_json::from_str(&raw) {
-                ordinary.push(value);
+            if let Ok(value) = Utf16JsonProjection::parse(&raw) {
+                if value.object_entries().is_some() {
+                    ordinary.push(value);
+                }
             }
         }
     }
     if let Some(flag) = flag_settings {
-        ordinary.push(flag.clone());
+        ordinary.push(
+            Utf16JsonProjection::from_serde_value(flag)
+                .expect("serde flag settings fit the JSON projection"),
+        );
     }
-    let mut managed = Vec::new();
-    for_each_managed_settings_tier(&managed_dir(), &mut |source| {
-        managed.push(Value::Object(source.clone()));
-    });
-    McpPolicy::from_effective_settings(&ordinary, &managed)
+    let managed = managed_settings_source_tiers(&managed_dir());
+    McpPolicy::from_effective_source_layers(&ordinary, &managed)
+}
+
+/// Read valid managed settings objects without materializing their string
+/// leaves as `serde_json::Value`, which cannot represent isolated surrogates.
+fn managed_settings_source_tiers(dir: &Path) -> Vec<Utf16JsonProjection> {
+    let mut tiers = Vec::new();
+    let mut push = |raw: &str| {
+        if let Ok(source) = Utf16JsonProjection::parse(raw) {
+            if source.object_entries().is_some() {
+                tiers.push(source);
+            }
+        }
+    };
+    if let Ok(raw) = std::fs::read_to_string(dir.join("managed-settings.json")) {
+        push(&raw);
+    }
+    let drop_in = dir.join("managed-settings.d");
+    if let Ok(rd) = std::fs::read_dir(&drop_in) {
+        let mut names: Vec<std::ffi::OsString> = rd
+            .flatten()
+            .map(|entry| entry.file_name())
+            .filter(|name| {
+                let name = name.to_string_lossy();
+                name.ends_with(".json") && !name.starts_with('.')
+            })
+            .collect();
+        names.sort();
+        for name in names {
+            if let Ok(raw) = std::fs::read_to_string(drop_in.join(name)) {
+                push(&raw);
+            }
+        }
+    }
+    tiers
 }
 
 /// Walk the managed settings tiers in ascending priority
@@ -383,65 +576,11 @@ const ALLOWED_LIST_INVALID: &str = "\"allowedMcpServers\" was present but invali
 /// into "deny everything" without locking the user out).
 const DENIED_LIST_INVALID: &str = "\"deniedMcpServers\" was present but invalid and was dropped; its entries cannot be enforced until it is fixed.";
 
-/// zod v4's `Mjm` (@225600556) — the `received` half of an `invalid_type`
-/// message. (JS-only outcomes — `NaN`, class names — cannot arise from JSON.)
-fn json_type_name(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
-}
-
-/// zod v4's default `invalid_type` message (@225601574).
-fn invalid_type(expected: &str, got: &Value) -> String {
-    format!(
-        "Invalid input: expected {expected}, received {}",
-        json_type_name(got)
-    )
-}
-
-/// The `serverName` refinements of claude `gqn` (allowed) / `_qn` (denied),
-/// byte-exact messages. `None` ⇒ valid.
-fn server_name_error(name: &str, kind: MatcherListKind) -> Option<&'static str> {
-    match kind {
-        MatcherListKind::Allowed => {
-            // gqn: `/^[a-zA-Z0-9_-]+$/`.
-            if name.is_empty()
-                || !name
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-            {
-                return Some(
-                    "Server name can only contain letters, numbers, hyphens, and underscores",
-                );
-            }
-        }
-        MatcherListKind::Denied => {
-            if name.is_empty() {
-                return Some("Server name must be non-empty");
-            }
-            if name.trim().is_empty() {
-                return Some("Server name must not be whitespace-only");
-            }
-            if name != name.trim() {
-                return Some(
-                    "Server name has leading or trailing whitespace and will never match (names are compared verbatim)",
-                );
-            }
-        }
-    }
-    None
-}
-
 /// Validate ONE raw allow/deny list element against claude `gqn`/`_qn`,
 /// returning the message of the FIRST zod issue on failure — what `Xql`'s
 /// element-level `.catch` reports.
 ///
-/// The element is parsed from the raw [`Value`] rather than through serde
+/// The element is parsed from a raw UTF-16 projection rather than through serde
 /// because the two halves of `gqn`/`_qn` are inseparable in zod: the TYPE
 /// checks (`serverName: E.string()`, `serverCommand: E.array(E.string())`) and
 /// the refinements live in one schema behind one `.catch`, so a type error must
@@ -453,41 +592,44 @@ fn server_name_error(name: &str, kind: MatcherListKind) -> Option<&'static str> 
 ///
 /// `.optional()` is `undefined | T`: a key present with a JSON `null` is a type
 /// error, NOT an absent field.
-fn parse_matcher_entry(raw: &Value, kind: MatcherListKind) -> Result<McpServerMatcher, String> {
-    let Some(obj) = raw.as_object() else {
-        return Err(invalid_type("object", raw));
+fn parse_matcher_entry(
+    raw: &Utf16JsonProjection,
+    kind: MatcherListKind,
+) -> Result<McpServerMatcher, String> {
+    let Some(_) = raw.object_entries() else {
+        return Err(invalid_projection_type("object", raw));
     };
     let mut m = McpServerMatcher::default();
-    if let Some(v) = obj.get("serverName") {
-        let Some(name) = v.as_str() else {
-            return Err(invalid_type("string", v));
+    if let Some(name) = projection_property(raw, "serverName") {
+        let Some(units) = projection_string_units(&name) else {
+            return Err(invalid_projection_type("string", &name));
         };
-        if let Some(msg) = server_name_error(name, kind) {
+        if let Some(msg) = server_name_error_units(&units, kind) {
             return Err(msg.to_string());
         }
-        m.server_name = Some(name.to_string());
+        m.server_name = Some(name);
     }
-    if let Some(v) = obj.get("serverCommand") {
-        let Some(items) = v.as_array() else {
-            return Err(invalid_type("array", v));
+    if let Some(command) = projection_property(raw, "serverCommand") {
+        let Some(items) = projection_array_items(&command) else {
+            return Err(invalid_projection_type("array", &command));
         };
         let mut cmd = Vec::with_capacity(items.len());
         for item in items {
-            let Some(s) = item.as_str() else {
-                return Err(invalid_type("string", item));
+            if projection_string_units(&item).is_none() {
+                return Err(invalid_projection_type("string", &item));
             };
-            cmd.push(s.to_string());
+            cmd.push(item);
         }
         if cmd.is_empty() {
             return Err("Server command must have at least one element (the command)".to_string());
         }
         m.server_command = Some(cmd);
     }
-    if let Some(v) = obj.get("serverUrl") {
-        let Some(url) = v.as_str() else {
-            return Err(invalid_type("string", v));
+    if let Some(url) = projection_property(raw, "serverUrl") {
+        if projection_string_units(&url).is_none() {
+            return Err(invalid_projection_type("string", &url));
         };
-        m.server_url = Some(url.to_string());
+        m.server_url = Some(url);
     }
     let present = [
         m.server_name.is_some(),
@@ -509,48 +651,59 @@ fn parse_matcher_entry(raw: &Value, kind: MatcherListKind) -> Result<McpServerMa
 /// oracle's typed settings never contained.
 #[must_use]
 pub fn read_managed_mcp_policy_in(dir: &Path) -> McpPolicy {
-    let mut merged = serde_json::Map::new();
-    for_each_managed_settings_tier(dir, &mut |m| {
-        for (k, v) in m {
-            merged.insert(k.clone(), v.clone());
+    let tiers = managed_settings_source_tiers(dir);
+    let mut merged = Utf16JsonProjection::parse("{}").expect("empty settings object is JSON");
+    for key in [
+        "allowManagedMcpServersOnly",
+        "deniedMcpServers",
+        "allowedMcpServers",
+    ] {
+        for tier in &tiers {
+            if let Some(value) = projection_property(tier, key) {
+                merged
+                    .set_field(key, value)
+                    .expect("managed policy projection remains an object");
+            }
         }
-    });
-    // claude `Xql(key, elementSchema, warn)`: the `.catch` sits on the ELEMENT
-    // schema and substitutes the `Jql` sentinel, which a `.transform` then
-    // filters out — one malformed entry drops itself and its valid siblings
-    // survive. Only a non-ARRAY value escapes to `RLi`'s outer `.catch`, whose
-    // two sides are deliberately ASYMMETRIC (see the two consts above).
-    let parse = |key: &str, kind: MatcherListKind| -> Option<Vec<McpServerMatcher>> {
-        let raw = merged.get(key)?; // absent ⇒ `.optional()` ⇒ undefined
-        let Some(items) = raw.as_array() else {
-            return match kind {
-                MatcherListKind::Allowed => {
-                    tracing::warn!("{key}: {ALLOWED_LIST_INVALID}");
-                    Some(Vec::new())
-                }
-                MatcherListKind::Denied => {
-                    tracing::warn!("{key}: {DENIED_LIST_INVALID}");
-                    None
-                }
-            };
-        };
-        Some(
-            items
-                .iter()
-                .filter_map(|item| match parse_matcher_entry(item, kind) {
-                    Ok(m) => Some(m),
-                    Err(msg) => {
-                        tracing::warn!("{key}[]: Invalid entry was ignored: {msg}");
-                        None
-                    }
-                })
-                .collect(),
-        )
-    };
-    McpPolicy {
-        denied: parse("deniedMcpServers", MatcherListKind::Denied),
-        allowed: parse("allowedMcpServers", MatcherListKind::Allowed),
     }
+    for (key, warning, fail_closed) in [
+        ("deniedMcpServers", DENIED_LIST_INVALID, false),
+        ("allowedMcpServers", ALLOWED_LIST_INVALID, true),
+    ] {
+        if let Some(value) = projection_property(&merged, key) {
+            if projection_array_items(&value).is_none() {
+                tracing::warn!("{key}: {warning}");
+                if fail_closed {
+                    merged
+                        .set_field(
+                            key,
+                            Utf16JsonProjection::parse("[]")
+                                .expect("empty policy array is valid JSON"),
+                        )
+                        .expect("managed policy projection remains an object");
+                } else {
+                    merged
+                        .remove_field(key)
+                        .expect("managed policy projection remains an object");
+                }
+            }
+        }
+    }
+    for (key, kind) in [
+        ("deniedMcpServers", MatcherListKind::Denied),
+        ("allowedMcpServers", MatcherListKind::Allowed),
+    ] {
+        if let Some(items) =
+            projection_property(&merged, key).and_then(|value| projection_array_items(&value))
+        {
+            for item in items {
+                if let Err(message) = parse_matcher_entry(&item, kind) {
+                    tracing::warn!("{key}[]: Invalid entry was ignored: {message}");
+                }
+            }
+        }
+    }
+    McpPolicy::from_effective_source_layers(&[], &[merged])
 }
 
 /// claude `byo` — expand `${VAR}` / `${VAR:-default}` against the LIVE
@@ -622,19 +775,36 @@ fn settings_env_pairs(env: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
+fn settings_env_projection_pairs(env: &Utf16JsonProjection) -> Vec<(String, String)> {
+    let Some(entries) = env.object_entries() else {
+        return Vec::new();
+    };
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let key = String::from_utf16(entry.code_units).ok()?;
+            if matches!(key.as_str(), "NO_COLOR" | "FORCE_COLOR") {
+                return None;
+            }
+            let value = String::from_utf16(entry.value.code_units()?).ok()?;
+            Some((key, value))
+        })
+        .collect()
+}
+
 /// claude `cWu`'s settings-source env fold (the `for t of VQ()` loop) over the
 /// managed tiers. `VQ()` folds first-seen-wins over DESCENDING priority; our
 /// tier walk is ascending (drop-ins override base), so later-wins here is the
 /// same fold viewed from the other end.
 fn managed_sources_env_in(dir: &Path) -> IndexMap<String, String> {
     let mut out = IndexMap::new();
-    for_each_managed_settings_tier(dir, &mut |m| {
-        if let Some(env) = m.get("env") {
-            for (k, v) in settings_env_pairs(env) {
+    for source in managed_settings_source_tiers(dir) {
+        if let Some(env) = projection_property(&source, "env") {
+            for (k, v) in settings_env_projection_pairs(&env) {
                 out.insert(k, v);
             }
         }
-    });
+    }
     out
 }
 
@@ -749,22 +919,88 @@ pub fn policy_expansion_env_with_flag_settings(
     PolicyExpansionEnv { env, fallback_env }
 }
 
-/// claude `uWu(value, env, fallback)` — expand a NON-URL policy string,
-/// warning (byte-exact) when it references variables absent from the policy
-/// expansion env. The unresolved `${...}` stays literal in the result.
-fn expand_policy_string(
-    value: &str,
+/// First unit of a JavaScript environment-variable identifier.
+fn is_env_name_start(unit: u16) -> bool {
+    matches!(unit, 0x41..=0x5a | 0x61..=0x7a | 0x5f)
+}
+
+fn is_env_name_continue(unit: u16) -> bool {
+    is_env_name_start(unit) || matches!(unit, 0x30..=0x39)
+}
+
+fn env_reference_at(value: &[u16], start: usize) -> Option<(usize, String, Option<Vec<u16>>)> {
+    if value.get(start) != Some(&0x24) || value.get(start + 1) != Some(&0x7b) {
+        return None;
+    }
+    let mut cursor = start + 2;
+    if !is_env_name_start(*value.get(cursor)?) {
+        return None;
+    }
+    let name_start = cursor;
+    cursor += 1;
+    while value
+        .get(cursor)
+        .is_some_and(|unit| is_env_name_continue(*unit))
+    {
+        cursor += 1;
+    }
+    let name = String::from_utf16(&value[name_start..cursor]).ok()?;
+    match value.get(cursor).copied() {
+        Some(0x7d) => Some((cursor + 1, name, None)),
+        Some(0x3a) if value.get(cursor + 1) == Some(&0x2d) => {
+            let default_start = cursor + 2;
+            let default_end = value[default_start..]
+                .iter()
+                .position(|unit| *unit == 0x7d)?
+                + default_start;
+            Some((
+                default_end + 1,
+                name,
+                Some(value[default_start..default_end].to_vec()),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// claude `uWu(value, env, fallback)` — expand a non-URL policy string using
+/// the Native `${NAME}` / `${NAME:-default}` grammar without
+/// materializing source strings as Rust `String`. Defaults can contain any
+/// UTF-16 units; an overridden malformed default therefore does not poison a
+/// valid environment substitution.
+fn expand_policy_string_units(
+    value: &[u16],
     env: &IndexMap<String, String>,
     fallback: Option<&IndexMap<String, String>>,
-) -> String {
-    let r = crate::env_expansion::expand_with_env(value, env, fallback);
-    if !r.missing_vars.is_empty() {
+) -> Vec<u16> {
+    let mut output = Vec::with_capacity(value.len());
+    let mut missing_vars = Vec::new();
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let Some((end, name, default)) = env_reference_at(value, cursor) else {
+            output.push(value[cursor]);
+            cursor += 1;
+            continue;
+        };
+        if let Some(replacement) = env.get(&name) {
+            output.extend(replacement.encode_utf16());
+        } else if let Some(default) = default {
+            output.extend(default);
+        } else if let Some(replacement) = fallback.and_then(|fallback| fallback.get(&name)) {
+            output.extend(replacement.encode_utf16());
+        } else {
+            output.extend_from_slice(&value[cursor..end]);
+            missing_vars.push(name);
+        }
+        cursor = end;
+    }
+    if !missing_vars.is_empty() {
         tracing::warn!(
             "MCP policy predicate references environment variable(s) not present in the policy expansion env: {}",
-            r.missing_vars.join(", ")
+            missing_vars.join(", ")
         );
     }
-    r.expanded
+    output
 }
 
 /// claude `oVn` — the `[command, ...args]` array for a stdio config, or `None`
@@ -792,9 +1028,32 @@ fn config_url(config: &Value) -> Option<&str> {
     config.get("url").and_then(Value::as_str)
 }
 
-/// claude `Ilu` — element-wise array equality.
-fn arrays_eq(a: &[String], b: &[String]) -> bool {
-    a == b
+fn matcher_name_matches(matcher: &Utf16JsonProjection, name: &str) -> bool {
+    projection_string_equals(matcher, name)
+}
+
+fn matcher_command_expanded_units(
+    matcher: &[Utf16JsonProjection],
+    env: &IndexMap<String, String>,
+    fallback: Option<&IndexMap<String, String>>,
+) -> Option<Vec<Vec<u16>>> {
+    matcher
+        .iter()
+        .map(|value| {
+            Some(expand_policy_string_units(
+                &value.string_units("")?,
+                env,
+                fallback,
+            ))
+        })
+        .collect()
+}
+
+fn command_units(command: &[String]) -> Vec<Vec<u16>> {
+    command
+        .iter()
+        .map(|value| value.encode_utf16().collect())
+        .collect()
 }
 
 // ── Policy URL expansion with unsafe-expansion detection (claude `dWu`) ──
@@ -1168,19 +1427,23 @@ pub fn is_denied_with_env(
         return false;
     };
     for m in denied {
-        if m.server_name.as_deref() == Some(name) {
+        if m.server_name
+            .as_ref()
+            .is_some_and(|matcher| matcher_name_matches(matcher, name))
+        {
             return true;
         }
     }
     if let Some(cmd) = config_command(config) {
-        let i: Vec<String> = cmd.iter().map(|s| get(s)).collect();
+        let candidate = command_units(&cmd.iter().map(|s| get(s)).collect::<Vec<_>>());
         for m in denied {
             if let Some(sc) = m.server_command.as_ref() {
-                let sc_e: Vec<String> = sc
-                    .iter()
-                    .map(|s| expand_policy_string(s, &envs.env, Some(&envs.fallback_env)))
-                    .collect();
-                if arrays_eq(&sc_e, &i) {
+                let Some(sc) =
+                    matcher_command_expanded_units(sc, &envs.env, Some(&envs.fallback_env))
+                else {
+                    continue;
+                };
+                if sc == candidate {
                     return true;
                 }
             }
@@ -1190,7 +1453,13 @@ pub fn is_denied_with_env(
         let iu = get(url);
         for m in denied {
             if let Some(su) = m.server_url.as_ref() {
-                let expansion = expand_policy_url(su, &envs.env, Some(&envs.fallback_env));
+                // Native URL matching passes policy strings through `new URL`,
+                // whose input boundary is a WebIDL USVString. Keep the source
+                // projection intact until this URL-only conversion.
+                let Some(su) = projection_string_to_usv(su) else {
+                    continue;
+                };
+                let expansion = expand_policy_url(&su, &envs.env, Some(&envs.fallback_env));
                 if url_matches(&iu, &expansion.expanded) {
                     return true;
                 }
@@ -1231,21 +1500,22 @@ pub fn is_allowed_with_env(
     let has_cmd = allowed.iter().any(|m| m.server_command.is_some());
     let has_url = allowed.iter().any(|m| m.server_url.is_some());
     let name_match = || {
-        allowed
-            .iter()
-            .any(|m| m.server_name.as_deref() == Some(name))
+        allowed.iter().any(|m| {
+            m.server_name
+                .as_ref()
+                .is_some_and(|matcher| matcher_name_matches(matcher, name))
+        })
     };
 
     if let Some(cmd) = config_command(config) {
         if has_cmd {
-            let a: Vec<String> = cmd.iter().map(|s| get(s)).collect();
+            let candidate = command_units(&cmd.iter().map(|s| get(s)).collect::<Vec<_>>());
             for m in allowed {
                 if let Some(sc) = m.server_command.as_ref() {
-                    let sc_e: Vec<String> = sc
-                        .iter()
-                        .map(|s| expand_policy_string(s, &envs.env, None))
-                        .collect();
-                    if arrays_eq(&sc_e, &a) {
+                    let Some(sc) = matcher_command_expanded_units(sc, &envs.env, None) else {
+                        continue;
+                    };
+                    if sc == candidate {
                         return true;
                     }
                 }
@@ -1259,7 +1529,12 @@ pub fn is_allowed_with_env(
             let a = get(url);
             for m in allowed {
                 if let Some(su) = m.server_url.as_ref() {
-                    let expansion = expand_policy_url(su, &envs.env, None);
+                    // See the deny branch: source units remain exact until
+                    // the matcher enters the native URL/USV-string path.
+                    let Some(su) = projection_string_to_usv(su) else {
+                        continue;
+                    };
+                    let expansion = expand_policy_url(&su, &envs.env, None);
                     if expansion.unsafe_expansion {
                         continue; // fail closed (claude `if(d)continue`)
                     }
@@ -1893,7 +2168,10 @@ mod tests {
         let key = "LINGXI_TEST_POLICY_EXPANSION_LATE";
         std::env::set_var(key, "attacker.example");
         let envs = super::policy_expansion_env();
-        let expanded = super::expand_policy_string(&format!("${{{key}}}"), &envs.env, None);
+        let source = format!("${{{key}}}").encode_utf16().collect::<Vec<_>>();
+        let expanded =
+            String::from_utf16(&super::expand_policy_string_units(&source, &envs.env, None))
+                .expect("test input and environment are valid Unicode");
         let via_get = super::get(&format!("${{{key}}}"));
         std::env::remove_var(key);
         assert_ne!(
@@ -1988,7 +2266,12 @@ mod tests {
     // ── bPe / gPe matcher tests ──
 
     fn matcher(json: &str) -> Vec<McpServerMatcher> {
-        serde_json::from_str(json).unwrap()
+        let source = Utf16JsonProjection::parse(json).expect("matcher fixture JSON");
+        projection_array_items(&source)
+            .expect("matcher fixture array")
+            .iter()
+            .filter_map(|entry| parse_matcher_entry(entry, MatcherListKind::Denied).ok())
+            .collect()
     }
     fn stdio(cmd: &str, args: &[&str]) -> Value {
         serde_json::json!({"type":"stdio","command":cmd,"args":args})
@@ -2403,7 +2686,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .iter()
-                .filter_map(|m| m.server_name.as_deref())
+                .filter_map(|m| m.server_name.as_ref()?.string_at(""))
                 .collect::<Vec<_>>(),
             ["good_1"]
         );
@@ -2412,7 +2695,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .iter()
-                .filter_map(|m| m.server_name.as_deref())
+                .filter_map(|m| m.server_name.as_ref()?.string_at(""))
                 .collect::<Vec<_>>(),
             ["corp"]
         );
@@ -2448,16 +2731,28 @@ mod tests {
         let allowed = p.allowed.as_ref().unwrap();
         assert_eq!(allowed.len(), 2, "valid siblings must survive");
         assert_eq!(
-            allowed[0].server_command.as_deref(),
-            Some(["npx".to_string(), "-y".to_string(), "corp".to_string()].as_slice())
+            allowed[0]
+                .server_command
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|item| item.string_at("").unwrap())
+                .collect::<Vec<_>>(),
+            ["npx", "-y", "corp"]
         );
-        assert_eq!(allowed[1].server_name.as_deref(), Some("good_1"));
+        assert_eq!(
+            allowed[1]
+                .server_name
+                .as_ref()
+                .and_then(|name| name.string_at("")),
+            Some("good_1")
+        );
         assert_eq!(
             p.denied
                 .as_ref()
                 .unwrap()
                 .iter()
-                .filter_map(|m| m.server_name.as_deref())
+                .filter_map(|m| m.server_name.as_ref()?.string_at(""))
                 .collect::<Vec<_>>(),
             ["corp"]
         );
@@ -2475,10 +2770,138 @@ mod tests {
     }
 
     #[test]
+    fn policy_refresh_preserves_the_hosts_admitted_file_scope() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let cwd = temp.path().join("project");
+        let project_settings = cwd.join(branding::DOT_DIR);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&project_settings).unwrap();
+        for (path, name) in [
+            (home.join("settings.json"), "scope-user"),
+            (project_settings.join("settings.json"), "scope-project"),
+            (project_settings.join("settings.local.json"), "scope-local"),
+        ] {
+            std::fs::write(
+                path,
+                serde_json::json!({"deniedMcpServers": [{"serverName": name}]}).to_string(),
+            )
+            .unwrap();
+        }
+        let flag = serde_json::json!({"deniedMcpServers": [{"serverName": "scope-flag"}]});
+        let contains = |policy: &McpPolicy, name: &str| {
+            policy.denied.as_ref().is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry
+                        .server_name
+                        .as_ref()
+                        .is_some_and(|value| matcher_name_matches(value, name))
+                })
+            })
+        };
+        let user_only =
+            read_effective_mcp_policy_with_scope(&home, &cwd, Some(&flag), (true, false));
+        assert!(contains(&user_only, "scope-user"));
+        assert!(contains(&user_only, "scope-flag"));
+        assert!(!contains(&user_only, "scope-project"));
+        assert!(!contains(&user_only, "scope-local"));
+        let project_only = read_effective_mcp_policy_with_scope(&home, &cwd, None, (false, true));
+        assert!(!contains(&project_only, "scope-user"));
+        assert!(contains(&project_only, "scope-project"));
+        assert!(contains(&project_only, "scope-local"));
+    }
+
+    #[test]
+    fn raw_policy_projection_preserves_valid_sibling_and_exact_name_units() {
+        let source = Utf16JsonProjection::parse(
+            r#"{"deniedMcpServers":[{"serverName":"kept"},{"serverName":"odd\ud800"}]}"#,
+        )
+        .expect("escaped lone surrogate is valid JSON source");
+        let policy = McpPolicy::from_effective_source_layers(&[source], &[]);
+        let candidate = stdio("command", &[]);
+
+        assert!(is_denied("kept", &candidate, &policy));
+        assert!(!is_denied("odd\u{fffd}", &candidate, &policy));
+        let retained_units = policy.denied.as_ref().unwrap()[1]
+            .server_name
+            .as_ref()
+            .unwrap()
+            .string_units("")
+            .unwrap();
+        assert_eq!(
+            retained_units,
+            vec![b'o' as u16, b'd' as u16, b'd' as u16, 0xd800]
+        );
+    }
+
+    #[test]
+    fn command_expansion_preserves_utf16_defaults_until_override_resolution() {
+        let source = Utf16JsonProjection::parse(
+            r#"{"deniedMcpServers":[{"serverCommand":["${CMD:-\ud800}"]},{"serverCommand":["${OTHER:-\ud800}"]}]}"#,
+        )
+        .expect("escaped lone surrogate is valid JSON source");
+        let policy = McpPolicy::from_effective_source_layers(&[source], &[]);
+        let envs = PolicyExpansionEnv {
+            env: map(&[("CMD", "npx")]),
+            // A present default wins over fallback. If the invalid default is
+            // retained exactly, this does not match a replacement character.
+            fallback_env: map(&[("OTHER", "\u{fffd}")]),
+        };
+
+        assert!(is_denied_with_env(
+            "npx",
+            &stdio("npx", &[]),
+            &policy,
+            &envs
+        ));
+        assert!(!is_denied_with_env(
+            "replacement",
+            &stdio("\u{fffd}", &[]),
+            &policy,
+            &envs
+        ));
+        let no_env = PolicyExpansionEnv {
+            env: map(&[]),
+            fallback_env: map(&[]),
+        };
+        assert!(!is_denied_with_env(
+            "replacement",
+            &stdio("\u{fffd}", &[]),
+            &policy,
+            &no_env
+        ));
+    }
+
+    #[test]
+    fn managed_policy_and_env_keep_valid_fields_beside_lone_surrogate() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("managed-settings.json"),
+            r#"{"allowManagedMcpServersOnly":true,"env":{"POLICY_HOST":"kept.example"},"allowedMcpServers":[{"serverName":"allowed"},{"serverName":"odd\ud800"}],"deniedMcpServers":[{"serverName":"denied"},{"serverName":"odd\ud800"}]}"#,
+        )
+        .unwrap();
+
+        let policy = read_managed_mcp_policy_in(dir.path());
+        let remote = http("https://kept.example/mcp");
+        let envs = PolicyExpansionEnv {
+            env: managed_sources_env_in(dir.path()),
+            fallback_env: map(&[]),
+        };
+        assert_eq!(
+            envs.env.get("POLICY_HOST").map(String::as_str),
+            Some("kept.example")
+        );
+        assert!(is_allowed_with_env("allowed", &remote, &policy, &envs));
+        assert!(!is_allowed_with_env("unlisted", &remote, &policy, &envs));
+        assert!(is_denied_with_env("denied", &remote, &policy, &envs));
+        assert!(!is_denied_with_env("odd\u{fffd}", &remote, &policy, &envs));
+    }
+
+    #[test]
     fn matcher_entry_errors_are_zod_byte_exact() {
         use MatcherListKind::{Allowed, Denied};
         let err = |raw: &str, kind| {
-            parse_matcher_entry(&serde_json::from_str::<Value>(raw).unwrap(), kind).unwrap_err()
+            parse_matcher_entry(&Utf16JsonProjection::parse(raw).unwrap(), kind).unwrap_err()
         };
         assert_eq!(
             err(r#""junk""#, Allowed),
@@ -2758,7 +3181,7 @@ mod tests {
                 names
                     .iter()
                     .map(|n| McpServerMatcher {
-                        server_name: Some((*n).to_string()),
+                        server_name: Some((*n).into()),
                         server_command: None,
                         server_url: None,
                     })
@@ -2820,7 +3243,7 @@ mod tests {
     fn the_denylist_still_wins_over_the_exemption() {
         let policy = McpPolicy {
             denied: Some(vec![McpServerMatcher {
-                server_name: Some("org-tool".to_string()),
+                server_name: Some("org-tool".into()),
                 server_command: None,
                 server_url: None,
             }]),

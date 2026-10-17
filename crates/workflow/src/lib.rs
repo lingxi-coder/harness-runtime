@@ -2562,7 +2562,7 @@ mod meta_validation_tests {
         let suffix_units = suffix.encode_utf16().count();
         let remaining = NATIVE_WORKFLOW_MAX_SCRIPT_CODE_UNITS - prefix_units - suffix_units;
         let emoji_count = remaining / 2;
-        let odd_unit = if remaining % 2 == 0 { "" } else { "a" };
+        let odd_unit = if remaining.is_multiple_of(2) { "" } else { "a" };
         let within_native_limit = format!("{prefix}{}{odd_unit}{suffix}", "😀".repeat(emoji_count));
         assert_eq!(
             within_native_limit.encode_utf16().count(),

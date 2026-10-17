@@ -142,6 +142,7 @@ pub use mcp_output_storage::{
 pub use raw_conn::RawConnectionProvider;
 pub use registry::{
     McpCatalogChanged, McpCatalogKind, McpRegistry, McpToolOutputSchemaParserHandle,
+    PluginMcpAdmission, PluginMcpConnectOutcome, PluginMcpRefusal,
 };
 pub use server_gate::{
     apply_project_server_gate, is_builtin_computer_use, mcp_server_is_disabled, McpPolicyContext,

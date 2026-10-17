@@ -54,8 +54,16 @@ impl ConversationOrchestrator {
             .connect_plugin_server(plugin_storage_id, &server_key)
             .await
         {
-            Ok(Some((public_name, _connection_id))) => {
-                mcp_connect_result(true, Some(&public_name), None, None)
+            Ok(Some(mcp::PluginMcpConnectOutcome::Connected { server, .. })) => {
+                mcp_connect_result(true, Some(&server), None, None)
+            }
+            Ok(Some(mcp::PluginMcpConnectOutcome::Refused(refusal))) => {
+                mcp_connect_result_with_message(
+                    false,
+                    None,
+                    Some(&refusal.reason),
+                    Some(refusal.message),
+                )
             }
             Ok(None) => {
                 let message = format!(

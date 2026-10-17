@@ -51,6 +51,93 @@ use super::{
     MobileSessionAgentObserver, MobileWakeupDelivery, TurnLifecycleListener, MOBILE_CRON_HANDLES,
 };
 
+// Recompute from admitted mobile settings for each plugin-owner connect. This
+// keeps a settings refresh from reviving a server that the current local
+// allow/deny policy now blocks, without adding a separate watcher.
+fn current_mobile_mcp_policy(
+    lingxi_home: &std::path::Path,
+    cwd: &std::path::Path,
+) -> Result<mcp::enterprise_policy::McpPolicy, lingxi_core::settings::SettingsError> {
+    use lingxi_core::settings::{
+        FileLayerScope, LoadInputs, RawSupplementalLayers, Settings, SettingsJson,
+    };
+
+    let env = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+    let effective = Settings::load_raw_layer_stack_from_user_path(
+        LoadInputs {
+            env: &env,
+            project_dir: cwd,
+            defaults: SettingsJson::default(),
+        },
+        FileLayerScope::ALL,
+        RawSupplementalLayers::default(),
+        Some(&lingxi_home.join("settings.json")),
+    )?
+    .into_effective_settings()?;
+
+    // Mobile admits user, project, and local settings tiers. Keep each raw
+    // source projection so policy parsing preserves isolated UTF-16 values.
+    let ordinary = effective
+        .source_layers
+        .iter()
+        .filter(|layer| {
+            matches!(
+                layer.source,
+                lingxi_core::settings::tracer::Source::User
+                    | lingxi_core::settings::tracer::Source::Project
+                    | lingxi_core::settings::tracer::Source::Local
+            )
+        })
+        .map(|layer| layer.projection.clone())
+        .collect::<Vec<_>>();
+    Ok(mcp::enterprise_policy::McpPolicy::from_effective_source_layers(&ordinary, &[]))
+}
+
+fn mobile_plugin_mcp_admission(
+    lingxi_home: std::path::PathBuf,
+    cwd: std::path::PathBuf,
+) -> Arc<mcp::PluginMcpAdmission> {
+    Arc::new(move |config| {
+        let policy = match current_mobile_mcp_policy(&lingxi_home, &cwd) {
+            Ok(policy) => policy,
+            Err(_) => {
+                tracing::warn!(
+                    "failed to resolve mobile MCP policy; refusing plugin MCP connection"
+                );
+                let message = format!(
+                    "Your organization's MCP policy does not allow \"{}\".",
+                    config.name
+                );
+                let message = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+                    message.clone(),
+                    message.encode_utf16().collect(),
+                )
+                .expect("native plugin MCP refusal text is a valid UTF-16 string");
+                return Some(mcp::PluginMcpRefusal {
+                    reason: "policy".to_string(),
+                    message,
+                });
+            }
+        };
+        if mcp::enterprise_policy::is_server_allowed(config, &policy) {
+            return None;
+        }
+        let message = format!(
+            "Your organization's MCP policy does not allow \"{}\".",
+            config.name
+        );
+        let message = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            message.clone(),
+            message.encode_utf16().collect(),
+        )
+        .expect("native plugin MCP refusal text is a valid UTF-16 string");
+        Some(mcp::PluginMcpRefusal {
+            reason: "policy".to_string(),
+            message,
+        })
+    })
+}
+
 /// Project the Native marketplace active view from merged settings. Only an
 /// explicit boolean `true` enables a plugin; arrays project to false.
 fn mobile_enabled_plugins_for_discovery(
@@ -95,6 +182,75 @@ mod mobile_enabled_plugins_tests {
         assert_eq!(enabled.get("strings@mkt"), Some(&false));
         assert_eq!(enabled.get("off@mkt"), Some(&false));
         assert!(!enabled.contains_key("missing@mkt"));
+    }
+}
+
+#[cfg(test)]
+mod mobile_plugin_mcp_admission_tests {
+    use super::{current_mobile_mcp_policy, mobile_plugin_mcp_admission};
+    use mcp::{ConfigScope, McpAgentSource, McpServerConfig, McpServerMetadata};
+    use std::fs;
+
+    #[test]
+    fn plugin_admission_rereads_settings_without_rebuilding_host() {
+        let temp = tempfile::tempdir().expect("temporary mobile home");
+        let home = temp.path().join("home");
+        let cwd = temp.path().join("project");
+        fs::create_dir_all(&home).expect("create home");
+        fs::create_dir_all(&cwd).expect("create project cwd");
+        let settings_path = home.join("settings.json");
+        let config = McpServerConfig {
+            name: "fixture-server".to_string(),
+            spec: lingxi_core::host::McpTransportSpec::Http {
+                url: "http://127.0.0.1:1/mcp".to_string(),
+                headers: lingxi_core::host::McpHeaders::new(),
+                headers_helper: None,
+                oauth: None,
+            },
+            scope: ConfigScope::Dynamic,
+            disabled: false,
+            timeout_ms: None,
+            discovery_cache: None,
+            always_load: false,
+            tools: Vec::new(),
+            tool_permissions: Default::default(),
+            config_error: None,
+            metadata: McpServerMetadata {
+                agent_source: Some(McpAgentSource::Plugin),
+                ..McpServerMetadata::default()
+            },
+        };
+        let admission = mobile_plugin_mcp_admission(home.clone(), cwd.clone());
+
+        fs::write(
+            &settings_path,
+            r#"{"allowedMcpServers":[{"serverName":"fixture-server"}]}"#,
+        )
+        .expect("write allow policy");
+        assert!(admission(&config).is_none(), "allowed plugin server passes");
+
+        fs::write(
+            &settings_path,
+            r#"{"deniedMcpServers":[{"serverName":"fixture-server"},{"serverName":"\ud800"}]}"#,
+        )
+        .expect("replace with deny policy");
+        let policy = current_mobile_mcp_policy(&home, &cwd)
+            .expect("source-aware settings parser accepts the deny policy");
+        assert_eq!(
+            policy.denied.as_ref().map(Vec::len),
+            Some(2),
+            "the matching deny and isolated-surrogate sibling both remain parsed"
+        );
+        assert!(
+            !mcp::enterprise_policy::is_server_allowed(&config, &policy),
+            "the parsed policy itself denies the plugin server"
+        );
+        let refusal = admission(&config).expect("same callback sees the new deny policy");
+        assert_eq!(refusal.reason, "policy");
+        assert_eq!(
+            refusal.message.to_json_string().expect("refusal JSON"),
+            r#""Your organization's MCP policy does not allow \"fixture-server\".""#
+        );
     }
 }
 
@@ -193,11 +349,13 @@ pub(super) async fn build_mobile_inner_with_ask(
     let mcp_auth_url = Arc::new(StdMutex::new(None::<String>));
     let mcp_auth_callback =
         mobile_mcp_oauth_authorization_callback(mcp_auth_url.clone(), platform.deep_link());
+    let plugin_mcp_admission = mobile_plugin_mcp_admission(cfg.lingxi_home.clone(), cwd.clone());
     let mut mcp_registry = McpRegistry::with_raw_conn(
         mobile_mcp.clone() as Arc<dyn lingxi_core::host::McpTransport>,
         mobile_mcp.clone() as Arc<dyn RawConnectionProvider>,
     )
     .with_projects_session_host(projects_session_host.clone())
+    .with_plugin_mcp_admission(plugin_mcp_admission)
     .with_headers_helper_cwd(cwd.clone())
     .with_discovery_cache_store(mcp::DiscoveryCacheStore::new(
         cfg.lingxi_home.join("mcp-discovery-cache"),
