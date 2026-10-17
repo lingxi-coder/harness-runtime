@@ -4794,8 +4794,13 @@ async fn build_wires_xaa_config_when_xaaidp_settings_present() {
 #[tokio::test]
 async fn build_discovers_and_materialises_an_installed_plugin() {
     let (_tmp, cfg) = test_config(true);
-    // Lay down a fixture plugin under `<lingxi_home>/plugins/myplugin`.
-    let plugin_dir = cfg.lingxi_home.join("plugins").join("myplugin");
+    // Lay down a current V2 installed plugin in its exact versioned cache path.
+    let plugins_dir = cfg.lingxi_home.join("plugins");
+    let plugin_dir = plugins_dir
+        .join("cache")
+        .join("acme")
+        .join("myplugin")
+        .join("1.0.0");
     std::fs::create_dir_all(plugin_dir.join(".lingxi-plugin")).unwrap();
     std::fs::write(
         plugin_dir.join(".lingxi-plugin").join("plugin.json"),
@@ -4808,6 +4813,8 @@ async fn build_discovers_and_materialises_an_installed_plugin() {
         "---\ndescription: greets\n---\nHello from the plugin.\n",
     )
     .unwrap();
+    write_installed_plugin_record(&plugins_dir, "acme", "myplugin", "1.0.0");
+    write_enabled_plugins(&cfg.lingxi_home, &[("myplugin@acme", true)]);
 
     let output: Arc<dyn lingxi_core::host::OutputStream> =
         Arc::new(orchestrator::test_support::MockOutputStream::new());

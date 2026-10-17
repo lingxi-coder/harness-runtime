@@ -386,7 +386,7 @@ mod tests {
             render_workflow_prompt(&prompt_source(&descriptor), &text(" \t\u{feff}\n"), false);
         assert_eq!(
             prompt.string_at(""),
-            Some("Run the \"review\" workflow.\n\nReview the change.\n\nPhases:\n\nInvoke: Workflow({ name: \"review\" })")
+            Some("Run the \"review\" workflow.\n\nReview the change.\n\nPhases:\n\n\nInvoke: Workflow({ name: \"review\" })")
         );
         assert!(!prompt.string_at("").unwrap().contains("args:"));
 

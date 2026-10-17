@@ -3443,8 +3443,8 @@ async fn runtime_message_is_prepended_before_additional_context() {
     let mut orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None);
     let runtime = "<system-reminder>\nMobile runtime environment (version 1)\n</system-reminder>";
     orch.mobile_runtime_environment_message = Some(runtime_message(runtime));
-    orch.mobile_runtime_environment = Some(mobile_environment("/workspace/a"));
-    orch.mobile_workspace_cwd_resolver = Some(Arc::new(|_| Some("/workspace/a".into())));
+    orch.mobile_runtime_environment = Some(mobile_environment("/home/lingxi/lingxi/a"));
+    orch.mobile_workspace_cwd_resolver = Some(Arc::new(|_| Some("/home/lingxi/lingxi/a".into())));
     let original = ConversationMessage::user(MessageId::new(), "hello".into());
     let mut messages = vec![original.clone()];
 
@@ -3455,7 +3455,7 @@ async fn runtime_message_is_prepended_before_additional_context() {
     orch.prepend_leading_context(&mut messages, &context).await;
 
     assert_eq!(text(&messages[0]), runtime);
-    assert!(text(&messages[1]).contains("Guest workspace: /workspace/a"));
+    assert!(text(&messages[1]).contains("Guest workspace: /home/lingxi/lingxi/a"));
     assert!(text(&messages[2]).contains("# currentDate\nToday's date is "));
     assert_eq!(messages[3], original);
     assert_eq!(
@@ -3470,7 +3470,7 @@ async fn unresolved_native_workspace_path_falls_back_to_guest_coordinate() {
     let session_cwd = tool_api::SessionCwd::new(host_cwd.clone(), vec![host_cwd]);
     let orch = orch_with(Arc::new(StaticMemoryProvider::empty()), None)
         .with_session_cwd(session_cwd)
-        .with_mobile_runtime_environment(mobile_environment("/workspace/a"))
+        .with_mobile_runtime_environment(mobile_environment("/home/lingxi/lingxi/a"))
         .with_mobile_workspace_cwd_resolver(Arc::new(|_| None));
     let mut messages = Vec::new();
 
@@ -3480,7 +3480,7 @@ async fn unresolved_native_workspace_path_falls_back_to_guest_coordinate() {
     };
     orch.prepend_leading_context(&mut messages, &context).await;
 
-    assert!(text(&messages[1]).contains("Guest workspace: /workspace/a"));
+    assert!(text(&messages[1]).contains("Guest workspace: /home/lingxi/lingxi/a"));
     assert!(!text(&messages[1]).contains("native-host-worktree"));
 }
 
@@ -3490,7 +3490,7 @@ fn scheduled_mobile_runtime_uses_headless_prompt_guidance() {
     orch.config.interactive_session = true;
     assert!(orch.prompt_is_interactive());
 
-    let mut environment = mobile_environment("/workspace/a");
+    let mut environment = mobile_environment("/home/lingxi/lingxi/a");
     environment.host.launch_mode = lingxi_core::host::MobileLaunchMode::ScheduledHeadless;
     orch.mobile_runtime_environment = Some(environment);
 
@@ -3505,8 +3505,8 @@ async fn runtime_message_stays_first_when_transient_context_is_reattached() {
     let date = runtime_message("<system-reminder>date</system-reminder>");
     let tail = runtime_message("<system-reminder>tail</system-reminder>");
     orch.mobile_runtime_environment_message = Some(runtime_message(runtime));
-    orch.mobile_runtime_environment = Some(mobile_environment("/workspace/a"));
-    orch.mobile_workspace_cwd_resolver = Some(Arc::new(|_| Some("/workspace/a".into())));
+    orch.mobile_runtime_environment = Some(mobile_environment("/home/lingxi/lingxi/a"));
+    orch.mobile_workspace_cwd_resolver = Some(Arc::new(|_| Some("/home/lingxi/lingxi/a".into())));
     let original = ConversationMessage::user(MessageId::new(), "hello".into());
     orch.session.lock().await.history.push(original.clone());
     let prepared = orch
@@ -3520,7 +3520,7 @@ async fn runtime_message_stays_first_when_transient_context_is_reattached() {
         .unwrap();
     let captured_bytes = serde_json::to_vec(captured).unwrap();
     assert_eq!(text(&prepared.snapshot[0]), runtime);
-    assert!(text(&prepared.snapshot[1]).contains("Guest workspace: /workspace/a"));
+    assert!(text(&prepared.snapshot[1]).contains("Guest workspace: /home/lingxi/lingxi/a"));
     assert_eq!(&prepared.snapshot[2], captured);
     assert_eq!(
         &prepared.snapshot[3..prepared.snapshot.len() - 1],
@@ -3553,7 +3553,7 @@ async fn runtime_message_stays_first_when_transient_context_is_reattached() {
 
         assert_eq!(messages.len(), 6 + turn_reminders.len());
         assert_eq!(text(&messages[0]), runtime);
-        assert!(text(&messages[1]).contains("Guest workspace: /workspace/a"));
+        assert!(text(&messages[1]).contains("Guest workspace: /home/lingxi/lingxi/a"));
         assert_eq!(messages[2], date);
         assert_eq!(messages[3], deferred);
         assert_eq!(&messages[4], captured);
@@ -3582,8 +3582,8 @@ async fn runtime_message_keeps_dynamic_environment_separate() {
     orch.mobile_runtime_environment_message = Some(runtime_message(
         "<system-reminder>\nMobile runtime environment (version 1)\n</system-reminder>",
     ));
-    orch.mobile_runtime_environment = Some(mobile_environment("/workspace/a"));
-    orch.mobile_workspace_cwd_resolver = Some(Arc::new(|_| Some("/workspace/a".into())));
+    orch.mobile_runtime_environment = Some(mobile_environment("/home/lingxi/lingxi/a"));
+    orch.mobile_workspace_cwd_resolver = Some(Arc::new(|_| Some("/home/lingxi/lingxi/a".into())));
 
     let body = text(
         &orch
@@ -3653,8 +3653,8 @@ async fn system_prompt_override_stays_verbatim_while_runtime_message_is_sent() {
     );
     let runtime = "<system-reminder>\nMobile runtime environment (version 1)\n</system-reminder>";
     orch.mobile_runtime_environment_message = Some(runtime_message(runtime));
-    orch.mobile_runtime_environment = Some(mobile_environment("/workspace/a"));
-    orch.mobile_workspace_cwd_resolver = Some(Arc::new(|_| Some("/workspace/a".into())));
+    orch.mobile_runtime_environment = Some(mobile_environment("/home/lingxi/lingxi/a"));
+    orch.mobile_workspace_cwd_resolver = Some(Arc::new(|_| Some("/home/lingxi/lingxi/a".into())));
 
     orch.run_turn("hi").await.expect("turn");
 
@@ -3664,7 +3664,7 @@ async fn system_prompt_override_stays_verbatim_while_runtime_message_is_sent() {
     );
     let sent = api.captured_msgs().await;
     assert_eq!(text(&sent[0][0]), runtime);
-    assert!(text(&sent[0][1]).contains("Guest workspace: /workspace/a"));
+    assert!(text(&sent[0][1]).contains("Guest workspace: /home/lingxi/lingxi/a"));
     assert!(text(&sent[0][2]).contains("# currentDate\nToday's date is "));
 }
 
