@@ -3424,16 +3424,12 @@ impl ModHost {
             Err(error) => return Err(error.into()),
         };
         if kind == "unmount" {
-            let handled = result.string_at("") == Some(runtime_id);
+            let handled = result
+                .at_pointer("/unmounted")
+                .and_then(|value| value.as_bool())
+                == Some(true);
             let mut data = lock(&self.client_ui.data);
-            if data
-                .instance_by_identity
-                .get(&instance.key)
-                .map(String::as_str)
-                == Some(runtime_id)
-            {
-                data.instance_by_identity.remove(&instance.key);
-            }
+            remove_instance_if_current(&mut data, runtime_id, &instance.key);
             return Ok(host_generated_json(
                 json!({"handled":handled,"renderRevision":revision}),
             ));
@@ -5495,6 +5491,59 @@ mod tests {
             pressed["frameSequence"].as_u64().unwrap()
                 > test_value(&reset)["frameSequence"].as_u64().unwrap()
         );
+
+        let client_identity = lock(&host.client_ui.data)
+            .instances
+            .get(&runtime_id)
+            .expect("mounted Client remains tracked after runHeld")
+            .key
+            .clone();
+        let unmounted = host
+            .dispatch_client_ui_operation(
+                host_generated_json(json!({
+                    "type":"unmount",
+                    "runtimeId":runtime_id,
+                    "render_revision":revision,
+                })),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(test_value(&unmounted)["handled"], true);
+        {
+            let data = lock(&host.client_ui.data);
+            assert!(!data.instances.contains_key(&runtime_id));
+            assert!(!data.instance_by_identity.contains_key(&client_identity));
+        }
+
+        let repeated_unmount = host
+            .dispatch_client_ui_operation(
+                host_generated_json(json!({
+                    "type":"unmount",
+                    "runtimeId":runtime_id,
+                    "render_revision":revision,
+                })),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(test_value(&repeated_unmount)["handled"], false);
+        assert!(test_value(&repeated_unmount).get("tree").is_none());
+
+        let stale_run_held = host
+            .dispatch_client_ui_operation(
+                host_generated_json(json!({
+                    "type":"runHeld",
+                    "runtimeId":runtime_id,
+                    "render_revision":revision,
+                    "handle":held,
+                })),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(test_value(&stale_run_held)["handled"], false);
+        assert!(test_value(&stale_run_held).get("tree").is_none());
 
         // A run failure reports through one authoritative Host ui.fault
         // dispatch. The worker keeps a failed snapshot: later operations on
