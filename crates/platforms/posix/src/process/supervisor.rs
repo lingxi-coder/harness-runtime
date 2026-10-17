@@ -400,6 +400,7 @@ mod tests {
                 .trim()
                 .parse::<i32>()
                 .unwrap();
+            let supervisor_birth = UnixPlatform.process_start_identity(supervisor as u32);
             nix::sys::signal::kill(
                 nix::unistd::Pid::from_raw(supervisor),
                 nix::sys::signal::Signal::SIGKILL,
@@ -418,7 +419,7 @@ mod tests {
             })
             .await
             .unwrap();
-            tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+            let output_ready = tokio::time::timeout(CROSS_PROCESS_WAIT, async {
                 while !std::fs::read_to_string(&path)
                     .unwrap_or_default()
                     .contains("[supervisor lost; task failed]")
@@ -426,8 +427,42 @@ mod tests {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
-            .await
-            .unwrap();
+            .await;
+            if output_ready.is_err() {
+                use std::io::{Read, Seek, SeekFrom};
+                let bounded_tail = |path: &Path| -> String {
+                    let result = (|| -> std::io::Result<Vec<u8>> {
+                        let mut file = std::fs::File::open(path)?;
+                        let length = file.metadata()?.len();
+                        file.seek(SeekFrom::Start(length.saturating_sub(4096)))?;
+                        let mut bytes = Vec::new();
+                        file.take(4096).read_to_end(&mut bytes)?;
+                        Ok(bytes)
+                    })();
+                    result.map_or_else(
+                        |error| format!("<unavailable: {error}>"),
+                        |bytes| String::from_utf8_lossy(&bytes).into_owned(),
+                    )
+                };
+                let supervisor_directory =
+                    std::fs::read_to_string(directory.join("supervisor.directory"))
+                        .ok()
+                        .map(|value| PathBuf::from(value.trim()));
+                let receipt_path = supervisor_directory
+                    .as_ref()
+                    .map(|path| path.join("receipt"));
+                let supervisor_now = UnixPlatform.process_start_identity(supervisor as u32);
+                let supervisor_alive = Platform::process_is_alive(&UnixPlatform, supervisor as u32);
+                let child_now = lingxi_core::host::live_sessions::process_start_identity(child);
+                let child_alive = Platform::process_is_alive(&UnixPlatform, child);
+                panic!(
+                    "{mode} timed out waiting for lost-supervisor footer; output_path={path:?}, output_tail={:?}, supervisor_dir={supervisor_directory:?}, receipt_path={receipt_path:?}, receipt_tail={}, supervisor_pid={supervisor}, supervisor_birth_before={supervisor_birth:?}, supervisor_birth_now={supervisor_now:?}, supervisor_alive={supervisor_alive:?}, child_pid={child}, child_birth_now={child_now:?}, child_alive={child_alive:?}",
+                    bounded_tail(&path),
+                    receipt_path
+                        .as_deref()
+                        .map_or_else(|| "<unknown>".to_owned(), bounded_tail),
+                );
+            }
             return;
         }
         if mode == "birthfail" {
@@ -623,10 +658,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let executable = std::env::current_exe().unwrap();
         let wrapper = directory.join("supervisor-bootstrap");
-        let script=format!("#!/bin/sh\necho $$ > {}\nexport LXS_TEST_ROLE=supervisor\nexport LXS_TEST_DIR=\"$2\"\nexec {} --exact process::supervisor::tests::supervisor_cross_process_helper --nocapture\n",quoted(directory.join("supervisor.pid").to_str().unwrap()),quoted(executable.to_str().unwrap()));
+        let supervisor_stderr = directory.join("supervisor.stderr.log");
+        let script=format!("#!/bin/sh\necho $$ > {}\nprintf '%s\n' \"$2\" > {}\nexport LXS_TEST_ROLE=supervisor\nexport LXS_TEST_DIR=\"$2\"\nexec {} --exact process::supervisor::tests::supervisor_cross_process_helper --nocapture 2>> {}\n",quoted(directory.join("supervisor.pid").to_str().unwrap()),quoted(directory.join("supervisor.directory").to_str().unwrap()),quoted(executable.to_str().unwrap()),quoted(supervisor_stderr.to_str().unwrap()));
         std::fs::write(&wrapper, script).unwrap();
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let status = tokio::process::Command::new(executable)
+        let mut helper = tokio::process::Command::new(executable)
             .args([
                 "--exact",
                 "process::supervisor::tests::supervisor_cross_process_helper",
@@ -637,10 +673,74 @@ mod tests {
             .env("LXS_TEST_WRAPPER", wrapper)
             .env("LXS_TEST_COMMAND", command)
             .env("LXS_TEST_MODE", mode)
-            .status()
-            .await
+            .spawn()
             .unwrap();
-        assert!(status.success());
+        let status = if matches!(mode, "cancel" | "deadline") {
+            // Exclude process/supervisor bootstrap from the stop-latency budget:
+            // the child PID marker is written by the actual command payload.
+            let marker_ready = tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                while !directory.join("child.pid").exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            if marker_ready.is_err() {
+                // Retain only the launched supervisor's birth identity; closing
+                // this RPC client makes its existing disconnect path cancel and
+                // join its owned runner. Never signal a PID without a capability.
+                let supervisor_identity = std::fs::read_to_string(directory.join("supervisor.pid"))
+                    .ok()
+                    .and_then(|pid| pid.trim().parse::<u32>().ok())
+                    .and_then(|pid| {
+                        lingxi_core::host::live_sessions::process_start_identity(pid)
+                            .map(|birth| (pid, birth))
+                    });
+                let helper_status = match helper
+                    .try_wait()
+                    .expect("inspect timed-out stop-test helper")
+                {
+                    Some(status) => status,
+                    None => match helper.kill().await {
+                        Ok(()) => helper.wait().await.expect("reap killed stop-test helper"),
+                        Err(kill_error) => helper
+                            .try_wait()
+                            .expect("inspect helper after kill error")
+                            .unwrap_or_else(|| {
+                                panic!("could not kill stop-test helper: {kill_error}")
+                            }),
+                    },
+                };
+                if let Some((pid, birth)) = supervisor_identity {
+                    tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+                        while lingxi_core::host::live_sessions::process_start_identity(pid)
+                            .as_deref()
+                            == Some(birth.as_str())
+                        {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .expect("supervisor did not exit after helper RPC disconnect");
+                }
+                panic!(
+                    "stop-test command did not reach its child-start marker; helper exited with {helper_status}"
+                );
+            }
+            let started = std::time::Instant::now();
+            let status = helper.wait().await.unwrap();
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{mode} did not stop promptly after the child started"
+            );
+            status
+        } else {
+            helper.wait().await.unwrap()
+        };
+        if !status.success() {
+            let stderr = std::fs::read_to_string(directory.join("supervisor.stderr.log"))
+                .unwrap_or_else(|error| format!("<unavailable: {error}>"));
+            panic!("{mode} supervisor helper exited with {status}; stderr: {stderr}");
+        }
         assert_eq!(
             std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
             0o700,
@@ -750,12 +850,7 @@ mod tests {
         }
         for mode in ["cancel", "deadline"] {
             let directory = tempfile::tempdir().unwrap();
-            let started = std::time::Instant::now();
             launch_mode(directory.path(), "echo $$ > child.pid; sleep 5", mode).await;
-            assert!(
-                started.elapsed() < Duration::from_secs(2),
-                "{mode} did not stop promptly"
-            );
             tokio::time::sleep(Duration::from_millis(300)).await;
             let pid = std::fs::read_to_string(directory.path().join("child.pid"))
                 .unwrap()
