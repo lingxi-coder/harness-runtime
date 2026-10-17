@@ -44,6 +44,7 @@ const NATIVE_UNKNOWN_COMMAND_NAMES: &[&str] = &[
     "security-review",
 ];
 const NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT: usize = 41;
+const HARNESS_NO_VERDICT_AVAILABLE_COMMAND_COUNT: usize = 40;
 // Native raw init fixture SHA-256 143238ef9dd790461f617295c12db131c12a810fbf11e87b894b0eb83645164d:
 // 46 rows, minus the four source-hidden descriptors (agents, heapdump,
 // __remote-workflow, workflow-launch-exec), with its two project Skills replaced
@@ -497,6 +498,13 @@ fn unknown_fallback_attachment_index(raw: &[u8], command_name: &str) -> Option<u
             && rendered.starts_with(&expected_rendered))
         .then_some(index)
     })
+}
+
+fn expected_unknown_command_reminder(remaining_count: usize) -> String {
+    let available_names = NATIVE_UNKNOWN_COMMAND_NAMES.join(", /");
+    format!(
+        "<system-reminder>\nThe user's message starts with the slash command /__native_unknown_295__, but no command with that name is available in this session, so it did not run. Slash commands available in this session: /{available_names}, and {remaining_count} more. Treat the message as a plain request and do the task with the tools you have. If the task needs that command, tell the user it is not installed in this session. The user can add it as an organization plugin or a project skill. Do not give installation steps you are not sure of. Do not say the command ran.\n</system-reminder>"
+    )
 }
 
 fn install_native_skill_input(cwd: &Path, name: &str, expected_sha256: &str) {
@@ -1138,7 +1146,7 @@ async fn native_295_commands_fixture_replay_body() {
             );
             assert_eq!(
                 native_attachment.number_at("/attachment/availableCommandCount"),
-                Some(41.0),
+                Some(NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT as f64),
                 "Native catalog count is fixed fixture data"
             );
             let native_budget = attachment_row(&native_jsonl, "budget_usd")
@@ -1166,7 +1174,28 @@ async fn native_295_commands_fixture_replay_body() {
                 .filter(|command| !command.is_hidden)
                 .map(|command| command.name.string_at("").unwrap().to_owned())
                 .collect::<Vec<_>>();
-            assert_eq!(available_names, NATIVE_AVAILABLE_COMMAND_NAMES);
+            // This Harness fixture has no resolved `allow_bundled_skills` policy.
+            // The captured Native init fixture does not record that policy input, so
+            // keep the Native 41-row golden separate and assert the source-defined
+            // no-verdict projection: the compiled `deep-research` row is filtered.
+            assert_eq!(
+                NATIVE_AVAILABLE_COMMAND_NAMES
+                    .iter()
+                    .filter(|name| **name == "deep-research")
+                    .count(),
+                1,
+                "the source-profile delta is exactly the compiled deep-research workflow"
+            );
+            let no_verdict_available_names = NATIVE_AVAILABLE_COMMAND_NAMES
+                .iter()
+                .copied()
+                .filter(|name| *name != "deep-research")
+                .collect::<Vec<_>>();
+            assert_eq!(
+                no_verdict_available_names.len(),
+                HARNESS_NO_VERDICT_AVAILABLE_COMMAND_COUNT
+            );
+            assert_eq!(available_names, no_verdict_available_names);
             assert_eq!(
                 available_names.len(),
                 current_catalog.available_command_count
@@ -1192,8 +1221,8 @@ async fn native_295_commands_fixture_replay_body() {
             );
             assert_eq!(
                 current_catalog.available_command_count,
-                NATIVE_UNKNOWN_COMMAND_AVAILABLE_COUNT,
-                "the ordinary headless command pool must match Native, including the enabled local policy prompts"
+                HARNESS_NO_VERDICT_AVAILABLE_COMMAND_COUNT,
+                "the no-verdict Harness profile filters the one compiled workflow not admitted without a policy verdict"
             );
 
             let reminder_marker = "The user's message starts with the slash command";
@@ -1250,9 +1279,15 @@ async fn native_295_commands_fixture_replay_body() {
             )];
             assert_eq!(native_reminder.matches("and 28 more").count(), 1);
             assert_eq!(
-                outbound_reminder,
                 *native_reminder,
-                "all unknown-command reminder bytes, including the available-command remainder, match Native"
+                expected_unknown_command_reminder(28),
+                "the captured Native profile retains its raw 41-command reminder"
+            );
+            assert_eq!(outbound_reminder.matches("and 27 more").count(), 1);
+            assert_eq!(
+                outbound_reminder,
+                expected_unknown_command_reminder(27),
+                "the no-verdict Harness profile renders the same Native template from its 40-command catalog"
             );
             let harness_prompt_index = transcript_prompt_index(&harness_jsonl, case.prompt)
                 .expect("Harness JSONL persists the exact unknown-command prompt");
