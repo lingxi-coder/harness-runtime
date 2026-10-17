@@ -243,9 +243,10 @@ const SERIALIZE_TREE = new Script(`
       if ((type === 'Button' || type === 'Select') && typeof callback !== 'function') {
         fail(type + ' requires its event callback');
       }
-      if (callback !== undefined) result.held = bridge.hold(callback);
       const hover = own(value, 'hover');
       if (hover !== undefined) result.hover = copyJson(hover);
+      if (callback !== undefined) result.held = bridge.hold(callback);
+      if (type === 'Input' || type === 'Select') return result;
       if (children !== undefined) {
         if (!Array.isArray(children)) fail(type + ' children must be an array');
         const cleanChildren = [];

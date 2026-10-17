@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { Script } from 'node:vm';
 import { ClientSurfaceManager } from './mod_ui_client_worker.mjs';
 import { decodeModsIpcFrame, encodeModsIpcFrame } from './mods_ipc_codec.mjs';
 
@@ -200,6 +201,37 @@ test('Client worker mirrors Native Button, Input and Select adapters and keeps M
         export function Board() { return h(Box, { children: ${body} }); }`,
     })), error => error.phase === 'render' && error.message.includes(message));
   }
+  manager.dispose();
+});
+
+test('Client tree JSON matches Native exportTree field order and Input/Select omissions', async () => {
+  const manager = new ClientSurfaceManager({ send() {} });
+  const mounted = await manager.mount(mountOptions({
+    runtimeId: 'native-export-tree-bytes',
+    source: `export function Board(_props, surface) { return surface.elements.Text({ children: 'ready' }); }`,
+  }));
+  const instance = manager.runtimeInstances.get(mounted.runtimeId);
+  assert(instance, 'the mounted runtime exposes the production serializer');
+
+  const makeTreeAndSerialize = new Script(`(serializeTree, bridge) => serializeTree({
+    type: 'Box', props: {}, children: [
+      { type: 'Button', props: { label: 'Save', onPress() {} }, hover: { borderColor: 'cyan' }, children: [] },
+      { type: 'Input', props: { key: 'query', onSubmit() {} }, hover: { borderColor: 'cyan' }, children: [] },
+      { type: 'Select', props: { key: 'mode', options: [{ value: 'fast' }], onSelect() {} }, hover: { borderColor: 'cyan' }, children: [] },
+      { type: 'Markdown', props: { text: 'docs' }, hover: { dimColor: true }, children: [] },
+    ],
+  }, bridge)`).runInContext(instance.environment.context);
+  let nextHandle = 0;
+  const actualRawJson = makeTreeAndSerialize(instance.environment.serializeTree, {
+    hold() { nextHandle += 1; return nextHandle; },
+  });
+
+  // Fixed Native 2.1.295 exportTree source: skill-display-name-source/src_192995347.js,
+  // SHA cfaaecaee8d26184f098f50f71d96e032ee78508ff5e67f8e8e7a979344223a3,
+  // binary offset 192995347, local bytes 296856-301053. Compare raw JSON so key order
+  // and omitted Input/Select children remain observable.
+  assert.equal(actualRawJson,
+    '{"type":"Box","props":{},"children":[{"type":"Button","props":{"label":"Save"},"hover":{"borderColor":"cyan"},"held":1,"children":[]},{"type":"Input","props":{"key":"query"},"hover":{"borderColor":"cyan"},"held":2},{"type":"Select","props":{"key":"mode","options":[{"value":"fast"}]},"hover":{"borderColor":"cyan"},"held":3},{"type":"Markdown","props":{"text":"docs"},"hover":{"dimColor":true},"children":[]}]}');
   manager.dispose();
 });
 
