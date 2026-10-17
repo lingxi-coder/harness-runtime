@@ -5909,6 +5909,12 @@ pub async fn build_with_credential_stack(
         _ => orch_builder,
     };
     let orch_builder = orch_builder.with_workflow_output_scopes(workflow_output_scopes);
+    // Keep the resolved provider identity for models shared by multiple profiles.
+    if let Some(profile) = default_model_profile.as_deref() {
+        orch_builder
+            .seed_initial_model_profile(&default_model_id, profile)
+            .await;
+    }
     let orch = orchestrator::ConversationOrchestrator::into_shared(orch_builder);
     let native_settings_prompt_provider: Arc<
         dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider,

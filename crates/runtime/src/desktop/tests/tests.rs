@@ -5491,6 +5491,194 @@ async fn build_reroutes_disconnected_default_to_connected_provider() {
     }
 }
 
+/// A cold desktop fallback can boot onto an OpenAI model ID that is shared by
+/// two visible provider profiles. The resolved profile must be retained by
+/// the new session so a later provider-local model pick does not have to infer
+/// which OpenAI route owned the old model.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // serialize provider environment across async build
+async fn build_keeps_resolved_default_profile_for_shared_openai_model_and_switch() {
+    use lingxi_core::host::{
+        ModelRouteAnchor, ModelSelectionOrigin, ModelSelectionRequest, ModelValidationMode,
+        OrchestratorHandle as _,
+    };
+    use orchestrator::OrchestratorApiClient as _;
+
+    struct RestoreEnvironment(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for RestoreEnvironment {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                if let Some(value) = value {
+                    std::env::set_var(name, value);
+                } else {
+                    std::env::remove_var(name);
+                }
+            }
+        }
+    }
+
+    // The same lock used by other desktop provider-fallback fixtures keeps
+    // API-provider env mutations serialized. Restore all touched values even
+    // if the build or an assertion fails.
+    let _env_lock = DEPR_ENV_LOCK.lock().unwrap();
+    let env_names = [
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENAI_PERSONAL_ACCESS_TOKEN",
+        "OPENAI_CHATGPT_ACCESS_TOKEN",
+        "OPENAI_CHATGPT_ACCOUNT_ID",
+        "LINGXI_TEST_PROFILE_SEED_OPENAI_KEY",
+        "LINGXI_TEST_PROFILE_SEED_SECOND_KEY",
+        "LINGXI_TEST_PROFILE_SEED_RANDOM_KEY",
+    ];
+    let _restore_environment = RestoreEnvironment(
+        env_names
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect(),
+    );
+    clear_provider_env();
+    for name in env_names.iter().skip(3) {
+        std::env::remove_var(name);
+    }
+
+    let (_tmp, mut cfg) = test_config(true);
+    // The temporary home forces NativePreferred storage off the host
+    // keychain, while `isolated_credential_storage = false` intentionally
+    // permits this test's explicit apiKeyEnv values to drive availability.
+    cfg.credential_storage_policy = lingxi_core::host::CredentialStoragePolicy::NativePreferred;
+    cfg.isolated_credential_storage = false;
+    cfg.default_model_explicit = false;
+    cfg.default_model = "anthropic/claude-sonnet-5".into();
+    cfg.provider_profiles = Some(std::collections::BTreeMap::from([
+        (
+            "openai".to_string(),
+            serde_json::json!({
+                "type": "openai",
+                "baseUrl": "https://api.openai.com/v1",
+                "apiKeyEnv": "LINGXI_TEST_PROFILE_SEED_OPENAI_KEY",
+                "models": ["gpt-6.1-sol"]
+            }),
+        ),
+        (
+            "second-openai".to_string(),
+            serde_json::json!({
+                "type": "openai",
+                "baseUrl": "https://api.openai.com/v1",
+                "apiKeyEnv": "LINGXI_TEST_PROFILE_SEED_SECOND_KEY",
+                "models": ["gpt-6.1-sol"]
+            }),
+        ),
+        (
+            "random-provider".to_string(),
+            serde_json::json!({
+                "type": "openai",
+                "baseUrl": "https://example.invalid/v1",
+                "apiKeyEnv": "LINGXI_TEST_PROFILE_SEED_RANDOM_KEY",
+                "models": ["smoke-model"]
+            }),
+        ),
+    ]));
+    std::env::set_var("LINGXI_TEST_PROFILE_SEED_OPENAI_KEY", "test-openai-key");
+    std::env::set_var(
+        "LINGXI_TEST_PROFILE_SEED_SECOND_KEY",
+        "test-second-openai-key",
+    );
+    std::env::set_var("LINGXI_TEST_PROFILE_SEED_RANDOM_KEY", "test-random-key");
+
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
+        Arc::new(orchestrator::test_support::MockOutputStream::new());
+    let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> =
+        Arc::new(RecordingPermissionSink::default());
+    let rt = build(cfg, output, perm_sink)
+        .await
+        .expect("cold desktop build with two visible OpenAI routes");
+
+    assert_eq!(
+        rt.provider_availability.get("anthropic"),
+        Some(&false),
+        "the isolated temporary credential root and cleared Anthropic env must keep the source default disconnected"
+    );
+    assert_eq!(rt.provider_availability.get("openai"), Some(&true));
+    assert_eq!(rt.provider_availability.get("second-openai"), Some(&true));
+    assert_eq!(rt.provider_availability.get("random-provider"), Some(&true));
+
+    let fallback = rt
+        .default_model_fallback
+        .as_ref()
+        .expect("disconnected Anthropic default must fall back to connected OpenAI");
+    assert_eq!(fallback.to, "openai/gpt-6.1-sol");
+    let ambiguous = rt
+        .provider_adapter
+        .resolve_media_route("gpt-6.1-sol", None)
+        .expect_err("the bare GPT ID remains ambiguous when both OpenAI routes are visible");
+    assert!(
+        ambiguous.to_string().contains("ambiguous across profiles"),
+        "unexpected unscoped route error: {ambiguous}"
+    );
+
+    let session = rt.orchestrator.session();
+    {
+        let state = session.lock().await;
+        assert_eq!(state.model, "gpt-6.1-sol");
+        assert_eq!(
+            state.model_profile.as_deref(),
+            Some("openai"),
+            "cold desktop initialization must retain the already-resolved fallback profile"
+        );
+    }
+
+    rt.orchestrator
+        .select_model(ModelSelectionRequest::Select {
+            source: Utf16JsonProjection::from("smoke-model"),
+            route_hint: Some(ModelRouteAnchor {
+                model: "smoke-model".into(),
+                profile: Some("random-provider".into()),
+            }),
+            origin: ModelSelectionOrigin::Picker,
+            validation: ModelValidationMode::ServerProbeDisabled,
+        })
+        .await
+        .expect("explicit provider-local model switch must route from the seeded session");
+    {
+        let state = session.lock().await;
+        assert_eq!(state.model, "smoke-model");
+        assert_eq!(state.model_profile.as_deref(), Some("random-provider"));
+    }
+
+    // A resumed transcript that carries the other OpenAI profile remains the
+    // owner even if the cold-boot seed is invoked again after restoration.
+    rt.orchestrator
+        .resume_session(
+            lingxi_core::types::SessionId::new(),
+            vec![lingxi_core::types::ConversationMessage::user(
+                lingxi_core::types::MessageId::new(),
+                "restored turn".into(),
+            )],
+            None,
+            None,
+            lingxi_core::host::ResumeRuntimeSnapshot {
+                model: "gpt-6.1-sol".into(),
+                model_profile: Some("second-openai".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("resume with a provider-qualified shared model");
+    rt.orchestrator
+        .seed_initial_model_profile("gpt-6.1-sol", "openai")
+        .await;
+    let state = session.lock().await;
+    assert_eq!(state.model, "gpt-6.1-sol");
+    assert_eq!(state.model_profile.as_deref(), Some("second-openai"));
+    assert_eq!(state.history.len(), 1);
+}
+
 /// An EXPLICIT `--model` choice is never overridden by the fallback, even
 /// with the same connected user provider present.
 #[tokio::test]
