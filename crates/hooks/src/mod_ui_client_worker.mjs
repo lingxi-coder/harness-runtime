@@ -183,27 +183,76 @@ const SERIALIZE_TREE = new Script(`
       const result = Object.create(null);
       result.type = type;
       const props = own(value, 'props');
-      const callbackKey = type === 'Button' ? 'onPress' : (type === 'Input' || type === 'Select') ? 'onEvent' : undefined;
       if (props !== undefined && !isPlainObject(props)) fail(type + ' props must be a plain object');
-      if (callbackKey !== undefined && props === undefined) fail(type + ' requires a callback');
+      let callbackKeys = [];
+      let callback;
+      if (type === 'Button') callbackKeys = ['onPress'];
+      else if (type === 'Select') {
+        if (props === undefined) fail('Select requires onSelect');
+        if (Object.hasOwn(props, 'onEvent')) fail('Select does not accept onEvent');
+        const onSelect = own(props, 'onSelect');
+        if (typeof onSelect !== 'function') fail('Select requires an onSelect callback');
+        if (children !== undefined && (!Array.isArray(children) || children.length > 0)) {
+          fail('Select does not accept children');
+        }
+        callbackKeys = ['onSelect'];
+        callback = event => onSelect(event?.value, event);
+      } else if (type === 'Input') {
+        if (props === undefined) fail('Input requires onSubmit');
+        if (Object.hasOwn(props, 'onEvent')) fail('Input does not accept onEvent');
+        if (children !== undefined && (!Array.isArray(children) || children.length > 0)) {
+          fail('Input does not accept children');
+        }
+        const onSubmit = own(props, 'onSubmit');
+        const onInput = own(props, 'onInput');
+        if (typeof onSubmit !== 'function') fail('Input requires an onSubmit callback');
+        if (onInput !== undefined && typeof onInput !== 'function') fail('Input onInput must be a function');
+        callbackKeys = onInput === undefined ? ['onSubmit'] : ['onSubmit', 'onInput'];
+        callback = event => event?.kind === 'submit'
+          ? onSubmit(event.value, event)
+          : onInput === undefined ? undefined : onInput(event?.value, event);
+      } else if (type === 'Markdown') {
+        const onLinkPress = own(props, 'onLinkPress');
+        const pressableLinks = own(props, 'pressableLinks');
+        const key = own(props, 'key');
+        if (children !== undefined && (!Array.isArray(children) || children.length > 0)) {
+          fail('Markdown does not accept children');
+        }
+        if (onLinkPress !== undefined && typeof onLinkPress !== 'function') {
+          fail('Markdown onLinkPress must be a function');
+        }
+        if (pressableLinks !== undefined && onLinkPress === undefined) {
+          fail('Markdown pressableLinks require onLinkPress');
+        }
+        if (onLinkPress !== undefined && (typeof key !== 'string' || key.length === 0)) {
+          fail('Markdown onLinkPress requires a non-empty key');
+        }
+        if (onLinkPress !== undefined) {
+          callbackKeys = ['onLinkPress'];
+          callback = event => onLinkPress(event?.link, event);
+        }
+      }
+      if (callbackKeys.length > 0 && props === undefined) fail(type + ' requires a callback');
       if (props !== undefined) {
         const cleanProps = Object.create(null);
-        let hasCallback = false;
         for (const key of Reflect.ownKeys(props)) {
           if (typeof key !== 'string') fail(type + ' props cannot contain symbol keys');
           if (key === 'children') continue;
           const prop = own(props, key);
-          if (key === callbackKey && typeof prop === 'function') {
-            result.held = bridge.hold(prop);
-            hasCallback = true;
+          if (callbackKeys.includes(key)) {
+            if (typeof prop !== 'function') fail(type + ' event callback must be a function');
+            if (type === 'Button') callback = prop;
             continue;
           }
           const copied = copyJson(prop);
           if (copied !== undefined) cleanProps[key] = copied;
         }
-        if (callbackKey !== undefined && !hasCallback) fail(type + ' requires its event callback');
         result.props = cleanProps;
       }
+      if ((type === 'Button' || type === 'Select') && typeof callback !== 'function') {
+        fail(type + ' requires its event callback');
+      }
+      if (callback !== undefined) result.held = bridge.hold(callback);
       const hover = own(value, 'hover');
       if (hover !== undefined) result.hover = copyJson(hover);
       if (children !== undefined) {

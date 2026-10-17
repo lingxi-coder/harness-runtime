@@ -127,6 +127,80 @@ test('mounts a module graph into a bounded VM tree and routes held, pointer, key
   manager.dispose();
 });
 
+test('Client worker mirrors Native Button, Input, Select and Markdown callback adapters', async () => {
+  const events = [];
+  const manager = new ClientSurfaceManager({ send: message => events.push(message) });
+  const mounted = await manager.mount(mountOptions({
+    runtimeId: 'native-callback-contract',
+    source: `
+      import { Box, Button, Input, Select, Markdown, h } from 'claude:surface-runtime';
+      export function Board(_props, surface) {
+        return h(Box, { children: [
+          h(Button, { key: 'save', label: 'Save', onPress: event => surface.post({ callback: 'button', event }) }),
+          h(Input, {
+            key: 'query',
+            onSubmit: (value, event) => surface.post({ callback: 'submit', value, kind: event.kind }),
+            onInput: (value, event) => surface.post({ callback: 'input', value, kind: event.kind }),
+          }),
+          h(Select, {
+            key: 'mode', options: [{ value: 'fast' }],
+            onSelect: (value, event) => surface.post({ callback: 'select', value, eventValue: event.value }),
+          }),
+          h(Markdown, {
+            key: 'links', text: '[docs](https://example.test)',
+            pressableLinks: ['https://example.test'],
+            onLinkPress: (link, event) => surface.post({ callback: 'link', href: link.href, eventHref: event.link.href }),
+          }),
+          h(Input, {
+            key: 'optional-input', onInput: undefined,
+            onSubmit: (value, event) => surface.post({ callback: 'optional-submit', value, kind: event.kind }),
+          }),
+        ] });
+      }
+    `,
+  }));
+
+  assert.deepEqual(mounted.tree.children.map(node => node.type), ['Button', 'Input', 'Select', 'Markdown', 'Input']);
+  assert.deepEqual(mounted.tree.children.map(node => node.held), [1, 2, 3, 4, 5]);
+  for (const node of mounted.tree.children) {
+    for (const callback of ['onPress', 'onSubmit', 'onInput', 'onSelect', 'onLinkPress', 'onEvent']) {
+      assert.equal(Object.hasOwn(node.props, callback), false, `${node.type} callback ${callback} is not serialized`);
+    }
+  }
+
+  const [button, input, select, markdown, optionalInput] = mounted.tree.children;
+  assert.equal(manager.runHeld(mounted.runtimeId, button.held, { kind: 'press' }), true);
+  assert.equal(manager.runHeld(mounted.runtimeId, input.held, { kind: 'change', value: ' typed ' }), true);
+  assert.equal(manager.runHeld(mounted.runtimeId, input.held, { kind: 'submit', value: ' answer ' }), true);
+  assert.equal(manager.runHeld(mounted.runtimeId, select.held, { value: 'fast' }), true);
+  assert.equal(manager.runHeld(mounted.runtimeId, markdown.held, {
+    link: { href: 'https://example.test' },
+  }), true);
+  assert.equal(manager.runHeld(mounted.runtimeId, optionalInput.held, {
+    kind: 'change', value: 'ignored without optional onInput',
+  }), true, 'an explicitly undefined optional onInput is treated as absent');
+  assert.deepEqual(events.filter(event => event.action === 'post').map(event => JSON.parse(event.json)), [
+    { callback: 'button', event: { kind: 'press' } },
+    { callback: 'input', value: ' typed ', kind: 'change' },
+    { callback: 'submit', value: ' answer ', kind: 'submit' },
+    { callback: 'select', value: 'fast', eventValue: 'fast' },
+    { callback: 'link', href: 'https://example.test', eventHref: 'https://example.test' },
+  ]);
+
+  for (const [runtimeId, body, message] of [
+    ['legacy-input-event', `h(Input, { key: 'query', onEvent() {} })`, 'Input does not accept onEvent'],
+    ['legacy-select-event', `h(Select, { key: 'mode', onEvent() {} })`, 'Select does not accept onEvent'],
+    ['markdown-without-handler', `h(Markdown, { key: 'links', pressableLinks: [] })`, 'Markdown pressableLinks require onLinkPress'],
+  ]) {
+    await assert.rejects(manager.mount(mountOptions({
+      runtimeId,
+      source: `import { Box, Input, Select, Markdown, h } from 'claude:surface-runtime';
+        export function Board() { return h(Box, { children: ${body} }); }`,
+    })), error => error.phase === 'render' && error.message.includes(message));
+  }
+  manager.dispose();
+});
+
 test('frame sequences are generation-local and reject out-of-order frame delivery', async () => {
   const manager = new ClientSurfaceManager({ send() {} });
   const first = await manager.mount(mountOptions({

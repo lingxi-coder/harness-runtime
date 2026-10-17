@@ -57,6 +57,97 @@ fn plain_text_projection(value: &str) -> Utf16JsonProjection {
         .expect("a Rust string is valid UTF-16")
 }
 
+/// Convert worker-private numeric held handles into the public Client frame's
+/// plugin-scoped `press` carrier, without materializing the worker tree as a
+/// serde value or losing exact string/key UTF-16 units.
+fn public_client_tree_projection(
+    tree: &Utf16JsonProjection,
+    plugin: &str,
+) -> Option<Utf16JsonProjection> {
+    fn lower_children(value: &Utf16JsonProjection, plugin: &str) -> Option<Utf16JsonProjection> {
+        if let Some(length) = value.array_len("") {
+            let mut children = Vec::with_capacity(length);
+            for index in 0..length {
+                let child = value.subprojection(&format!("/{index}")).ok()?;
+                let lowered = if child.array_len("").is_some()
+                    || child.object_entries().is_some() && child.string_at("/type").is_some()
+                {
+                    lower_children(&child, plugin)?
+                } else {
+                    child
+                };
+                children.push(lowered);
+            }
+            return Utf16JsonProjection::array(children).ok();
+        }
+
+        if value.object_entries().is_none() || value.string_at("/type").is_none() {
+            return Some(value.clone());
+        }
+
+        let node_type = value.string_at("/type").unwrap_or_default();
+        let requires_private_press = matches!(node_type, "Button" | "Input" | "Select");
+        let may_have_private_press = requires_private_press || node_type == "Markdown";
+        let held_key = "held".encode_utf16().collect::<Vec<_>>();
+        let children_key = "children".encode_utf16().collect::<Vec<_>>();
+        let press_key = "press".encode_utf16().collect::<Vec<_>>();
+        let held = may_have_private_press
+            .then(|| value.subprojection_property_units(&held_key).ok())
+            .flatten();
+        let handle = if let Some(held) = &held {
+            if value.subprojection_property_units(&press_key).is_ok() {
+                return None;
+            }
+            let number = held.number_at("")?;
+            if !number.is_finite()
+                || number.fract() != 0.0
+                || number <= 0.0
+                || number > MAX_JS_SAFE_INTEGER as f64
+            {
+                return None;
+            }
+            Some(held.clone())
+        } else if requires_private_press {
+            return None;
+        } else {
+            None
+        };
+
+        let entries = value.object_entries()?;
+        let mut press = handle
+            .map(|handle| {
+                Utf16JsonProjection::object(vec![
+                    ("plugin".into(), plain_text_projection(plugin)),
+                    ("handle".into(), handle),
+                ])
+            })
+            .transpose()
+            .ok()?;
+        let mut fields = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if may_have_private_press && entry.code_units == held_key {
+                if let Some(press) = press.take() {
+                    fields.push((press_key.clone(), press));
+                }
+                continue;
+            }
+            let child = value.subprojection_property_units(entry.code_units).ok()?;
+            let child = if entry.code_units == children_key {
+                lower_children(&child, plugin)?
+            } else {
+                child
+            };
+            fields.push((entry.code_units.to_vec(), child));
+        }
+        if press.is_some() {
+            return None;
+        }
+        Utf16JsonProjection::object_units(fields).ok()
+    }
+
+    lower_children(tree, plugin)
+}
+
 #[derive(Default)]
 pub(super) struct ClientUiHostState {
     data: StdMutex<ClientUiHostData>,
@@ -480,7 +571,7 @@ pub(super) fn normalize_control_request(
                 _ => {
                     return Err(ModError::Hook(
                         "ui_client_press event type is invalid".into(),
-                    ))
+                    ));
                 }
             };
             let event = pick_projection_fields(request, "/event", fields)?;
@@ -2613,9 +2704,12 @@ impl ModHost {
                 .map_err(|error| ModError::Protocol(error.to_string()))?;
             let frame = self.run_client_worker_operation(operation).await?;
             self.update_instance_props(&instance.runtime_id, props.clone());
-            if let Some(frame) =
-                self.frame_for_worker_result(&instance.runtime_id, instance.revision, &frame)
-            {
+            if let Some(frame) = self.frame_for_worker_result(
+                &instance.runtime_id,
+                instance.revision,
+                &plugin,
+                &frame,
+            ) {
                 self.emit_client_frame(session, &instance.runtime_id, instance.revision, &frame)
                     .await;
             }
@@ -2945,6 +3039,7 @@ impl ModHost {
         &self,
         runtime_id: &str,
         revision: u64,
+        plugin: &str,
         result: &Utf16JsonProjection,
     ) -> Option<Utf16JsonProjection> {
         if result
@@ -2969,9 +3064,9 @@ impl ModHost {
             "hasPointerListener":has_pointer_listener,
             "hasKeyListener":has_key_listener,
         }));
-        frame
-            .set_field("tree", result.subprojection("/tree").ok()?)
-            .ok()?;
+        let worker_tree = result.subprojection("/tree").ok()?;
+        let public_tree = public_client_tree_projection(&worker_tree, plugin)?;
+        frame.set_field("tree", public_tree).ok()?;
         Some(frame)
     }
 
@@ -3268,7 +3363,7 @@ impl ModHost {
                 json!({"handled":false,"renderRevision":revision}),
             ));
         }
-        self.frame_for_worker_result(&runtime_id, revision, &result)
+        self.frame_for_worker_result(&runtime_id, revision, &plugin, &result)
             .ok_or_else(|| ModError::Protocol("Client mount result has no render frame".into()))
     }
 
@@ -3330,6 +3425,9 @@ impl ModHost {
             }
             instance
         };
+        let plugin = host_plugin_name(instance.key.identity.plugin()).ok_or_else(|| {
+            ModError::Hook("Client plugin identity is not valid host text".into())
+        })?;
         if kind == "setProps" {
             let submitted = operation
                 .subprojection("/props")
@@ -3475,7 +3573,7 @@ impl ModHost {
                 ));
             }
             return self
-                .frame_for_worker_result(runtime_id, revision, &rendered)
+                .frame_for_worker_result(runtime_id, revision, &plugin, &rendered)
                 .ok_or_else(|| {
                     ModError::Protocol("Client operation produced no render frame".into())
                 });
@@ -3488,7 +3586,7 @@ impl ModHost {
                     .map_err(|error| ModError::Protocol(error.to_string()))?,
             );
         }
-        self.frame_for_worker_result(runtime_id, revision, &result)
+        self.frame_for_worker_result(runtime_id, revision, &plugin, &result)
             .ok_or_else(|| ModError::Protocol("Client operation produced no render frame".into()))
     }
 
@@ -3792,6 +3890,9 @@ impl ModHost {
             }
             instance
         };
+        let plugin = host_plugin_name(instance.key.identity.plugin()).ok_or_else(|| {
+            ModError::Hook("Client plugin identity is not valid host text".into())
+        })?;
         if instance.worker_fault.is_some() && action != "fault" {
             return Ok(());
         }
@@ -3804,7 +3905,7 @@ impl ModHost {
                     })))
                     .await?;
                 if let Some(frame) =
-                    self.frame_for_worker_result(&runtime_id, instance.revision, &result)
+                    self.frame_for_worker_result(&runtime_id, instance.revision, &plugin, &result)
                 {
                     if self
                         .current_instance(&instance.key.site, &instance.key.identity)
@@ -4104,12 +4205,33 @@ mod tests {
             })
     }
 
-    fn tree_first_held(tree: &Value) -> Option<u64> {
-        tree.get("held").and_then(Value::as_u64).or_else(|| {
-            tree.get("children")
-                .and_then(Value::as_array)
-                .and_then(|children| children.iter().find_map(tree_first_held))
-        })
+    fn tree_node_with_key<'a>(tree: &'a Value, key: &str) -> Option<&'a Value> {
+        if tree.pointer("/props/key").and_then(Value::as_str) == Some(key) {
+            return Some(tree);
+        }
+        tree.get("children")
+            .and_then(Value::as_array)
+            .and_then(|children| {
+                children
+                    .iter()
+                    .find_map(|child| tree_node_with_key(child, key))
+            })
+    }
+
+    fn tree_press_handle_for_key(tree: &Value, key: &str) -> Option<u64> {
+        tree_node_with_key(tree, key)
+            .and_then(|node| node.pointer("/press/handle"))
+            .and_then(Value::as_u64)
+    }
+
+    fn tree_first_press_handle(tree: &Value) -> Option<u64> {
+        tree.pointer("/press/handle")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                tree.get("children")
+                    .and_then(Value::as_array)
+                    .and_then(|children| children.iter().find_map(tree_first_press_handle))
+            })
     }
 
     fn projection_tree_contains_text(projection: &Utf16JsonProjection, expected: &str) -> bool {
@@ -5046,7 +5168,7 @@ mod tests {
             "frameSequence":3,
         });
         let frame = host
-            .frame_for_worker_result("runtime-1", 4, &host_generated_json(result))
+            .frame_for_worker_result("runtime-1", 4, "plugin", &host_generated_json(result))
             .unwrap();
         assert_eq!(test_value(&frame)["frameSequence"], 3);
         assert_eq!(test_value(&frame)["renderRevision"], 4);
@@ -5054,6 +5176,7 @@ mod tests {
             .frame_for_worker_result(
                 "runtime-1",
                 4,
+                "plugin",
                 &host_generated_json(json!({
                     "tree":{"type":"Text","props":{},"children":["stale"]},
                     "hasPointerListener":false,
@@ -5066,6 +5189,7 @@ mod tests {
             .frame_for_worker_result(
                 "runtime-1",
                 4,
+                "plugin",
                 &host_generated_json(json!({
                     "tree":{"type":"Text","props":{},"children":["missing"]},
                     "hasPointerListener":false,
@@ -5073,6 +5197,66 @@ mod tests {
                 })),
             )
             .is_none());
+    }
+
+    #[test]
+    fn client_tree_projection_lowers_private_handles_without_losing_utf16_or_key_order() {
+        let tree = Utf16JsonProjection::parse(
+            r#"{"type":"Box","props":{"label":"\ud800"},"children":[[{"type":"Input","props":{"key":"q\ud800","value":"v\ud800"},"held":7,"children":[]}],{"type":"Markdown","props":{"key":"links","text":"docs"},"held":8,"children":[]},{"type":"Markdown","props":{"key":"plain","text":"plain"},"children":[]},{"type":"Text","props":{},"children":["text:\ud800"]}]}"#,
+        )
+        .unwrap();
+
+        let public = public_client_tree_projection(&tree, "review").unwrap();
+        assert_eq!(public.string_units("/props/label"), Some(vec![0xd800]));
+        assert_eq!(
+            public.string_units("/children/0/0/props/key"),
+            Some(vec![u16::from(b'q'), 0xd800])
+        );
+        assert_eq!(
+            public.string_units("/children/0/0/props/value"),
+            Some(vec![u16::from(b'v'), 0xd800])
+        );
+        assert_eq!(
+            public.string_units("/children/3/children/0"),
+            Some("text:".encode_utf16().chain([0xd800]).collect())
+        );
+        assert_eq!(
+            public.string_at("/children/0/0/press/plugin"),
+            Some("review")
+        );
+        assert_eq!(public.number_at("/children/0/0/press/handle"), Some(7.0));
+        assert_eq!(public.number_at("/children/1/press/handle"), Some(8.0));
+        assert!(public.subprojection("/children/0/0/held").is_err());
+        assert!(public.subprojection("/children/1/held").is_err());
+        assert!(public.subprojection("/children/2/press").is_err());
+        assert!(public.subprojection("/children/2/held").is_err());
+        let input_node = public.subprojection("/children/0/0").unwrap();
+        let input_fields = input_node
+            .object_entries()
+            .unwrap()
+            .into_iter()
+            .map(|field| field.code_units)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            input_fields,
+            ["type", "props", "press", "children"]
+                .into_iter()
+                .map(|key| key.encode_utf16().collect())
+                .collect::<Vec<Vec<u16>>>()
+        );
+        assert!(public
+            .to_json_string()
+            .unwrap()
+            .contains(r#""label":"\ud800""#));
+
+        let invalid_handle =
+            Utf16JsonProjection::parse(r#"{"type":"Button","props":{},"held":1.5}"#).unwrap();
+        assert!(public_client_tree_projection(&invalid_handle, "review").is_none());
+        let conflicting_press = Utf16JsonProjection::parse(
+            r#"{"type":"Button","props":{},"held":1,"press":{"plugin":"other","handle":9}}"#,
+        )
+        .unwrap();
+        assert!(public_client_tree_projection(&conflicting_press, "review").is_none());
     }
 
     #[test]
@@ -5116,7 +5300,7 @@ mod tests {
         std::fs::write(
             &child,
             r#"
-              import { Box, Text, Button, Input, Select, h } from 'claude:surface-runtime';
+              import { Box, Text, Button, Input, Select, Markdown, h } from 'claude:surface-runtime';
               type CardProps = { title: string; fail?: boolean; failRun?: boolean; timerFault?: boolean };
               export function Card(props: CardProps, surface: any) {
                 if (props.fail) throw new Error('client render exploded');
@@ -5135,8 +5319,16 @@ mod tests {
                       if (props.failRun) throw new Error('client press exploded');
                       surface.post({ title: 'pressed' });
                     } }),
-                  h(Input, { key: 'query', value: '', onEvent: () => {} }),
-                  h(Select, { key: 'mode', value: 'fast', options: [{ value: 'fast' }], onEvent: () => {} }),
+                  h(Input, {
+                    key: 'query', value: '',
+                    onSubmit: (value, event) => surface.post({ title: `Input submitted (${event.kind}): ${value}` }),
+                    onInput: (value, event) => surface.post({ title: `Input changed (${event.kind}): ${value}` }),
+                  }),
+                  h(Select, { key: 'mode', value: 'fast', options: [{ value: 'fast' }],
+                    onSelect: (value, event) => surface.post({ title: `Select ${event.value}: ${value}` }) }),
+                  h(Markdown, { key: 'links', text: '[docs](https://example.test)',
+                    pressableLinks: ['https://example.test'],
+                    onLinkPress: (link, event) => surface.post({ title: `Markdown link ${event.link.href}: ${link.href}` }) }),
                 ] });
               }
             "#,
@@ -5318,6 +5510,29 @@ mod tests {
         assert_eq!(test_value(&mount)["renderRevision"], revision);
         assert_eq!(test_value(&mount)["frameSequence"], 1);
         assert!(tree_contains_text(&test_value(&mount)["tree"], "initial"));
+        let mount_value = test_value(&mount);
+        let mounted_tree = &mount_value["tree"];
+        let input_node = tree_node_with_key(mounted_tree, "query").unwrap();
+        assert_eq!(input_node["type"], "Input");
+        assert_eq!(input_node["press"]["plugin"], "review");
+        assert!(input_node["press"]["handle"].as_u64().unwrap() > 0);
+        assert!(input_node.get("held").is_none());
+        assert!(input_node["props"].get("onSubmit").is_none());
+        assert!(input_node["props"].get("onInput").is_none());
+        assert!(input_node["props"].get("onEvent").is_none());
+        for key in ["submit", "mode", "links"] {
+            let node = tree_node_with_key(mounted_tree, key)
+                .unwrap_or_else(|| panic!("rendered {key} node exists"));
+            assert_eq!(node["press"]["plugin"], "review");
+            assert!(node["press"]["handle"].as_u64().unwrap() > 0);
+            assert!(node.get("held").is_none());
+        }
+        let select_node = tree_node_with_key(mounted_tree, "mode").unwrap();
+        assert!(select_node["props"].get("onSelect").is_none());
+        assert!(select_node["props"].get("onEvent").is_none());
+        let markdown_node = tree_node_with_key(mounted_tree, "links").unwrap();
+        assert!(markdown_node["props"].get("onLinkPress").is_none());
+        assert!(markdown_node["props"].get("onEvent").is_none());
 
         let uncommitted_client_press = host
             .dispatch_client_ui_control(
@@ -5356,6 +5571,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(test_value(&committed)["handled"], true);
+
+        // The initial worker post is queued until draw_commit admits this
+        // Client. Once replayed it emits a newer frame and replaces the
+        // render-scoped callback handles, so wait before taking any handle.
+        let posted =
+            wait_for_client_frame(&session_impl, &runtime_id, "initial mount post", |frame| {
+                tree_contains_text(&frame["tree"], "posted")
+            })
+            .await;
+        assert!(
+            posted["frameSequence"].as_u64().unwrap()
+                > test_value(&mount)["frameSequence"].as_u64().unwrap()
+        );
 
         let client_press = |element: &str, event: Value| {
             host_generated_json(json!({
@@ -5402,6 +5630,104 @@ mod tests {
             test_value(&changed_event.response)["reached"]["value"],
             "typed"
         );
+        let input_handle = tree_press_handle_for_key(&posted["tree"], "query")
+            .expect("rendered Input exposes its public press handle");
+        let changed_callback = host
+            .dispatch_client_ui_operation(
+                host_generated_json(json!({
+                    "type":"runHeld",
+                    "runtimeId":runtime_id,
+                    "render_revision":revision,
+                    "handle":input_handle,
+                    "event":{"kind":"change","value":test_value(&changed_event.response)["reached"]["value"]},
+                })),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert!(test_value(&changed_callback).get("tree").is_some());
+        let changed_input_frame =
+            wait_for_client_frame(&session_impl, &runtime_id, "Input onInput post", |frame| {
+                tree_contains_text(&frame["tree"], "Input changed (change): typed")
+            })
+            .await;
+        assert!(tree_press_handle_for_key(&changed_input_frame["tree"], "query").is_some());
+        let input_submit_handle =
+            tree_press_handle_for_key(&changed_input_frame["tree"], "query").unwrap();
+        let submitted_callback = host
+            .dispatch_client_ui_operation(
+                host_generated_json(json!({
+                    "type":"runHeld",
+                    "runtimeId":runtime_id,
+                    "render_revision":revision,
+                    "handle":input_submit_handle,
+                    "event":{"kind":"submit","value":"typed"},
+                })),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert!(test_value(&submitted_callback).get("tree").is_some());
+        let submitted_input_frame =
+            wait_for_client_frame(&session_impl, &runtime_id, "Input onSubmit post", |frame| {
+                tree_contains_text(&frame["tree"], "Input submitted (submit): typed")
+            })
+            .await;
+        assert!(tree_press_handle_for_key(&submitted_input_frame["tree"], "query").is_some());
+        let select_handle = tree_press_handle_for_key(&submitted_input_frame["tree"], "mode")
+            .expect("rendered Select exposes its public press handle");
+        let selected_callback = host
+            .dispatch_client_ui_operation(
+                host_generated_json(json!({
+                    "type":"runHeld",
+                    "runtimeId":runtime_id,
+                    "render_revision":revision,
+                    "handle":select_handle,
+                    "event":{"value":"fast"},
+                })),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert!(test_value(&selected_callback).get("tree").is_some());
+        let selected_input_frame = wait_for_client_frame(
+            &session_impl,
+            &runtime_id,
+            "Select onSelect post",
+            |frame| tree_contains_text(&frame["tree"], "Select fast: fast"),
+        )
+        .await;
+        assert!(tree_press_handle_for_key(&selected_input_frame["tree"], "mode").is_some());
+
+        let markdown_handle = tree_press_handle_for_key(&selected_input_frame["tree"], "links")
+            .expect("rendered link Markdown exposes its public press handle");
+        let markdown_callback = host
+            .dispatch_client_ui_operation(
+                host_generated_json(json!({
+                    "type":"runHeld",
+                    "runtimeId":runtime_id,
+                    "render_revision":revision,
+                    "handle":markdown_handle,
+                    "event":{"link":{"href":"https://example.test"}},
+                })),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        assert!(test_value(&markdown_callback).get("tree").is_some());
+        let markdown_input_frame = wait_for_client_frame(
+            &session_impl,
+            &runtime_id,
+            "Markdown onLinkPress post",
+            |frame| {
+                tree_contains_text(
+                    &frame["tree"],
+                    "Markdown link https://example.test: https://example.test",
+                )
+            },
+        )
+        .await;
+        assert!(tree_press_handle_for_key(&markdown_input_frame["tree"], "links").is_some());
 
         let selected_event = host
             .dispatch_client_ui_control(
@@ -5442,18 +5768,6 @@ mod tests {
             "another Client key cannot borrow the committed draw"
         );
 
-        // `surface.post` fires during the first Client render, before mount
-        // returns its runtime generation. The Host must queue and replay it.
-        let posted =
-            wait_for_client_frame(&session_impl, &runtime_id, "initial mount post", |frame| {
-                tree_contains_text(&frame["tree"], "posted")
-            })
-            .await;
-        assert!(
-            posted["frameSequence"].as_u64().unwrap()
-                > test_value(&mount)["frameSequence"].as_u64().unwrap()
-        );
-
         let reset = host
             .dispatch_client_ui_operation(
                 host_generated_json(json!({
@@ -5467,8 +5781,8 @@ mod tests {
             .await
             .unwrap();
         assert!(tree_contains_text(&test_value(&reset)["tree"], "initial"));
-        let held = tree_first_held(&test_value(&reset)["tree"])
-            .expect("rendered Button has a held action");
+        let held = tree_first_press_handle(&test_value(&reset)["tree"])
+            .expect("rendered Button has a public press handle");
         let run = host
             .dispatch_client_ui_operation(
                 host_generated_json(json!({
@@ -5601,7 +5915,7 @@ mod tests {
             |frame| tree_contains_text(&frame["tree"], "ready to fail"),
         )
         .await;
-        let failed_run_handle = tree_first_held(&ready_to_fail["tree"]).unwrap();
+        let failed_run_handle = tree_first_press_handle(&ready_to_fail["tree"]).unwrap();
         let run_fault = host
             .dispatch_client_ui_operation(
                 host_generated_json(json!({
