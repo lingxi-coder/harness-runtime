@@ -114,13 +114,15 @@ mod terminal_sequence_tests {
 #[cfg(test)]
 mod terminal_api_error_tests {
     use crate::turn_loop::{refusal_explanation_clause, terminal_api_error_text};
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use llm_runtime::HistoryStopDetails;
 
     fn details(category: &str, explanation: Option<&str>) -> HistoryStopDetails {
-        HistoryStopDetails {
-            category: Some(category.to_string()),
-            explanation: explanation.map(Into::into),
-        }
+        let explanation = explanation.map(|text| {
+            Utf16JsonProjection::root_string(text.to_owned(), text.encode_utf16().collect())
+                .unwrap()
+        });
+        HistoryStopDetails::from_parts(Some(category), explanation.as_ref()).unwrap()
     }
 
     /// The refusal message appends `\n\nRequest ID: {id}` (double newline) when a

@@ -2117,10 +2117,12 @@ mod tests {
             model: "model".into(),
             content: Vec::new(),
             stop_reason: Some("refusal".into()),
-            stop_details: Some(crate::HistoryStopDetails {
-                category: Some("category".into()),
-                explanation: Some("explanation".into()),
-            }),
+            stop_details: Some(
+                crate::HistoryStopDetails::parse(
+                    r#"{"category":"category","explanation":"explanation"}"#,
+                )
+                .unwrap(),
+            ),
             resumable: None,
             usage: ExecutionUsage::default(),
             cost: None,

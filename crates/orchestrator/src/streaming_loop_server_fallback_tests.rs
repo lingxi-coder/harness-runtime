@@ -1321,10 +1321,12 @@ async fn reused_block_index_does_not_relabel_an_older_pending_j_original() {
         Ok(HistoryEvent::MessageDelta {
             delta: llm_runtime::HistoryMessageDelta {
                 stop_reason: Some("refusal".into()),
-                stop_details: Some(llm_runtime::HistoryStopDetails {
-                    category: Some("cyber".into()),
-                    explanation: Some("prior refusal".into()),
-                }),
+                stop_details: Some(
+                    llm_runtime::HistoryStopDetails::parse(
+                        r#"{"category":"cyber","explanation":"prior refusal"}"#,
+                    )
+                    .unwrap(),
+                ),
                 resumable: None,
             },
             usage: Some(prior_delta_usage.clone()),
@@ -1413,10 +1415,10 @@ async fn usage_only_delta_can_set_details_before_a_terminal_reason_exists() {
         .expect("fallback test binds the streaming scheduler owner");
     let sink = Arc::new(RecordingFallbackOutput::default());
     let output: Arc<dyn OutputStream> = sink.clone();
-    let details = llm_runtime::HistoryStopDetails {
-        category: Some("bio".into()),
-        explanation: Some("pre-terminal detail".into()),
-    };
+    let details = llm_runtime::HistoryStopDetails::parse(
+        r#"{"category":"bio","explanation":"pre-terminal detail"}"#,
+    )
+    .unwrap();
     let events = vec![
         Ok(message_start("original-response", "requested-model")),
         Ok(content_block_start_text(0)),
@@ -1498,10 +1500,12 @@ async fn terminal_reason_delta_replaces_and_can_clear_prior_stop_details() {
         Ok(HistoryEvent::MessageDelta {
             delta: llm_runtime::HistoryMessageDelta {
                 stop_reason: Some("refusal".into()),
-                stop_details: Some(llm_runtime::HistoryStopDetails {
-                    category: Some("cyber".into()),
-                    explanation: Some("prior refusal".into()),
-                }),
+                stop_details: Some(
+                    llm_runtime::HistoryStopDetails::parse(
+                        r#"{"category":"cyber","explanation":"prior refusal"}"#,
+                    )
+                    .unwrap(),
+                ),
                 resumable: None,
             },
             usage: None,

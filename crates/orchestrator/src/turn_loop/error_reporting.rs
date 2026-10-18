@@ -452,12 +452,12 @@ pub(crate) fn terminal_api_error_text(
             // Faithful port of the binary's `U2e` (@197278360): the message is
             // category-aware via `rnt(cat) = cat ∈ {"cyber","bio"}` and
             // `pd() = firstParty` (always true for LingXi's Anthropic path).
-            let category = stop_details.and_then(|sd| sd.category.as_deref());
+            let category = stop_details.and_then(llm_runtime::HistoryStopDetails::category);
             // Public Native 2.1.293 print-mode captures pin these labeled
             // surfaces. The provider message ID is not the HTTP request ID.
-            if !interactive && (category.is_none() || category == Some("cyber")) {
+            if !interactive && (category.is_none() || category.as_deref() == Some("cyber")) {
                 if let Some(label) = crate::prompt::env_meta::marketing_name_for_model(model) {
-                    let mut notice = if category == Some("cyber") {
+                    let mut notice = if category.as_deref() == Some("cyber") {
                         format!(
                             "API Error: {label}'s safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Apply to the Cyber Verification Program to reduce these interruptions. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`"
                         )
@@ -472,8 +472,8 @@ pub(crate) fn terminal_api_error_text(
                     return Some(notice.into());
                 }
             }
-            let cyber_or_bio = matches!(category, Some("cyber" | "bio"));
-            let is_cyber = matches!(category, Some("cyber"));
+            let cyber_or_bio = matches!(category.as_deref(), Some("cyber" | "bio"));
+            let is_cyber = matches!(category.as_deref(), Some("cyber"));
             let base = match crate::prompt::env_meta::marketing_name_for_model(model) {
                 Some(label) => {
                     // LABEL branch. `m`/`f` are the interactive suffixes.
@@ -545,9 +545,9 @@ pub(crate) fn terminal_api_error_text(
                         // `m` rephrase message.) 2.1.206 REMOVED the
                         // `military_weapons` arm entirely — 0 hits for
                         // 'weapons-related content' / 'military_weapons' in 206.
-                        let clause = refusal_explanation_clause(
-                            stop_details.and_then(|sd| sd.explanation.as_ref()),
-                        );
+                        let explanation =
+                            stop_details.and_then(llm_runtime::HistoryStopDetails::explanation);
+                        let clause = refusal_explanation_clause(explanation.as_ref());
                         let suffix = request_id
                             .filter(|id| !id.is_empty())
                             .map_or_else(String::new, |id| format!("\n\nRequest ID: {id}"));
@@ -1047,12 +1047,9 @@ mod source_error_tests {
         ];
         for (category, message_id, capture) in captures {
             let native = Utf16JsonProjection::parse(capture.trim()).unwrap();
-            let details = llm_runtime::HistoryStopDetails {
-                category: category.map(str::to_owned),
-                explanation: Some(
-                    Utf16JsonProjection::parse(r#""source \ud800 explanation""#).unwrap(),
-                ),
-            };
+            let explanation = Utf16JsonProjection::parse(r#""source \ud800 explanation""#).unwrap();
+            let details =
+                llm_runtime::HistoryStopDetails::from_parts(category, Some(&explanation)).unwrap();
             let text = terminal_api_error_text(
                 "claude-sonnet-4-5",
                 false,

@@ -359,10 +359,11 @@ pub(crate) async fn surface_declined(
         .format("%Y-%m-%dT%H:%M:%S%.3fZ")
         .to_string();
     if info.event.reason == "refusal" {
-        let details = llm_runtime::HistoryStopDetails {
-            category: info.event.api_refusal_category.clone(),
-            explanation: None,
-        };
+        let details = llm_runtime::HistoryStopDetails::from_parts(
+            info.event.api_refusal_category.as_deref(),
+            None,
+        )
+        .expect("server fallback refusal details form a valid object");
         let (request_route, applied_route) = request_routes_for_fallback();
         let model = match applied_route.or(request_route) {
             Some(route) => route.model,

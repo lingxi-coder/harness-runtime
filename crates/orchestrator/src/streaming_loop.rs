@@ -2728,10 +2728,10 @@ mod tests {
         for (error, accepted) in errors {
             let sink = Arc::new(MockOutputStream::new().with_partial_stream_events());
             let output: Arc<dyn OutputStream> = sink.clone();
-            let details = llm_runtime::HistoryStopDetails {
-                category: Some("category".into()),
-                explanation: Some("explanation".into()),
-            };
+            let details = llm_runtime::HistoryStopDetails::parse(
+                r#"{"category":"category","explanation":"explanation"}"#,
+            )
+            .unwrap();
             let mut usage = LlmUsage::default();
             usage.counts_mut().input_tokens = 100;
             usage.counts_mut().output_tokens = 17;

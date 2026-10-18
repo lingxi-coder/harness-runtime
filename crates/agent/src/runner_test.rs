@@ -12001,10 +12001,12 @@ async fn owner_notification_waits_for_handler_rest_acknowledgement() {
 #[tokio::test]
 async fn a_refusing_subagent_hops_to_the_fallback_and_retries() {
     let mut refusal = text_response("", Some("refusal"));
-    refusal.stop_details = Some(llm_runtime::HistoryStopDetails {
-        category: Some("cyber".into()),
-        explanation: Some("fixture detail".into()),
-    });
+    refusal.stop_details = Some(
+        llm_runtime::HistoryStopDetails::parse(
+            r#"{"category":"cyber","explanation":"fixture detail"}"#,
+        )
+        .unwrap(),
+    );
     refusal.usage.counts_mut().input_tokens = 11;
     let mut answer = text_response("done", Some("end_turn"));
     answer.usage.counts_mut().output_tokens = 7;
@@ -12074,8 +12076,8 @@ async fn a_refusing_subagent_hops_to_the_fallback_and_retries() {
             .response
             .as_ref()
             .and_then(|response| response.stop_details.as_ref())
-            .and_then(|details| details.category.as_deref()),
-        Some("cyber")
+            .and_then(|details| details.category()),
+        Some("cyber".to_string())
     );
     assert_eq!(
         calls[0]

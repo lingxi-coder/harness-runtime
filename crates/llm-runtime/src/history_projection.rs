@@ -17,7 +17,7 @@ fn invalid(error: impl std::fmt::Display) -> LlmError {
 }
 
 fn stop_details(payload: &wire::JsonPayload) -> Result<HistoryStopDetails, LlmError> {
-    serde_json::from_str(payload.as_json_source()).map_err(invalid)
+    HistoryStopDetails::from_payload(payload.clone())
 }
 
 fn serialized_payload(value: &impl serde::Serialize) -> Result<wire::JsonPayload, LlmError> {
@@ -1112,10 +1112,7 @@ impl HistoryProjector {
                                     stop_reason: Some(stop.reason.into()),
                                     stop_details: stop
                                         .details
-                                        .map(|value| {
-                                            serde_json::from_str(value.as_json_source())
-                                                .map_err(invalid)
-                                        })
+                                        .map(|value| stop_details(&value))
                                         .transpose()?,
                                     resumable: self.resumable.clone(),
                                 },
@@ -1437,6 +1434,67 @@ mod tests {
             .events(vec![Ok(wire::StreamEvent::Native { block: 0, value })])
             .unwrap();
         assert!(events.iter().any(|event| matches!(event, HistoryEvent::ContentBlockStart { content_block, .. } if content_block == &host)));
+    }
+
+    #[test]
+    fn stop_details_source_survives_non_streaming_and_streaming_adapters() {
+        let stop_details = r#"{"explanation":"prefix \ud800 suffix","future":{"x":null},"category":"cyber","type":"refusal","nullable":null}"#;
+        let metadata =
+            wire::JsonPayload::parse(&format!(r#"{{"stop_details":{stop_details}}}"#)).unwrap();
+        let decoded = wire::ChatResponse {
+            tool_input_issues: Vec::new(),
+            inference: Default::default(),
+            response_cache: None,
+            message: wire::ConversationMessage::assistant(Vec::new()),
+            web_search: None,
+            file_search: None,
+            native_metadata: Vec::new(),
+            stop_reason: wire::StopReason::Refusal,
+            usage: Default::default(),
+            native_resume_context_exhausted: None,
+            model: "model".into(),
+            response_id: None,
+            continuation: None,
+            executed_profile: None,
+        };
+        let response = project_model_response(
+            decoded,
+            wire::ProtocolFamily::AnthropicMessages,
+            metadata,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            response
+                .stop_details
+                .as_ref()
+                .unwrap()
+                .source()
+                .as_json_source(),
+            stop_details
+        );
+
+        let mut projector = HistoryProjector::projection(
+            wire::ProtocolFamily::AnthropicMessages,
+            wire::JsonPayload::default(),
+        )
+        .unwrap();
+        let stream_delta = format!(
+            r#"{{"type":"message_delta","delta":{{"stop_reason":"refusal","stop_details":{stop_details}}}}}"#
+        );
+        let events = projector
+            .events(vec![Ok(wire::StreamEvent::ProviderEvent {
+                protocol: wire::ProtocolFamily::AnthropicMessages,
+                payload: wire::JsonPayload::parse(&stream_delta).unwrap(),
+            })])
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HistoryEvent::MessageDelta { delta, .. }
+                if delta.stop_details.as_ref().is_some_and(|details| {
+                    details.source().as_json_source() == stop_details
+                })
+        )));
     }
 
     #[test]

@@ -642,11 +642,11 @@ impl ConversationOrchestrator {
             let null = lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null")
                 .expect("null is valid JSON");
             let category = stop_details
-                .and_then(|details| details.category.clone())
+                .and_then(|details| details.category())
                 .map(lingxi_core::types::utf16_json::Utf16JsonProjection::from)
                 .unwrap_or_else(|| null.clone());
             let explanation = stop_details
-                .and_then(|details| details.explanation.clone())
+                .and_then(|details| details.explanation())
                 .unwrap_or(null);
             lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![
                 ("category".to_string(), category),

@@ -302,10 +302,9 @@ impl ChildTurnComplete {
         self.answer = response_answer_source(&response.content);
         self.refusal = (response.stop_reason.as_deref() == Some("refusal")).then(|| {
             let details = response.stop_details.as_ref();
-            refusal_metadata(
-                details.and_then(|details| details.category.as_deref()),
-                details.and_then(|details| details.explanation.as_ref()),
-            )
+            let category = details.and_then(|details| details.category());
+            let explanation = details.and_then(|details| details.explanation());
+            refusal_metadata(category.as_deref(), explanation.as_ref())
         });
     }
 

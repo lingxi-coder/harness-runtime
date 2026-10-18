@@ -77,8 +77,8 @@ pub struct HistoryResponse {
     /// `tool_use`, `max_tokens`, `stop_sequence`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
-    /// Optional refusal `stop_details` (`{category, explanation}`) for the
-    /// terminal refusal message's cyber/bio variant. `None` for non-refusals.
+    /// Complete source-backed provider `stop_details` object. `None` when the
+    /// provider did not send terminal details.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_details: Option<HistoryStopDetails>,
     /// Normalized usage.
@@ -484,24 +484,109 @@ impl<'de> Deserialize<'de> for HistoryContentDelta {
     }
 }
 
-/// Refusal `stop_details` — the Anthropic response message's
-/// `stop_details: {category, explanation}` (present on `stop_reason: "refusal"`
-/// responses). Drives the terminal refusal message's cyber/bio category variant
-/// (claude-code `U2e`: `t.category`/`t.explanation`). Both the non-streaming
-/// body and the streaming `message_delta.delta` carry it.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct HistoryStopDetails {
-    /// `cyber` / `bio` / … — the refusal category.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub category: Option<String>,
-    /// Free-text explanation (may embed a `https://claude.com/form/…` exemption URL).
-    #[serde(
-        default,
-        deserialize_with = "lingxi_core::types::utf16_json::raw_json_serde::deserialize_option",
-        serialize_with = "lingxi_core::types::utf16_json::raw_json_serde::serialize_option",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub explanation: Option<Utf16JsonProjection>,
+/// Anthropic's complete `stop_details` object. The raw SDK payload is the only
+/// stored representation so history roundtrips preserve field order, unknown
+/// fields, explicit nulls, and exact UTF-16 strings. Refusal presentation reads
+/// `category` and `explanation` through accessors without rewriting the source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryStopDetails(JsonPayload);
+
+impl HistoryStopDetails {
+    /// Validate and retain one complete stop-details object.
+    pub fn from_payload(payload: JsonPayload) -> Result<Self, crate::LlmError> {
+        if !payload.is_root_object() {
+            return Err(crate::LlmError::InvalidRequest {
+                message: "stop_details must be a JSON object".into(),
+            });
+        }
+        Ok(Self(payload))
+    }
+
+    /// Parse a raw stop-details object without passing through `serde_json::Value`.
+    pub fn parse(source: &str) -> Result<Self, crate::LlmError> {
+        let payload =
+            JsonPayload::parse(source).map_err(|error| crate::LlmError::InvalidRequest {
+                message: error.to_string(),
+            })?;
+        Self::from_payload(payload)
+    }
+
+    /// Build a stop-details object from presentation fields. The resulting raw
+    /// object becomes authoritative; no Native discriminator is synthesized.
+    pub fn from_parts(
+        category: Option<&str>,
+        explanation: Option<&Utf16JsonProjection>,
+    ) -> Result<Self, crate::LlmError> {
+        let mut payload = JsonPayload::parse("{}").expect("empty JSON object is valid");
+        if let Some(category) = category {
+            payload = payload
+                .with_object_field("category", &JsonPayload::string(category))
+                .map_err(|error| crate::LlmError::InvalidRequest {
+                    message: error.to_string(),
+                })?;
+        }
+        if let Some(explanation) = explanation {
+            let source =
+                explanation
+                    .to_json_string()
+                    .map_err(|error| crate::LlmError::InvalidRequest {
+                        message: error.to_string(),
+                    })?;
+            let explanation =
+                JsonPayload::parse(&source).map_err(|error| crate::LlmError::InvalidRequest {
+                    message: error.to_string(),
+                })?;
+            payload = payload
+                .with_object_field("explanation", &explanation)
+                .map_err(|error| crate::LlmError::InvalidRequest {
+                    message: error.to_string(),
+                })?;
+        }
+        Self::from_payload(payload)
+    }
+
+    /// Source-backed object; serialization writes this exact JSON source.
+    pub fn source(&self) -> &JsonPayload {
+        &self.0
+    }
+
+    /// Display view of a string-valued Native refusal category.
+    pub fn category(&self) -> Option<String> {
+        self.0.string_at("/category")
+    }
+
+    /// UTF-16-preserving view of a string-valued Native explanation.
+    pub fn explanation(&self) -> Option<Utf16JsonProjection> {
+        let payload = self.0.payload_at("/explanation")?;
+        if !payload.is_root_string() {
+            return None;
+        }
+        Utf16JsonProjection::parse(payload.as_json_source()).ok()
+    }
+}
+
+impl Serialize for HistoryStopDetails {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for HistoryStopDetails {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let payload = JsonPayload::deserialize(deserializer)?;
+        if !payload.is_root_object() {
+            return Err(serde::de::Error::custom(
+                "stop_details must be a JSON object",
+            ));
+        }
+        Ok(Self(payload))
+    }
 }
 
 /// Host terminal presentation payload.
@@ -509,8 +594,8 @@ pub struct HistoryStopDetails {
 pub struct HistoryMessageDelta {
     /// Optional terminal stop reason.
     pub stop_reason: Option<String>,
-    /// Optional refusal `stop_details` (the streaming `message_delta.delta`
-    /// carries it on a refusal).
+    /// Complete source-backed `stop_details` object from the streaming
+    /// `message_delta.delta`, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_details: Option<HistoryStopDetails>,
     /// Exact provider resumability checkpoint received on the terminal stream
@@ -1118,6 +1203,31 @@ mod wire_presence_tests {
             HistoryContentDelta::InputJsonDelta { partial_json }
                 if partial_json.utf16_code_units() == fragment_units.as_slice()
         ));
+    }
+
+    #[test]
+    fn refusal_stop_details_preserve_complete_source_object() {
+        let source = r#"{"explanation":"prefix \ud800 suffix","future":{"x":null},"category":"cyber","type":"refusal","nullable":null}"#;
+        let details: HistoryStopDetails = serde_json::from_str(source).unwrap();
+        assert_eq!(details.category().as_deref(), Some("cyber"));
+        assert_eq!(
+            details.source().string_at("/type").as_deref(),
+            Some("refusal")
+        );
+        assert_eq!(details.source().as_json_source(), source);
+        assert_eq!(
+            details
+                .explanation()
+                .and_then(|value| value.string_units("")),
+            Some(
+                "prefix "
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .chain(" suffix".encode_utf16())
+                    .collect::<Vec<_>>()
+            )
+        );
+        assert_eq!(serde_json::to_string(&details).unwrap(), source);
     }
 
     #[test]

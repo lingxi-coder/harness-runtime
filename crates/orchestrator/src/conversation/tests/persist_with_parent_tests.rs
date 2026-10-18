@@ -3035,10 +3035,10 @@ async fn completed_row_mod_content_rewrite_preserves_response_envelope() {
             "upstreamUsageState": "complete"
         }))
         .unwrap();
-    let stop_details = llm_runtime::HistoryStopDetails {
-        category: Some("cyber".into()),
-        explanation: Some("source response details".into()),
-    };
+    let stop_details = llm_runtime::HistoryStopDetails::parse(
+        r#"{"category":"cyber","explanation":"source response details"}"#,
+    )
+    .unwrap();
     let mut row = crate::streaming_loop::CompletedAssistantRow {
         per_turn_effort: None,
         stream_order: 0,
