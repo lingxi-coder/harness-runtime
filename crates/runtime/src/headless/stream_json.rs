@@ -2705,67 +2705,77 @@ impl StreamJsonStream {
     ///   server_tool_use:{...DR.server_tool_use,web_search_requests:…}}}
     /// ```
     ///
+    /// In Native 2.1.295, the print producer's `ns()` at binary offset
+    /// 203275359 sums model-usage rows from `RO()`. Native's `outputTokens`
+    /// already includes thinking tokens, which are also reported separately in
+    /// `output_tokens_details`; this projection adds the Rust row's separate
+    /// reasoning count to its output count. The base object keeps
+    /// `service_tier` and `speed` at `standard` and both ephemeral
+    /// cache-creation buckets at zero.
+    /// Keep `CurrentUsageSnapshot` as the separate last-response view used by
+    /// compaction and status consumers; result usage follows the aggregate
+    /// model rows just like Native.
+    ///
     /// The 2.1.220 twin `jw` (@233167154) is byte-identical MINUS
     /// `output_tokens_details` (0 hits in that binary), so the new key is the
     /// only delta — and because `gXl` never overrides it, the spread keeps
     /// `DR`'s literal `{thinking_tokens:0}` and its position as the FIRST key.
     fn build_usage_block(cost: &CostSnapshot) -> Value {
         let mut usage = serde_json::Map::new();
-        let current = cost.current_usage.unwrap_or_default();
-        let details = cost.current_usage_details.unwrap_or_default();
+        let (
+            input_tokens,
+            output_tokens,
+            thinking_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            web_search_requests,
+        ) = cost.by_model.iter().fold(
+            (0_u64, 0_u64, 0_u64, 0_u64, 0_u64, 0_u64),
+            |(input, output, thinking, cache_read, cache_creation, web_search), model| {
+                (
+                    input.saturating_add(model.input_tokens),
+                    output.saturating_add(model.output_tokens),
+                    thinking.saturating_add(model.reasoning_tokens),
+                    cache_read.saturating_add(model.cache_read_input_tokens),
+                    cache_creation.saturating_add(model.cache_creation_input_tokens),
+                    web_search.saturating_add(model.web_search_requests),
+                )
+            },
+        );
         if cost.current_usage.is_none() {
             usage.insert(
                 "output_tokens_details".into(),
-                json!({"thinking_tokens":0_u64}),
+                json!({"thinking_tokens":thinking_tokens}),
             );
         }
-        usage.insert("input_tokens".into(), json!(current.input_tokens));
+        usage.insert("input_tokens".into(), json!(input_tokens));
         usage.insert(
             "cache_creation_input_tokens".into(),
-            json!(current.cache_creation_input_tokens),
+            json!(cache_creation_tokens),
         );
-        usage.insert(
-            "cache_read_input_tokens".into(),
-            json!(current.cache_read_input_tokens),
-        );
+        usage.insert("cache_read_input_tokens".into(), json!(cache_read_tokens));
         usage.insert(
             "output_tokens".into(),
-            json!(current
-                .output_tokens
-                .saturating_add(details.reasoning_tokens)),
+            json!(output_tokens.saturating_add(thinking_tokens)),
         );
         if cost.current_usage.is_some() {
             usage.insert(
                 "output_tokens_details".into(),
-                json!({"thinking_tokens":details.reasoning_tokens}),
+                json!({"thinking_tokens":thinking_tokens}),
             );
         }
         usage.insert(
             "server_tool_use".into(),
-            json!({"web_search_requests":details.web_search_requests,"web_fetch_requests":0_u64}),
+            json!({"web_search_requests":web_search_requests,"web_fetch_requests":0_u64}),
         );
-        usage.insert(
-            "service_tier".into(),
-            json!(if details.fast_mode {
-                "fast"
-            } else {
-                "standard"
-            }),
-        );
+        usage.insert("service_tier".into(), json!("standard"));
         usage.insert(
             "cache_creation".into(),
-            json!({"ephemeral_1h_input_tokens":details.cache_creation_1h_input_tokens,"ephemeral_5m_input_tokens":details.cache_creation_5m_input_tokens}),
+            json!({"ephemeral_1h_input_tokens":0_u64,"ephemeral_5m_input_tokens":0_u64}),
         );
         usage.insert("inference_geo".into(), json!(""));
         usage.insert("iterations".into(), json!([]));
-        usage.insert(
-            "speed".into(),
-            json!(if details.fast_mode {
-                "fast"
-            } else {
-                "standard"
-            }),
-        );
+        usage.insert("speed".into(), json!("standard"));
         usage.insert("fallback_credit".into(), Value::Null);
         Value::Object(usage)
     }
@@ -4499,18 +4509,74 @@ mod tests {
             ..Default::default()
         };
         let usage = StreamJsonStream::build_usage_block(&cost);
-        assert_eq!(usage["output_tokens"], 27);
-        assert_eq!(usage["output_tokens_details"]["thinking_tokens"], 7);
-        assert_eq!(usage["server_tool_use"]["web_search_requests"], 3);
+        assert_eq!(usage["input_tokens"], 30);
+        assert_eq!(usage["cache_creation_input_tokens"], 10);
+        assert_eq!(usage["cache_read_input_tokens"], 5);
+        assert_eq!(usage["output_tokens"], 48);
+        assert_eq!(usage["output_tokens_details"]["thinking_tokens"], 8);
+        assert_eq!(usage["server_tool_use"]["web_search_requests"], 4);
         assert_eq!(
             usage["cache_creation"],
-            json!({"ephemeral_1h_input_tokens":4,"ephemeral_5m_input_tokens":6})
+            json!({"ephemeral_1h_input_tokens":0,"ephemeral_5m_input_tokens":0})
         );
-        assert_eq!(usage["speed"], "fast");
+        assert_eq!(usage["service_tier"], "standard");
+        assert_eq!(usage["speed"], "standard");
         let models = StreamJsonStream::build_model_usage_block(&cost, &[]);
         assert_eq!(models["claude-sonnet-5-5"]["thinkingTokens"], 8);
         assert_eq!(models["claude-sonnet-5-5"]["outputTokens"], 48);
         assert_eq!(models["claude-sonnet-5-5"]["webSearchRequests"], 4);
+    }
+
+    #[tokio::test]
+    async fn result_usage_aggregates_refusal_reissue_without_spending_a_turn() {
+        let params = make_params("refusal-reissue-usage");
+        let stream = StreamJsonStream::new(params, Output::new(tokio::io::sink()));
+        stream
+            .set_result_metadata(StreamJsonResultMetadata {
+                is_error: true,
+                terminal_reason: Some("api_error".into()),
+                num_turns: Some(1),
+                ..Default::default()
+            })
+            .await;
+        let cost = CostSnapshot {
+            input_tokens: 2,
+            output_tokens: 8,
+            api_calls: 2,
+            current_usage: Some(lingxi_core::host::CurrentUsageSnapshot {
+                input_tokens: 1,
+                output_tokens: 4,
+                ..Default::default()
+            }),
+            by_model: vec![lingxi_core::host::orchestrator::ModelUsageRow {
+                model: "claude-sonnet-4-5".into(),
+                provider: Some("firstParty".into()),
+                total_nano_usd: 0,
+                input_tokens: 2,
+                output_tokens: 8,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning_tokens: 0,
+                web_search_requests: 0,
+            }],
+            ..Default::default()
+        };
+        let frame = stream
+            .build_result_success_frame(
+                "API Error: fixed refusal",
+                "refusal",
+                &cost,
+                "off",
+                None,
+                &[],
+            )
+            .await;
+
+        assert_eq!(frame["usage"]["input_tokens"], 2);
+        assert_eq!(frame["usage"]["output_tokens"], 8);
+        assert_eq!(frame["modelUsage"]["claude-sonnet-4-5"]["inputTokens"], 2);
+        assert_eq!(frame["modelUsage"]["claude-sonnet-4-5"]["outputTokens"], 8);
+        assert_eq!(frame["num_turns"], 1);
     }
 
     // Claude Code 2.1.261: $Ke @164270142 and live manual /compact boundary.
