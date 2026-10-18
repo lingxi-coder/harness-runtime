@@ -618,11 +618,12 @@ pub struct InProcessTeammateHandler {
     /// [`Self::tool_registry_handle`]). Unfilled (the default / tests) ⇒ no tools
     /// advertised (chat-only — byte-identical to before this seam).
     tool_registry: Arc<OnceLock<Arc<agent::ToolRegistry>>>,
-    /// Tool-wide deny-rule names from the boot permission policy, applied in the
-    /// per-spawn tool resolution so a blanket-denied tool never leaks into the
-    /// teammate's advertised pool (claude-code `filterToolsByDenyRules`).
-    /// SET-ONCE; unfilled ⇒ no filtering.
-    tool_wide_deny_names: Arc<OnceLock<Vec<String>>>,
+    /// Live permission gate used to obtain the Native name/content deny
+    /// snapshot for every teammate catalog build (claude-code
+    /// `filterToolsByDenyRules`). This keeps aliases and rules on the current
+    /// policy generation. SET-ONCE; unfilled ⇒ the empty context.
+    tool_permission_gate:
+        Arc<OnceLock<Arc<dyn lingxi_core::host::permission_gate::PermissionGate>>>,
     /// Budget enforcer inherited by the teammate so its turns charge the shared
     /// cumulative cost (claude-code teammates share the session budget). `None`
     /// (the default / tests) ⇒ no per-turn budget gate.
@@ -694,7 +695,7 @@ impl InProcessTeammateHandler {
             instruction_provider: None,
             new_diagnostics_source_factory: None,
             tool_registry: Arc::new(OnceLock::new()),
-            tool_wide_deny_names: Arc::new(OnceLock::new()),
+            tool_permission_gate: Arc::new(OnceLock::new()),
             budget_enforcer: None,
             hook_executor: Arc::new(OnceLock::new()),
             strict_plugin_only_hooks: Arc::new(OnceLock::new()),
@@ -725,11 +726,24 @@ impl InProcessTeammateHandler {
         self
     }
 
-    /// Return a clone of the set-once tool-wide-deny-names cell (filled from the
-    /// boot permission policy, like the spawner).
+    /// Return a clone of the set-once live permission-gate cell (filled from
+    /// the enforcing gate, like the spawner). Each teammate catalog build
+    /// reads a fresh Native deny-context snapshot from it.
     #[must_use]
-    pub fn tool_wide_deny_names_handle(&self) -> Arc<OnceLock<Vec<String>>> {
-        self.tool_wide_deny_names.clone()
+    pub fn permission_gate_handle(
+        &self,
+    ) -> Arc<OnceLock<Arc<dyn lingxi_core::host::permission_gate::PermissionGate>>> {
+        self.tool_permission_gate.clone()
+    }
+
+    /// Builder: set the live permission gate immediately (tests/minimal hosts).
+    #[must_use]
+    pub fn with_permission_gate(
+        self,
+        gate: Arc<dyn lingxi_core::host::permission_gate::PermissionGate>,
+    ) -> Self {
+        let _ = self.tool_permission_gate.set(gate);
+        self
     }
 
     /// Builder: inherit a budget enforcer so the teammate's turns charge the
@@ -1241,12 +1255,14 @@ impl InProcessTeammateHandler {
             Some(registry) => {
                 let _has_task_list_tools =
                     agent::augment_teammate_tool_policy(registry, &mut definition);
-                let empty: Vec<String> = Vec::new();
-                let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
+                let deny_context = match self.tool_permission_gate.get() {
+                    Some(gate) => gate.native_mcp_deny_context().await,
+                    None => lingxi_core::host::permission_gate::NativeMcpDenyContext::default(),
+                };
                 agent::resolve_subagent_tools(
                     registry,
                     &definition,
-                    denied,
+                    &deny_context,
                     child_selection.as_ref(),
                     0,
                     // Every in-process teammate is a coordinator worker, so

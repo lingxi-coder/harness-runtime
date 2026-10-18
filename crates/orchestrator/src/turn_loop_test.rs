@@ -4594,6 +4594,28 @@ mod read_file_state_tests {
         )
     }
 
+    fn orch_with_policy_and_mcp_tools(
+        mcp_tools: Vec<Arc<dyn Tool>>,
+        policy: permission::PermissionPolicy,
+    ) -> ConversationOrchestrator {
+        use permission::PolicyPermissionGate;
+        let registry = ToolRegistry::new();
+        registry.register_mcp_tools(lingxi_core::types::McpConnectionId::new(), mcp_tools);
+        let gate: Arc<dyn lingxi_core::host::permission_gate::PermissionGate> = Arc::new(
+            PolicyPermissionGate::new(Arc::new(policy), Arc::new(NoOpPermissionGate)),
+        );
+        ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            crate::test_support::noop_hook_executor(),
+            gate,
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        )
+    }
+
     fn wire_tool_names(wire: &[lingxi_core::host::SourceToolWireDefinition]) -> Vec<String> {
         wire.iter().map(|t| t.name.as_str().to_string()).collect()
     }
@@ -4645,6 +4667,110 @@ mod read_file_state_tests {
             names,
             vec!["Read", "mcp__slack__post"],
             "deny:[mcp__github] hides all mcp__github__* but keeps mcp__slack__post"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_wire_tools_uses_alias_aware_policy_snapshot_for_mcp_catalog() {
+        use permission::{
+            PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
+            PermissionRuleValue,
+        };
+
+        let cwd = PathBuf::from("/tmp");
+        let tools: Vec<Arc<dyn Tool>> = vec![
+            Arc::new(StubFileTool {
+                name: "mcp__linear__create_issue",
+                cwd: cwd.clone(),
+            }),
+            Arc::new(StubFileTool {
+                name: "mcp__slack__post_message",
+                cwd,
+            }),
+        ];
+        let policy = PermissionPolicy::from_rules(
+            permission::PermissionMode::Default,
+            [PermissionRule {
+                value: PermissionRuleValue {
+                    tool_name: "mcp__legacy__create_issue".into(),
+                    rule_content: None,
+                    original_rule: None,
+                },
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
+            }],
+        )
+        .with_tool_aliases(Some(
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+                r#"{"mcp__legacy__create_issue":"mcp__linear__create_issue"}"#,
+            )
+            .unwrap(),
+        ))
+        .unwrap();
+        let orch = orch_with_policy_and_mcp_tools(tools, policy);
+        assert_eq!(
+            wire_tool_names(&orch.build_wire_tools().await.unwrap().0),
+            ["mcp__slack__post_message"],
+            "the provider-visible catalog must apply the same alias-aware deny context as Jqe"
+        );
+        assert!(orch
+            .find_dispatchable_tool("mcp__linear__create_issue")
+            .is_none());
+        assert!(orch
+            .find_dispatchable_tool("mcp__slack__post_message")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn build_wire_tools_only_projects_native_content_alias_denies() {
+        use permission::{
+            PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
+            PermissionRuleValue,
+        };
+
+        let cwd = PathBuf::from("/tmp");
+        let tool = || {
+            Arc::new(StubFileTool {
+                name: "mcp__linear__create_issue",
+                cwd: cwd.clone(),
+            }) as Arc<dyn Tool>
+        };
+        let aliases = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
+            r#"{"Read":"mcp__linear__create_issue"}"#,
+        )
+        .unwrap();
+        let make_policy = |content: &str| {
+            PermissionPolicy::from_rules(
+                permission::PermissionMode::Default,
+                [PermissionRule {
+                    value: PermissionRuleValue::from_rule_string(&format!("Read({content})")),
+                    behavior: PermissionBehavior::Deny,
+                    source: PermissionRuleSource::Settings(
+                        lingxi_core::types::SettingsScope::Project,
+                    ),
+                }],
+            )
+            .with_tool_aliases(Some(aliases.clone()))
+            .unwrap()
+        };
+
+        let ordinary_content = orch_with_policy_and_mcp_tools(vec![tool()], make_policy("src/**"));
+        assert_eq!(
+            wire_tool_names(&ordinary_content.build_wire_tools().await.unwrap().0),
+            ["mcp__linear__create_issue"],
+            "ordinary path content must not blanket-hide an aliased tool"
+        );
+
+        let native_special_alias =
+            orch_with_policy_and_mcp_tools(vec![tool()], make_policy("//**"));
+        assert!(
+            native_special_alias
+                .build_wire_tools()
+                .await
+                .unwrap()
+                .0
+                .is_empty(),
+            "the Native Read deny-family sentinel is projected through its alias source"
         );
     }
 

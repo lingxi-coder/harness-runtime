@@ -7,6 +7,10 @@ use crate::error::OrchestratorError;
 pub(super) struct ProjectedUserContent {
     pub(super) blocks: Vec<ContentBlock>,
     pub(super) text: Utf16JsonProjection,
+    /// Root representation of the SDK input before its text was normalized
+    /// into `ContentBlock`s. `false` means the original input was an array,
+    /// including a one-text-block array.
+    pub(super) source_was_json_string: bool,
 }
 
 pub(super) fn queued_human_content(
@@ -81,7 +85,8 @@ pub(super) fn queued_human_rendered(
 impl ProjectedUserContent {
     pub(super) fn parse(content: &Utf16JsonProjection) -> Result<Self, OrchestratorError> {
         content.validate().map_err(invalid_content)?;
-        let blocks = if content.string_units("").is_some() {
+        let source_was_json_string = content.string_units("").is_some();
+        let blocks = if source_was_json_string {
             vec![text_block(content.clone(), None)?]
         } else if let Some(count) = content.array_len("") {
             (0..count)
@@ -109,7 +114,11 @@ impl ProjectedUserContent {
             ));
         };
         let text = exact_blocks_text(&blocks);
-        Ok(Self { blocks, text })
+        Ok(Self {
+            blocks,
+            text,
+            source_was_json_string,
+        })
     }
 
     pub(super) fn display_text(&self) -> &str {
@@ -483,6 +492,62 @@ mod tests {
         let metrics = orch.completed_turn_metrics().expect("error owner metrics");
         assert_eq!(metrics.num_turns, 1);
         assert_eq!(metrics.stop_reason.as_deref(), Some("model_error"));
+    }
+
+    #[tokio::test]
+    async fn sdk_projected_single_text_block_keeps_jsonl_array_shape() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("transcript.jsonl");
+        let stream = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
+            message_start("assistant", "claude-sonnet-5"),
+            content_block_start_text(0),
+            text_delta(0, "done"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]]));
+        let writer = Arc::new(session::JsonlWriter::new(
+            path.clone(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(
+                root.path().to_path_buf(),
+            )),
+        ));
+        let orch = crate::ConversationOrchestrator::into_shared(
+            crate::ConversationOrchestrator::new_with_streaming(
+                crate::OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                stream,
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                root.path().to_path_buf(),
+            )
+            .with_jsonl_writer(writer),
+        );
+        let incoming =
+            Utf16JsonProjection::parse(r#"[{"type":"text","text":"one block"}]"#).unwrap();
+
+        crate::native_user_message_source::with_sdk_source(
+            orch.run_turn_streaming_with_cancel_projected_content(
+                &incoming,
+                CancellationToken::new(),
+                None,
+            ),
+        )
+        .await
+        .unwrap();
+
+        let raw = std::fs::read_to_string(path).unwrap();
+        let row: Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        assert_eq!(row["promptSource"], "sdk");
+        let content = row["message"]["content"]
+            .as_array()
+            .expect("projected SDK content retains its original array shape");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "one block");
     }
 
     #[tokio::test]

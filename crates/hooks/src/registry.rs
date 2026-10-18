@@ -551,10 +551,9 @@ impl HookRegistry {
         partition: HookSourcePartition,
     ) -> Vec<&HookDefinition> {
         let et = event.event_type();
-        // Comma-mode (`atf`) widens the simple-pattern matcher (comma-separated
-        // lists + the v2.1.195 hyphen) for this event type — claude
-        // `matchesPattern`'s `n` argument. The port has no `toolAliases`, so the
-        // `r` extra-alias map is `None`.
+        // Native 2.1.295's `J9` membership selects the widened simple-pattern
+        // matcher for this event. The port has no `toolAliases`, so the `r`
+        // extra-alias map is `None`.
         let comma_mode = comma_mode_for(&et);
         let if_target = Self::if_match_target(event);
         let keep = |h: &&HookDefinition| -> bool {
@@ -652,10 +651,9 @@ impl HookRegistry {
             return Vec::new();
         };
         let et = event.event_type();
-        // Comma-mode (`atf`) widens the simple-pattern matcher (comma-separated
-        // lists + the v2.1.195 hyphen) for this event type — claude
-        // `matchesPattern`'s `n` argument. The port has no `toolAliases`, so the
-        // `r` extra-alias map is `None`.
+        // Native 2.1.295's `J9` membership selects the widened simple-pattern
+        // matcher for this event. The port has no `toolAliases`, so the `r`
+        // extra-alias map is `None`.
         let comma_mode = comma_mode_for(&et);
         let if_target = Self::if_match_target(event);
         let keep = |h: &&HookDefinition| -> bool {
@@ -703,10 +701,9 @@ impl HookRegistry {
         _exclude_agent_id: AgentId,
     ) -> Vec<&HookDefinition> {
         let et = event.event_type();
-        // Comma-mode (`atf`) widens the simple-pattern matcher (comma-separated
-        // lists + the v2.1.195 hyphen) for this event type — claude
-        // `matchesPattern`'s `n` argument. The port has no `toolAliases`, so the
-        // `r` extra-alias map is `None`.
+        // Native 2.1.295's `J9` membership selects the widened simple-pattern
+        // matcher for this event. The port has no `toolAliases`, so the `r`
+        // extra-alias map is `None`.
         let comma_mode = comma_mode_for(&et);
         let if_target = Self::if_match_target(event);
         let keep = |h: &&HookDefinition| -> bool {
@@ -2089,6 +2086,88 @@ mod match_event_matcher_tests {
             matched_names(&reg, &slash).is_empty(),
             "directory text must not satisfy a source matcher"
         );
+    }
+
+    #[test]
+    fn native_295_comma_mode_event_set_matches_directory_added_and_model_switches() {
+        // Native 2.1.295's simple-list event set includes all three query
+        // sources below. Keep this version-bound regression separate from the
+        // retained 2.1.293 public matcher fixture.
+        let mut directory_reg = HookRegistry::new();
+        directory_reg.register(hook_with(
+            "directory-source-list",
+            HookEventType::DirectoryAdded,
+            Some("register_repo_root, slash_command"),
+        ));
+        let directory_event = |source: &str| HookEvent::DirectoryAdded {
+            directory: "/work/project".into(),
+            source: source.into(),
+        };
+        assert_eq!(
+            matched_names(&directory_reg, &directory_event("register_repo_root")),
+            vec!["directory-source-list"]
+        );
+        assert!(matched_names(&directory_reg, &directory_event("other")).is_empty());
+
+        let model_list = "claude-opus-4-6, claude-sonnet-4-5";
+        let mut pre_reg = HookRegistry::new();
+        pre_reg.register(hook_with(
+            "pre-model-list",
+            HookEventType::PreModelSwitch,
+            Some(model_list),
+        ));
+        let pre_event = |to_model: &str| HookEvent::PreModelSwitch {
+            from_model: "claude-sonnet-4-6".into(),
+            to_model: to_model.into(),
+            requested_model: None,
+            source: "picker".into(),
+            context_tokens: 0,
+            prompt_cache_warm: false,
+            cache_ttl: "5m".into(),
+            estimated_cache_write_usd: 0.0,
+            pricing: "default".into(),
+        };
+        assert_eq!(
+            matched_names(&pre_reg, &pre_event("claude-opus-4-6")),
+            vec!["pre-model-list"]
+        );
+        assert!(matched_names(&pre_reg, &pre_event("claude-haiku-4-5")).is_empty());
+
+        let mut post_reg = HookRegistry::new();
+        post_reg.register(hook_with(
+            "post-model-list",
+            HookEventType::PostModelSwitch,
+            Some(model_list),
+        ));
+        let post_event = |to_model: &str| HookEvent::PostModelSwitch {
+            from_model: "claude-sonnet-4-6".into(),
+            to_model: to_model.into(),
+            requested_model: None,
+            source: "picker".into(),
+            context_tokens: 0,
+            prompt_cache_warm: false,
+            cache_ttl: "5m".into(),
+            estimated_cache_write_usd: 0.0,
+            pricing: "default".into(),
+        };
+        assert_eq!(
+            matched_names(&post_reg, &post_event("claude-opus-4-6")),
+            vec!["post-model-list"]
+        );
+        assert!(matched_names(&post_reg, &post_event("claude-haiku-4-5")).is_empty());
+
+        // Metacharacters keep a comma-mode event on Native's RegExp branch.
+        let mut regex_reg = HookRegistry::new();
+        regex_reg.register(hook_with(
+            "directory-regex",
+            HookEventType::DirectoryAdded,
+            Some("^register_(?:repo_root|worktree)$"),
+        ));
+        assert_eq!(
+            matched_names(&regex_reg, &directory_event("register_repo_root")),
+            vec!["directory-regex"]
+        );
+        assert!(matched_names(&regex_reg, &directory_event("slash_command")).is_empty());
     }
 
     #[test]

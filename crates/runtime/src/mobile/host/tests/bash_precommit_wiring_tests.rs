@@ -154,7 +154,7 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
     let (tools, _) = agent::resolve_subagent_tools(
         &runtime.mcp_tool_registry,
         &definition,
-        &[],
+        &lingxi_core::host::permission_gate::NativeMcpDenyContext::default(),
         None,
         0,
         false,
@@ -170,7 +170,7 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
     let (tools, _) = agent::resolve_subagent_tools(
         &runtime.mcp_tool_registry,
         &definition,
-        &[],
+        &lingxi_core::host::permission_gate::NativeMcpDenyContext::default(),
         None,
         0,
         false,

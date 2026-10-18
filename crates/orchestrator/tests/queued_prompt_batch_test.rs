@@ -261,6 +261,7 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
                     .unwrap()
                 }),
                 prompt_source: None,
+                sdk_content_is_json_string: None,
                 prompt_ingress_kind: None,
                 skip_model_query: false,
                 message_id: Some(ids[i]),

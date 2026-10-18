@@ -26,6 +26,83 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    #[tokio::test]
+    async fn initialize_tool_aliases_replace_the_live_policy_projection_exactly() {
+        let initial = Utf16JsonProjection::parse(
+            r#"{"old_alias":"mcp__old__run","surrogate-\ud800":"target-\udfff"}"#,
+        )
+        .unwrap();
+        let policy = Arc::new(
+            PermissionPolicy::from_rules(PermissionMode::Default, Vec::new())
+                .with_tool_aliases(Some(initial.clone()))
+                .unwrap(),
+        );
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        assert_eq!(
+            gate.native_mcp_deny_context().await.tool_aliases,
+            Some(initial)
+        );
+
+        let refreshed = Utf16JsonProjection::parse(
+            r#"{"new_alias":"mcp__new__run","surrogate-\ud800":"replacement-\udfff"}"#,
+        )
+        .unwrap();
+        gate.set_native_tool_aliases(refreshed.clone())
+            .await
+            .expect("a source-preserving string record replaces the current aliases");
+        let current = gate.native_mcp_deny_context().await;
+        assert_eq!(current.tool_aliases, Some(refreshed.clone()));
+        assert_eq!(
+            current.tool_aliases.unwrap().to_json_string().unwrap(),
+            r#"{"new_alias":"mcp__new__run","surrogate-\ud800":"replacement-\udfff"}"#,
+            "the live snapshot retains isolated UTF-16 units without lossy conversion"
+        );
+
+        let invalid = Utf16JsonProjection::parse(r#"{"new_alias":false}"#).unwrap();
+        assert_eq!(
+            gate.set_native_tool_aliases(invalid).await,
+            Err("toolAliases must be an object of string values".to_owned())
+        );
+        assert_eq!(
+            gate.native_mcp_deny_context().await.tool_aliases,
+            Some(refreshed),
+            "a rejected refresh leaves the previous live map intact"
+        );
+    }
+
+    struct RuleFreePermissionGate;
+
+    #[async_trait]
+    impl PermissionGate for RuleFreePermissionGate {
+        async fn check(&self, _name: &str, _input: &Utf16JsonProjection) -> PermissionDecision {
+            PermissionDecision::Allow
+        }
+    }
+
+    #[tokio::test]
+    async fn rule_free_gate_validates_initialize_aliases_without_retaining_policy_state() {
+        let gate = RuleFreePermissionGate;
+        let valid =
+            Utf16JsonProjection::parse(r#"{"friendly":"Read","surrogate-\ud800":"target-\udfff"}"#)
+                .unwrap();
+        gate.set_native_tool_aliases(valid)
+            .await
+            .expect("a rule-free gate accepts a valid initialize map");
+        assert_eq!(gate.native_mcp_deny_context().await.tool_aliases, None);
+
+        let invalid = Utf16JsonProjection::parse(r#"{"friendly":false}"#).unwrap();
+        assert_eq!(
+            gate.set_native_tool_aliases(invalid).await,
+            Err("toolAliases must be an object of string values".to_owned())
+        );
+        assert_eq!(
+            gate.native_mcp_deny_context().await.tool_aliases,
+            None,
+            "a rule-free gate validates initialize input without creating policy state"
+        );
+    }
+
     #[test]
     fn deny_reason_string_is_byte_faithful() {
         // Generic deny (rule/mode/other) ⇒ claude-code `permissions.ts:1087,1179`.

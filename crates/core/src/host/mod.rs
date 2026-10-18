@@ -349,8 +349,8 @@ pub use orchestrator::{
 pub use panel_pool::{PanelPoolLease, PanelPoolPermit};
 pub use permission_gate::{
     AutoModePrompt, ClassifierOnlyOnBlock, ClassifierOnlyOutcome, ClassifierOnlyPolicy,
-    ClassifierOnlyReviewRequest, PermissionDecision, PermissionDenial, PermissionGate,
-    PermissionRequestSource,
+    ClassifierOnlyReviewRequest, NativeMcpDenyContext, NativeMcpDenyRule, PermissionDecision,
+    PermissionDenial, PermissionGate, PermissionRequestSource,
 };
 pub use platform::Platform;
 pub use process::{

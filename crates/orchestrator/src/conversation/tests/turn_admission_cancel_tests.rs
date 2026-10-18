@@ -61,6 +61,7 @@ async fn assert_cancelled_admission(entry: Entry, precancelled: bool) {
                     mod_origin: None,
                     message_origin: None,
                     prompt_source: None,
+                    sdk_content_is_json_string: None,
                     prompt_ingress_kind: None,
                     skip_model_query: false,
                     message_id: None,

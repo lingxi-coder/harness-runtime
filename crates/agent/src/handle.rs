@@ -279,13 +279,15 @@ pub struct PoolSubagentSpawner {
     /// exists. Unfilled (the default / tests) ⇒ the child runner skips the
     /// SubagentStart fire + frontmatter-hook registration (byte-identical legacy).
     hook_executor: Arc<RuntimeLink<Arc<hooks::HookExecutorImpl>>>,
-    /// Gate used to RE-CHECK an `agent.spawn` hook's rewrite.
+    /// Live session gate used to re-check an `agent.spawn` hook's rewrite and
+    /// provide each child/roster catalog build with its current atomic Native
+    /// alias/name/content deny context.
     ///
     /// 🚨 The `Agent(<type>)` deny rule is evaluated in the TOOL layer, ABOVE
     /// this spawner — so without a second check a hook that rewrites
     /// `subagent_type` reaches a type the operator's rules explicitly deny.
-    /// Unfilled (tests, hosts with no policy) means no re-check, which is
-    /// exactly the pre-hook behaviour.
+    /// Unfilled (tests, hosts with no policy) means no re-check and an empty
+    /// catalog deny context, preserving the no-policy behavior.
     ///
     /// Deliberately a `OnceLock` and not a [`RuntimeLink`] like its neighbours:
     /// this link's empty state must keep meaning exactly one thing. A
@@ -357,25 +359,12 @@ pub struct PoolSubagentSpawner {
     /// reads it via [`SubagentSpawner::resolve_name`]. Shared `Arc` so the same
     /// map is visible across spawner clones. Sync agents are NOT registered.
     name_registry: Arc<InMemoryAgentNameRegistry>,
-    /// TOOL-WIDE deny-rule names from the boot permission policy, applied in
-    /// [`Self::resolve_tools`] so a blanket-denied tool never leaks into a
-    /// subagent's advertised wire `tools` array — matching claude-code, where
-    /// `assembleToolPool` (the SAME pool builder used for coordinator workers,
-    /// `runAgent.ts`) runs `filterToolsByDenyRules`. A SET-ONCE cell mirroring
-    /// [`Self::tool_registry`]: the permission policy is built at the composition
-    /// root AFTER the spawner is boxed, so the host fills this once it exists via
-    /// [`Self::tool_wide_deny_names_handle`]. Unfilled (the default / tests /
-    /// no-enforcement) ⇒ NO names ⇒ the subagent tool pool is UNCHANGED
-    /// (byte-identical / regression-safe). Each entry is matched against a
-    /// resolved tool's name by [`permission::tool_wide_name_matches`] (exact name
-    /// OR an `mcp__server` prefix).
-    tool_wide_deny_names: Arc<std::sync::OnceLock<Vec<String>>>,
     /// Renderer for the subagent `<env>` block claude-code 2.1.186 appends to a
     /// NON-fork subagent's system prompt after the `Notes:` trailer (`tIm` — see
     /// `orchestrator::prompt::subagent_env`). Given a RESOLVED model id it returns
     /// the byte-exact block (cwd / git / platform / shell / OS / model + cutoff);
     /// the static environment inputs are captured at the composition root. A
-    /// SET-ONCE cell mirroring [`Self::tool_wide_deny_names`]: the renderer is
+    /// SET-ONCE cell mirroring [`Self::permission_gate_handle`]: the renderer is
     /// built at the composition root (which can reach the orchestrator formatter +
     /// the git/uname probes; the `agent` crate cannot, to avoid a dep cycle) and
     /// filled via [`Self::subagent_env_renderer_handle`] after the spawner is
@@ -521,7 +510,6 @@ impl PoolSubagentSpawner {
             allocated_transcript_paths: Arc::new(std::sync::Mutex::new(HashMap::new())),
             transcript_fs: None,
             name_registry: Arc::new(InMemoryAgentNameRegistry::new()),
-            tool_wide_deny_names: Arc::new(std::sync::OnceLock::new()),
             subagent_env_renderer: Arc::new(std::sync::OnceLock::new()),
             mcp_tool_builder: Arc::new(RuntimeLink::new()),
             coordinator_mode: Arc::new(std::sync::OnceLock::new()),
@@ -606,7 +594,7 @@ impl PoolSubagentSpawner {
 
     /// Return a clone of the set-once subagent-`<env>`-renderer cell so the host
     /// can fill it AFTER the orchestrator env formatter + probes are available
-    /// (same cycle-break as [`Self::tool_wide_deny_names_handle`]). First fill
+    /// (same cycle-break as [`Self::permission_gate_handle`]). First fill
     /// wins. Unfilled ⇒ no env block appended (byte-identical legacy).
     #[must_use]
     pub fn subagent_env_renderer_handle(&self) -> Arc<std::sync::OnceLock<SubagentEnvRenderer>> {
@@ -676,26 +664,6 @@ impl PoolSubagentSpawner {
     #[must_use]
     pub fn with_coordinator_mode(self, mode: Arc<dyn CoordinatorModeHandle>) -> Self {
         let _ = self.coordinator_mode.set(mode);
-        self
-    }
-
-    /// Return a clone of the set-once tool-wide-deny-names cell so the host can
-    /// fill it AFTER the permission policy is built (same cycle-break as
-    /// [`Self::tool_registry_handle`]). The subagent tool resolver
-    /// ([`Self::resolve_tools`]) then strips any blanket-denied tool from each
-    /// child's advertised pool (claude-code `filterToolsByDenyRules`). First fill
-    /// wins. Unfilled ⇒ no filtering (byte-identical legacy).
-    #[must_use]
-    pub fn tool_wide_deny_names_handle(&self) -> Arc<std::sync::OnceLock<Vec<String>>> {
-        self.tool_wide_deny_names.clone()
-    }
-
-    /// Builder: set the tool-wide deny names immediately (tests). The boot path
-    /// uses [`Self::tool_wide_deny_names_handle`] to fill it later (the policy
-    /// does not exist at construction). Applied in [`Self::resolve_tools`].
-    #[must_use]
-    pub fn with_tool_wide_deny_names(self, names: Vec<String>) -> Self {
-        let _ = self.tool_wide_deny_names.set(names);
         self
     }
 
@@ -843,7 +811,8 @@ impl PoolSubagentSpawner {
         self
     }
 
-    /// Builder: supply the gate that re-checks an `agent.spawn` rewrite.
+    /// Builder: supply the live session gate used for rewritten spawn checks
+    /// and fresh per-catalog Native deny snapshots.
     #[must_use]
     pub fn with_permission_gate(
         self,
@@ -853,7 +822,9 @@ impl PoolSubagentSpawner {
         self
     }
 
-    /// Set-once cell so the composition root can fill the gate after build.
+    /// Set-once cell so the composition root can fill the live session gate
+    /// after build. Child catalogs and the denied-agent roster read current
+    /// Native deny snapshots from this same gate.
     #[must_use]
     pub fn permission_gate_handle(
         &self,
@@ -2128,18 +2099,20 @@ impl SubagentSpawner for PoolSubagentSpawner {
 
     /// claude 2.1.238 `NJa` (@290291941) — the agent types every one of whose
     /// tools is denied by the current permission settings. Computed over the
-    /// SAME merged catalog [`Self::listing_entries`] renders, against the boot
-    /// policy's tool-wide deny names (the set-once cell filled by the
-    /// composition root; UNFILLED / EMPTY ⇒ nothing denied ⇒ empty result, so
-    /// this is regression-safe for every host that never wires it).
+    /// SAME merged catalog [`Self::listing_entries`] renders, against the live
+    /// Native deny context. The gate is queried for each roster build;
+    /// UNFILLED ⇒ empty context ⇒ nothing denied.
     async fn tools_denied_agent_types(&self) -> Vec<String> {
-        let empty: Vec<String> = Vec::new();
-        let denied = self.tool_wide_deny_names.get().unwrap_or(&empty).clone();
+        let empty = lingxi_core::host::permission_gate::NativeMcpDenyContext::default();
+        let deny_context = match self.permission_gate.get() {
+            Some(gate) => gate.native_mcp_deny_context().await,
+            None => empty,
+        };
         let mut defs: Vec<AgentDefinition> = self.builtins.values().cloned().collect();
         if let Some(catalog) = self.agent_catalog.get() {
             defs.extend(catalog.read().await.iter().cloned());
         }
-        crate::tools_denied_agent_types(&defs, &denied)
+        crate::tools_denied_agent_types(&defs, &deny_context)
     }
 
     /// Resolve the `required_mcp_servers` declared by `subagent_type`'s

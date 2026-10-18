@@ -355,7 +355,7 @@ fn auto_memory_enabled_for_flags(disabled: Option<&str>, simple: Option<&str>) -
 /// [`crate::handle::PoolSubagentSpawner`] and the in-process teammate handler —
 /// both must advertise the same `assembleToolPool`-equivalent pool (claude-code
 /// `runAgent.ts`): [`AgentToolResolver::resolve`] over the registry's
-/// `available_tools`, then the tool-wide deny filter
+/// `available_tools`, then the Native deny-context filter
 /// (`filterToolsByDenyRules`), then wire serialization keyed on the subagent's
 /// resolved model/profile (so route-gated tool prompts track the child's
 /// provider as well as its model).
@@ -363,11 +363,11 @@ fn auto_memory_enabled_for_flags(disabled: Option<&str>, simple: Option<&str>) -
 /// The allow-list includes each resolved tool's `aliases()` so the runner's
 /// dispatch guard accepts the SAME surface the inherited `RegistryToolInvoker`
 /// does for tools that declare aliases; the advertised schemas stay
-/// canonical-name-only. An empty `tool_wide_deny` drops nothing.
+/// canonical-name-only. An empty deny context drops nothing.
 pub async fn resolve_subagent_tools(
     registry: &tool_api::ToolRegistry,
     agent_def: &AgentDefinition,
-    tool_wide_deny: &[String],
+    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
     child_selection: Option<&ResolvedModelSelection>,
     // The resolved subagent's own recursion depth — gates its `Agent` tool
     // against Claude's configured maximum. Threaded from the spawn request.
@@ -390,7 +390,7 @@ pub async fn resolve_subagent_tools(
     resolve_subagent_tools_with_handback(
         registry,
         agent_def,
-        tool_wide_deny,
+        deny_context,
         child_selection,
         depth,
         coordinator_mode,
@@ -407,7 +407,7 @@ pub async fn resolve_subagent_tools(
 pub async fn resolve_subagent_tools_with_handback(
     registry: &tool_api::ToolRegistry,
     agent_def: &AgentDefinition,
-    tool_wide_deny: &[String],
+    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
     child_selection: Option<&ResolvedModelSelection>,
     // The resolved subagent's own recursion depth — gates its `Agent` tool
     // against Claude's configured maximum. Threaded from the spawn request.
@@ -456,13 +456,9 @@ pub async fn resolve_subagent_tools_with_handback(
         depth,
         coordinator_mode,
     );
-    if !tool_wide_deny.is_empty() {
-        resolved.retain(|t| {
-            !tool_wide_deny
-                .iter()
-                .any(|d| permission::tool_wide_name_matches(d, t.name()))
-        });
-    }
+    resolved.retain(|tool| {
+        !permission::native_deny_context_matches_tool_name(deny_context, tool.name())
+    });
     if let AgentToolPolicy::Explicit(names) = &agent_def.tools {
         if !names.is_empty() && resolved.is_empty() {
             return Err(ToolResolutionError::EmptyExplicitToolSet(names.join(", ")));
@@ -546,6 +542,7 @@ mod tests {
     use super::*;
     use crate::definition::{AgentModel, AgentSource};
     use async_trait::async_trait;
+    use lingxi_core::host::permission_gate::{NativeMcpDenyContext, NativeMcpDenyRule};
     use lingxi_core::types::utf16_json::Utf16JsonProjection;
     use serde_json::Value;
     use tool_api::context::ToolUseContext;
@@ -655,6 +652,20 @@ mod tests {
         })
     }
 
+    fn deny_context(names: &[&str]) -> NativeMcpDenyContext {
+        NativeMcpDenyContext {
+            tool_aliases: None,
+            deny_rules: names
+                .iter()
+                .map(|name| NativeMcpDenyRule {
+                    tool_name: (*name).to_string(),
+                    rule_content: None,
+                    proxy_expansion: false,
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn handback_injection_matches_pinned_spawn_conjunction() {
         let fixture: Value = serde_json::from_str(include_str!(
@@ -747,16 +758,32 @@ mod tests {
             enabled: false,
         }));
         let definition = agent_def(AgentToolPolicy::Explicit(vec!["Read".into(), "LSP".into()]));
-        let (schemas, allowed) =
-            resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
-                .await
-                .expect("disabled LSP must not block the builder");
+        let (schemas, allowed) = resolve_subagent_tools(
+            &registry,
+            &definition,
+            &NativeMcpDenyContext::default(),
+            None,
+            0,
+            false,
+            &[],
+        )
+        .await
+        .expect("disabled LSP must not block the builder");
         assert_eq!(allowed, vec!["Read"]);
         assert_eq!(schemas.len(), 1);
         assert_eq!(schemas[0].name, "Read");
         let only_disabled = agent_def(AgentToolPolicy::Explicit(vec!["LSP".into()]));
         assert!(matches!(
-            resolve_subagent_tools(&registry, &only_disabled, &[], None, 0, false, &[],).await,
+            resolve_subagent_tools(
+                &registry,
+                &only_disabled,
+                &NativeMcpDenyContext::default(),
+                None,
+                0,
+                false,
+                &[],
+            )
+            .await,
             Err(ToolResolutionError::EmptyExplicitToolSet(_))
         ));
     }
@@ -767,20 +794,79 @@ mod tests {
         registry.register_builtin(tool("Read"));
         registry.register_builtin(tool("LSP"));
         let definition = agent_def(AgentToolPolicy::Explicit(vec!["Read".into(), "LSP".into()]));
-        let (_, allowed) = resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
-            .await
-            .unwrap();
+        let (_, allowed) = resolve_subagent_tools(
+            &registry,
+            &definition,
+            &NativeMcpDenyContext::default(),
+            None,
+            0,
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
         assert_eq!(allowed, vec!["LSP", "Read"]);
-        let (_, allowed) =
-            resolve_subagent_tools(&registry, &definition, &["LSP".into()], None, 0, false, &[])
-                .await
-                .unwrap();
+        let (_, allowed) = resolve_subagent_tools(
+            &registry,
+            &definition,
+            &deny_context(&["LSP"]),
+            None,
+            0,
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
         assert_eq!(allowed, vec!["Read"]);
         registry.set_session_tool_allowlist(&["Read".into()]);
         assert!(matches!(
-            resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[],).await,
+            resolve_subagent_tools(
+                &registry,
+                &definition,
+                &NativeMcpDenyContext::default(),
+                None,
+                0,
+                false,
+                &[],
+            )
+            .await,
             Err(ToolResolutionError::UnknownExplicitTools(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn child_catalog_filters_native_mcp_alias_deny() {
+        let mut registry = tool_api::ToolRegistry::new();
+        registry.register_builtin(tool("mcp__linear__create_issue"));
+        let deny_context = NativeMcpDenyContext {
+            tool_aliases: Some(
+                Utf16JsonProjection::parse(
+                    r#"{"mcp__legacy__create_issue":"mcp__linear__create_issue"}"#,
+                )
+                .expect("alias map is valid JSON"),
+            ),
+            deny_rules: vec![NativeMcpDenyRule {
+                tool_name: "mcp__legacy__create_issue".into(),
+                rule_content: None,
+                proxy_expansion: true,
+            }],
+        };
+        let definition = agent_def(AgentToolPolicy::All {
+            use_exact_tools: true,
+        });
+
+        let (schemas, allowed) =
+            resolve_subagent_tools(&registry, &definition, &deny_context, None, 0, false, &[])
+                .await
+                .expect("all-policy child catalog resolves after filtering");
+        assert!(
+            schemas.is_empty(),
+            "alias-denied tool must not be advertised"
+        );
+        assert!(
+            allowed.is_empty(),
+            "alias-denied tool must not be dispatchable"
+        );
     }
 
     fn pool(names: &[&'static str]) -> Vec<Arc<dyn Tool>> {
@@ -809,7 +895,7 @@ mod tests {
             let (schemas, _) = resolve_subagent_tools(
                 &registry,
                 &definition,
-                &[],
+                &NativeMcpDenyContext::default(),
                 Some(&selection),
                 0,
                 false,
@@ -856,20 +942,36 @@ mod tests {
                 .expect("Bash prompt description is a string")
                 .to_owned()
         };
-        let (schemas, _) = resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
-            .await
-            .unwrap();
+        let (schemas, _) = resolve_subagent_tools(
+            &registry,
+            &definition,
+            &NativeMcpDenyContext::default(),
+            None,
+            0,
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
         assert!(description(schemas).contains("custom_verify: true"));
 
         let blocked = agent_def(AgentToolPolicy::Except(vec!["Skill".into()]));
-        let (schemas, _) = resolve_subagent_tools(&registry, &blocked, &[], None, 0, false, &[])
-            .await
-            .unwrap();
+        let (schemas, _) = resolve_subagent_tools(
+            &registry,
+            &blocked,
+            &NativeMcpDenyContext::default(),
+            None,
+            0,
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
         assert!(description(schemas).contains("custom_verify: false"));
         let (schemas, _) = resolve_subagent_tools(
             &registry,
             &definition,
-            &["Skill".into()],
+            &deny_context(&["Skill"]),
             None,
             0,
             false,
@@ -881,9 +983,17 @@ mod tests {
 
         enabled.store(false, Ordering::Relaxed);
         registry.reset_bash_precommit_prompt_session();
-        let (schemas, _) = resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
-            .await
-            .unwrap();
+        let (schemas, _) = resolve_subagent_tools(
+            &registry,
+            &definition,
+            &NativeMcpDenyContext::default(),
+            None,
+            0,
+            false,
+            &[],
+        )
+        .await
+        .unwrap();
         let prompt = description(schemas);
         assert!(prompt.contains("custom_verify: false"));
         assert!(prompt.contains("generation=1"));

@@ -455,6 +455,47 @@ fn compact_summary_content_source_if_unmodified(
     Source::root_string(String::from_utf16_lossy(&units), units).ok()
 }
 
+/// Headless SDK plain-text input is persisted as a JSON string by Native,
+/// while later injected rows such as `[Request interrupted by user]` use a
+/// text-block array. The ingress must explicitly identify the original SDK
+/// content root as a string; a normalized one-text-block projection may have
+/// come from an input array and is not sufficient evidence.
+fn sdk_plain_prompt_content_source(
+    message: &ConversationMessage,
+    prompt_source: Option<&Source>,
+    sdk_content_is_json_string: Option<bool>,
+) -> Option<Source> {
+    if prompt_source?.string_at("") != Some("sdk") {
+        return None;
+    }
+    if sdk_content_is_json_string != Some(true) {
+        return None;
+    }
+    let ConversationMessage::User {
+        content,
+        is_meta: false,
+        ..
+    } = message
+    else {
+        return None;
+    };
+    let [block] = content.as_slice() else {
+        return None;
+    };
+    match block {
+        lingxi_core::types::ContentBlock::Text {
+            text,
+            citations: None,
+        } => Source::root_string(text.clone(), text.encode_utf16().collect()).ok(),
+        lingxi_core::types::ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            citations: None,
+        } => Source::root_string(text.clone(), utf16_code_units.clone()).ok(),
+        _ => None,
+    }
+}
+
 fn mod_append_block_matches(
     original: &lingxi_core::types::ContentBlock,
     incoming: &Source,
@@ -4176,6 +4217,17 @@ impl ConversationOrchestrator {
                             .cloned(),
                     )
                 };
+                if let Some(content) = sdk_plain_prompt_content_source(
+                    msg,
+                    envelope
+                        .as_ref()
+                        .and_then(|value| value.prompt_source.as_ref()),
+                    queued_input.and_then(|input| input.sdk_content_is_json_string),
+                ) {
+                    jmsg.message
+                        .set_field("content", content)
+                        .expect("SDK plain prompt content is a valid JSON string");
+                }
                 if let Some(envelope) = envelope {
                     for (key, projection) in [
                         ("verifiedSlackHumanTurn", envelope.verified_slack_human_turn),

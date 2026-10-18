@@ -4297,6 +4297,33 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         Ok(())
     }
 
+    /// Replace the live Native `initialize.toolAliases` source projection.
+    /// The enforcing permission gate publishes the map atomically with its
+    /// live rules; invalidate schema and deferred-token caches before another
+    /// request can reuse a catalog assembled under the previous alias map.
+    pub async fn set_native_tool_aliases(
+        &self,
+        aliases: Utf16JsonProjection,
+    ) -> Result<(), String> {
+        self.perms.set_native_tool_aliases(aliases).await?;
+        *self.prompt_runtime.wire_tool_schema_cache.lock().await = None;
+        self.prompt_runtime
+            .deferred_tool_token_cache
+            .lock()
+            .await
+            .clear();
+        Ok(())
+    }
+
+    /// Snapshot the current permission gate's Native deny facts and exact live
+    /// alias source. The permission gate clones them from one policy generation.
+    #[must_use]
+    pub async fn native_mcp_deny_context(
+        &self,
+    ) -> lingxi_core::host::permission_gate::NativeMcpDenyContext {
+        self.perms.native_mcp_deny_context().await
+    }
+
     /// Apply or clear the LIVE per-MCP-server permission-mode override
     /// (stream-json `set_mcp_permission_mode_override` control_request).
     pub async fn set_mcp_permission_mode_override(

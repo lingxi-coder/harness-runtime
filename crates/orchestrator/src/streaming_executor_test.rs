@@ -2340,10 +2340,22 @@ mod tests {
             assert!(unknown_tool_suffix_for(name, &orch).contains("disabled for this session"));
         }
         for denied in ["Read", "Agent"] {
-            *orch.tool_pool_denied_names.write().unwrap() = vec![denied.into()];
+            *orch.tool_pool_deny_context.write().unwrap() =
+                lingxi_core::host::permission_gate::NativeMcpDenyContext {
+                    tool_aliases: None,
+                    deny_rules: vec![lingxi_core::host::permission_gate::NativeMcpDenyRule {
+                        tool_name: denied.into(),
+                        rule_content: None,
+                        proxy_expansion: false,
+                    }],
+                };
             assert!(unknown_tool_suffix_for("Read", &orch).contains("disabled for this session"));
         }
-        orch.tool_pool_denied_names.write().unwrap().clear();
+        orch.tool_pool_deny_context
+            .write()
+            .unwrap()
+            .deny_rules
+            .clear();
         *orch.main_agent_tool_names.write().unwrap() = Some(["Read".into()].into_iter().collect());
         assert!(unknown_tool_suffix_for("Read", &orch).contains("disabled for this session"));
         *orch.main_agent_tool_names.write().unwrap() = None;

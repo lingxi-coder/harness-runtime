@@ -2981,6 +2981,9 @@ pub enum BuildError {
     /// Explicit custom-agent configuration could not be parsed.
     #[error("Invalid --agents configuration: {0}")]
     InvalidAgents(String),
+    /// The embedding tool-alias map was not an object of string targets.
+    #[error("Invalid toolAliases configuration: {0}")]
+    InvalidToolAliases(String),
     /// Custom beta headers were requested for a route/auth mode that cannot
     /// safely carry Anthropic first-party API-key beta headers.
     #[error("custom betas require a first-party Anthropic API-key session")]

@@ -1938,8 +1938,11 @@ pub struct ConversationOrchestrator {
     pub(crate) coordinator_simple_mode_override: Option<bool>,
     #[cfg(test)]
     pub(crate) coordinator_pool_override: Option<(bool, Vec<String>)>,
-    /// Tool-wide denial snapshot captured when assembling the current wire pool.
-    pub(crate) tool_pool_denied_names: std::sync::RwLock<Vec<String>>,
+    /// Atomic tool-wide/content denial and alias snapshot captured when
+    /// assembling the current wire pool. Reminders and dispatch lookups reuse
+    /// the same Native permission generation as the advertised catalog.
+    pub(crate) tool_pool_deny_context:
+        std::sync::RwLock<lingxi_core::host::permission_gate::NativeMcpDenyContext>,
     /// Main-agent policy names from the current tool assembly, before coordinator filtering.
     pub(crate) main_agent_tool_names: std::sync::RwLock<Option<std::collections::HashSet<String>>>,
     /// Live coordinator-mode flag (`Ci()`). `None` is an ordinary session, so

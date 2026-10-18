@@ -3873,6 +3873,7 @@ fn build_mobile_engine_on_worker(
                                         pending_prompt_identity: None,
                                         message_origin: None,
                                         prompt_source: None,
+                                        sdk_content_is_json_string: None,
                                         prompt_ingress_kind: None,
                                         skip_model_query: false,
                                         queue_priority: Some("later".into()),

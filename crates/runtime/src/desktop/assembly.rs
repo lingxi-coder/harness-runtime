@@ -738,6 +738,10 @@ pub async fn build(
     output: Arc<dyn OutputStream>,
     permission_sink: Arc<dyn PermissionRequestSink>,
 ) -> Result<DesktopRuntime, BuildError> {
+    // Reject malformed embedding options before opening credential storage.
+    let _ = permission::PermissionPolicy::new(cfg.permission_mode)
+        .with_tool_aliases(cfg.tool_aliases.clone())
+        .map_err(BuildError::InvalidToolAliases)?;
     let shared = build_shared_credential_stack_for_config(&cfg).await?;
     build_with_credential_stack(cfg, output, permission_sink, shared).await
 }
@@ -847,6 +851,9 @@ pub async fn build_with_credential_stack(
     permission_sink: Arc<dyn PermissionRequestSink>,
     shared: SharedCredentialStack,
 ) -> Result<DesktopRuntime, BuildError> {
+    let fallback_permission_policy = permission::PermissionPolicy::new(cfg.permission_mode)
+        .with_tool_aliases(cfg.tool_aliases.clone())
+        .map_err(BuildError::InvalidToolAliases)?;
     let native_cron_seed = cron_native::should_start_native_scheduler(&cfg).then(|| {
         let mut seed = cfg.clone();
         seed.session_writer_lease = None;
@@ -2036,12 +2043,10 @@ pub async fn build_with_credential_stack(
     // fill once `mcp_registry` + `mcp_tool_ctx` exist (same cycle-break as the
     // hook/skill cells above — see `mcp_tool_builder`'s doc in `agent::handle`).
     let subagent_mcp_tool_builder_cell = subagent_spawner_concrete.mcp_tool_builder_handle();
-    // FIX 1 (subagent pool): grab the set-once tool-wide-deny-names cell BEFORE
-    // boxing, to fill once the permission policy is built (same cycle-break as
-    // the registry/catalog/hook cells). Filled inside the enforcement branch
-    // below from `policy.tool_wide_deny_names()`; left empty otherwise ⇒ the
-    // subagent tool pool is unfiltered (byte-identical to before).
-    let subagent_tool_wide_deny_cell = subagent_spawner_concrete.tool_wide_deny_names_handle();
+    // Fill the child tool-filter context after the permission policy exists,
+    // retaining aliases and source-specific content/proxy rules together.
+    // This set-once cell breaks the registry/policy construction cycle.
+    let subagent_permission_gate_cell = subagent_spawner_concrete.permission_gate_handle();
     // (2.1.263 `bs(Rn)`) The spawn-time bypass clamps: an agent definition's
     // `permissionMode: bypassPermissions` must NOT raise a restrictive parent
     // session. Grabbed before boxing because `bypass_disabled` only exists once
@@ -2859,6 +2864,8 @@ pub async fn build_with_credential_stack(
         // stale-flag foot-gun.)
         let mut policy =
             permission::PermissionPolicy::from_rules(permission::PermissionMode::Default, rules)
+                .with_tool_aliases(cfg.tool_aliases.clone())
+                .map_err(BuildError::InvalidToolAliases)?
                 .with_roots(roots)
                 .with_working_dirs(additional_working_dirs)
                 .with_block_reads_outside_working_directories(
@@ -2914,12 +2921,6 @@ pub async fn build_with_credential_stack(
         // Resolve the active Read(deny) rules to search-exclude globs while
         // the policy is still in scope (before it moves into the gate).
         read_deny_exclude_globs = permission::read_deny_exclude_globs(&policy, &cwd);
-        // FIX 1 (subagent pool): hand the policy's TOOL-WIDE deny names to the
-        // subagent spawner so a blanket-denied tool is stripped from each
-        // child's advertised pool too (claude-code `assembleToolPool` →
-        // `filterToolsByDenyRules`). Set-once; only meaningful when there are
-        // tool-wide deny rules (empty otherwise ⇒ no child-pool filtering).
-        let _ = subagent_tool_wide_deny_cell.set(policy.tool_wide_deny_names());
         let policy = Arc::new(policy);
         // Share the boot policy into `tool_ctx` for the prompt shell-expansion
         // gate (clone the `Arc` BEFORE `policy` moves into the gate below).
@@ -2963,6 +2964,9 @@ pub async fn build_with_credential_stack(
     // permission-mode cycling (`set_permission_mode`), before `perms` is moved
     // into the tool context below.
     let enforcing_permission_gate: Option<Arc<dyn PermissionGate>> = Some(perms.clone());
+    // Resolve child catalogs against the current session policy, including
+    // aliases replaced by a later initialize control request.
+    let _ = subagent_permission_gate_cell.set(perms.clone());
 
     // (5.25) M5-13: build the real hook executor now that `hook_registry`
     //        exists. This replaces the `noop_hook_executor()` stub (which fed
@@ -3664,7 +3668,7 @@ pub async fn build_with_credential_stack(
     // tool registry / skill loader exist (same deferred-fill the spawner uses).
     let teammate_tool_registry_cell = teammate_handler.tool_registry_handle();
     let teammate_skill_loader_cell = teammate_handler.skill_loader_handle();
-    let teammate_tool_wide_deny_cell = teammate_handler.tool_wide_deny_names_handle();
+    let teammate_permission_gate_cell = teammate_handler.permission_gate_handle();
     let teammate_strict_plugin_hooks_cell = teammate_handler.strict_plugin_only_hooks_handle();
     let teammate_system_prompt_renderer_cell = teammate_handler.system_prompt_renderer_handle();
     let teammate_native_settings_prompt_provider_cell =
@@ -4509,7 +4513,7 @@ pub async fn build_with_credential_stack(
         // regardless of any local enforcement toggle.
         permission_policy: boot_permission_policy.clone().unwrap_or_else(|| {
             Arc::new(
-                permission::PermissionPolicy::new(cfg.permission_mode)
+                fallback_permission_policy
                     // Same TS formula as the enforced boot policy above; no
                     // settings were read on this path, so no killswitch term.
                     .with_bypass_available(
@@ -5469,14 +5473,10 @@ pub async fn build_with_credential_stack(
                 >
         }));
     }
-    // In-process teammate full parity (P1): advertise the SAME resolved tool pool
-    // + apply the SAME tool-wide deny filter as the spawner, so a teammate can
-    // actually use tools (not chat-only). The deny names are copied from the
-    // spawner's already-filled cell (set in the enforcement branch above; empty /
-    // unfilled ⇒ no filtering).
+    // Teammates share the parent's live policy rather than a boot snapshot.
     let _ = teammate_tool_registry_cell.set(tools.clone());
-    if let Some(deny) = subagent_tool_wide_deny_cell.get() {
-        let _ = teammate_tool_wide_deny_cell.set(deny.clone());
+    if let Some(gate) = subagent_permission_gate_cell.get() {
+        let _ = teammate_permission_gate_cell.set(gate.clone());
     }
     // Capture the fully-wired restore inheritance before `tools` and `perms`
     // move into the orchestrator. The actual cold restore runs later, after the

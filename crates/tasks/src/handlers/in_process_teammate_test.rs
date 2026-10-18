@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 
 use lingxi_core::host::filesystem::{FileContent, FileEvent, FileSystem, FlockGuard, FsError};
+use lingxi_core::host::permission_gate::{NativeMcpDenyContext, PermissionDecision};
 use lingxi_core::host::RuntimeSpawner;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use test_harness::mocks::MockRuntimeSpawner;
@@ -556,10 +557,36 @@ fn model_test_handler(default_model: Option<&str>) -> InProcessTeammateHandler {
 
 struct RoutePromptTool;
 
+struct MutablePermissionGate(StdMutex<NativeMcpDenyContext>);
+
+impl MutablePermissionGate {
+    fn new(context: NativeMcpDenyContext) -> Self {
+        Self(StdMutex::new(context))
+    }
+
+    fn set_context(&self, context: NativeMcpDenyContext) {
+        *self.0.lock().unwrap() = context;
+    }
+}
+
+#[async_trait]
+impl lingxi_core::host::permission_gate::PermissionGate for MutablePermissionGate {
+    async fn check(&self, _name: &str, _input: &Utf16JsonProjection) -> PermissionDecision {
+        PermissionDecision::Allow
+    }
+
+    async fn native_mcp_deny_context(&self) -> NativeMcpDenyContext {
+        self.0.lock().unwrap().clone()
+    }
+}
+
 #[async_trait]
 impl tool_api::Tool for RoutePromptTool {
     fn name(&self) -> &str {
         "RouteFacts"
+    }
+    fn aliases(&self) -> &[&str] {
+        &["legacy_route_facts"]
     }
     fn input_schema(&self) -> &Utf16JsonProjection {
         static SCHEMA: OnceLock<Utf16JsonProjection> = OnceLock::new();
@@ -679,6 +706,73 @@ async fn teammate_tool_prompts_use_child_model_and_profile_for_duplicate_model_i
             Some(expected_description.as_str())
         );
     }
+}
+
+#[tokio::test]
+async fn teammate_catalog_filters_canonical_tool_denied_through_alias_context() {
+    let mut registry = agent::ToolRegistry::new();
+    registry.register_builtin(Arc::new(RoutePromptTool));
+    let gate = Arc::new(MutablePermissionGate::new(NativeMcpDenyContext::default()));
+    let handler = model_test_handler(Some("parent-model"))
+        .with_tool_registry(Arc::new(registry))
+        .with_permission_gate(gate.clone());
+
+    // An empty/unfilled deny context preserves the existing no-alias behavior.
+    let baseline_definition = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "worker")
+        .await
+        .unwrap();
+    let baseline = handler
+        .build_context(
+            lingxi_core::types::AgentId::new(),
+            "lead",
+            "alpha",
+            "do the task",
+            baseline_definition,
+        )
+        .await
+        .expect("empty deny context keeps the tool available");
+    assert_eq!(baseline.tool_schemas.len(), 1);
+    assert!(baseline
+        .allowed_tools
+        .iter()
+        .any(|name| name == "RouteFacts"));
+    assert!(baseline
+        .allowed_tools
+        .iter()
+        .any(|name| name == "legacy_route_facts"));
+
+    let deny_context = lingxi_core::host::permission_gate::NativeMcpDenyContext {
+        tool_aliases: Some(
+            Utf16JsonProjection::parse(r#"{"legacy_route_facts":"RouteFacts"}"#)
+                .expect("alias map source projection is valid JSON"),
+        ),
+        deny_rules: vec![lingxi_core::host::permission_gate::NativeMcpDenyRule {
+            tool_name: "legacy_route_facts".into(),
+            rule_content: None,
+            proxy_expansion: true,
+        }],
+    };
+    // The handler keeps this same live gate Arc. Updating its policy between
+    // catalog builds must filter the next teammate, not just the first one.
+    gate.set_context(deny_context);
+
+    let denied_definition = DefaultTeammateDefinition
+        .resolve(&lingxi_core::types::AgentId::new(), "worker")
+        .await
+        .unwrap();
+    let denied = handler
+        .build_context(
+            lingxi_core::types::AgentId::new(),
+            "lead",
+            "alpha",
+            "do the task",
+            denied_definition,
+        )
+        .await
+        .expect("alias deny filters the canonical tool in the teammate catalog");
+    assert!(denied.tool_schemas.is_empty());
+    assert!(denied.allowed_tools.is_empty());
 }
 
 struct StaticSystemPromptRenderer(&'static str);

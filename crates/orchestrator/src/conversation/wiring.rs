@@ -213,7 +213,7 @@ impl ConversationOrchestrator {
             coordinator_simple_mode_override: None,
             #[cfg(test)]
             coordinator_pool_override: None,
-            tool_pool_denied_names: std::sync::RwLock::new(Vec::new()),
+            tool_pool_deny_context: std::sync::RwLock::new(Default::default()),
             main_agent_tool_names: std::sync::RwLock::new(None),
         }
     }
@@ -961,23 +961,37 @@ impl ConversationOrchestrator {
     }
 
     pub(crate) fn is_tool_pool_denied(&self, tool: &dyn tool_api::Tool) -> bool {
-        let denied = self
-            .tool_pool_denied_names
+        let context = self
+            .tool_pool_deny_context
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        denied.iter().any(|rule| {
-            std::iter::once(tool.name())
-                .chain(tool.underlying_v1_tool_name())
-                .chain(tool.family_parent_tool_name().filter(|name| {
-                    self.tools.find_registered(name).is_some_and(|parent| {
-                        parent.is_enabled(&tool_api::tool_trait::ToolStaticContext {
-                            main_loop_model: self.tools.main_loop_model(),
-                            ..Default::default()
-                        })
-                    })
-                }))
-                .chain(tool.aliases().iter().copied())
-                .any(|name| permission::tool_wide_name_matches(rule, name))
+        self.is_tool_pool_denied_with_context(tool, &context)
+    }
+
+    pub(crate) fn is_tool_pool_denied_with_context(
+        &self,
+        tool: &dyn tool_api::Tool,
+        context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
+    ) -> bool {
+        let primary_name_denied = std::iter::once(tool.name())
+            .chain(tool.underlying_v1_tool_name())
+            .chain(tool.aliases().iter().copied())
+            .any(|name| permission::native_deny_context_matches_tool_name(context, name));
+        if primary_name_denied {
+            return true;
+        }
+        tool.family_parent_tool_name().is_some_and(|parent_name| {
+            self.tools
+                .find_registered(parent_name)
+                .is_some_and(|parent| {
+                    parent.is_enabled(&tool_api::tool_trait::ToolStaticContext {
+                        main_loop_model: self.tools.main_loop_model(),
+                        ..Default::default()
+                    }) && context
+                        .deny_rules
+                        .iter()
+                        .any(|rule| rule.rule_content.is_none() && rule.tool_name == parent_name)
+                })
         })
     }
 

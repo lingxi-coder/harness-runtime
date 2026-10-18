@@ -172,9 +172,11 @@ pub use persist::{
     PersistError,
 };
 pub use policy::{
-    job_tmp_session_allowance, tool_wide_name_matches, PermissionPolicy, SessionReadAllowance,
-    JOB_TMP_READ_ALLOW_REASON, PROJECT_TEMP_READ_ALLOW_REASON, SCRATCHPAD_READ_ALLOW_REASON,
-    TOOL_RESULT_READ_ALLOW_REASON,
+    job_tmp_session_allowance, native_deny_context_matches_tool_name,
+    native_rule_content_alias_matches, native_rule_content_matches_alias_source,
+    native_tool_alias_source_units, native_tool_wide_rule_matches, tool_wide_name_matches,
+    PermissionPolicy, SessionReadAllowance, JOB_TMP_READ_ALLOW_REASON,
+    PROJECT_TEMP_READ_ALLOW_REASON, SCRATCHPAD_READ_ALLOW_REASON, TOOL_RESULT_READ_ALLOW_REASON,
 };
 pub use policy_gate::{LiveModelContext, LiveModelProvider, PolicyPermissionGate};
 pub use prompting_gate::InteractivePromptingGate;

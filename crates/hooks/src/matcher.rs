@@ -8,9 +8,10 @@
 //! exactly:
 //!
 //! 1. `*` / empty → match everything (short-circuit `true`).
-//! 2. `^[A-Za-z0-9_|]+$` → a "simple" pattern with no regex metacharacters
-//!    other than `|`: an exact match, or — when it contains `|` — a match
-//!    against any pipe-separated segment (each `trim()`-med + legacy-normalized).
+//! 2. A "simple" pattern with no regex metacharacters other than the active
+//!    list separators: an exact match, or a match against any `|`-separated
+//!    segment (plus comma-separated segments in event comma mode; each is
+//!    `trim()`-med + legacy-normalized).
 //! 3. Otherwise → treat the pattern as an anchored-or-not regex. An invalid
 //!    regex logs and returns `false` (never panics), exactly like the TS
 //!    `try { new RegExp(...) } catch { … return false }`.
@@ -32,7 +33,7 @@ use rquickjs::{Context, Runtime};
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-/// the binary's `atf` membership exactly (note: `FileChanged`,
+/// Native 2.1.295's `J9` membership exactly (note: `FileChanged`,
 /// `UserPromptSubmit`, `Stop`, the task/teammate events, etc. are NOT in it).
 pub(crate) fn comma_mode_for(event_type: &HookEventType) -> bool {
     matches!(
@@ -48,6 +49,8 @@ pub(crate) fn comma_mode_for(event_type: &HookEventType) -> bool {
             | HookEventType::Setup
             | HookEventType::PreCompact
             | HookEventType::PostCompact
+            | HookEventType::PreModelSwitch
+            | HookEventType::PostModelSwitch
             | HookEventType::Notification
             | HookEventType::SubagentStart
             | HookEventType::SubagentStop
@@ -55,6 +58,7 @@ pub(crate) fn comma_mode_for(event_type: &HookEventType) -> bool {
             | HookEventType::ElicitationResult
             | HookEventType::ConfigChange
             | HookEventType::InstructionsLoaded
+            | HookEventType::DirectoryAdded
     )
 }
 
@@ -110,11 +114,9 @@ pub fn matches_pattern(match_query: &str, matcher: &str) -> bool {
 ///   tool events; the MCP server name / config source / load reason / changed
 ///   file basename for the corresponding non-tool events).
 /// * `matcher` (`t`) — the hook's declared pattern.
-/// * `comma_mode` (`n`) — `true` for events in claude's comma-mode set (`atf`);
-///   it widens the "simple pattern" char class to `^[a-zA-Z0-9_|, -]+$` (the
-///   space + comma were always allowed in comma-mode; the **`-` hyphen is the
-///   v2.1.195 addition**, so hyphenated names — e.g. MCP server names — match as
-///   simple list entries) and splits the simple pattern on BOTH `|` and `,`.
+/// * `comma_mode` (`n`) — `true` for events in Native 2.1.295's `J9` set; it
+///   widens the simple-pattern character class to
+///   `^[a-zA-Z0-9_|, -]+$` and splits simple patterns on both `|` and `,`.
 ///   When `false`, the classic `^[a-zA-Z0-9_|]+$` / `|`-only behavior applies.
 /// * `tool_aliases` (`r`) — claude `toolPermissionContext.toolAliases`: an extra
 ///   runtime alias map layered on top of the static legacy-tool-name map. It

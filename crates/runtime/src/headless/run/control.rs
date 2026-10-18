@@ -80,6 +80,19 @@ pub(super) fn resolve_set_model_target(field: Option<JsonValueView<'_>>) -> SetM
     }
 }
 
+async fn apply_initialize_tool_aliases(
+    orchestrator: &Arc<orchestrator::ConversationOrchestrator>,
+    request: &Utf16JsonProjection,
+) -> Result<(), String> {
+    if request.get_property("toolAliases").is_none() {
+        return Ok(());
+    }
+    let aliases = request
+        .subprojection("/toolAliases")
+        .map_err(|error| format!("initialize: invalid toolAliases source: {error}"))?;
+    orchestrator.set_native_tool_aliases(aliases).await
+}
+
 /// Dispatch a single `control_request` frame using initialization data collected
 /// before the asynchronous dispatcher task starts.
 #[allow(clippy::too_many_arguments)]
@@ -126,6 +139,12 @@ pub(super) async fn dispatch_control_request(
 
     match subtype {
         "initialize" => {
+            if let Err(error) =
+                apply_initialize_tool_aliases(orchestrator, &request_projection).await
+            {
+                writer.reply_error(request_id, &error);
+                return writer.finish();
+            }
             orchestrator.apply_native_proactivity_initialize(
                 field("proactivity").and_then(JsonValueView::as_bool),
                 field("reinitialize").and_then(JsonValueView::as_bool) == Some(true),
@@ -1594,6 +1613,194 @@ impl RequestReplyWriter<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::headless::run::PrintAuxTaskGroup;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_initialize_alias_request(
+        runtime: &Runtime,
+        writer: &ControlPlaneWriter,
+        _outbound: &Arc<crate::headless::stream_json::OutboundTx>,
+        receiver: &mut tokio::sync::mpsc::UnboundedReceiver<
+            crate::headless::stream_json::OutboundMsg,
+        >,
+        id: &str,
+        request: &str,
+        cancel: &tokio::sync::watch::Sender<bool>,
+        lifecycle: &crate::headless::queued_commands::QueueLifecycle,
+        plane: &Arc<crate::headless::control_plane::StdioControlPlane>,
+        end: &Arc<tokio::sync::Notify>,
+        auxiliary_tasks: &Arc<PrintAuxTaskGroup>,
+    ) -> serde_json::Value {
+        let frame = Utf16JsonProjection::parse(&format!(
+            r#"{{"type":"control_request","request_id":"{id}","request":{request}}}"#
+        ))
+        .unwrap();
+        dispatch_control_request(
+            "initialize",
+            id,
+            &frame,
+            writer,
+            cancel,
+            lifecycle,
+            &runtime.orchestrator,
+            &runtime.task_registry,
+            &runtime.session_cwd,
+            plane,
+            end,
+            &[],
+            &[],
+            &[],
+            &json!({}),
+            "off",
+            None,
+            &StreamFileSuggestionIndex::default(),
+            &runtime.prompt_suggestions,
+            runtime.services.as_ref(),
+            auxiliary_tasks,
+            &runtime.execution_errors,
+        )
+        .await
+        .unwrap();
+
+        let Some(crate::headless::stream_json::OutboundMsg::Line(line)) = receiver.recv().await
+        else {
+            panic!("initialize must return one control response")
+        };
+        serde_json::from_str(&line).unwrap()
+    }
+
+    #[tokio::test]
+    async fn initialize_tool_aliases_refresh_the_live_policy_and_reject_invalid_maps() {
+        let root = tempfile::tempdir().unwrap();
+        let stream = Arc::new(
+            crate::headless::stream_json::StreamJsonStream::new_placeholder(
+                crate::headless::io::Output::new(tokio::io::sink()),
+            ),
+        );
+        let runtime = super::super::tests::fixture_runtime(stream, root.path()).await;
+        let (tx, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let outbound = Arc::new(tx);
+        let writer = ControlPlaneWriter::new(Arc::clone(&outbound));
+        let cancel = tokio::sync::watch::channel(false).0;
+        let lifecycle = crate::headless::queued_commands::QueueLifecycle::new(
+            Arc::clone(&outbound),
+            "initialize-tool-aliases".to_owned(),
+        );
+        let plane = crate::headless::control_plane::StdioControlPlane::new(Arc::clone(&outbound));
+        let end = Arc::new(tokio::sync::Notify::new());
+        let auxiliary_tasks = Arc::new(PrintAuxTaskGroup::default());
+
+        let initial = dispatch_initialize_alias_request(
+            &runtime,
+            &writer,
+            &outbound,
+            &mut receiver,
+            "aliases-initial",
+            r#"{"subtype":"initialize","toolAliases":{"friendly":"Read","surrogate-\ud800":"target-\udfff"}}"#,
+            &cancel,
+            &lifecycle,
+            &plane,
+            &end,
+            &auxiliary_tasks,
+        )
+        .await;
+        assert_eq!(initial["response"]["subtype"], "success");
+        let initial_aliases =
+            Utf16JsonProjection::parse(r#"{"friendly":"Read","surrogate-\ud800":"target-\udfff"}"#)
+                .unwrap();
+        assert_eq!(
+            runtime
+                .orchestrator
+                .native_mcp_deny_context()
+                .await
+                .tool_aliases,
+            Some(initial_aliases)
+        );
+
+        let refreshed = dispatch_initialize_alias_request(
+            &runtime,
+            &writer,
+            &outbound,
+            &mut receiver,
+            "aliases-refreshed",
+            r#"{"subtype":"initialize","reinitialize":true,"toolAliases":{"friendly":"Write","surrogate-\ud800":"replacement-\udfff"}}"#,
+            &cancel,
+            &lifecycle,
+            &plane,
+            &end,
+            &auxiliary_tasks,
+        )
+        .await;
+        assert_eq!(refreshed["response"]["subtype"], "success");
+        let refreshed_aliases = Utf16JsonProjection::parse(
+            r#"{"friendly":"Write","surrogate-\ud800":"replacement-\udfff"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            runtime
+                .orchestrator
+                .native_mcp_deny_context()
+                .await
+                .tool_aliases,
+            Some(refreshed_aliases.clone())
+        );
+
+        let omitted = dispatch_initialize_alias_request(
+            &runtime,
+            &writer,
+            &outbound,
+            &mut receiver,
+            "aliases-omitted",
+            r#"{"subtype":"initialize","proactivity":true}"#,
+            &cancel,
+            &lifecycle,
+            &plane,
+            &end,
+            &auxiliary_tasks,
+        )
+        .await;
+        assert_eq!(omitted["response"]["subtype"], "success");
+        assert_eq!(
+            runtime
+                .orchestrator
+                .native_mcp_deny_context()
+                .await
+                .tool_aliases,
+            Some(refreshed_aliases.clone()),
+            "an omitted field leaves the current map unchanged"
+        );
+
+        let invalid = dispatch_initialize_alias_request(
+            &runtime,
+            &writer,
+            &outbound,
+            &mut receiver,
+            "aliases-invalid",
+            r#"{"subtype":"initialize","toolAliases":{"friendly":false}}"#,
+            &cancel,
+            &lifecycle,
+            &plane,
+            &end,
+            &auxiliary_tasks,
+        )
+        .await;
+        assert_eq!(invalid["response"]["subtype"], "error");
+        assert_eq!(
+            invalid["response"]["error"],
+            "toolAliases must be an object of string values"
+        );
+        assert_eq!(
+            runtime
+                .orchestrator
+                .native_mcp_deny_context()
+                .await
+                .tool_aliases,
+            Some(refreshed_aliases),
+            "a rejected initialize leaves the prior map current"
+        );
+    }
+
     #[test]
     fn attach_viewport_is_canonical_and_accepts_positive_integer_numbers() {
         let request = projection_from_value(
@@ -1610,7 +1817,6 @@ mod tests {
         assert!(super::validate_ui_attach(&request).is_err());
     }
 
-    use super::*;
     #[tokio::test]
     async fn request_reply_retains_utf16_identity_and_native_key_order() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

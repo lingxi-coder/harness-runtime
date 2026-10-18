@@ -21,12 +21,12 @@ fn native_mcp_tool_identity(name: &str) -> Option<(&str, &str)> {
 /// deliberately not a retraction cause.
 fn native_mcp_revocation_cause(
     name: &str,
-    deny_rules: &[String],
+    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
     state: Option<lingxi_core::host::McpActionState>,
     config: Option<&mcp::McpServerConfig>,
     failure: Option<&mcp::McpFailedServerSnapshot>,
 ) -> Option<&'static str> {
-    if super::model_reminders_impl::native_mcp_dropped_tool_denied(deny_rules, name) {
+    if super::model_reminders_impl::native_mcp_dropped_tool_denied(deny_context, name) {
         return Some("denied");
     }
     let (_, tool_name) = native_mcp_tool_identity(name)?;
@@ -3426,7 +3426,14 @@ message with multiple tool uses so they run concurrently."
             needs_auth,
             failed,
         };
-        let deny_rules = self.perms.tool_wide_deny_names().await;
+        // Tool-pool assembly ran earlier in this prepare cycle. Reuse its
+        // snapshot so retraction classification stays in the same permission
+        // generation as the outgoing catalog.
+        let deny_context = self
+            .tool_pool_deny_context
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let mut configs = std::collections::HashMap::new();
         if let Some(registry) = &self.mcp_registry {
             for name in prior_declared.as_deref().unwrap_or_default() {
@@ -3451,7 +3458,7 @@ message with multiple tool uses so they run concurrently."
                 let normalized_server = mcp::normalization::normalize_name_for_mcp(server_name);
                 let cause = native_mcp_revocation_cause(
                     name,
-                    &deny_rules,
+                    &deny_context,
                     mcp_states.get(&normalized_server).copied(),
                     configs.get(&normalized_server).and_then(Option::as_ref),
                     failed_by_name.get(&normalized_server).copied(),
@@ -3941,6 +3948,21 @@ mod native_deferred_revocation_tests {
         assert!(native_tool_change_api_system_message(&ordinary_tool_search, &[]).is_none());
     }
 
+    fn deny_context(names: &[&str]) -> lingxi_core::host::permission_gate::NativeMcpDenyContext {
+        use lingxi_core::host::permission_gate::{NativeMcpDenyContext, NativeMcpDenyRule};
+        NativeMcpDenyContext {
+            tool_aliases: None,
+            deny_rules: names
+                .iter()
+                .map(|name| NativeMcpDenyRule {
+                    tool_name: (*name).to_owned(),
+                    rule_content: None,
+                    proxy_expansion: false,
+                })
+                .collect(),
+        }
+    }
+
     #[test]
     fn wgn_retains_only_native_revocation_causes() {
         let blocked_config = {
@@ -3972,7 +3994,7 @@ mod native_deferred_revocation_tests {
         assert_eq!(
             native_mcp_revocation_cause(
                 "mcp__srv__tool",
-                &["mcp__srv__to*".into()],
+                &deny_context(&["mcp__srv__to*"]),
                 Some(lingxi_core::host::McpActionState::Connected),
                 None,
                 None,
@@ -3983,7 +4005,7 @@ mod native_deferred_revocation_tests {
         assert_eq!(
             native_mcp_revocation_cause(
                 "mcp__srv__write",
-                &[],
+                &deny_context(&[]),
                 Some(lingxi_core::host::McpActionState::Connected),
                 Some(&blocked_config),
                 None,
@@ -3993,7 +4015,7 @@ mod native_deferred_revocation_tests {
         assert_eq!(
             native_mcp_revocation_cause(
                 "mcp__srv__tool",
-                &[],
+                &deny_context(&[]),
                 Some(lingxi_core::host::McpActionState::Disabled),
                 Some(&stdio_config()),
                 None,
@@ -4003,7 +4025,7 @@ mod native_deferred_revocation_tests {
         assert_eq!(
             native_mcp_revocation_cause(
                 "mcp__srv__tool",
-                &[],
+                &deny_context(&[]),
                 Some(lingxi_core::host::McpActionState::Disabled),
                 Some(&sdk_config),
                 None,
@@ -4013,7 +4035,7 @@ mod native_deferred_revocation_tests {
         assert_eq!(
             native_mcp_revocation_cause(
                 "mcp__srv__tool",
-                &[],
+                &deny_context(&[]),
                 Some(lingxi_core::host::McpActionState::Failed),
                 None,
                 Some(&policy_failure),
@@ -4030,7 +4052,7 @@ mod native_deferred_revocation_tests {
         assert_eq!(
             native_mcp_revocation_cause(
                 "mcp__srv__tool",
-                &[],
+                &deny_context(&[]),
                 Some(lingxi_core::host::McpActionState::Failed),
                 None,
                 Some(&display_only_policy_failure),
@@ -4041,7 +4063,7 @@ mod native_deferred_revocation_tests {
         assert_eq!(
             native_mcp_revocation_cause(
                 "mcp__srv__tool",
-                &[],
+                &deny_context(&[]),
                 Some(lingxi_core::host::McpActionState::Failed),
                 None,
                 Some(&unconfigured_failure),
@@ -4058,7 +4080,7 @@ mod native_deferred_revocation_tests {
         assert_eq!(
             native_mcp_revocation_cause(
                 "mcp__srv__tool",
-                &[],
+                &deny_context(&[]),
                 Some(lingxi_core::host::McpActionState::Failed),
                 None,
                 Some(&disconnected),
@@ -4067,7 +4089,7 @@ mod native_deferred_revocation_tests {
             "Native disconnected and retrying failures are not retractedTools causes"
         );
         assert_eq!(
-            native_mcp_revocation_cause("mcp__srv__tool", &[], None, None, None),
+            native_mcp_revocation_cause("mcp__srv__tool", &deny_context(&[]), None, None, None),
             Some("not_configured"),
             "Native maps a missing current MCP client row to not_configured"
         );

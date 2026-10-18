@@ -1219,13 +1219,15 @@ impl ConversationOrchestrator {
             registry.refresh_pending_servers().await;
         }
         let mut tools = self.tools.available_tools(&ToolStaticContext::default());
-        let denied = self.perms.tool_wide_deny_names().await;
+        let deny_context = self.perms.native_mcp_deny_context().await;
         *self
-            .tool_pool_denied_names
+            .tool_pool_deny_context
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = denied.clone();
-        if !denied.is_empty() {
-            tools.retain(|t| !self.is_tool_pool_denied(t.as_ref()));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = deny_context.clone();
+        if !deny_context.deny_rules.is_empty() {
+            tools.retain(|tool| {
+                !self.is_tool_pool_denied_with_context(tool.as_ref(), &deny_context)
+            });
         }
         Self::apply_wait_for_mcp_servers_gate(&mut tools);
         {

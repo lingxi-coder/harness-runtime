@@ -300,11 +300,10 @@ pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEnt
 ///   contains `"*"`, so a wildcard list ([`AgentToolPolicy::All`]) is skipped.
 /// * the surviving case is a non-empty, wildcard-free explicit allow-list; the
 ///   agent stays available iff SOME entry is both un-denied (`!ak(t,{name:o})`,
-///   a deny rule matched against the bare tool NAME ⇒ the port's tool-wide deny
-///   names, matched with [`permission::tool_wide_name_matches`] — the SAME
-///   matcher [`crate::tool_resolver::resolve_subagent_tools`] uses to strip the
-///   spawn's pool, so this predicate cannot disagree with the pool the agent
-///   would actually get) and usable
+///   a deny rule matched against the bare tool NAME using the same Native
+///   deny-context matcher [`crate::tool_resolver::resolve_subagent_tools`] uses
+///   to strip the spawn's pool, so this predicate cannot disagree with the pool
+///   the agent would actually get) and usable
 ///   (`_Tv(o) = o!==cm||Vs(wjr)` — `WebFetch` additionally needs the
 ///   `allow_web_fetch` entitlement,
 ///   [`crate::builtins::web_fetch_policy_allowed`]).
@@ -318,7 +317,7 @@ pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEnt
 #[must_use]
 pub fn tools_denied_agent_types(
     defs: &[AgentDefinition],
-    tool_wide_deny: &[String],
+    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
 ) -> Vec<String> {
     let mut by_type: HashMap<String, &AgentDefinition> = HashMap::new();
     for def in defs {
@@ -326,7 +325,7 @@ pub fn tools_denied_agent_types(
     }
     let mut out: Vec<String> = by_type
         .into_values()
-        .filter(|def| every_tool_denied(def, tool_wide_deny))
+        .filter(|def| every_tool_denied(def, deny_context))
         .map(|def| def.agent_type.clone())
         .collect();
     out.sort();
@@ -335,7 +334,10 @@ pub fn tools_denied_agent_types(
 
 /// claude `mdr(e,t)` (@290291941) = `NJa([e],t).length===0` — the single-agent
 /// arm of [`tools_denied_agent_types`].
-pub(super) fn every_tool_denied(def: &AgentDefinition, tool_wide_deny: &[String]) -> bool {
+pub(super) fn every_tool_denied(
+    def: &AgentDefinition,
+    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
+) -> bool {
     // `r.source!=="built-in"` ⇒ kept (never withheld).
     if !matches!(def.source, AgentSource::BuiltIn) {
         return false;
@@ -350,9 +352,7 @@ pub(super) fn every_tool_denied(def: &AgentDefinition, tool_wide_deny: &[String]
     // `!r.tools.some(...)` — no entry is both un-denied and usable.
     !names.iter().any(|name| {
         let tool = rule_tool_name(name);
-        let denied = tool_wide_deny
-            .iter()
-            .any(|d| permission::tool_wide_name_matches(d, tool));
+        let denied = permission::native_deny_context_matches_tool_name(deny_context, tool);
         // `_Tv(o) = o !== cm || Vs(wjr)`
         let usable = tool != crate::builtins::WEB_FETCH_TOOL_NAME
             || crate::builtins::web_fetch_policy_allowed();
@@ -748,12 +748,14 @@ impl PoolSubagentSpawner {
             return Ok((Vec::new(), Vec::new(), false));
         };
         // Delegate to the shared resolver (single source of truth, also used by
-        // the in-process teammate handler). The tool-wide deny names come from the
-        // boot policy via the set-once cell. Tool prompts use the child's
-        // admitted route directly; a same-named model on another profile must
-        // retain that profile's tool capability facts.
-        let empty: Vec<String> = Vec::new();
-        let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
+        // the in-process teammate handler). Read one Native deny-context
+        // snapshot from the same live gate used for authorization. Tool prompts
+        // use the child's admitted route directly; a same-named model on another
+        // profile must retain that profile's tool capability facts.
+        let deny_context = match self.permission_gate.get() {
+            Some(gate) => gate.native_mcp_deny_context().await,
+            None => lingxi_core::host::permission_gate::NativeMcpDenyContext::default(),
+        };
         let coordinator_mode = self
             .coordinator_mode
             .get()
@@ -761,7 +763,7 @@ impl PoolSubagentSpawner {
         crate::tool_resolver::resolve_subagent_tools_with_handback(
             registry.as_ref(),
             agent_def,
-            denied,
+            &deny_context,
             child_selection,
             depth,
             coordinator_mode,

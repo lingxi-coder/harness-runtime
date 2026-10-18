@@ -449,6 +449,10 @@ pub struct DesktopConfig {
     /// Precedence-ordered `.mcp.json` paths (project preferred over global)
     /// handed to `mcp::load_mcp_json_with_precedence`.
     pub mcp_paths: Vec<std::path::PathBuf>,
+    /// Native embedding `Options.toolAliases`, a single-hop name-to-name map.
+    /// The original JSON object preserves source key/value UTF-16 units.
+    /// Omission means no aliases; the policy builder validates supplied maps.
+    pub tool_aliases: Option<Utf16JsonProjection>,
     /// When `true`, bind `NoOpPermissionGate` (the CLI default); when `false`,
     /// the host binds the connection-scoped `AdapterPermissionGate`.
     pub use_noop_permission_gate: bool,
@@ -1206,6 +1210,7 @@ impl Default for DesktopConfig {
             provider_profiles: None,
             routing: None,
             mcp_paths: Vec::new(),
+            tool_aliases: None,
             use_noop_permission_gate: true,
             deny_unresolved_ask: false,
             is_tty: false,

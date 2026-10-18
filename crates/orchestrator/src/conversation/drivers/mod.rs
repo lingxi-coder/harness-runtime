@@ -58,6 +58,10 @@ pub struct QueuedPromptInput {
     pub message_origin: Option<Utf16JsonProjection>,
     /// Native outer `promptSource` value when the source is known.
     pub prompt_source: Option<Utf16JsonProjection>,
+    /// Original SDK `message.content` root shape when the ingress explicitly
+    /// supplied it: `Some(true)` is a JSON string, `Some(false)` is a block
+    /// array, and `None` means the source shape is unknown.
+    pub sdk_content_is_json_string: Option<bool>,
     /// Trusted source kind stamped by a host and retained through durable
     /// queue recovery. `DirectBash` is a one-step classification, never read
     /// back from the rendered transcript row.
@@ -94,6 +98,7 @@ impl Default for QueuedPromptInput {
             mod_origin: None,
             message_origin: None,
             prompt_source: None,
+            sdk_content_is_json_string: None,
             prompt_ingress_kind: None,
             skip_model_query: false,
             message_id: None,
@@ -3628,6 +3633,12 @@ impl ConversationOrchestrator {
     ) -> Result<TurnOutcome, OrchestratorError> {
         let display = prompt.string_at("").unwrap_or_default().to_owned();
         let native_user_source = crate::native_user_message_source::current().unwrap_or_default();
+        let sdk_content_is_json_string = (native_user_source
+            .prompt_source
+            .as_ref()
+            .and_then(|source| source.string_at(""))
+            == Some("sdk"))
+        .then(|| prompt.string_units("").is_some());
         self.run_turn_streaming_inputs_locked(
             turn_guard,
             &display,
@@ -3641,6 +3652,7 @@ impl ConversationOrchestrator {
                 is_meta: !in_human_turn,
                 message_origin: native_user_source.message_origin,
                 prompt_source: native_user_source.prompt_source,
+                sdk_content_is_json_string,
                 message_id,
                 transcript_row_token: row_token.clone(),
                 ..Default::default()

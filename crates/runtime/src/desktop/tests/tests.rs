@@ -4347,6 +4347,46 @@ async fn desktop_factory_exposes_admitted_native_classifier_policy_snapshot() {
 }
 
 #[tokio::test]
+async fn desktop_factory_carries_native_tool_aliases_into_the_live_policy() {
+    let (_tmp, mut cfg) = test_config(true);
+    cfg.restricted = true;
+    let aliases =
+        Utf16JsonProjection::parse(r#"{"friendly":"mcp__server__tool","source_\ud800":"Read"}"#)
+            .expect("source-preserving alias object");
+    cfg.tool_aliases = Some(aliases.clone());
+    let runtime = build(
+        cfg,
+        Arc::new(orchestrator::test_support::MockOutputStream::new()),
+        Arc::new(RecordingPermissionSink::default()),
+    )
+    .await
+    .expect("desktop alias composition");
+    let snapshot = runtime
+        .enforcing_permission_gate
+        .as_ref()
+        .expect("policy gate")
+        .native_mcp_deny_context()
+        .await;
+    assert_eq!(snapshot.tool_aliases, Some(aliases));
+}
+
+#[tokio::test]
+async fn desktop_factory_rejects_non_string_native_tool_alias_targets() {
+    let (_tmp, mut cfg) = test_config(true);
+    cfg.tool_aliases = Some(Utf16JsonProjection::parse(r#"{"friendly":false}"#).unwrap());
+    let result = build(
+        cfg,
+        Arc::new(orchestrator::test_support::MockOutputStream::new()),
+        Arc::new(RecordingPermissionSink::default()),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(super::BuildError::InvalidToolAliases(_))
+    ));
+}
+
+#[tokio::test]
 async fn failed_task_drain_preserves_desktop_runtime_authorities_for_retry() {
     use platform_posix::{PosixFileSystem, PosixRuntime};
     use tasks::task_trait::{Task, TaskContext, TaskError, TaskHandle, TaskSpawnInput};

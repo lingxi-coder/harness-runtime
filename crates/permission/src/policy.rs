@@ -621,6 +621,10 @@ pub struct PermissionPolicy {
     /// permission mode. `true` in any settings source wins (see
     /// [`crate::loader::block_reads_outside_working_directories_from_settings_json`]).
     pub block_reads_outside_working_directories: bool,
+    /// The exact Native `Options.toolAliases` source object. Keys and values
+    /// remain in the UTF-16 projection so alias source enumeration never
+    /// narrows JavaScript strings through Rust `String`.
+    pub tool_aliases: Option<Utf16JsonProjection>,
     /// Minimal sandbox-runtime config for the bash sandbox-auto-allow layer
     /// (`bashToolHasPermission`'s `isSandboxingEnabled() &&
     /// isAutoAllowBashIfSandboxedEnabled() && shouldUseSandbox(input)` branch).
@@ -825,6 +829,7 @@ impl PermissionPolicy {
             stripped_positions: Vec::new(),
             additional_working_dirs: AdditionalWorkingDirs::new(),
             block_reads_outside_working_directories: false,
+            tool_aliases: None,
             sandbox_runtime: None,
             pwsh_parser: None,
             plan_files: None,
@@ -845,6 +850,24 @@ impl PermissionPolicy {
     ) -> Self {
         self.session_read_allowances = allowances.into_iter().collect();
         self
+    }
+
+    /// Attach the validated Native `Options.toolAliases` object.
+    ///
+    /// Native treats this as a one-hop string-to-string map. The complete
+    /// source projection is retained to preserve exact UTF-16 keys, values,
+    /// and JavaScript property order for alias-source matching.
+    pub fn with_tool_aliases(
+        mut self,
+        aliases: Option<Utf16JsonProjection>,
+    ) -> Result<Self, String> {
+        if let Some(source) = &aliases {
+            lingxi_core::host::permission_gate::NativeMcpDenyContext::validate_tool_aliases(
+                source,
+            )?;
+        }
+        self.tool_aliases = aliases;
+        Ok(self)
     }
 
     /// Publish the session's plan-file identity holder — see
@@ -1240,6 +1263,97 @@ impl PermissionPolicy {
             .filter(|r| r.value.rule_content.is_none())
             .map(|r| r.value.tool_name.clone())
             .collect()
+    }
+
+    /// Snapshot the live name/content deny facts consumed by Native `Jqe`.
+    /// This intentionally retains content rules, unlike the advertised-tool
+    /// filter's [`Self::tool_wide_deny_names`], because Native only consults
+    /// selected content rules when `toolAliases` supplies alias sources.
+    #[must_use]
+    pub fn native_mcp_deny_context(
+        &self,
+    ) -> lingxi_core::host::permission_gate::NativeMcpDenyContext {
+        let mut deny_rules = self
+            .deny_rules
+            .values()
+            .flat_map(|rules| rules.iter())
+            .map(
+                |rule| lingxi_core::host::permission_gate::NativeMcpDenyRule {
+                    tool_name: rule.value.tool_name.clone(),
+                    rule_content: rule.value.rule_content.clone(),
+                    proxy_expansion: !matches!(
+                        rule.source,
+                        PermissionRuleSource::CliArg | PermissionRuleSource::ToolsNarrowing
+                    ),
+                },
+            )
+            .collect::<Vec<_>>();
+        deny_rules.sort_by(|left, right| {
+            left.tool_name
+                .cmp(&right.tool_name)
+                .then_with(|| left.proxy_expansion.cmp(&right.proxy_expansion))
+                .then_with(|| {
+                    left.rule_content
+                        .as_ref()
+                        .and_then(|content| content.string_units(""))
+                        .cmp(
+                            &right
+                                .rule_content
+                                .as_ref()
+                                .and_then(|content| content.string_units("")),
+                        )
+                })
+        });
+        lingxi_core::host::permission_gate::NativeMcpDenyContext {
+            tool_aliases: self.tool_aliases.clone(),
+            deny_rules,
+        }
+    }
+
+    /// Does this Native permission snapshot deny one provider-visible tool
+    /// name? This is the shared `Jqe` name/content projection used both by the
+    /// MCP dropped-tool reminder and by the outgoing tool catalog, so both
+    /// surfaces see one source-unit alias map and one permission generation.
+    #[must_use]
+    pub fn native_deny_context_matches_tool_name(
+        context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
+        tool_name: &str,
+    ) -> bool {
+        let tool_units = tool_name.encode_utf16().collect::<Vec<_>>();
+        let alias_sources =
+            native_tool_alias_source_units(context.tool_aliases.as_ref(), &tool_units);
+
+        context.deny_rules.iter().any(|rule| {
+            let Some(content) = &rule.rule_content else {
+                return native_tool_wide_rule_matches(
+                    &rule.tool_name,
+                    tool_name,
+                    context.tool_aliases.as_ref(),
+                    true,
+                    rule.proxy_expansion,
+                );
+            };
+
+            alias_sources.iter().any(|alias| {
+                alias.as_slice() != tool_units.as_slice()
+                    && ((rule.proxy_expansion
+                        && native_rule_content_matches_alias_source(
+                            &rule.tool_name,
+                            PermissionBehavior::Deny,
+                            content,
+                            alias,
+                        ))
+                        || (rule.tool_name == tool_name
+                            && String::from_utf16(alias).is_ok_and(|alias_name| {
+                                native_rule_content_matches_alias_source(
+                                    &alias_name,
+                                    PermissionBehavior::Deny,
+                                    content,
+                                    alias,
+                                )
+                            })))
+            })
+        })
     }
 
     /// The source of the highest-priority DENY rule that denies `Agent(<type>)`,
@@ -2065,6 +2179,7 @@ impl PermissionPolicy {
             stripped_positions: self.stripped_positions.clone(),
             additional_working_dirs,
             block_reads_outside_working_directories: self.block_reads_outside_working_directories,
+            tool_aliases: self.tool_aliases.clone(),
             sandbox_runtime: self.sandbox_runtime.clone(),
             pwsh_parser: self.pwsh_parser.clone(),
             plan_files: self.plan_files.clone(),
@@ -2912,9 +3027,17 @@ impl PermissionPolicy {
                 return RulePatternMatch::NoMatch;
             }
             return kind(if rule.value.rule_content.is_none() {
-                tool_wide_name_matches_opts(&rule.value.tool_name, tool_name, rule_uses_glob(rule))
+                self.native_tool_wide_rule_matches(rule, tool_name)
             } else {
                 rule.value.tool_name == tool_name
+                    || rule.value.rule_content.as_ref().is_some_and(|content| {
+                        native_rule_content_alias_matches_for_permission(
+                            rule,
+                            tool_name,
+                            content,
+                            self.tool_aliases.as_ref(),
+                        )
+                    })
             });
         };
         let pattern_units = match rule.value.rule_content_units() {
@@ -2926,11 +3049,7 @@ impl PermissionPolicy {
                 // matches all of that server's tools). GLOB-01: DENY/ASK rules also
                 // glob-match (`h8`/`kqe` pass `globMatching:!0`); ALLOW rules do not
                 // (`nes` default opts).
-                return kind(tool_wide_name_matches_opts(
-                    &rule.value.tool_name,
-                    tool_name,
-                    rule_uses_glob(rule),
-                ));
+                return kind(self.native_tool_wide_rule_matches(rule, tool_name));
             }
             // A malformed/non-string content rule is not tool-wide. In
             // particular, never broaden an exact source rule whose units the
@@ -2947,7 +3066,9 @@ impl PermissionPolicy {
         // `deny:["Agent(subagent_type:foo*)"]` / `deny:["WebSearch(query:*secret*)"]`
         // match, which the dedicated-key logic below cannot express. Gated on
         // DENY/ASK (over-restrict only — never broadens an allow).
-        if rule_uses_glob(rule) && rule.value.tool_name == tool_name {
+        if rule_uses_glob(rule)
+            && rule_content_tool_name_matches(rule, tool_name, self.tool_aliases.as_ref())
+        {
             if let Some((field, pat)) = split_field_pattern_units(&pattern_units) {
                 let dedicated_field = tool_rule_content_field(tool_name)
                     .map(|field| field.encode_utf16().collect::<Vec<_>>());
@@ -2965,6 +3086,7 @@ impl PermissionPolicy {
                 }
             }
         }
+        let alias_group_ok = self.rule_matches_native_content_alias(rule, tool_name);
         let group_ok = match file_tool_kind(tool_name) {
             FileToolKind::NonFile => {
                 // Shell tools: CONTENT rule matches the command (any-subcommand,
@@ -3016,11 +3138,12 @@ impl PermissionPolicy {
                     key_units == pattern_units
                 });
             }
-            FileToolKind::Editor => rule.value.tool_name == "Edit",
+            FileToolKind::Editor => rule.value.tool_name == "Edit" || alias_group_ok,
             FileToolKind::Reader => {
                 rule.value.tool_name == "Read"
                     || (rule.value.tool_name == "Edit"
                         && matches!(rule.behavior, PermissionBehavior::Allow))
+                    || alias_group_ok
             }
         };
         if !group_ok {
@@ -3040,6 +3163,33 @@ impl PermissionPolicy {
             rule.source,
             rule.behavior,
             roots,
+        )
+    }
+
+    fn native_tool_wide_rule_matches(&self, rule: &PermissionRule, tool_name: &str) -> bool {
+        let proxy_expansion = !matches!(rule.behavior, PermissionBehavior::Allow)
+            && !matches!(
+                rule.source,
+                PermissionRuleSource::CliArg | PermissionRuleSource::ToolsNarrowing
+            );
+        native_tool_wide_rule_matches(
+            &rule.value.tool_name,
+            tool_name,
+            self.tool_aliases.as_ref(),
+            rule_uses_glob(rule),
+            proxy_expansion,
+        )
+    }
+
+    fn rule_matches_native_content_alias(&self, rule: &PermissionRule, tool_name: &str) -> bool {
+        let Some(content) = rule.value.rule_content.as_ref() else {
+            return false;
+        };
+        native_rule_content_alias_matches_for_permission(
+            rule,
+            tool_name,
+            content,
+            self.tool_aliases.as_ref(),
         )
     }
 
@@ -4249,6 +4399,242 @@ pub fn tool_wide_name_matches(rule_tool_name: &str, tool_name: &str) -> bool {
     tool_wide_name_matches_opts(rule_tool_name, tool_name, false)
 }
 
+/// Native `jW`: source-alias keys whose effective `Options.toolAliases` value
+/// is the canonical tool name. The projection is read as JavaScript
+/// `Object.entries`, including integer-index key ordering and last-wins
+/// duplicate properties, while key/value UTF-16 units remain intact.
+#[must_use]
+pub fn native_tool_alias_source_units(
+    aliases: Option<&Utf16JsonProjection>,
+    canonical_tool_units: &[u16],
+) -> Vec<Vec<u16>> {
+    let Some(aliases) = aliases else {
+        return Vec::new();
+    };
+    let Some(mut entries) = aliases.object_entries() else {
+        return Vec::new();
+    };
+    entries.sort_by(|left, right| {
+        match (
+            native_js_array_index(left.code_units),
+            native_js_array_index(right.code_units),
+        ) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => std::cmp::Ordering::Equal,
+        }
+    });
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let target = entry.value.code_units()?;
+            (target == canonical_tool_units).then(|| entry.code_units.to_vec())
+        })
+        .collect()
+}
+
+fn native_js_array_index(key_units: &[u16]) -> Option<u32> {
+    let key = String::from_utf16(key_units).ok()?;
+    let index = key.parse::<u32>().ok()?;
+    (index != u32::MAX && index.to_string() == key).then_some(index)
+}
+
+fn native_tool_alias_target_units(
+    aliases: Option<&Utf16JsonProjection>,
+    alias_source_units: &[u16],
+) -> Option<Vec<u16>> {
+    aliases?
+        .object_entries()?
+        .into_iter()
+        .find(|entry| entry.code_units == alias_source_units)
+        .and_then(|entry| entry.value.code_units().map(<[u16]>::to_vec))
+}
+
+/// Shared `Jqe` projection for MCP reminders and provider-visible tool pools.
+#[must_use]
+pub fn native_deny_context_matches_tool_name(
+    context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
+    tool_name: &str,
+) -> bool {
+    PermissionPolicy::native_deny_context_matches_tool_name(context, tool_name)
+}
+
+/// Native `P`'s tool-name matcher for a single source rule. Deny/ask use glob
+/// matching; allow uses neither glob nor proxy expansion. With proxy expansion
+/// enabled, Native `oZ` resolves a rule's one-hop alias target, and a glob can
+/// match the candidate tool's alias-source names. MCP server-prefix matching
+/// remains on the canonical candidate, as it is in Native `coversMcpTool`.
+#[must_use]
+pub fn native_tool_wide_rule_matches(
+    rule_tool_name: &str,
+    tool_name: &str,
+    aliases: Option<&Utf16JsonProjection>,
+    glob_matching: bool,
+    proxy_expansion: bool,
+) -> bool {
+    if tool_wide_name_matches_opts(rule_tool_name, tool_name, glob_matching) {
+        return true;
+    }
+    if !proxy_expansion {
+        return false;
+    }
+
+    let tool_units = tool_name.encode_utf16().collect::<Vec<_>>();
+    let rule_units = rule_tool_name.encode_utf16().collect::<Vec<_>>();
+    if native_tool_alias_target_units(aliases, &rule_units).as_deref()
+        == Some(tool_units.as_slice())
+    {
+        return true;
+    }
+    glob_matching
+        && rule_tool_name.contains('*')
+        && native_tool_alias_source_units(aliases, &tool_units)
+            .iter()
+            .any(|alias| glob_name_matches_units(&rule_units, &alias))
+}
+
+fn glob_name_matches_units(pattern: &[u16], value: &[u16]) -> bool {
+    let mut matched = vec![false; value.len() + 1];
+    matched[0] = true;
+    for pattern_unit in pattern {
+        if *pattern_unit == b'*' as u16 {
+            for index in 1..=value.len() {
+                matched[index] |= matched[index - 1];
+            }
+        } else {
+            for index in (1..=value.len()).rev() {
+                matched[index] = matched[index - 1] && value[index - 1] == *pattern_unit;
+            }
+            matched[0] = false;
+        }
+    }
+    matched[value.len()]
+}
+
+/// Native `S`'s source-dependent content alias branch. Only the source-bound
+/// Bash whitespace rule and Read/Edit-family negated path rules are inherited
+/// through aliases; ordinary content rules do not blanket-deny an aliased
+/// tool. The second `S` arm renames a canonical rule to the matching alias
+/// source, matching Native `H(m,n)`.
+#[must_use]
+pub fn native_rule_content_alias_matches(
+    rule_tool_name: &str,
+    canonical_tool_name: &str,
+    behavior: PermissionBehavior,
+    content: &Utf16JsonProjection,
+    aliases: Option<&Utf16JsonProjection>,
+    proxy_expansion: bool,
+) -> bool {
+    let canonical_units = canonical_tool_name.encode_utf16().collect::<Vec<_>>();
+    native_tool_alias_source_units(aliases, &canonical_units)
+        .iter()
+        .any(|alias| {
+            alias.as_slice() != canonical_units.as_slice()
+                && ((proxy_expansion
+                    && native_rule_content_matches_alias_source(
+                        rule_tool_name,
+                        behavior,
+                        content,
+                        alias,
+                    ))
+                    || (rule_tool_name == canonical_tool_name
+                        && String::from_utf16(alias).is_ok_and(|alias_name| {
+                            native_rule_content_matches_alias_source(
+                                &alias_name,
+                                behavior,
+                                content,
+                                alias,
+                            )
+                        })))
+        })
+}
+
+/// Native `y` for one rule and one alias source. This intentionally excludes
+/// ALLOW content rules and matches the source's action-specific Read/Edit
+/// family table plus its Bash whitespace sentinel.
+#[must_use]
+pub fn native_rule_content_matches_alias_source(
+    rule_tool_name: &str,
+    behavior: PermissionBehavior,
+    content: &Utf16JsonProjection,
+    alias_source_units: &[u16],
+) -> bool {
+    if behavior == PermissionBehavior::Allow {
+        return false;
+    }
+    let Some(content_units) = content.string_units("") else {
+        return false;
+    };
+    if rule_tool_name == "Bash" {
+        return alias_source_units == "Bash".encode_utf16().collect::<Vec<_>>()
+            && !content_units.is_empty()
+            && content_units
+                .iter()
+                .all(|unit| *unit == b'*' as u16 || native_javascript_whitespace(*unit));
+    }
+    if !native_special_path_negation_content(&content_units) {
+        return false;
+    }
+    let family: &[&str] = match (rule_tool_name, behavior) {
+        ("Read", PermissionBehavior::Deny) => &["Read", "Grep", "Glob", "Edit", "Write"],
+        ("Read", PermissionBehavior::Ask) => &["Read", "Grep", "Glob"],
+        ("Edit", PermissionBehavior::Deny | PermissionBehavior::Ask) => {
+            &["Edit", "Write", "NotebookEdit"]
+        }
+        _ => return false,
+    };
+    family
+        .iter()
+        .any(|name| alias_source_units == name.encode_utf16().collect::<Vec<_>>())
+}
+
+fn native_special_path_negation_content(content: &[u16]) -> bool {
+    const SLASH: u16 = b'/' as u16;
+    const STAR: u16 = b'*' as u16;
+    if !content.starts_with(&[SLASH, SLASH]) {
+        return false;
+    }
+    let mut normalized = Vec::with_capacity(content.len());
+    for unit in content {
+        if *unit != SLASH || normalized.last().copied() != Some(SLASH) {
+            normalized.push(*unit);
+        }
+    }
+    let mut index = 1;
+    if normalized.get(index..index + 4) == Some(&[SLASH, STAR, STAR, SLASH]) {
+        index += 4;
+    }
+    let star_start = index;
+    while normalized.get(index) == Some(&STAR) {
+        index += 1;
+    }
+    if index == star_start {
+        return false;
+    }
+    if normalized.get(index..index + 3) == Some(&[SLASH, STAR, STAR]) {
+        index += 3;
+    }
+    index == normalized.len()
+}
+
+fn native_javascript_whitespace(unit: u16) -> bool {
+    matches!(
+        unit,
+        0x0009..=0x000D
+            | 0x0020
+            | 0x00A0
+            | 0x1680
+            | 0x2000..=0x200A
+            | 0x2028
+            | 0x2029
+            | 0x202F
+            | 0x205F
+            | 0x3000
+            | 0xFEFF
+    )
+}
+
 /// Glob-aware tool-wide name matcher — 1:1 with claude-code `URu` (`permissions.ts`).
 ///
 /// `glob == true` (the DENY walk `h8` and ASK walk `kqe`, both passing
@@ -4259,10 +4645,11 @@ pub fn tool_wide_name_matches(rule_tool_name: &str, tool_name: &str) -> bool {
 ///     `mcp__server__footool`).
 ///
 /// `glob == false` (the ALLOW walk `nes`, default opts) keeps exact-name /
-/// MCP server-level matching only. Alias/`proxyExpansion` (`sDn`/`toolAliases`)
-/// is NOT ported — no runtime tool-alias map is wired in the port, and the
-/// legacy static aliases are already normalized at parse time
-/// ([`crate::rule::normalize_legacy_tool_name`]); documented as a follow-up.
+/// MCP server-level matching only. Runtime `toolAliases` and
+/// source-dependent `proxyExpansion` are applied by
+/// [`native_tool_wide_rule_matches`] around this base name matcher. Legacy
+/// static aliases remain normalized at parse time
+/// ([`crate::rule::normalize_legacy_tool_name`]).
 #[must_use]
 fn tool_wide_name_matches_opts(rule_tool_name: &str, tool_name: &str, glob: bool) -> bool {
     if rule_tool_name == tool_name {
@@ -4303,6 +4690,55 @@ fn rule_uses_glob(rule: &PermissionRule) -> bool {
     matches!(
         rule.behavior,
         PermissionBehavior::Deny | PermissionBehavior::Ask
+    )
+}
+
+/// Permission rule's source-bound `proxyExpansion` flag (`T` in the Native
+/// tool-rule matcher). ALLOW matching deliberately keeps the Native default
+/// options instead; this flag applies to DENY/ASK walks and alias-source
+/// content lookup.
+fn rule_allows_proxy_expansion(rule: &PermissionRule) -> bool {
+    !matches!(
+        rule.source,
+        PermissionRuleSource::CliArg | PermissionRuleSource::ToolsNarrowing
+    )
+}
+
+/// Generic Native `field:pattern` lookup accepts a rule under the actual tool
+/// name, or under a one-hop alias-source key. Native filters alias-source
+/// rules through `proxyExpansion`; a direct canonical rule is not filtered.
+fn rule_content_tool_name_matches(
+    rule: &PermissionRule,
+    canonical_tool_name: &str,
+    aliases: Option<&Utf16JsonProjection>,
+) -> bool {
+    if rule.value.tool_name == canonical_tool_name {
+        return true;
+    }
+    if !rule_allows_proxy_expansion(rule) {
+        return false;
+    }
+    native_tool_alias_source_units(
+        aliases,
+        &canonical_tool_name.encode_utf16().collect::<Vec<_>>(),
+    )
+    .iter()
+    .any(|alias| alias.as_slice() == rule.value.tool_name.encode_utf16().collect::<Vec<_>>())
+}
+
+fn native_rule_content_alias_matches_for_permission(
+    rule: &PermissionRule,
+    canonical_tool_name: &str,
+    content: &Utf16JsonProjection,
+    aliases: Option<&Utf16JsonProjection>,
+) -> bool {
+    native_rule_content_alias_matches(
+        &rule.value.tool_name,
+        canonical_tool_name,
+        rule.behavior,
+        content,
+        aliases,
+        rule_allows_proxy_expansion(rule),
     )
 }
 

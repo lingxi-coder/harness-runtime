@@ -1,8 +1,7 @@
-//! Replay Native 2.1.293's in-flight CLI SIGINT boundary through the public
-//! Orchestrator entrypoint, real ProviderApiAdapter/ApiService, and JSONL writer.
-//! Native's process-level SIGINT wiring itself remains a separate Product gate.
+//! Replay Native 2.1.295's in-flight CLI SIGINT boundary through the public
+//! Orchestrator entrypoint, real ProviderApiAdapter/ApiService/HttpTransport,
+//! localhost HTTP, and JSONL writer. Native is never launched by this test.
 
-use async_trait::async_trait;
 use lingxi_core::host::{FileSystem, OutputEvent};
 use lingxi_core::types::SessionId;
 use llm_runtime::model::{thinking::ThinkingConfig, user_agent::UserAgentEnv};
@@ -14,12 +13,15 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig, ProviderApiAdap
 use platform_posix::fs::PosixFileSystem;
 use serde_json::{json, Value};
 use session::jsonl::{reader::JsonlReader, writer::JsonlWriter, JsonlMessage};
+use std::io::Read;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    Arc,
 };
+use std::thread;
 use tempfile::tempdir;
-use tokio::sync::{watch, Notify};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tool_api::registry::ToolRegistry;
 
@@ -27,75 +29,134 @@ const MODEL: &str = "claude-sonnet-4-5";
 const PROMPT: &str = "Reply with the fixed cancellation probe result.";
 const INTERRUPT: &str = "[Request interrupted by user]";
 const SESSION_ID: &str = "00000000-0000-4000-8000-000000002940";
+const NATIVE_PROMPT_CONTENT: &[u8] = include_bytes!(
+    "../../../docs/parity/current-alignment/fixtures/cli-cancel-295/native-baseline/2.1.295/prompt-content.raw.json"
+);
+const NATIVE_INTERRUPT_CONTENT: &[u8] = include_bytes!(
+    "../../../docs/parity/current-alignment/fixtures/cli-cancel-295/native-baseline/2.1.295/interrupt-content.raw.json"
+);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RequestShape {
-    model: Option<String>,
-    stream: Option<bool>,
+struct PendingHttpServer {
+    address: SocketAddr,
+    request: Option<oneshot::Receiver<Result<Vec<u8>, String>>>,
+    disconnected: Option<oneshot::Receiver<Result<bool, String>>>,
+    stop: Arc<AtomicBool>,
+    worker: Option<thread::JoinHandle<()>>,
 }
 
-fn request_shape(request: &lingxi_llm_client::HttpRequest) -> RequestShape {
-    let body: Option<Value> = serde_json::from_slice(request.body.as_ref()).ok();
-    RequestShape {
-        model: body
-            .as_ref()
-            .and_then(|body| body.get("model"))
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        stream: body
-            .as_ref()
-            .and_then(|body| body.get("stream"))
-            .and_then(Value::as_bool),
+impl PendingHttpServer {
+    fn start() -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback fixture");
+        listener
+            .set_nonblocking(true)
+            .expect("loopback fixture listener is nonblocking");
+        let address = listener.local_addr().expect("loopback address");
+        let (request_tx, request) = oneshot::channel();
+        let (disconnected_tx, disconnected) = oneshot::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let worker = thread::spawn(move || {
+            let accepted = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break Ok(stream),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if worker_stop.load(Ordering::Acquire) {
+                            break Err("loopback fixture stopped before accept".to_owned());
+                        }
+                        thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(error) => break Err(error.to_string()),
+                }
+            };
+            let result = match accepted {
+                Ok(mut stream) => match stream
+                    .set_nonblocking(false)
+                    .and_then(|()| stream.set_read_timeout(Some(std::time::Duration::from_secs(5))))
+                    .map_err(|error| error.to_string())
+                    .and_then(|()| {
+                        read_http_request(&mut stream).map_err(|error| error.to_string())
+                    }) {
+                    Ok(request) => {
+                        let _ = request_tx.send(Ok(request));
+                        // Keep the socket open without sending response headers.
+                        // Dropping the pending reqwest send future must close it.
+                        let mut byte = [0_u8; 1];
+                        match stream.read(&mut byte) {
+                            Ok(0) => Ok(true),
+                            Ok(_) => Ok(false),
+                            Err(error) => Err(error.to_string()),
+                        }
+                    }
+                    Err(error) => {
+                        let _ = request_tx.send(Err(error.clone()));
+                        Err(error)
+                    }
+                },
+                Err(error) => {
+                    let _ = request_tx.send(Err(error.clone()));
+                    Err(error)
+                }
+            };
+            let _ = disconnected_tx.send(result);
+        });
+        Self {
+            address,
+            request: Some(request),
+            disconnected: Some(disconnected),
+            stop,
+            worker: Some(worker),
+        }
     }
 }
 
-struct WaitForCancelTransport {
-    calls: AtomicUsize,
-    request_shapes: Mutex<Vec<RequestShape>>,
-    opened: Arc<Notify>,
-    release: watch::Receiver<bool>,
-}
-
-#[async_trait]
-impl Transport for WaitForCancelTransport {
-    async fn send(
-        &self,
-        request: lingxi_llm_client::HttpRequest,
-    ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.request_shapes
-            .lock()
-            .expect("request-shape mutex")
-            .push(request_shape(&request));
-        self.opened.notify_one();
-
-        // Keep the physical provider request pending until the test cancels the
-        // public turn and releases this deterministic transport gate.
-        let mut release = self.release.clone();
-        while !*release.borrow() {
-            if release.changed().await.is_err() {
-                break;
-            }
+impl Drop for PendingHttpServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
         }
-
-        // Native's 2.1.293 fixture receives no response body before SIGINT.
-        // Returning a successful empty SSE body models the closed response
-        // boundary without inventing a provider error payload.
-        Ok(lingxi_llm_client::HttpResponse {
-            status: 200,
-            headers: vec![("content-type".into(), "text/event-stream".into())],
-            body: Vec::<u8>::new().into(),
-        }
-        .into())
     }
 }
 
-fn api_service(transport: Arc<WaitForCancelTransport>) -> Arc<ApiService> {
+fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    let mut request = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "client closed before completing HTTP request",
+            ));
+        }
+        request.extend_from_slice(&chunk[..read]);
+        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        let content_length = headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        let expected = header_end + 4 + content_length;
+        if request.len() >= expected {
+            request.truncate(expected);
+            return Ok(request);
+        }
+    }
+}
+
+fn api_service(base_url: &str, transport: Arc<dyn Transport>) -> Arc<ApiService> {
     let config: ClientConfig = serde_json::from_value(json!({
         "providers": [{
             "provider_id": "anthropic_first_party",
             "profile_name": "direct",
-            "base_url": "https://api.anthropic.com",
+            "base_url": base_url,
             "protocol": "anthropic_messages",
             "auth": "none",
             "credential": {"type": "none"},
@@ -151,15 +212,13 @@ async fn native_inflight_sigint_contract_reaches_orchestrator_output_and_jsonl()
     let transcript_path = dir.path().join("session.jsonl");
     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
     let writer = Arc::new(JsonlWriter::new(transcript_path.clone(), fs.clone()));
-    let opened = Arc::new(Notify::new());
-    let (release_tx, release_rx) = watch::channel(false);
-    let transport = Arc::new(WaitForCancelTransport {
-        calls: AtomicUsize::new(0),
-        request_shapes: Mutex::new(Vec::new()),
-        opened: opened.clone(),
-        release: release_rx,
-    });
-    let adapter = Arc::new(ProviderApiAdapter::new(api_service(transport.clone())));
+    let mut server = PendingHttpServer::start();
+    let base_url = format!("http://{}", server.address);
+    let transport: Arc<dyn Transport> = Arc::new(
+        lingxi_llm_client::HttpTransport::with_client_configurator(|builder| builder.no_proxy())
+            .expect("construct loopback-only HTTP transport"),
+    );
+    let adapter = Arc::new(ProviderApiAdapter::new(api_service(&base_url, transport)));
     let output = Arc::new(MockOutputStream::new());
     let orchestrator = ConversationOrchestrator::into_shared(
         ConversationOrchestrator::new_with_streaming(
@@ -185,29 +244,39 @@ async fn native_inflight_sigint_contract_reaches_orchestrator_output_and_jsonl()
     let cancel = CancellationToken::new();
     let turn_orchestrator = orchestrator.clone();
     let turn_cancel = cancel.clone();
-    let mut turn = tokio::spawn(async move {
-        turn_orchestrator
-            .run_turn_streaming_with_cancel(PROMPT, turn_cancel)
-            .await
+    let turn = tokio::spawn(async move {
+        orchestrator::native_user_message_source::with_sdk_source(
+            turn_orchestrator.run_turn_streaming_with_cancel(PROMPT, turn_cancel),
+        )
+        .await
     });
 
-    if tokio::time::timeout(std::time::Duration::from_secs(5), opened.notified())
-        .await
-        .is_err()
-    {
-        cancel.cancel();
-        let _ = release_tx.send(true);
-        let turn_status = tokio::time::timeout(std::time::Duration::from_secs(5), &mut turn).await;
-        panic!(
-            "one provider request must enter the fixed waiting transport; calls={}, turn_status={turn_status:?}",
-            transport.calls.load(Ordering::SeqCst)
-        );
-    }
-    assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
+    let raw_request = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        server.request.take().expect("request receiver is present"),
+    )
+    .await
+    .expect("one provider HTTP request must arrive within five seconds")
+    .expect("HTTP fixture worker must report the request")
+    .expect("HTTP fixture must read the complete request");
+    let header_end = raw_request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("request headers terminate");
+    let request_line = String::from_utf8_lossy(&raw_request[..header_end]);
+    assert!(
+        request_line.starts_with("POST /v1/messages?beta=true "),
+        "{request_line}"
+    );
+    let request_body: Value = serde_json::from_slice(&raw_request[header_end + 4..])
+        .expect("streaming request body is JSON");
+    assert_eq!(request_body["model"], MODEL);
+    assert!(request_body["stream"].as_bool().unwrap_or(false));
+    assert!(request_body["messages"].to_string().contains(PROMPT));
+
+    // The server has received a complete request but is withholding response
+    // headers. Cancellation must drop the request-open future itself.
     cancel.cancel();
-    release_tx
-        .send(true)
-        .expect("release waiting provider response");
 
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), turn)
         .await
@@ -215,20 +284,17 @@ async fn native_inflight_sigint_contract_reaches_orchestrator_output_and_jsonl()
         .expect("turn task must not panic")
         .expect("orchestrator cancellation is a completed turn outcome");
     assert_eq!(outcome, TurnOutcome::Cancelled);
-
-    let shapes = transport
-        .request_shapes
-        .lock()
-        .expect("request-shape mutex")
-        .clone();
-    assert_eq!(
-        shapes,
-        vec![RequestShape {
-            model: Some(MODEL.to_owned()),
-            stream: Some(true),
-        }],
-        "the fixed transport receives one streaming request and no retry"
-    );
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        server
+            .disconnected
+            .take()
+            .expect("disconnect receiver is present"),
+    )
+    .await
+    .expect("cancel must close the pending HTTP connection")
+    .expect("HTTP fixture worker must report socket closure")
+    .expect("HTTP fixture socket read succeeds"));
 
     let events = output.snapshot().await;
     let end_reasons = events
@@ -240,7 +306,7 @@ async fn native_inflight_sigint_contract_reaches_orchestrator_output_and_jsonl()
         .collect::<Vec<_>>();
     assert_eq!(end_reasons, vec!["aborted_streaming"]);
 
-    let rows = JsonlReader::new(transcript_path, fs)
+    let rows = JsonlReader::new(transcript_path.clone(), fs)
         .read_all()
         .await
         .expect("read actual Orchestrator JSONL output");
@@ -263,6 +329,37 @@ async fn native_inflight_sigint_contract_reaches_orchestrator_output_and_jsonl()
             .count(),
         0,
         "an interrupted request with no response does not persist an assistant row"
+    );
+
+    // Native 2.1.295 stores the initial plain SDK prompt as a JSON string, but
+    // writes its injected interrupt as a text-block array. Compare those exact
+    // source slices from the real JSONL bytes, not normalized parsed values.
+    let transcript_raw = std::fs::read(&transcript_path).expect("read raw JSONL bytes");
+    let raw_rows = transcript_raw
+        .split(|byte| *byte == b'\n')
+        .filter(|row| !row.is_empty())
+        .collect::<Vec<_>>();
+    let prompt_slice_matches = raw_rows
+        .iter()
+        .filter(|row| {
+            row.windows(NATIVE_PROMPT_CONTENT.len())
+                .any(|w| w == NATIVE_PROMPT_CONTENT)
+        })
+        .count();
+    let interrupt_slice_matches = raw_rows
+        .iter()
+        .filter(|row| {
+            row.windows(NATIVE_INTERRUPT_CONTENT.len())
+                .any(|w| w == NATIVE_INTERRUPT_CONTENT)
+        })
+        .count();
+    assert_eq!(
+        prompt_slice_matches, 1,
+        "persist the Native prompt JSON slice byte-for-byte"
+    );
+    assert_eq!(
+        interrupt_slice_matches, 1,
+        "persist the Native interruption JSON slice byte-for-byte"
     );
 
     // Native creates message UUIDs and timestamps dynamically. Check their

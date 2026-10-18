@@ -30,10 +30,11 @@ use crate::turn_loop::{
 };
 use hooks::attachment::HookPublicationGuard;
 
-// Cancel request opening without dropping foreground tool execution. An empty
-// stream takes the normal executor cancellation and drain path.
-async fn open_side_stream<F>(
-    orch: &ConversationOrchestrator,
+// Cancel request opening before the first response stream exists. This is safe
+// for the foreground turn: no stream event has dispatched tools or produced a
+// partial assistant row yet. Once the stream is open, the pump owns the more
+// granular cancellation path that preserves completed blocks and settles tools.
+async fn open_cancelable_stream<F>(
     cancel: &Option<CancellationToken>,
     request: F,
 ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>
@@ -45,14 +46,12 @@ where
         >,
     >,
 {
-    if orch.side_chat {
-        if let Some(cancel) = cancel {
-            return tokio::select! {
-                biased;
-                () = cancel.cancelled() => Ok(futures::stream::empty().boxed()),
-                result = request => result,
-            };
-        }
+    if let Some(cancel) = cancel {
+        return tokio::select! {
+            biased;
+            () = cancel.cancelled() => Ok(futures::stream::empty().boxed()),
+            result = request => result,
+        };
     }
     request.await
 }
@@ -1285,8 +1284,7 @@ impl StreamingTurnDriver<'_> {
             let request_dispatch_observer =
                 observe_main_dispatch(orch.turn_request_dispatch_observer(), &orch.output);
             orch.cancel_idle_compaction();
-            open_side_stream(
-                orch,
+            open_cancelable_stream(
                 user_cancel,
                 Box::pin(
                     retry_scope.run(
@@ -2458,8 +2456,7 @@ impl StreamingTurnDriver<'_> {
                                 &orch.output,
                             );
                             orch.cancel_idle_compaction();
-                            let retry_stream = open_side_stream(
-                                orch,
+                            let retry_stream = open_cancelable_stream(
                                 user_cancel,
                                 Box::pin(
                                     retry_scope.run(
@@ -4103,6 +4100,9 @@ impl StreamingTurnDriver<'_> {
         };
         let prompt_projection =
             screened_prompt.unwrap_or_else(|| super::source_string_projection(prompt));
+        let sdk_content_is_json_string = projected_content
+            .as_ref()
+            .map(|content| content.source_was_json_string);
 
         // 1. Append the user prompt (+ any pasted images) to session history.
         // `images` arrives already decoded (path-based callers ran `load_images`
@@ -4179,6 +4179,7 @@ impl StreamingTurnDriver<'_> {
                         text: prompt_projection.clone(),
                         images,
                         is_meta: !in_human_turn,
+                        sdk_content_is_json_string,
                         message_id,
                         transcript_row_token: row_token,
                         ..Default::default()

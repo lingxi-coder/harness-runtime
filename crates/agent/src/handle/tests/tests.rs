@@ -1,6 +1,7 @@
 use super::*;
 use async_trait::async_trait;
 use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
+use lingxi_core::host::permission_gate::{NativeMcpDenyContext, NativeMcpDenyRule};
 use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
 use lingxi_core::host::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -60,6 +61,55 @@ fn test_spawner(pool: Arc<StateMachinePool>) -> PoolSubagentSpawner {
     PoolSubagentSpawner::new(pool)
         .with_api_client(Arc::new(PendingModel))
         .with_model_resolution_context_provider(route_provider)
+}
+
+fn native_deny_context(names: &[&str]) -> NativeMcpDenyContext {
+    NativeMcpDenyContext {
+        tool_aliases: None,
+        deny_rules: names
+            .iter()
+            .map(|name| NativeMcpDenyRule {
+                tool_name: (*name).to_string(),
+                rule_content: None,
+                proxy_expansion: false,
+            })
+            .collect(),
+    }
+}
+
+struct MutablePermissionGate {
+    deny_context: Mutex<NativeMcpDenyContext>,
+}
+
+impl MutablePermissionGate {
+    fn new(context: NativeMcpDenyContext) -> Self {
+        Self {
+            deny_context: Mutex::new(context),
+        }
+    }
+
+    fn set_deny_context(&self, context: NativeMcpDenyContext) {
+        *self.deny_context.lock().unwrap() = context;
+    }
+}
+
+#[async_trait]
+impl lingxi_core::host::permission_gate::PermissionGate for MutablePermissionGate {
+    async fn check(
+        &self,
+        _name: &str,
+        _input: &Utf16JsonProjection,
+    ) -> lingxi_core::host::permission_gate::PermissionDecision {
+        lingxi_core::host::permission_gate::PermissionDecision::Allow
+    }
+
+    async fn native_mcp_deny_context(&self) -> NativeMcpDenyContext {
+        self.deny_context.lock().unwrap().clone()
+    }
+}
+
+fn test_permission_gate(context: NativeMcpDenyContext) -> Arc<MutablePermissionGate> {
+    Arc::new(MutablePermissionGate::new(context))
 }
 
 fn test_model_selection(
@@ -2900,7 +2950,7 @@ async fn resolve_tools_strips_tool_wide_denied_tool_from_subagent_pool() {
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
     let spawner = test_spawner(pool)
         .with_tool_registry(registry_with(&["Read", "Bash", "WebFetch"]))
-        .with_tool_wide_deny_names(vec!["WebFetch".to_string()]);
+        .with_permission_gate(test_permission_gate(native_deny_context(&["WebFetch"])));
 
     let (schemas, allowed) = spawner
         .resolve_tools(
@@ -2936,7 +2986,7 @@ async fn resolve_tools_mcp_server_deny_strips_all_server_tools_from_subagent() {
             "mcp__github__issue",
             "mcp__slack__post",
         ]))
-        .with_tool_wide_deny_names(vec!["mcp__github".to_string()]);
+        .with_permission_gate(test_permission_gate(native_deny_context(&["mcp__github"])));
 
     let (schemas, _allowed) = spawner
         .resolve_tools(
@@ -2960,8 +3010,68 @@ async fn resolve_tools_mcp_server_deny_strips_all_server_tools_from_subagent() {
 }
 
 #[tokio::test]
-async fn resolve_tools_empty_deny_leaves_subagent_pool_unchanged() {
-    // Regression safety: an unset / empty deny-names cell must leave the
+async fn resolve_tools_reads_live_gate_for_native_alias_denied_mcp_tool() {
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let pool = Arc::new(StateMachinePool::new(runtime, 4));
+    let deny_context = NativeMcpDenyContext {
+        tool_aliases: Some(
+            Utf16JsonProjection::parse(
+                r#"{"mcp__legacy__create_issue":"mcp__linear__create_issue"}"#,
+            )
+            .expect("alias map is valid JSON"),
+        ),
+        deny_rules: vec![NativeMcpDenyRule {
+            tool_name: "mcp__legacy__create_issue".into(),
+            rule_content: None,
+            proxy_expansion: true,
+        }],
+    };
+    let gate = test_permission_gate(NativeMcpDenyContext::default());
+    let spawner = test_spawner(pool)
+        .with_tool_registry(registry_with(&["mcp__linear__create_issue", "Read"]))
+        .with_permission_gate(gate.clone());
+
+    let (before_schemas, before_allowed) = spawner
+        .resolve_tools(
+            &agent_def(AgentToolPolicy::All {
+                use_exact_tools: true,
+            }),
+            0,
+            &[],
+        )
+        .await
+        .expect("empty live policy leaves the child tools available");
+    let before_names: Vec<&str> = before_schemas
+        .iter()
+        .map(|tool| tool.name.as_str())
+        .collect();
+    assert_eq!(before_names.len(), 2);
+    assert!(before_names.contains(&"Read"));
+    assert!(before_names.contains(&"mcp__linear__create_issue"));
+    assert!(before_allowed.contains(&"mcp__linear__create_issue".to_string()));
+
+    // Keep the same gate Arc, as assembly does. The next child catalog build
+    // must read the updated Native alias/content snapshot, not a boot copy.
+    gate.set_deny_context(deny_context);
+
+    let (schemas, allowed) = spawner
+        .resolve_tools(
+            &agent_def(AgentToolPolicy::All {
+                use_exact_tools: true,
+            }),
+            0,
+            &[],
+        )
+        .await
+        .expect("all-policy child catalog resolves after the live policy update");
+    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(names, vec!["Read"]);
+    assert_eq!(allowed, vec!["Read"]);
+}
+
+#[tokio::test]
+async fn resolve_tools_empty_live_deny_leaves_subagent_pool_unchanged() {
+    // Regression safety: an unset / empty live gate must leave the
     // child pool byte-identical to before (no filtering).
     let runtime = Arc::new(MockRuntimeSpawner::default());
     let pool = Arc::new(StateMachinePool::new(runtime, 4));
@@ -2979,7 +3089,7 @@ async fn resolve_tools_empty_deny_leaves_subagent_pool_unchanged() {
         .expect("all policy should resolve without deny");
     let empty_deny = test_spawner(pool)
         .with_tool_registry(registry_with(&["Read", "Bash"]))
-        .with_tool_wide_deny_names(vec![]);
+        .with_permission_gate(test_permission_gate(NativeMcpDenyContext::default()));
     let (schemas_b, allowed_b) = empty_deny
         .resolve_tools(
             &agent_def(AgentToolPolicy::All {
@@ -4992,7 +5102,7 @@ fn tools_denied_agent_types_ports_nja_guards() {
         agent_type: ty.into(),
         ..agent_def(tools)
     };
-    let deny = vec!["Read".to_string(), "Edit".to_string()];
+    let deny_context = native_deny_context(&["Read", "Edit"]);
 
     // Subject to the check: built-in + non-empty, wildcard-free explicit
     // allow-list, every entry denied ⇒ unavailable.
@@ -5044,11 +5154,63 @@ fn tools_denied_agent_types_ports_nja_guards() {
         rule_form,
     ];
     assert_eq!(
-        crate::tools_denied_agent_types(&defs, &deny),
+        crate::tools_denied_agent_types(&defs, &deny_context),
         vec!["rule-form".to_string(), "statusline-setup".to_string()]
     );
     // No deny rules ⇒ nothing withheld (the regression-safe default).
-    assert!(crate::tools_denied_agent_types(&defs, &[]).is_empty());
+    assert!(crate::tools_denied_agent_types(&defs, &NativeMcpDenyContext::default()).is_empty());
+}
+
+#[test]
+fn tools_denied_agent_types_use_native_tool_aliases() {
+    let def = AgentDefinition {
+        agent_type: "linear-worker".into(),
+        ..agent_def(AgentToolPolicy::Explicit(vec![
+            "mcp__linear__create_issue".into()
+        ]))
+    };
+    let context = NativeMcpDenyContext {
+        tool_aliases: Some(
+            Utf16JsonProjection::parse(
+                r#"{"mcp__legacy__create_issue":"mcp__linear__create_issue"}"#,
+            )
+            .expect("alias map is valid JSON"),
+        ),
+        deny_rules: vec![NativeMcpDenyRule {
+            tool_name: "mcp__legacy__create_issue".into(),
+            rule_content: None,
+            proxy_expansion: true,
+        }],
+    };
+    assert_eq!(
+        crate::tools_denied_agent_types(std::slice::from_ref(&def), &context),
+        vec!["linear-worker".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn tools_denied_agent_roster_reads_live_permission_gate_each_call() {
+    let runtime = Arc::new(MockRuntimeSpawner::default());
+    let pool = Arc::new(StateMachinePool::new(runtime, 4));
+    let test_definition = AgentDefinition {
+        agent_type: "live-deny-test".into(),
+        ..agent_def(AgentToolPolicy::Explicit(vec!["Read".into()]))
+    };
+    let catalog = Arc::new(RwLock::new(vec![test_definition]));
+    let gate = test_permission_gate(NativeMcpDenyContext::default());
+    let spawner = test_spawner(pool)
+        .with_agent_catalog(catalog)
+        .with_permission_gate(gate.clone());
+
+    let before = spawner.tools_denied_agent_types().await;
+    assert!(!before.iter().any(|name| name == "live-deny-test"));
+
+    gate.set_deny_context(native_deny_context(&["Read"]));
+    let after = spawner.tools_denied_agent_types().await;
+    assert!(
+        after.iter().any(|name| name == "live-deny-test"),
+        "the roster must use the current gate snapshot, not the first context"
+    );
 }
 
 /// claude `_Tv(o) = o!==cm||Vs(wjr)`: WebFetch counts as usable only while
@@ -5062,9 +5224,16 @@ fn web_fetch_only_agent_follows_the_allow_web_fetch_term() {
         ..agent_def(AgentToolPolicy::Explicit(vec!["WebFetch".into()]))
     };
     assert!(crate::builtins::web_fetch_policy_allowed());
-    assert!(crate::tools_denied_agent_types(std::slice::from_ref(&wf), &[]).is_empty());
+    assert!(crate::tools_denied_agent_types(
+        std::slice::from_ref(&wf),
+        &NativeMcpDenyContext::default()
+    )
+    .is_empty());
     assert_eq!(
-        crate::tools_denied_agent_types(std::slice::from_ref(&wf), &["WebFetch".to_string()]),
+        crate::tools_denied_agent_types(
+            std::slice::from_ref(&wf),
+            &native_deny_context(&["WebFetch"])
+        ),
         vec!["web-fetch".to_string()]
     );
 }

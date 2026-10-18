@@ -812,6 +812,38 @@ pub struct PermissionPolicyRuleFact {
     pub pattern: Option<Utf16JsonProjection>,
 }
 
+/// One live Native name-deny rule, retaining content and proxy-expansion scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeMcpDenyRule {
+    pub tool_name: String,
+    pub rule_content: Option<Utf16JsonProjection>,
+    pub proxy_expansion: bool,
+}
+
+/// A single policy snapshot for Native `Hmn` / `Jqe` dropped-tool filtering.
+/// Aliases retain their original object keys, values and UTF-16 source units.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NativeMcpDenyContext {
+    pub tool_aliases: Option<Utf16JsonProjection>,
+    pub deny_rules: Vec<NativeMcpDenyRule>,
+}
+
+impl NativeMcpDenyContext {
+    /// Validate the initialize string record without narrowing its UTF-16 keys.
+    pub fn validate_tool_aliases(aliases: &Utf16JsonProjection) -> Result<(), String> {
+        let Some(entries) = aliases.object_entries() else {
+            return Err("toolAliases must be an object of string values".to_owned());
+        };
+        if entries
+            .iter()
+            .any(|entry| entry.value.code_units().is_none())
+        {
+            return Err("toolAliases must be an object of string values".to_owned());
+        }
+        Ok(())
+    }
+}
+
 /// One source-specific root used to resolve permission rule paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionPolicyRuleRoot {
@@ -1601,6 +1633,34 @@ pub trait PermissionGate: Send + Sync {
     /// policy's tool-wide deny names. Additive DEFAULTED (frozen-trait safe).
     async fn tool_wide_deny_names(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Effective aliases and deny rules from one live policy generation.
+    /// A name-only gate contributes its advertised blanket-deny facts; policy
+    /// owners override this to include content rules and aliases atomically.
+    async fn native_mcp_deny_context(&self) -> NativeMcpDenyContext {
+        NativeMcpDenyContext {
+            tool_aliases: None,
+            deny_rules: self
+                .tool_wide_deny_names()
+                .await
+                .into_iter()
+                .map(|tool_name| NativeMcpDenyRule {
+                    tool_name,
+                    rule_content: None,
+                    proxy_expansion: false,
+                })
+                .collect(),
+        }
+    }
+
+    /// Replace the session's alias map from an initialize control request.
+    /// Policy owners publish this with their live permission state. Rule-free
+    /// transports validate the input without introducing a permission layer.
+    /// Custom gates with alias-aware deny rules must override this setter and
+    /// return the retained map from [`Self::native_mcp_deny_context`].
+    async fn set_native_tool_aliases(&self, aliases: Utf16JsonProjection) -> Result<(), String> {
+        NativeMcpDenyContext::validate_tool_aliases(&aliases)
     }
 
     /// If `Agent(<agent_type>)` is DENIED by a permission rule, the rule's source

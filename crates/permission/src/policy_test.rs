@@ -224,6 +224,254 @@ mod tests {
         assert!(p.tool_wide_deny_names().is_empty());
     }
 
+    #[test]
+    fn native_mcp_deny_context_preserves_alias_units_and_fork_state() {
+        let aliases = Utf16JsonProjection::parse(
+            r#"{"mcp__legacy__tool":"mcp__current__tool","\ud800":"mcp__current__tool"}"#,
+        )
+        .unwrap();
+        let rule = PermissionRule {
+            value: PermissionRuleValue::from_rule_string("Read(//**)"),
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
+        };
+        let policy = PermissionPolicy::from_rules(PermissionMode::Default, [rule])
+            .with_tool_aliases(Some(aliases.clone()))
+            .unwrap();
+
+        let context = policy.native_mcp_deny_context();
+        assert_eq!(context.tool_aliases, Some(aliases.clone()));
+        assert_eq!(context.deny_rules.len(), 1);
+        assert_eq!(context.deny_rules[0].tool_name, "Read");
+        assert_eq!(
+            context.deny_rules[0]
+                .rule_content
+                .as_ref()
+                .and_then(|value| value.string_units("")),
+            Some("//**".encode_utf16().collect::<Vec<_>>())
+        );
+        assert!(context.deny_rules[0].proxy_expansion);
+        assert_eq!(
+            policy
+                .fork_independent(PermissionMode::Plan)
+                .native_mcp_deny_context()
+                .tool_aliases,
+            Some(aliases)
+        );
+    }
+
+    #[test]
+    fn native_tool_alias_builder_rejects_non_object_or_non_string_values() {
+        let scalar = Utf16JsonProjection::from("not-an-object");
+        assert!(PermissionPolicy::new(PermissionMode::Default)
+            .with_tool_aliases(Some(scalar))
+            .is_err());
+
+        let non_string = Utf16JsonProjection::parse(r#"{"alias":false}"#).unwrap();
+        assert!(PermissionPolicy::new(PermissionMode::Default)
+            .with_tool_aliases(Some(non_string))
+            .is_err());
+
+        let duplicate_last_string =
+            Utf16JsonProjection::parse(r#"{"alias":false,"alias":"Read"}"#).unwrap();
+        let policy = PermissionPolicy::new(PermissionMode::Default)
+            .with_tool_aliases(Some(duplicate_last_string))
+            .expect("Native JSON.parse keeps the last duplicate value");
+        assert_eq!(
+            policy
+                .native_mcp_deny_context()
+                .tool_aliases
+                .as_ref()
+                .and_then(|aliases| aliases.string_at("/alias")),
+            Some("Read")
+        );
+
+        let duplicate_last_non_string =
+            Utf16JsonProjection::parse(r#"{"alias":"Read","alias":false}"#).unwrap();
+        assert!(PermissionPolicy::new(PermissionMode::Default)
+            .with_tool_aliases(Some(duplicate_last_non_string))
+            .is_err());
+    }
+
+    #[test]
+    fn native_alias_proxy_expansion_matches_only_native_rule_walks() {
+        use lingxi_core::types::SettingsScope;
+
+        let aliases = Utf16JsonProjection::parse(r#"{"ReadProxy":"Read"}"#).unwrap();
+        let make_policy = |behavior, source| {
+            PermissionPolicy::from_rules(
+                PermissionMode::Default,
+                [PermissionRule {
+                    value: PermissionRuleValue {
+                        tool_name: "ReadProxy".into(),
+                        rule_content: None,
+                        original_rule: None,
+                    },
+                    behavior,
+                    source,
+                }],
+            )
+            .with_tool_aliases(Some(aliases.clone()))
+            .unwrap()
+        };
+
+        let settings = PermissionRuleSource::Settings(SettingsScope::Project);
+        let denied = make_policy(PermissionBehavior::Deny, settings);
+        assert!(matches!(
+            denied.authorize("Read", &source_json!({})),
+            PermissionResult::Deny {
+                reason: PermissionDecisionReason::MatchedRule { .. },
+                ..
+            }
+        ));
+
+        let cli_deny = make_policy(PermissionBehavior::Deny, PermissionRuleSource::CliArg);
+        assert!(
+            matches!(
+                cli_deny.authorize("Read", &source_json!({})),
+                PermissionResult::Ask {
+                    reason: PermissionDecisionReason::PermissionMode { .. },
+                    ..
+                }
+            ),
+            "cliArg keeps Native proxyExpansion disabled"
+        );
+
+        let asked = make_policy(PermissionBehavior::Ask, settings);
+        assert!(matches!(
+            asked.authorize("Read", &source_json!({})),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::MatchedRule { .. },
+                ..
+            }
+        ));
+
+        let cli_ask = make_policy(PermissionBehavior::Ask, PermissionRuleSource::CliArg);
+        assert!(matches!(
+            cli_ask.authorize("Read", &source_json!({})),
+            PermissionResult::Ask {
+                reason: PermissionDecisionReason::PermissionMode { .. },
+                ..
+            }
+        ));
+
+        let allowed = make_policy(PermissionBehavior::Allow, settings);
+        assert!(
+            matches!(
+                allowed.authorize("Read", &source_json!({})),
+                PermissionResult::Ask {
+                    reason: PermissionDecisionReason::PermissionMode { .. },
+                    ..
+                }
+            ),
+            "Native allow uses Q8t's default options without proxy expansion"
+        );
+
+        assert!(PermissionPolicy::native_deny_context_matches_tool_name(
+            &denied.native_mcp_deny_context(),
+            "Read"
+        ));
+
+        let lone_surrogate_alias = Utf16JsonProjection::parse(r#"{"a\ud800":"Read"}"#).unwrap();
+        assert!(
+            native_tool_wide_rule_matches("a*", "Read", Some(&lone_surrogate_alias), true, true,),
+            "glob matching must retain alias source code units instead of dropping lone surrogates"
+        );
+        assert!(
+            !native_tool_wide_rule_matches("a*", "Read", Some(&lone_surrogate_alias), true, false,),
+            "the same UTF-16 alias glob stays disabled for cliArg/toolsNarrowing"
+        );
+    }
+
+    #[test]
+    fn native_content_alias_match_keeps_source_and_rule_family_conditions() {
+        use lingxi_core::types::SettingsScope;
+
+        let read_alias = Utf16JsonProjection::parse(r#"{"Grep":"Read"}"#).unwrap();
+        let special_read_path = Utf16JsonProjection::from("//**");
+        assert!(native_rule_content_alias_matches(
+            "Read",
+            "Read",
+            PermissionBehavior::Deny,
+            &special_read_path,
+            Some(&read_alias),
+            true,
+        ));
+        assert!(native_rule_content_alias_matches(
+            "Read",
+            "Read",
+            PermissionBehavior::Ask,
+            &special_read_path,
+            Some(&read_alias),
+            true,
+        ));
+        assert!(!native_rule_content_alias_matches(
+            "Read",
+            "Read",
+            PermissionBehavior::Allow,
+            &special_read_path,
+            Some(&read_alias),
+            true,
+        ));
+        assert!(
+            !native_rule_content_alias_matches(
+                "Read",
+                "Read",
+                PermissionBehavior::Deny,
+                &special_read_path,
+                Some(&read_alias),
+                false,
+            ),
+            "cliArg/toolsNarrowing cannot use the proxy-enabled S arm"
+        );
+
+        let edit_alias = Utf16JsonProjection::parse(r#"{"Edit":"Read"}"#).unwrap();
+        assert!(native_rule_content_alias_matches(
+            "Edit",
+            "Read",
+            PermissionBehavior::Deny,
+            &special_read_path,
+            Some(&edit_alias),
+            true,
+        ));
+        let ordinary_path = Utf16JsonProjection::from("src/**");
+        assert!(
+            !native_rule_content_alias_matches(
+                "Read",
+                "Read",
+                PermissionBehavior::Deny,
+                &ordinary_path,
+                Some(&read_alias),
+                true,
+            ),
+            "ordinary content rules do not blanket-deny aliased tools"
+        );
+
+        let setting_rule = PermissionRule {
+            value: PermissionRuleValue {
+                tool_name: "Grep".into(),
+                rule_content: Some(Utf16JsonProjection::from("query:*secret*")),
+                original_rule: None,
+            },
+            behavior: PermissionBehavior::Deny,
+            source: PermissionRuleSource::Settings(SettingsScope::Project),
+        };
+        assert!(rule_content_tool_name_matches(
+            &setting_rule,
+            "Read",
+            Some(&read_alias)
+        ));
+        let cli_rule = PermissionRule {
+            source: PermissionRuleSource::CliArg,
+            ..setting_rule
+        };
+        assert!(!rule_content_tool_name_matches(
+            &cli_rule,
+            "Read",
+            Some(&read_alias)
+        ));
+    }
+
     /// SECURITY (ultra-review HIGH): a command-Monitor is evaluated by the FULL
     /// Bash resolver (oracle `Lon({...e,command},t)`), so a `Bash(curl:*)` deny
     /// rule must HARD-DENY `Monitor{command:"curl …"}` — it previously evaded

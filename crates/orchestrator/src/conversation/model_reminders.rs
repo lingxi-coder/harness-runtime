@@ -20,31 +20,11 @@ fn source_text_block(units: Vec<u16>) -> ContentBlock {
     }
 }
 
-pub(super) fn native_mcp_dropped_tool_denied(rule_names: &[String], full_tool_name: &str) -> bool {
-    rule_names.iter().any(|rule| {
-        permission::tool_wide_name_matches(rule, full_tool_name)
-            || (rule.contains('*') && native_tool_name_glob_matches(rule, full_tool_name))
-    })
-}
-
-fn native_tool_name_glob_matches(pattern: &str, value: &str) -> bool {
-    let pattern = pattern.chars().collect::<Vec<_>>();
-    let value = value.chars().collect::<Vec<_>>();
-    let mut matched = vec![false; value.len() + 1];
-    matched[0] = true;
-    for pattern_character in pattern {
-        if pattern_character == '*' {
-            for index in 1..=value.len() {
-                matched[index] |= matched[index - 1];
-            }
-        } else {
-            for index in (1..=value.len()).rev() {
-                matched[index] = matched[index - 1] && value[index - 1] == pattern_character;
-            }
-            matched[0] = false;
-        }
-    }
-    matched[value.len()]
+pub(super) fn native_mcp_dropped_tool_denied(
+    context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
+    full_tool_name: &str,
+) -> bool {
+    permission::native_deny_context_matches_tool_name(context, full_tool_name)
 }
 
 /// Source-shaped projection of Native 2.1.295 `Hmn`: filter permission-denied
@@ -53,7 +33,7 @@ fn native_tool_name_glob_matches(pattern: &str, value: &str) -> bool {
 /// `addedEntries`.
 fn native_mcp_dropped_tools_attachment(
     snapshots: &[mcp::McpDroppedToolServerSnapshot],
-    denied_rules: &[String],
+    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
     prior_entries: &std::collections::HashSet<String>,
 ) -> Option<crate::request_context::PromptIngressAttachment> {
     let mut added = std::collections::BTreeSet::new();
@@ -63,7 +43,7 @@ fn native_mcp_dropped_tools_attachment(
         for dropped in &server.tools {
             let normalized_tool = mcp::normalization::normalize_name_for_mcp(&dropped.tool_name);
             let full_name = format!("mcp__{normalized_server}__{normalized_tool}");
-            if native_mcp_dropped_tool_denied(denied_rules, &full_name) {
+            if native_mcp_dropped_tool_denied(deny_context, &full_name) {
                 continue;
             }
             let name = mcp::registry::sanitize_native_mcp_text(&dropped.tool_name);
@@ -576,7 +556,14 @@ impl ConversationOrchestrator {
             return None;
         }
 
-        let denied_rules = self.perms.tool_wide_deny_names().await;
+        // `build_wire_tools` captured this snapshot before reminder production;
+        // reuse it so the advertised pool and Jqe projection cannot straddle a
+        // live permission update.
+        let deny_context = self
+            .tool_pool_deny_context
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         let mut prior_entries = std::collections::HashSet::new();
         {
             let session = self.session.lock().await;
@@ -602,7 +589,7 @@ impl ConversationOrchestrator {
             }
         }
 
-        native_mcp_dropped_tools_attachment(&snapshots, &denied_rules, &prior_entries)
+        native_mcp_dropped_tools_attachment(&snapshots, &deny_context, &prior_entries)
     }
 
     pub(crate) async fn mcp_instructions_reminder_message(&self) -> Option<ConversationMessage> {
@@ -618,6 +605,37 @@ mod tests {
         mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
         NoOpPermissionGate, StaticMemoryProvider,
     };
+
+    fn native_deny_context(
+        rules: impl IntoIterator<Item = String>,
+    ) -> lingxi_core::host::permission_gate::NativeMcpDenyContext {
+        lingxi_core::host::permission_gate::NativeMcpDenyContext {
+            tool_aliases: None,
+            deny_rules: rules
+                .into_iter()
+                .map(
+                    |tool_name| lingxi_core::host::permission_gate::NativeMcpDenyRule {
+                        tool_name,
+                        rule_content: None,
+                        proxy_expansion: true,
+                    },
+                )
+                .collect(),
+        }
+    }
+
+    struct ToolWideOnlyGate;
+
+    #[async_trait::async_trait]
+    impl permission::PermissionGate for ToolWideOnlyGate {
+        async fn check(&self, _tool_name: &str, _input: &Source) -> permission::PermissionDecision {
+            permission::PermissionDecision::Allow
+        }
+
+        async fn tool_wide_deny_names(&self) -> Vec<String> {
+            vec!["mcp__linear".to_owned()]
+        }
+    }
     use platform_posix::{fs::PosixFileSystem, mcp::PosixMcpTransport};
     use serde_json::json;
     use tool_api::registry::ToolRegistry;
@@ -1043,7 +1061,7 @@ for line in sys.stdin:
     fn native_hmn_factory_fixture_filters_sorts_deduplicates_and_suppresses_prior_entries() {
         // Hmn synthesizes only `{name, mcpInfo:{serverName,toolName}}`; this
         // fixture has no alias sources, so Native's content-rule alias walk
-        // has no candidate. `denied_rules` are the live blanket-name/pattern
+        // has no candidate. The context carries the live blanket-name/pattern
         // facts supplied by the permission gate.
         let snapshots = vec![
             dropped_tool_server(
@@ -1064,11 +1082,12 @@ for line in sys.stdin:
             ),
             dropped_tool_server("denied", [("blocked".into(), "bad schema".into())]),
         ];
-        let denied_rules = vec!["mcp__zeta__skip*".to_owned(), "mcp__denied".to_owned()];
+        let deny_context =
+            native_deny_context(["mcp__zeta__skip*".to_owned(), "mcp__denied".to_owned()]);
         let prior_entries = ["\"tool\" (MCP server \"alpha\"): \"bad schema\"".to_owned()]
             .into_iter()
             .collect();
-        let row = native_mcp_dropped_tools_attachment(&snapshots, &denied_rules, &prior_entries)
+        let row = native_mcp_dropped_tools_attachment(&snapshots, &deny_context, &prior_entries)
             .expect("three new non-denied entries remain");
         let expected = vec![
             "\"kept\" (MCP server \"alpha\"): \"bad schema\"".to_owned(),
@@ -1091,7 +1110,7 @@ for line in sys.stdin:
         // above and the row emitted here, just as transcript history does.
         let mut all_prior = prior_entries.clone();
         all_prior.extend(dropped_entries(&row));
-        let repeated = native_mcp_dropped_tools_attachment(&snapshots, &denied_rules, &all_prior);
+        let repeated = native_mcp_dropped_tools_attachment(&snapshots, &deny_context, &all_prior);
         assert!(
             repeated.is_none(),
             "Native Hmn must suppress the exact prior addedEntries: {:?}",
@@ -1109,7 +1128,7 @@ for line in sys.stdin:
         let prior = std::collections::HashSet::new();
         let at_limit = native_mcp_dropped_tools_attachment(
             &[dropped_tool_server("schema", make_tools(30))],
-            &[],
+            &native_deny_context([]),
             &prior,
         )
         .expect("30 distinct entries are individual rows");
@@ -1120,7 +1139,7 @@ for line in sys.stdin:
 
         let over_limit = native_mcp_dropped_tools_attachment(
             &[dropped_tool_server("schema", make_tools(31))],
-            &[],
+            &native_deny_context([]),
             &prior,
         )
         .expect("31 distinct entries become one summary");
@@ -1133,22 +1152,206 @@ for line in sys.stdin:
     #[test]
     fn native_mcp_drop_filter_matches_exact_server_prefix_and_pattern_denies() {
         let name = "mcp__linear__create_issue";
+        let deny_context =
+            |rules: &[&str]| native_deny_context(rules.iter().map(|rule| (*rule).to_owned()));
         assert!(native_mcp_dropped_tool_denied(
-            &["mcp__linear__create_issue".into()],
+            &deny_context(&["mcp__linear__create_issue"]),
             name,
         ));
         assert!(native_mcp_dropped_tool_denied(
-            &["mcp__linear".into()],
+            &deny_context(&["mcp__linear"]),
             name
         ));
         assert!(native_mcp_dropped_tool_denied(
-            &["mcp__linear__create_*".into()],
+            &deny_context(&["mcp__linear__create_*"]),
             name,
         ));
-        assert!(native_mcp_dropped_tool_denied(&["mcp__*".into()], name));
+        assert!(native_mcp_dropped_tool_denied(
+            &deny_context(&["mcp__*"]),
+            name
+        ));
         assert!(!native_mcp_dropped_tool_denied(
-            &["mcp__github__create_issue".into()],
+            &deny_context(&["mcp__github__create_issue"]),
             name,
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_mcp_default_gate_context_keeps_server_prefix_denies() {
+        let context = <ToolWideOnlyGate as permission::PermissionGate>::native_mcp_deny_context(
+            &ToolWideOnlyGate,
+        )
+        .await;
+        assert_eq!(context.tool_aliases, None);
+        assert_eq!(context.deny_rules.len(), 1);
+        assert_eq!(context.deny_rules[0].tool_name, "mcp__linear");
+        assert!(context.deny_rules[0].rule_content.is_none());
+        assert!(!context.deny_rules[0].proxy_expansion);
+        assert!(native_mcp_dropped_tool_denied(
+            &context,
+            "mcp__linear__create_issue"
+        ));
+    }
+
+    #[test]
+    fn native_jqe_resolves_exact_aliases_once_and_respects_proxy_expansion() {
+        use lingxi_core::host::permission_gate::{NativeMcpDenyContext, NativeMcpDenyRule};
+
+        let aliases = Source::parse(
+            r#"{"mcp__legacy__create_issue":"mcp__wrong__create_issue","mcp__chain__create_issue":"mcp__legacy__create_issue","mcp__legacy__create_issue":"mcp__linear__create_issue"}"#,
+        )
+        .unwrap();
+        let context = NativeMcpDenyContext {
+            tool_aliases: Some(aliases.clone()),
+            deny_rules: vec![NativeMcpDenyRule {
+                tool_name: "mcp__legacy__create_issue".into(),
+                rule_content: None,
+                proxy_expansion: true,
+            }],
+        };
+        assert!(native_mcp_dropped_tool_denied(
+            &context,
+            "mcp__linear__create_issue"
+        ));
+
+        let cli_rule = NativeMcpDenyContext {
+            tool_aliases: Some(aliases.clone()),
+            deny_rules: vec![NativeMcpDenyRule {
+                tool_name: "mcp__legacy__create_issue".into(),
+                rule_content: None,
+                proxy_expansion: false,
+            }],
+        };
+        assert!(!native_mcp_dropped_tool_denied(
+            &cli_rule,
+            "mcp__linear__create_issue"
+        ));
+
+        // Alias values are not followed recursively: the second key points to
+        // the first alias, not the canonical dropped tool.
+        let one_hop_only = NativeMcpDenyContext {
+            tool_aliases: Some(aliases),
+            deny_rules: vec![NativeMcpDenyRule {
+                tool_name: "mcp__chain__create_issue".into(),
+                rule_content: None,
+                proxy_expansion: true,
+            }],
+        };
+        assert!(!native_mcp_dropped_tool_denied(
+            &one_hop_only,
+            "mcp__linear__create_issue"
+        ));
+
+        let shadowed_alias = Source::parse(
+            r#"{"mcp__legacy__create_issue":"mcp__linear__create_issue","mcp__legacy__create_issue":"mcp__other__create_issue"}"#,
+        )
+        .unwrap();
+        let shadowed_context = NativeMcpDenyContext {
+            tool_aliases: Some(shadowed_alias),
+            deny_rules: vec![NativeMcpDenyRule {
+                tool_name: "mcp__legacy__create_issue".into(),
+                rule_content: None,
+                proxy_expansion: true,
+            }],
+        };
+        assert!(!native_mcp_dropped_tool_denied(
+            &shadowed_context,
+            "mcp__linear__create_issue"
+        ));
+    }
+
+    #[test]
+    fn native_alias_sources_follow_effective_object_entries_order() {
+        let aliases = Source::parse(
+            r#"{"10":"mcp__linear__create_issue","2":"mcp__linear__create_issue","alpha":"mcp__linear__create_issue","\ud800":"mcp__linear__create_issue"}"#,
+        )
+        .unwrap();
+        let source_names = permission::native_tool_alias_source_units(
+            Some(&aliases),
+            "mcp__linear__create_issue"
+                .encode_utf16()
+                .collect::<Vec<_>>()
+                .as_slice(),
+        )
+        .into_iter()
+        .map(|units| String::from_utf16_lossy(&units))
+        .collect::<Vec<_>>();
+        assert_eq!(source_names, ["2", "10", "alpha", "�"]);
+    }
+
+    #[test]
+    fn native_jqe_content_rules_match_only_source_alias_branches() {
+        use lingxi_core::host::permission_gate::{NativeMcpDenyContext, NativeMcpDenyRule};
+
+        let aliases =
+            Source::parse(r#"{"Read":"mcp__linear__create_issue","Bash":"mcp__bash__tool"}"#)
+                .unwrap();
+        let read_path_rule = NativeMcpDenyContext {
+            tool_aliases: Some(aliases.clone()),
+            deny_rules: vec![NativeMcpDenyRule {
+                tool_name: "Read".into(),
+                rule_content: Some(Source::from("//**")),
+                proxy_expansion: true,
+            }],
+        };
+        assert!(native_mcp_dropped_tool_denied(
+            &read_path_rule,
+            "mcp__linear__create_issue"
+        ));
+
+        let no_proxy_expansion = NativeMcpDenyContext {
+            tool_aliases: Some(aliases.clone()),
+            deny_rules: vec![NativeMcpDenyRule {
+                tool_name: "Read".into(),
+                rule_content: Some(Source::from("//**")),
+                proxy_expansion: false,
+            }],
+        };
+        assert!(!native_mcp_dropped_tool_denied(
+            &no_proxy_expansion,
+            "mcp__linear__create_issue"
+        ));
+
+        // Native also checks an alias-renamed rule when the original rule
+        // names the canonical tool; that branch does not require proxy
+        // expansion on the rule's source.
+        let canonical_content_rule = NativeMcpDenyContext {
+            tool_aliases: Some(aliases.clone()),
+            deny_rules: vec![NativeMcpDenyRule {
+                tool_name: "mcp__linear__create_issue".into(),
+                rule_content: Some(Source::from("//**")),
+                proxy_expansion: false,
+            }],
+        };
+        assert!(native_mcp_dropped_tool_denied(
+            &canonical_content_rule,
+            "mcp__linear__create_issue"
+        ));
+
+        let bash_space_rule = NativeMcpDenyContext {
+            tool_aliases: Some(aliases.clone()),
+            deny_rules: vec![NativeMcpDenyRule {
+                tool_name: "Bash".into(),
+                rule_content: Some(Source::from(" \u{feff}*")),
+                proxy_expansion: true,
+            }],
+        };
+        assert!(native_mcp_dropped_tool_denied(
+            &bash_space_rule,
+            "mcp__bash__tool"
+        ));
+
+        let ordinary_bash_rule = NativeMcpDenyContext {
+            tool_aliases: Some(aliases),
+            deny_rules: vec![NativeMcpDenyRule {
+                tool_name: "Bash".into(),
+                rule_content: Some(Source::from("rm -rf *")),
+                proxy_expansion: true,
+            }],
+        };
+        assert!(!native_mcp_dropped_tool_denied(
+            &ordinary_bash_rule,
+            "mcp__bash__tool"
         ));
     }
 }

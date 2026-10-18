@@ -128,6 +128,9 @@ struct LivePermissionState {
     deny_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
     ask_rules: HashMap<PermissionRuleSource, Vec<PermissionRule>>,
     additional_working_dirs: crate::working_dirs::AdditionalWorkingDirs,
+    /// Current Native `initialize.toolAliases` projection. Stored beside the
+    /// live rule buckets so each policy snapshot observes one generation.
+    tool_aliases: Option<Utf16JsonProjection>,
 }
 
 fn classifier_deny_rules(
@@ -727,6 +730,7 @@ impl LivePermissionState {
             deny_rules: policy.deny_rules.clone(),
             ask_rules: policy.ask_rules.clone(),
             additional_working_dirs: policy.additional_working_dirs.clone(),
+            tool_aliases: policy.tool_aliases.clone(),
         }
     }
 }
@@ -1700,6 +1704,8 @@ impl PolicyPermissionGate {
         }
         self.policy
             .clone_with_live_state(allow_rules, deny_rules, live.ask_rules, working_dirs)
+            .with_tool_aliases(live.tool_aliases)
+            .expect("live toolAliases were validated before publication")
             .with_bash_command_clamps(folded.bash_command_clamps.clone())
     }
 
@@ -1810,12 +1816,15 @@ impl PolicyPermissionGate {
             .clone();
         let mut deny_rules = live.deny_rules;
         self.fold_command_input_denies(&mut deny_rules);
-        self.policy.clone_with_live_state(
-            live.allow_rules,
-            deny_rules,
-            live.ask_rules,
-            live.additional_working_dirs,
-        )
+        self.policy
+            .clone_with_live_state(
+                live.allow_rules,
+                deny_rules,
+                live.ask_rules,
+                live.additional_working_dirs,
+            )
+            .with_tool_aliases(live.tool_aliases)
+            .expect("live toolAliases were validated before publication")
     }
 
     /// Map a 3-valued [`PermissionResult`] onto the 2-valued
@@ -3712,6 +3721,25 @@ impl PermissionGate for PolicyPermissionGate {
     /// not the tool). With zero deny rules this is empty ⇒ no tools stripped.
     async fn tool_wide_deny_names(&self) -> Vec<String> {
         self.live_policy().tool_wide_deny_names()
+    }
+
+    /// Capture the exact deny facts and Native alias map from one live-policy
+    /// generation for the dropped-MCP-tool reminder path.
+    async fn native_mcp_deny_context(&self) -> core_permission::NativeMcpDenyContext {
+        self.live_policy().native_mcp_deny_context()
+    }
+
+    /// Replace the session's Native alias map without mutating the boot policy.
+    /// Validate before taking the live-state write lock; snapshots then observe
+    /// either the old or new exact projection together with the matching live
+    /// permission rules.
+    async fn set_native_tool_aliases(&self, aliases: Utf16JsonProjection) -> Result<(), String> {
+        core_permission::NativeMcpDenyContext::validate_tool_aliases(&aliases)?;
+        self.live_state
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .tool_aliases = Some(aliases);
+        Ok(())
     }
 
     /// Surface the source of a matching `Agent(<type>)` deny rule so the Agent
