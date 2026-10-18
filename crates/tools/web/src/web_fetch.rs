@@ -1192,6 +1192,82 @@ Usage notes:\n\
         self.emit_started(&invocation_id, &url, parsed_input.prompt.is_some())
             .await;
 
+        // Independent provider fetch keeps HTTP/auth inside llm-client. The
+        // selected conversation account remains authoritative on every call.
+        let model = if ctx.options.main_loop_model.is_empty() {
+            &self.ctx.default_model
+        } else {
+            &ctx.options.main_loop_model
+        };
+        if let Some(provider) =
+            self.ctx.hosted_search.as_ref().filter(|provider| {
+                provider.supports_fetch(model, ctx.options.model_profile.as_deref())
+            })
+        {
+            let mut provider_url = parsed_url.clone();
+            upgrade_to_https(&mut provider_url);
+            let fetched = match provider
+                .fetch(tool_api::HostedFetchRequest {
+                    model: model.clone(),
+                    profile: ctx.options.model_profile.clone(),
+                    url: provider_url.to_string(),
+                })
+                .await
+            {
+                Ok(output) => output,
+                Err(error) => {
+                    self.emit_failed(
+                        &invocation_id,
+                        "provider_fetch_error",
+                        error.http_status,
+                        call_started.elapsed().as_millis() as u64,
+                    )
+                    .await;
+                    return Err(ToolError::Transport(error.message));
+                }
+            };
+            let markdown = if fetched.title.is_empty() {
+                fetched.content
+            } else {
+                format!("# {}\n\n{}", fetched.title, fetched.content)
+            };
+            let bytes = markdown.len();
+            let truncated = body_exceeds_markdown_cap(&markdown);
+            let result = self
+                .apply_or_raw(
+                    is_preapproved,
+                    "text/markdown",
+                    &markdown,
+                    parsed_input.prompt.as_ref(),
+                    policy,
+                )
+                .await;
+            let elapsed = call_started.elapsed().as_millis() as u64;
+            self.emit_completed(&invocation_id, 200, bytes as u64, truncated, elapsed)
+                .await;
+            return finish_fusion_result(
+                ToolCallResult {
+                    data: object([
+                        ("bytes", generated(json!(bytes))),
+                        ("code", generated(json!(200))),
+                        ("codeText", "OK".into()),
+                        ("result", result),
+                        ("durationMs", generated(json!(elapsed))),
+                        ("url", parsed_input.url.clone()),
+                    ]),
+                    model_content: None,
+                    new_messages: vec![],
+                    context_modifier: None,
+                    is_error: false,
+                    mcp_meta: None,
+                    subagent_hooks_fired: false,
+                },
+                policy,
+                FetchSource::Network,
+                unix_epoch_ms(),
+            );
+        }
+
         // Cache check (keyed by the *original* URL), before the http→https
         // upgrade — mirrors `utils.ts:392-404`, which short-circuits on a hit
         // ahead of the upgrade block at `utils.ts:406-416`. Repeat fetches of

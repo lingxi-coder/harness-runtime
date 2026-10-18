@@ -49,7 +49,26 @@ pub struct HostedSearchError {
     /// Whether a host or transport deadline expired.
     pub timeout: bool,
 }
-/// Session service for provider-hosted web search.
+/// A page fetch on the selected conversation account.
+#[derive(Clone, Debug)]
+pub struct HostedFetchRequest {
+    /// Active conversation model.
+    pub model: String,
+    /// Exact selected profile.
+    pub profile: Option<String>,
+    /// Validated HTTP(S) page URL.
+    pub url: String,
+}
+/// Native provider page content and request usage.
+pub struct HostedFetchOutput {
+    /// Page title.
+    pub title: String,
+    /// Markdown page content.
+    pub content: String,
+    /// Successful, nonempty provider requests.
+    pub billable_requests: u64,
+}
+/// Session service for provider-hosted web search and independent web fetch.
 #[async_trait::async_trait]
 pub trait HostedWebSearchClient: Send + Sync {
     /// Whether the selected route supports hosted search.
@@ -57,6 +76,21 @@ pub trait HostedWebSearchClient: Send + Sync {
     /// Whether the route supports this request's additional constraints.
     fn supports_request(&self, request: &HostedSearchRequest) -> bool {
         self.supports(&request.model, request.profile.as_deref())
+    }
+    /// Whether this route has a provider-native page fetch API.
+    fn supports_fetch(&self, _model: &str, _profile: Option<&str>) -> bool {
+        false
+    }
+    /// Fetch once; the provider adapter owns credentials and HTTP.
+    async fn fetch(
+        &self,
+        _request: HostedFetchRequest,
+    ) -> Result<HostedFetchOutput, HostedSearchError> {
+        Err(HostedSearchError {
+            message: "provider fetch is unsupported".into(),
+            http_status: None,
+            timeout: false,
+        })
     }
     /// Execute the search and forward progress signals.
     async fn search(
