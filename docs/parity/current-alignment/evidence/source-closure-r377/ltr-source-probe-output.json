@@ -1,0 +1,219 @@
+{
+  "schema": "claude-2.1.295-ltr-source-probe-v1",
+  "execution": "extracted-pure-javascript-functions-only",
+  "native_process_started": false,
+  "artifact": {
+    "path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+  },
+  "source_range": {
+    "offset": 186325155,
+    "bytes": 7419,
+    "source_sha256": "a66f6f6d6f121ab2a8a9b5acf8ad8fa5d95ce3c6b55175dd7bbf5463b3567f0b",
+    "functions": [
+      "P",
+      "h",
+      "LTr"
+    ]
+  },
+  "node_version": "25.2.1",
+  "cases": [
+    {
+      "id": "exact-equality",
+      "pattern_utf16_units": [
+        "0070",
+        "006c",
+        "0061",
+        "0069",
+        "006e"
+      ],
+      "name_utf16_units": [
+        "0070",
+        "006c",
+        "0061",
+        "0069",
+        "006e"
+      ],
+      "expected": true,
+      "observed": true
+    },
+    {
+      "id": "exact-mismatch",
+      "pattern_utf16_units": [
+        "0070",
+        "006c",
+        "0061",
+        "0069",
+        "006e"
+      ],
+      "name_utf16_units": [
+        "006f",
+        "0074",
+        "0068",
+        "0065",
+        "0072"
+      ],
+      "expected": false,
+      "observed": false
+    },
+    {
+      "id": "wildcard-ordinary",
+      "pattern_utf16_units": [
+        "0070",
+        "006f",
+        "0073",
+        "005f",
+        "0061",
+        "002a",
+        "0062"
+      ],
+      "name_utf16_units": [
+        "0070",
+        "006f",
+        "0073",
+        "005f",
+        "0061",
+        "0062"
+      ],
+      "expected": true,
+      "observed": true
+    },
+    {
+      "id": "wildcard-internal-lf",
+      "pattern_utf16_units": [
+        "006c",
+        "0066",
+        "005f",
+        "0061",
+        "002a",
+        "0062"
+      ],
+      "name_utf16_units": [
+        "006c",
+        "0066",
+        "005f",
+        "0061",
+        "000a",
+        "0062"
+      ],
+      "expected": true,
+      "observed": true
+    },
+    {
+      "id": "wildcard-internal-cr",
+      "pattern_utf16_units": [
+        "0063",
+        "0072",
+        "005f",
+        "0061",
+        "002a",
+        "0062"
+      ],
+      "name_utf16_units": [
+        "0063",
+        "0072",
+        "005f",
+        "0061",
+        "000d",
+        "0062"
+      ],
+      "expected": true,
+      "observed": true
+    },
+    {
+      "id": "wildcard-internal-line-separator",
+      "pattern_utf16_units": [
+        "006c",
+        "0073",
+        "005f",
+        "0061",
+        "002a",
+        "0062"
+      ],
+      "name_utf16_units": [
+        "006c",
+        "0073",
+        "005f",
+        "0061",
+        "2028",
+        "0062"
+      ],
+      "expected": true,
+      "observed": true
+    },
+    {
+      "id": "wildcard-internal-paragraph-separator",
+      "pattern_utf16_units": [
+        "0070",
+        "0073",
+        "005f",
+        "0061",
+        "002a",
+        "0062"
+      ],
+      "name_utf16_units": [
+        "0070",
+        "0073",
+        "005f",
+        "0061",
+        "2029",
+        "0062"
+      ],
+      "expected": true,
+      "observed": true
+    },
+    {
+      "id": "terminal-lf-is-not-ignored",
+      "pattern_utf16_units": [
+        "0073",
+        "0075",
+        "0066",
+        "0066",
+        "0069",
+        "0078",
+        "005f",
+        "0061",
+        "002a",
+        "0062"
+      ],
+      "name_utf16_units": [
+        "0073",
+        "0075",
+        "0066",
+        "0066",
+        "0069",
+        "0078",
+        "005f",
+        "0061",
+        "0062",
+        "000a"
+      ],
+      "expected": false,
+      "observed": false
+    },
+    {
+      "id": "wildcard-can-split-a-surrogate-pair",
+      "pattern_utf16_units": [
+        "0075",
+        "006e",
+        "0069",
+        "0074",
+        "005f",
+        "d83d",
+        "002a",
+        "de00"
+      ],
+      "name_utf16_units": [
+        "0075",
+        "006e",
+        "0069",
+        "0074",
+        "005f",
+        "d83d",
+        "de00"
+      ],
+      "expected": true,
+      "observed": true
+    }
+  ]
+}

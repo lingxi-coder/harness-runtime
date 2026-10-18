@@ -1,0 +1,33 @@
+
+running 28 tests
+test forked_skill::tests::a_cold_resume_requires_a_matching_marker_witness ... ok
+test forked_skill::tests::a_malformed_record_refuses_before_any_absence_check ... ok
+test forked_skill::tests::a_marker_without_scoping_refuses_on_the_cold_path ... ok
+test forked_skill::tests::a_matching_task_record_yields_the_scoping ... ok
+test forked_skill::tests::a_skill_that_is_no_longer_fork_capable_refuses ... ok
+test forked_skill::tests::a_symlinked_scoping_record_is_malformed_not_followed ... ok
+test forked_skill::tests::a_task_record_naming_a_different_skill_refuses_as_mismatch ... ok
+test forked_skill::tests::a_task_record_naming_a_skill_with_no_scoping_refuses_as_missing ... ok
+test forked_skill::tests::an_ordinary_agent_passes_the_gate ... ok
+test forked_skill::tests::an_oversized_record_is_rejected_unread ... ok
+test forked_skill::tests::frozen_deny_length_uses_utf16_units_and_accepts_exact_1024_boundary ... ok
+test forked_skill::tests::frozen_deny_sidecar_rejects_non_string_array_values ... ok
+test forked_skill::tests::frozen_deny_sidecar_round_trip_keeps_lone_surrogate_and_exact_identity ... ok
+test agent_rows::tests::a_row_round_trips_its_full_launch_configuration ... ok
+test forked_skill::tests::marker_without_scoping_is_absent_but_marked ... ok
+test forked_skill::tests::no_sidecars_is_absent ... ok
+test forked_skill::tests::marker_witness_is_none_for_every_failure_mode ... ok
+test forked_skill::tests::only_a_trailing_jsonl_is_replaced ... ok
+test forked_skill::tests::paths_replace_a_trailing_jsonl_suffix ... ok
+test forked_skill::tests::omits_unset_optional_keys_on_the_wire ... ok
+test forked_skill::tests::scoping_validation_matches_the_schema_bounds ... ok
+test forked_skill::tests::sidecars_sit_beside_the_agents_real_transcript ... ok
+test forked_skill::tests::skill_names_reject_newlines_and_length_extremes ... ok
+test forked_skill::tests::the_deny_union_dedupes_keeping_the_first_occurrence ... ok
+test forked_skill::tests::the_deny_union_keeps_frozen_rules_and_only_grows ... ok
+test forked_skill::tests::round_trips_a_written_record ... ok
+test forked_skill::tests::unpaired_skill_identity_survives_sidecar_cold_recovery ... ok
+test forked_skill::tests::unparseable_or_schema_failing_records_are_malformed ... ok
+
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 349 filtered out; finished in 0.06s
+

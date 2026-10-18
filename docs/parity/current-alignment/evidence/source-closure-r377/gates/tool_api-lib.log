@@ -1,0 +1,8 @@
+
+running 3 tests
+test tool_invoker_impl::tests::dispatch_forwards_frozen_command_denies_as_a_separate_source_array ... ok
+test tool_invoker_impl::tests::frozen_lone_surrogate_deny_survives_sidecar_round_trip_and_dispatch_context ... ok
+test tool_invoker_impl::tests::own_plan_allowance_preserves_deny_ask_frozen_rules_and_structured_result ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 290 filtered out; finished in 0.00s
+

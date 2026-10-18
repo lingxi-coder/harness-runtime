@@ -1,0 +1,7 @@
+
+running 2 tests
+test provider_side_query::tests::fork_text_candidate_keeps_lone_surrogate_source_units ... ok
+test fork_response::tests::synthesized_candidate_keeps_lone_surrogate_source_units ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 69 filtered out; finished in 0.00s
+

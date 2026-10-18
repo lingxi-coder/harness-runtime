@@ -1,0 +1,11 @@
+
+running 6 tests
+test policy::policy_test::tests::native_content_alias_match_keeps_source_and_rule_family_conditions ... ok
+test policy::policy_test::tests::native_alias_proxy_expansion_matches_only_native_rule_walks ... ok
+test policy_gate::policy_gate_test::tests::command_input_union_keeps_semantically_equal_source_spellings ... ok
+test policy_gate::policy_gate_test::tests::frozen_live_and_additional_command_denies_use_exact_first_seen_order ... ok
+test policy_gate::policy_gate_test::tests::frozen_live_and_additional_read_rules_keep_native_source_order ... ok
+test policy::policy_test::tests::native_ltr_tool_name_globs_follow_source_case_table ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1777 filtered out; finished in 0.03s
+

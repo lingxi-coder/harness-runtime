@@ -1,0 +1,8 @@
+
+running 3 tests
+test prompt_suggestion_wire_preserves_unpaired_surrogate_as_string ... ok
+test composer_feedback_is_an_explicit_host_extension ... ok
+test prompt_suggestion_wire_roundtrip ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

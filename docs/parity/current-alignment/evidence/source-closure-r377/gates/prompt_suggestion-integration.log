@@ -1,0 +1,18 @@
+
+running 13 tests
+test composer_context_accepts_only_the_current_raw_session_uuid ... ok
+test disabling_preserves_an_inflight_preview_and_its_submission_lifecycle ... ok
+test clearing_session_cancels_inflight_suggestion ... ok
+test focus_permission_and_toggle_gate_actual_generation ... ok
+test new_turn_cancels_old_suggestion_and_only_emits_the_new_reply ... ok
+test generated_previews_that_never_reach_the_composer_do_not_back_off ... ok
+test plan_mode_skips_the_post_turn_query ... ok
+test post_turn_output_stream_emits_the_exact_normalized_suggestion_units ... ok
+test post_turn_suggestion_is_nonblocking_uses_parent_prefix_and_never_changes_history ... ok
+test prompt_suggestion_matches_shared_fixture_cases_and_filters ... ok
+test prompt_suggestion_normalization_keeps_unpaired_utf16_and_native_candidate_order ... ok
+test only_shown_unused_suggestions_back_off_and_reenable_resets_frequency ... ok
+test typing_cancels_generation_before_it_can_replace_the_draft ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+

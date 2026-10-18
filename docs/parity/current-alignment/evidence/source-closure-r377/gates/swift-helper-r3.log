@@ -1,0 +1,38 @@
+Building for debugging...
+[0/7] /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/r377-swift-source-274b3w30/build/arm64-apple-macosx/debug/LingxiCodePackageTests.derived/runner.swift
+[1/7] Write sources
+[4/7] Write swift-version--58304C5D6DBC2206.txt
+[6/9] Emitting module LingxiCode
+[7/9] Compiling LingxiCode PromptSuggestionDraftSource.swift
+[8/11] Compiling LingxiCodeTests PromptSuggestionDraftSourceTests.swift
+[9/11] Emitting module LingxiCodeTests
+[10/13] Compiling LingxiCodePackageTests runner.swift
+[11/13] Emitting module LingxiCodePackageTests
+[11/13] Write Objects.LinkFileList
+[12/13] Linking LingxiCodePackageTests
+Build complete! (11.83s)
+Test Suite 'All tests' started at 2026-10-18 05:14:22.808.
+Test Suite 'LingxiCodePackageTests.xctest' started at 2026-10-18 05:14:22.809.
+Test Suite 'PromptSuggestionDraftSourceTests' started at 2026-10-18 05:14:22.809.
+Test Case '-[LingxiCodeTests.PromptSuggestionDraftSourceTests testAppendingAfterDisplayedIsolatedSurrogatePreservesItsSourceUnit]' started.
+Test Case '-[LingxiCodeTests.PromptSuggestionDraftSourceTests testAppendingAfterDisplayedIsolatedSurrogatePreservesItsSourceUnit]' passed (0.002 seconds).
+Test Case '-[LingxiCodeTests.PromptSuggestionDraftSourceTests testCanonicalEquivalentEditUpdatesUtf16SourceUnits]' started.
+Test Case '-[LingxiCodeTests.PromptSuggestionDraftSourceTests testCanonicalEquivalentEditUpdatesUtf16SourceUnits]' passed (0.000 seconds).
+Test Case '-[LingxiCodeTests.PromptSuggestionDraftSourceTests testDeletingDisplayedReplacementRemovesItsSourceUnit]' started.
+Test Case '-[LingxiCodeTests.PromptSuggestionDraftSourceTests testDeletingDisplayedReplacementRemovesItsSourceUnit]' passed (0.000 seconds).
+Test Case '-[LingxiCodeTests.PromptSuggestionDraftSourceTests testEditingDisplayedReplacementReplacesOnlyItsSourceUnit]' started.
+Test Case '-[LingxiCodeTests.PromptSuggestionDraftSourceTests testEditingDisplayedReplacementReplacesOnlyItsSourceUnit]' passed (0.000 seconds).
+Test Case '-[LingxiCodeTests.PromptSuggestionDraftSourceTests testUtf16EditDoesNotCollapseCanonicalEquivalentStringChanges]' started.
+Test Case '-[LingxiCodeTests.PromptSuggestionDraftSourceTests testUtf16EditDoesNotCollapseCanonicalEquivalentStringChanges]' passed (0.000 seconds).
+Test Case '-[LingxiCodeTests.PromptSuggestionDraftSourceTests testWhitespaceTrimPreservesRawSuffixUnits]' started.
+Test Case '-[LingxiCodeTests.PromptSuggestionDraftSourceTests testWhitespaceTrimPreservesRawSuffixUnits]' passed (0.000 seconds).
+Test Suite 'PromptSuggestionDraftSourceTests' passed at 2026-10-18 05:14:22.812.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+Test Suite 'LingxiCodePackageTests.xctest' passed at 2026-10-18 05:14:22.812.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.002 (0.003) seconds
+Test Suite 'All tests' passed at 2026-10-18 05:14:22.812.
+	 Executed 6 tests, with 0 failures (0 unexpected) in 0.002 (0.004) seconds
+􀟈  Test run started.
+􀄵  Testing Library Version: 1501
+􀄵  Target Platform: arm64e-apple-macos14.0
+􁁛  Test run with 0 tests in 0 suites passed after 0.001 seconds.

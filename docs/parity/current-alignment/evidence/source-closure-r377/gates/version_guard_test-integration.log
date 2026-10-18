@@ -1,0 +1,17 @@
+
+running 12 tests
+test a_second_breaking_change_with_no_further_bump_is_still_rejected ... ok
+test adding_optional_field_is_compatible ... ok
+test adding_a_variant_is_compatible ... ok
+test contract_index_covers_every_dto ... ok
+test adding_required_field_to_existing_variant_requires_major_bump ... ok
+test exact_client_text_keeps_the_protocol_json_string_shape ... ok
+test identical_index_is_compatible ... ok
+test current_contract_matches_index_or_version_bumped ... ok
+test removing_a_field_requires_major_bump ... ok
+test renaming_a_variant_requires_major_bump ... ok
+test skill_admin_command_and_source_target_are_indexed ... ok
+test retyping_a_field_requires_major_bump ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

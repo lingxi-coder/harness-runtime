@@ -1,0 +1,430 @@
+{
+  "status": "passed",
+  "duration_s": 92.71020126342773,
+  "build_command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--no-run",
+    "--lib",
+    "--features",
+    "harness-runtime/desktop,client/adapter,client/uniffi",
+    "--message-format=json",
+    "-p",
+    "core",
+    "-p",
+    "permission",
+    "-p",
+    "session",
+    "-p",
+    "tool-api",
+    "-p",
+    "tool-skill",
+    "-p",
+    "sidequery",
+    "-p",
+    "orchestrator",
+    "-p",
+    "client",
+    "-p",
+    "harness-runtime",
+    "--test",
+    "prompt_suggestion_fork",
+    "--test",
+    "prompt_suggestion_wire",
+    "--test",
+    "prompt_suggestion",
+    "--test",
+    "prompt_suggestion_filter_reasons",
+    "--test",
+    "prompt_suggestion_controls",
+    "--test",
+    "prompt_suggestion_background",
+    "--test",
+    "prompt_suggestion_test",
+    "--test",
+    "version_guard_test",
+    "--test",
+    "version_test"
+  ],
+  "rows": [
+    {
+      "target": "session",
+      "kind": [
+        "lib"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/session-5e137ecbcd033b24",
+        "forked_skill::tests::",
+        "a_row_round_trips_its_full_launch_configuration",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "7c7b846357712f45b4a6a036243fddc9d2666e419f98d72bb5ff1ae627e111c2",
+      "status": 0,
+      "duration_s": 0.08031105995178223,
+      "summary": [
+        "ok",
+        "28",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "permission",
+      "kind": [
+        "lib"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/permission-bd475c01f861c458",
+        "native_ltr_tool_name_globs_follow_source_case_table",
+        "native_alias_proxy_expansion",
+        "native_content_alias_match",
+        "frozen_live_and_additional_read_rules_keep_native_source_order",
+        "frozen_live_and_additional_command_denies",
+        "command_input_union_keeps_semantically_equal_source_spellings",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "5cf7cb26f43e9ac0d35a8ff002f8748e2bbe5352480e7313ab419feccf204133",
+      "status": 0,
+      "duration_s": 0.04892897605895996,
+      "summary": [
+        "ok",
+        "6",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "prompt_suggestion_test",
+      "kind": [
+        "test"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/prompt_suggestion_test-ca5d96e8e7d71f35",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "19d4af511a1435c3fff7d072743bace7525a08bc31c2dba60c3b58e8c5b757c5",
+      "status": 0,
+      "duration_s": 0.016459941864013672,
+      "summary": [
+        "ok",
+        "3",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "version_test",
+      "kind": [
+        "test"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/version_test-15aa9fa8af5ce1e0",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "e8e1cbdaf6b6bf3ccde6716dca6e836eb4839225b0f06393ebeb36dd425a1d56",
+      "status": 0,
+      "duration_s": 0.006167173385620117,
+      "summary": [
+        "ok",
+        "2",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "version_guard_test",
+      "kind": [
+        "test"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/version_guard_test-61ac769860225e4e",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "0ef8286295d1910c8e89c55c09a3cf719e48f406507dd80ba5bb6c7008dcbdfc",
+      "status": 0,
+      "duration_s": 0.017386913299560547,
+      "summary": [
+        "ok",
+        "12",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "client",
+      "kind": [
+        "lib"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/client-8b19e8b02d603ba8",
+        "protocol::text::",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "ab0deedab1f4da7b5656bf8d17add7b557d215e9f070aded2b23e4881ce779eb",
+      "status": 0,
+      "duration_s": 0.026656150817871094,
+      "summary": [
+        "ok",
+        "3",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "prompt_suggestion_controls",
+      "kind": [
+        "test"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/prompt_suggestion_controls-8511b7b0d365b4fa",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "9db7fcb11f78da131ae4ec4a16de0d722e79dd3088bb8a25c3bb505d3683e0db",
+      "status": 0,
+      "duration_s": 0.019366979598999023,
+      "summary": [
+        "ok",
+        "8",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "orchestrator",
+      "kind": [
+        "lib"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/orchestrator-240752cbf21d2588",
+        "presentation_json_round_trip_preserves_unpaired_surrogate_units",
+        "new_messages_appended_to_history_after_tool_result",
+        "appended_batched_tool_injection_contributes_query_user_event",
+        "cancel_during_batched_tool_dispatch_records_tool_interruption",
+        "native_jqe_resolves_exact_aliases",
+        "submission_does_not_conflate_unpaired_source",
+        "query_user_events_are_query_local",
+        "compaction_rebuilt_message_ids_do_not_change_query_user_event_metrics",
+        "generated_session_name_tests::",
+        "stringify_preserves_lone_units_and_javascript_numeric_key_order",
+        "truncation_keeps_a_surrogate_pair_whole",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "9e8bb04b869dc8a3d661a6863bd9cb24c6e9f237622f6241a4a7dfd19bcd53a9",
+      "status": 0,
+      "duration_s": 0.30846595764160156,
+      "summary": [
+        "ok",
+        "13",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "prompt_suggestion",
+      "kind": [
+        "test"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/prompt_suggestion-7d76c2098398739c",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "595a5594150c4588422ca3bcc6d5c8c7604431c396cca897671609ee37eaa4f4",
+      "status": 0,
+      "duration_s": 0.7168688774108887,
+      "summary": [
+        "ok",
+        "13",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "prompt_suggestion_background",
+      "kind": [
+        "test"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/prompt_suggestion_background-38b5111a9b976a61",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "24629acc27ebfd2846b76a66cc2267f68fc1b6db6caef5641ae5ad51a37d9174",
+      "status": 0,
+      "duration_s": 7.076963663101196,
+      "summary": [
+        "ok",
+        "1",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "prompt_suggestion_filter_reasons",
+      "kind": [
+        "test"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/prompt_suggestion_filter_reasons-a5f18e1cced21f76",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "c84b51fc744b04d7f0bdea95a4f6effe56e48d983ea2aa5bbc70fd0fedffa964",
+      "status": 0,
+      "duration_s": 0.04031014442443848,
+      "summary": [
+        "ok",
+        "1",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "tool_skill",
+      "kind": [
+        "lib"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tool_skill-00eb24a97c415edc",
+        "a_fork_freezes_the_command_denies_in_force_at_launch",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "f5d65c474cbc7835e31f36ce76f488b59b8d73a3bea16c644fe2d700daf73021",
+      "status": 0,
+      "duration_s": 0.0210878849029541,
+      "summary": [
+        "ok",
+        "1",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "prompt_suggestion_wire",
+      "kind": [
+        "test"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/prompt_suggestion_wire-fd5a3c2af588c250",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "bcfb0237cbdd4478e245b57dbbe23e361ce7a1cb4ddab73f208498be57fbbc13",
+      "status": 0,
+      "duration_s": 0.39165687561035156,
+      "summary": [
+        "ok",
+        "2",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "prompt_suggestion_fork",
+      "kind": [
+        "test"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/prompt_suggestion_fork-c1707d288e22d833",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "22fd39af660d63fa5bdfe7b0a3229c6efbfa1b995a6185a5db8789614823f53c",
+      "status": 0,
+      "duration_s": 0.012936115264892578,
+      "summary": [
+        "ok",
+        "3",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "sidequery",
+      "kind": [
+        "lib"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/sidequery-154cf93dd972609c",
+        "synthesized_candidate_keeps_lone_surrogate",
+        "fork_text_candidate_keeps_lone_surrogate",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "7723ab60d1d9a4ffa2a04d24a5ba49055cc20944acd060f76b0d211d7af34fc4",
+      "status": 0,
+      "duration_s": 0.04647994041442871,
+      "summary": [
+        "ok",
+        "2",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "tool_api",
+      "kind": [
+        "lib"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tool_api-997cc5a99b7dfd1a",
+        "dispatch_forwards_frozen_command_denies_as_a_separate_source_array",
+        "frozen_lone_surrogate_deny_survives_sidecar_round_trip_and_dispatch_context",
+        "own_plan_allowance_preserves_deny_ask_frozen_rules",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "a0220544ced4a4db20ee6bc8b36c5064d7489a555a015eb7ffb45e52d9c0f28b",
+      "status": 0,
+      "duration_s": 0.027959108352661133,
+      "summary": [
+        "ok",
+        "3",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "lingxi_core",
+      "kind": [
+        "lib"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/lingxi_core-5a09b76ea00ea980",
+        "frozen_command_denies_serde",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "128bdfea67923e586b5c97b3f3324181349821dd6cb8ae1b1f6f5971bd2eeee4",
+      "status": 0,
+      "duration_s": 0.10237598419189453,
+      "summary": [
+        "ok",
+        "1",
+        "0",
+        "0"
+      ]
+    },
+    {
+      "target": "harness_runtime",
+      "kind": [
+        "lib"
+      ],
+      "command": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/harness_runtime-b3b2127bbe23721e",
+        "result_publication_tests::",
+        "compact_rebuilt_prompt_ids_do_not_hide_cancelled_print_projection",
+        "partial_assistant_and_tool_use_interruptions_use_native_error_projection",
+        "print_cancellation_projection_uses_yielded_user_events_and_native_guards",
+        "sdk_suggestion_output_",
+        "pending_suggestion_feedback_keeps_source_surrogate",
+        "prompt_suggestion_frame_matches_expected_shape",
+        "suggestion_frame_serializes_lone_surrogate",
+        "--test-threads=2"
+      ],
+      "exe_sha256": "a1071eae42f94ceae4f7a11779878dcbfa73c16465944a745db2dd9a54d602cb",
+      "status": 0,
+      "duration_s": 4.471430778503418,
+      "summary": [
+        "ok",
+        "18",
+        "0",
+        "0"
+      ]
+    }
+  ]
+}

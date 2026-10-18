@@ -1,0 +1,6 @@
+
+running 1 test
+test host::subagent_spawn::tests::frozen_command_denies_serde_is_string_array_and_preserves_lone_units ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1047 filtered out; finished in 0.03s
+

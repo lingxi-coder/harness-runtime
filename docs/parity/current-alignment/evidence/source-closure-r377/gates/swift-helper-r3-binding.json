@@ -1,0 +1,23 @@
+{
+  "scope": "actual Foundation-only helper and its checked-in XCTest source, not full iOS app or FFI generation",
+  "command": [
+    "/usr/bin/swift",
+    "test",
+    "--disable-sandbox",
+    "--package-path",
+    "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/r377-swift-source-274b3w30",
+    "--scratch-path",
+    "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/r377-swift-source-274b3w30/build",
+    "--cache-path",
+    "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/r377-swift-source-274b3w30/cache",
+    "--config-path",
+    "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/r377-swift-source-274b3w30/config",
+    "--security-path",
+    "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/r377-swift-source-274b3w30/security"
+  ],
+  "files": {
+    "apps/ios/native/Sources/Conversation/PromptSuggestionDraftSource.swift": "47084add06409c80e54ee06a88336ce8c7cc810b69350526a30f17727ef64fbf",
+    "apps/ios/native/Tests/PromptSuggestionDraftSourceTests.swift": "a6c0009982707f34446dc6993c1924daaa6db00fab4fed6811571f69d5db8bf0"
+  },
+  "status": 0
+}

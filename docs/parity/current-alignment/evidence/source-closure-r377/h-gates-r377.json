@@ -1,0 +1,69 @@
+{
+  "schema": "lingxi.claude.source-closure-r377.h-gates.v1",
+  "candidate": {
+    "repository": "harness-runtime",
+    "commit": "6548b9d5e702f8e9d42772412cd65b72881e24b4",
+    "base": "e4e00ec16acfc8702d03799258095676cc203bf0"
+  },
+  "reference": {
+    "version": "2.1.295",
+    "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+  },
+  "gates": {
+    "selected-r9": {
+      "status": "passed",
+      "test_rows": 18,
+      "tests": {
+        "passed": 120,
+        "failed": 0,
+        "ignored": 0
+      },
+      "evidence": {
+        "integration_root_relative_path": "acceptance/source-closure-r377/gates/selected-r9/selected-run.json",
+        "sha256": "3461d736cf4f83fbda18c614d1347034d35d54896a83b8faf9df82e519dfb61e"
+      }
+    },
+    "format-r4": {
+      "status": "passed",
+      "exit_code": 0,
+      "evidence": {
+        "integration_root_relative_exit_path": "acceptance/source-closure-r377/gates/fmt-final-r4.exit",
+        "exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "integration_root_relative_log_path": "acceptance/source-closure-r377/gates/fmt-final-r4.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    "clippy-final-r4": {
+      "status": "passed",
+      "exit_code": 0,
+      "scope": "full workspace, all targets",
+      "features": [
+        "harness-runtime/desktop",
+        "client/adapter",
+        "client/uniffi"
+      ],
+      "evidence": {
+        "integration_root_relative_exit_path": "acceptance/source-closure-r377/gates/clippy-final-r4.exit",
+        "exit_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+        "integration_root_relative_log_path": "acceptance/source-closure-r377/gates/clippy-final-r4.log",
+        "log_sha256": "c11a80c98725adea81ced53335316b38f6873547ef8830541f6261c833654165"
+      }
+    }
+  },
+  "product_gates": {
+    "status": "passed_scoped",
+    "commit": "a2a45fd0e845558ce55aa35e6bd9f57ed4491ed3",
+    "receipt": "stage-receipt.json"
+  },
+  "native_public_evidence": {
+    "native_processes_started": 0,
+    "fresh_package_created": false,
+    "device_launched": false,
+    "public_bytes_captured": false
+  },
+  "claim_boundary": [
+    "Selected H regressions and the extracted-source helper probe are not a public Native byte oracle.",
+    "The focused H test selection is not a full-workspace test run or a full 42-row contract pass.",
+    "Product scoped gates passed; platform app/device and fresh package acceptance were not rerun."
+  ]
+}

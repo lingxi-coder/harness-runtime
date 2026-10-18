@@ -1,0 +1,8 @@
+
+running 3 tests
+test protocol::text::tests::exact_utf16_text_round_trips_as_a_plain_json_string ... ok
+test protocol::text::tests::scalar_text_uses_the_same_wire_shape ... ok
+test protocol::text::tests::source_projection_conversion_preserves_lone_surrogate_units ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 397 filtered out; finished in 0.00s
+

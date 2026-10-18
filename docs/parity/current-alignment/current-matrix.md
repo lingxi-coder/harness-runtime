@@ -8,10 +8,18 @@ constraints remain distinct evidence classes.
 
 ## Candidate status
 
-**Current candidate: H `44f2eef5` is delivered and pushed; Product
-`17593eaa66dc762d5c9c581ba348398c914bdbcd` is verified and pushed to main. Its full tests,
-five platform checks, public CLI SIGINT gate, fresh signed macOS package, and
-packaged GUI acceptance have passed. The 42-row matrix assembly and validator passed.**
+**R376 baseline only:** H `44f2eef5` and Product
+`17593eaa66dc762d5c9c581ba348398c914bdbcd` were delivered and pushed to main;
+the full tests, five platform checks, run04 SIGINT gate, signed macOS package,
+and packaged GUI acceptance below apply to those recorded r376 source pins.
+They do not validate the locked r377 follow-up. H candidate commit
+`6548b9d5e702f8e9d42772412cd65b72881e24b4` passed selected-r9 (120 passed, 0
+failed, 0 ignored across 18 selected rows), format-r4, and full-workspace
+all-targets Clippy-r4 with desktop, client adapter, and UniFFI features. See
+the compact [H gate receipt](evidence/source-closure-r377/h-gates-r377.json)
+and [r377 source closure](source-closure-r377.md). Product `a2a45fd0e845558ce55aa35e6bd9f57ed4491ed3` pins H `6548b9d5e702f8e9d42772412cd65b72881e24b4` and passed the scoped workspace/check/Clippy, Bridge, CLI, docs and consumer gates recorded in the [stage receipt](evidence/source-closure-r377/stage-receipt.json). These gates are not a full-workspace test run,
+all-42-row pass, or public Native byte-parity result. The r377 Native process
+count is 0; no fresh GUI package or device launch occurred.
 SDK `a363c5b3` is unchanged. The immutable
 `baseline.json` preserves the starting combination (SDK `a363c5b3`, H
 `4d6d0d6c`, Product `f71087b4`) and all **42 original unique contract IDs**.
@@ -19,14 +27,17 @@ The historical count of 43 incorrectly included the MCP domain heading. Earlier
 receipts remain evidence only for their pinned inputs; they do not certify the
 current candidate.
 
-H `44f2eef5baf8ae16254934dbca451cbfd528d955` is pushed to `main`; r10
-formatting, runtime (1,468 passed, 0 failed), and Clippy gates passed. These
-affected-source gates do not claim a blanket full-workspace H pass. H includes a
-narrowly guarded streaming-cancellation result projection. Native projection
-parity remains unverified when session compaction retargets a preserved message
-ID or when interruption occurs before the provider stream is active.
+R376 H `44f2eef5baf8ae16254934dbca451cbfd528d955` was pushed to `main`; its r10
+formatting, runtime (1,468 passed, 0 failed), and Clippy receipts are historical
+affected-source gates, not a blanket full-workspace or r377 pass. R377 now binds
+Native's one-shot cancellation row-count and terminal-row projection, and the H
+candidate carries query-local yielded-user facts with a typed interruption
+marker. The compaction-ID-rebuild and cancellation projection selectors passed
+in selected-r9; these publisher tests are not a live provider turn or public
+Native output capture. Pre-admission and shutdown-specific cancellation remain
+unverified.
 
-Product `17593eaa66dc762d5c9c581ba348398c914bdbcd` includes the current pin,
+R376 Product `17593eaa66dc762d5c9c581ba348398c914bdbcd` included the current pin,
 public CLI SIGINT regression, four self-contained fixtures, and committed ledger
 docs. The full runner at
 `/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/run.json`
@@ -51,15 +62,45 @@ terminal result. That outcome does not certify or contradict the new Product
 pin. The public cold-resume selector remains Product regression evidence, not a
 Native cold-resume oracle.
 
-The 2.1.295 Native alias/glob semantics remain **unverified**. The bounded
-endpoint-only probe (`native-ltr-alias-probe-approved-endpoint-run/receipt.json`)
-is `capture_invalid`: the positive Edit-deny
-control was not observed, so its catalog observations cannot establish alias or
-glob behavior. The Native `LTr` helper body/regex flags have not been bound to
-the fixed artifact. This is neither an accepted difference nor a parity pass.
-H source and regression coverage are separate evidence; they do not substitute
-for the missing Native semantic evidence. Any contract requiring exact Native
-alias/glob behavior remains unverified until valid evidence exists.
+The fixed-source question for 2.1.295 alias/glob matching is now closed: `LTr`
+returns the literal-segment `h` matcher, which uses `*` splitting, exact
+prefix/suffix checks, ordered interior search, and JavaScript UTF-16 units; it
+does not construct a regex. The extracted-source probe produced the expected
+results for nine bounded vectors. See the [r377 alias source closure](source-closure-r377.md#alias-glob)
+and the tracked [pinned source evidence](evidence/source-closure-r377/native-source-bindings.md), [pure probe script](evidence/source-closure-r377/ltr-source-probe.mjs), and [recorded probe output](evidence/source-closure-r377/ltr-source-probe-output.json).
+The prior public endpoint-only probe remains `capture_invalid` because its
+positive Edit-deny control was not observed. It provides no Native runtime
+catalog observation. The selected H alias/glob selectors passed in selected-r9,
+but source closure and extracted-source checks are not a public-byte parity
+pass.
+
+For TURN-3, r377 recovered Native's one-shot print projection: yielded user-row
+count, final non-turn-companion row, cancellation marker, `ZVo` suppression,
+and `error_during_execution` diagnostic rules. The [source closure](source-closure-r377.md#cancellation)
+links the byte-bound evidence; selected-r9 H cancellation and ID-rebuild
+selectors passed. The prior run04 remains the sole narrow public SIGINT
+capture; selected H tests do not establish whole stdout or live-compaction
+parity.
+
+The frozen-deny source consumer is also now bound: Native merges the frozen
+array before current Command denies and skill additions, then exact-deduplicates
+with JavaScript `Set`. The locked H candidate carries raw projections into one
+Command source in the matching frozen → live Command → current input → per-call
+additional order. Its three-stage Read-negation, exact `Bash`/`Bash(*)`, and
+parked-request UTF-16 persistence checks passed in selected-r9. The
+[frozen-order source closure](source-closure-r377.md#frozen-deny-order)
+separates those H checks from absent Native public permission bytes. The pinned
+Product workspace check and Clippy gates passed; they compile this path but do
+not add a public Native permission capture.
+
+The r377 source review also binds Native's cold tool-result projection and
+prompt-suggestion string handling. The existing Product cold-resume run is
+r376 regression evidence, not a Native cold-resume oracle; public Native
+U+D800 prompt-suggestion output is unobserved. Selected H suggestion/helper
+regressions passed. Product Bridge and CLI gates passed, and the recorded mobile
+source/helper checks passed within their stated scope; full mobile app builds
+and device UI were not run. The public Native frame remains unobserved. The
+[Unicode source closure](source-closure-r377.md#cold-resume-utf16) records these limits.
 
 The final ledger must use these current pins and their own receipts, and retain
 the distinction between source agreement, focused regression, executed
@@ -114,23 +155,23 @@ Pending evidence cannot be upgraded to a pass by relabeling it.
 | TURN-1 | bounded-pass | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
 | TURN-2 | bounded-evidence | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
 | STOPDETAILS-1 | partial_native_host_projection_pass | [sdk](evidence/final-ledger-r376/sdk-audit.json) |
-| TURN-3 | H-source-pass; Product-17593-captured-stream-case-pass | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
-| TOOL-1 | source-repair-and-live-consumer-regressions-passed | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
+| TURN-3 | r376 run04 remains a narrow public capture; r377 source projection bound and selected H selectors passed; no live-provider or whole-stdout result | [r376 runtime](evidence/final-ledger-r376/runtime-audit.json); [r377 source](source-closure-r377.md#cancellation) |
+| TOOL-1 | r377 LTr source and extracted-source behavior closed; selected H selectors passed; public Native catalog capture invalid | [r376 runtime](evidence/final-ledger-r376/runtime-audit.json); [r377 source](source-closure-r377.md#alias-glob) |
 | TOOL-2 | bounded-pass | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
 | TOOL-3 | bounded-helper-and-production-persistence-evidence | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
-| TOOL-4 | source-closed-on-reviewed-helper-path; evidence-version-bounded | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
-| CMD-1 | Product-17593-cold-resume-regression-pass; Native-cold-oracle-unavailable | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
-| PROMPT-1 | composition-acceptance-bounded | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
-| PROMPT-2 | source_closed_current_regressions | [sdk](evidence/final-ledger-r376/sdk-audit.json) |
+| TOOL-4 | r377 Native cold object-result source path closed; public cold-resume bytes absent | [r376 runtime](evidence/final-ledger-r376/runtime-audit.json); [r377 source](source-closure-r377.md#cold-resume-utf16) |
+| CMD-1 | r376 Product cold-resume regression is historical; r377 frozen-order H selectors passed; Native cold oracle unavailable | [r376 runtime](evidence/final-ledger-r376/runtime-audit.json); [r377 frozen order](source-closure-r377.md#frozen-deny-order); [r377 resume](source-closure-r377.md#cold-resume-utf16) |
+| PROMPT-1 | r376 composition acceptance retained; r377 frozen-deny source order bound and selected H regressions passed | [r376 runtime](evidence/final-ledger-r376/runtime-audit.json); [r377 source](source-closure-r377.md#frozen-deny-order) |
+| PROMPT-2 | r377 Native suggestion normalization source-bound; selected H UTF-16 regressions and scoped Product mobile source/helper checks passed; full mobile app/device checks and public Native frame absent | [r376 sdk](evidence/final-ledger-r376/sdk-audit.json); [r377 source](source-closure-r377.md#utf16-suggestion) |
 | SESSION-1 | source-reviewed; native-persistence-evidence-unavailable | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
-| SESSION-3 | Product-17593-cold-resume-regression-pass; Native-cold-oracle-unavailable | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
+| SESSION-3 | r376 Product cold-resume regression is historical; r377 H source chain reviewed; Native cold oracle unavailable | [r376 runtime](evidence/final-ledger-r376/runtime-audit.json); [r377 source](source-closure-r377.md#cold-resume-utf16) |
 | EFFORT-1 | source_projection_closed_fixture_value_limited | [sdk](evidence/final-ledger-r376/sdk-audit.json) |
 | PER-TURN-CONTROL-295 | current_sdk_route_control_matrix_pass | [sdk](evidence/final-ledger-r376/sdk-audit.json) |
 | SESSION-2 | bounded-evidence; current-corewriter-receipt-not-included | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
-| SESSION-4 | bounded-source-and-regression-pass | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
-| SESSION-5 | native-oracle-unverified; no-confirmed-source-gap | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
+| SESSION-4 | r377 frozen deny carrier/source order reviewed; selected H regressions passed | [r376 runtime](evidence/final-ledger-r376/runtime-audit.json); [r377 source](source-closure-r377.md#frozen-deny-order) |
+| SESSION-5 | r377 generated-name/suggestion source reviewed; selected H helper regressions passed; public Native scalar outputs unavailable | [r376 runtime](evidence/final-ledger-r376/runtime-audit.json); [r377 source](source-closure-r377.md#cold-resume-utf16) |
 | AGENT-1 | source-and-current-regression-pass-bounded-lifecycle | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
-| MCP-1 | source-repair-and-current-H-regressions-passed; native-regex-semantics-unresolved | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
+| MCP-1 | r377 Native alias/glob implementation source-bound; selected H alias selectors passed; public Native catalog bytes unavailable | [r376 runtime](evidence/final-ledger-r376/runtime-audit.json); [r377 source](source-closure-r377.md#alias-glob) |
 | HOOK-1 | candidate_closed_evidence_limited | [mods](evidence/final-ledger-r376/mods-audit.json) |
 | HOOK-2 | partial | [mods](evidence/final-ledger-r376/mods-audit.json) |
 | HOOK-RELEASE-1 | complete | [mods](evidence/final-ledger-r376/mods-audit.json) |
@@ -143,3 +184,5 @@ Pending evidence cannot be upgraded to a pass by relabeling it.
 | RUNTIME-1 | partial | [mods](evidence/final-ledger-r376/mods-audit.json) |
 | BUILD-1 | verified_build_and_client_regression_scoped | [gates](evidence/final-ledger-r376/gates-audit.json) |
 | BASH-INPUT-295 | bounded-pass | [runtime](evidence/final-ledger-r376/runtime-audit.json) |
+
+Product delivery includes documentation-only commit `7ea23b6ae96d88ab1919cf7f00c44115f2fb562c` above the tested Product source commit; runtime and dependency sources are identical.

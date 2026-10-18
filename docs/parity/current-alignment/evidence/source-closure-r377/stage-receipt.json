@@ -1,0 +1,82 @@
+{
+  "schema": "lingxi.claude.source-closure-r377.stage-v1",
+  "target": "2.1.295",
+  "commits": {
+    "harness_production": "6548b9d5e702f8e9d42772412cd65b72881e24b4",
+    "product": "a2a45fd0e845558ce55aa35e6bd9f57ed4491ed3",
+    "sdk_unchanged": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "product_delivery_docs_only": "7ea23b6ae96d88ab1919cf7f00c44115f2fb562c"
+  },
+  "status": "bounded_source_contract_stage_passed",
+  "not_a_full_42_row_or_public_byte_parity_pass": true,
+  "harness": {
+    "selected_tests_passed": 120,
+    "failed": 0,
+    "full_workspace_clippy_all_targets": true,
+    "features": [
+      "harness-runtime/desktop",
+      "client/adapter",
+      "client/uniffi"
+    ],
+    "format": true
+  },
+  "product": {
+    "workspace_all_features_all_targets_check": true,
+    "workspace_all_features_all_targets_clippy": true,
+    "format": true,
+    "bridge_tests_passed": 99,
+    "bridge_types": true,
+    "electron_types": true,
+    "canonical_git_sources_and_locked_metadata": true,
+    "all_harness_pins": "6548b9d5e702f8e9d42772412cd65b72881e24b4",
+    "harness_direct_reference_count": 39,
+    "docs_sync_and_check": true,
+    "actual_cli_integration_tests": [
+      {
+        "name": "actual_cli_matches_native_2_1_295_slash_skill_and_stream_json_fixed_fields",
+        "returncode": 0,
+        "passed": true,
+        "log": "product-cli-1.log"
+      },
+      {
+        "name": "cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire",
+        "returncode": 0,
+        "passed": true,
+        "log": "product-cli-2.log"
+      },
+      {
+        "name": "public_cli_sigint_during_stream_open_matches_native_2_1_295",
+        "returncode": 0,
+        "passed": true,
+        "log": "product-cli-3.log"
+      }
+    ],
+    "docs_final_check": "product-docs-r5.log: production H/Mobile commits fixed in detached checkouts; Product source/docs commits clean"
+  },
+  "mobile": {
+    "swift_foundation_tests_passed": 6,
+    "kotlin_helper_assertions_passed": 6,
+    "swift_syntax_file_count": 13,
+    "generated_current_client_swift_binding_typecheck": true,
+    "binding_limit": "Client bindings freshly generated from current H; surrounding wrapper bindings from saved baseline; no Rust link or XCFramework build.",
+    "not_run": [
+      "full_iOS_app_typecheck",
+      "full_Android_app_compile",
+      "mobile_reducer_or_platform_XCTest_suites",
+      "device_UI"
+    ]
+  },
+  "evidence_limits": [
+    "No Native process launched in r377. Extracted-source helper execution is not public byte equality.",
+    "Alias public positive control remains capture_invalid; it is not reused as passing evidence.",
+    "Native cold-resume/suggestion-frame bytes remain unobserved.",
+    "Pre-admission, shutdown/QueueNow, deferred slash and multi-turn cancellation remain outside this bounded stage.",
+    "No fresh macOS package or packaged GUI run; r376 package evidence remains bound to its older commits.",
+    "No full-workspace test rerun or all-contract parity claim."
+  ],
+  "excluded_attempts": [
+    "selected-r8 invalid non-executable cache artifact; rebuilt and passed selected-r9.",
+    "product-docs-r4: concurrent H documentation HEAD advance between generate/check; replaced by fixed-production-commit r5 pass."
+  ],
+  "native_launches": 0
+}

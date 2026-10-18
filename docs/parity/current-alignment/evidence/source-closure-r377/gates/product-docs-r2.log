@@ -1,0 +1,10 @@
+Preparing worktree (detached HEAD 6b033d4)
+HEAD is now at 6b033d4 feat(mobile): run Linux sessions as lingxi with persistent home workspaces
+Handbook baseline: 43 pages, 395 source references
+{"output": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/web/public/api-index.json", "declarations": {"harness": 870, "llm": 4426, "mobile": 89, "bridge": 244}}
+Example manifest fixtures are current.
+Handbook generated: 43 pages × 2 languages, 97 files
+Handbook baseline: 43 pages, 395 source references
+{"output": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/web/public/api-index.json", "declarations": {"harness": 870, "llm": 4426, "mobile": 89, "bridge": 244}}
+Example manifest fixtures are current.
+Handbook checked: 43 pages × 2 languages, 97 files

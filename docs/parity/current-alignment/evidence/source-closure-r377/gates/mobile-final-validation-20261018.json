@@ -1,0 +1,78 @@
+{
+  "scope": "Final validation receipt for the frozen 18-file Product mobile suggestion lifecycle diff.",
+  "worktree": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app",
+  "aggregate_sha256": "c3ddab6a8b26930fe3213dad54709f418e256d2ed539ef0aa3d4800f88ec2f46",
+  "aggregate_method": "shasum -a 256 over the lexically sorted repo-relative file list, piped to shasum -a 256",
+  "review": "Independent verifier confirmed this fingerprint, unchanged scoped file hashes during review, and no remaining blocker.",
+  "checks": {
+    "swift_syntax_parse": {
+      "command": "swiftc -parse <all changed and new Swift source/test files listed below>",
+      "status": 0,
+      "file_count": 13,
+      "scope": "Syntax parsing only; no app typecheck, generated FFI check, or device execution."
+    },
+    "swift_foundation_helper_r3": {
+      "evidence": "acceptance/source-closure-r377/gates/swift-helper-r3.log",
+      "exit_file": "acceptance/source-closure-r377/gates/swift-helper-r3.exit",
+      "status": 0,
+      "passed_tests": 6,
+      "tests": [
+        "testAppendingAfterDisplayedIsolatedSurrogatePreservesItsSourceUnit",
+        "testCanonicalEquivalentEditUpdatesUtf16SourceUnits",
+        "testDeletingDisplayedReplacementRemovesItsSourceUnit",
+        "testEditingDisplayedReplacementReplacesOnlyItsSourceUnit",
+        "testUtf16EditDoesNotCollapseCanonicalEquivalentStringChanges",
+        "testWhitespaceTrimPreservesRawSuffixUnits"
+      ],
+      "scope": "Actual Foundation-only helper and checked-in XCTest source; not full iOS app or FFI generation."
+    },
+    "kotlin_client_text_helper": {
+      "evidence": "acceptance/source-closure-r377/gates/kotlin-helper.log",
+      "exit_file": "acceptance/source-closure-r377/gates/kotlin-helper.exit",
+      "status": 0,
+      "passed_assertions": 6,
+      "source_sha256_matches_current": true,
+      "scope": "Actual checked-in ClientText helper with a data-only ClientTextDto fixture; not Android app/bindings compilation or reducer execution."
+    }
+  },
+  "limitations": [
+    "No Cargo commands or full native/platform builds were run.",
+    "Swift syntax parsing does not prove app-level type correctness or generated FFI compatibility.",
+    "The Kotlin helper assertions do not prove Android app compilation or reducer integration."
+  ],
+  "swift_parse_files": [
+    "apps/ios/native/Sources/Conversation/ChatView.swift",
+    "apps/ios/native/Sources/Conversation/Composer.swift",
+    "apps/ios/native/Sources/Conversation/ConversationModels.swift",
+    "apps/ios/native/Sources/Conversation/ConversationSource.swift",
+    "apps/ios/native/Sources/Conversation/EngineConversationSource.swift",
+    "apps/ios/native/Sources/Conversation/MockConversationSource.swift",
+    "apps/ios/native/Sources/Conversation/PromptSuggestionDraftSource.swift",
+    "apps/ios/native/Sources/Conversation/SideChatSheet.swift",
+    "apps/ios/native/Tests/ConversationTurnCompletionTests.swift",
+    "apps/ios/native/Tests/PromptSuggestionDraftSourceTests.swift",
+    "apps/ios/native/Tests/SideChatCommandTests.swift",
+    "apps/ios/native/Tests/SlashCommandTests.swift",
+    "apps/ios/native/Tests/VoiceInteractionControllerTests.swift"
+  ],
+  "files_sha256": {
+    "apps/android/native/app/src/main/java/com/lingxi/code/conversation/ChatState.kt": "a850ac3eda20abf0ab011bf7f012206161368dca93724b0bc2f3dd2ba5ccf3b6",
+    "apps/android/native/app/src/main/java/com/lingxi/code/conversation/ChatViewModel.kt": "7d55c32b7b1977b3e224c3b586fedb8b8b8a37a7a2efb4c3a19986f0ae2e5228",
+    "apps/android/native/app/src/main/java/com/lingxi/code/conversation/ClientText.kt": "b06fef3eb16876c0928076b933165678022e3c72f217141f85447d5dd42053ce",
+    "apps/android/native/app/src/main/java/com/lingxi/code/conversation/Composer.kt": "3badd0a1ddd0c562ed1f9054c3108cfde566404bb36e82bd846223626612464c",
+    "apps/android/native/app/src/test/java/com/lingxi/code/conversation/ChatViewModelReducerTest.kt": "45b134876a555b9826551cf4eaf4a461346b96eb98035c4ecdbc76606e2ef390",
+    "apps/ios/native/Sources/Conversation/ChatView.swift": "a9ed59bc22bee9eb6b2ad56f9d0459c74b11be5927287ed89010a730bf518bd9",
+    "apps/ios/native/Sources/Conversation/Composer.swift": "f2f56c61c2f985f1d25493a0f956555f239f1f9198523bce1a982577c8dfdb07",
+    "apps/ios/native/Sources/Conversation/ConversationModels.swift": "02674f01edd40a062758fdffa6e2f5bfbd7af4d8d6a5022e7352e094447e43c7",
+    "apps/ios/native/Sources/Conversation/ConversationSource.swift": "7ad15de5dcc212045f5493180ae810c237783bf52b61c06ebd2944e0ded9a920",
+    "apps/ios/native/Sources/Conversation/EngineConversationSource.swift": "70c1958756c9a814d770b8a8af34f974d4d01846a8c33987d21e75d9c8ea2341",
+    "apps/ios/native/Sources/Conversation/MockConversationSource.swift": "105a1583df7da920aa6d6493f4ccd6b976753198d721e33013a292debab05b82",
+    "apps/ios/native/Sources/Conversation/PromptSuggestionDraftSource.swift": "47084add06409c80e54ee06a88336ce8c7cc810b69350526a30f17727ef64fbf",
+    "apps/ios/native/Sources/Conversation/SideChatSheet.swift": "109c8f85dde52a2c22a9880ad2aa78305ff18982f1aa98efc548a52888e647e5",
+    "apps/ios/native/Tests/ConversationTurnCompletionTests.swift": "de5e7643bdcebb284499e100901178d5f2186747af1be4c7fa32fc1c8bb3137e",
+    "apps/ios/native/Tests/PromptSuggestionDraftSourceTests.swift": "a6c0009982707f34446dc6993c1924daaa6db00fab4fed6811571f69d5db8bf0",
+    "apps/ios/native/Tests/SideChatCommandTests.swift": "1225154424de94276fd634519a3a66b22cd6b986984f574e13da133c774a4fbc",
+    "apps/ios/native/Tests/SlashCommandTests.swift": "65367c91f1e12834d841dbc07e868016a68f01e054b27b32c201bdb6699a7dcb",
+    "apps/ios/native/Tests/VoiceInteractionControllerTests.swift": "d0e5d8d9c9ff0394ba6a2291d8355fd3af2ad0259b4f1a52584d6c6298191fe7"
+  }
+}

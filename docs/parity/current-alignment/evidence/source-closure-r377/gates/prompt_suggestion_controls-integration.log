@@ -1,0 +1,13 @@
+
+running 8 tests
+test native_environment_and_switch_precedence ... ok
+test native_backoff_age_threshold_env_and_notice_boundaries ... ok
+test native_focus_and_background_blocked_throttle_bypass ... ok
+test native_presentation_transitions_and_edited_acceptance ... ok
+test native_generation_gates_and_cache_boundaries ... ok
+test state::tests::presentation_json_round_trip_preserves_unpaired_surrogate_units ... ok
+test state::tests::submission_does_not_conflate_unpaired_source_with_replacement_character ... ok
+test native_submission_and_config_toggle_streak_updates ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

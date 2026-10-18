@@ -1,0 +1,23 @@
+
+running 18 tests
+test headless::run::prompt_suggestion_tests::sdk_suggestion_output_preserves_lone_surrogate_as_json_string ... ok
+test headless::run::prompt_suggestion_tests::sdk_suggestion_output_matches_native_line_separator_escaping ... ok
+test headless::run::result_publication_tests::auxiliary_join_retains_children_registered_by_an_admitted_task ... ok
+test headless::run::result_publication_tests::compact_rebuilt_prompt_ids_do_not_hide_cancelled_print_projection ... ok
+test headless::run::result_publication_tests::execution_errors_are_recorded_separately_from_shutdown_failures ... ok
+test headless::run::result_publication_tests::max_turns_public_outcome_keeps_its_native_error_result ... ok
+test headless::run::result_publication_tests::graceful_model_error_keeps_success_envelope_but_fails_execution ... ok
+test headless::run::result_publication_tests::no_stream_json_uses_batched_api_and_publishes_result ... ok
+test headless::run::result_publication_tests::one_shot_uses_streaming_by_default_and_batched_api_for_no_stream ... ok
+test headless::run::result_publication_tests::print_cancellation_projection_uses_yielded_user_events_and_native_guards ... ok
+test headless::run::result_publication_tests::print_publishes_parent_before_wait_and_notification_query_after_completion ... ok
+test headless::run::result_publication_tests::partial_assistant_and_tool_use_interruptions_use_native_error_projection ... ok
+test headless::run::result_publication_tests::request_too_large_keeps_terminal_reason_separate_from_inner_stop_reason ... ok
+test headless::run::result_publication_tests::sdk_eof_publishes_notification_query_result_before_teardown ... ok
+test headless::sdk_prompt_suggestions::tests::pending_suggestion_feedback_keeps_source_surrogate_distinct_from_display_text ... ok
+test headless::sdk_prompt_suggestions::tests::suggestion_frame_serializes_lone_surrogate_as_json_string ... ok
+test headless::stream_json::tests::prompt_suggestion_frame_matches_expected_shape ... ok
+test headless::run::result_publication_tests::unknown_slash_persists_typed_user_fallback_and_request_context ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 1157 filtered out; finished in 4.28s
+

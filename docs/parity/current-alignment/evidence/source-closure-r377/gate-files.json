@@ -1,0 +1,190 @@
+[
+  {
+    "path": "gates/client-lib.log",
+    "sha256": "6fd314d98ed3ca69eb686e243735304335e29b92f63d7be30a42087efb02281f"
+  },
+  {
+    "path": "gates/clippy-final-r4.log",
+    "sha256": "c11a80c98725adea81ced53335316b38f6873547ef8830541f6261c833654165"
+  },
+  {
+    "path": "gates/fmt-final-r4.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "gates/harness_runtime-lib.log",
+    "sha256": "54696aaf04528d6fd9e79f35ee0b48f2af2e81c852b10c9d201e597ea9e5262d"
+  },
+  {
+    "path": "gates/kotlin-helper.exit",
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "gates/kotlin-helper.log",
+    "sha256": "a5a2d5ab405520dc0d27f56d684dffc3f3bf7f7ca6463c004becb0a0c6e12822"
+  },
+  {
+    "path": "gates/lingxi_core-lib.log",
+    "sha256": "bb5888bbc43082437e93b023a20fb2d47b7c52f97dc793f74bc3ecc7ecc84b9a"
+  },
+  {
+    "path": "gates/mobile-final-validation-20261018.json",
+    "sha256": "2c2f2c559f832bbcfb6d542f62ca0d9ff9b3e4ee4bf037c47f4bbf11f2c15287"
+  },
+  {
+    "path": "gates/orchestrator-lib.log",
+    "sha256": "b0a04538a7c2d214766aa3fd86ed2beae8f8439196b106718c8987c0b5562111"
+  },
+  {
+    "path": "gates/permission-lib.log",
+    "sha256": "1ac041e185763765506b10aaf115d12cde161de575bb0f95a4785ce1d9bc2c87"
+  },
+  {
+    "path": "gates/product-bridge-full-r3.exit",
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "gates/product-bridge-full-r3.log",
+    "sha256": "800102cbb67fe6cb246369421278e62f950480c4e4cffd5930708bb4a7b0097b"
+  },
+  {
+    "path": "gates/product-bridge-typecheck-r2.exit",
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "gates/product-bridge-typecheck-r2.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "gates/product-check.exit",
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "gates/product-check.log",
+    "sha256": "0faebde768a2f08d1b749badfc13a961245046c371285363f000dc26f3b377c6"
+  },
+  {
+    "path": "gates/product-cli-1.log",
+    "sha256": "eb3c15db489ad38d0f81454a8fa03ec9025cf567e83a187f23569c2a830f8a07"
+  },
+  {
+    "path": "gates/product-cli-2.log",
+    "sha256": "7c410d62bf2f17e56b396ca0938e5b46cdfde8f904d7c0c7f9391a481b76b4ab"
+  },
+  {
+    "path": "gates/product-cli-3.log",
+    "sha256": "8ae03a054d108257d571cec6d1c6ec43910e7dd0dca0e99f886a0cb29214a323"
+  },
+  {
+    "path": "gates/product-cli-receipt.json",
+    "sha256": "83dfed9745a8826775d6416cf2ff79bc60ac7d8934bd7d3c1e99795649110b16"
+  },
+  {
+    "path": "gates/product-clippy.exit",
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "gates/product-clippy.log",
+    "sha256": "c364369930504cfaa3b138b8b70bd3703b50f94e19aab9f3ae17776ffc5c4740"
+  },
+  {
+    "path": "gates/product-docs-r2.log",
+    "sha256": "55677cb3caeb54bc4cf09283edba212842d1912bdda21316f3935a1dfb946454"
+  },
+  {
+    "path": "gates/product-docs-r3.log",
+    "sha256": "55677cb3caeb54bc4cf09283edba212842d1912bdda21316f3935a1dfb946454"
+  },
+  {
+    "path": "gates/product-docs-r5.log",
+    "sha256": "11c21cc34d541e79d1877ba76ed230945e71206f395fe3445a20c8674f013df2"
+  },
+  {
+    "path": "gates/product-electron-typecheck.exit",
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "gates/product-electron-typecheck.log",
+    "sha256": "b26f9497a4af270039e8e64b4a4b3ee40d6149fc22597b851dd565377409ddbe"
+  },
+  {
+    "path": "gates/product-fmt.exit",
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "gates/product-fmt.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "gates/prompt_suggestion-integration.log",
+    "sha256": "aaf613eeeca34cbb37bcd088db6193c473c31f46e879c829992fe8e8b63e2fa6"
+  },
+  {
+    "path": "gates/prompt_suggestion_background-integration.log",
+    "sha256": "bc61081f86b603d714851d02ae4555ddafd0e81898c288ceae5e21882c4fd343"
+  },
+  {
+    "path": "gates/prompt_suggestion_controls-integration.log",
+    "sha256": "66fd0aa39423d7b715b969f4a22c49920816f3b03e90ec9e93b14e2580160569"
+  },
+  {
+    "path": "gates/prompt_suggestion_filter_reasons-integration.log",
+    "sha256": "45637430bfc1eb41425889cef65bd26b346285e126ce56ddb613d046f9eec645"
+  },
+  {
+    "path": "gates/prompt_suggestion_fork-integration.log",
+    "sha256": "1ca77455895fb4aee823b56db9c416b3d88d2524d7a455d4f976b7804ead3d49"
+  },
+  {
+    "path": "gates/prompt_suggestion_test-integration.log",
+    "sha256": "9accba44d47fa7c902534393ae66bb512b0ca0c1307c57f802b5d1b2dae40709"
+  },
+  {
+    "path": "gates/prompt_suggestion_wire-integration.log",
+    "sha256": "682f087ef1bbfb1349c69b90e04c82c653cf065b657fea2f0823906abeeca41d"
+  },
+  {
+    "path": "gates/selected-build.log",
+    "sha256": "9ac7c10f8b2d2a4f5d00a2dfe76bb4ab0f53619e90ef3cdde361e02c8a4ffb84"
+  },
+  {
+    "path": "gates/selected-run.json",
+    "sha256": "3461d736cf4f83fbda18c614d1347034d35d54896a83b8faf9df82e519dfb61e"
+  },
+  {
+    "path": "gates/session-lib.log",
+    "sha256": "76a15f94a7de4ba9ca1782c385bccd86221a682ff90796017f82e083728133e5"
+  },
+  {
+    "path": "gates/sidequery-lib.log",
+    "sha256": "b3f8a6b72cc36eedfc158d14f1640fb67a2060ab7948c39d610323970382a70a"
+  },
+  {
+    "path": "gates/swift-helper-r3-binding.json",
+    "sha256": "81e3e069d8a6146bbbcb015182af5f42c41b9de899c2cb3739a0b5896eecc1f0"
+  },
+  {
+    "path": "gates/swift-helper-r3.exit",
+    "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+  },
+  {
+    "path": "gates/swift-helper-r3.log",
+    "sha256": "ca46333fcee93d8d8595c9749e0029d2db17dc1a960e3356764ada06127c74a2"
+  },
+  {
+    "path": "gates/tool_api-lib.log",
+    "sha256": "69f0b03f82a04b56dbdfebf9267386c977da9921aa7a967e1cd75f4be0462b89"
+  },
+  {
+    "path": "gates/tool_skill-lib.log",
+    "sha256": "1fabf2d55cccbd0053bebc18898b883a0cfac2099856b724795584aa912df87b"
+  },
+  {
+    "path": "gates/version_guard_test-integration.log",
+    "sha256": "37f70b4f75642f113e02b6ed96019d3f057636ab34923d2033a0d1c77fac1a14"
+  },
+  {
+    "path": "gates/version_test-integration.log",
+    "sha256": "c241a8775645d74dbc211fcbadc178388a921a04599019fc52949bcb7dcf3a45"
+  }
+]

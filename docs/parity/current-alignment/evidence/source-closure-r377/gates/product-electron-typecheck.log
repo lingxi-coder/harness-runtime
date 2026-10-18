@@ -1,0 +1,12 @@
+
+> lingxi-code-desktop@0.1.0 typecheck
+> npm run typecheck:node && npm run typecheck:web
+
+
+> lingxi-code-desktop@0.1.0 typecheck:node
+> tsc --noEmit -p tsconfig.node.json --composite false
+
+
+> lingxi-code-desktop@0.1.0 typecheck:web
+> tsc --noEmit -p tsconfig.web.json --composite false
+

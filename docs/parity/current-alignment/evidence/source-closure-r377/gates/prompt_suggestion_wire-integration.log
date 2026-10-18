@@ -1,0 +1,7 @@
+
+running 2 tests
+test prompt_suggestion_main_transition_keeps_identity_but_ordinary_side_query_does_not ... ok
+test session_prompt_suggestion_streams_with_parent_prefix_candidates_and_http_request_id ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.35s
+

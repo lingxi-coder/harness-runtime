@@ -1,0 +1,18 @@
+
+running 13 tests
+test conversation::conversation_test::generated_session_name_tests::parses_plain_and_fenced_json_but_rejects_empty_or_prose ... ok
+test conversation::conversation_test::generated_session_name_tests::trims_ecmascript_whitespace_and_keeps_non_js_space_units ... ok
+test conversation::conversation_test::generated_session_name_tests::keeps_unpaired_name_units_from_source_json ... ok
+test conversation::model_reminders_impl::tests::native_jqe_resolves_exact_aliases_once_and_respects_proxy_expansion ... ok
+test conversation::prompt_suggestion::controls::tests::presentation_json_round_trip_preserves_unpaired_surrogate_units ... ok
+test conversation::prompt_suggestion::controls::tests::submission_does_not_conflate_unpaired_source_with_replacement_character ... ok
+test conversation::runtime_impl::api_error_metrics_tests::compaction_rebuilt_message_ids_do_not_change_query_user_event_metrics ... ok
+test conversation::drivers_impl::accepted_query_row_tests::appended_batched_tool_injection_contributes_query_user_event ... ok
+test conversation::runtime_impl::turn_timing_tests::query_user_events_are_query_local_and_survive_turn_completion ... ok
+test tool_result_text::tests::stringify_preserves_lone_units_and_javascript_numeric_key_order ... ok
+test tool_result_text::tests::truncation_keeps_a_surrogate_pair_whole_and_counts_omitted_code_points ... ok
+test turn_loop::turn_loop_test::pre_cancel_tests::cancel_during_batched_tool_dispatch_records_tool_interruption ... ok
+test turn_loop::turn_loop_test::pre_tool_hook_tests::new_messages_appended_to_history_after_tool_result ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 2095 filtered out; finished in 0.15s
+

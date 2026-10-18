@@ -1,0 +1,27 @@
+{
+  "product": "a2a45fd0e845558ce55aa35e6bd9f57ed4491ed3",
+  "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/commands_native_cli-1f745f431c5df6ca",
+  "sha256": "91d0617044f1c62feb62310f402bfac15165c1cae450d6cac107cd25020b70c2",
+  "tests": [
+    {
+      "name": "actual_cli_matches_native_2_1_295_slash_skill_and_stream_json_fixed_fields",
+      "returncode": 0,
+      "passed": true,
+      "log": "product-cli-1.log"
+    },
+    {
+      "name": "cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire",
+      "returncode": 0,
+      "passed": true,
+      "log": "product-cli-2.log"
+    },
+    {
+      "name": "public_cli_sigint_during_stream_open_matches_native_2_1_295",
+      "returncode": 0,
+      "passed": true,
+      "log": "product-cli-3.log"
+    }
+  ],
+  "native_launches": 0,
+  "passed": true
+}
