@@ -1,0 +1,135 @@
+Window: "灵犀 Code · Desktop", App: LingXi Code.
+0 standard window 灵犀 Code · Desktop, Secondary Actions: Raise
+	1 container 灵犀 Code · Desktop
+		2 container
+			3 HTML content 灵犀 Code · Desktop, URL: file:///Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-7f8e022d1a-r378-20261018T132052Z-64644/LingXi-Code-0.1.0-mac-arm64/LingXi%20Code.app/Contents/Resources/app.asar/out/renderer/index.html
+				4 container
+					5 button Hide sidebar
+						6 image
+					7 text LingXi
+					8 toggle button Description: Turn on activity view, Help: Turn on activity view (⌥⌘U), Value: 0
+						9 image
+					10 button Search chats
+						11 image
+					12 text workspace
+					13 text /private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-TjFqow/workspace
+					14 toggle button Description: Toggle pinned summary, Value: 0
+						15 image
+					16 toggle button Description: Toggle terminal, Help: Toggle terminal (Ctrl+`), Value: 0
+						17 image
+					18 toggle button Description: Toggle right panel, Value: 0
+						19 image
+					20 container Main navigation
+						21 button Home
+							22 image
+						23 button Projects
+							24 image
+						25 button Scheduled tasks
+							26 image
+						27 button Activity
+							28 image
+						29 button Review changes
+							30 image
+						31 button Settings
+							32 image
+					33 button New chat
+						34 image
+						35 text New chat
+					36 button Scheduled
+						37 image
+						38 text Scheduled
+					39 container Projects and sessions
+						40 container Projects
+							41 heading Projects, Value: 2
+								42 text Projects
+							43 pop up button Project sidebar options
+								44 image
+							45 button Add project
+								46 image
+							47 container
+								48 button workspace, Help: /private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-TjFqow/workspace
+									49 image
+									50 text workspace
+								51 button Description: Edit workspace, Help: Open project draft
+									52 image
+								53 button Project actions for workspace
+									54 image
+								55 container
+									56 draggable Description: Sidebar Beta, 2 minutes ago · 2 messages, Value: 0
+									57 button Description: Pin Sidebar Beta, Help: Pin session
+									58 button Description: Archive Sidebar Beta, Help: Archive chat
+								59 container
+									60 draggable Description: Sidebar Gamma, 2 minutes ago · 2 messages, Value: 0
+									61 button Description: Pin Sidebar Gamma, Help: Pin session
+									62 button Description: Archive Sidebar Gamma, Help: Archive chat
+								63 draggable (disabled) Sidebar Alpha, 2 minutes ago · 10 messages Pin Sidebar Alpha Archive Sidebar Alpha, Value: 0
+									64 draggable Description: Sidebar Alpha, 2 minutes ago · 10 messages, Value: 0
+									65 button (disabled) Description: Pin Sidebar Alpha, Help: Pin session
+									66 button (disabled) Description: Archive Sidebar Alpha, Help: Archive chat
+					67 splitter Description: Resize sidebar, Value: 308
+					68 container
+						69 container
+							70 text [product-mod-active]PACKAGED_MOD_PROBE
+							71 text 6:33 AM
+							72 button Copy message
+								73 image
+							74 text PACKAGED_MOD_FAKE_REPLY
+							75 text PACKAGED_TOOL_PROBE
+Use the Read tool to read tool-probe.txt from this trusted workspace, then return its exact marker.
+							76 text 6:33 AM
+							77 button Copy message
+								78 image
+							79 button Read(/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-TjFqow/workspace/tool-probe.txt) · Read 2 lines
+								80 text Read(
+								81 text ‎/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-TjFqow/workspace/tool-probe.txt‎
+								82 text )
+								83 text Read 2 lines
+							84 text PACKAGED_TOOL_READ_COMPLETED
+							85 text PACKAGED_MOD_PROBE
+							86 text 6:33 AM
+							87 button Copy message
+								88 image
+							89 text PACKAGED_MOD_FAKE_REPLY
+							90 text [product-mod-active]PACKAGED_MOD_PROBE
+							91 text 6:33 AM
+							92 button Copy message
+								93 image
+							94 text PACKAGED_MOD_FAKE_REPLY
+							95 text PACKAGED_MOD_FAKE_REPLY
+						96 text Packaged Host Client UI
+						97 container
+							98 text Message
+							99 text field (settable) Message, Value: packaged-host-cua-valuexy, Placeholder: Type a value
+						100 button Submit
+						101 text Submit callback accepted: packaged-host-cua-valuexy
+						102 container
+							103 text entry area (settable) Description: Prompt, Value: Do anything
+								104 text Do anything
+							105 button Description: Attach files, Help: Attach files or images
+								106 image
+							107 button Description: Add context, Help: Add context (@)
+								108 image
+							109 pop up button Description: Permission mode: Ask for approval, Help: Change permission mode
+								110 image
+								111 text Ask
+								112 image
+							113 button Context window (estimated): Usage unavailable. Context size unavailable
+							114 pop up button Model: Smoke Model, reasoning Auto
+								115 text Smoke Model
+								116 text ·
+								117 text Auto
+								118 image
+							119 button Description: Start ordinary recording, Help: 普通录音
+								120 image
+							121 toggle button Description: 开启心流模式, Value: 0
+								122 image
+	123 close button
+	124 full screen button Help: this button also has an action to zoom the window, Secondary Actions: zoom the window
+	125 minimize button
+126 menu bar
+	127 LingXi Code
+	128 Edit
+	129 View
+	130 Window
+
+The focused UI element is 100 button Submit

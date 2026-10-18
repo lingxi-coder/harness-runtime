@@ -1,0 +1,68 @@
+{
+  "schema": "mac-cua-evidence-r378-v1",
+  "status": "visible-gui-passed-owned-cleanup-verified-global-exit-failed",
+  "recorded_at": "2026-10-18T13:37:35.276768+00:00",
+  "observation_method": "actual-visible-native-CUA",
+  "native_version": "2.1.295",
+  "product_sha": "7f8e022d1aef248fbd64e3db379af7c4903f12de",
+  "harness_production_sha": "6548b9d5e702f8e9d42772412cd65b72881e24b4",
+  "sdk_sha": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+  "app_pid": 27257,
+  "app_path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-7f8e022d1a-r378-20261018T132052Z-64644/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app",
+  "actions": [
+    {
+      "click": "Sidebar Alpha",
+      "visible": "Packaged Host Client UI; Message; Submit; Waiting for a value."
+    },
+    {
+      "typeText": "packaged-host-cua-value",
+      "visible_input": "packaged-host-cua-value",
+      "visible_result": "Input callback received: packaged-host-cua-value",
+      "focus": "Message"
+    },
+    {
+      "typeText": "xy",
+      "visible_input": "packaged-host-cua-valuexy",
+      "visible_result": "Input callback received: packaged-host-cua-valuexy",
+      "focus": "Message"
+    },
+    {
+      "click": "Submit",
+      "visible_input": "packaged-host-cua-valuexy",
+      "visible_result": "Submit callback accepted: packaged-host-cua-valuexy",
+      "focus": "Submit"
+    }
+  ],
+  "routing": [
+    "App name resolved and opened historical p-17593 package; only Raise and Tab; quit rejected by auto-review, no bypass; user permission pending.",
+    "Full current app path resolved correct p-7f8 package URL and isolated TjFqow workspace; actual native CUA actions succeeded."
+  ],
+  "sidebar_drag": "not executed; no drag/gesture pass claimed",
+  "files": {
+    "cua-final-ax.txt": {
+      "sha256": "f00e7fca091d88da632fc8003f0e6743d97b28488dc737da28a176a9945cc343",
+      "bytes": 5582
+    },
+    "cua-submit.png": {
+      "sha256": "2d406c895e7824f7354dd4d8c0cc728caf9b82134dd0f20ae0688c34375a5b0f",
+      "bytes": 311630
+    },
+    "owned-cleanup-audit.json": {
+      "sha256": "9c2f4accef5bdd4da867977d3a4e3cd11ec8af4ece16078af10c9d7e9ad7cc61",
+      "bytes": 1377
+    },
+    "packaged-host-mod-2026-10-18T13-40-02-082Z.json": {
+      "sha256": "daf1d11be6cec71c0b5898471542693eb9faacb7e3f84e08d61b4812232f2b7e",
+      "bytes": 18192
+    }
+  },
+  "cleanup": {
+    "providerCredentialCleanup": "cleared",
+    "owned_pid_27257": "exited",
+    "loopback_57865_57915": "closed",
+    "driver_exit": 1,
+    "driver_outcome": "failed",
+    "stop_reason": "control-file",
+    "failure": "Global all-app exit predicate sees historical p-17593 PID31038; no old-app quit performed; no reclassification of raw driver result."
+  }
+}

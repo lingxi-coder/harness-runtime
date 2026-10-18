@@ -1,0 +1,384 @@
+{
+  "schema": "lingxi.mobile-package-r378.stage-receipt.v1",
+  "snapshotDate": "2026-10-18",
+  "nativeVersion": "2.1.295",
+  "status": "accepted_with_diagnostic",
+  "pins": {
+    "harnessProduction": "6548b9d5e702f8e9d42772412cd65b72881e24b4",
+    "harnessDocs": "4fb6583072c12f51558ab12125667847a7998c4d",
+    "productSource": "343fe8528697d95b3cc0e21d9651727fa1b0a4e0",
+    "productDeliveryDocsOnly": "7f8e022d1aef248fbd64e3db379af7c4903f12de",
+    "llmClient": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "mobileLinux": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+  },
+  "sourceChanges": {
+    "iosCompileFixCommit": "04b1b6ea095a3e35e6ab76e12d1d78966339d9dd",
+    "iosCompileFixFiles": 7,
+    "productMobileFollowupCommit": "343fe8528697d95b3cc0e21d9651727fa1b0a4e0",
+    "androidFixes": [
+      {
+        "path": "apps/android/native/app/src/main/java/com/lingxi/code/conversation/Composer.kt",
+        "change": "Adds the current ClientTextDto import.",
+        "sha256": "c08cc8f32901fa7c4edeb6669edee9833518a86591f6c0bbc8a568f63905cf06"
+      },
+      {
+        "path": "apps/android/native/app/src/main/java/com/lingxi/code/conversation/ExecutionStatus.kt",
+        "change": "Uses shared displayText helper; removes duplicate local helper.",
+        "sha256": "cc3f68dc1a976d662d70e083109ebeb723db06c796b87101e4ecc4268cc221a6"
+      }
+    ],
+    "iosTestOnlyFollowup": "SlashCommandTests selector preserves UTF-16 source identity; test outcome below is a one-test rerun."
+  },
+  "ios": {
+    "ffi": {
+      "target": "aarch64-apple-ios-sim",
+      "profile": "debug",
+      "exitCode": 0,
+      "harness": "6548b9d5e702f8e9d42772412cd65b72881e24b4",
+      "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+      "mobileLinux": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d",
+      "currentMetadataArchiveSha256": "7761ee7f1d4cdd40235cfafaa85000cf4590d5bf25f11dedfab8309cd01fe6a8",
+      "combinedAndPromotedSimulatorSliceSha256": "0d6af1cc4b6e1846f8e05a5c5e2784c882dfc0a9aef5fc6241e572170a974813",
+      "archiveManifestProductRevision": "7ea23b6ae96d88ab1919cf7f00c44115f2fb562c"
+    },
+    "buildForTesting": {
+      "exitCode": 0,
+      "outcome": "TEST BUILD SUCCEEDED",
+      "executesTests": false
+    },
+    "focusedTests": {
+      "initialScopedRun": {
+        "executed": 23,
+        "passed": 22,
+        "failed": 1,
+        "exitCode": 65,
+        "failure": "catalog selector compared displayed replacement text rather than source UTF-16 identity"
+      },
+      "correctedTargetedRerun": {
+        "executed": 1,
+        "passed": 1,
+        "failed": 0,
+        "exitCode": 0,
+        "test": "SlashCommandTests.testSelectedCatalogIdentitySurvivesLossyDisplayCollision"
+      },
+      "claimLimit": "There is no single final 23-test, zero-failure run."
+    },
+    "runtimeLimit": "test-without-building attempt ended after an Xcode internal test-operation failure and was interrupted; simulator UI runtime remains unverified.",
+    "deviceRun": false
+  },
+  "android": {
+    "sourceAndMetadata": {
+      "mobileLinux": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d",
+      "nativeSupportArtifactCount": 6,
+      "nativeSupportAbiCount": 2,
+      "rustCoreIncludedInSupportArtifacts": false,
+      "gradleVerifierEnabled": true
+    },
+    "jni": [
+      {
+        "abi": "arm64-v8a",
+        "sha256": "8ef639ef3a2efa254c40ab37f80e1d5d9225d39d217c00a18cb5a186d1fa0b4c",
+        "bytes": 262946392,
+        "atomicPromotionAndFullHashVerified": true
+      },
+      {
+        "abi": "x86_64",
+        "sha256": "0a2905f8a9485b241562f8dc22766b5b7ab855098db8499c5857d92dd0c0b7e0",
+        "bytes": 268896080,
+        "atomicPromotionAndFullHashVerified": true
+      }
+    ],
+    "productionBindgen": {
+      "source": "apps/ios/ffi/src/bin/uniffi-bindgen.rs",
+      "sourceSha256": "6f73c0db04f8678d6378b6b731c6361386c3db5c2101d6975a9e1aca9e4654fb",
+      "binarySha256": "bc106eba2f3a3e4a4eb9fa3b603fe4290187309d0cc595f8b362ad29335d1354",
+      "uniffiVersion": "0.32.2",
+      "exitCode": 0,
+      "includesProductionMessageAndCallbackBufferRepairs": true,
+      "promptSuggestionPayload": "ClientEvent.PromptSuggestion.suggestion: ClientTextDto",
+      "promotedBindingsMatchedStagedHashes": true
+    },
+    "gradle": {
+      "compileExitCode": 0,
+      "tasks": [
+        ":app:verifyPlayMobileLinuxNative",
+        ":app:compilePlayDebugKotlin",
+        ":app:compilePlayDebugUnitTestKotlin"
+      ],
+      "reducerTestExitCode": 0,
+      "reducerTests": 97,
+      "reducerFailures": 0,
+      "reducerErrors": 0,
+      "reducerXmlSha256": "a850a20885a1edd90ab20d8c0d2ad3a1f0b80827301a4bec5e3aa7acb67e8a11",
+      "apkBuilt": false,
+      "deviceRun": false
+    }
+  },
+  "macOS": {
+    "status": "package_and_actual_visible_gui_passed_owned_cleanup_verified_driver_aggregate_failed",
+    "productDeliveryCommit": "7f8e022d1aef248fbd64e3db379af7c4903f12de",
+    "validatedAppSource": "343fe8528697d95b3cc0e21d9651727fa1b0a4e0",
+    "harnessDocs": "4fb6583072c12f51558ab12125667847a7998c4d",
+    "harnessProductionPin": "6548b9d5e702f8e9d42772412cd65b72881e24b4",
+    "llmClient": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "mobileLinux": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d",
+    "appPath": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-7f8e022d1a-r378-20261018T132052Z-64644/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app",
+    "zip": {
+      "bytes": 281885759,
+      "sha256": "c355b7a1609ae77be478229687dc312d128d567018fedce3fc3dc26993936762"
+    },
+    "signing": {
+      "channel": "development",
+      "teamId": "AZ4AX7J833",
+      "certificateFingerprint": "DF422E132604B63835F35605A0080A66AFF67CC4",
+      "notarized": false
+    },
+    "checks": {
+      "normalFlareWrapperExitCode": 0,
+      "staticPackageVerification": "passed",
+      "isolatedPackagedSmoke": "passed",
+      "prebuildGuard": "passed",
+      "postbuildGuard": "passed",
+      "postbuildGuardExitCode": 0,
+      "postbuildFreeBytes": 5422727168
+    },
+    "actualVisibleGui": {
+      "status": "passed",
+      "observationMethod": "actual-visible-native-CUA",
+      "nativeVersion": "2.1.295",
+      "productDeliveryCommit": "7f8e022d1aef248fbd64e3db379af7c4903f12de",
+      "harnessProduction": "6548b9d5e702f8e9d42772412cd65b72881e24b4",
+      "llmClient": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+      "appPid": 27257,
+      "appPath": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-7f8e022d1a-r378-20261018T132052Z-64644/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app",
+      "workspace": "isolated fixture TjFqow",
+      "appUrl": "file:///Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-7f8e022d1a-r378-20261018T132052Z-64644/LingXi-Code-0.1.0-mac-arm64/LingXi%20Code.app/Contents/Resources/app.asar/out/renderer/index.html",
+      "actions": [
+        {
+          "action": "click Sidebar Alpha",
+          "result": "Packaged Host Client UI; Message; Submit; Waiting for a value."
+        },
+        {
+          "action": "typeText packaged-host-cua-value",
+          "visibleInput": "packaged-host-cua-value",
+          "visibleResult": "Input callback received: packaged-host-cua-value",
+          "focus": "Message"
+        },
+        {
+          "action": "append typeText xy",
+          "visibleInput": "packaged-host-cua-valuexy",
+          "visibleResult": "Input callback received: packaged-host-cua-valuexy",
+          "focus": "Message"
+        },
+        {
+          "action": "click Submit",
+          "visibleInput": "packaged-host-cua-valuexy",
+          "visibleResult": "Submit callback accepted: packaged-host-cua-valuexy",
+          "focus": "Submit"
+        }
+      ],
+      "sidebarDrag": "not executed",
+      "evidence": [
+        {
+          "path": "evidence/mobile-package-r378/cua-observations.json",
+          "sha256": "ab984cdd4c5bab185eaf8a35fe60f74771a56e4dcbd3a2d059834fc5b220e56c"
+        },
+        {
+          "path": "evidence/mobile-package-r378/cua-final-ax.txt",
+          "sha256": "f00e7fca091d88da632fc8003f0e6743d97b28488dc737da28a176a9945cc343"
+        },
+        {
+          "path": "evidence/mobile-package-r378/cua-submit.png",
+          "sha256": "2d406c895e7824f7354dd4d8c0cc728caf9b82134dd0f20ae0688c34375a5b0f"
+        }
+      ],
+      "initialRoutingNote": "Name-based lookup initially opened historical p-17593; only Raise and Tab occurred there. No input was entered or submitted in that app. The exact p-7f8 path then resolved and passed the native CUA sequence."
+    },
+    "limitations": [
+      "The wrapper did not use --launch; packaged smoke used an isolated temporary app copy.",
+      "Gatekeeper transfer prompts, another-Mac signature approval, notarization/stapling, and physical workspace-trust interaction are not claimed."
+    ],
+    "receiptPath": "../../../../../../acceptance/mobile-package-r378/mac/package-receipt.md",
+    "fullLogPath": "../../../../../../acceptance/mobile-package-r378/mac/flare-package-r378-20261018T132052Z.log",
+    "driver": {
+      "outcome": "failed",
+      "exitCode": 1,
+      "stage": "complete",
+      "stopReason": "control-file",
+      "rawResultPath": "../../../../../../acceptance/mobile-package-r378/gui/packaged-host-mod-2026-10-18T13-40-02-082Z.json",
+      "rawResultSha256": "daf1d11be6cec71c0b5898471542693eb9faacb7e3f84e08d61b4812232f2b7e",
+      "failure": "Global waitForNoRunningApp predicate timed out because it also matched historical p-17593 PID 31038; the owned p-7f8 process was PID 27257.",
+      "credentialCleanup": "cleared",
+      "ownedAppExited": true,
+      "ownedLoopbackPorts": {
+        "57865": "closed",
+        "57915": "closed"
+      },
+      "cleanupAuditPath": "evidence/mobile-package-r378/owned-cleanup-audit.json",
+      "cleanupAuditSha256": "9c2f4accef5bdd4da867977d3a4e3cd11ec8af4ece16078af10c9d7e9ad7cc61"
+    },
+    "historicalAppRouting": {
+      "package": "p-17593",
+      "pid": 31038,
+      "normalQuit": "earlier request rejected by automatic review; no retry or termination was performed",
+      "relationToScopedResult": "unrelated historical process; caused the supplementary driver global exit predicate to fail"
+    },
+    "independentVerifier": {
+      "status": "accepted_scoped_functional_stage_and_owned_cleanup",
+      "auditPath": "../../../../../../acceptance/mobile-package-r378/verification/mac-gui-audit.md",
+      "auditSha256": "4abcbb3e337a39417aa96d2baec1fbe165503246576d37f9b4a68c33cc0af6aa",
+      "codesignFinding": "A sandboxed strict verify reported invalid signature; the same read-only verification with elevated filesystem access exited 0 and confirmed valid-on-disk plus designated requirement. The independent audit classifies this as a sandbox filesystem-access limit, not a signature gap.",
+      "cuaHashDeltaReviewed": {
+        "earlier": "e84ce3201eaae0aa829d1855e5cd1b57277ebe5fbd308f7b037d23594a72934a",
+        "current": "ab984cdd4c5bab185eaf8a35fe60f74771a56e4dcbd3a2d059834fc5b220e56c",
+        "review": "cleanup status/audit/driver hashes and cleanup object only; package pins, app path/PID, actions, AX and screenshot hashes unchanged"
+      }
+    }
+  },
+  "evidenceRootFromBase": "acceptance/mobile-package-r378",
+  "sourceEvidence": [
+    {
+      "path": "android/README.md",
+      "sha256": "ceb692d4b44ad7cfacc773a0a2056363bb3d1be480e62d0e83c85619e6448349"
+    },
+    {
+      "path": "android/android-r378-receipt.json",
+      "sha256": "087adb34d92cb4650210b70c42c5f3269bd9b60e6525c5d7ae215d1aabcd264e"
+    },
+    {
+      "path": "build/android-current-metadata.a",
+      "sha256": "9e2927d3f12e9b4eea452386cc719e5f00790c6de72866fcfbd2b62c425b3bac"
+    },
+    {
+      "path": "build/android-current-metadata.json",
+      "sha256": "9044a343a7676480cf29d765d6fca1ad91682d6670b0d97dcbaa98058dedcd58"
+    },
+    {
+      "path": "build/ios-current-metadata.a",
+      "sha256": "7761ee7f1d4cdd40235cfafaa85000cf4590d5bf25f11dedfab8309cd01fe6a8"
+    },
+    {
+      "path": "build/ios-current-metadata.json",
+      "sha256": "fa9b4412e6df5b5df509b94f2c046ea1e1391da3cc337a9cb33f3d3d7f8f163b"
+    },
+    {
+      "path": "build/production-bindgen-provenance.json",
+      "sha256": "ca25be3b3677092ee9e04f9393ffe3bcbc84e4a60ecba565ce51b5ddad12c139"
+    },
+    {
+      "path": "gui/cua-final-ax.txt",
+      "sha256": "f00e7fca091d88da632fc8003f0e6743d97b28488dc737da28a176a9945cc343"
+    },
+    {
+      "path": "gui/cua-observations.json",
+      "sha256": "ab984cdd4c5bab185eaf8a35fe60f74771a56e4dcbd3a2d059834fc5b220e56c"
+    },
+    {
+      "path": "gui/cua-submit.png",
+      "sha256": "2d406c895e7824f7354dd4d8c0cc728caf9b82134dd0f20ae0688c34375a5b0f"
+    },
+    {
+      "path": "gui/owned-cleanup-audit.json",
+      "sha256": "9c2f4accef5bdd4da867977d3a4e3cd11ec8af4ece16078af10c9d7e9ad7cc61"
+    },
+    {
+      "path": "gui/packaged-host-mod-2026-10-18T13-40-02-082Z.json",
+      "sha256": "daf1d11be6cec71c0b5898471542693eb9faacb7e3f84e08d61b4812232f2b7e"
+    },
+    {
+      "path": "ios-source-commit.json",
+      "sha256": "4be4d5522412ce31f34039f09df04662469a89bd3ceb81a55c1694a596c3b910"
+    },
+    {
+      "path": "ios/ios-sim-arm64-debug-archive-manifest.json",
+      "sha256": "576c732cd2d9e0d00472a4e1849401620f39dd454d0e9a2cb88f80abf43fcb25"
+    },
+    {
+      "path": "mac/package-receipt.md",
+      "sha256": "66e899a3245c1cfb2476a2284cfbadc7e5a23f7fee5a99b62d0d20d991d16cab"
+    },
+    {
+      "path": "mobile-source-commit.json",
+      "sha256": "328fced2508a67f8ded6074441f5da8ad7cfe52094e02030a0144c75eb60f1ee"
+    },
+    {
+      "path": "product-final-candidate.json",
+      "sha256": "c09797039db666ba03ac0875f70acc08949ebf74fe1623f345a0afafeece25cf"
+    },
+    {
+      "path": "verification/android-audit.md",
+      "sha256": "7742d9159b8d169c7a3b75ddff125cccf6e3a50b73a4a90fbaccfb161ffe0b26"
+    },
+    {
+      "path": "verification/ios-audit.md",
+      "sha256": "72d6dfdacc58027cdca1a2d21c556626c9af6668b95d54d534a87998765c70eb"
+    },
+    {
+      "path": "verification/mac-gui-audit.md",
+      "sha256": "4abcbb3e337a39417aa96d2baec1fbe165503246576d37f9b4a68c33cc0af6aa"
+    }
+  ],
+  "logEvidence": [
+    {
+      "path": "android/current-jni-cargo.log",
+      "sha256": "a098e8e648207ff99b4a2bcb4d0bfce93f7286b13ea791a8ea4bcb35a1b79f95",
+      "exitCode": 0,
+      "note": "receipt labels this as a captured cached repeat of the current-source command"
+    },
+    {
+      "path": "android/jni-promotion.log",
+      "sha256": "421103683cd3f0817c962321841fe6379849520164a1ccf5dda3a166e54cd259"
+    },
+    {
+      "path": "android/play-debug-compile-r2.log",
+      "sha256": "6b0f2154f3ae7a22d77cdfb68d7f26e846d84c1898d31dd325aeb9ca4b71552f",
+      "exitCode": 0
+    },
+    {
+      "path": "android/play-debug-reducer.log",
+      "sha256": "2957edd7f60bcf42a47219a27ae5f0a65049bee64c718d501e3a9f2eb5647e9b",
+      "exitCode": 0
+    },
+    {
+      "path": "build/production-bindgen-build.log",
+      "sha256": "b9dff47b105e34df512f6955b61a1668291c3ce65bb5ba328a53446714bfc7b6"
+    },
+    {
+      "path": "ios/ffi-sim-arm64-debug.log",
+      "sha256": "e97a31a623129e03243a24ebd846576e6100c990a41501abd3b8f2f167732f45",
+      "exitCode": 0
+    },
+    {
+      "path": "ios/xcodebuild-focused-unit-tests.log",
+      "sha256": "9e2802f11c301822621f1e4bdc45eaed8f4e7a6c3ac3d6c464a05f520e75c0c3",
+      "exitCode": 65
+    },
+    {
+      "path": "ios/xcodebuild-for-testing.log",
+      "sha256": "7440994bcda1f0ce26632ac8cbbf9f0378797c0567ba69bf614afde846b8591d",
+      "exitCode": 0
+    },
+    {
+      "path": "ios/xcodebuild-selected-slash-identity-test.log",
+      "sha256": "2755e69de07035d7a6e598b68b65cf4dc4c4d84bd142dc512bdad5bb444410b3",
+      "exitCode": 0
+    },
+    {
+      "path": "ios/xcodebuild-test-without-building-attempt0.exit",
+      "sha256": "fd0e684be2c1e23c66c236df071e7c00d5674c227790b25d81cbeb3b1cb35fd3",
+      "state": "interrupted_after_internal_test_operation_failure_session_exit_130"
+    },
+    {
+      "path": "ios/xcodebuild-test-without-building-attempt0.log",
+      "sha256": "f7dd5500013e7c6d49a989fc700d6dbc5bbfb26297c62501d01b97aa436a9d92",
+      "state": "interrupted_after_internal_test_operation_failure"
+    },
+    {
+      "path": "mac/flare-package-r378-20261018T132052Z.log",
+      "sha256": "494ea318ad52bdbd8a0acdc8ad0170451f6e9979d1059c42a328324447c84d7b",
+      "exitCode": 0,
+      "note": "normal Flare wrapper plus postbuild guard; visible GUI remains pending"
+    }
+  ],
+  "overallDisposition": "Scoped r378 mobile, signed-package, visible-CUA, and owned-cleanup evidence is accepted with a diagnostic. The supplementary packaged-host driver aggregate remains failed (exit 1) because its global process-exit predicate matched the unrelated historical p-17593 process; do not relabel that driver result as passed or infer all gates green."
+}

@@ -1,0 +1,13 @@
+{
+  "recorded_at": "2026-10-18T13:40:46.849129+00:00",
+  "owned_pid": 27257,
+  "owned_process_running": false,
+  "loopback_ports": {
+    "57865": "closed",
+    "57915": "closed"
+  },
+  "providerCredentialCleanup": "cleared",
+  "driver_outcome": "failed",
+  "driver_error": "Cleanup failure(s):\nError: timed out waiting for signed app process exit\n    at waitFor (file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/product-js-gates-fbe2a847-20261014/packaged-host-driver-r375/run-packaged-host-mod-smoke.mjs:697:9)\n    at async waitForNoRunningApp (file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/product-js-gates-fbe2a847-20261014/packaged-host-driver-r375/run-packaged-host-mod-smoke.mjs:1621:3)\n    at async run (file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/product-js-gates-fbe2a847-20261014/packaged-host-driver-r375/run-packaged-host-mod-smoke.mjs:1790:7)\n    at async file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/product-js-gates-fbe2a847-20261014/packaged-host-driver-r375/run-packaged-host-mod-smoke.mjs:1876:3",
+  "classification": "global all-app-exit predicate blocked by separately opened historical app; owned process/credential/provider cleanup verified independently; no driver retry or old-app termination"
+}
