@@ -1,0 +1,11 @@
+{
+  "recorded_at": "2026-10-18T14:05:59.115Z",
+  "authorization": "User explicitly approved normal quit of mistakenly opened p-17593 old app",
+  "action": "CUA exact app path binding; Command-Q did not exit; clicked LingXi Code menu > Quit lingxi-code-desktop; PID absence verified",
+  "old_pid": 31038,
+  "remaining_lingxi_processes": [],
+  "all_app_exit_predicate": "passed",
+  "original_driver_exit": 1,
+  "original_driver_result_preserved": true,
+  "driver_rerun": false
+}

@@ -234,3 +234,8 @@ because the same read-only verification passed with elevated access. The scoped
 r378 result is accepted with this driver diagnostic. No all-42 parity or public
 Native byte-parity claim is made; the r376 GUI result remains historical.
 See the [r378 mobile gate report](mobile-package-r378.md), [receipt](evidence/mobile-package-r378/receipt.json), and [selected log excerpts](evidence/mobile-package-r378/gate-excerpts.md).
+
+The r378 [authorized cleanup follow-up](mobile-package-r378.md#authorized-cleanup-follow-up)
+closed the historical-app process-exit condition: normal Quit completed and the
+unchanged global process predicate returned no LingXi processes. The original
+supplementary driver exit-1 record remains unchanged.

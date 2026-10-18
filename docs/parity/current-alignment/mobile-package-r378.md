@@ -78,3 +78,13 @@ The [independent iOS audit](../../../../acceptance/mobile-package-r378/verificat
 gate excerpts](evidence/mobile-package-r378/gate-excerpts.md) preserve the pins,
 artifact hashes, full-log hashes, and source provenance. Original command output
 remains under `acceptance/mobile-package-r378/`.
+
+## Authorized cleanup follow-up
+
+After the user explicitly authorized normal exit of the mistakenly opened old
+p-17593 window, CUA selected that exact app path and clicked its normal Quit menu
+item. PID 31038 exited. The same `runningAppCommands()` predicate used by the
+driver then returned an empty array, so the outstanding global process-exit
+condition is now satisfied. The [follow-up receipt](evidence/mobile-package-r378/old-app-approved-quit-followup.json)
+records this check. The original driver result remains failed/exit 1; it was not
+rewritten or rerun. No build, Native capture, or GUI acceptance was repeated.
