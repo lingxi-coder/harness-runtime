@@ -17,12 +17,15 @@ use crate::mod_ui_fault::{
 };
 use crate::response::ExactHookText;
 use lingxi_core::host::orchestrator::ModUiControlOutcome;
+use lingxi_core::host::CancellationToken;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex as StdMutex, PoisonError};
+use std::sync::{Arc, Mutex as StdMutex, PoisonError};
+use std::time::Duration;
+use tokio::sync::mpsc;
 
 const MAX_CONTROL_UTF16: usize = 256;
 const MAX_PARENT_CLIENT_UTF16: usize = 10_000;
@@ -31,6 +34,7 @@ const MAX_CLIENT_MESSAGE_VALUES: usize = 2_000;
 const MAX_CLIENT_MESSAGE_DEPTH: usize = 32;
 const MAX_PRESS_VALUE_UTF16: usize = 16_384;
 const MAX_JS_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
+const CLIENT_POST_SETTLEMENT_BUDGET: Duration = Duration::from_secs(20);
 
 fn lock<T>(mutex: &StdMutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
@@ -52,9 +56,53 @@ fn host_generated_json(value: Value) -> Utf16JsonProjection {
         .expect("host-generated Mod UI JSON is representable")
 }
 
+fn client_pending_event(
+    event: &Utf16JsonProjection,
+    post_ack: &mut Option<ClientPostEventGuard>,
+    worker_epoch: Option<u64>,
+) -> Result<Utf16JsonProjection, ModError> {
+    let mut pending = event.clone();
+    if let Some(post_ack) = post_ack.as_mut() {
+        let epoch = worker_epoch
+            .or_else(|| client_post_u64(event, "/hostPostWorkerEpoch"))
+            .ok_or_else(|| ModError::Protocol("queued Client post has no worker epoch".into()))?;
+        pending
+            .set_field(
+                "hostPostWorkerEpoch",
+                Utf16JsonProjection::parse(&epoch.to_string())
+                    .expect("worker epoch is a valid JSON number"),
+            )
+            .map_err(|error| ModError::Protocol(error.to_string()))?;
+        post_ack.defer();
+    }
+    Ok(pending)
+}
+
 fn plain_text_projection(value: &str) -> Utf16JsonProjection {
     Utf16JsonProjection::root_string(value.to_owned(), value.encode_utf16().collect())
         .expect("a Rust string is valid UTF-16")
+}
+
+fn client_post_u64(value: &Utf16JsonProjection, pointer: &str) -> Option<u64> {
+    let number = value.number_at(pointer)?;
+    (number.is_finite()
+        && number.fract() == 0.0
+        && number >= 0.0
+        && number <= MAX_JS_SAFE_INTEGER as f64)
+        .then_some(number as u64)
+}
+
+fn client_post_ids(result: &Utf16JsonProjection) -> Result<Vec<u64>, ModError> {
+    let count = result
+        .array_len("/postIds")
+        .ok_or_else(|| ModError::Protocol("Client runHeld result has no post ID list".into()))?;
+    (0..count)
+        .map(|index| {
+            client_post_u64(result, &format!("/postIds/{index}")).ok_or_else(|| {
+                ModError::Protocol("Client runHeld result has an invalid post ID".into())
+            })
+        })
+        .collect()
 }
 
 /// Convert worker-private numeric held handles into the public Client frame's
@@ -156,11 +204,366 @@ fn public_client_tree_projection(
 #[derive(Default)]
 pub(super) struct ClientUiHostState {
     data: StdMutex<ClientUiHostData>,
+    post_actions: Arc<ClientPostAckRegistry>,
     fault_registry: ClientUiFaultRegistry,
     next_revision: AtomicU64,
     next_client_environment_epoch: AtomicU64,
     next_runtime_id: AtomicU64,
     next_invalidation_id: AtomicU64,
+    next_post_action_id: AtomicU64,
+}
+
+#[derive(Default)]
+struct ClientPostAckRegistry {
+    actions: StdMutex<HashMap<String, ClientPostActionState>>,
+}
+
+struct ClientPostActionState {
+    runtime_id: String,
+    worker_epoch: Option<u64>,
+    sender: mpsc::UnboundedSender<ClientPostAck>,
+    cancellation: CancellationToken,
+}
+
+enum ClientPostAck {
+    Settled { worker_epoch: u64, post_id: u64 },
+    Failed { worker_epoch: u64, reason: String },
+}
+
+pub(super) struct ClientPostActionGuard {
+    registry: Arc<ClientPostAckRegistry>,
+    action_id: String,
+    runtime_id: String,
+    worker_epoch: Option<u64>,
+    receiver: mpsc::UnboundedReceiver<ClientPostAck>,
+    cancellation: CancellationToken,
+    settled: bool,
+}
+
+impl ClientPostActionGuard {
+    fn action_id(&self) -> &str {
+        &self.action_id
+    }
+
+    pub(super) fn bind_worker_epoch(&mut self, worker_epoch: u64) -> Result<(), ModError> {
+        let mut actions = lock(&self.registry.actions);
+        let Some(action) = actions.get_mut(&self.action_id) else {
+            return Err(ModError::Unavailable(
+                "Client post action was cancelled before worker dispatch".into(),
+            ));
+        };
+        if action.runtime_id != self.runtime_id
+            || action
+                .worker_epoch
+                .is_some_and(|current| current != worker_epoch)
+        {
+            return Err(ModError::Protocol(
+                "Client post action changed runtime or worker epoch".into(),
+            ));
+        }
+        if action.cancellation.is_cancelled() {
+            return Err(ModError::Unavailable(
+                "Client post action was cancelled before worker dispatch".into(),
+            ));
+        }
+        action.worker_epoch = Some(worker_epoch);
+        self.worker_epoch = Some(worker_epoch);
+        Ok(())
+    }
+
+    async fn wait_for_posts(&mut self, post_ids: &[u64]) -> Result<(), ModError> {
+        let Some(worker_epoch) = self.worker_epoch else {
+            return Err(ModError::Protocol(
+                "Client post action has no worker epoch".into(),
+            ));
+        };
+        let mut pending = post_ids.iter().copied().collect::<HashSet<_>>();
+        if pending.len() != post_ids.len() {
+            return Err(ModError::Protocol(
+                "Client post action contains duplicate post IDs".into(),
+            ));
+        }
+        if pending.is_empty() {
+            self.settled = true;
+            return Ok(());
+        }
+        let deadline = tokio::time::Instant::now() + CLIENT_POST_SETTLEMENT_BUDGET;
+        while !pending.is_empty() {
+            let ack = tokio::time::timeout_at(deadline, async {
+                tokio::select! {
+                    biased;
+                    ack = self.receiver.recv() => ack,
+                    _ = self.cancellation.cancelled() => None,
+                }
+            })
+            .await
+            .map_err(|_| {
+                ModError::Unavailable("Client post handling did not settle in time".into())
+            })?
+            .ok_or_else(|| ModError::Unavailable("Client post handling was cancelled".into()))?;
+            match ack {
+                ClientPostAck::Settled {
+                    worker_epoch: ack_epoch,
+                    post_id,
+                } if ack_epoch == worker_epoch => {
+                    pending.remove(&post_id);
+                }
+                ClientPostAck::Failed {
+                    worker_epoch: ack_epoch,
+                    reason,
+                } if ack_epoch == worker_epoch => {
+                    return Err(ModError::Unavailable(format!(
+                        "Client post handling failed: {reason}"
+                    )));
+                }
+                ClientPostAck::Settled { .. } | ClientPostAck::Failed { .. } => {
+                    // An old worker epoch cannot settle a current action.
+                }
+            }
+        }
+        self.settled = true;
+        Ok(())
+    }
+
+    fn fail(&self, reason: impl Into<String>) {
+        let Some(worker_epoch) = self.worker_epoch else {
+            return;
+        };
+        self.registry.notify(
+            &self.action_id,
+            &self.runtime_id,
+            worker_epoch,
+            ClientPostAck::Failed {
+                worker_epoch,
+                reason: reason.into(),
+            },
+        );
+    }
+}
+
+impl Drop for ClientPostActionGuard {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.fail("Client post action was cancelled");
+        }
+        self.registry.remove(&self.action_id, &self.runtime_id);
+    }
+}
+
+struct ClientPostEventGuard {
+    registry: Arc<ClientPostAckRegistry>,
+    action_id: Option<String>,
+    runtime_id: String,
+    worker_epoch: Option<u64>,
+    post_id: Option<u64>,
+    cancellation: CancellationToken,
+    deferred: bool,
+    settled: bool,
+}
+
+impl ClientPostEventGuard {
+    fn new(
+        registry: Arc<ClientPostAckRegistry>,
+        event: &Utf16JsonProjection,
+        worker_epoch: Option<u64>,
+    ) -> Option<Self> {
+        if event.string_at("/action") != Some("post") {
+            return None;
+        }
+        let action_id = event.string_at("/postActionId").map(str::to_owned);
+        action_id.as_ref()?;
+        let runtime_id = event.string_at("/runtimeId").unwrap_or_default().to_owned();
+        let worker_epoch = worker_epoch.or_else(|| client_post_u64(event, "/hostPostWorkerEpoch"));
+        let cancellation = registry.cancellation_for(
+            action_id.as_deref().expect("action id checked above"),
+            &runtime_id,
+            worker_epoch,
+        );
+        Some(Self {
+            registry,
+            action_id,
+            runtime_id,
+            worker_epoch,
+            post_id: client_post_u64(event, "/postId"),
+            cancellation,
+            deferred: false,
+            settled: false,
+        })
+    }
+
+    fn defer(&mut self) {
+        self.deferred = true;
+    }
+
+    fn complete(mut self) {
+        if let (Some(worker_epoch), Some(post_id)) = (self.worker_epoch, self.post_id) {
+            self.send(ClientPostAck::Settled {
+                worker_epoch,
+                post_id,
+            });
+        } else if let Some(worker_epoch) = self.worker_epoch {
+            self.send(ClientPostAck::Failed {
+                worker_epoch,
+                reason: "Client post event has invalid correlation metadata".into(),
+            });
+        }
+        self.settled = true;
+    }
+
+    fn fail(mut self, reason: &str) {
+        if let Some(worker_epoch) = self.worker_epoch {
+            self.send(ClientPostAck::Failed {
+                worker_epoch,
+                reason: reason.to_owned(),
+            });
+        }
+        self.settled = true;
+    }
+
+    fn send(&self, ack: ClientPostAck) {
+        if let (Some(action_id), Some(worker_epoch)) =
+            (self.action_id.as_deref(), self.worker_epoch)
+        {
+            self.registry
+                .notify(action_id, &self.runtime_id, worker_epoch, ack);
+        }
+    }
+}
+
+impl Drop for ClientPostEventGuard {
+    fn drop(&mut self) {
+        if !self.deferred && !self.settled {
+            self.send(ClientPostAck::Failed {
+                worker_epoch: self.worker_epoch.unwrap_or_default(),
+                reason: "Client post event was discarded before handling completed".into(),
+            });
+        }
+    }
+}
+
+impl ClientPostAckRegistry {
+    fn register(
+        self: &Arc<Self>,
+        action_id: String,
+        runtime_id: String,
+    ) -> Result<ClientPostActionGuard, ModError> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let cancellation = CancellationToken::new();
+        let mut actions = lock(&self.actions);
+        if actions.contains_key(&action_id) {
+            return Err(ModError::Protocol(
+                "Client post action ID was reused".into(),
+            ));
+        }
+        actions.insert(
+            action_id.clone(),
+            ClientPostActionState {
+                runtime_id: runtime_id.clone(),
+                worker_epoch: None,
+                sender,
+                cancellation: cancellation.clone(),
+            },
+        );
+        Ok(ClientPostActionGuard {
+            registry: Arc::clone(self),
+            action_id,
+            runtime_id,
+            worker_epoch: None,
+            receiver,
+            cancellation,
+            settled: false,
+        })
+    }
+
+    fn notify(&self, action_id: &str, runtime_id: &str, worker_epoch: u64, ack: ClientPostAck) {
+        let actions = lock(&self.actions);
+        let Some(action) = actions.get(action_id) else {
+            return;
+        };
+        if action.runtime_id != runtime_id
+            || action
+                .worker_epoch
+                .is_some_and(|current| current != worker_epoch)
+        {
+            return;
+        }
+        let _ = action.sender.send(ack);
+    }
+
+    fn cancellation_for(
+        &self,
+        action_id: &str,
+        runtime_id: &str,
+        worker_epoch: Option<u64>,
+    ) -> CancellationToken {
+        let actions = lock(&self.actions);
+        let token = actions
+            .get(action_id)
+            .filter(|action| {
+                action.runtime_id == runtime_id
+                    && worker_epoch.is_some()
+                    && action.worker_epoch == worker_epoch
+            })
+            .map(|action| action.cancellation.clone());
+        token.unwrap_or_else(|| {
+            let cancelled = CancellationToken::new();
+            cancelled.cancel();
+            cancelled
+        })
+    }
+
+    fn remove(&self, action_id: &str, runtime_id: &str) {
+        let mut actions = lock(&self.actions);
+        if actions
+            .get(action_id)
+            .is_some_and(|action| action.runtime_id == runtime_id)
+        {
+            if let Some(action) = actions.remove(action_id) {
+                action.cancellation.cancel();
+            }
+        }
+    }
+
+    fn fail_epoch(&self, worker_epoch: u64, reason: &str) {
+        let actions = lock(&self.actions);
+        for action in actions.values() {
+            if action.worker_epoch == Some(worker_epoch) {
+                action.cancellation.cancel();
+                let _ = action.sender.send(ClientPostAck::Failed {
+                    worker_epoch,
+                    reason: reason.to_owned(),
+                });
+            }
+        }
+    }
+
+    fn fail_runtime(&self, runtime_id: &str, reason: &str) {
+        let actions = lock(&self.actions);
+        for action in actions.values() {
+            if action.runtime_id == runtime_id {
+                action.cancellation.cancel();
+                if let Some(worker_epoch) = action.worker_epoch {
+                    let _ = action.sender.send(ClientPostAck::Failed {
+                        worker_epoch,
+                        reason: reason.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    fn fail_all(&self, reason: &str) {
+        let actions = lock(&self.actions);
+        for action in actions.values() {
+            action.cancellation.cancel();
+            if let Some(worker_epoch) = action.worker_epoch {
+                let _ = action.sender.send(ClientPostAck::Failed {
+                    worker_epoch,
+                    reason: reason.to_owned(),
+                });
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -308,6 +711,52 @@ fn remove_instance_if_current(
 }
 
 impl ClientUiHostState {
+    fn begin_post_action(&self, runtime_id: &str) -> Result<ClientPostActionGuard, ModError> {
+        let sequence = self.next_post_action_id.fetch_add(1, Ordering::Relaxed) + 1;
+        if sequence == 0 || sequence > MAX_JS_SAFE_INTEGER {
+            return Err(ModError::Unavailable(
+                "Client post action ID space is exhausted".into(),
+            ));
+        }
+        self.post_actions
+            .register(format!("client-post-{sequence}"), runtime_id.to_owned())
+    }
+
+    pub(super) fn fail_post_actions_for_epoch(&self, worker_epoch: u64, reason: &str) {
+        self.post_actions.fail_epoch(worker_epoch, reason);
+    }
+
+    pub(super) fn fail_all_post_actions(&self, reason: &str) {
+        self.post_actions.fail_all(reason);
+    }
+
+    pub(super) fn fail_post_event(
+        &self,
+        event: &Utf16JsonProjection,
+        worker_epoch: u64,
+        reason: &str,
+    ) {
+        if let Some(post_ack) =
+            ClientPostEventGuard::new(Arc::clone(&self.post_actions), event, Some(worker_epoch))
+        {
+            post_ack.fail(reason);
+        }
+    }
+
+    fn fail_post_actions_for_runtime(&self, runtime_id: &str, reason: &str) {
+        self.post_actions.fail_runtime(runtime_id, reason);
+    }
+
+    fn remove_instance_if_current(
+        &self,
+        data: &mut ClientUiHostData,
+        runtime_id: &str,
+        key: &ClientUiInstanceKey,
+    ) {
+        remove_instance_if_current(data, runtime_id, key);
+        self.fail_post_actions_for_runtime(runtime_id, "Client runtime was removed");
+    }
+
     pub(super) fn install_loaded_plugin(
         &self,
         plugin: &str,
@@ -339,7 +788,7 @@ impl ClientUiHostState {
     }
 
     pub(super) fn unload_storage(&self, storage_id: &str) -> Vec<ClientUiRenderSite> {
-        let (removed_plugin, affected_sites) = {
+        let (removed_plugin, affected_sites, removed_runtimes) = {
             let mut data = lock(&self.data);
             if let Some(plugin) = data.plugin_by_storage.remove(storage_id) {
                 let still_loaded = data
@@ -349,6 +798,15 @@ impl ClientUiHostState {
                 if !still_loaded {
                     data.modules.remove(&plugin);
                     data.client_runtime_epochs.remove(&plugin);
+                    let removed_runtimes = data
+                        .instances
+                        .iter()
+                        .filter(|(_, instance)| {
+                            host_plugin_name(instance.key.identity.plugin()).as_deref()
+                                == Some(plugin.as_str())
+                        })
+                        .map(|(runtime_id, _)| runtime_id.clone())
+                        .collect::<Vec<_>>();
                     data.instances.retain(|_, instance| {
                         host_plugin_name(instance.key.identity.plugin()).as_deref()
                             != Some(plugin.as_str())
@@ -388,7 +846,11 @@ impl ClientUiHostState {
                                 != Some(plugin.as_str())
                         });
                     }
-                    (Some(plugin), affected_sites.into_iter().collect())
+                    (
+                        Some(plugin),
+                        affected_sites.into_iter().collect(),
+                        removed_runtimes,
+                    )
                 } else {
                     // Unloading any storage disposes the worker's plugin
                     // environment. If another storage still owns the plugin,
@@ -403,15 +865,18 @@ impl ClientUiHostState {
                         "Client environment epoch space exhausted"
                     );
                     data.client_runtime_epochs.insert(plugin.clone(), epoch);
-                    (None, Vec::new())
+                    (None, Vec::new(), Vec::new())
                 }
             } else {
-                (None, Vec::new())
+                (None, Vec::new(), Vec::new())
             }
         };
         if let Some(plugin) = removed_plugin {
             self.fault_registry
                 .remove_plugin_clients(&ExactHookText::from_text(plugin));
+        }
+        for runtime_id in removed_runtimes {
+            self.fail_post_actions_for_runtime(&runtime_id, "Client plugin was unloaded");
         }
         affected_sites
     }
@@ -2987,6 +3452,25 @@ impl ModHost {
         &self,
         operation: Utf16JsonProjection,
     ) -> Result<Utf16JsonProjection, ClientWorkerOperationError> {
+        self.run_client_worker_operation_inner(operation, None)
+            .await
+            .map(|(result, _)| result)
+    }
+
+    async fn run_client_worker_operation_with_post_action(
+        &self,
+        operation: Utf16JsonProjection,
+        post_action: &mut ClientPostActionGuard,
+    ) -> Result<(Utf16JsonProjection, u64), ClientWorkerOperationError> {
+        self.run_client_worker_operation_inner(operation, Some(post_action))
+            .await
+    }
+
+    async fn run_client_worker_operation_inner(
+        &self,
+        operation: Utf16JsonProjection,
+        post_action: Option<&mut ClientPostActionGuard>,
+    ) -> Result<(Utf16JsonProjection, u64), ClientWorkerOperationError> {
         let mut envelope = host_generated_json(json!({
             "kind":"ui.client.operation",
         }));
@@ -2995,7 +3479,21 @@ impl ModHost {
             .map_err(|error| {
                 ClientWorkerOperationError::Host(ModError::Protocol(error.to_string()))
             })?;
-        let mut request = self.request_projection(envelope).await?;
+        let mut request = if let Some(post_action) = post_action {
+            self.request_projection_for_client_post_action(envelope, post_action)
+                .await?
+        } else {
+            self.request_projection(envelope).await?
+        };
+        let worker_epoch = request
+            .worker_epoch
+            .as_ref()
+            .map(|epoch| epoch.id)
+            .ok_or_else(|| {
+                ClientWorkerOperationError::Host(ModError::Protocol(
+                    "Client operation has no worker epoch".into(),
+                ))
+            })?;
         let reply = self.receive(&mut request).await?;
         match reply.string_at("/kind") {
             Some("ui.client.result") => {
@@ -3019,11 +3517,12 @@ impl ModHost {
                         reason,
                     });
                 }
-                reply.subprojection("/result").map_err(|_| {
+                let result = reply.subprojection("/result").map_err(|_| {
                     ClientWorkerOperationError::Host(ModError::Protocol(
                         "Client operation reply has no result".into(),
                     ))
-                })
+                })?;
+                Ok((result, worker_epoch))
             }
             Some("error") => Err(ClientWorkerOperationError::Host(ModError::Hook(
                 reply
@@ -3202,6 +3701,10 @@ impl ModHost {
             }
         };
         if let Some(old_instance) = old_instance {
+            self.client_ui.fail_post_actions_for_runtime(
+                &old_instance.runtime_id,
+                "Client runtime was replaced",
+            );
             let mut unmount =
                 host_generated_json(json!({"type":"unmount","runtimeId":old_instance.runtime_id}));
             if let Some(generation) = old_instance.worker_generation {
@@ -3304,7 +3807,11 @@ impl ModHost {
                 };
                 {
                     let mut data = lock(&self.client_ui.data);
-                    remove_instance_if_current(&mut data, &runtime_id, &instance_key);
+                    self.client_ui.remove_instance_if_current(
+                        &mut data,
+                        &runtime_id,
+                        &instance_key,
+                    );
                 }
                 match error {
                     ClientWorkerOperationError::Fault { phase, reason } => {
@@ -3347,7 +3854,8 @@ impl ModHost {
             {
                 if let Some(instance) = data.instances.get(&runtime_id) {
                     let key = instance.key.clone();
-                    remove_instance_if_current(&mut data, &runtime_id, &key);
+                    self.client_ui
+                        .remove_instance_if_current(&mut data, &runtime_id, &key);
                 }
                 false
             } else if let Some(instance) = data.instances.get_mut(&runtime_id) {
@@ -3511,7 +4019,26 @@ impl ModHost {
             "render" | "unmount" => {}
             _ => unreachable!("operation was validated"),
         }
-        let result = match self.run_client_worker_operation(worker_operation).await {
+        let mut post_action = if kind == "runHeld" {
+            Some(self.client_ui.begin_post_action(runtime_id)?)
+        } else {
+            None
+        };
+        if let Some(post_action) = post_action.as_ref() {
+            worker_operation
+                .set_field(
+                    "postActionId",
+                    plain_text_projection(post_action.action_id()),
+                )
+                .map_err(|error| ModError::Protocol(error.to_string()))?;
+        }
+        let result = match if let Some(post_action) = post_action.as_mut() {
+            self.run_client_worker_operation_with_post_action(worker_operation, post_action)
+                .await
+                .map(|(result, _worker_epoch)| result)
+        } else {
+            self.run_client_worker_operation(worker_operation).await
+        } {
             Ok(result) => result,
             Err(ClientWorkerOperationError::Fault { phase, reason }) if kind != "unmount" => {
                 self.record_client_worker_fault(runtime_id, &phase, &reason);
@@ -3526,13 +4053,24 @@ impl ModHost {
             }
             Err(error) => return Err(error.into()),
         };
+        if let Some(post_action) = post_action.as_mut() {
+            if result
+                .at_pointer("/stale")
+                .and_then(|value| value.as_bool())
+                != Some(true)
+            {
+                let post_ids = client_post_ids(&result)?;
+                post_action.wait_for_posts(&post_ids).await?;
+            }
+        }
         if kind == "unmount" {
             let handled = result
                 .at_pointer("/unmounted")
                 .and_then(|value| value.as_bool())
                 == Some(true);
             let mut data = lock(&self.client_ui.data);
-            remove_instance_if_current(&mut data, runtime_id, &instance.key);
+            self.client_ui
+                .remove_instance_if_current(&mut data, runtime_id, &instance.key);
             return Ok(host_generated_json(
                 json!({"handled":handled,"renderRevision":revision}),
             ));
@@ -3704,6 +4242,10 @@ impl ModHost {
             (handled, stale_runtimes, pending_event_runtimes)
         };
         for (runtime_id, generation) in stale_runtimes {
+            self.client_ui.fail_post_actions_for_runtime(
+                &runtime_id,
+                "Client runtime was removed from the committed tree",
+            );
             let mut unmount = json!({"type":"unmount","runtimeId":runtime_id});
             if let Some(generation) = generation {
                 unmount["generation"] = json!(generation);
@@ -3782,6 +4324,8 @@ impl ModHost {
             &site.request_id().utf16_code_units,
         );
         for runtime_id in instances {
+            self.client_ui
+                .fail_post_actions_for_runtime(&runtime_id, "Client render site was unmounted");
             let _ = self
                 .run_client_worker_operation(host_generated_json(
                     json!({"type":"unmount","runtimeId":runtime_id}),
@@ -3810,17 +4354,28 @@ impl ModHost {
                 }
                 instance.pending_events.remove(0)
             };
-            self.handle_client_ui_background_event_inner(&event, session, true)
+            self.handle_client_ui_background_event_inner(&event, session, true, None)
                 .await?;
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn handle_client_ui_background_event(
         &self,
         event: &Utf16JsonProjection,
         session: &dyn ModSessionContext,
     ) -> Result<(), ModError> {
-        self.handle_client_ui_background_event_inner(event, session, false)
+        self.handle_client_ui_background_event_inner(event, session, false, None)
+            .await
+    }
+
+    pub(super) async fn handle_client_ui_background_event_in_epoch(
+        &self,
+        event: &Utf16JsonProjection,
+        session: &dyn ModSessionContext,
+        worker_epoch: u64,
+    ) -> Result<(), ModError> {
+        self.handle_client_ui_background_event_inner(event, session, false, Some(worker_epoch))
             .await
     }
 
@@ -3829,10 +4384,16 @@ impl ModHost {
         event: &Utf16JsonProjection,
         session: &dyn ModSessionContext,
         from_pending_queue: bool,
+        worker_epoch: Option<u64>,
     ) -> Result<(), ModError> {
         if event.string_at("/kind") != Some("ui.client.event") {
             return Ok(());
         }
+        let mut post_ack = ClientPostEventGuard::new(
+            Arc::clone(&self.client_ui.post_actions),
+            event,
+            worker_epoch,
+        );
         let runtime_id = event
             .string_units("/runtimeId")
             .and_then(|units| String::from_utf16(&units).ok())
@@ -3868,7 +4429,8 @@ impl ModHost {
                 }
             } else {
                 if let Some(instance) = data.instances.get_mut(&runtime_id) {
-                    instance.pending_events.push(event.clone());
+                    let pending = client_pending_event(event, &mut post_ack, worker_epoch)?;
+                    instance.pending_events.push(pending);
                 }
                 return Ok(());
             }
@@ -3889,7 +4451,8 @@ impl ModHost {
             }
             if !drawn || (!from_pending_queue && instance.draining_pending_events) {
                 if let Some(instance) = data.instances.get_mut(&runtime_id) {
-                    instance.pending_events.push(event.clone());
+                    let pending = client_pending_event(event, &mut post_ack, worker_epoch)?;
+                    instance.pending_events.push(pending);
                 }
                 return Ok(());
             }
@@ -3952,7 +4515,31 @@ impl ModHost {
                     ("data".into(), data),
                 ])
                 .map_err(|error| ModError::Protocol(error.to_string()))?;
-                let _ = self.dispatch_client_message(&request, session).await?;
+                let response = if let Some(post_ack) = post_ack.as_ref() {
+                    let cancellation = post_ack.cancellation.clone();
+                    tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => return Ok(()),
+                        response = self.dispatch_client_message(&request, session) => response?,
+                    }
+                } else {
+                    self.dispatch_client_message(&request, session).await?
+                };
+                if post_ack
+                    .as_ref()
+                    .is_some_and(|post_ack| post_ack.cancellation.is_cancelled())
+                {
+                    return Ok(());
+                }
+                if response
+                    .at_pointer("/handled")
+                    .and_then(|value| value.as_bool())
+                    != Some(false)
+                {
+                    if let Some(post_ack) = post_ack.take() {
+                        post_ack.complete();
+                    }
+                }
             }
             "fault" => {
                 let event_phase = event
@@ -4125,6 +4712,77 @@ mod tests {
         serde_json::from_str(&source).expect("test projection serializes as JSON")
     }
 
+    #[tokio::test]
+    async fn client_post_action_keeps_early_acks_and_releases_on_worker_epoch_end() {
+        let registry = Arc::new(ClientPostAckRegistry::default());
+        let mut early = registry
+            .register("early-action".into(), "runtime-a".into())
+            .unwrap();
+        early.bind_worker_epoch(9).unwrap();
+        for post_id in [2, 3] {
+            registry.notify(
+                "early-action",
+                "runtime-a",
+                9,
+                ClientPostAck::Settled {
+                    worker_epoch: 9,
+                    post_id,
+                },
+            );
+        }
+        early.wait_for_posts(&[2, 3]).await.unwrap();
+        let early_cancellation = registry.cancellation_for("early-action", "runtime-a", Some(9));
+        drop(early);
+        assert!(early_cancellation.is_cancelled());
+
+        let mut awaiting_no_props = registry
+            .register("no-props-action".into(), "runtime-a".into())
+            .unwrap();
+        awaiting_no_props.bind_worker_epoch(9).unwrap();
+        for post_id in [0, 1] {
+            registry.notify(
+                "no-props-action",
+                "runtime-a",
+                9,
+                ClientPostAck::Settled {
+                    worker_epoch: 9,
+                    post_id,
+                },
+            );
+        }
+        let waiter =
+            tokio::spawn(async move { awaiting_no_props.wait_for_posts(&[0, 1, 2]).await });
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        assert!(
+            !waiter.is_finished(),
+            "posts without props still have to settle before the frame can return"
+        );
+        registry.notify(
+            "no-props-action",
+            "runtime-a",
+            9,
+            ClientPostAck::Settled {
+                worker_epoch: 9,
+                post_id: 2,
+            },
+        );
+        waiter.await.unwrap().unwrap();
+
+        let mut interrupted = registry
+            .register("interrupted-action".into(), "runtime-b".into())
+            .unwrap();
+        interrupted.bind_worker_epoch(10).unwrap();
+        registry.fail_epoch(10, "worker exited");
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            interrupted.wait_for_posts(&[0]),
+        )
+        .await
+        .expect("worker exit releases the action without waiting for the settlement deadline")
+        .unwrap_err();
+        assert!(error.to_string().contains("worker exited"));
+    }
+
     fn parent_action_handle(value: Option<&Value>) -> Option<u64> {
         let handle = value?.as_u64()?;
         (handle > 0 && handle <= MAX_JS_SAFE_INTEGER).then_some(handle)
@@ -4135,8 +4793,16 @@ mod tests {
         root: std::path::PathBuf,
         frames: StdMutex<Vec<(String, Value)>>,
         raw_frames: StdMutex<Vec<(String, Utf16JsonProjection)>>,
+        frame_gate: StdMutex<Option<UiLifecycleFrameGate>>,
+        logs: StdMutex<Vec<String>>,
         allow_non_scalar_frames: bool,
         invalidations: StdMutex<Vec<Value>>,
+    }
+
+    struct UiLifecycleFrameGate {
+        runtime_id: String,
+        entered: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::Arc<tokio::sync::Notify>,
     }
 
     #[async_trait::async_trait]
@@ -4161,7 +4827,28 @@ mod tests {
             1
         }
 
+        async fn emit_mod_log(&self, _plugin: &str, text: Utf16JsonProjection) {
+            if let Some(text) = text.string_at("") {
+                lock(&self.logs).push(text.to_owned());
+            }
+        }
+
         async fn emit_mod_ui_client_frame(&self, runtime_id: &str, frame: &Utf16JsonProjection) {
+            let gate = {
+                let mut gate = lock(&self.frame_gate);
+                if gate
+                    .as_ref()
+                    .is_some_and(|gate| gate.runtime_id == runtime_id)
+                {
+                    gate.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(gate) = gate {
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
             // Preserve raw frames for assertions that include lone UTF-16
             // units. Ordinary tests may still use Value as a semantic oracle.
             lock(&self.raw_frames).push((runtime_id.to_owned(), frame.clone()));
@@ -5346,7 +6033,7 @@ mod tests {
                   if (!props.failRun && !props.timerFault) surface.post({ title: 'posted' });
                 }
                 return h(Box, { flexDirection: 'column', children: [
-                  h(Text, { children: props.title }),
+                  h(Text, { key: 'title', children: props.title }),
                   h(Button, { key: 'submit', label: 'Send',
                     onPress: () => {
                       if (props.failRun) throw new Error('client press exploded');
@@ -5355,7 +6042,23 @@ mod tests {
                   h(Input, {
                     key: 'query', value: '',
                     onSubmit: (value, event) => surface.post({ title: `Input submitted (${event.kind}): ${value}` }),
-                    onInput: (value, event) => surface.post({ title: `Input changed (${event.kind}): ${value}` }),
+                    onInput: (value, event) => {
+                      if (value === 'cancel-block') {
+                        surface.post({ block: true });
+                        return;
+                      }
+                      if (value === 'after-cancel') {
+                        surface.post({ afterCancellation: true });
+                        return;
+                      }
+                      if (value === 'barrier') {
+                        surface.post({ title: 'BARRIER UPPERCASE' });
+                        surface.post({ title: '' });
+                        surface.post({ noProps: true });
+                        return;
+                      }
+                      surface.post({ title: `Input changed (${event.kind}): ${value}` });
+                    },
                   }),
                   h(Select, { key: 'mode', value: 'fast', options: [{ value: 'fast' }],
                     onSelect: (value, event) => surface.post({ title: `Select ${event.value}: ${value}` }) }),
@@ -5369,6 +6072,11 @@ mod tests {
         std::fs::write(
             &entry,
             r#"
+              let blockedPostAborted = false;
+              let releaseBlockedPostAborted;
+              const blockedPostAbortedSignal = new Promise(resolve => {
+                releaseBlockedPostAborted = resolve;
+              });
               export function register(on) {
                 on('ui.render', { surface: 'desktop', component: 'Pane' }, ($, event) => {
                   const { Client, h } = $.ui.resolve(event);
@@ -5386,10 +6094,28 @@ mod tests {
                   });
                   return client;
                 });
-                on('ui.message', (_$, event) => ({
-                  handled: true,
-                  props: { title: event.data.title },
-                }));
+                on('ui.message', async (_$, event, next) => {
+                  if (event.data.block) {
+                    _$.ui.log('blocking ui.message reached');
+                    await new Promise(resolve => {
+                      next.signal.addEventListener('abort', () => {
+                        blockedPostAborted = true;
+                        releaseBlockedPostAborted();
+                        resolve();
+                      }, { once: true });
+                    });
+                    return { handled: true, props: { title: 'late props' } };
+                  }
+                  if (event.data.afterCancellation) {
+                    await blockedPostAbortedSignal;
+                    return { handled: true, props: {
+                      title: blockedPostAborted ? 'after cancellation' : 'not cancelled',
+                    } };
+                  }
+                  return event.data.noProps
+                    ? { handled: true }
+                    : { handled: true, props: { title: event.data.title } };
+                });
                 on('ui.press', (_$, event, next) => next(event));
                 on('ui.input', (_$, event, next) => next({ ...event, value: event.value.trim() }));
                 on('ui.select', (_$, event, next) => next({ ...event, value: `selected:${event.value}` }));
@@ -5693,8 +6419,66 @@ mod tests {
             })
             .await;
         assert!(tree_press_handle_for_key(&changed_input_frame["tree"], "query").is_some());
-        let input_submit_handle =
-            tree_press_handle_for_key(&changed_input_frame["tree"], "query").unwrap();
+        // The background `ui.message` frame above is an intermediate frame.
+        // runHeld settles its synchronous posts and then returns the current
+        // render with freshly-issued handles; use that authoritative response
+        // for the next operation.
+        let barrier_handle =
+            tree_press_handle_for_key(&test_value(&changed_callback)["tree"], "query").unwrap();
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        *lock(&session_impl.frame_gate) = Some(UiLifecycleFrameGate {
+            runtime_id: runtime_id.clone(),
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        let barrier_operation = host_generated_json(json!({
+            "type":"runHeld",
+            "runtimeId":runtime_id,
+            "render_revision":revision,
+            "handle":barrier_handle,
+            "event":{"kind":"change","value":"barrier"},
+        }));
+        let barrier_host = host.clone();
+        let barrier_session = session.clone();
+        let barrier_task = tokio::spawn(async move {
+            barrier_host
+                .dispatch_client_ui_operation(barrier_operation, barrier_session.as_ref())
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified())
+            .await
+            .expect("the correlated ui.message reaches its props frame");
+        assert!(
+            !barrier_task.is_finished(),
+            "runHeld waits while synchronous post props are being applied and emitted"
+        );
+        release.notify_one();
+        let barrier_callback = barrier_task.await.unwrap().unwrap();
+        let barrier_value = test_value(&barrier_callback);
+        let barrier_tree = &barrier_value["tree"];
+        let title_node = tree_node_with_key(barrier_tree, "title")
+            .expect("the final frame contains the title node");
+        assert_eq!(
+            title_node["children"],
+            json!([""]),
+            "the synchronous clear post is applied before the runHeld frame returns"
+        );
+        assert!(
+            !tree_contains_text(barrier_tree, "BARRIER UPPERCASE"),
+            "the final frame includes later posts and does not return an intermediate props frame"
+        );
+        assert!(
+            lock(&session_impl.frames)
+                .iter()
+                .any(|(frame_runtime, frame)| {
+                    frame_runtime == &runtime_id
+                        && tree_contains_text(&frame["tree"], "BARRIER UPPERCASE")
+                }),
+            "the delayed uppercase props frame was emitted before the clear frame"
+        );
+
+        let input_submit_handle = tree_press_handle_for_key(barrier_tree, "query").unwrap();
         let submitted_callback = host
             .dispatch_client_ui_operation(
                 host_generated_json(json!({
@@ -5715,8 +6499,9 @@ mod tests {
             })
             .await;
         assert!(tree_press_handle_for_key(&submitted_input_frame["tree"], "query").is_some());
-        let select_handle = tree_press_handle_for_key(&submitted_input_frame["tree"], "mode")
-            .expect("rendered Select exposes its public press handle");
+        let select_handle =
+            tree_press_handle_for_key(&test_value(&submitted_callback)["tree"], "mode")
+                .expect("the authoritative runHeld frame exposes the current Select handle");
         let selected_callback = host
             .dispatch_client_ui_operation(
                 host_generated_json(json!({
@@ -5821,6 +6606,105 @@ mod tests {
             pressed["frameSequence"].as_u64().unwrap()
                 > test_value(&reset)["frameSequence"].as_u64().unwrap()
         );
+
+        assert!(host
+            .active_request_epochs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+        let cancellation_input_handle =
+            tree_press_handle_for_key(&test_value(&run)["tree"], "query").unwrap();
+        let cancellation_operation = host_generated_json(json!({
+            "type":"runHeld",
+            "runtimeId":runtime_id,
+            "render_revision":revision,
+            "handle":cancellation_input_handle,
+            "event":{"kind":"change","value":"cancel-block"},
+        }));
+        let cancellation_host = host.clone();
+        let cancellation_session = session.clone();
+        let cancellation_task = tokio::spawn(async move {
+            cancellation_host
+                .dispatch_client_ui_operation(cancellation_operation, cancellation_session.as_ref())
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if !host
+                    .active_request_epochs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the blocking ui.message hook has an active worker request");
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if lock(&session_impl.logs)
+                    .iter()
+                    .any(|line| line == "blocking ui.message reached")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the real Worker ui.message handler entered before cancellation");
+        assert!(!cancellation_task.is_finished());
+        host.client_ui
+            .fail_post_actions_for_runtime(&runtime_id, "test runtime cancellation");
+        let cancellation_result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), cancellation_task)
+                .await
+                .expect("runtime cancellation releases runHeld promptly")
+                .unwrap();
+        assert!(cancellation_result.is_err());
+
+        let after_cancel_render = host
+            .dispatch_client_ui_operation(
+                host_generated_json(json!({
+                    "type":"render",
+                    "runtimeId":runtime_id,
+                    "render_revision":revision,
+                })),
+                session.as_ref(),
+            )
+            .await
+            .unwrap();
+        let after_cancel_handle =
+            tree_press_handle_for_key(&test_value(&after_cancel_render)["tree"], "query")
+                .expect("the still-mounted Client can receive a later action");
+        let after_cancel_result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            host.dispatch_client_ui_operation(
+                host_generated_json(json!({
+                    "type":"runHeld",
+                    "runtimeId":runtime_id,
+                    "render_revision":revision,
+                    "handle":after_cancel_handle,
+                    "event":{"kind":"change","value":"after-cancel"},
+                })),
+                session.as_ref(),
+            ),
+        )
+        .await
+        .expect("a later background event is not stuck behind the cancelled post")
+        .unwrap();
+        assert!(tree_contains_text(
+            &test_value(&after_cancel_result)["tree"],
+            "after cancellation"
+        ));
+        assert!(!lock(&session_impl.frames)
+            .iter()
+            .any(|(frame_runtime, frame)| {
+                frame_runtime == &runtime_id && tree_contains_text(&frame["tree"], "late props")
+            }));
 
         let client_identity = lock(&host.client_ui.data)
             .instances

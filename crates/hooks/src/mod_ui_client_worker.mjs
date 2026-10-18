@@ -669,6 +669,11 @@ export class ClientSurfaceManager {
 
   emit(instance, action, fields = {}) {
     if (instance.destroyed || this.disposed || (instance.failure && action !== 'fault')) return;
+    const postAction = action === 'post' ? instance.activePostAction : undefined;
+    const postCorrelation = postAction
+      ? { postActionId: postAction.id, postId: postAction.postIds.length }
+      : undefined;
+    if (postCorrelation) postAction.postIds.push(postCorrelation.postId);
     this.send({
       id: 0,
       kind: 'ui.client.event',
@@ -680,6 +685,9 @@ export class ClientSurfaceManager {
       module: instance.identity.module,
       action,
       ...fields,
+      // Correlation is host-private metadata, appended after the opaque post
+      // payload so authors cannot replace the action or sequence identity.
+      ...(postCorrelation ?? {}),
     });
   }
 
@@ -721,6 +729,7 @@ export class ClientSurfaceManager {
       nextHeld: 1,
       timers: new Map(),
       nextTimer: 1,
+      activePostAction: undefined,
       scheduled: false,
       destroyed: false,
       failure: undefined,
@@ -843,16 +852,33 @@ export class ClientSurfaceManager {
   }
 
   runHeld(runtimeId, handle, payload) {
+    return this.runHeldCore(runtimeId, handle, payload).accepted;
+  }
+
+  runHeldWithPostIds(runtimeId, handle, payload, postActionId) {
+    return this.runHeldCore(runtimeId, handle, payload, postActionId);
+  }
+
+  runHeldCore(runtimeId, handle, payload, postActionId) {
     const instance = this.runtimeInstances.get(runtimeId);
-    if (!instance || instance.destroyed || instance.failure) return false;
+    if (!instance || instance.destroyed || instance.failure) {
+      return { accepted: false, postIds: [] };
+    }
     const callback = instance.held.get(handle);
-    if (typeof callback !== 'function') return false;
+    if (typeof callback !== 'function') return { accepted: false, postIds: [] };
+    const postAction = postActionId === undefined ? undefined : { id: postActionId, postIds: [] };
+    if (postAction && instance.activePostAction) fail('Client post action is already active');
+    if (postAction) instance.activePostAction = postAction;
     try {
       this.invokeCallback(instance, callback, instance.environment.cloneData(payload));
-      return true;
+      return { accepted: true, postIds: postAction?.postIds ?? [] };
     } catch (error) {
       this.emitFault(instance, 'run', error);
       throw clientError('run', error);
+    } finally {
+      // invokeCallback intentionally does not await callback Promises. Only
+      // posts emitted before its synchronous return belong to this action.
+      if (postAction && instance.activePostAction === postAction) instance.activePostAction = undefined;
     }
   }
 
@@ -968,7 +994,13 @@ export class ClientSurfaceManager {
       case 'resize': return this.resize(operation.runtimeId, operation.columns, operation.rows);
       case 'pointer': return { accepted: this.pointer(operation.runtimeId, operation.payload) };
       case 'key': return { accepted: this.key(operation.runtimeId, operation.payload) };
-      case 'runHeld': return { accepted: this.runHeld(operation.runtimeId, operation.handle, operation.payload) };
+      case 'runHeld':
+        if (typeof operation.postActionId !== 'string' || operation.postActionId.length === 0) {
+          fail('Client runHeld operation requires a host post action ID');
+        }
+        return this.runHeldWithPostIds(
+          operation.runtimeId, operation.handle, operation.payload, operation.postActionId,
+        );
       case 'dropHeld': this.dropHeld(operation.runtimeId, operation.handles); return { ok: true };
       case 'unmount': return { unmounted: this.unmount(operation.runtimeId) };
       case 'disposeEnvironment': return { disposed: this.disposeEnvironment(operation.plugin, operation.environmentId) };

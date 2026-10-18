@@ -204,6 +204,56 @@ test('Client worker mirrors Native Button, Input and Select adapters and keeps M
   manager.dispose();
 });
 
+test('runHeld correlates synchronous posts only and still rejects a replaced handle', async () => {
+  const events = [];
+  const manager = new ClientSurfaceManager({ send: message => events.push(message) });
+  const mounted = await manager.mount(mountOptions({
+    runtimeId: 'post-action-correlation',
+    source: `
+      import { Button, h } from 'claude:surface-runtime';
+      export function Board(_props, surface) {
+        return h(Button, { onPress: async () => {
+          surface.post({ stage: 'synchronous' });
+          await Promise.resolve();
+          surface.post({ stage: 'promise-continuation' });
+        } });
+      }
+    `,
+  }));
+  const handle = mounted.tree.held;
+  await assert.rejects(manager.operation({
+    type: 'runHeld', runtimeId: mounted.runtimeId, handle, payload: { kind: 'press' },
+  }), /requires a host post action ID/);
+  const action = await manager.operation({
+    type: 'runHeld',
+    runtimeId: mounted.runtimeId,
+    handle,
+    payload: { kind: 'press' },
+    postActionId: 'host-action-7',
+  });
+  assert.deepEqual(action, { accepted: true, postIds: [0] });
+  const posts = events.filter(event => event.action === 'post');
+  assert.equal(posts.length, 2);
+  assert.equal(posts[0].postActionId, 'host-action-7');
+  assert.equal(posts[0].postId, 0);
+  assert.deepEqual(JSON.parse(posts[0].json), { stage: 'synchronous' });
+  assert.equal(Object.hasOwn(posts[1], 'postActionId'), false,
+    'a post after the callback promise yields is a later external update');
+
+  manager.render(mounted.runtimeId);
+  const stale = await manager.operation({
+    type: 'runHeld',
+    runtimeId: mounted.runtimeId,
+    handle,
+    payload: { kind: 'press' },
+    postActionId: 'host-action-stale',
+  });
+  assert.deepEqual(stale, { accepted: false, postIds: [] });
+  assert.equal(events.filter(event => event.action === 'post').length, 2,
+    'a replaced handle does not invoke its callback or emit a post');
+  manager.dispose();
+});
+
 test('Client tree JSON matches Native exportTree field order and Input/Select omissions', async () => {
   const manager = new ClientSurfaceManager({ send() {} });
   const mounted = await manager.mount(mountOptions({

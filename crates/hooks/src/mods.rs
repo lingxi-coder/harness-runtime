@@ -3551,6 +3551,7 @@ async fn background_api_loop(
     epoch: Weak<ModWorkerEpoch>,
     mut replies: mpsc::UnboundedReceiver<Utf16JsonProjection>,
 ) {
+    let worker_epoch_id = epoch.upgrade().map(|epoch| epoch.id);
     type BackgroundCall = Pin<
         Box<
             dyn Future<
@@ -3782,11 +3783,21 @@ async fn background_api_loop(
                     Some("ui.client.event") => {
                         if let Some(session) = worker.background_session() {
                             if let Err(error) = worker
-                                .handle_client_ui_background_event(&message, session.as_ref())
+                                .handle_client_ui_background_event_in_epoch(
+                                    &message,
+                                    session.as_ref(),
+                                    source_epoch.id,
+                                )
                                 .await
                             {
                                 tracing::warn!(%error, "background Mod Client UI event failed");
                             }
+                        } else {
+                            worker.client_ui.fail_post_event(
+                                &message,
+                                source_epoch.id,
+                                "Mod session ended before Client post handling",
+                            );
                         }
                     }
                     Some("log.error") => tracing::warn!(message = %message.to_json_string().unwrap_or_default(), "background Mod API call failed"),
@@ -3861,6 +3872,12 @@ async fn background_api_loop(
                 }
             }
         }
+    }
+    if let (Some(worker), Some(worker_epoch_id)) = (host.upgrade(), worker_epoch_id) {
+        worker.client_ui.fail_post_actions_for_epoch(
+            worker_epoch_id,
+            "Mod worker epoch ended before Client posts settled",
+        );
     }
 }
 
@@ -3997,6 +4014,8 @@ pub struct ModHost {
 impl Drop for ModHost {
     fn drop(&mut self) {
         self.ui_pacing_cancelled.store(true, Ordering::Release);
+        self.client_ui
+            .fail_all_post_actions("Mod session ended before Client posts settled");
         let epoch = Arc::clone(self.worker_epoch.get_mut());
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
@@ -6226,12 +6245,48 @@ impl ModHost {
 
     async fn request_projection_with_api_origin_and_session(
         &self,
-        mut message: Utf16JsonProjection,
+        message: Utf16JsonProjection,
         api_origin: lingxi_core::host::task_registry::FieldPresence<Value>,
         generation_session: Option<Arc<dyn ModSessionContext>>,
         inherited_generation_context_ticket: Option<String>,
     ) -> Result<RequestChannel, ModError> {
+        self.request_projection_inner(
+            message,
+            api_origin,
+            generation_session,
+            inherited_generation_context_ticket,
+            None,
+        )
+        .await
+    }
+
+    async fn request_projection_for_client_post_action(
+        &self,
+        message: Utf16JsonProjection,
+        post_action: &mut client_ui_host::ClientPostActionGuard,
+    ) -> Result<RequestChannel, ModError> {
+        self.request_projection_inner(
+            message,
+            lingxi_core::host::task_registry::FieldPresence::Missing,
+            None,
+            None,
+            Some(post_action),
+        )
+        .await
+    }
+
+    async fn request_projection_inner(
+        &self,
+        mut message: Utf16JsonProjection,
+        api_origin: lingxi_core::host::task_registry::FieldPresence<Value>,
+        generation_session: Option<Arc<dyn ModSessionContext>>,
+        inherited_generation_context_ticket: Option<String>,
+        post_action: Option<&mut client_ui_host::ClientPostActionGuard>,
+    ) -> Result<RequestChannel, ModError> {
         let epoch = self.current_worker_epoch().await;
+        if let Some(post_action) = post_action {
+            post_action.bind_worker_epoch(epoch.id)?;
+        }
         let status = epoch.status.load(Ordering::Acquire);
         if status == WORKER_EPOCH_DEAD
             || (status == WORKER_EPOCH_RECOVERING
