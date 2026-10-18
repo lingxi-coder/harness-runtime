@@ -1,0 +1,9 @@
+   Compiling cli v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host)
+   Compiling bridge-server v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server)
+    Finished `test` profile [unoptimized] target(s) in 5.11s
+     Running tests/e2e_settings_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_settings_test-e0f4d07d06dbe6f8)
+     Running tests/router_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/router_test-287bfb0337caac98)
+     Running tests/mcp_serve.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mcp_serve-4f9a4bf379f12079)
+     Running tests/parity_accepted_divergences.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/parity_accepted_divergences-21a31e24b51d082d)
+     Running tests/provider_error_cli.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/provider_error_cli-2427a4f5264b8c87)
+     Running tests/resume_routing_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/resume_routing_test-493ff25a5c81ac84)

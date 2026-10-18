@@ -1,0 +1,2325 @@
+{
+  "schema": "claude-295-final-evidence-ledger-r376-v1",
+  "target_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "tested_implementation": {
+    "llm-client": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "harness-runtime": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+    "lingxi-app": "17593eaa66dc762d5c9c581ba348398c914bdbcd"
+  },
+  "status": "42 contracts reconciled against explicit final H/P source SHAs; consult per-row source and validation limits; not a universal byte-parity certification",
+  "new_native_launches": 1,
+  "native_launch_accounting": {
+    "scope": "The two one-shot Native 2.1.295 alias/glob probe attempts in this cleanup batch; historical fixture captures are not counted.",
+    "attempts": [
+      {
+        "receipt": "native-ltr-alias-probe-run-once/receipt.json",
+        "status": "capture_invalid",
+        "native_process_count": 0
+      },
+      {
+        "receipt": "native-ltr-alias-probe-approved-endpoint-run/receipt.json",
+        "status": "capture_invalid",
+        "native_process_count": 1
+      }
+    ],
+    "interpretation": "Counts started Native processes from each runner receipt, including invalid captures; invalid attempts do not establish alias/glob semantics."
+  },
+  "native_alias_probe_semantics": {
+    "status": "capture_invalid",
+    "evidence": [
+      "native-ltr-alias-probe-plan.md",
+      "native-ltr-alias-probe-approved-endpoint-run/receipt.json"
+    ],
+    "limitation": "capture invalid; do not infer alias/glob semantics"
+  },
+  "contract_count": 42,
+  "documentation_commit_policy": "Documentation commits do not repin unchanged Product dependencies or rebuild the accepted signed package. Tested implementation SHAs stay explicit.",
+  "contracts": [
+    {
+      "id": "M2-HTTP-1",
+      "requirement": "Compare the first physical Native Claude Messages request in headless print-text mode: HTTP/1 request line and query, raw header spelling/order/CRLF/framing, request-body bytes and offered response.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "M2-HTTP-1",
+        "status": "partial_raw_http_pass_with_constraints",
+        "evidence": [
+          "harness-runtime/docs/parity/current-alignment/fixtures/http-layout-295/README.md",
+          "harness-runtime/docs/parity/current-alignment/fixtures/http-layout-295/native-baseline/2.1.295/native-comparison-293-vs-295.json",
+          "harness-runtime/crates/llm-runtime/tests/current_alignment_http_layout_293_test.rs",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-27/phase.json"
+        ],
+        "limitations": [
+          "Candidate raw capture exercises ApiService and built-in HttpTransport directly, not Product CLI assembly.",
+          "Only dynamic Host is constrained in headers; body comparison fixes exactly the 64-byte device_id at bytes 628-691. The body is not claimed whole-byte identical.",
+          "The exact 862-byte Native response is offered and the decoded fixed text is checked; raw response bytes are not independently captured from the candidate client boundary."
+        ],
+        "minimal_missing_validation": [
+          "One pinned Product 2.1.295 headless print-text capture of the assembled first request and client-observed response, if the ledger requires Product-level raw HTTP closure."
+        ],
+        "source_status": "closed_for_tested_ApiService_path; no source defect identified",
+        "byte_status": "raw request line/header/body compared on SDK a363 with dynamic Host and 64-byte device_id constraints; Product raw assembly boundary remains unverified"
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "SDK-ERR-1",
+      "requirement": "Anthropic HTTP 400 with nested error.message containing one isolated UTF-16 unit, nested message null, and empty response body. Preserve response bytes and Native CLI result text without reserializing captured output.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "SDK-ERR-1",
+        "status": "verified_with_cross_version_raw_input_equivalence",
+        "evidence": [
+          "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/receipt.json",
+          "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/comparison-to-293.json",
+          "harness-runtime/crates/orchestrator/tests/provider_error_output_293_test.rs",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-07/phase.json"
+        ],
+        "limitations": [
+          "Candidate replays the 2.1.293 frozen fixture; the 2.1.295 three selected 400 response bodies have the same raw SHA-256 and Native result-string literals are recorded equal.",
+          "This verifies the current SDK/error-text behavior, not a full CLI JSON stdout envelope."
+        ],
+        "minimal_missing_validation": [],
+        "source_status": "closed for the three 400 SDK/error-text cases",
+        "byte_status": "selected raw 295 response hashes equal the 293 replay inputs; untouched Native result literals match cross-version"
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "HOST-ERR-1",
+      "requirement": "Replay captured HTTP error bodies through production `ApiService → ProviderApiAdapter → ConversationOrchestrator`; compare Native result text at `OutputStream` and persisted assistant rows.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "HOST-ERR-1",
+        "status": "verified_host_boundary",
+        "evidence": [
+          "harness-runtime/crates/orchestrator/tests/provider_error_output_293_test.rs",
+          "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/comparison-to-293.json",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-07/phase.json"
+        ],
+        "limitations": [
+          "Checks exact result UTF-16 units at OutputStream and persisted assistant JSONL; not Product CLI stdout."
+        ],
+        "minimal_missing_validation": [],
+        "source_status": "closed at Host output and persistence boundaries",
+        "byte_status": "exact UTF-16 result units verified; not whole CLI envelope bytes"
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "HOST-ERR-STATUS-1",
+      "requirement": "Status-specific HTTP presentation for 403, 404, 413, plus separately scoped 401/500 responses with explicit `x-should-retry:false`.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "HOST-ERR-STATUS-1",
+        "status": "verified_host_boundary_with_500_authority_constraint",
+        "evidence": [
+          "harness-runtime/crates/orchestrator/tests/provider_error_output_293_test.rs",
+          "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/comparison-to-293.json",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-07/phase.json"
+        ],
+        "limitations": [
+          "Covers 403/404/413 and x-should-retry:false 401/500; 500 result authority is constrained to the actual loopback gateway host/port.",
+          "No full stdout envelope byte-equality claim."
+        ],
+        "minimal_missing_validation": [],
+        "source_status": "closed for tested status presentations and no-retry cases",
+        "byte_status": "result literal cross-version pass with only 500 listener authority constraint; candidate Host text/source units asserted"
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "HOST-REFUSAL-1",
+      "requirement": "Final Native terminal refusal presentation from stop reason/category/explanation, model display label, and interactive mode; compare exact JSON CLI result and persisted source fields.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "HOST-REFUSAL-1",
+        "status": "partial_host_boundary_pass",
+        "evidence": [
+          "harness-runtime/docs/parity/current-alignment/fixtures/stop-details-295/README.md",
+          "harness-runtime/crates/orchestrator/tests/current_alignment_refusal.rs",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-08/phase.json"
+        ],
+        "limitations": [
+          "Exact Native result text units and persisted category/explanation are asserted at Host boundaries; public CLI model-display and interactive-mode composition are not."
+        ],
+        "minimal_missing_validation": [
+          "One public CLI refusal replay checking the requested display label, interactive mode, JSON result, and durable source fields."
+        ],
+        "source_status": "closed at Host refusal text and persistence boundaries",
+        "byte_status": "Native 2.1.295 result UTF-16 and durable explanation/category units asserted; public CLI presentation not established"
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "CLI-ERR-1",
+      "requirement": "Replay the same bodies through the exact Native mode `--print --output-format json` and the pinned Product CLI entrypoint; compare raw stdout schema, error/status flags, final result text units, stderr and exit status.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "CLI-ERR-1",
+        "status": "selected_current_product_cli_cases_pass",
+        "evidence": [
+          "acceptance/final-ledger-r376/runtime-audit.json",
+          "lingxi-app/apps/cli/host/tests/provider_error_cli.rs",
+          "/private/tmp/product-full-r342-r375-20261018T014521Z-68469/runner/phases/integration-tests-04/phase.json",
+          "/private/tmp/product-full-r342-r375-20261018T014521Z-68469/runner/phases/integration-tests-04/stdout.jsonl",
+          "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/receipt.json"
+        ],
+        "limitations": [
+          "The six successful invocations are three 400 error bodies, one 413 body, one no-stream control and one print-text control; they are not six distinct HTTP error statuses.",
+          "The assertions compare the raw result-string literal and selected fixed top-level field slices with generated-field constraints; complete stdout JSON byte equality is not claimed."
+        ],
+        "minimal_missing_validation": [],
+        "source_status": "current pinned Product CLI entrypoint regression passed on f71087b4 for the bounded six-invocation subset",
+        "byte_status": "The three 400 error cases and 413 compare raw result literals/fixed field slices, UTF-16 units, stderr and exit; generated fields are constrained; full stdout bytes are not compared"
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "SDK-ERR-2",
+      "requirement": "Statusless Anthropic SSE `event:error`, `data.type=error`, nested `timeout_error` with U+D800 message; compare no-start and partial-text-before-error cases plus a generic `api_error` control.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "SDK-ERR-2",
+        "status": "current_sdk_message_unit_pass_295_classifier_mapped_293_comparison_unresolved",
+        "evidence": [
+          "acceptance/source-alignment-295-r30/native-classifier-context/manifest.json",
+          "acceptance/source-alignment-295-r30/native-classifier-context/src_194447854.js",
+          "llm-client/src/codecs/anthropic/stream.rs",
+          "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+          "harness-runtime/docs/parity/current-alignment/fixtures/statusless-stream-error/README.md",
+          "harness-runtime/docs/parity/current-alignment/fixtures/statusless-stream-error/native-baseline/native-receipt.json"
+        ],
+        "limitations": [
+          "The 2.1.295 extracted function proves target-version timeout_error classification but not exact SSE event parsing or message extraction.",
+          "The only checked-in public statusless SSE Native oracle is 2.1.293. Its no-start timeout, partial-text timeout, and api_error outputs are documented in the fixture README; it does not expose the SDK intermediate string.",
+          "No retained 2.1.293 extracted source hash is available to prove the 2.1.295 classifier/message function is identical across versions."
+        ],
+        "minimal_missing_validation": [
+          "Keep the Native cross-version classifier/message comparison as an explicit evidence limit; no additional collection was done in this source-binding update."
+        ],
+        "source_status": "Current SDK decoder/message projection regression passes; Native 2.1.295 source confirms timeout_error classification; no source evidence proves the full SSE parser/message branch is byte-identical to 2.1.293.",
+        "byte_status": "SDK preserves statusless error source UTF-16 and maps timeout to ProviderTimeout(status=None); Native 2.1.293 has the three public SSE outcomes; no 2.1.295 statusless SSE public capture.",
+        "native_source_binding": {
+          "binary_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+          "chunk_path": "acceptance/source-alignment-295-r30/native-classifier-context/src_194447854.js",
+          "chunk_sha256": "ae64b2c8c87be0e990738da478adbbe5cd6a8201cef7953d7684cf59bd780120",
+          "manifest_path": "acceptance/source-alignment-295-r30/native-classifier-context/manifest.json",
+          "selectors": "Native source names timeout_error and api_error as known error kinds in HY; Edr maps server-side timeout_error to timedOut.",
+          "binding_limit": "This chunk binding establishes the 2.1.295 error-kind classifier only. It does not include the statusless SSE parser/message extraction branch. No retained 2.1.293 extracted source hash was found for a same-function comparison."
+        },
+        "candidate_source_binding": {
+          "path": "llm-client/src/codecs/anthropic/stream.rs",
+          "sha256": "21ede35455b34fd55e470ad357a6b1b930bd93fbe6b068087859c9171cd433eb",
+          "selector": "stop_delta_tests::stream_error_text_keeps_native_statusless_units_and_timeout_role",
+          "receipt": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+          "receipt_line": 192,
+          "result": "The current 620-test SDK library run passed this direct decoder case; it preserves the error/message source units and distinguishes timeout_error as ProviderTimeout { status: None }. It is SDK unit evidence, not a native SSE transport or CLI replay."
+        }
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "SDK-1",
+      "requirement": "Claude Messages/Foundry request method, URL, headers, ordered body fields, exact-string sidecars, final body string normalization, signing inputs, response and SSE frame bytes.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "SDK-1",
+        "status": "partial_current_first_party_wire_coverage",
+        "evidence": [
+          "acceptance/source-alignment-295-r30/sdk-request.md",
+          "acceptance/source-alignment-295-r30/native-classifier-context/manifest.json",
+          "acceptance/source-alignment-295-r31/mcp-sanitizer-source/manifest.json",
+          "acceptance/source-alignment-295-r31/mcp-sanitizer-source/src_186231195.js",
+          "llm-client/src/hosting/mod.rs",
+          "llm-client/src/exact_json.rs",
+          "llm-client/src/client/executor.rs",
+          "llm-client/src/client/prepared.rs",
+          "llm-client/src/codecs/anthropic/encode.rs",
+          "llm-client/src/auth/sigv4.rs",
+          "llm-client/tests/anthropic_message_controls.rs",
+          "acceptance/final-ledger-r376/sdk-message-controls.log",
+          "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-27/phase.json"
+        ],
+        "limitations": [
+          "Historical Native 2.1.295 source bindings establish the Foundry route gate, request-history generator and exact-value final body normalization without treating them as a raw candidate byte comparison.",
+          "Current SDK route controls and library tests pass, but the physical raw HTTP candidate fixture is first-party only; there is no Foundry raw request/response capture in this audit.",
+          "SigV4 has current SDK source/vector coverage for AWS signing. No comparable Foundry/first-party Native physical signing bytes are claimed.",
+          "Response and SSE frame source/regression behavior is covered by SDK unit tests, but no one Native 2.1.295 full request/response stream capture compares those bytes for Foundry."
+        ],
+        "minimal_missing_validation": [
+          "No source defect is identified. Keep Foundry/response-frame raw-wire evidence bounded to source and existing regressions unless strict public raw-byte parity is required."
+        ],
+        "source_status": "Foundry route admission, exact-value final-body normalization and current route controls are source-bound; no implementation defect found. SigV4 remains a distinct AWS/Bedrock source contract.",
+        "byte_status": "The Native 2.1.295 source binds Foundry route eligibility and final string normalization; the current request gate remains raw-byte proof for first-party only. Foundry, signing and response-frame physical bytes are not compared.",
+        "native_source_binding": {
+          "native_binary_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+          "request_analysis": "acceptance/source-alignment-295-r30/sdk-request.md",
+          "request_generator_chunk": {
+            "path": "acceptance/source-alignment-295-r30/native-classifier-context/src_202924418.js",
+            "sha256": "2612bbe89324a30f9c773abfc2cc83802fd0340cd6283094ea1ed0413ba21e9d",
+            "selector": "ad",
+            "binary_offset": 203050026
+          },
+          "main_query_chunk": {
+            "path": "acceptance/source-alignment-295-r30/native-classifier-context/src_194447854.js",
+            "sha256": "ae64b2c8c87be0e990738da478adbbe5cd6a8201cef7953d7684cf59bd780120"
+          },
+          "final_value_normalizer": {
+            "path": "acceptance/source-alignment-295-r31/mcp-sanitizer-source/src_186231195.js",
+            "sha256": "125f57566b99b67ce958d77cd787163124654cbbb3bdd6f3a92dfd38955a2317",
+            "selector": "Yc/cf/t1e; binary offsets 186233438, 186233487, 186233606"
+          },
+          "route_binding": "sdk-request.md maps vh/Gyo to first-party, Anthropic AWS/GCP and Foundry route admission; it distinguishes Bedrock/Vertex from the Anthropic AWS/GCP identities.",
+          "sidecar_binding": "The Native final-value walk visits JSON string values, preserves keys, and leaves histories/sidecars intact; request normalizer is final-dispatch only."
+        },
+        "candidate_source_binding": {
+          "paths": {
+            "Foundry codec": "llm-client/src/hosting/mod.rs",
+            "final JSON value normalizer": "llm-client/src/exact_json.rs",
+            "generation dispatch": "llm-client/src/client/executor.rs and llm-client/src/client/prepared.rs",
+            "Anthropic encoding": "llm-client/src/codecs/anthropic/encode.rs",
+            "SigV4/AWS signing": "llm-client/src/auth/sigv4.rs",
+            "route controls": "llm-client/tests/anthropic_message_controls.rs"
+          },
+          "source_sha256": {
+            "llm-client/src/auth/sigv4.rs": "2d12ffdc07a7fe78974bd29e3415e509ccf63b4cfa4d770cecd3f732c039ade2",
+            "llm-client/src/exact_json.rs": "842aafbe93f610d35ce537619a486e9217dd487e46b76c6bb2db87e15ee15cc1",
+            "llm-client/src/hosting/mod.rs": "e306e816bd9be12ebcbdef0ed8e7a5b06d10025e7e9a7dba9c54bef6c694dd3c",
+            "llm-client/src/codecs/anthropic/encode.rs": "272d426bd8e7d115d2b89ced2de8d986ffcce6127e72d9cbe3fdaf8ef5b6e979",
+            "llm-client/src/client/executor.rs": "b19c1810dd28375fd9c767b8b42877ada462f395f78a87a1f701a83ea6756bc3",
+            "llm-client/src/client/prepared.rs": "364ba72c77e3ec32c95e843667548f9daf7b350aade0311eec605fb16cea561c",
+            "llm-client/tests/anthropic_message_controls.rs": "cfb92c2991d5573eabcbd82fec982d2c239e9abde558f2c4a855559120db1d56"
+          },
+          "receipts": [
+            "acceptance/final-ledger-r376/sdk-message-controls.log: 18/18 current a363 controls passed; includes Foundry/effort route and beta behavior.",
+            "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log: 620/620 current a363 library tests passed; SigV4 source vectors run at lines 76-99.",
+            "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-27/phase.json: current-lock a363 first-party raw HTTP test passed."
+          ],
+          "signing_scope": "The retained source binds current SDK SigV4 request canonicalization/vector tests for AWS signing. It does not make a Foundry or first-party Native signing/physical-wire claim; the Native route source describes Foundry as its own endpoint/auth route."
+        }
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "SDK-2",
+      "requirement": "Non-Anthropic providers retain their own URL, headers, body/signing, streaming, error and fallback contracts.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "SDK-2",
+        "status": "current_sdk_provider_regression_pass",
+        "evidence": [
+          "acceptance/final-ledger-r376/gates-audit.json",
+          "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+          "llm-client/src/providers/",
+          "harness-runtime/Cargo.lock"
+        ],
+        "limitations": [
+          "Current source/unit regressions do not imply external physical HTTP captures for every Non-Anthropic provider."
+        ],
+        "minimal_missing_validation": [],
+        "source_status": "closed for mapped current SDK provider/codec regressions: 620 default-library tests passed at a363; no implementation gap identified",
+        "byte_status": "Native raw byte differential is not applicable to the independent Non-Anthropic provider contracts in this row"
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "SDK-3",
+      "requirement": "Credential snapshot, account change, retry latch, body/stream fallback, cache and model selection agree at each physical attempt.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "SDK-3",
+        "status": "source_regression_closed_current_pin",
+        "evidence": [
+          "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+          "harness-runtime/crates/llm-runtime/src/execution_context.rs",
+          "harness-runtime/crates/llm-runtime/src/client.rs",
+          "harness-runtime/crates/llm-runtime/src/service.rs",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/unit-libraries/phase.json"
+        ],
+        "limitations": [
+          "The current a363 tests separately cover configuration snapshots, credential/account replacement, retry classification, stream fallback/exact-string controls, cache policy, and model selection/latches; H r271 covers the operation physical-dispatch budget and selected 2.1.295 request/error paths. This is not a whole-request byte pass across every attempt."
+        ],
+        "minimal_missing_validation": [],
+        "source_status": "closed for mapped credential/account snapshots, retry classification/latch, fallback stream/exact-string controls, cache policy and model selection semantics across a363 SDK tests and current H dispatch gates",
+        "byte_status": "Source regression pass; no all-attempt physical wire byte comparison is claimed or needed to establish the reviewed source semantics"
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "TURN-1",
+      "requirement": "`/` and unknown slash command fall back to ordinary turn with unchanged prompt; ParseFailure hint/refusal is checked per execution mode.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "TURN-1",
+        "source_status": "source-and-regression-closed-for-reviewed-fixed-2.1.295-command-cases",
+        "status": "bounded-pass",
+        "evidence": [
+          "H r296 native_295_commands_fixture_replay_through_headless_entry passed.",
+          "Product r375 commands_native_cli passed on Product HEAD f71087b4; fixed one-process cases include Unicode/punctuation Skills and unpaired-surrogate request projection.",
+          "Product 17593 full gate passed skill-cold selector cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire 1/1; the full runner completed."
+        ],
+        "limitations": [
+          "The fixed two-process Product Skill cold-resume case now passes; this uses a pinned first-turn Native fixture and does not provide a Native cold-resume byte oracle."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "TURN-2",
+      "requirement": "Retry, cancellation, truncation, refusal and terminal result preserve event order and tool/transcript identity.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "TURN-2",
+        "source_status": "bounded-source-and-regression-evidence; no single-sequence Native parity claim",
+        "status": "bounded-evidence",
+        "evidence": [
+          "H r271 integration-08 current_alignment_refusal and cancellation selectors passed; H r3 orchestrator-lib 2,103 tests passed."
+        ],
+        "limitations": [
+          "No single pinned 2.1.295 sequence covers every retry, cancellation, refusal, truncation, terminal result and transcript/tool ordering branch."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "STOPDETAILS-1",
+      "requirement": "Anthropic refusal `stop_details.explanation` containing U+D800; compare raw response, public CLI result, and durable assistant row against fixed Native source units.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "STOPDETAILS-1",
+        "status": "partial_native_host_projection_pass",
+        "evidence": [
+          "harness-runtime/docs/parity/current-alignment/fixtures/stop-details-295/README.md",
+          "harness-runtime/crates/orchestrator/tests/current_alignment_refusal.rs",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-08/phase.json"
+        ],
+        "limitations": [
+          "Raw Native SSE, Host result-text units, and durable explanation units are checked; exact public CLI JSON stdout is not."
+        ],
+        "minimal_missing_validation": [
+          "One public CLI 2.1.295 refusal JSON-result projection preserving exact explanation source units."
+        ],
+        "source_status": "closed at SDK/Host result and durable-row boundaries",
+        "byte_status": "Native 2.1.295 raw SSE fixture plus exact result/explanation UTF-16 units; public CLI JSON output remains unverified"
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "TURN-3",
+      "requirement": "Public CLI SIGINT while one provider request is in flight: terminal result envelope, interruption row, and persisted event order.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "TURN-3",
+        "source_status": "H 44f2 no-assistant stream-opening projection and r10 gates pass; Product 17593 regression/run04 pass for captured shape.",
+        "status": "H-source-pass; Product-17593-captured-stream-case-pass",
+        "evidence": [
+          "H 44f2 changes only crates/runtime/src/headless/run.rs. The r10 pending_stream_interrupt_publishes_native_error_frame_but_exits_successfully selector passed in the 1468/0/0 Runtime library run; fmt and changed-package Clippy passed.",
+          "Product 17593 full runner completed 2740 passed, 0 failed, 4 ignored across 8 phases, 40 executable targets and 9 doctest targets. The public CLI SIGINT regression logged ok in integration-tests-02 (20/0/2 phase; focused group 3/0/0).",
+          "Product 17593 run04 receipt acceptance/final-ledger-r376/cli-sigint-candidate-run-04-17593eaa66-20261018T091547Z-1496/receipt.json (a99af6f15e9dd53646658065b00e391e8331db97f2fab61608ce8f1d1a7bde0e) passed 15/15 checks in 4.071s: POST accepted, response withheld, SIGINT delivered, exit 0 without forced cleanup, terminal fields and stable content slices match constraints, no assistant row.",
+          "Final macOS package receipt passed static audit, startup smoke, independent audit and the recorded visible CUA Submit flow; credentials were cleared and app PID 52288 exited."
+        ],
+        "limitations": [
+          "The Native cancellation fixture covers one public print-JSON case after a full streaming POST is accepted and before any provider response; it establishes no behavior for compact-regenerated message IDs, partial assistant output, pre-admission cancellation, cancellation after response data, or other turn shapes.",
+          "The run04 comparison checks stable prompt/interruption content slices and selected terminal/transcript constraints, not whole stdout/session byte equality.",
+          "The macOS receipt is development-signed without notarization/stapling and scopes actual visible CUA to the recorded packaged form and Submit flow; it does not certify all Native parity contracts.",
+          "Product 8610 run04 is retained as a historical failure and does not decide Product 17593."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "TOOL-1",
+      "requirement": "Tool registration with `isDeferred` absent, `false`, `true`; first physical Messages request's `tools` array and schemas.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "TOOL-1",
+        "source_status": "Alias source mismatch repaired; current H r6 permission, Agent, Tasks and Orchestrator gates pass on source-bound final H b3864c6",
+        "status": "source-repair-and-live-consumer-regressions-passed",
+        "evidence": [
+          "H final stage gate is bound to b3864c6 by harness-stage-gate-receipt.json and verified r6-test-only-followup-proof.json.",
+          "r6 permission-lib 1,779; Agent-lib 725; Tasks-lib 555; Orchestrator-lib 2,103 passed.",
+          "Live PermissionGate reads for child catalog, denied-agent roster and teammate catalog are covered by current selectors in the r6 Agent/Tasks receipts."
+        ],
+        "limitations": [
+          "No complete Native provider request-byte equality or live Foundry service behavior is claimed."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "TOOL-2",
+      "requirement": "Tool check/call, permission allow/deny/rewrite, result/error, pre-cancel and post-cancel behavior, process side effects and transcript mutation.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "TOOL-2",
+        "source_status": "source-reviewed; current permission/Bash fixture regressions pass",
+        "status": "bounded-pass",
+        "evidence": [
+          "H r271 integration-24 bash_input_validation exercised five pinned 2.1.295 input fixtures through production schema/permission checks.",
+          "H r5 permission-lib passed 1,779 tests."
+        ],
+        "limitations": [
+          "The Bash test injects a counted ProcessRunner and does not launch a shell side effect."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "TOOL-3",
+      "requirement": "Oversized registered-tool string result: source preview UTF-16 units, Claude Messages request serialization, session JSONL row and persisted UTF-8 file bytes.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "TOOL-3",
+        "source_status": "historical source/fixture review; selected tool-result persistence regression passes",
+        "status": "bounded-helper-and-production-persistence-evidence",
+        "evidence": [
+          "H r271 integration-36 passed current_alignment_tool_result_persist against the Native 2.1.293 fixture; source preview UTF-16 units, outgoing projection and persisted UTF-8 bytes are checked."
+        ],
+        "limitations": [
+          "This is a controlled registered-tool persistence path, not a full Agent/tool/CLI replay or whole-row cross-run byte golden; Native oracle is 2.1.293."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "TOOL-4",
+      "requirement": "Cold resume of object-valued `tool_result.content`: JSON-stringification, 50,000 UTF-16-unit cut, code-point boundary and omitted-character count.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "TOOL-4",
+        "source_status": "reviewed source projection path is closed; public 2.1.295 full cold-resume acceptance is not established",
+        "status": "source-closed-on-reviewed-helper-path; evidence-version-bounded",
+        "evidence": [
+          "The preserved Native 2.1.293 object-valued tool_result fixture checks JSON stringification, the 50,000 UTF-16-unit boundary and omitted marker; its helper selector passed 1/1.",
+          "Current headless stream_json carries ToolResultProjection through enqueue_tool_result_frame/build_tool_result_frame; session JSONL writer/reader paths are present in the current source."
+        ],
+        "limitations": [
+          "No specific current H source mismatch is established. The historical helper receipt does not prove a full current Host/SDK/CLI cold-resume path or 2.1.295 durable-row byte parity; do not reopen broad collection for this alone."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "CMD-1",
+      "requirement": "Skill names with supplementary Unicode and punctuation resolve to the local skill; unpaired UTF-16 command input retains the Native persistence/final-wire boundary.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "CMD-1",
+        "source_status": "Product 17593 isolated --resume regression passed; exact Native cold-resume oracle remains unavailable",
+        "status": "Product-17593-cold-resume-regression-pass; Native-cold-oracle-unavailable",
+        "evidence": [
+          "H r296 headless command replay and Product r375 commands_native_cli pass; Product checks exact U+D800 JSONL source units and outgoing request projection.",
+          "Product 17593 full gate skill-cold selector cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire passed 1/1 (7.90s, exit 0); it persists U+D800 in source JSONL and projects U+FFFD in the resumed Anthropic request."
+        ],
+        "limitations": [
+          "The Native oracle covers the first-turn fixture only; no Native cold-resume trace proves the exact resumed request bytes. Product cold regression closure does not imply exact Native cold-byte parity."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "PROMPT-1",
+      "requirement": "Main, hook, child, fork and resume prompt assembly; CLAUDE.md/AGENTS, skill discovery/read, order and attachments.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "PROMPT-1",
+        "source_status": "staged attachment implementation present; separate path regressions pass",
+        "status": "composition-acceptance-bounded",
+        "evidence": [
+          "Current command/Skill replay checks fixed attachment order/request projection; prepare.rs owns staged composition and hook/child/fork/resume paths have separate bounded evidence."
+        ],
+        "limitations": [
+          "No single 2.1.295 fixture compares the complete main + hook + child + fork + resume composition byte-for-byte. No concrete current source mismatch was found."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "PROMPT-2",
+      "requirement": "Context compaction, cache attribution, token limits, aliases and request counting use current model/protocol policy.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "PROMPT-2",
+        "status": "source_closed_current_regressions",
+        "evidence": [
+          "harness-runtime/crates/llm-runtime/src/execution_context.rs",
+          "harness-runtime/crates/orchestrator/src/conversation/compaction.rs",
+          "harness-runtime/crates/compaction/src/autocompact.rs",
+          "harness-runtime/crates/compaction/src/orchestrator.rs",
+          "harness-runtime/crates/sidequery/src/provider_side_query.rs",
+          "harness-runtime/crates/sidequery/src/forked_agent.rs",
+          "harness-runtime/crates/llm-runtime/src/client.rs",
+          "harness-runtime/crates/llm-runtime/src/service.rs",
+          "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/unit-libraries/phase.json",
+          "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+        ],
+        "limitations": [
+          "Current-matrix.md still says no equivalent Harness operation budget; that source note is stale. The current ApiAttemptsLeft producer/consumer chain and named tests are verified. SDK a363 tests cover cache allowlist/TTL/model families, token limits and aliases; H current tests cover the shared physical attempt budget."
+        ],
+        "minimal_missing_validation": [],
+        "source_status": "closed for ApiAttemptsLeft source gap and mapped cache/model/token/request-policy semantics",
+        "byte_status": "Source/regression coverage; not a raw public CLI request byte claim"
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "SESSION-1",
+      "requirement": "`session.append` middleware rewrite and raw returned event for user and system messages; preserve source UTF-16 units through Native result and candidate transcript path.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "SESSION-1",
+        "source_status": "candidate append-to-transcript/JSONL path reviewed; Native durable-row oracle absent",
+        "status": "source-reviewed; native-persistence-evidence-unavailable",
+        "evidence": [
+          "Pinned Native 2.1.295 plugin-test capture exposes the raw system append event but contains no corresponding JSONL rows.",
+          "Candidate persistence path is implemented through session agent-row and JSONL writer/durable-writer modules; the available Native capture cannot compare their resulting row bytes."
+        ],
+        "limitations": [
+          "No source discrepancy is established by a capture that has no durable output. Do not claim durable-byte parity or schedule a broad capture solely to manufacture absent Native rows."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "SESSION-3",
+      "requirement": "Cold `--resume` distinguishes exact persisted source units from Native's resumed public/API projection.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "SESSION-3",
+        "source_status": "Product 17593 isolated --resume regression passed; exact Native cold-resume oracle remains unavailable",
+        "status": "Product-17593-cold-resume-regression-pass; Native-cold-oracle-unavailable",
+        "evidence": [
+          "The Product 17593 full gate includes skill-cold: cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire passed 1/1 (7.90 s, exit 0) in /private/tmp/product-full-r342-r376-20261018T084434Z-98045/gate-logs/skill-cold.log.",
+          "Two independent CLI processes use one session: first writes the escaped U+D800 Skill row; cold resume retains U+D800 in JSONL, normalizes the resumed Anthropic request to U+FFFD, emits one continuation request, and keeps the same session.",
+          "The same pinned Product 17593 full runner completed 2740/0/4 across 8 phases."
+        ],
+        "limitations": [
+          "This is the Product cold-resume regression using the pinned Native first-turn fixture. No Native cold-resume JSONL/request capture exists, so exact Native cold-flow parity remains unproven."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "EFFORT-1",
+      "requirement": "A per-turn effort override survives a cold resume and is projected into the resumed model request without replacing the historical turn's system metadata.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "EFFORT-1",
+        "status": "source_projection_closed_fixture_value_limited",
+        "evidence": [
+          "harness-runtime/docs/parity/current-alignment/fixtures/per-turn-effort/README.md",
+          "harness-runtime/crates/orchestrator/tests/effort_cold_resume_295_test.rs",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-10/phase.json"
+        ],
+        "limitations": [
+          "r271 cold-resume test preserves historical low and emits current default medium, while Native capture uses resumed high. The level literal difference is a bounded fixture-value limit, not a demonstrated implementation gap.",
+          "Current anthropic_message_controls source/regression covers exact effort levels and first-party/Foundry projection."
+        ],
+        "minimal_missing_validation": [],
+        "source_status": "closed for per-turn level projection and cold-resume historical/current message placement; the current 18-case message-controls target covers explicit effort levels",
+        "byte_status": "Candidate fresh-process test checks exact marker placement in parsed request JSON; not full raw request-byte identity"
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "PER-TURN-CONTROL-295",
+      "requirement": "The default main request includes the `per-turn-control-2026-07-01` beta and a per-message effort row only when the experimental-beta setting permits it, across first-party/Foundry and Sonnet/Fable routes.",
+      "owner": "sdk",
+      "assessment": {
+        "id": "PER-TURN-CONTROL-295",
+        "status": "current_sdk_route_control_matrix_pass",
+        "evidence": [
+          "llm-client/tests/anthropic_message_controls.rs",
+          "acceptance/final-ledger-r376/sdk-message-controls.log",
+          "harness-runtime/docs/parity/current-alignment/fixtures/per-turn-effort/README.md",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-27/phase.json",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-10/phase.json"
+        ],
+        "limitations": [
+          "The 18-case SDK target closes implementation/control regressions; public raw-wire evidence remains limited to the captured 2.1.295 first-party request and effort-resume fixture."
+        ],
+        "minimal_missing_validation": [],
+        "source_status": "closed for current SDK first-party/Foundry and beta/effort controls; existing a363 anthropic_message_controls target passed 18/18",
+        "byte_status": "Current SDK source regression pass plus separate raw first-party Native 2.1.295 beta-header check; not raw byte capture of every route/model pair"
+      },
+      "audit": "evidence/final-ledger-r376/sdk-audit.json"
+    },
+    {
+      "id": "SESSION-2",
+      "requirement": "Direct return, denial, thrown error, subscription removal and plugin/process shutdown.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "SESSION-2",
+        "source_status": "historical worker receipts retained; current full return/unload lifecycle is not closed by those receipts",
+        "status": "bounded-evidence; current-corewriter-receipt-not-included",
+        "evidence": [
+          "Preserved session.append worker receipts distinguish rewrite/deny/throw result objects from direct-return behavior; Corewriter owns the direct path review/gate."
+        ],
+        "limitations": [
+          "Do not claim direct return, denial, throw, subscriber removal, plugin unload or process shutdown parity without the current Corewriter receipt. This audit does not identify a current source defect."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "SESSION-4",
+      "requirement": "JSONL persistence, parallel tail recovery, attachments, crash write, compact boundaries and rollback.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "SESSION-4",
+        "source_status": "X5e trim and routing repair applied; focused source regressions pass",
+        "status": "bounded-source-and-regression-pass",
+        "evidence": [
+          "Current reader SHA-256 877d4fbc313fa3e29e1ed2c768c7864219b41fc6d30a5cf47e7f43922d85bcd0 and loader 2ec3583e89d5e8ada609c7593cdb627cb0359fe7b1faff50c153b56453c13dbb.",
+          "r46 FEFF/NEL trim and typed-row routing selectors each passed 1/1; r271 reuses unchanged blobs."
+        ],
+        "limitations": [
+          "Closes the recovered small-file JSONL trim difference (FEFF trimmed, NEL retained) and selected routing case; not every malformed/torn-tail loader mode."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "SESSION-5",
+      "requirement": "Generated session name and prompt-suggestion public scalar APIs when the model's final text contains an unpaired UTF-16 unit.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "SESSION-5",
+        "source_status": "candidate source behavior is specific but Native public scalar result is unavailable; no source mismatch established",
+        "status": "native-oracle-unverified; no-confirmed-source-gap",
+        "evidence": [
+          "Generated session-name parser preserves lone-surrogate source units; r3 orchestrator test conversation::conversation_test::generated_session_name_tests::keeps_unpaired_name_units_from_source_json passed.",
+          "prompt_suggestion.rs converts the final UTF-16 units with String::from_utf16 and returns ModError for ill-formed scalar text."
+        ],
+        "limitations": [
+          "These are candidate facts only. Without a corresponding Native public name/suggestion result, the apparent branch difference is not a proven semantic mismatch. A fixed Native response with U+D800 and the resulting public name/suggestion values would be the narrow oracle if this row is release-blocking; no broad byte capture is warranted."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "AGENT-1",
+      "requirement": "Agent/task spawn, offer, receipt, wait, stop, report admission, handback and nested/cold recovery.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "AGENT-1",
+        "source_status": "Current alias-aware child resolver, catalog and denied-agent roster regressions pass on final H b3864c6",
+        "status": "source-and-current-regression-pass-bounded-lifecycle",
+        "evidence": [
+          "H r6 Agent-lib passed 725 tests, including resolve_tools_reads_live_gate_for_native_alias_denied_mcp_tool, tools_denied_agent_roster_reads_live_permission_gate_each_call, tools_denied_agent_types_use_native_tool_aliases and child_catalog_filters_native_mcp_alias_deny.",
+          "Exact final source binding is through harness-stage-gate-receipt.json plus the verified r6 test-only follow-up proof."
+        ],
+        "limitations": [
+          "Does not prove every Native spawn/offer/receipt/wait/stop/report/handback/nested-cold ordering in one public chain."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "MCP-1",
+      "requirement": "JSON-RPC initialize/discovery, tools/resources/prompts, input-required, auth, result/error/null presence and transport frames.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "MCP-1",
+        "source_status": "Recovered Native alias/content mismatch repaired; current permission and live consumers pass H final r6 gates; Native LTr semantics remain unbound",
+        "status": "source-repair-and-current-H-regressions-passed; native-regex-semantics-unresolved",
+        "evidence": [
+          "Pinned de(e)/Hmn/Jqe/rdo/S/y source confirms one-hop alias source matching, per-walk proxyExpansion and source-specific content branches.",
+          "H r6 permission 1,779, Agent 725, Tasks 555 and Orchestrator 2,103 passed; live catalog/reminder/child/teammate/roster consumers use the repaired shared context/matcher paths.",
+          "The approved Native probe remains capture_invalid because its positive Edit-deny control failed. Its initialize ACK, one POST and normal exit do not validate alias semantics."
+        ],
+        "limitations": [
+          "No remaining H source mismatch is established by current gates. Native LTr implementation body, regex flags and line-terminator behavior remain unknown; do not call the invalid probe a pass or infer parity."
+        ],
+        "source_fingerprints": [
+          "harness-runtime/crates/agent/src/handle.rs@sha256:14360556d5c8f7fb1e0fdedbfbff2a2c67f5217bfc07e83f5311f4b18f826d90",
+          "harness-runtime/crates/agent/src/handle/spawn_context.rs@sha256:fb8a51b8484b3a5934ef5922b9a0f41c55456a459a6bb64d4cf75688ef7ea9e0",
+          "harness-runtime/crates/agent/src/tool_resolver.rs@sha256:51fac235967a719ee0c9b75df3a3f631f288636c05e23481772cf770d26eb6bc",
+          "harness-runtime/crates/agent/src/handle/tests/tests.rs@sha256:743d62bf3f8227d9254594850179462bfe46af7f905d954c82b8b1d4a52e4cad",
+          "harness-runtime/crates/tasks/src/handlers/in_process_teammate.rs@sha256:951845428bbe1192bc64efaf64f965d912d88a7c521604696b8cbb6fbeff1f41",
+          "harness-runtime/crates/tasks/src/handlers/in_process_teammate_test.rs@sha256:0b0190e4429f0a3366f980c535cbb4811343ca2610562db7d734eef08d4e0ec5",
+          "harness-runtime/crates/runtime/src/desktop/assembly.rs@sha256:df204c6629226bbd2271b0b670f75c651365d01f7b65c850b8bd664a7941cd7f"
+        ],
+        "minimal_selector": [
+          "cargo test --locked --offline -p agent --lib child_catalog_filters_native_mcp_alias_deny",
+          "cargo test --locked --offline -p agent --lib resolve_tools_strips_native_alias_denied_mcp_tool_from_subagent",
+          "cargo test --locked --offline -p agent --lib tools_denied_agent_types_use_native_tool_aliases",
+          "cargo test --locked --offline -p tasks --lib teammate_catalog_filters_canonical_tool_denied_through_alias_context"
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "HOOK-1",
+      "requirement": "RegExp matcher and event source, registration/order, match/nonmatch and raw event payload.",
+      "owner": "mods",
+      "assessment": {
+        "id": "HOOK-1",
+        "status": "candidate_closed_evidence_limited",
+        "source_status": "Native 2.1.295 J9 includes DirectoryAdded, PreModelSwitch, and PostModelSwitch in comma mode; candidate comma_mode_for had omitted them and H b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b added all three. The r8 focused and full Hooks gates were executed on b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b; their matcher/registry source hashes exactly match current final H 44f2eef5baf8ae16254934dbca451cbfd528d955, so the closed source and gate evidence are reused for H44 without claiming a new Hooks execution.",
+        "verification_classes": [
+          "static_native_source_2.1.295_matcher_and_event_query",
+          "candidate_gate_current_ignored_matcher_corpus_1_of_1_before_event_set_fix",
+          "candidate_source_fix_committed_harness_b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+          "candidate_gate_native_295_comma_regression_r8_1_of_1_commit_bound",
+          "candidate_gate_hooks_all_features_lib_r8_852_passed_0_failed_1_ignored_executed_on_b386_source_hash_reused_at_H44",
+          "candidate_source_hash_reuse_b386_to_H44_no_new_hooks_execution"
+        ],
+        "raw_evidence_status": "Public Native matcher fixture is 2.1.293 and covers eight Native-comparable cases. No 2.1.295 public matcher capture is recorded. The separate initialize-alias Native process run has status=capture_invalid and is not a Mods probe; it does not change this evidence limit.",
+        "evidence": [
+          "acceptance/source-alignment-295-r30/mods-api-source/src_194447854.js: Native chunk offset 194447854, SHA-256 ae64b2c8c87be0e990738da478adbbe5cd6a8201cef7953d7684cf59bd780120; J9 includes DirectoryAdded, PreModelSwitch, and PostModelSwitch; tan at 197396236 implements the event-specific simple-list grammar and Q9 at 197398966 has the JavaScript RegExp fallback.",
+          "harness-runtime/crates/hooks/src/matcher.rs: committed candidate SHA-256 b1e8942326d96eb62f29db71bc02ab814655ae39973d032a9e152fba88cc1de2; comma_mode_for includes all three J9 members; is_simple_pattern_units and matches_pattern_source_with/js_regexp_test retain the list/RegExp branches and JavaScript units.",
+          "harness-runtime/crates/hooks/src/registry.rs: committed candidate SHA-256 39bc30f6b99983429aea6082483e5e470131f036eed37eb1cab79b8c61db1b5e; match_event_matcher_tests::native_295_comma_mode_event_set_matches_directory_added_and_model_switches covers positive and negative comma-list queries for all three events plus positive/negative non-simple RegExp cases on DirectoryAdded.",
+          "acceptance/final-ledger-r376/hooks-comma-receipt.json (schema r376-hook-comma-gate-v1): candidate b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b; focused_new_regression=1; passed=852, failed=0, ignored=1. It binds matcher.rs b1e8942326d96eb62f29db71bc02ab814655ae39973d032a9e152fba88cc1de2, registry.rs 39bc30f6b99983429aea6082483e5e470131f036eed37eb1cab79b8c61db1b5e, core/src/host/mod.rs 26be137b5ca90dd2d47674366318e347d03d345c2926b701d0f750e82a3f49b4, and core/src/host/permission_gate.rs b0540cb766becf8085107029b564e68bcc6e58c7b2d36c8d5042fb9b452cad65.",
+          "acceptance/final-ledger-r376/harness-repair-gates-r8/hooks-focused.log: SHA-256 511659dfaf997fab9c220272f361771434b6d15fc03b0ba1a2be2520c5844862; focused new regression 1 passed, 0 failed. acceptance/final-ledger-r376/harness-repair-gates-r8/hooks-lib.log: SHA-256 c81d10313ced358ad0bbd3d60814da563fea703df4622913956d7afa1dd594af; all-features Hooks library 852 passed, 0 failed, 1 ignored.",
+          "acceptance/final-ledger-r376/hook-corpus.log: root ignored-corpus test passed 1/1 before the source fix; its 12 cases did not cover the three omitted event-set members.",
+          "harness-runtime/docs/parity/current-alignment/fixtures/hook-regexp/native-receipt.json: pinned public Native CLI fixture is 2.1.293; its eight comparable event inputs use source=startup.",
+          "Current H 44f2eef5baf8ae16254934dbca451cbfd528d955 retains the exact r8 receipt hashes for matcher.rs b1e8942326d96eb62f29db71bc02ab814655ae39973d032a9e152fba88cc1de2 and registry.rs 39bc30f6b99983429aea6082483e5e470131f036eed37eb1cab79b8c61db1b5e. r8 ran on b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b; the H44 source proof shows only crates/runtime/src/headless/run.rs changed since that pin, so these gates are reused by exact source identity, not newly executed at H44."
+        ],
+        "limitations": [
+          "Only eight corpus rows have a Native public comparison; the four source_projection_only rows are candidate assertions only.",
+          "The 2.1.293 public fixture is historical evidence and is not represented as a 2.1.295 public result.",
+          "No same-version 2.1.295 public matcher output is available; the retained 2.1.293 receipt remains historical evidence.",
+          "The separate initialize-alias probe receipt is capture_invalid and is not a Mods probe or Mods capture.",
+          "This classic HookRegistry matcher is distinct from the Mods on() event-pattern grammar and the URL matcher functions yu/PT/Ao in src_188693222.js.",
+          "The focused and full Hooks suites were executed on H b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b. H 44f2eef5baf8ae16254934dbca451cbfd528d955 reuses them because the audited Hooks sources are byte-identical; no clean-checkout Hooks rerun at H44 is claimed. Product P17593 production/platform/package gates passed for the recorded scope; this does not provide a same-version Native matcher output."
+        ],
+        "source_unresolved": [],
+        "minimal_missing_validation": []
+      },
+      "audit": "evidence/final-ledger-r376/mods-audit.json"
+    },
+    {
+      "id": "HOOK-2",
+      "requirement": "Hook rewrite/refusal, commands/settings merge, env overlays, managed policy, built-in protected events and refresh.",
+      "owner": "mods",
+      "assessment": {
+        "id": "HOOK-2",
+        "status": "partial",
+        "source_status": "Candidate production path and unchanged-Core tests are source-closed for the audited normalization, Due validation, URL semantics, and display-sanitizer contract. The r271 Core results remain reusable because the audited Core paths are unchanged in the final H44 source snapshot. No same-version Native public settings result is available.",
+        "verification_classes": [
+          "static_native_source_2.1.295",
+          "native_source_oracle_execution_49_cases_under_bun_1.4.3",
+          "candidate_core_unit_library_gate_r271_reused_core_unchanged_through_4d6d0d6",
+          "candidate_hooks_gate_r375_851_pass_1_ignored_historical",
+          "candidate_core_gate_r271_reused_audited_sources_unchanged_at_H44"
+        ],
+        "raw_evidence_status": "No Native public settings CLI capture. Extracted Native JavaScript executed under Bun is source-oracle evidence, not a Native process result.",
+        "evidence": [
+          "harness-runtime/crates/core/src/settings/mod.rs registers native_policy_hook_settings; native_policy_static_defaults.rs invokes normalize_native_hook_settings and validate_native_hooks_due.",
+          "Production policy collection supplies exact URL/display inputs to NativePolicyJsSemanticsRegistry. The pinned URL and display semantics are sourced from src_186231195.js, SHA-256 125f57566b99b67ce958d77cd787163124654cbbb3bdd6f3a92dfd38955a2317.",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/unit-libraries/stdout.jsonl: seven native_policy_hook_settings tests pass at lines 4351-4357, settings merger tests at 4260-4287, and eight native_extra_known_marketplaces Due tests at 4298-4305. Core source is unchanged through Harness 4d6d0d6.",
+          "The historical r375 Hooks receipt records 851 passed, 0 failed, 1 ignored; it is distinct from the Core unit-library run and does not represent a new H44 gate.",
+          "acceptance/source-alignment-295-r31/static-defaults-next-batch/hook-settings-oracle/receipt.json records the 49-case extracted-source Bun oracle and labels the Rust module acceptance-only.",
+          "H44 r10 source-followup proof records only crates/runtime/src/headless/run.rs as the final delta; the audited Core settings sources remain unchanged, so the previously passing r271 unit-library selectors are reused rather than claimed as a new H44 execution."
+        ],
+        "limitations": [
+          "The production/candidate source closure does not supply a same-version Native public settings result.",
+          "The source oracle is not Native CLI output or a current Cargo gate."
+        ],
+        "source_unresolved": [],
+        "minimal_missing_validation": []
+      },
+      "audit": "evidence/final-ledger-r376/mods-audit.json"
+    },
+    {
+      "id": "HOOK-RELEASE-1",
+      "requirement": "Compare the Native public Stop `type:prompt` hook request across historical 2.1.293 and 2.1.294 without mutating either baseline.",
+      "owner": "mods",
+      "assessment": {
+        "id": "HOOK-RELEASE-1",
+        "status": "complete",
+        "source_status": "Closed for the narrow historical 2.1.293 versus 2.1.294 Stop type:prompt request comparison only.",
+        "verification_classes": [
+          "native_public_capture_2.1.293",
+          "native_public_capture_2.1.294",
+          "native_public_capture_2.1.295_retained",
+          "raw_request_byte_comparison"
+        ],
+        "raw_evidence_status": "Three version-pinned receipts and the original raw request bytes are retained.",
+        "evidence": [
+          "harness-runtime/docs/parity/current-alignment/fixtures/stop-prompt-hook/README.md documents the isolated runner and immutable request artifacts.",
+          "The 2.1.293 and 2.1.294 receipts each record one public Stop type:prompt request and exit code 0.",
+          "comparison-2.1.293-vs-2.1.294-vs-2.1.295.json compares system and messages bytes without normalization."
+        ],
+        "limitations": [
+          "Historical release comparison only; not candidate parity or model-judgment quality.",
+          "SubagentStop is outside scope."
+        ],
+        "source_unresolved": [],
+        "minimal_missing_validation": []
+      },
+      "audit": "evidence/final-ledger-r376/mods-audit.json"
+    },
+    {
+      "id": "AGENT-RELEASE-1",
+      "requirement": "Compare the Native public `Agent` → general-purpose child → `SubagentStop` prompt hook → parent continuation using preserved 2.1.293/2.1.294 evidence and the frozen 2.1.295 target.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "AGENT-RELEASE-1",
+        "source_status": "preserved Native lifecycle receipts are version-bounded; current H lifecycle regression gates pass",
+        "status": "version-bounded-lifecycle-evidence",
+        "evidence": [
+          "H r3 orchestrator-lib passed; prior H r271 integration-28 subagent start/stop hook and integration-05 realtime agent tests passed.",
+          "Immutable Native public lifecycle receipts cover 2.1.293/2.1.294."
+        ],
+        "limitations": [
+          "These receipts prove fixed lifecycle reachability, not child reasoning quality or exact 2.1.295 public-chain bytes; no new Native capture is required."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    },
+    {
+      "id": "FINAL-TARGET-1",
+      "requirement": "Freeze one Native version for the final alignment pass and close impacted acceptance gates against that exact binary.",
+      "owner": "root",
+      "assessment": {
+        "status": "verified_frozen_target",
+        "evidence": [
+          "baseline.json"
+        ],
+        "limitations": [
+          "Version freeze is verified; it does not itself establish all contract parity."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/baseline.json"
+    },
+    {
+      "id": "MOD-1",
+      "requirement": "Public Mods middleware event ordering, `next(e)` rewrite/direct answer/error/deny, module load and unload boundary.",
+      "owner": "mods",
+      "assessment": {
+        "id": "MOD-1",
+        "status": "partial",
+        "source_status": "Native 2.1.295 on() grammar/order and runtime projection are source-reviewed. The candidate direct-return host/transcript path is closed by the reused r271 integration result; its relevant Agent/transcript source remains unchanged in the final H 44f2eef5baf8ae16254934dbca451cbfd528d955 snapshot.",
+        "verification_classes": [
+          "static_native_source_2.1.295_registration",
+          "native_public_capture_2.1.293_session_append",
+          "candidate_hooks_gate_r375",
+          "candidate_signed_package_middleware_start_reload_restart",
+          "candidate_gate_r271_integration_39_reused_agent_source_unchanged_at_H44"
+        ],
+        "raw_evidence_status": "Native public session.append cases are 2.1.293. No 2.1.295 public middleware dispatch result or explicit-unload capture is present.",
+        "evidence": [
+          "acceptance/source-alignment-295-r30/mods-product.md pins on() grammar, supported events, duplicate rules, first-registration order, callback linkage, and plugin.register projection.",
+          "harness-runtime/docs/parity/current-alignment/fixtures/mod-middleware/native-receipt.json retains four 2.1.293 session.append cases: rewrite, direct return, cancellation, and throw.",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-39/stdout.jsonl:713 reports native_session_append_middleware_contract_reaches_host_and_transcript ... ok; the relevant Agent/transcript source remains unchanged in the final H44 source snapshot; this is reused evidence, not a new integration execution at H44.",
+          "Current r375 Hooks tests cover wrapper/order, rewrite/direct-answer/failure/cancellation and unload by plugin; the signed package receipt covers startup, reload disable/re-enable, and restart."
+        ],
+        "limitations": [
+          "The old worker intermediate direct-return difference is not the public contract; the reused production test closes the current host/transcript result path.",
+          "Native process exit does not prove a supported per-handler/module unload event; the on() return is not an unsubscribe handle."
+        ],
+        "source_unresolved": [],
+        "minimal_missing_validation": []
+      },
+      "audit": "evidence/final-ledger-r376/mods-audit.json"
+    },
+    {
+      "id": "MOD-2",
+      "requirement": "`$.tool.register`, `$.tool.list/call/check`, command and prompt APIs; provider-facing schema/catalog order.",
+      "owner": "mods",
+      "assessment": {
+        "id": "MOD-2",
+        "status": "partial",
+        "source_status": "Source-closed for the Native 2.1.295 tool, command, prompt, list/check/call, dynamic-MCP registration, tool.describe, and deferred provider-catalog chain. Candidate isDeferred value/presence and provider-wire marker are source/test-bound; the r271 tests are reused on H44 because the audited paths remain unchanged, not claimed as a new H44 test run.",
+        "verification_classes": [
+          "static_native_source_2.1.295_api_routes_and_catalog",
+          "candidate_hooks_api_tests_r375",
+          "candidate_packaged_read_tool_roundtrip",
+          "candidate_gate_r271_mod_register_and_deferred_wire_tests_reused_sources_unchanged_at_H44"
+        ],
+        "raw_evidence_status": "The retained Native public tool.register capture is 2.1.293, including its 25-tool catalog slice. No 2.1.295 public list/check/call, command, prompt, or catalog result capture is present.",
+        "evidence": [
+          "acceptance/source-alignment-295-r30/mods-api-source/src_189676409.js: chunk offset 189676409, 243580 bytes, SHA-256 52ad1c53312d15fbf90ddb548c9692e6598ead6e35398c38be9ac9d0c6806555. CT (binary offset 189895956), Nw (189883144), and sT (189889728) expose exact $.tool, $.command, and $.prompt method argument/validation routes.",
+          "acceptance/source-alignment-295-r30/mods-api-source/src_194447854.js: SHA-256 ae64b2c8c87be0e990738da478adbbe5cd6a8201cef7953d7684cf59bd780120. Wj/AHo/PHo/MHo implement tool call/check/list/register; TCo/RCo/xCo command list/register/run; Pvo/Pme/o7o/sXt prompt submit/read/suggest/compose. tZt/ZJt at binary offset 196877559 maps isDeferred presence to anthropic/alwaysLoad metadata; V2n at 194899401 and provider builder vL carry the resolved deferred/listed state through tool.describe to provider defer_loading.",
+          "harness-runtime/crates/orchestrator/src/turn_loop/tool_dispatch.rs::mod_tool_register_spec preserves optional isDeferred; ModRegisteredTool::should_defer/always_load maps its three states. core::host::SourceToolWireDefinition carries defer_loading to the provider wire.",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/unit-libraries/stdout.jsonl: lines 12212-12214 pass the isDeferred presence, invalid-type, and source-schema tests; line 12407 passes mod_tool_describe_rewrites_wire_and_deferral_until_invalidated. These source paths remain unchanged in final H44; the r271 selectors are reused by source identity, not represented as a new H44 run.",
+          "acceptance/source-alignment-295-r30/mcp-tools.md documents the 2.1.295 typed output-validation branch for $.tool.call; current Hooks receipt covers API cases and the packaged host receipt has a Read roundtrip."
+        ],
+        "limitations": [
+          "The historical 2.1.293 public capture is not a 2.1.295 public output/catalog result.",
+          "Candidate API tests and package Read roundtrip are candidate evidence, not Native public output."
+        ],
+        "source_unresolved": [],
+        "minimal_missing_validation": []
+      },
+      "audit": "evidence/final-ledger-r376/mods-audit.json"
+    },
+    {
+      "id": "MOD-3",
+      "requirement": "ModUI subscriptions, events, resolution/render tree, update/disposal, restart and visible terminal/desktop surfaces.",
+      "owner": "mods",
+      "assessment": {
+        "id": "MOD-3",
+        "status": "partial",
+        "source_status": "Native 2.1.295 exportTree serialization is source-closed against the retained worker snapshot by the executed 15-case raw-output/error differential. Product P 17593eaa66dc762d5c9c581ba348398c914bdbcd production gates, five-platform checks, final signed macOS package/static/startup/Host gates, and the recorded actual-visible CUA form/Submit flow all passed. That CUA acceptance is limited to the archived packaged form; Native public lifecycle and visual parity evidence remain separate limits.",
+        "verification_classes": [
+          "native_source_oracle_execution_15_of_15_retained_worker_snapshot",
+          "historical_candidate_node_worker_suite_r375_21_of_21",
+          "candidate_product_p17593_production_gates_2740_passed_0_failed_4_ignored",
+          "candidate_product_p17593_platform_checks_5_of_5_passed",
+          "historical_candidate_signed_package_host_ui_api_r375",
+          "historical_candidate_actual_cua_gui_r375",
+          "candidate_p17593_signed_package_static_startup_host_gate_passed",
+          "candidate_p17593_actual_visible_cua_input_append_submit_passed_scoped"
+        ],
+        "raw_evidence_status": "No Native public ModUI lifecycle capture exists. Current P17593 packaged Host UI form/Submit flow passed actual-visible CUA; this is candidate package evidence, not a Native public API lifecycle capture. Visual comparison is excluded.",
+        "evidence": [
+          "acceptance/final-ledger-r376/source-oracle-receipt.json records 15/15, worker SHA-256 2ee0d2b88a6c2aa565a929cf23d058dc8283b9d308c30b6b7e1f9ec132c12c1f, extracted-source log SHA-256 0761972925540b952f2ea1b56bf794e05629b9cd40c31fc04e5631a596384f03, results SHA-256 3898ab57a4de299de8bfeb7bbb2657657913545c04590314b5d6a96e565b3f02, and native_cli_launches=0.",
+          "Native source is src_192995347.js, artifact offset 192995347, SHA-256 cfaaecaee8d26184f098f50f71d96e032ee78508ff5e67f8e8e7a979344223a3; source-oracle-receipt.json records zero Native CLI launches.",
+          "acceptance/mod-ui-post-ack-r375-20261017/node-worker.log records the historical r375 21/21 worker tests; mac-final r375 includes signed-package host UI/API and actual CUA typing plus Submit.",
+          "mod_ui_client_worker.test.mjs verifies a post before callback Promise yield is correlated and a continuation post is an independent update; runHeldCore intentionally does not await callback Promises.",
+          "Current P17593 production runner `/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/run.json` is complete and source-pinned to H44/SDK a363: 2740 passed, 0 failed, 4 ignored across 40 executable test targets and 9 doctest targets; its `product.log` records source-validator, fmt, check, clippy, skill-cold-resume, full-runner, and cli-8mib exits all 0. Run receipt SHA-256 is 6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e.",
+          "The five P17593/H44 platform checks passed (Android arm64/x86_64 default and computer-use, iOS simulator default) under `/private/tmp/repaired-h-product-r376-17593eaa66-20261018T083723Z-63256/platform`; platform identities and individual log hashes are recorded in candidate_state.platform_gate_status.",
+          "acceptance/final-ledger-r376/receipts/mac-package-final-17593.json (SHA-256 6e4f1ce2eba4d069f9219603b6043b64ce0cb8f2e7b4e71645710e2b37fbb337) records current P17593/H44/SDK a363 signed macOS package with static audit, startup smoke, independent audit, packaged Host driver, and actual CUA all passed. Signed ZIP SHA-256 is 64c8a4d7a441f53c5dc9990d13f3ea4930f1ead72c2df52759565102f73481de; app.asar SHA-256 is 21462a3c01035cd13bb3785dcfcc11ad474ea6f22b6fde0357db352fa23ecb06.",
+          "The archived actual-visible CUA sequence entered `packaged-host-cua-value`, appended `xy`, then clicked Submit; final callback text was `Submit callback accepted: packaged-host-cua-valuexy`. App PID 52288 exited and provider credential cleanup was cleared. Screenshot SHA-256 is 28be6f881ae2844132ea366dad0174632ec2cffb7feaabe4c5c870dcffde7b0c; `mac-package-evidence-17593/index.json` maps the archived evidence hashes.",
+          "Finalizer `acceptance/final-ledger-r376/repairs-final-17593-v2.json` (SHA-256 86f1d03e74063b3f1db4ec47416e924562bd9c08cbefdf9848fd347631e1465f) passed all 20 selected phases and records the 8-phase Product runner; final H44 source patch matches the r10 source snapshot."
+        ],
+        "limitations": [
+          "The source-oracle and Node worker evidence are retained historical results, not validation of the current Product candidate 17593eaa66dc762d5c9c581ba348398c914bdbcd.",
+          "Source-oracle execution is not a Native process or public UI capture.",
+          "Native public subscription/update/dispose/restart remains uncaptured; this is an evidence limit.",
+          "Visual layout comparison is explicitly outside this contract.",
+          "The current CUA is limited to the archived packaged Host Client form and Submit flow; it does not establish physical-device GUI acceptance, optional sidebar drag, visual Native parity, or Native public subscription/update/dispose/restart semantics.",
+          "Development signing passed; notarization and stapling are not claimed. The package receipt explicitly does not certify all 42 Native parity contracts."
+        ],
+        "source_unresolved": [],
+        "minimal_missing_validation": []
+      },
+      "audit": "evidence/final-ledger-r376/mods-audit.json"
+    },
+    {
+      "id": "CLIENT-1",
+      "requirement": "CLI, TUI, desktop and mobile callers preserve prompt, session, command, cancellation and transcript identity under current client protocol 25.0.0 (formal contract blessing passed; generated bindings pending); Local Apps Native parity is excluded; Local App tool bug fixes and current API integration remain in scope.",
+      "owner": "gates",
+      "assessment": {
+        "status": "verified_build_and_client_regression_scoped",
+        "evidence": [
+          "gates-audit.json",
+          "platform-receipt.json",
+          "repairs-gate-receipt.json",
+          "mac-package-r376-receipt.json"
+        ],
+        "limitations": [
+          "The named Rust and macOS package checks bind to final-baseline.json; they do not establish generated-language consumer integration or physical-device behavior. Cross-target compile is not AAR/XCFramework runtime acceptance. No claim of every client output byte matching Native."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/gates-audit.json"
+    },
+    {
+      "id": "RUNTIME-1",
+      "requirement": "Bun worker startup/restart, filesystem/process/sandbox, env inheritance, cancellation/deadline, stdout/stderr and cleanup.",
+      "owner": "mods",
+      "assessment": {
+        "id": "RUNTIME-1",
+        "status": "partial",
+        "source_status": "Native 2.1.295 public Mods API wrappers and host RPC/stream bindings are source-mapped for env, filesystem, process.run/spawn, stdio chunk validation, and stream cancellation. Candidate Bun subprocess topology is a product-owned implementation and is not asserted to be Native process-isomorphic.",
+        "verification_classes": [
+          "static_native_source_2.1.295_host_api_and_stream_binding",
+          "candidate_focused_bun_gate_4_of_4",
+          "candidate_signed_package_bun_identity",
+          "candidate_packaged_startup_reload_restart",
+          "candidate_hooks_runtime_tests_r375_historical",
+          "candidate_harness_runtime_lib_r10_1468_passed_on_final_H44_source_snapshot"
+        ],
+        "raw_evidence_status": "No Native public worker lifecycle capture. Source wrappers describe the API boundary; they are not a Native process/OS effects run.",
+        "evidence": [
+          "Native src_189676409.js at chunk offset 189676409, SHA-256 52ad1c53312d15fbf90ddb548c9692e6598ead6e35398c38be9ac9d0c6806555: jw env.get/set, Fw fs.read/write/list/exists/stat/ancestors, Yw process.run/spawn, zr/Fi stdout/stderr chunk validation.",
+          "Native src_189920606.js at offset 189920606, SHA-256 51b6fc78c996ca2cd60cfd83b0aa6f1030a41205e512b261b4e28c99c0ab3529: hostOps/no and hostStreamOps/io pass cancellation signals; iterator release aborts the host stream.",
+          "Candidate Bun 1.4.3 revision c6da4a4d3010e5553438c60f6bd76d981976867c; focused Electron mod-bun gate passed 4/4, H runtime tests and signed package identity/startup/reload/restart evidence are retained.",
+          "H r10 runtime-lib.log records 1468 passed, 0 failed, 0 ignored (SHA-256 c632575a78d8bd17e13f52a2b2703106d990f2a1ea0315ff74dbf4c15c03a24a); fmt and changed-clippy exits are 0. The recorded execution HEAD was b386 with dirty crates/runtime/src/headless/run.rs, and r8-r10-source-followup-proof.json verifies the captured source snapshot equals the final H44 delta. This is not a clean-checkout rerun and does not substitute for Native public worker lifecycle evidence or the historical Node worker suite."
+        ],
+        "limitations": [
+          "Native source maps API requests and chunk/cancellation shape, not the underlying host OS implementation effects.",
+          "The packaged candidate process model does not have to reproduce Native host RPC topology; no architecture-equivalence claim is made.",
+          "The absence of a Native lifecycle capture limits raw evidence only; no candidate/source discrepancy was found in the mapped interface.",
+          "The r10 Harness runtime library result is source-snapshot-bound to H44 but is not a new execution of the ModUI Node worker tests or a Product/package gate."
+        ],
+        "source_unresolved": [],
+        "minimal_missing_validation": []
+      },
+      "audit": "evidence/final-ledger-r376/mods-audit.json"
+    },
+    {
+      "id": "BUILD-1",
+      "requirement": "Three repositories resolve one candidate; dependency-complete checks, macOS production app and package, and required cross-platform checks.",
+      "owner": "gates",
+      "assessment": {
+        "status": "verified_build_and_client_regression_scoped",
+        "evidence": [
+          "gates-audit.json",
+          "platform-receipt.json",
+          "repairs-gate-receipt.json",
+          "mac-package-r376-receipt.json"
+        ],
+        "limitations": [
+          "The named Rust and macOS package checks bind to final-baseline.json; they do not establish generated-language consumer integration or physical-device behavior. Cross-target compile is not AAR/XCFramework runtime acceptance. No claim of every client output byte matching Native."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/gates-audit.json"
+    },
+    {
+      "id": "BASH-INPUT-295",
+      "requirement": "Normalize Bash `tool_input.command_description` and `timeout_ms` aliases before `PreToolUse`, validation, and execution; preserve Native field priority and source units.",
+      "owner": "runtime",
+      "assessment": {
+        "id": "BASH-INPUT-295",
+        "source_status": "pinned 2.1.295 Bash fixture-backed production gate passes",
+        "status": "bounded-pass",
+        "evidence": [
+          "H r271 integration-24 bash_input_validation passed alias-priority, non-string alias, timeout alias and lone-surrogate fixtures; H r5 permission-lib passed 1,779 tests."
+        ],
+        "limitations": [
+          "ProcessRunner is mocked; no operating-system shell side effect is claimed."
+        ]
+      },
+      "audit": "evidence/final-ledger-r376/runtime-audit.json"
+    }
+  ],
+  "audit_artifacts": [
+    {
+      "path": "evidence/final-ledger-r376/.gitattributes",
+      "sha256": "37ee517945d417e39374a6a4dc803e747a6af3a7744c6683899450d15b542747"
+    },
+    {
+      "path": "evidence/final-ledger-r376/baseline.json",
+      "sha256": "376077062b8829f6cde545cbb11f068cd2369564c0122e60b8a785186e0a7778"
+    },
+    {
+      "path": "evidence/final-ledger-r376/ownership.json",
+      "sha256": "4df4d5d12233ae6c335b45af2df12fb239bbc7a42ca435e5f8edbbadc4c0ac18"
+    },
+    {
+      "path": "evidence/final-ledger-r376/ledger-rules.md",
+      "sha256": "6b503c3eab1ed70626054fc49a58e591321c0f6a0af475b64ccee7494fae5eed"
+    },
+    {
+      "path": "evidence/final-ledger-r376/platform-receipt.json",
+      "sha256": "c82726c6d4498d9bb64b8732724ee9de29fff2a76d3437aacbafd7750450fd4c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/run-platform-checks.sh",
+      "sha256": "4531eb32c1a4ffd4d69ec751b2b8eb2d06ff591f0b0be309e370cb7421359a68"
+    },
+    {
+      "path": "evidence/final-ledger-r376/platform-run.log",
+      "sha256": "73611dd26bf1283ff646f990d47cd20f67025c40a7945d3eacd87892bc0b3a3a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/hook-corpus.log",
+      "sha256": "0fa14e92d0731b8a42f190b6fdb6609ca412f70e61ec6f89fe4aabc394acd070"
+    },
+    {
+      "path": "evidence/final-ledger-r376/source-oracle-receipt.json",
+      "sha256": "09a3cc37337d1d66dc0ba028b2d962feb6a3acfc5677b6bae570c451984f4af6"
+    },
+    {
+      "path": "evidence/final-ledger-r376/source-oracle-differential.mjs",
+      "sha256": "bd964c10eebf8f1407b914e326c3be1fb3bca9f541da4d76985a3c57b6d5aeab"
+    },
+    {
+      "path": "evidence/final-ledger-r376/source-oracle.log",
+      "sha256": "0761972925540b952f2ea1b56bf794e05629b9cd40c31fc04e5631a596384f03"
+    },
+    {
+      "path": "evidence/final-ledger-r376/oracle-differential-results.jsonl",
+      "sha256": "3898ab57a4de299de8bfeb7bbb2657657913545c04590314b5d6a96e565b3f02"
+    },
+    {
+      "path": "evidence/final-ledger-r376/sdk-message-controls.log",
+      "sha256": "bb3867b012d93e77479d23fb974cdf736798a84ccdef39169ba8c9a84956adbe"
+    },
+    {
+      "path": "evidence/final-ledger-r376/sdk-message-controls-receipt.json",
+      "sha256": "8430d5bf9fe6333845210526cf714407095f4674ee4b6958dfae29723c2f24c5"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-baseline.json",
+      "sha256": "32663a6fb64ab1563d6d0ebd54181412ab8611c09994425b9bb4a2452ea8a4e3"
+    },
+    {
+      "path": "evidence/final-ledger-r376/hooks-comma-receipt.json",
+      "sha256": "d28209b30e217cae3538306877af6b00ef4480d434680993b0ec265da47e4926"
+    },
+    {
+      "path": "evidence/final-ledger-r376/validate-ledger.py",
+      "sha256": "4be81336a2629ff661c6fdb58141963a8517637f476a192f1d0578df4f3c5325"
+    },
+    {
+      "path": "evidence/final-ledger-r376/assemble-ledger.py",
+      "sha256": "b9fe157ee32b12cdc955724cc65bb21be64ec186e61f9ffb136f74df2c9f6454"
+    },
+    {
+      "path": "evidence/final-ledger-r376/checkpoint-current.md",
+      "sha256": "07fc481f5f7c96bb09e63fb55e3137ac5b970531b6aa489b71aa96c3b38ccb13"
+    },
+    {
+      "path": "evidence/final-ledger-r376/matrix-introduction.md",
+      "sha256": "030332deaf99fa7cc1d86ce60b8b196aaef9b8037cf788d54a5210eefa8414eb"
+    },
+    {
+      "path": "evidence/final-ledger-r376/native-ltr-alias-probe-plan.md",
+      "sha256": "ebfa8b6b56859fb0cb1be01fef57f7024cfebecd6dc6cd18a3851028b003c668"
+    },
+    {
+      "path": "evidence/final-ledger-r376/independent-finalizer-review.md",
+      "sha256": "334e5a99db072524e6f491e5a3558e2bf3498a1f2aa9937419d178fb42b9a240"
+    },
+    {
+      "path": "evidence/final-ledger-r376/independent-cli-sigint-review.md",
+      "sha256": "4f23a33425455247709bf6c1fddd7c449a351f15eb5deee1cc7176aacca63261"
+    },
+    {
+      "path": "evidence/final-ledger-r376/cancellation-terminal-review.md",
+      "sha256": "f7932d3902332486afe7a28e760a39f1077aee57770477a783cf0d72e2faf230"
+    },
+    {
+      "path": "evidence/final-ledger-r376/cancellation-terminal-review.json",
+      "sha256": "462c4f68c0c98d0c3417b595ab05796b69476e7b3a62759eb9df43759cea99fc"
+    },
+    {
+      "path": "evidence/final-ledger-r376/make-mac-aggregate-r376.py",
+      "sha256": "7174548fc70c43df1928d8d90659955644f816475003bebd6a4023d0a95b948f"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-aggregate-r376-runbook.md",
+      "sha256": "fc24beeddf6d49ecdb95e1a291246cc594972ec7f75767c51cfe743ecda735d7"
+    },
+    {
+      "path": "evidence/final-ledger-r376/canonical-before.json",
+      "sha256": "2cfa1515af06b7d11ccdbc688ebddb9b16bed4651972d019c3186f5ad840b9e8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/canonical-preservation-final-17593.json",
+      "sha256": "1aaaae14096685bb55189a33e7ac03e7f1c0ccc7e14f12758880759339382ae0"
+    },
+    {
+      "path": "evidence/final-ledger-r376/finalize-repair-receipt.py",
+      "sha256": "a3b54a27e530d73a768c7a1c43750e848ae1af5ef0f97bfe8e90ca41eb7fb05c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/make-r8-final-source-proof.py",
+      "sha256": "c4a05c7e501e93cb5182bfabd80c27997cc8287abb65a8ea134778c8d5dacb3c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/make-r8-r9-source-proof.py",
+      "sha256": "534a97d5dca97c894c65e5c7f4c4e8b0a0de9b817851bb281619fec43e00264b"
+    },
+    {
+      "path": "evidence/final-ledger-r376/r6-test-only-followup-proof.json",
+      "sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db"
+    },
+    {
+      "path": "evidence/final-ledger-r376/r6-test-only-followup.patch",
+      "sha256": "4c3cd4d6b00a7b671a6f29c4185a808019ce028910739347d84374aa2318d88e"
+    },
+    {
+      "path": "evidence/final-ledger-r376/r8-r9-source-followup-proof.json",
+      "sha256": "ad09c418d7e28a59ccf68cd716a880bf4c96c7c7fc5868dc163043e69de766bc"
+    },
+    {
+      "path": "evidence/final-ledger-r376/r8-r9-production-delta.patch",
+      "sha256": "2fe29538d30d9d694ab137df5a6aa648fb26317de9569b697a04dd31992206fb"
+    },
+    {
+      "path": "evidence/final-ledger-r376/r8-r10-source-followup-proof.json",
+      "sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46"
+    },
+    {
+      "path": "evidence/final-ledger-r376/r8-r10-production-delta.patch",
+      "sha256": "863c0349d3a5f2faec585297f536d0143bc7abb08a31bb4bc4afe0c23b897127"
+    },
+    {
+      "path": "evidence/final-ledger-r376/sdk-audit.md",
+      "sha256": "191ae0d9051dda82e06e890ff1d5b1cd402c1fb7d05b940299f18ff17290d911"
+    },
+    {
+      "path": "evidence/final-ledger-r376/sdk-audit.json",
+      "sha256": "dca64b188a32922135207315686bb5e9e444a4dce5cbb42dc8c5b21a545f200d"
+    },
+    {
+      "path": "evidence/final-ledger-r376/runtime-audit.md",
+      "sha256": "e5375618d0544470c0c23cea806564534903aacdd252483682d92ab02f0f9a6e"
+    },
+    {
+      "path": "evidence/final-ledger-r376/runtime-audit.json",
+      "sha256": "d4ee67e5ed2ec417d34327bbef13b3f5908704028e59022c811bd93e9345df66"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mods-audit.md",
+      "sha256": "977967ae71b22c491fc9869dd0b709d505f633108ace4006111e7cabfde41cc3"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mods-audit.json",
+      "sha256": "5ed3d2a1dfbc439bfb7acfa669812b2481ead331e72b91cf48c52c357028f909"
+    },
+    {
+      "path": "evidence/final-ledger-r376/gates-audit.md",
+      "sha256": "8cbac97f63698c6bfd166a70ac6ae66107e0b9e747355270f2f758c4c6fb5901"
+    },
+    {
+      "path": "evidence/final-ledger-r376/gates-audit.json",
+      "sha256": "975af8e9741181f5e44e73a386b35dc1656096721b3d2e89ea99635c21eb722a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/platform/android-arm64-computer-use.log",
+      "sha256": "6ea168064040f3e215946020a5885101919ad5acd634da1074d7bbb8538738ae"
+    },
+    {
+      "path": "evidence/final-ledger-r376/platform/android-arm64-default.log",
+      "sha256": "dc330374d75d7aa48ebe19b629936bd56596177fa5decd14bb0c2addcdcb1cba"
+    },
+    {
+      "path": "evidence/final-ledger-r376/platform/android-x86_64-computer-use.log",
+      "sha256": "c738a8eea7e682ead9378ce426e7e3d750ee2977e97d2da1af7ee8401c28a683"
+    },
+    {
+      "path": "evidence/final-ledger-r376/platform/android-x86_64-default.log",
+      "sha256": "4fdb04f3cd1e4a4c32b03d56313c48507c0b787ced854cba727abe4fdf5645ab"
+    },
+    {
+      "path": "evidence/final-ledger-r376/platform/ios-simulator-default.log",
+      "sha256": "f69835c8c54528a75635bd1bf583f77a20b11ba9b51a8e08265403a1e75b66f2"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/h-full-r271-run.json",
+      "sha256": "864080986f8d38a182ee53caa35988412fe1c329523f216358254c865d56ff7c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/h-hooks-r375.json",
+      "sha256": "c77ded958dec9afb94e0d8cccdcfe6d3a71298d3919b5cdcf3594cd597b2c672"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/index.json",
+      "sha256": "7f52be01bab0b2d91263a1c21eb5e9b50cb59cafda0d342849ae31ac546bb2dc"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/mac-final-r375.json",
+      "sha256": "a10fcbe7f39911e158ace3150c3c8a1a1dcf89fda65b4ec4a850e81c4aceee90"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/mac-package-final-17593.json",
+      "sha256": "6e4f1ce2eba4d069f9219603b6043b64ce0cb8f2e7b4e71645710e2b37fbb337"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/p-final-r375.json",
+      "sha256": "90b07244698f928e183ecc6caeb126b90d914afb97e003433baa32bcefe4763b"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/p-full-r375-run.json",
+      "sha256": "71f9c8d34c051be9241612993f06832253fcb898fe9175278897c8609c4fc25f"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/binary-tests.json",
+      "sha256": "b166fd0be5c248d8a4a5654f83a9578e33077b5cee7bac6112adea1259baf29a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/doctests.json",
+      "sha256": "58c241d1a1a162a007bf59cd79643c48cd86746d39f825e8cce0b46cfde0f75a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/index.json",
+      "sha256": "66f4efab70c9a45b72439f6d348c3276146647640931fd9604163665ef14daf8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-00.json",
+      "sha256": "d90a543df270521d6bdd52c1133114d93668a5915f0a92b45fff1bc44ac65fc8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-01.json",
+      "sha256": "e4092163689596797c25e0c90db247785074197627210b4d8227e331b33dab71"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-02.json",
+      "sha256": "9ac17baef1e8cf914824b8bc76fe4981a128de9b80143b86d952112b45d3daf1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-03.json",
+      "sha256": "b12291f72f46ea5183f84000d319193d706a726918c9cfbc6dc0bf08cac22772"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-04.json",
+      "sha256": "dcd9c8506ecc7605453369eec84b7020a41063c257aa24b3f4bf9895a1cb527c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-05.json",
+      "sha256": "b5540438c14358670be0489dc41002f4d2f093c6de032a42ddca61122c507da2"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-06.json",
+      "sha256": "7d9695571f9946b84f9b79caac4678c298cddb46c07804177772d5bf5841b3cb"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-07.json",
+      "sha256": "f4ec594853adc4db341e86482fe944fe25ebc6c398ced04cd4182ec7795c499b"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-08.json",
+      "sha256": "49713af7e0d6f33380a30080b6d2373ee44a86dc795990b6c4153ab1e1e723f7"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-09.json",
+      "sha256": "d65cbcf71229a4526c34772c1122d942373d36f40e961ec13517c6035a918aa6"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-10.json",
+      "sha256": "b2b48eff697f714e2a348438cc7d54a8c826223a214efdb9d326080efb98934c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-11.json",
+      "sha256": "10837572b91d9f03d7b9b258e97b44bcea0e68ece385f4669871a52446174aec"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-12.json",
+      "sha256": "7780663aee1f85cab61f7a0b88ceeacde4c31f282d00cf2b2f8a45064b6b920f"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-13.json",
+      "sha256": "0ea2fb124b7406a056242c20cda9821d52fd12cd58f65534ac4e3a15a5ead8c8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-14.json",
+      "sha256": "8a90dc2f70df0fdce4d8fa79ebdd8f9bc093feb547a7cdc8eb98a51056e4895d"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-15.json",
+      "sha256": "19b16e4e924a56fc7396f011dc7240e11b20a436017d32f674ea19d55c61201d"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-16.json",
+      "sha256": "0778d4c9657175faee8978b023dcdc8ba1f416ed5e73ca997bc56e98f049f82c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-17.json",
+      "sha256": "313c0c8125fb12a5782206745d7e6900a2118fbc6885535c5d3117ffb5655898"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-18.json",
+      "sha256": "c8133599f662a19a05a6242fbc36ace44fb14178da09150035ff3803c512b8fc"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-19.json",
+      "sha256": "6da7a14446030e8d947b91468464e94fea778063a5b1887655487997c42bf21d"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-20.json",
+      "sha256": "0b850e477073438c079f856f3345264fb05725e65bbb9ffa33b89852e19836f3"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-21.json",
+      "sha256": "09c5dc3548da1801e5bff57b0c24b257149679a28c8e8f02c8699e3c1c3e5576"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-22.json",
+      "sha256": "01a397811dc31bd0d8f6e38576e8b0d0fe4673295f576e76fb96b6c70632c22c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-23.json",
+      "sha256": "ae422cb8c01eba9ffb17bd56ea0314c74a087c25f81000851aaf8e57a3167ba7"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-24.json",
+      "sha256": "80ebe27e8920772f5fd087627a3638090846e511bc5df9943fa00fa980a9c432"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-25.json",
+      "sha256": "fb308ac765a9051298522554619c749413dbbed89ab36bd52818a7a02b259668"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-26.json",
+      "sha256": "64fa47128fb44d3c71a0f3828138ae404a8f97cadf892787ea8b135c2b56b22d"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-27.json",
+      "sha256": "b574e3f71c6b89c660816e0cfc1bd894fd898304247c59fe1e3881b1d973f670"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-28.json",
+      "sha256": "5872bc4c6a82d5da89ecf3878837cd61b2ee783a44244deae7d51424f96886e8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-29.json",
+      "sha256": "e0163bd485f441e483d22c9c025303a54d0a6426d2de6bd55e0ed795c2db288a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-30.json",
+      "sha256": "8a5b3b21b1551e6042024e903160bf98025c47162cddb0945fc594f3eed95fbf"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-31.json",
+      "sha256": "298fcb4d66e358f04f4a774639c56c884df5a6239fc1f55949df8928f871fdbb"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-32.json",
+      "sha256": "85fb38451eb435f7e65eef8be2f9bbf110058003bfb02e6598c91e2409791849"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-33.json",
+      "sha256": "922b5d73499a1826ba6533cccdf394dffc432aadf191a06dd2c6200a8ea84890"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-34.json",
+      "sha256": "565b85decda07ff53b576b731c134d7f38d90476d4defa83366c198700e4f1a7"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-35.json",
+      "sha256": "b85013a7071d1c3502a577c997f265b9a4706ddbda8cc632b62b525afdd80870"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-36.json",
+      "sha256": "daf67e3e4e361de34c6d00e9b5638a01bddefdeb2685eefef2258b3cd9ce2254"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-37.json",
+      "sha256": "5b5ead7eccfa45a30c5b6e01d2b2db846ec04d23c4ce3157129e34f0d3ed5288"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-38.json",
+      "sha256": "d1b4cb5d4b719f7de5e331681f595898827efda7d615957c393743ddc9d4bcdc"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-39.json",
+      "sha256": "eb119ed312803a747dca497b9292155257a809e68ac486edbe40ac56850c9902"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-40.json",
+      "sha256": "0b84159e4317c0ebd7dd9c89e22dcabba255631bbc38fd2f57619fc6a96dfd37"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-41.json",
+      "sha256": "aaed176640643ca0d3c3e664da621ce5ad46e83aa14306db4a7bd26cf1ba812e"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-42.json",
+      "sha256": "a8ff9a97fab6a7f5243d4e640862d92ef5a8fcb31157b05e4bce4ea70453f845"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-43.json",
+      "sha256": "51dc8907f6d33f3bdcb57014b96740c5c43080bafcf9149dcc173e09b9c7be66"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/integration-44.json",
+      "sha256": "ad016f1f7e5a057614b215ff6ccb4023bb39748d8248dad79f55a4ee0efd163f"
+    },
+    {
+      "path": "evidence/final-ledger-r376/receipts/r271-phases/unit-libraries.json",
+      "sha256": "11b275006a74db22278ed744446ddc27eb686398e54816c252beda4cee96d9df"
+    },
+    {
+      "path": "evidence/final-ledger-r376/repairs-gate-receipt.json",
+      "sha256": "86f1d03e74063b3f1db4ec47416e924562bd9c08cbefdf9848fd347631e1465f"
+    },
+    {
+      "path": "evidence/final-ledger-r376/repairs-final-17593-v2.json",
+      "sha256": "86f1d03e74063b3f1db4ec47416e924562bd9c08cbefdf9848fd347631e1465f"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-r376-receipt.json",
+      "sha256": "6e4f1ce2eba4d069f9219603b6043b64ce0cb8f2e7b4e71645710e2b37fbb337"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/00-wrapper.exit",
+      "sha256": "bde294368bfed77c2cddf8cec271d398aee9cdbab3b26e1059281bd33adb0120"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/01-wrapper.stdout.log",
+      "sha256": "d46de90df8b32e497e69287f302dfaa8cfdf85235efe2c3aa38b7164b429f2ac"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/02-flare-r342-r376-17593-20261018T0916.log",
+      "sha256": "bf89f96e5eff75657592da13cdf50560547976316b6fa9ac98c04f6077c6144a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/03-static-audit.exit",
+      "sha256": "bde294368bfed77c2cddf8cec271d398aee9cdbab3b26e1059281bd33adb0120"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/04-static-audit.log",
+      "sha256": "e1eb70818ea10aa610dd26e5069743cc62e35b04f7b714acf94ab9b1e6644d4a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/06-host-driver.exit",
+      "sha256": "bde294368bfed77c2cddf8cec271d398aee9cdbab3b26e1059281bd33adb0120"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/07-host-driver.log",
+      "sha256": "30a5082efb2262086886ddbd517c30502682c37321e0f073271dc10e21b048b7"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/08-packaged-host-mod-2026-10-18T09-35-08-620Z.json",
+      "sha256": "13f17b969ab19462cdc193dddb4804569d1429fe595c416a144cf16ff524217a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/09-cua-observations.json",
+      "sha256": "289e82a2f2b7099beeea51576295979bbefeb98e911452b15baae4bdec8a59a1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/10-cua-submit.png",
+      "sha256": "28be6f881ae2844132ea366dad0174632ec2cffb7feaabe4c5c870dcffde7b0c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/12-run-repaired-h-package.sh",
+      "sha256": "719b4b94bada5b4726a619064d45eb9a93dfc17025ce1c368262aea76527e9c7"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/13-package-flare.sh",
+      "sha256": "37f8e4fe0abd303a59fae4598305f0fe12f0ecb0f1053c33557fc3ec05d4fc92"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/14-source_guard.py",
+      "sha256": "d1a855731b2c4ec0fcb880ef09513592d4aac95067210182383127185dc49f8d"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/15-verify-final-macos-package.mjs",
+      "sha256": "d2ca70c7a0d19507f3452681481030f313a7e2e291c8e667d763a830f9b330fd"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/16-run-packaged-host-mod-smoke.mjs",
+      "sha256": "ce19225514a7ec1c438a237eb092a647bc9e1d30748c5b44019154885d5617ea"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/cua-final-ax.txt",
+      "sha256": "ecfa802cc9b502b3acfdf969b84f11a5365c25dd4df8c36ee6b7abef37f44289"
+    },
+    {
+      "path": "evidence/final-ledger-r376/mac-package-evidence-17593/index.json",
+      "sha256": "16d0352055eb03f71cc81317d1941f4caa14425c71d5d312a21876eeae549212"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/platform/android-arm64-computer-use.log",
+      "sha256": "41b76d53724671b1abdb24c54ed8ffcbb92a1772c6fabe9f73a9007d8383d7e0"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/platform/android-arm64-default.log",
+      "sha256": "63ed073b13b049eacb09d99c378397575478deae9cde37e2e18a3e0e8cb5e451"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/platform/android-x86_64-computer-use.log",
+      "sha256": "d77b8d39bc4bab2db4a77801d1933d7fe992666a31a8590d39b5b0eb6b8b44be"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/platform/android-x86_64-default.log",
+      "sha256": "ab4d6c87243ddba028bd6372479fc8eeaec9ab3b16035136cf7e43b4aeb00203"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/platform/ios-simulator-default.log",
+      "sha256": "ce8c5e99e0af7d31bf0534af5c33734c2a64f5886f70c6f08325a09169189764"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/check-runtime-dependency.log",
+      "sha256": "d6c4559dac5d4737745bcfdb329bdb134e06cb6a398069adefc983efa37a0088"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/gates/check.log",
+      "sha256": "282fc6a591558776f68ff0fd52883446c628806d43367d2ff3815c00453ed860"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/gates/cli-8mib.log",
+      "sha256": "327a9cc97dc67d29d71ddabf56815175076fa9baa95e659ec61505ff13e11c4b"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/gates/clippy.log",
+      "sha256": "d2b6780620588a8c704c8f40100a90c2ebd106dd9c62d62541d045490c53843a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/gates/commands.txt",
+      "sha256": "27f0b3475109e1ea42224423b3593e1437bbf428595a5d84c0a61b378b9ee4a8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/gates/fmt-progress.log",
+      "sha256": "a6b2e3d5b7811aa619b71a5f38525b49f57a223fd20142f9ec963a547e3918ee"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/gates/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/gates/metadata.log",
+      "sha256": "db73e1fa409183fd7443b811eb2190d72ab96416685843fbddff3b4582f84222"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/gates/progress.log",
+      "sha256": "a6b2e3d5b7811aa619b71a5f38525b49f57a223fd20142f9ec963a547e3918ee"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/gates/skill-cold.log",
+      "sha256": "cdc1a1516862cc5ffd58c727d11d2b86bebfafdee3ff892dbcdab60bd5ec9cd1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/gates/source-validator.log",
+      "sha256": "1b8d41fbaa7aa2cfea5b431d177824001a74e56c1eacf24db9020493d43aade7"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/binary-tests-01/phase.json",
+      "sha256": "9ce45a1a2655b1cae3f6842bb638244d8f7a24751b8f160fbf47352a0ceea6ea"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/binary-tests-01/stderr.log",
+      "sha256": "655ea77b627631d38f0eeb6312d6402a361e01bdae0a93952b8e50d3cd24191a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/binary-tests-01/stdout.log",
+      "sha256": "5e9f34a8497648db336226364fe667c2618c4a8a29aea154a9832e5b9ee2c626"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/doctests/phase.json",
+      "sha256": "d6a1dc00b83e2093c546bd7e2c55bb90c74c40a2784b4f5f5086903a0a5cc5ba"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/doctests/stderr.log",
+      "sha256": "3746d683917cdf74347d694aa713f47406db6fc6156a7ca86b8fc711645510e8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/doctests/stdout.log",
+      "sha256": "dbf777efe6783d82a24611db61ad54005abba0e1012a82b253143296b3fd0b56"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-01/phase.json",
+      "sha256": "dc406999e9cc807599e90e48e04e76759e198544aeac77348f711a0a346276ec"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-01/stderr.log",
+      "sha256": "f5361d2b2f479735c0f7604375f0c5b395d0d0f7c7d8c1c720df331d677d5ec8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-01/stdout.log",
+      "sha256": "1be630a6808b4efe6613970c7ae18a399f16c4039b249661cc33251e86f9e1d9"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-02/phase.json",
+      "sha256": "d33cc492ef3bb4430a5d75ff407d1f6fbe0a70111b92118e3bf659945fdcac84"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-02/stderr.log",
+      "sha256": "b61d5df771a2ebfa648f357ffea199f2c19cdd0e82254fdd319b29e1b7019cf7"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-02/stdout.log",
+      "sha256": "9f7afbbfdd3115a64e974cc30926a49d779182f595ce3e770adde9960eac1efb"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-03/phase.json",
+      "sha256": "5a41b8e4fa5fc1a7e476f4d6ca93de85b66c2c52feb6798f472046bf05a04f17"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-03/stderr.log",
+      "sha256": "8c6e5e753320a7c6d2488df2c54df6024e7cb63d234b875a95cfa099eb2eda4d"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-03/stdout.log",
+      "sha256": "f4a3afe0ebb6432c59d9e2e9ab39c30d6241f5bc4785c8ff16cbe86b372159ea"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-04/phase.json",
+      "sha256": "d45562b9b7a926b8f735b17a80706bcfdf792804a88fae6f6fb07170cf90a747"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-04/stderr.log",
+      "sha256": "ff310ad6392fcc4cf4304f06e52281695fe0258ee56a0b178bca9d646c3a37ee"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-04/stdout.log",
+      "sha256": "53f85cd5ea967373e8f957ddfe2ae884f740e8c018297e46f628e426e915ec70"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-05/phase.json",
+      "sha256": "b92f529d0d64e969dc94b1007fd93db414430e92b706f3a5b9b2b4661114009a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-05/stderr.log",
+      "sha256": "6b345bd62ef207d589c94133751db5eb009b2c6e9f016240eb7fd6cc30e4fdee"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-05/stdout.log",
+      "sha256": "c5efe04029fc442e07a8f78c846001cedfb40c4e4a4dc945b12786bfd15dc169"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/library-tests/phase.json",
+      "sha256": "729607f07abbc283d55031d4abd00fa4e3be97e53d8d240a5b18ad168b5512c8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/library-tests/stderr.log",
+      "sha256": "3fcd458081bfa3ec97d9520c28b9b2380d0cc2187c9f3d837c2df64749ef8f91"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/library-tests/stdout.log",
+      "sha256": "3331ac184cbba605d8140ff3b517af4f04955154c9cfd514a7c298533e9daf4e"
+    },
+    {
+      "path": "evidence/final-ledger-r376/final-evidence-17593-v2/product/runner/run.json",
+      "sha256": "6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r8/hooks-lib.log",
+      "sha256": "c81d10313ced358ad0bbd3d60814da563fea703df4622913956d7afa1dd594af"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r8/hooks-focused.log",
+      "sha256": "511659dfaf997fab9c220272f361771434b6d15fc03b0ba1a2be2520c5844862"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates/base-head.txt",
+      "sha256": "8f6811def5f7002de8c91a99cd6bde709fd95948dff49d46c1c756910ef6b1a1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates/cancel-inflight.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates/cancel-inflight.log",
+      "sha256": "9204b9330bbb6f7a22bf9478c190da67e63323a5ccb866999c7d92d205f5c610"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates/fmt.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates/orchestrator-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates/orchestrator-lib.log",
+      "sha256": "ebfeabb5a12034a6a46c7785687e91c96948cbe4f15e625519dc0e557da162d8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates/permission-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates/permission-lib.log",
+      "sha256": "df58ed87e8c2df0fd9d3b7aa080f5c8f47afa072b5f6138c5b98c439c1b62cab"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates/source-current.patch",
+      "sha256": "5fac54b9f24f52cd40652c69fe936b5535da9b429bef9843172151fd9d744c30"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates/source.patch",
+      "sha256": "5e67340a200cff0ca3728d1605ef653dd9125929ae10461a1eab64e0ce92cc61"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates/source.patch.sha256",
+      "sha256": "c320c282d538639c9f4a5e3c0ee26c2549a9f45dbdca204a7c888b59474878ff"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r10/base-head.txt",
+      "sha256": "8f6811def5f7002de8c91a99cd6bde709fd95948dff49d46c1c756910ef6b1a1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r10/candidate-head.txt",
+      "sha256": "bd9f1db83b8b1a19c4ca2d8e4814c93d7047a89b3c629277e67c18540330c17b"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r10/changed-clippy.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r10/changed-clippy.log",
+      "sha256": "6a6ac311fc8ba74d7c2ebba02937f97dda309ae395d57223022104b6b1bfa35d"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r10/fmt.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r10/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r10/runtime-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r10/runtime-lib.log",
+      "sha256": "c632575a78d8bd17e13f52a2b2703106d990f2a1ea0315ff74dbf4c15c03a24a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r10/source-current.patch",
+      "sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r10/source.patch",
+      "sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r10/source.patch.sha256",
+      "sha256": "01e670a77ff5ea631810445974c4cff267374f16197a8e9167101c1715667318"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r10/status.txt",
+      "sha256": "2700165975f68815c97d605c56eca8e90d497ade1264b6282401d13fee99ac27"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/agent-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/agent-lib.log",
+      "sha256": "52595649488d520f6b4827e11b66a5b443bbc3494d4327038a244d21855fc798"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/base-head.txt",
+      "sha256": "8f6811def5f7002de8c91a99cd6bde709fd95948dff49d46c1c756910ef6b1a1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/cancel-inflight.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/cancel-inflight.log",
+      "sha256": "b28fdf758f754f152245dd7447c7ab4d6c30efe25b5992fc2cdc5aae97d28488"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/fmt.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/orchestrator-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/orchestrator-lib.log",
+      "sha256": "aac047f4f64f451ff03fff30348d057463fa3d6666c7de6ea1d3a1713fb0b0fa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/permission-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/permission-lib.log",
+      "sha256": "54cd21b9fd4678e165527a6d549c790421b57d1a1c9834f641be1e55242f9efc"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/runtime-lib.exit",
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/runtime-lib.log",
+      "sha256": "29f24666ad6ebb1b490600ed0604b92fed1d75dd82f2251ba0e2e9c8c746f8eb"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/source-current.patch",
+      "sha256": "d0084250baa85554d722f9ebbe8ccd6c727bd5f580325e9b3caa226e8fab9f46"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/source.patch",
+      "sha256": "d0084250baa85554d722f9ebbe8ccd6c727bd5f580325e9b3caa226e8fab9f46"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/source.patch.sha256",
+      "sha256": "290636fc2005869a3095e43e4b2be7a26b271326d294f5b635fecbf31f99ee52"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/tasks-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r2/tasks-lib.log",
+      "sha256": "329fc13d82dd6d9d0b0cf1b782da31a1fbffecb8058ec6e52b32045af07b22f8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/base-head.txt",
+      "sha256": "8f6811def5f7002de8c91a99cd6bde709fd95948dff49d46c1c756910ef6b1a1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/changed-clippy.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/changed-clippy.log",
+      "sha256": "5db1eb030b47431c03a857283f5e17744c14301a00e43a2d58960316536ed1d8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/changed-docs.exit",
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/changed-docs.log",
+      "sha256": "79e82a3c68f1068d8592c7896a5eb3e82482d00597759c5dd13955a925aadff1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/fmt.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/orchestrator-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/orchestrator-lib.log",
+      "sha256": "6a89a3432eb954bb9ffbf0c326aba10501a21ae29e468d1b3e75b953796b01bb"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/runtime-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/runtime-lib.log",
+      "sha256": "0bfab03cb4141f76e014d028a538887648a3c05cbcd1233f624a27b24c2c53c8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/source-current.patch",
+      "sha256": "e5b3f8daf1afcb0643181b4714d091a3d9b33e75f376fbdd5dfdc3eacf958e0a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/source.patch",
+      "sha256": "e5b3f8daf1afcb0643181b4714d091a3d9b33e75f376fbdd5dfdc3eacf958e0a"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r3/source.patch.sha256",
+      "sha256": "1ba6040de44a61031143910116e29df6b726609fbf3a3308c41a870de89e299f"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r4/base-head.txt",
+      "sha256": "8f6811def5f7002de8c91a99cd6bde709fd95948dff49d46c1c756910ef6b1a1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r4/fmt.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r4/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r4/permission-lib.exit",
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r4/permission-lib.log",
+      "sha256": "f6be4ddd9681a9f1d33b03028e93e71d85851fb14fb5b4d650cd1ac89ea14375"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r4/source-current.patch",
+      "sha256": "9a8f4c525bc8186f09fe87c5d16d5c3db573aae8a28af49d5ade75e2f6c0947d"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r4/source.patch",
+      "sha256": "9a8f4c525bc8186f09fe87c5d16d5c3db573aae8a28af49d5ade75e2f6c0947d"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r4/source.patch.sha256",
+      "sha256": "e1728f4189540374b6c8ab100563791dba1dafcd06eee347c28d76b724799077"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r5/agent-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r5/agent-lib.log",
+      "sha256": "75c1831567846ebc2c2ee1fd2ebc16273236a261439600b4d4d2dc8f0d6b549b"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r5/base-head.txt",
+      "sha256": "8f6811def5f7002de8c91a99cd6bde709fd95948dff49d46c1c756910ef6b1a1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r5/fmt.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r5/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r5/permission-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r5/permission-lib.log",
+      "sha256": "3a7a77d71fe9d927f90b56b01fe7775b9b633bb3eeaa4281bf7d681b15b8d898"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r5/source-current.patch",
+      "sha256": "003a26f77af1f79c8af2dbce79bed0f3b5c28af6810c4e7ec93433668d9d733b"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r5/source.patch",
+      "sha256": "ec2dd787d6350014206cd60999b549fa0c2d4d1cd3b28eb75bcab3c2c2efe3ae"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r5/source.patch.sha256",
+      "sha256": "558d490821b4886a0b0b6c18fe59e717ebcc43b771776b267821c70b80103e30"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r5/tasks-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r5/tasks-lib.log",
+      "sha256": "5cfeaca4422a93bcda954c99f521003d356095a3756868ddacf28fb878e79962"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/agent-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/agent-lib.log",
+      "sha256": "f24c079f38459de6136d944e46393fef9747970bcd3488d21c0c64ae0162bf1e"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/base-head.txt",
+      "sha256": "8f6811def5f7002de8c91a99cd6bde709fd95948dff49d46c1c756910ef6b1a1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/cancel-inflight.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/cancel-inflight.log",
+      "sha256": "ba319fdd8496059370f52558feffcd5ce67b40751261dce2b37a581f428debf6"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/fmt.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/orchestrator-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/orchestrator-lib.log",
+      "sha256": "871e8c5ffa3e5fe5d297d01d4ff8d395d50719b88abf7fac61ca851e5abc5d8b"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/permission-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/permission-lib.log",
+      "sha256": "5e168d4717a3476d13553d9d8cb8a41b11a50b5b1a7b21c30edd7e0ba506884e"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/runtime-lib.exit",
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/runtime-lib.log",
+      "sha256": "66a98efc4efb76561bacb413c817ae12a1fc401dacff19c6335b2b9da5a0d911"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/source-current.patch",
+      "sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/source.patch",
+      "sha256": "003a26f77af1f79c8af2dbce79bed0f3b5c28af6810c4e7ec93433668d9d733b"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/source.patch.sha256",
+      "sha256": "72737d50044016cf6bc1f7d89ad6a7d2de3f84fea48e51e8c0eeac28589d7bb7"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/tasks-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r6/tasks-lib.log",
+      "sha256": "6761fb7cb6d2257a719f4e567c88b9251ebc8f33736f4a3ec97a4a4c7283c5e0"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r7/base-head.txt",
+      "sha256": "8f6811def5f7002de8c91a99cd6bde709fd95948dff49d46c1c756910ef6b1a1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r7/changed-clippy.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r7/changed-clippy.log",
+      "sha256": "d98ae84542e9b2519ee47fb5cf869ebf8ff4245c2e07ad6b5a47c598b4403429"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r7/fmt.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r7/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r7/hooks-lib.exit",
+      "sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r7/hooks-lib.log",
+      "sha256": "c38e9cb2aa542b00fb4eb2feb37290da52653f396195006dbd4e5ac2c1c75606"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r7/runtime-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r7/runtime-lib.log",
+      "sha256": "df2e62c1e70f0fee3f855881fc6a5577707f175f227f157d5e4eee5187139e5f"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r7/source-current.patch",
+      "sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r7/source.patch",
+      "sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r7/source.patch.sha256",
+      "sha256": "de4e4d757ac93ccca33a9babb9dfa283144c1709c25e70b8fb1e3ac3dbf5e6c8"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r8/base-head.txt",
+      "sha256": "8f6811def5f7002de8c91a99cd6bde709fd95948dff49d46c1c756910ef6b1a1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r8/changed-docs.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r8/changed-docs.log",
+      "sha256": "f8fa131e8e90256a66892888cbd5d99f0bff5051eadcf4b43a776618fd700e93"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r8/fmt.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r8/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r8/hooks-focused.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r8/hooks-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r8/source-current.patch",
+      "sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r8/source.patch",
+      "sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r8/source.patch.sha256",
+      "sha256": "ad04616d84f1beb06b95aca1fffe0eeffbf0da16701949aaf09c9fc72a58ba21"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r8/status.txt",
+      "sha256": "2700165975f68815c97d605c56eca8e90d497ade1264b6282401d13fee99ac27"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r9/base-head.txt",
+      "sha256": "8f6811def5f7002de8c91a99cd6bde709fd95948dff49d46c1c756910ef6b1a1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r9/candidate-head.txt",
+      "sha256": "bd9f1db83b8b1a19c4ca2d8e4814c93d7047a89b3c629277e67c18540330c17b"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r9/changed-clippy.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r9/changed-clippy.log",
+      "sha256": "3f14ef83a9f81e1dea365d101247ba538a89bd74fd57865cbc427ad803c29978"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r9/fmt.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r9/fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r9/runtime-lib.exit",
+      "sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r9/runtime-lib.log",
+      "sha256": "13e32b05e817858a45b3cc230ce151a0accbbe55de5a12fcb7161e8462ef2811"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r9/source-current.patch",
+      "sha256": "8470e956a493f59b7bbbd932af78b849c612822f3d6da342abd8e89006a2e51b"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r9/source.patch",
+      "sha256": "8470e956a493f59b7bbbd932af78b849c612822f3d6da342abd8e89006a2e51b"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r9/source.patch.sha256",
+      "sha256": "5d0562a3b900a79fdaa446e93c19a86840a71a43cefc0536edb18aa3dad4e55e"
+    },
+    {
+      "path": "evidence/final-ledger-r376/harness-repair-gates-r9/status.txt",
+      "sha256": "2700165975f68815c97d605c56eca8e90d497ade1264b6282401d13fee99ac27"
+    },
+    {
+      "path": "evidence/final-ledger-r376/native-ltr-alias-probe-run-once/receipt.json",
+      "sha256": "5cae055e5748dce92392b10c9899550526b1c4629078ced8ff61638858fb94c1"
+    },
+    {
+      "path": "evidence/final-ledger-r376/native-ltr-alias-probe-approved-endpoint-run/initialize-ack.raw.jsonl",
+      "sha256": "11ca8ebcebb22821d5ff0fbd13789634ad2da591c3770dc9b9d2ba24679ce832"
+    },
+    {
+      "path": "evidence/final-ledger-r376/native-ltr-alias-probe-approved-endpoint-run/initialize-frame.raw.jsonl",
+      "sha256": "58cd6145b7a3982a6b57be0a95b371b5b1d5384ddd5712d49fd4dd2ce0117bcc"
+    },
+    {
+      "path": "evidence/final-ledger-r376/native-ltr-alias-probe-approved-endpoint-run/project-settings.json",
+      "sha256": "7156c0993f301ea856534f573ae62fe17c46428f3b085604cf930181aca8246e"
+    },
+    {
+      "path": "evidence/final-ledger-r376/native-ltr-alias-probe-approved-endpoint-run/provider-request.raw.json",
+      "sha256": "092e2b0d7d52ea47eda63d2349e19ec48bb08f85456c02faf2f0369a91bb626d"
+    },
+    {
+      "path": "evidence/final-ledger-r376/native-ltr-alias-probe-approved-endpoint-run/provider-response.raw.sse",
+      "sha256": "1884e8116accdeb47f5290aa9eb4016c8522f30d388a89b0bec61b09edabcdec"
+    },
+    {
+      "path": "evidence/final-ledger-r376/native-ltr-alias-probe-approved-endpoint-run/receipt.json",
+      "sha256": "a85c269e7cb21c8df4abed2884d72c0174a727ebc32a5f67b8ecc680ca880514"
+    },
+    {
+      "path": "evidence/final-ledger-r376/native-ltr-alias-probe-approved-endpoint-run/session.raw.jsonl",
+      "sha256": "2f646b2a5d59f9e75d4353cd5527654fe9cdeb226667573582384c34a18801ca"
+    },
+    {
+      "path": "evidence/final-ledger-r376/native-ltr-alias-probe-approved-endpoint-run/stderr.raw",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "evidence/final-ledger-r376/native-ltr-alias-probe-approved-endpoint-run/stdout.raw",
+      "sha256": "10f67431380d86ca0b758ab408c2b752eb9d4296bc984d6ca379bc7dbfb7ac40"
+    },
+    {
+      "path": "evidence/final-ledger-r376/native-ltr-alias-probe-approved-endpoint-run/user-frame.raw.jsonl",
+      "sha256": "4792553db93e2afee0dab81a501a4157347a2a2ac7f832a8f1334b266cd3c6fa"
+    }
+  ]
+}

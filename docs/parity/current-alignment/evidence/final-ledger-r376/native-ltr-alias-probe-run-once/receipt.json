@@ -1,0 +1,194 @@
+{
+  "schema": "native-2.1.295-ltr-alias-probe-v1",
+  "status": "capture_invalid",
+  "native_process_started": false,
+  "native_sha256_expected": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "fixed_inputs": {
+    "model": "claude-sonnet-4-5",
+    "session_id": "00000000-0000-4000-8000-000000002950",
+    "prompt": "List the available tool names. Do not call tools. Reply exactly OK.",
+    "initialize_request_id": "alias-glob-initialize-1",
+    "settings_deny": [
+      "lf_a*b",
+      "cr_a*b",
+      "ls_a*b",
+      "ps_a*b",
+      "suffix_a*b",
+      "pos_a*b"
+    ],
+    "tool_aliases": {
+      "lf_a\nb": "Read",
+      "cr_a\rb": "Bash",
+      "ls_a\u2028b": "Glob",
+      "ps_a\u2029b": "Grep",
+      "suffix_ab\n": "Write",
+      "pos_ab": "Edit"
+    },
+    "tools_argument": "Read,Bash,Glob,Grep,Write,Edit,NotebookEdit",
+    "tool_search": "disabled"
+  },
+  "native_process_count": 0,
+  "provider_request_count": 0,
+  "checks": {
+    "pinned_native_sha256": true,
+    "one_native_process": false,
+    "initialize_ack_success": false,
+    "one_accepted_loopback_messages_post": false,
+    "request_is_fixed_model_streaming": false,
+    "positive_edit_deny_observed": true,
+    "unaliased_notebookedit_presence_control": false,
+    "fixed_sse_reply_sent": false,
+    "normal_exit_without_forced_cleanup": false,
+    "one_session_file_or_none": true,
+    "within_60_seconds": false
+  },
+  "interpretation": "capture invalid; do not infer alias/glob semantics",
+  "failures": [
+    "PermissionError: [Errno 1] Operation not permitted"
+  ],
+  "native_binding": {
+    "path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+  },
+  "loopback_requests": [],
+  "observed_tool_names": [],
+  "alias_observations": [
+    {
+      "case": "LF-internal",
+      "alias_source_utf16_units": [
+        108,
+        102,
+        95,
+        97,
+        10,
+        98
+      ],
+      "canonical_tool": "Read",
+      "deny_pattern": "lf_a*b",
+      "canonical_tool_present_in_provider_catalog": false
+    },
+    {
+      "case": "CR-internal",
+      "alias_source_utf16_units": [
+        99,
+        114,
+        95,
+        97,
+        13,
+        98
+      ],
+      "canonical_tool": "Bash",
+      "deny_pattern": "cr_a*b",
+      "canonical_tool_present_in_provider_catalog": false
+    },
+    {
+      "case": "LS-internal",
+      "alias_source_utf16_units": [
+        108,
+        115,
+        95,
+        97,
+        8232,
+        98
+      ],
+      "canonical_tool": "Glob",
+      "deny_pattern": "ls_a*b",
+      "canonical_tool_present_in_provider_catalog": false
+    },
+    {
+      "case": "PS-internal",
+      "alias_source_utf16_units": [
+        112,
+        115,
+        95,
+        97,
+        8233,
+        98
+      ],
+      "canonical_tool": "Grep",
+      "deny_pattern": "ps_a*b",
+      "canonical_tool_present_in_provider_catalog": false
+    },
+    {
+      "case": "terminal-newline control",
+      "alias_source_utf16_units": [
+        115,
+        117,
+        102,
+        102,
+        105,
+        120,
+        95,
+        97,
+        98,
+        10
+      ],
+      "canonical_tool": "Write",
+      "deny_pattern": "suffix_a*b",
+      "canonical_tool_present_in_provider_catalog": false
+    },
+    {
+      "case": "plain-positive control",
+      "alias_source_utf16_units": [
+        112,
+        111,
+        115,
+        95,
+        97,
+        98
+      ],
+      "canonical_tool": "Edit",
+      "deny_pattern": "pos_a*b",
+      "canonical_tool_present_in_provider_catalog": false
+    }
+  ],
+  "provider_request": {
+    "path": null,
+    "bytes": 0,
+    "sha256": null,
+    "model": null,
+    "stream": null
+  },
+  "provider_response": {
+    "path": null,
+    "bytes": 0,
+    "sha256": null
+  },
+  "stdout": {
+    "path": "stdout.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "stderr": {
+    "path": "stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "initialize_frame": {
+    "path": "initialize-frame.raw.jsonl",
+    "sha256": "58cd6145b7a3982a6b57be0a95b371b5b1d5384ddd5712d49fd4dd2ce0117bcc"
+  },
+  "initialize_ack": {
+    "path": null,
+    "sha256": null
+  },
+  "user_frame": {
+    "path": "user-frame.raw.jsonl",
+    "sha256": "4792553db93e2afee0dab81a501a4157347a2a2ac7f832a8f1334b266cd3c6fa"
+  },
+  "session": {
+    "present": false,
+    "path": null,
+    "bytes": 0,
+    "sha256": null
+  },
+  "native_exit_code": null,
+  "forced_cleanup": null,
+  "elapsed_seconds": null,
+  "temp_isolation": {
+    "root": "/private/tmp/native-ltr-alias-txvw4ngj",
+    "removed": true
+  },
+  "network_boundary": "The only configured provider endpoint is an ephemeral 127.0.0.1 Messages stub; environment is rebuilt without inherited credentials/proxies, and telemetry/nonessential traffic is disabled. This reuses the checked-in cli-cancel-295 isolation posture; it is not an OS-level egress sandbox.",
+  "native_source_boundary": "The public initialize toolAliases field is source-confirmed. This run observes only provider tool-name presence for the fixed request; it does not establish complete Native raw request/session byte parity or bind unavailable Native LTr regex flags beyond these observed cases."
+}

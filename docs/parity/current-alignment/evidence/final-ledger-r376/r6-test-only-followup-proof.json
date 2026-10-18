@@ -1,0 +1,25 @@
+{
+  "schema": "r376-test-only-followup-proof-v1",
+  "status": "verified",
+  "path": "crates/runtime/src/headless/run/control.rs",
+  "previous_source_patch_sha256": "003a26f77af1f79c8af2dbce79bed0f3b5c28af6810c4e7ec93433668d9d733b",
+  "current_source_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+  "previous_control_git_blob": "01bf557387fcfd3e9bad2dc6d35edbc33f44e5d0",
+  "current_control_git_blob": "5dcb61b86c05fc905315893913bdf32b881e619a",
+  "production_prefix_sha256": "6b1f24d7fa043042d15cd2553e29c25ac07e4e365087f131c826534aee69b916",
+  "all_other_source_diff_sections_identical": true,
+  "changes": [
+    "cfg(test) helper missing import",
+    "cfg(test) unused parameter name",
+    "cfg(test) argument-count lint annotation"
+  ],
+  "reused_phases": [
+    "permission-lib",
+    "agent-lib",
+    "tasks-lib",
+    "cancel-inflight",
+    "orchestrator-lib"
+  ],
+  "test_only_delta_patch": "r6-test-only-followup.patch",
+  "test_only_delta_patch_sha256": "4c3cd4d6b00a7b671a6f29c4185a808019ce028910739347d84374aa2318d88e"
+}

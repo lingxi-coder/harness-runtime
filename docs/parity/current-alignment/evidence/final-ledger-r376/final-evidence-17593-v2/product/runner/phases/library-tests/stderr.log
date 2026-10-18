@@ -1,0 +1,167 @@
+   Compiling json-projection v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling rooted-fs v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling device-api v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling sandbox-runtime v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling syntect v5.3.0-harness.1 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling mbedtls-sys v3.6.2 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling libssh2-sys v0.3.1 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling libgit2-sys v0.18.5+1.9.4 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling config-requirements v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/packages/config-requirements)
+   Compiling git2 v0.21.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling mcp-wire v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling jsonrpc v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling core v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling telemetry v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling secret v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling lsp v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling visualization v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling http-client v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling task-store v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling session v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling workflow v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling outputstyles v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling local-app v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling platform-macos-computer-control v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling audio-runtime v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling msgqueue v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling llm-runtime v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling permission v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling cost v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling skill v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling sandbox v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling hooks v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling migrations v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling platform-common v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling provider-config v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling mcp v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-api v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling platform-posix v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling platform-posix-minimal v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling sidequery v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-file v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-shell v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-worktree v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-agent v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling memory v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling fusion v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling agent v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-web v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-ui v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-mcp v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-plan v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-shell-mobile v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-lsp v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-android-use v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-git-mobile v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-computer-use v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-mobile v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-meta v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tasks v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-ios-use v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/tools/ios-use)
+   Compiling cron v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling coordinator v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling command-api v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-cron v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-task v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-workflow v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling plugin v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling compaction v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-skill v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling orchestrator v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling client v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling audio-provider v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/audio-provider)
+   Compiling bridge v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling configuration-admin v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tui-core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui-core)
+   Compiling tui v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui)
+   Compiling harness-runtime v0.9.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling cli v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host)
+   Compiling ios-framework v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/ios/ffi)
+   Compiling android-aar v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/android/ffi)
+   Compiling bridge-server v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server)
+    Finished `test` profile [unoptimized] target(s) in 3m 05s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/android_aar-a70e5fbef42a3546)
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/audio_provider-b75d3cbd4e807bbb)
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/bridge_server-0b6c785742834e24)
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli-5389060e2a9c6bc8)
+2026-10-18T09:11:19.723417Z  INFO tool_cron::wakeup: [loop] keepalive armed (model did not reschedule): 1200s fallback
+2026-10-18T09:11:19.723453Z  INFO telemetry: event="tengu_loop_keepalive_fired" clamped_delay_seconds=1200 prompt_is_sentinel=false
+2026-10-18T09:11:19.723476Z  INFO tool_cron::wakeup: [loop] keepalive budget exhausted (model declined to reschedule twice) — ending loop
+2026-10-18T09:11:19.723496Z  INFO telemetry: event="tengu_loop_ended" reason=model_stopped via_keepalive=true
+2026-10-18T09:11:19.723758Z  INFO tool_cron::wakeup: [loop] keepalive armed (model did not reschedule): 1200s fallback
+2026-10-18T09:11:19.723770Z  INFO telemetry: event="tengu_loop_keepalive_fired" clamped_delay_seconds=1200 prompt_is_sentinel=false
+2026-10-18T09:11:19.723787Z  INFO tool_cron::wakeup: [loop/dynamic] cancelled 0 pending loop wakeup(s) on user abort (tick in flight)
+2026-10-18T09:11:19.723794Z  INFO telemetry: event="tengu_loop_ended" reason=user_abort
+2026-10-18T09:11:19.958899Z  INFO orchestrator::conversation::drivers_impl: event="tengu_orchestrator_turn_streaming_started" prompt_len=13
+2026-10-18T09:11:19.973215Z  INFO orchestrator::conversation::drivers_impl: event="tengu_orchestrator_turn_streaming_completed" turn_count=1
+2026-10-18T09:11:20.035957Z  INFO orchestrator::conversation::drivers_impl: event="tengu_orchestrator_turn_streaming_started" prompt_len=13
+2026-10-18T09:11:20.050220Z  INFO orchestrator::conversation::drivers_impl: event="tengu_orchestrator_turn_streaming_completed" turn_count=1
+2026-10-18T09:11:20.052198Z  INFO orchestrator::conversation::drivers_impl: event="tengu_orchestrator_turn_streaming_started" prompt_len=34
+2026-10-18T09:11:20.070442Z  INFO orchestrator::conversation::drivers_impl: event="tengu_orchestrator_turn_streaming_completed" turn_count=1
+2026-10-18T09:11:20.659758Z  WARN mcp::json_config: skipping malformed global config (user-scope mcpServers) error=invalid .mcp.json: EOF while parsing a value at line 1 column 0 path=/dev/null
+2026-10-18T09:11:20.659801Z  WARN mcp::config_diagnostics: MCP config skipped for /dev/null (scope=project): not a regular file or exceeds 2097152 byte limit path=/dev/null scope="project"
+2026-10-18T09:11:20.659813Z  WARN telemetry: event="mcp_config_parse" reason="mcp_config_shape_gate"
+2026-10-18T09:11:20.659847Z  WARN mcp::json_config: skipping malformed global config (local-scope mcpServers) error=invalid .mcp.json: EOF while parsing a value at line 1 column 0 path=/dev/null
+2026-10-18T09:11:20.660506Z  INFO harness_runtime::desktop::assembly: permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0) rules=0 mode=Auto
+2026-10-18T09:11:21.183197Z  WARN mcp::json_config: skipping malformed global config (user-scope mcpServers) error=invalid .mcp.json: EOF while parsing a value at line 1 column 0 path=/dev/null
+2026-10-18T09:11:21.183247Z  WARN mcp::config_diagnostics: MCP config skipped for /dev/null (scope=project): not a regular file or exceeds 2097152 byte limit path=/dev/null scope="project"
+2026-10-18T09:11:21.183261Z  WARN telemetry: event="mcp_config_parse" reason="mcp_config_shape_gate"
+2026-10-18T09:11:21.183306Z  WARN mcp::json_config: skipping malformed global config (local-scope mcpServers) error=invalid .mcp.json: EOF while parsing a value at line 1 column 0 path=/dev/null
+2026-10-18T09:11:21.185658Z  INFO harness_runtime::desktop::assembly: permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0) rules=0 mode=Auto
+2026-10-18T09:11:22.047050Z  WARN harness_runtime::desktop::credentials: provider-config assembly warning=routing.defaultProtocols["deepseek"]: format is not authorized on this account; skipped
+2026-10-18T09:11:22.598119Z  INFO harness_runtime::desktop::assembly: permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0) rules=0 mode=Auto
+2026-10-18T09:11:24.404822Z  INFO telemetry: event="tengu_mcp_server_connection_succeeded" connection_duration_ms=1806 transport_type="http" scope="user" is_plugin=false negotiation_mode="auto" protocol_era="modern" negotiated_protocol_version="2026-07-28"
+2026-10-18T09:11:25.348793Z  INFO telemetry: event="tengu_mcp_tools_listed" transport_type="http" list_duration_ms=463 tool_count=2 always_load_count=0 discovery_source="live"
+2026-10-18T09:11:25.357045Z DEBUG lingxi_harness_runtime::desktop::mcp: Received MCP list_changed notification, refreshing catalog server=context7 catalog=Tools
+2026-10-18T09:11:25.617765Z  WARN harness_runtime::desktop::credentials: provider-config assembly warning=routing.defaultProtocols["deepseek"]: format is not authorized on this account; skipped
+2026-10-18T09:11:25.736036Z  INFO telemetry: event="tengu_mcp_listen_reopen" mcp_server_key_hash="0472116c93c0" outcome="opened_from_zero" attempts=0 trigger="connect"
+2026-10-18T09:11:25.931990Z  INFO harness_runtime::desktop::assembly: permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0) rules=0 mode=Auto
+2026-10-18T09:11:26.204532Z  INFO mcp::client: event="tengu_mcp_list_paginated" method="tools/list" itemCount=2 outcome="complete" source="aggregate"
+2026-10-18T09:11:27.199210Z  INFO telemetry: event="tengu_mcp_server_connection_succeeded" connection_duration_ms=1266 transport_type="http" scope="user" is_plugin=false negotiation_mode="auto" protocol_era="modern" negotiated_protocol_version="2026-07-28"
+2026-10-18T09:11:28.543105Z  INFO telemetry: event="tengu_mcp_tools_listed" transport_type="http" list_duration_ms=869 tool_count=2 always_load_count=0 discovery_source="live"
+2026-10-18T09:11:28.552001Z DEBUG lingxi_harness_runtime::desktop::mcp: Received MCP list_changed notification, refreshing catalog server=context7 catalog=Tools
+2026-10-18T09:11:29.336483Z  WARN harness_runtime::desktop::credentials: provider-config assembly warning=routing.defaultProtocols["deepseek"]: format is not authorized on this account; skipped
+2026-10-18T09:11:29.648682Z  INFO harness_runtime::desktop::assembly: permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0) rules=0 mode=Auto
+2026-10-18T09:11:30.517265Z  INFO telemetry: event="tengu_mcp_server_connection_succeeded" connection_duration_ms=868 transport_type="http" scope="user" is_plugin=false negotiation_mode="auto" protocol_era="modern" negotiated_protocol_version="2026-07-28"
+2026-10-18T09:11:31.847808Z  INFO telemetry: event="tengu_mcp_tools_listed" transport_type="http" list_duration_ms=862 tool_count=2 always_load_count=0 discovery_source="live"
+2026-10-18T09:11:31.864304Z DEBUG lingxi_harness_runtime::desktop::mcp: Received MCP list_changed notification, refreshing catalog server=context7 catalog=Tools
+2026-10-18T09:11:32.662099Z  WARN harness_runtime::desktop::credentials: provider-config assembly warning=routing.defaultProtocols["deepseek"]: format is not authorized on this account; skipped
+2026-10-18T09:11:32.962090Z  INFO harness_runtime::desktop::assembly: permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0) rules=0 mode=Auto
+2026-10-18T09:11:35.711487Z  INFO telemetry: event="tengu_mcp_server_connection_succeeded" connection_duration_ms=2748 transport_type="http" scope="user" is_plugin=false negotiation_mode="auto" protocol_era="modern" negotiated_protocol_version="2026-07-28"
+2026-10-18T09:11:36.463579Z  INFO telemetry: event="tengu_mcp_tools_listed" transport_type="http" list_duration_ms=266 tool_count=2 always_load_count=0 discovery_source="live"
+2026-10-18T09:11:36.470891Z DEBUG lingxi_harness_runtime::desktop::mcp: Received MCP list_changed notification, refreshing catalog server=context7 catalog=Tools
+2026-10-18T09:11:37.246732Z  WARN harness_runtime::desktop::credentials: provider-config assembly warning=routing.defaultProtocols["deepseek"]: format is not authorized on this account; skipped
+2026-10-18T09:11:37.568652Z  INFO harness_runtime::desktop::assembly: permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0) rules=0 mode=Auto
+2026-10-18T09:11:38.500937Z  INFO telemetry: event="tengu_mcp_server_connection_succeeded" connection_duration_ms=931 transport_type="http" scope="user" is_plugin=false negotiation_mode="auto" protocol_era="modern" negotiated_protocol_version="2026-07-28"
+2026-10-18T09:11:39.270964Z  INFO telemetry: event="tengu_mcp_tools_listed" transport_type="http" list_duration_ms=275 tool_count=2 always_load_count=0 discovery_source="live"
+2026-10-18T09:11:39.284330Z DEBUG lingxi_harness_runtime::desktop::mcp: Received MCP list_changed notification, refreshing catalog server=context7 catalog=Tools
+2026-10-18T09:11:40.075471Z  WARN harness_runtime::desktop::credentials: provider-config assembly warning=routing.defaultProtocols["deepseek"]: format is not authorized on this account; skipped
+2026-10-18T09:11:40.379846Z  INFO harness_runtime::desktop::assembly: permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0) rules=0 mode=Auto
+2026-10-18T09:11:41.317977Z  INFO telemetry: event="tengu_mcp_server_connection_succeeded" connection_duration_ms=937 transport_type="http" scope="user" is_plugin=false negotiation_mode="auto" protocol_era="modern" negotiated_protocol_version="2026-07-28"
+2026-10-18T09:11:42.295803Z  INFO telemetry: event="tengu_mcp_tools_listed" transport_type="http" list_duration_ms=479 tool_count=2 always_load_count=0 discovery_source="live"
+2026-10-18T09:11:42.313286Z DEBUG lingxi_harness_runtime::desktop::mcp: Received MCP list_changed notification, refreshing catalog server=context7 catalog=Tools
+2026-10-18T09:11:43.099681Z  WARN harness_runtime::desktop::credentials: provider-config assembly warning=routing.defaultProtocols["deepseek"]: format is not authorized on this account; skipped
+2026-10-18T09:11:43.402563Z  INFO harness_runtime::desktop::assembly: permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0) rules=0 mode=Auto
+2026-10-18T09:11:44.274859Z  INFO telemetry: event="tengu_mcp_server_connection_succeeded" connection_duration_ms=871 transport_type="http" scope="user" is_plugin=false negotiation_mode="auto" protocol_era="modern" negotiated_protocol_version="2026-07-28"
+2026-10-18T09:11:45.398335Z  INFO telemetry: event="tengu_mcp_tools_listed" transport_type="http" list_duration_ms=254 tool_count=2 always_load_count=0 discovery_source="live"
+2026-10-18T09:11:45.408840Z DEBUG lingxi_harness_runtime::desktop::mcp: Received MCP list_changed notification, refreshing catalog server=context7 catalog=Tools
+2026-10-18T09:11:46.200981Z  WARN harness_runtime::desktop::credentials: provider-config assembly warning=routing.defaultProtocols["deepseek"]: format is not authorized on this account; skipped
+2026-10-18T09:11:46.517696Z  INFO harness_runtime::desktop::assembly: permission enforcement enabled (default on; disable with LINGXI_ENFORCE_PERMISSIONS=0) rules=0 mode=Auto
+2026-10-18T09:11:47.595198Z  INFO telemetry: event="tengu_mcp_server_connection_succeeded" connection_duration_ms=1076 transport_type="http" scope="user" is_plugin=false negotiation_mode="auto" protocol_era="modern" negotiated_protocol_version="2026-07-28"
+2026-10-18T09:11:48.324471Z  INFO telemetry: event="tengu_mcp_tools_listed" transport_type="http" list_duration_ms=258 tool_count=2 always_load_count=0 discovery_source="live"
+2026-10-18T09:11:48.340424Z DEBUG lingxi_harness_runtime::desktop::mcp: Received MCP list_changed notification, refreshing catalog server=context7 catalog=Tools
+2026-10-18T09:11:49.035401Z  WARN cli::shell_handoff: shell adoption acknowledgement unavailable; retaining worker ownership error=injected full filesystem
+2026-10-18T09:11:49.138615Z  WARN cli::shell_handoff: shell adoption acknowledgement unavailable; retaining worker ownership error=injected full filesystem
+2026-10-18T09:11:49.308563Z  WARN cli::shell_handoff: recovering prepared shells after source process exited before handoff decision short="feed1234" task_ids=["bshell001"]
+2026-10-18T09:11:49.608814Z  WARN cli::shell_handoff: recovering prepared shells after source process exited before handoff decision short="feed1234" task_ids=["bshell001"]
+2026-10-18T09:11:51.932097Z  INFO permission::prompting_gate: event="tengu_orchestrator_permission_prompted" tool_name=Bash default_allow=false
+2026-10-18T09:11:53.937247Z  INFO permission::prompting_gate: event="tengu_orchestrator_permission_prompted" tool_name=Bash default_allow=false
+2026-10-18T09:11:53.937484Z  INFO permission::prompting_gate: event="tengu_orchestrator_permission_answered" tool_name=Bash allowed=true attempts=1
+2026-10-18T09:11:53.938227Z  INFO permission::prompting_gate: event="tengu_orchestrator_permission_prompted" tool_name=Bash default_allow=false
+2026-10-18T09:11:53.938516Z  INFO permission::prompting_gate: event="tengu_orchestrator_permission_answered" tool_name=Bash allowed=false attempts=1
+2026-10-18T09:11:53.939142Z  INFO permission::prompting_gate: event="tengu_orchestrator_permission_prompted" tool_name=Bash default_allow=false
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/config_requirements-5d5ef0370d470538)
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/ios_framework-96d38618f76d211c)
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tool_ios_use-2500ee4cb3264801)
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tui-a9718b29f8718132)
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tui_core-c96b676aa3b2c247)

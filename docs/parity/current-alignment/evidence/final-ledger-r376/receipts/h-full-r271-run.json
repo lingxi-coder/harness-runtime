@@ -1,0 +1,544 @@
+{
+  "actual_test_summary": {
+    "failed": 0,
+    "ignored": 7,
+    "passed": 20471
+  },
+  "doctest_target_coverage": 73,
+  "ended_at_unix_ns": 1792217130505751000,
+  "environment": {
+    "CARGO_BUILD_JOBS": "1",
+    "CARGO_ENCODED_RUSTFLAGS": null,
+    "CARGO_HOME": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/cargo-home",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_NET_OFFLINE": "true",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_TARGET_DIR": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target",
+    "LINGXI_MOD_BUN_EXECUTABLE": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/bun-1.4.3/bun",
+    "PATH": "/Applications/ChatGPT.app/Contents/Resources/codex-cli/codex-path:/Users/luolingfeng/.codex/tmp/arg0-macos/codex-arg0xLtPns:/Users/luolingfeng/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:/Users/luolingfeng/.grok/bin:/Users/luolingfeng/go/bin:/opt/homebrew/share/google-cloud-sdk/bin:/Users/luolingfeng/.bun/bin:/Users/luolingfeng/.bun/bin:/Users/luolingfeng/.bun/bin:/opt/homebrew/share/dotnet:/usr/local/share/dotnet:/Users/luolingfeng/.antigravity/antigravity/bin:/Users/luolingfeng/Library/pnpm:/Users/luolingfeng/.local/bin:/opt/homebrew/opt/libpq/bin:/opt/anaconda3/bin:/opt/anaconda3/condabin:/Users/luolingfeng/Google/google-cloud-sdk/bin:/Users/luolingfeng/.bun/bin:/Users/luolingfeng/.npm-global/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/Users/luolingfeng/.nvm/versions/node/v22.17.0/bin:/opt/homebrew/lib/ruby/gems/4.0.0/bin:/opt/homebrew/opt/ruby/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/Library/Apple/usr/bin:/usr/local/MacGPG2/bin:/usr/local/share/dotnet:~/.dotnet/tools:/usr/local/go/bin:/Users/luolingfeng/.cargo/bin:/Users/luolingfeng/Library/Android/sdk/platform-tools:/Users/luolingfeng/Library/Android/sdk/tools:/Users/luolingfeng/Library/Android/sdk/tools/bin:/Users/luolingfeng/Library/Android/sdk/emulator:/Users/luolingfeng/Library/Android/sdk/cmake/3.30.5/bin:/Users/luolingfeng/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/Applications/ChatGPT.app/Contents/Resources:/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS",
+    "RUSTDOCFLAGS": null,
+    "RUSTFLAGS": null,
+    "RUSTUP_TOOLCHAIN": "1.94.0",
+    "RUST_MIN_STACK": "16777216",
+    "actual_child_environment_sha256": "00cf5b4b29e4975ac1f282a25096e0a48f9a4e1670861626592a4235307b2e80",
+    "cargo_path": "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo",
+    "tool_versions": {
+      "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "rustdoc": "rustdoc 1.94.0 (4a4ef493e 2026-03-02)"
+    }
+  },
+  "fingerprint": "35f0e448b6bc4fa3848d0d83944f64b9c6c7a1aeb83b675a9b16e9894ca65770",
+  "git": {
+    "cargo_lock_sha256": "2f9456e8b1d289bfc8dab0005a5ba9a865b7ccf044a16221a9ec214a9fec5409",
+    "head": "dc6ce1217143b693d97ab6278ff66568beea20d3",
+    "source_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tree": "fc3674d85ff66e1d88c903d842a2dae3175ab0d5"
+  },
+  "historical_count_used_as_acceptance": false,
+  "metadata": {
+    "doctest_targets": 73,
+    "identity_sha256": "f88f07c1968c05057069e54dcc6e9f0936451ee90c319291948b1ce1da985d02",
+    "mtime_ns": 1792215087197833376,
+    "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/r51-270/h-metadata.json",
+    "sha256": "2deed6cf3bfcbdfa26bd9e023b1dd63233354ebc340a5fbb40a2497277613f31",
+    "target_directory": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target",
+    "test_targets": 521,
+    "workspace_default_members": 67,
+    "workspace_members": 75,
+    "workspace_root": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime"
+  },
+  "min_free_bytes": 3221225472,
+  "phases": {
+    "binary-tests": {
+      "artifact_count": 4,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 2
+      }
+    },
+    "doctests": {
+      "artifact_count": 0,
+      "doc_test_count": 73,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 4,
+        "passed": 4
+      }
+    },
+    "integration-00": {
+      "artifact_count": 2,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 5
+      }
+    },
+    "integration-01": {
+      "artifact_count": 3,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 12
+      }
+    },
+    "integration-02": {
+      "artifact_count": 3,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 12
+      }
+    },
+    "integration-03": {
+      "artifact_count": 4,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 13
+      }
+    },
+    "integration-04": {
+      "artifact_count": 3,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 8
+      }
+    },
+    "integration-05": {
+      "artifact_count": 3,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 11
+      }
+    },
+    "integration-06": {
+      "artifact_count": 4,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 6
+      }
+    },
+    "integration-07": {
+      "artifact_count": 4,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 35
+      }
+    },
+    "integration-08": {
+      "artifact_count": 4,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 15
+      }
+    },
+    "integration-09": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 6
+      }
+    },
+    "integration-10": {
+      "artifact_count": 3,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 14
+      }
+    },
+    "integration-11": {
+      "artifact_count": 4,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 22
+      }
+    },
+    "integration-12": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 23
+      }
+    },
+    "integration-13": {
+      "artifact_count": 4,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 58
+      }
+    },
+    "integration-14": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 29
+      }
+    },
+    "integration-15": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 27
+      }
+    },
+    "integration-16": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 26
+      }
+    },
+    "integration-17": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 20
+      }
+    },
+    "integration-18": {
+      "artifact_count": 6,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 23
+      }
+    },
+    "integration-19": {
+      "artifact_count": 6,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 37
+      }
+    },
+    "integration-20": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 26
+      }
+    },
+    "integration-21": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 10
+      }
+    },
+    "integration-22": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 35
+      }
+    },
+    "integration-23": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 20
+      }
+    },
+    "integration-24": {
+      "artifact_count": 4,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 10
+      }
+    },
+    "integration-25": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 34
+      }
+    },
+    "integration-26": {
+      "artifact_count": 4,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 65
+      }
+    },
+    "integration-27": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 25
+      }
+    },
+    "integration-28": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 19
+      }
+    },
+    "integration-29": {
+      "artifact_count": 6,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 22
+      }
+    },
+    "integration-30": {
+      "artifact_count": 6,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 29
+      }
+    },
+    "integration-31": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 11
+      }
+    },
+    "integration-32": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 9
+      }
+    },
+    "integration-33": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 37
+      }
+    },
+    "integration-34": {
+      "artifact_count": 5,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 18
+      }
+    },
+    "integration-35": {
+      "artifact_count": 7,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 43
+      }
+    },
+    "integration-36": {
+      "artifact_count": 7,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 20
+      }
+    },
+    "integration-37": {
+      "artifact_count": 7,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 7
+      }
+    },
+    "integration-38": {
+      "artifact_count": 10,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 35
+      }
+    },
+    "integration-39": {
+      "artifact_count": 15,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 78
+      }
+    },
+    "integration-40": {
+      "artifact_count": 19,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 126
+      }
+    },
+    "integration-41": {
+      "artifact_count": 24,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 99
+      }
+    },
+    "integration-42": {
+      "artifact_count": 40,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 272
+      }
+    },
+    "integration-43": {
+      "artifact_count": 85,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 1,
+        "passed": 374
+      }
+    },
+    "integration-44": {
+      "artifact_count": 72,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 1,
+        "passed": 305
+      }
+    },
+    "unit-libraries": {
+      "artifact_count": 73,
+      "doc_test_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 1,
+        "passed": 18334
+      }
+    }
+  },
+  "plan_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/h-full-gate-plan-r62-20261016/plan.json",
+  "plan_sha256": "27f72231954401064d226c47d1b4e36243bbb245739911f4b60fc60d7857081d",
+  "retire_passed_test_executables": true,
+  "schema": "h-full-gate-run-r1",
+  "started_at_unix_ns": 1792215109231075000,
+  "status": "complete",
+  "target_directory": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target",
+  "unique_test_executable_target_coverage": 521,
+  "workspace": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime"
+}

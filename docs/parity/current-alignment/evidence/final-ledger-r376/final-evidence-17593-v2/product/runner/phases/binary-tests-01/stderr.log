@@ -1,0 +1,7 @@
+   Compiling bridge-server v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server)
+   Compiling ios-framework v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/ios/ffi)
+   Compiling cli v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host)
+    Finished `test` profile [unoptimized] target(s) in 15.36s
+     Running unittests src/main.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/bridge_server-7dd279863edea057)
+     Running unittests src/main.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/lingxi_cli-96648ca5aeeae0f0)
+     Running unittests src/bin/uniffi-bindgen.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/uniffi_bindgen-04c8e6627f51130e)

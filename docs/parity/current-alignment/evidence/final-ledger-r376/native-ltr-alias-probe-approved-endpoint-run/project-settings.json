@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "deny": [
+      "lf_a*b",
+      "cr_a*b",
+      "ls_a*b",
+      "ps_a*b",
+      "suffix_a*b",
+      "pos_a*b"
+    ]
+  }
+}

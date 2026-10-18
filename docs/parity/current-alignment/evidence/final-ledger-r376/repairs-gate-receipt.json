@@ -1,0 +1,772 @@
+{
+  "schema": "claude-295-repairs-gate-receipt-r1",
+  "status": "passed",
+  "repos": {
+    "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "harness": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+    "product": "17593eaa66dc762d5c9c581ba348398c914bdbcd"
+  },
+  "source_delta": {
+    "harness": [
+      "crates/agent/src/handle.rs",
+      "crates/agent/src/handle/spawn_context.rs",
+      "crates/agent/src/handle/tests/tests.rs",
+      "crates/agent/src/tool_resolver.rs",
+      "crates/core/src/host/mod.rs",
+      "crates/core/src/host/permission_gate.rs",
+      "crates/hooks/src/matcher.rs",
+      "crates/hooks/src/registry.rs",
+      "crates/orchestrator/src/conversation.rs",
+      "crates/orchestrator/src/conversation/drivers/mod.rs",
+      "crates/orchestrator/src/conversation/drivers/projected_content.rs",
+      "crates/orchestrator/src/conversation/drivers/streaming.rs",
+      "crates/orchestrator/src/conversation/model.rs",
+      "crates/orchestrator/src/conversation/model_reminders.rs",
+      "crates/orchestrator/src/conversation/reminders.rs",
+      "crates/orchestrator/src/conversation/tests/turn_admission_cancel_tests.rs",
+      "crates/orchestrator/src/conversation/tooling.rs",
+      "crates/orchestrator/src/conversation/transcript.rs",
+      "crates/orchestrator/src/conversation/wiring.rs",
+      "crates/orchestrator/src/streaming_executor_test.rs",
+      "crates/orchestrator/src/turn_loop_test.rs",
+      "crates/orchestrator/tests/current_alignment_cancel.rs",
+      "crates/orchestrator/tests/queued_prompt_batch_test.rs",
+      "crates/permission/src/lib.rs",
+      "crates/permission/src/policy.rs",
+      "crates/permission/src/policy_gate.rs",
+      "crates/permission/src/policy_gate_test.rs",
+      "crates/permission/src/policy_test.rs",
+      "crates/runtime/src/desktop/assembly.rs",
+      "crates/runtime/src/desktop/configuration.rs",
+      "crates/runtime/src/desktop/mod.rs",
+      "crates/runtime/src/desktop/tests/tests.rs",
+      "crates/runtime/src/headless/run.rs",
+      "crates/runtime/src/headless/run/control.rs",
+      "crates/runtime/src/mobile/host/assembly.rs",
+      "crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs",
+      "crates/tasks/src/handlers/in_process_teammate.rs",
+      "crates/tasks/src/handlers/in_process_teammate_test.rs"
+    ],
+    "product": [
+      "Cargo.lock",
+      "Cargo.toml",
+      "apps/bridge-server/src/driver.rs",
+      "apps/bridge-server/src/server.rs",
+      "apps/cli/host/src/init.rs",
+      "apps/cli/host/src/loop_wakeup.rs",
+      "apps/cli/host/src/repl.rs",
+      "apps/cli/host/tests/commands_native_cli.rs",
+      "apps/cli/host/tests/fixtures/cli-cancel-native-295/README.md",
+      "apps/cli/host/tests/fixtures/cli-cancel-native-295/interrupt-content.raw.json",
+      "apps/cli/host/tests/fixtures/cli-cancel-native-295/prompt-content.raw.json",
+      "apps/cli/host/tests/fixtures/cli-cancel-native-295/stdout.raw"
+    ]
+  },
+  "harness_source_binding": {
+    "baseline_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+    "final_head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+    "r6_tested_source_patch_sha256": "003a26f77af1f79c8af2dbce79bed0f3b5c28af6810c4e7ec93433668d9d733b",
+    "r7_tested_source_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+    "r8_tested_source_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+    "r9_intermediate_source_patch_sha256": "8470e956a493f59b7bbbd932af78b849c612822f3d6da342abd8e89006a2e51b",
+    "r10_final_source_patch_sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03",
+    "final_commit_source_patch_sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03",
+    "final_commit_patch_matches_r8": false,
+    "final_commit_patch_matches_r9": false,
+    "final_commit_patch_matches_r10": true,
+    "final_gate_status": "harness-repair-gates-r10/status.txt",
+    "final_gate_status_sha256": "2700165975f68815c97d605c56eca8e90d497ade1264b6282401d13fee99ac27",
+    "r6_current_patch_matches_r7_tested_patch": true,
+    "r7_current_patch_matches_r7_tested_patch": true,
+    "r8_tested_patch_matches_r7_tested_patch": true,
+    "r8_current_patch_matches_r8_tested_patch": true,
+    "test_only_followup_proof": "r6-test-only-followup-proof.json",
+    "test_only_followup_proof_sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db",
+    "test_only_delta_patch": "r6-test-only-followup.patch",
+    "test_only_delta_patch_sha256": "4c3cd4d6b00a7b671a6f29c4185a808019ce028910739347d84374aa2318d88e",
+    "test_only_path": "crates/runtime/src/headless/run/control.rs",
+    "test_only_changes": [
+      "cfg(test) argument-count lint annotation",
+      "cfg(test) helper missing import",
+      "cfg(test) unused parameter name"
+    ],
+    "current_control_git_blob": "5dcb61b86c05fc905315893913bdf32b881e619a",
+    "production_prefix_sha256": "6b1f24d7fa043042d15cd2553e29c25ac07e4e365087f131c826534aee69b916",
+    "reused_r6_phases": [
+      "agent-lib",
+      "cancel-inflight",
+      "orchestrator-lib",
+      "permission-lib",
+      "tasks-lib"
+    ],
+    "superseded_r7_source_phases": [
+      "changed-clippy",
+      "runtime-lib"
+    ],
+    "reused_r8_source_phases": [
+      "changed-docs",
+      "hooks-focused",
+      "hooks-lib"
+    ],
+    "final_r10_phases": [
+      "changed-clippy",
+      "fmt",
+      "runtime-lib"
+    ],
+    "r9_intermediate_phases": [
+      {
+        "name": "changed-clippy",
+        "status": "passed_intermediate",
+        "command": "cargo clippy --locked --offline -p harness-runtime --all-features --all-targets -- -D warnings",
+        "exit_code": 0,
+        "source_patch_sha256": "8470e956a493f59b7bbbd932af78b849c612822f3d6da342abd8e89006a2e51b",
+        "log": "harness-repair-gates-r9/changed-clippy.log",
+        "log_sha256": "3f14ef83a9f81e1dea365d101247ba538a89bd74fd57865cbc427ad803c29978",
+        "exit_receipt": "harness-repair-gates-r9/changed-clippy.exit",
+        "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+      },
+      {
+        "name": "fmt",
+        "status": "passed_intermediate",
+        "command": "cargo fmt --all -- --check",
+        "exit_code": 0,
+        "source_patch_sha256": "8470e956a493f59b7bbbd932af78b849c612822f3d6da342abd8e89006a2e51b",
+        "log": "harness-repair-gates-r9/fmt.log",
+        "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "exit_receipt": "harness-repair-gates-r9/fmt.exit",
+        "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+      },
+      {
+        "name": "runtime-lib",
+        "status": "passed_intermediate",
+        "command": "cargo test --locked --offline -p harness-runtime --all-features --lib -- --test-threads=2",
+        "exit_code": 0,
+        "source_patch_sha256": "8470e956a493f59b7bbbd932af78b849c612822f3d6da342abd8e89006a2e51b",
+        "log": "harness-repair-gates-r9/runtime-lib.log",
+        "log_sha256": "13e32b05e817858a45b3cc230ce151a0accbbe55de5a12fcb7161e8462ef2811",
+        "exit_receipt": "harness-repair-gates-r9/runtime-lib.exit",
+        "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+      }
+    ],
+    "r9_intermediate_gate_status": "harness-repair-gates-r9/status.txt",
+    "r9_intermediate_gate_status_sha256": "2700165975f68815c97d605c56eca8e90d497ade1264b6282401d13fee99ac27",
+    "final_r8_to_r10_source_proof": "r8-r10-source-followup-proof.json",
+    "final_r8_to_r10_source_proof_sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46",
+    "final_r8_to_r10_delta_patch": "r8-r10-production-delta.patch",
+    "final_r8_to_r10_delta_patch_sha256": "863c0349d3a5f2faec585297f536d0143bc7abb08a31bb4bc4afe0c23b897127",
+    "r10_candidate_head": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+    "r10_delta_path": "crates/runtime/src/headless/run.rs",
+    "r10_previous_run_git_blob": "4d79728988a711186e03d14b8a6bb03def0b5e4b",
+    "r10_final_run_git_blob": "e5e62cb9e44035ccbe047192b1c6516bdb9a6bee",
+    "r10_final_patch_matches_r10": true,
+    "r10_gate_status": "harness-repair-gates-r10/status.txt",
+    "r10_gate_status_sha256": "2700165975f68815c97d605c56eca8e90d497ade1264b6282401d13fee99ac27",
+    "source_patch_snapshots": {
+      "r6": {
+        "execution_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "tested_source_patch": "harness-repair-gates-r6/source.patch",
+        "sha256": "003a26f77af1f79c8af2dbce79bed0f3b5c28af6810c4e7ec93433668d9d733b",
+        "current_patch": "harness-repair-gates-r6/source-current.patch",
+        "current_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825"
+      },
+      "r7": {
+        "execution_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "tested_source_patch": "harness-repair-gates-r7/source.patch",
+        "sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+        "current_patch": "harness-repair-gates-r7/source-current.patch",
+        "current_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825"
+      },
+      "r8": {
+        "execution_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+        "tested_source_patch": "harness-repair-gates-r8/source.patch",
+        "sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+        "current_patch": "harness-repair-gates-r8/source-current.patch",
+        "current_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825"
+      },
+      "r9": {
+        "execution_head": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+        "tested_source_patch": "harness-repair-gates-r9/source.patch",
+        "sha256": "8470e956a493f59b7bbbd932af78b849c612822f3d6da342abd8e89006a2e51b",
+        "current_patch": "harness-repair-gates-r9/source-current.patch",
+        "current_patch_sha256": "8470e956a493f59b7bbbd932af78b849c612822f3d6da342abd8e89006a2e51b"
+      },
+      "r10": {
+        "execution_head": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+        "tested_source_patch": "harness-repair-gates-r10/source.patch",
+        "sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03",
+        "current_patch": "harness-repair-gates-r10/source-current.patch",
+        "current_patch_sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03"
+      }
+    }
+  },
+  "phases": [
+    {
+      "name": "permission-lib",
+      "repository": "harness-runtime",
+      "head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "execution_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+      "execution_gate_snapshot": "r6",
+      "command": "cargo test --locked --offline -p permission --all-features --lib",
+      "exit_code": 0,
+      "log": "harness-repair-gates-r6/permission-lib.log",
+      "log_sha256": "5e168d4717a3476d13553d9d8cb8a41b11a50b5b1a7b21c30edd7e0ba506884e",
+      "stdout_log": "harness-repair-gates-r6/permission-lib.log",
+      "stdout_log_sha256": "5e168d4717a3476d13553d9d8cb8a41b11a50b5b1a7b21c30edd7e0ba506884e",
+      "exit_receipt": "harness-repair-gates-r6/permission-lib.exit",
+      "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "tested_source_patch_sha256": "003a26f77af1f79c8af2dbce79bed0f3b5c28af6810c4e7ec93433668d9d733b",
+      "followup_source_closure_proof_sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db",
+      "production_followup_source_closure_proof_sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46"
+    },
+    {
+      "name": "agent-lib",
+      "repository": "harness-runtime",
+      "head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "execution_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+      "execution_gate_snapshot": "r6",
+      "command": "cargo test --locked --offline -p agent --all-features --lib",
+      "exit_code": 0,
+      "log": "harness-repair-gates-r6/agent-lib.log",
+      "log_sha256": "f24c079f38459de6136d944e46393fef9747970bcd3488d21c0c64ae0162bf1e",
+      "stdout_log": "harness-repair-gates-r6/agent-lib.log",
+      "stdout_log_sha256": "f24c079f38459de6136d944e46393fef9747970bcd3488d21c0c64ae0162bf1e",
+      "exit_receipt": "harness-repair-gates-r6/agent-lib.exit",
+      "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "tested_source_patch_sha256": "003a26f77af1f79c8af2dbce79bed0f3b5c28af6810c4e7ec93433668d9d733b",
+      "followup_source_closure_proof_sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db",
+      "production_followup_source_closure_proof_sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46"
+    },
+    {
+      "name": "tasks-lib",
+      "repository": "harness-runtime",
+      "head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "execution_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+      "execution_gate_snapshot": "r6",
+      "command": "cargo test --locked --offline -p tasks --all-features --lib",
+      "exit_code": 0,
+      "log": "harness-repair-gates-r6/tasks-lib.log",
+      "log_sha256": "6761fb7cb6d2257a719f4e567c88b9251ebc8f33736f4a3ec97a4a4c7283c5e0",
+      "stdout_log": "harness-repair-gates-r6/tasks-lib.log",
+      "stdout_log_sha256": "6761fb7cb6d2257a719f4e567c88b9251ebc8f33736f4a3ec97a4a4c7283c5e0",
+      "exit_receipt": "harness-repair-gates-r6/tasks-lib.exit",
+      "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "tested_source_patch_sha256": "003a26f77af1f79c8af2dbce79bed0f3b5c28af6810c4e7ec93433668d9d733b",
+      "followup_source_closure_proof_sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db",
+      "production_followup_source_closure_proof_sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46"
+    },
+    {
+      "name": "cancel-inflight",
+      "repository": "harness-runtime",
+      "head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "execution_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+      "execution_gate_snapshot": "r6",
+      "command": "cargo test --locked --offline -p orchestrator --test current_alignment_cancel native_inflight_sigint_contract_reaches_orchestrator_output_and_jsonl -- --exact --nocapture",
+      "exit_code": 0,
+      "log": "harness-repair-gates-r6/cancel-inflight.log",
+      "log_sha256": "ba319fdd8496059370f52558feffcd5ce67b40751261dce2b37a581f428debf6",
+      "stdout_log": "harness-repair-gates-r6/cancel-inflight.log",
+      "stdout_log_sha256": "ba319fdd8496059370f52558feffcd5ce67b40751261dce2b37a581f428debf6",
+      "exit_receipt": "harness-repair-gates-r6/cancel-inflight.exit",
+      "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "tested_source_patch_sha256": "003a26f77af1f79c8af2dbce79bed0f3b5c28af6810c4e7ec93433668d9d733b",
+      "followup_source_closure_proof_sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db",
+      "production_followup_source_closure_proof_sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46"
+    },
+    {
+      "name": "orchestrator-lib",
+      "repository": "harness-runtime",
+      "head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "execution_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+      "execution_gate_snapshot": "r6",
+      "command": "cargo test --locked --offline -p orchestrator --all-features --lib",
+      "exit_code": 0,
+      "log": "harness-repair-gates-r6/orchestrator-lib.log",
+      "log_sha256": "871e8c5ffa3e5fe5d297d01d4ff8d395d50719b88abf7fac61ca851e5abc5d8b",
+      "stdout_log": "harness-repair-gates-r6/orchestrator-lib.log",
+      "stdout_log_sha256": "871e8c5ffa3e5fe5d297d01d4ff8d395d50719b88abf7fac61ca851e5abc5d8b",
+      "exit_receipt": "harness-repair-gates-r6/orchestrator-lib.exit",
+      "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "tested_source_patch_sha256": "003a26f77af1f79c8af2dbce79bed0f3b5c28af6810c4e7ec93433668d9d733b",
+      "followup_source_closure_proof_sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db",
+      "production_followup_source_closure_proof_sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46"
+    },
+    {
+      "name": "runtime-lib",
+      "repository": "harness-runtime",
+      "head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "execution_head": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+      "execution_gate_snapshot": "r10",
+      "command": "cargo test --locked --offline -p harness-runtime --all-features --lib -- --test-threads=2",
+      "exit_code": 0,
+      "log": "harness-repair-gates-r10/runtime-lib.log",
+      "log_sha256": "c632575a78d8bd17e13f52a2b2703106d990f2a1ea0315ff74dbf4c15c03a24a",
+      "stdout_log": "harness-repair-gates-r10/runtime-lib.log",
+      "stdout_log_sha256": "c632575a78d8bd17e13f52a2b2703106d990f2a1ea0315ff74dbf4c15c03a24a",
+      "exit_receipt": "harness-repair-gates-r10/runtime-lib.exit",
+      "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "tested_source_patch_sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03",
+      "followup_source_closure_proof_sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db",
+      "production_followup_source_closure_proof_sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46"
+    },
+    {
+      "name": "changed-clippy",
+      "repository": "harness-runtime",
+      "head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "execution_head": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+      "execution_gate_snapshot": "r10",
+      "command": "cargo clippy --locked --offline -p harness-runtime --all-features --all-targets -- -D warnings",
+      "exit_code": 0,
+      "log": "harness-repair-gates-r10/changed-clippy.log",
+      "log_sha256": "6a6ac311fc8ba74d7c2ebba02937f97dda309ae395d57223022104b6b1bfa35d",
+      "stdout_log": "harness-repair-gates-r10/changed-clippy.log",
+      "stdout_log_sha256": "6a6ac311fc8ba74d7c2ebba02937f97dda309ae395d57223022104b6b1bfa35d",
+      "exit_receipt": "harness-repair-gates-r10/changed-clippy.exit",
+      "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "tested_source_patch_sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03",
+      "followup_source_closure_proof_sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db",
+      "production_followup_source_closure_proof_sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46"
+    },
+    {
+      "name": "fmt",
+      "repository": "harness-runtime",
+      "head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "execution_head": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+      "execution_gate_snapshot": "r10",
+      "command": "cargo fmt --all -- --check",
+      "exit_code": 0,
+      "log": "harness-repair-gates-r10/fmt.exit",
+      "log_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "stdout_log": "harness-repair-gates-r10/fmt.log",
+      "stdout_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "exit_receipt": "harness-repair-gates-r10/fmt.exit",
+      "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "tested_source_patch_sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03",
+      "followup_source_closure_proof_sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db",
+      "production_followup_source_closure_proof_sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46"
+    },
+    {
+      "name": "changed-docs",
+      "repository": "harness-runtime",
+      "head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "execution_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+      "execution_gate_snapshot": "r8",
+      "command": "cargo doc --locked --offline -p core -p permission -p agent -p tasks -p orchestrator -p harness-runtime --all-features --no-deps",
+      "exit_code": 0,
+      "log": "harness-repair-gates-r8/changed-docs.log",
+      "log_sha256": "f8fa131e8e90256a66892888cbd5d99f0bff5051eadcf4b43a776618fd700e93",
+      "stdout_log": "harness-repair-gates-r8/changed-docs.log",
+      "stdout_log_sha256": "f8fa131e8e90256a66892888cbd5d99f0bff5051eadcf4b43a776618fd700e93",
+      "exit_receipt": "harness-repair-gates-r8/changed-docs.exit",
+      "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "tested_source_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+      "followup_source_closure_proof_sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db",
+      "production_followup_source_closure_proof_sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46"
+    },
+    {
+      "name": "hooks-lib",
+      "repository": "harness-runtime",
+      "head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "execution_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+      "execution_gate_snapshot": "r8",
+      "command": "cargo test --locked --offline -p hooks --all-features --lib",
+      "exit_code": 0,
+      "log": "harness-repair-gates-r8/hooks-lib.log",
+      "log_sha256": "c81d10313ced358ad0bbd3d60814da563fea703df4622913956d7afa1dd594af",
+      "stdout_log": "harness-repair-gates-r8/hooks-lib.log",
+      "stdout_log_sha256": "c81d10313ced358ad0bbd3d60814da563fea703df4622913956d7afa1dd594af",
+      "exit_receipt": "harness-repair-gates-r8/hooks-lib.exit",
+      "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "tested_source_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+      "followup_source_closure_proof_sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db",
+      "production_followup_source_closure_proof_sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46"
+    },
+    {
+      "name": "hooks-focused",
+      "repository": "harness-runtime",
+      "head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "execution_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+      "execution_gate_snapshot": "r8",
+      "command": "cargo test --locked --offline -p hooks --all-features --lib native_295_comma_mode_event_set_matches_directory_added_and_model_switches",
+      "exit_code": 0,
+      "log": "harness-repair-gates-r8/hooks-focused.log",
+      "log_sha256": "511659dfaf997fab9c220272f361771434b6d15fc03b0ba1a2be2520c5844862",
+      "stdout_log": "harness-repair-gates-r8/hooks-focused.log",
+      "stdout_log_sha256": "511659dfaf997fab9c220272f361771434b6d15fc03b0ba1a2be2520c5844862",
+      "exit_receipt": "harness-repair-gates-r8/hooks-focused.exit",
+      "exit_receipt_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "tested_source_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+      "followup_source_closure_proof_sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db",
+      "production_followup_source_closure_proof_sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46"
+    },
+    {
+      "name": "product-source",
+      "repository": "lingxi-app",
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "command": "python3 scripts/checks/check-runtime-dependency.py",
+      "exit_code": 0,
+      "log": "final-evidence-17593-v2/product/check-runtime-dependency.log",
+      "log_sha256": "d6c4559dac5d4737745bcfdb329bdb134e06cb6a398069adefc983efa37a0088"
+    },
+    {
+      "name": "product-metadata",
+      "repository": "lingxi-app",
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "command": "cargo metadata --manifest-path /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/Cargo.toml --locked --offline --all-features --format-version 1",
+      "exit_code": 0,
+      "log": "final-evidence-17593-v2/product/gates/metadata.log",
+      "log_sha256": "db73e1fa409183fd7443b811eb2190d72ab96416685843fbddff3b4582f84222"
+    },
+    {
+      "name": "product-runtime-source",
+      "repository": "lingxi-app",
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "command": "/Users/luolingfeng/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3.12 scripts/lib/runtime_source.py --json",
+      "exit_code": 0,
+      "log": "final-evidence-17593-v2/product/gates/source-validator.log",
+      "log_sha256": "1b8d41fbaa7aa2cfea5b431d177824001a74e56c1eacf24db9020493d43aade7"
+    },
+    {
+      "name": "product-fmt",
+      "repository": "lingxi-app",
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "command": "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo fmt --all -- --check",
+      "exit_code": 0,
+      "log": "final-evidence-17593-v2/product/gates/fmt-progress.log",
+      "log_sha256": "a6b2e3d5b7811aa619b71a5f38525b49f57a223fd20142f9ec963a547e3918ee",
+      "stdout_log": "final-evidence-17593-v2/product/gates/fmt.log",
+      "stdout_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "product-check",
+      "repository": "lingxi-app",
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "command": "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo check --locked --offline --workspace --all-features --all-targets --keep-going",
+      "exit_code": 0,
+      "log": "final-evidence-17593-v2/product/gates/check.log",
+      "log_sha256": "282fc6a591558776f68ff0fd52883446c628806d43367d2ff3815c00453ed860"
+    },
+    {
+      "name": "product-clippy",
+      "repository": "lingxi-app",
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "command": "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo clippy --locked --offline --workspace --all-targets -- -D warnings",
+      "exit_code": 0,
+      "log": "final-evidence-17593-v2/product/gates/clippy.log",
+      "log_sha256": "d2b6780620588a8c704c8f40100a90c2ebd106dd9c62d62541d045490c53843a"
+    },
+    {
+      "name": "skill-cold",
+      "repository": "lingxi-app",
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "command": "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo test --locked --offline -p cli --test commands_native_cli cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire -- --exact --nocapture",
+      "exit_code": 0,
+      "log": "final-evidence-17593-v2/product/gates/skill-cold.log",
+      "log_sha256": "cdc1a1516862cc5ffd58c727d11d2b86bebfafdee3ff892dbcdab60bd5ec9cd1"
+    },
+    {
+      "name": "product-full-runner",
+      "repository": "lingxi-app",
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "command": "/Users/luolingfeng/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3.12 /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/product-full-gate-parallel-compile-r319-20261017/run_product_full_gate.py --metadata /private/tmp/product-full-r342-r376-20261018T084434Z-98045/metadata.json --expected-product-head 17593eaa66dc762d5c9c581ba348398c914bdbcd --expected-harness-sha 44f2eef5baf8ae16254934dbca451cbfd528d955 --expected-sdk-sha a363c5b3a237d53eea12c3abfb3b98648ef15d3e --expected-mobile-sha 6b033d41a2b6b736fda1e8f996f55a4b20bd885d --results-dir /private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner --cargo /Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo --min-free-bytes 3221225472 --retire-passed-test-executables",
+      "exit_code": 0,
+      "log": "final-evidence-17593-v2/product/runner/run.json",
+      "log_sha256": "6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e"
+    },
+    {
+      "name": "product-cli-8mib",
+      "repository": "lingxi-app",
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "command": "env RUST_MIN_STACK=8388608 /Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo test --locked --offline --workspace --all-features --test commands_native_cli actual_cli_matches_native_2_1_295_slash_skill_and_stream_json_fixed_fields -- --exact --nocapture --test-threads=1",
+      "exit_code": 0,
+      "log": "final-evidence-17593-v2/product/gates/cli-8mib.log",
+      "log_sha256": "327a9cc97dc67d29d71ddabf56815175076fa9baa95e659ec61505ff13e11c4b"
+    }
+  ],
+  "superseded_harness_phases": [
+    {
+      "phase": "runtime-lib",
+      "snapshot": "r6",
+      "exit_code": 101,
+      "command": "cargo test --locked --offline -p harness-runtime --all-features --lib -- --test-threads=2",
+      "log": "harness-repair-gates-r6/runtime-lib.log",
+      "log_sha256": "66a98efc4efb76561bacb413c817ae12a1fc401dacff19c6335b2b9da5a0d911",
+      "exit_receipt": "harness-repair-gates-r6/runtime-lib.exit",
+      "exit_receipt_sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c",
+      "reason": "Superseded first by the r7 runtime-lib pass after the proof-bound cfg(test)-only fix, then by the final r10 runtime-lib pass bound to the one-file run.rs production delta."
+    }
+  ],
+  "superseded_environment": [
+    {
+      "phase": "hooks-lib",
+      "snapshot": "r7",
+      "exit_code": 101,
+      "command": "cargo test --locked --offline -p hooks --all-features --lib",
+      "log": "harness-repair-gates-r7/hooks-lib.log",
+      "log_sha256": "c38e9cb2aa542b00fb4eb2feb37290da52653f396195006dbd4e5ac2c1c75606",
+      "exit_receipt": "harness-repair-gates-r7/hooks-lib.exit",
+      "exit_receipt_sha256": "39b8dc3fc8b44765c8e6f1adee04c5b465e555ab791cc42d0d9e810d5b64297c",
+      "superseded_environment": true,
+      "environment_failure": "Bun executable was absent from PATH in the r7 runner environment.",
+      "resolution": "r8 reran hooks-lib with the fixed Bun executable directory on PATH."
+    }
+  ],
+  "product_runner": {
+    "path": "final-evidence-17593-v2/product/runner/run.json",
+    "sha256": "6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e",
+    "phases": [
+      {
+        "name": "binary-tests-01",
+        "status": "passed",
+        "test_summary": {
+          "failed": 0,
+          "ignored": 0,
+          "passed": 2
+        },
+        "receipt": {
+          "path": "final-evidence-17593-v2/product/runner/phases/binary-tests-01/phase.json",
+          "sha256": "9ce45a1a2655b1cae3f6842bb638244d8f7a24751b8f160fbf47352a0ceea6ea"
+        },
+        "logs": {
+          "stdout": {
+            "path": "final-evidence-17593-v2/product/runner/phases/binary-tests-01/stdout.log",
+            "sha256": "5e9f34a8497648db336226364fe667c2618c4a8a29aea154a9832e5b9ee2c626"
+          },
+          "stderr": {
+            "path": "final-evidence-17593-v2/product/runner/phases/binary-tests-01/stderr.log",
+            "sha256": "655ea77b627631d38f0eeb6312d6402a361e01bdae0a93952b8e50d3cd24191a"
+          }
+        }
+      },
+      {
+        "name": "doctests",
+        "status": "passed",
+        "test_summary": {
+          "failed": 0,
+          "ignored": 0,
+          "passed": 0
+        },
+        "receipt": {
+          "path": "final-evidence-17593-v2/product/runner/phases/doctests/phase.json",
+          "sha256": "d6a1dc00b83e2093c546bd7e2c55bb90c74c40a2784b4f5f5086903a0a5cc5ba"
+        },
+        "logs": {
+          "stdout": {
+            "path": "final-evidence-17593-v2/product/runner/phases/doctests/stdout.log",
+            "sha256": "dbf777efe6783d82a24611db61ad54005abba0e1012a82b253143296b3fd0b56"
+          },
+          "stderr": {
+            "path": "final-evidence-17593-v2/product/runner/phases/doctests/stderr.log",
+            "sha256": "3746d683917cdf74347d694aa713f47406db6fc6156a7ca86b8fc711645510e8"
+          }
+        }
+      },
+      {
+        "name": "integration-tests-01",
+        "status": "passed",
+        "test_summary": {
+          "failed": 0,
+          "ignored": 0,
+          "passed": 49
+        },
+        "receipt": {
+          "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-01/phase.json",
+          "sha256": "dc406999e9cc807599e90e48e04e76759e198544aeac77348f711a0a346276ec"
+        },
+        "logs": {
+          "stdout": {
+            "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-01/stdout.log",
+            "sha256": "1be630a6808b4efe6613970c7ae18a399f16c4039b249661cc33251e86f9e1d9"
+          },
+          "stderr": {
+            "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-01/stderr.log",
+            "sha256": "f5361d2b2f479735c0f7604375f0c5b395d0d0f7c7d8c1c720df331d677d5ec8"
+          }
+        }
+      },
+      {
+        "name": "integration-tests-02",
+        "status": "passed",
+        "test_summary": {
+          "failed": 0,
+          "ignored": 2,
+          "passed": 20
+        },
+        "receipt": {
+          "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-02/phase.json",
+          "sha256": "d33cc492ef3bb4430a5d75ff407d1f6fbe0a70111b92118e3bf659945fdcac84"
+        },
+        "logs": {
+          "stdout": {
+            "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-02/stdout.log",
+            "sha256": "9f7afbbfdd3115a64e974cc30926a49d779182f595ce3e770adde9960eac1efb"
+          },
+          "stderr": {
+            "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-02/stderr.log",
+            "sha256": "b61d5df771a2ebfa648f357ffea199f2c19cdd0e82254fdd319b29e1b7019cf7"
+          }
+        }
+      },
+      {
+        "name": "integration-tests-03",
+        "status": "passed",
+        "test_summary": {
+          "failed": 0,
+          "ignored": 0,
+          "passed": 15
+        },
+        "receipt": {
+          "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-03/phase.json",
+          "sha256": "5a41b8e4fa5fc1a7e476f4d6ca93de85b66c2c52feb6798f472046bf05a04f17"
+        },
+        "logs": {
+          "stdout": {
+            "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-03/stdout.log",
+            "sha256": "f4a3afe0ebb6432c59d9e2e9ab39c30d6241f5bc4785c8ff16cbe86b372159ea"
+          },
+          "stderr": {
+            "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-03/stderr.log",
+            "sha256": "8c6e5e753320a7c6d2488df2c54df6024e7cb63d234b875a95cfa099eb2eda4d"
+          }
+        }
+      },
+      {
+        "name": "integration-tests-04",
+        "status": "passed",
+        "test_summary": {
+          "failed": 0,
+          "ignored": 0,
+          "passed": 98
+        },
+        "receipt": {
+          "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-04/phase.json",
+          "sha256": "d45562b9b7a926b8f735b17a80706bcfdf792804a88fae6f6fb07170cf90a747"
+        },
+        "logs": {
+          "stdout": {
+            "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-04/stdout.log",
+            "sha256": "53f85cd5ea967373e8f957ddfe2ae884f740e8c018297e46f628e426e915ec70"
+          },
+          "stderr": {
+            "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-04/stderr.log",
+            "sha256": "ff310ad6392fcc4cf4304f06e52281695fe0258ee56a0b178bca9d646c3a37ee"
+          }
+        }
+      },
+      {
+        "name": "integration-tests-05",
+        "status": "passed",
+        "test_summary": {
+          "failed": 0,
+          "ignored": 0,
+          "passed": 8
+        },
+        "receipt": {
+          "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-05/phase.json",
+          "sha256": "b92f529d0d64e969dc94b1007fd93db414430e92b706f3a5b9b2b4661114009a"
+        },
+        "logs": {
+          "stdout": {
+            "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-05/stdout.log",
+            "sha256": "c5efe04029fc442e07a8f78c846001cedfb40c4e4a4dc945b12786bfd15dc169"
+          },
+          "stderr": {
+            "path": "final-evidence-17593-v2/product/runner/phases/integration-tests-05/stderr.log",
+            "sha256": "6b345bd62ef207d589c94133751db5eb009b2c6e9f016240eb7fd6cc30e4fdee"
+          }
+        }
+      },
+      {
+        "name": "library-tests",
+        "status": "passed",
+        "test_summary": {
+          "failed": 0,
+          "ignored": 2,
+          "passed": 2548
+        },
+        "receipt": {
+          "path": "final-evidence-17593-v2/product/runner/phases/library-tests/phase.json",
+          "sha256": "729607f07abbc283d55031d4abd00fa4e3be97e53d8d240a5b18ad168b5512c8"
+        },
+        "logs": {
+          "stdout": {
+            "path": "final-evidence-17593-v2/product/runner/phases/library-tests/stdout.log",
+            "sha256": "3331ac184cbba605d8140ff3b517af4f04955154c9cfd514a7c298533e9daf4e"
+          },
+          "stderr": {
+            "path": "final-evidence-17593-v2/product/runner/phases/library-tests/stderr.log",
+            "sha256": "3fcd458081bfa3ec97d9520c28b9b2380d0cc2187c9f3d837c2df64749ef8f91"
+          }
+        }
+      }
+    ]
+  },
+  "runtime_dependency_gate": {
+    "command": "python3 scripts/checks/check-runtime-dependency.py",
+    "exit_code": 0,
+    "log": "final-evidence-17593-v2/product/check-runtime-dependency.log",
+    "log_sha256": "d6c4559dac5d4737745bcfdb329bdb134e06cb6a398069adefc983efa37a0088",
+    "harness_revision": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+    "mobile_revision": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+  },
+  "hook_gate": {
+    "receipt": "hooks-comma-receipt.json",
+    "sha256": "d28209b30e217cae3538306877af6b00ef4480d434680993b0ec265da47e4926"
+  },
+  "package": {
+    "receipt": "receipts/mac-package-final-17593.json",
+    "sha256": "6e4f1ce2eba4d069f9219603b6043b64ce0cb8f2e7b4e71645710e2b37fbb337"
+  },
+  "platform": {
+    "receipt": "platform-final-17593-v2.json",
+    "sha256": "c82726c6d4498d9bb64b8732724ee9de29fff2a76d3437aacbafd7750450fd4c"
+  },
+  "cli_sigint_run04": {
+    "receipt": "cli-sigint-candidate-run-04-17593eaa66-20261018T091547Z-1496/receipt.json",
+    "sha256": "a99af6f15e9dd53646658065b00e391e8331db97f2fab61608ce8f1d1a7bde0e",
+    "status": "passed"
+  },
+  "product_full_gate": {
+    "receipt": "final-evidence-17593-v2/product/runner/run.json",
+    "sha256": "6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e"
+  },
+  "harness_gate_folders": {
+    "r6": {
+      "source_patch": "harness-repair-gates-r6/source.patch",
+      "source_patch_sha256": "003a26f77af1f79c8af2dbce79bed0f3b5c28af6810c4e7ec93433668d9d733b"
+    },
+    "r7": {
+      "source_patch": "harness-repair-gates-r7/source.patch",
+      "source_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825"
+    },
+    "r8": {
+      "source_patch": "harness-repair-gates-r8/source.patch",
+      "source_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+      "status": "harness-repair-gates-r8/status.txt",
+      "status_sha256": "2700165975f68815c97d605c56eca8e90d497ade1264b6282401d13fee99ac27"
+    },
+    "r9": {
+      "source_patch": "harness-repair-gates-r9/source.patch",
+      "source_patch_sha256": "8470e956a493f59b7bbbd932af78b849c612822f3d6da342abd8e89006a2e51b",
+      "status": "harness-repair-gates-r9/status.txt",
+      "status_sha256": "2700165975f68815c97d605c56eca8e90d497ade1264b6282401d13fee99ac27"
+    },
+    "r10": {
+      "source_patch": "harness-repair-gates-r10/source.patch",
+      "source_patch_sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03",
+      "status": "harness-repair-gates-r10/status.txt",
+      "status_sha256": "2700165975f68815c97d605c56eca8e90d497ade1264b6282401d13fee99ac27"
+    }
+  },
+  "product_gate_inputs": {
+    "progress_log": "final-evidence-17593-v2/product/gates/progress.log",
+    "progress_log_sha256": "a6b2e3d5b7811aa619b71a5f38525b49f57a223fd20142f9ec963a547e3918ee",
+    "commands_log": "final-evidence-17593-v2/product/gates/commands.txt",
+    "commands_log_sha256": "27f0b3475109e1ea42224423b3593e1437bbf428595a5d84c0a61b378b9ee4a8"
+  },
+  "platform_candidate": {
+    "product": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+    "harness_runtime": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+    "llm_client": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "mobile_linux": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+  }
+}

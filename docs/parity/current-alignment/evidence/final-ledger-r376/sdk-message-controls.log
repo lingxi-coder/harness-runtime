@@ -1,0 +1,238 @@
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper/Cargo.toml
+workspace: /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/Cargo.toml
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.26
+   Compiling libc v0.2.189
+   Compiling find-msvc-tools v0.1.13
+   Compiling shlex v2.0.1
+   Compiling cfg-if v1.0.5
+   Compiling memchr v2.8.3
+   Compiling stable_deref_trait v1.2.1
+   Compiling pin-project-lite v0.2.17
+   Compiling serde_core v1.0.229
+   Compiling futures-core v0.3.34
+   Compiling autocfg v1.5.1
+   Compiling smallvec v1.16.1
+   Compiling bytes v1.12.1
+   Compiling version_check v0.9.5
+   Compiling serde v1.0.229
+   Compiling num-traits v0.2.19
+   Compiling itoa v1.0.18
+   Compiling futures-sink v0.3.34
+   Compiling litemap v0.8.3
+   Compiling pkg-config v0.3.34
+   Compiling once_cell v1.21.4
+   Compiling writeable v0.6.4
+   Compiling syn v3.0.6
+   Compiling futures-channel v0.3.34
+   Compiling icu_normalizer_data v2.3.0
+   Compiling icu_properties_data v2.3.0
+   Compiling jobserver v0.1.35
+   Compiling mio v1.2.3
+   Compiling cc v1.4.7
+   Compiling socket2 v0.6.5
+   Compiling utf8_iter v1.0.4
+   Compiling percent-encoding v2.3.2
+   Compiling futures-io v0.3.34
+   Compiling zeroize v1.9.0
+   Compiling equivalent v1.0.2
+   Compiling futures-task v0.3.34
+   Compiling slab v0.4.12
+   Compiling rustls-pki-types v1.15.1
+   Compiling ring v0.17.14
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling http v1.5.0
+   Compiling generic-array v0.14.7
+   Compiling crc32fast v1.5.2
+   Compiling zstd-safe v7.2.4
+   Compiling alloc-no-stdlib v2.0.4
+   Compiling subtle v2.6.1
+   Compiling hashbrown v0.17.1
+   Compiling alloc-stdlib v0.2.4
+   Compiling synstructure v0.14.0
+   Compiling indexmap v2.14.2
+   Compiling http-body v1.1.0
+   Compiling num-integer v0.1.47
+   Compiling getrandom v0.2.17
+   Compiling typenum v1.20.1
+   Compiling httparse v1.10.1
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.3
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+   Compiling serde_derive v1.0.229
+   Compiling tokio-macros v2.7.2
+   Compiling zerofrom v0.1.8
+   Compiling futures-macro v0.3.34
+   Compiling tokio v1.53.1
+   Compiling yoke v0.8.3
+   Compiling futures-util v0.3.34
+   Compiling zerovec v0.11.8
+   Compiling zerotrie v0.2.5
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling icu_collections v2.3.0
+   Compiling icu_locale_core v2.3.0
+   Compiling adler2 v2.0.1
+   Compiling simd-adler32 v0.3.10
+   Compiling zmij v1.0.23
+   Compiling untrusted v0.9.0
+   Compiling miniz_oxide v0.9.1
+   Compiling icu_provider v2.3.1
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling brotli-decompressor v5.0.3
+   Compiling ref-cast v1.0.27
+   Compiling serde_json v1.0.151
+   Compiling tower-service v0.3.3
+   Compiling rustls v0.23.45
+   Compiling try-lock v0.2.5
+   Compiling getrandom v0.3.4
+   Compiling zerocopy v0.8.57
+   Compiling parking_lot_core v0.9.12
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling brotli v8.0.2
+   Compiling want v0.3.1
+   Compiling flate2 v1.1.10
+   Compiling rustls-webpki v0.103.15
+   Compiling ref-cast-impl v1.0.27
+   Compiling zstd v0.13.3
+   Compiling num-bigint v0.4.8
+   Compiling form_urlencoded v1.2.2
+   Compiling tracing-core v0.1.36
+   Compiling ahash v0.8.12
+   Compiling aho-corasick v1.1.5
+   Compiling scopeguard v1.2.0
+   Compiling atomic-waker v1.1.2
+   Compiling regex-syntax v0.8.11
+   Compiling compression-core v0.4.32
+   Compiling compression-codecs v0.4.38
+   Compiling num-rational v0.4.2
+   Compiling lingxi-hyper v1.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper)
+   Compiling lock_api v0.4.14
+   Compiling tracing v0.1.44
+   Compiling regex-automata v0.4.18
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling num-iter v0.1.46
+   Compiling webpki-roots v1.0.9
+   Compiling num-complex v0.4.6
+   Compiling sync_wrapper v1.0.2
+   Compiling bit-vec v0.8.0
+   Compiling borrow-or-share v0.2.4
+   Compiling allocator-api2 v0.2.21
+   Compiling unicode-general-category v1.1.0
+   Compiling tower-layer v0.3.3
+   Compiling base64 v0.22.1
+   Compiling foldhash v0.2.0
+   Compiling siphasher v1.0.3
+   Compiling ipnet v2.12.2
+   Compiling phf_shared v0.12.1
+   Compiling hashbrown v0.16.1
+   Compiling lingxi-hyper-util v0.1.21 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-util)
+   Compiling tower v0.5.3
+warning: unused variable: `timer`
+    --> vendor/lingxi-hyper-util/src/client/legacy/client.rs:1509:32
+     |
+1509 |     pub fn timer<M>(&mut self, timer: M) -> &mut Self
+     |                                ^^^^^ help: if this is intentional, prefix it with an underscore: `_timer`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling num v0.4.3
+   Compiling bit-set v0.8.0
+   Compiling fluent-uri v0.4.1
+   Compiling tokio-rustls v0.26.5
+warning: `lingxi-hyper-util` (lib) generated 1 warning (run `cargo fix --lib -p lingxi-hyper-util` to apply 1 suggestion)
+   Compiling webpki-roots v0.26.11
+   Compiling digest v0.10.7
+   Compiling parking_lot v0.12.5
+   Compiling async-compression v0.4.42
+   Compiling url v2.5.8
+   Compiling tokio-util v0.7.19
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling http-body-util v0.1.5
+   Compiling micromap v0.3.0
+   Compiling vsimd v0.8.0
+   Compiling bitflags v2.13.2
+   Compiling outref v0.5.2
+   Compiling lazy_static v1.5.0
+   Compiling toml_write v0.1.2
+   Compiling chrono-tz v0.10.4
+   Compiling thiserror v2.0.20
+   Compiling winnow v0.7.15
+   Compiling ryu v1.0.23
+   Compiling serde_urlencoded v0.7.1
+   Compiling uuid-simd v0.8.0
+   Compiling tower-http v0.6.11
+   Compiling fraction v0.15.4
+   Compiling referencing v0.46.3
+   Compiling lingxi-hyper-rustls v0.27.5 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-rustls)
+warning: unused macro definition: `debug`
+  --> vendor/lingxi-hyper-rustls/src/lib.rs:53:18
+   |
+53 |     macro_rules! debug    ( ($($tt:tt)*) => {{}} );
+   |                  ^^^^^
+   |
+   = note: `#[warn(unused_macros)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `debug`
+  --> vendor/lingxi-hyper-rustls/src/lib.rs:55:20
+   |
+55 |     pub(crate) use debug;
+   |                    ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `lingxi-hyper-rustls` (lib) generated 2 warnings (run `cargo fix --lib -p lingxi-hyper-rustls` to apply 1 suggestion)
+   Compiling fancy-regex v0.18.0
+   Compiling regex v1.13.1
+   Compiling phf v0.12.1
+   Compiling futures-executor v0.3.34
+   Compiling email_address v0.2.9
+   Compiling thiserror-impl v2.0.20
+   Compiling chrono v0.4.45
+   Compiling cpufeatures v0.2.17
+   Compiling toml_edit v0.22.27
+   Compiling data-encoding v2.11.1
+   Compiling num-cmp v0.1.0
+   Compiling bytecount v0.6.9
+   Compiling lingxi-llm-client v0.3.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client)
+   Compiling log v0.4.34
+   Compiling lingxi-reqwest v0.12.29 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-reqwest)
+   Compiling jsonschema v0.46.3
+   Compiling sha2 v0.10.9
+   Compiling futures v0.3.34
+   Compiling toml v0.8.23
+   Compiling hmac v0.12.1
+   Compiling async-trait v0.1.92
+   Compiling ryu-js v1.0.3
+    Finished `test` profile [unoptimized] target(s) in 44.93s
+     Running tests/anthropic_message_controls.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/anthropic_message_controls-92263d9c67ec3fb4)
+
+running 18 tests
+test foundry_per_message_controls_remain_restricted_to_main_effort_marker ... ok
+test effort_report_changes_only_at_next_user_without_rewriting_top_level ... ok
+test foundry_effort_history_keeps_multiple_rows_and_reports_the_latest_level ... ok
+test automatic_cache_does_not_insert_breakpoint_into_scoped_message ... ok
+test active_effort_obeys_thinking_constraints_without_applying_future_changes_early ... ok
+test invalid_message_controls_fail_before_transport ... ok
+test foundry_main_effort_only_marker_is_encoded_and_reported_without_extra_sdk_beta ... ok
+test explicit_never_keeps_effort_only_position_exception ... ok
+test native_server_classifier_context_is_source_preserving_and_main_route_scoped ... ok
+test native_main_wire_keeps_empty_tools_and_tool_result_shape ... ok
+test never_is_preserved_and_can_carry_effort_and_text ... ok
+test effort_only_groups_have_position_exception_but_mixed_groups_do_not ... ok
+test effort_models_and_levels_are_exact ... ok
+test request_local_native_admission_is_bound_to_the_exact_first_party_profile ... ok
+test scoped_reminder_stays_verbatim_after_later_user_turn ... ok
+test client_prepare_dispatch_preserves_admitted_per_message_effort_to_wire ... ok
+test unsupported_protocols_do_not_drop_anthropic_metadata ... ok
+test scoped_messages_reject_cache_effort_tool_changes_and_wrong_roles ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

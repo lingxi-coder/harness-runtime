@@ -1,0 +1,13 @@
+{
+  "schema": "current-worker-source-differential-r376-v1",
+  "status": "passed",
+  "cases": 15,
+  "native_version": "2.1.295",
+  "evidence_class": "executed extracted source differential; not public Native CLI capture",
+  "worker_sha256": "2ee0d2b88a6c2aa565a929cf23d058dc8283b9d308c30b6b7e1f9ec132c12c1f",
+  "script_sha256": "bd964c10eebf8f1407b914e326c3be1fb3bca9f541da4d76985a3c57b6d5aeab",
+  "log_sha256": "0761972925540b952f2ea1b56bf794e05629b9cd40c31fc04e5631a596384f03",
+  "results_sha256": "3898ab57a4de299de8bfeb7bbb2657657913545c04590314b5d6a96e565b3f02",
+  "source_sha256": "cfaaecaee8d26184f098f50f71d96e032ee78508ff5e67f8e8e7a979344223a3",
+  "native_cli_launches": 0
+}

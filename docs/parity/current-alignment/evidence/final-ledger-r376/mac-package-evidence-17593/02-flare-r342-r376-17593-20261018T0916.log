@@ -1,0 +1,241 @@
+Flare package: Product 17593eaa66dc762d5c9c581ba348398c914bdbcd / Harness 44f2eef5baf8ae16254934dbca451cbfd528d955
+
+> lingxi-code-desktop@0.1.0 package:mac:flare
+> bash scripts/package-macos-flare.sh --channel development --output-root /Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z
+
+[package:mac:flare] signing team: Flare App, Inc. (AZ4AX7J833)
+[package:mac:flare] signing identity: Apple Development: lingfeng luo (KQ7KX8LCYL) (DF422E132604B63835F35605A0080A66AFF67CC4)
+[package:mac:flare] Desktop profile: /Users/luolingfeng/Library/Developer/Xcode/UserData/Provisioning Profiles/c3d581eb-b204-463b-b69a-c83a0d02f6ae.provisionprofile
+[package:mac:flare] Broker profile: /Users/luolingfeng/Library/Developer/Xcode/UserData/Provisioning Profiles/c3d581eb-b204-463b-b69a-c83a0d02f6ae.provisionprofile
+[package:mac:flare] Audio Helper profile: /Users/luolingfeng/Library/Developer/Xcode/UserData/Provisioning Profiles/c3d581eb-b204-463b-b69a-c83a0d02f6ae.provisionprofile
+[package:mac:flare] credential channel: development
+[package:mac:flare] building portable release bridge-server
+   Compiling json-projection v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling branding v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling rooted-fs v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling device-api v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling telemetry-macros v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling visualization v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling sandbox-runtime v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling cost v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling command-api v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling icu_collator v2.3.1 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling jsonrpc v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling mcp-wire v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling mbedtls-sys v3.6.2 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling core v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling libssh2-sys v0.3.1 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling syntect v5.3.0-harness.1 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling libgit2-sys v0.18.5+1.9.4 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tui v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui)
+   Compiling cli v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host)
+   Compiling bridge-server v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server)
+   Compiling telemetry v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling secret v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling lsp v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling session v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling http-client v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling llm-runtime v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling permission v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling workflow v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling migrations v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling sandbox v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling mcp v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling hooks v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling platform-common v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling task-store v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling skill v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-api v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling sidequery v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling outputstyles v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-file v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling memory v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling agent v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling git2 v0.21.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-shell v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling provider-config v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling local-app v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-ui v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tasks v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling fusion v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-web v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-meta v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-mobile v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-plan v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling cron v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-cron v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-task v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling compaction v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-skill v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-workflow v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling orchestrator v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling plugin v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling coordinator v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-worktree v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-mcp v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-computer-use v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-agent v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tool-lsp v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling platform-posix v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling audio-runtime v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling platform-macos-computer-control v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling msgqueue v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling client v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling audio-provider v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/audio-provider)
+   Compiling bridge v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling tui-core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui-core)
+   Compiling harness-runtime v0.9.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+   Compiling configuration-admin v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=44f2eef5baf8ae16254934dbca451cbfd528d955#44f2eef5)
+    Finished `release` profile [optimized] target(s) in 10m 06s
+[package:mac:flare] packaging and signing the Electron app
+
+> lingxi-code-desktop@0.1.0 package:mac
+> node scripts/package-mac.mjs
+
+[package:mac] npm run build
+
+> @lingxi/bridge-client@0.1.0 build
+> tsc -p tsconfig.json
+
+[package:mac] npm run build
+
+> lingxi-code-desktop@0.1.0 build
+> electron-vite build
+
+vite v7.3.6 building ssr environment for production...
+transforming...
+✓ 59 modules transformed.
+rendering chunks...
+out/main/index.js  615.16 kB
+✓ built in 823ms
+vite v7.3.6 building ssr environment for production...
+transforming...
+✓ 13 modules transformed.
+rendering chunks...
+out/preload/visualization.cjs   0.61 kB
+out/preload/index.cjs          14.04 kB
+✓ built in 31ms
+vite v7.3.6 building client environment for production...
+transforming...
+✓ 548 modules transformed.
+rendering chunks...
+../../out/renderer/index.html                                0.58 kB
+../../out/renderer/assets/variant-24-dark--ve2oZMJ.svg       4.19 kB
+../../out/renderer/assets/variant-07-dark-zaPu0cTO.svg       4.32 kB
+../../out/renderer/assets/variant-03-light-I8xKkGfp.svg      4.81 kB
+../../out/renderer/assets/variant-12-dark-BrDmxaZa.svg       4.96 kB
+../../out/renderer/assets/variant-01-light-C3UvtCUW.svg      4.97 kB
+../../out/renderer/assets/variant-01-dark-B3Nkyz-o.svg       5.00 kB
+../../out/renderer/assets/variant-03-dark-VQrGYUaT.svg       5.19 kB
+../../out/renderer/assets/variant-12-light-C34Nr0R8.svg      5.62 kB
+../../out/renderer/assets/variant-08-light-CsCoLQ_G.svg      5.63 kB
+../../out/renderer/assets/variant-08-dark-Cr0aABX8.svg       5.65 kB
+../../out/renderer/assets/variant-24-light-Bkt1ykb4.svg      6.18 kB
+../../out/renderer/assets/variant-20-light-BoKn0HzD.svg      7.14 kB
+../../out/renderer/assets/variant-20-dark-CA5g7I48.svg       7.88 kB
+../../out/renderer/assets/variant-13-light-BB-9mMRO.svg      9.87 kB
+../../out/renderer/assets/variant-02-light-BsILA2dS.svg      9.89 kB
+../../out/renderer/assets/variant-13-dark-vOrvIizI.svg       9.89 kB
+../../out/renderer/assets/variant-02-dark-DeBRtOvl.svg       9.90 kB
+../../out/renderer/assets/variant-11-light-B49eRXib.svg     10.02 kB
+../../out/renderer/assets/variant-21-light-Df2qFl3v.svg     10.04 kB
+../../out/renderer/assets/variant-21-dark-CVOa6MjZ.svg      10.04 kB
+../../out/renderer/assets/variant-11-dark-DunBb65G.svg      10.08 kB
+../../out/renderer/assets/variant-19-light-CSPDAezl.svg     15.40 kB
+../../out/renderer/assets/variant-00-light-z_XAJP5n.svg     15.68 kB
+../../out/renderer/assets/variant-19-dark-Dc0rjZdf.svg      15.69 kB
+../../out/renderer/assets/variant-00-dark-B7j0VdUP.svg      15.76 kB
+../../out/renderer/assets/google-g-CpxN0HWb.png             33.66 kB
+../../out/renderer/assets/app-icon-B13hGiK5.png            199.92 kB
+../../out/renderer/assets/xterm-GVL3fBIr.css                 7.11 kB
+../../out/renderer/assets/index-B8E-1TKy.css               187.82 kB
+../../out/renderer/assets/addon-fit-D89xfLfG.js              1.42 kB
+../../out/renderer/assets/xterm-R4LLEgbX.js                411.70 kB
+../../out/renderer/assets/index-Dr7CTk3e.js              3,462.59 kB
+✓ built in 2.78s
+[0/1] Planning build
+Building for production...
+[0/2] Write swift-version--58304C5D6DBC2206.txt
+[2/3] Compiling SherpaOnnx SherpaOnnx.swift
+[3/4] Compiling LingXiAudioHelper AudioHelperMain.swift
+Build complete! (10.88s)
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/libvk_swiftshader.dylib: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Helper (Renderer).app/Contents/MacOS/Electron Helper (Renderer): replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Helpers/chrome_crashpad_handler: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Helper (Plugin).app/Contents/MacOS/Electron Helper (Plugin): replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/libffmpeg.dylib: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/libGLESv2.dylib: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Libraries/libEGL.dylib: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Helper (GPU).app/Contents/MacOS/Electron Helper (GPU): replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Helper.app/Contents/MacOS/Electron Helper: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/ReactiveObjC.framework/Versions/A/ReactiveObjC: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Squirrel.framework/Versions/A/Resources/ShipIt: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Squirrel.framework/Versions/A/Squirrel: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Mantle.framework/Versions/A/Mantle: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Framework.framework: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Helper (GPU).app: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Helper (Plugin).app: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Helper (Renderer).app: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Electron Helper.app: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Mantle.framework: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/ReactiveObjC.framework: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Frameworks/Squirrel.framework: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/bin/bun: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/bin/bridge-server: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/credential-broker/bin/lingxi-credential-client: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/LingXiAudioHelper.app: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/credential-broker/LingXiCredentialBroker.app: replacing existing signature
+/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app: replacing existing signature
+Executable=/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/LingXiAudioHelper.app/Contents/MacOS/LingXiAudioHelper
+Executable=/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/credential-broker/LingXiCredentialBroker.app/Contents/MacOS/LingXiCredentialBroker
+Executable=/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/MacOS/LingXi Code
+[package:mac] signed app, audio helper, and credential broker with DF422E132604B63835F35605A0080A66AFF67CC4 (0.1.0)
+[package:mac] app: /Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app
+[package:mac] zip: /Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64.zip
+[package:mac] sha256: 64c8a4d7a441f53c5dc9990d13f3ea4930f1ead72c2df52759565102f73481de
+
+> lingxi-code-desktop@0.1.0 verify:package
+> npm run verify:package:static && npm run verify:package:smoke
+
+
+> lingxi-code-desktop@0.1.0 verify:package:static
+> node scripts/verify-package.mjs
+
+Print: Entry, ":NSAppTransportSecurity", Does Not Exist
+Print: Entry, ":NSAudioCaptureUsageDescription", Does Not Exist
+Print: Entry, ":NSBluetoothAlwaysUsageDescription", Does Not Exist
+Print: Entry, ":NSBluetoothPeripheralUsageDescription", Does Not Exist
+Print: Entry, ":NSCameraUsageDescription", Does Not Exist
+Executable=/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/LingXiAudioHelper.app/Contents/MacOS/LingXiAudioHelper
+Executable=/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/credential-broker/LingXiCredentialBroker.app/Contents/MacOS/LingXiCredentialBroker
+Executable=/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/MacOS/LingXi Code
+[verify:package] OK /Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app
+[verify:package] ZIP 281900096 bytes, SHA-256 64c8a4d7a441f53c5dc9990d13f3ea4930f1ead72c2df52759565102f73481de
+
+> lingxi-code-desktop@0.1.0 verify:package:smoke
+> node scripts/packaged-app-smoke.mjs
+
+[verify:package:smoke] checking renderer bootstrap
+[verify:package:smoke] checking renderer security
+[verify:package:smoke] checking bundled sidecar
+[verify:package:smoke] checking terminal
+[verify:package:smoke] packaged bottom terminal: renderer, Unicode, project cwd, hide/resume and close passed
+[verify:package:smoke] checking Desktop Git
+[verify:package:smoke] packaged Git: init, branch, diff, stage, commit, local push/fetch/pull, Review watcher and summary environment passed
+[verify:package:smoke] checking credential and scheduled-task persistence
+[verify:package:smoke] scheduled project/No project create, pause, edit, restart, history and delete verified
+[verify:package:smoke] app diagnostics: {"timestamp":"2026-10-18T09:28:17.719Z","level":"info","source":"host","message":"{\"event\":\"bootstrap_completed\",\"activeSessionId\":\"7f43117d-403e-44bf-a01e-e6874f5da724\",\"catalogCount\":2,\"durationMs\":1,\"revision\":16,\"runtimeCount\":3}"}
+{"timestamp":"2026-10-18T09:28:18.310Z","level":"info","source":"host","message":"{\"event\":\"connection_state\",\"generation\":1,\"state\":{\"reason\":\"session runtime disposed\",\"status\":\"disconnected\"}}"}
+{"timestamp":"2026-10-18T09:28:18.310Z","level":"info","source":"host","message":"{\"event\":\"connection_state\",\"generation\":1,\"state\":{\"reason\":\"session runtime disposed\",\"status\":\"disconnected\"}}"}
+{"timestamp":"2026-10-18T09:28:18.311Z","level":"info","source":"host","message":"{\"event\":\"connection_state\",\"generation\":1,\"state\":{\"reason\":\"session runtime disposed\",\"status\":\"disconnected\"}}"}
+{"timestamp":"2026-10-18T09:28:18.312Z","level":"info","source":"bridge","message":"{\"event\":\"engine_log\",\"generation\":1,\"message\":\"2026-10-18T09:28:18.312386Z  INFO bridge_server: bridge-server: shutdown signal received shutdown_signal=\\\"ctrl-c\\\"\",\"projectPath\":\"/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-smoke-QehcPe/workspace\",\"sessionId\":\"7f43117d-403e-44bf-a01e-e6874f5da724\"}"}
+{"timestamp":"2026-10-18T09:28:18.313Z","level":"info","source":"bridge","message":"{\"event\":\"engine_log\",\"generation\":1,\"message\":\"2026-10-18T09:28:18.312424Z  INFO bridge_server: bridge-server: shutdown signal received shutdown_signal=\\\"ctrl-c\\\"\",\"projectPath\":\"/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-smoke-QehcPe/home/Library/Application Support/LingXi Code/scheduled-workspace\",\"sessionId\":\"abc00808-1d3f-496d-af06-00cc4512dfc9\"}"}
+{"timestamp":"2026-10-18T09:28:18.314Z","level":"info","source":"bridge","message":"{\"event\":\"engine_log\",\"generation\":1,\"message\":\"2026-10-18T09:28:18.312497Z  INFO bridge_server: bridge-server: shutdown signal received shutdown_signal=\\\"ctrl-c\\\"\",\"projectPath\":\"/private/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-smoke-QehcPe/workspace\",\"sessionId\":\"7f864e94-1461-4560-a369-08c970dac46b\"}"}
+
+[verify:package:smoke] app stderr: DevTools listening on ws://127.0.0.1:62523/devtools/browser/d73ac7e3-14d8-4eff-a011-e08912536c2f
+[verify:package:smoke] OK /var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-smoke-QehcPe/app-copy/LingXi Code.app
+[verify:package:smoke] Automated: bundled renderer and sidecar, custom Provider Keychain persistence across app restart, authenticated localhost model request, credential deletion, live permission modes, security checks, and exact temp cleanup.
+[verify:package:smoke] Manual-only: Gatekeeper transfer prompts, ad-hoc signature approval on a different Mac, full Developer ID notarization/stapling, and native workspace-trust dialog text on physical user interaction.
+[package:mac:flare] verified app: /Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app
+Flare package verified by normal wrapper: /Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z

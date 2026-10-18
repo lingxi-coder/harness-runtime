@@ -1,0 +1,6 @@
+   Compiling bridge-server v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server)
+    Finished `test` profile [unoptimized] target(s) in 3.24s
+     Running tests/serve_e2e.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/serve_e2e-45db321dc57d449d)
+     Running tests/session_presence_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/session_presence_test-1165a813787b05a9)
+     Running tests/tool_fixture.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tool_fixture-53360645e3bb7713)
+     Running tests/version_mismatch_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/version_mismatch_test-8fbf4a2b4bf6a933)

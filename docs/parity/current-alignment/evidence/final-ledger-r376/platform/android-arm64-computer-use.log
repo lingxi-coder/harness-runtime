@@ -1,0 +1,8 @@
+
+=== android-arm64-computer-use ===
+    Building arm64-v8a (aarch64-linux-android)
+    Checking tool-android-use v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+   Compiling android-aar v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/android/ffi)
+    Checking harness-runtime v0.9.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Finished `dev` profile [unoptimized] target(s) in 14.23s
+exit_code=0

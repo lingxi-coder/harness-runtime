@@ -1,0 +1,9 @@
+   Compiling cli v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host)
+    Finished `test` profile [unoptimized] target(s) in 0.99s
+     Running tests/commands_native_cli.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/commands_native_cli-d388b2dc03f3cc92)
+
+running 1 test
+test actual_cli_matches_native_2_1_295_slash_skill_and_stream_json_fixed_fields ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 11.53s
+

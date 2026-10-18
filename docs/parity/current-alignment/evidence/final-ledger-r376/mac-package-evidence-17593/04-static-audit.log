@@ -1,0 +1,13 @@
+Print: Entry, ":NSAppTransportSecurity", Does Not Exist
+Print: Entry, ":NSAudioCaptureUsageDescription", Does Not Exist
+Print: Entry, ":NSBluetoothAlwaysUsageDescription", Does Not Exist
+Print: Entry, ":NSBluetoothPeripheralUsageDescription", Does Not Exist
+Print: Entry, ":NSCameraUsageDescription", Does Not Exist
+Executable=/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/LingXiAudioHelper.app/Contents/MacOS/LingXiAudioHelper
+Executable=/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/credential-broker/LingXiCredentialBroker.app/Contents/MacOS/LingXiCredentialBroker
+Executable=/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/MacOS/LingXi Code
+[mac-package-audit] Product 17593eaa66dc762d5c9c581ba348398c914bdbcd
+[mac-package-audit] Harness Cargo.lock 44f2eef5baf8ae16254934dbca451cbfd528d955
+[mac-package-audit] app.asar SHA-256 21462a3c01035cd13bb3785dcfcc11ad474ea6f22b6fde0357db352fa23ecb06
+[mac-package-audit] Bun 1.4.3 revision c6da4a4d3010e5553438c60f6bd76d981976867c; source SHA-256 28c7dd0a06916aba284d570ef44a2d70e9c538eaf2ba58dfe0910525563b3f79; sealed SHA-256 411603452b61c7bfcafc81269360e378e9aec1b3c59f5ddc3340a17ec2a838ed
+[mac-package-audit] static package verification passed: /Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app

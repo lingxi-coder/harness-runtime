@@ -1,0 +1,16 @@
+{
+  "harness-runtime": {
+    "head": "1a95887481789b43af01467a9115d94abecc7b07",
+    "branch": "main",
+    "status": " M packages/webrtc/Cargo.lock\n M packages/webrtc/Cargo.toml\n M packages/webrtc/DEVICE_VALIDATION.md\n M packages/webrtc/README.md\n M packages/webrtc/compose.yaml\n M packages/webrtc/core/src/lib.rs\n M packages/webrtc/core/src/transport.rs\n M packages/webrtc/core/src/transport_tests.rs\n M packages/webrtc/media/src/lib.rs\n M packages/webrtc/media/src/video_ports.rs\n M packages/webrtc/mobile/include/lingxi_webrtc.h\n M packages/webrtc/mobile/src/lib.rs\n M packages/webrtc/mobile/src/probe_session.rs\n M packages/webrtc/platform/android-probe/app/src/main/cpp/bridge.cpp\n M packages/webrtc/platform/android-probe/app/src/main/java/com/lingxi/webrtc/probe/MainActivity.java\n M packages/webrtc/platform/android-probe/app/src/main/java/com/lingxi/webrtc/probe/MediaService.java\n M packages/webrtc/platform/android-probe/app/src/main/java/com/lingxi/webrtc/probe/NativeBridge.java\n M packages/webrtc/platform/ios-probe/Sources/NativeDevices.m\n M packages/webrtc/platform/ios-probe/Sources/main.m\n M packages/webrtc/platform/ios-probe/project.yml\n M packages/webrtc/test-server/src/main.rs\n M packages/webrtc/vendor/README.md\n",
+    "unstaged_sha256": "9553e817ebd835cccd53842af0c7001592ea9a4324384ea84d59a4e66c332291",
+    "staged_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "lingxi-app": {
+    "head": "3af47d77fcff4273fc2f235af0b1ed77b13919eb",
+    "branch": "main",
+    "status": " M apps/ios/native/Resources/Localizable.xcstrings\n M apps/ios/native/Sources/Settings/ProviderPages.swift\n M apps/ios/native/UITests/DesktopSettingsUITests.swift\n M apps/ios/native/UITests/LingxiCodeUITests.swift\n",
+    "unstaged_sha256": "d85495e07659712cc8a485dede4cb28f37e1be961a29d59c4be2767c44dbf68d",
+    "staged_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}

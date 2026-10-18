@@ -1,0 +1,165 @@
+{
+  "actual_test_summary": {
+    "failed": 0,
+    "ignored": 4,
+    "passed": 2738
+  },
+  "doctest_target_coverage": 9,
+  "ended_at_unix_ns": 1792288179318673000,
+  "environment": {
+    "CARGO_BUILD_JOBS": "6",
+    "CARGO_ENCODED_RUSTFLAGS": null,
+    "CARGO_HOME": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/cargo-home",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_NET_OFFLINE": "true",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_TARGET_DIR": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target",
+    "LINGXI_MOD_BUN_EXECUTABLE": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/bun-1.4.3/bun",
+    "PATH": "/Users/luolingfeng/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/bun-1.4.3:/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin:/Users/luolingfeng/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+    "RUSTDOCFLAGS": null,
+    "RUSTFLAGS": null,
+    "RUSTUP_TOOLCHAIN": "1.94.0",
+    "RUST_MIN_STACK": "16777216",
+    "actual_child_environment_sha256": "8066c9d5e83052e3faee3347fe71d4c92882ebf1e1bb5ca8aba670eb9993ed3b",
+    "cargo_path": "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo",
+    "tool_versions": {
+      "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "rustdoc": "rustdoc 1.94.0 (4a4ef493e 2026-03-02)"
+    }
+  },
+  "executable_test_target_coverage": 40,
+  "fingerprint": "6d997b8d64f0ecd727ee4e821530efbf2cbf200e649f704dfe7aabc9031df719",
+  "git": {
+    "cargo_lock_sha256": "0cb925d4057bad15c730804d221ce8807b1192da3d0ba1386ca9dbf6a3637807",
+    "cargo_manifest_sha256": "4f6c6fad8b0caa97c01364f092d6bb82dd6caad6c3477bf932d66a2143986651",
+    "head": "f71087b428665c30d0bd752e16f76cb53ab7fef6",
+    "source_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tree": "2db2c3f7cfc40028de49f253257b4c9f64f12a2a"
+  },
+  "historical_counts_used_as_acceptance": false,
+  "metadata": {
+    "doctest_targets": 9,
+    "identity_sha256": "e8e1fe2b04b3b8b275bada632d6746837b7f46865911440617e7a855edce7235",
+    "mtime_ns": 1792287922534454725,
+    "path": "/private/tmp/product-full-r342-r375-20261018T014521Z-68469/metadata.json",
+    "pin_rows": {
+      "harness_lock_rows": 78,
+      "harness_manifest_rows": 39,
+      "harness_metadata_rows": 78,
+      "mobile_lock_rows": 5,
+      "mobile_manifest_rows": 3,
+      "mobile_metadata_rows": 5,
+      "sdk_lock_rows": 5,
+      "sdk_manifest_rows": 1,
+      "sdk_metadata_rows": 5
+    },
+    "sha256": "8de77d0cbccdfa70816aed125d5eb50b860017d1fd47706ea05cd04e9b1db511",
+    "test_targets": 40,
+    "workspace_default_members": 6,
+    "workspace_members": 9
+  },
+  "min_free_bytes": 3221225472,
+  "phases": {
+    "binary-tests-01": {
+      "artifact_count": 3,
+      "doctest_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 2
+      }
+    },
+    "doctests": {
+      "artifact_count": 0,
+      "doctest_count": 9,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 0
+      }
+    },
+    "integration-tests-01": {
+      "artifact_count": 6,
+      "doctest_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 49
+      }
+    },
+    "integration-tests-02": {
+      "artifact_count": 6,
+      "doctest_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 2,
+        "passed": 18
+      }
+    },
+    "integration-tests-03": {
+      "artifact_count": 6,
+      "doctest_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 15
+      }
+    },
+    "integration-tests-04": {
+      "artifact_count": 6,
+      "doctest_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 98
+      }
+    },
+    "integration-tests-05": {
+      "artifact_count": 4,
+      "doctest_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 0,
+        "passed": 8
+      }
+    },
+    "library-tests": {
+      "artifact_count": 9,
+      "doctest_count": 0,
+      "status": "passed",
+      "test_summary": {
+        "failed": 0,
+        "ignored": 2,
+        "passed": 2548
+      }
+    }
+  },
+  "pins": {
+    "harness": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+    "mobile": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d",
+    "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e"
+  },
+  "plan_info": {
+    "doctest_targets": 9,
+    "phase_count": 8,
+    "sha256": "5668f4030e21238e8b44dc05c6f32324ecb08b78b316d11bf4dee718d4ca8f58",
+    "test_targets": 40
+  },
+  "plan_sha256": "5668f4030e21238e8b44dc05c6f32324ecb08b78b316d11bf4dee718d4ca8f58",
+  "product_head": "f71087b428665c30d0bd752e16f76cb53ab7fef6",
+  "retire_passed_test_executables": true,
+  "schema": "product-full-gate-run-v1",
+  "started_at_unix_ns": 1792287927467224000,
+  "status": "complete",
+  "target_directory": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target",
+  "workspace": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app"
+}

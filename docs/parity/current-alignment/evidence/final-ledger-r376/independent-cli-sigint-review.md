@@ -1,0 +1,11 @@
+# Independent Product SIGINT regression review
+
+Read-only source review; no Cargo or Native process was run. Reviewed Product `17593eaa66dc762d5c9c581ba348398c914bdbcd` (`commands_native_cli.rs` SHA-256 `af62c3656a9d8b9b833c7b4766909c4a95d34ba9846bbdb885d53d9eda0ab1f0`) and Harness H44 `run.rs` SHA-256 `f9afe39ea99eaffa8afb3097b53bfab8aa17ae13f3e28788a40aca768f30b8ee`.
+
+No confirmed source or fixture blocker found. The public CLI regression sends one `--print --output-format json` request to a loopback endpoint, verifies the accepted streaming `POST /v1/messages` body, and withholds its response before sending SIGINT. It compares the stable Native result fields and exact raw transcript `message.content` tokens for the prompt and user-interruption row. The fixtures are fixed inputs/oracles, not mocked candidate output: all three raw-file SHA-256 values match the constants in the test and README, and the assertions inspect the real CLI output/session file. The test does not claim whole stdout or transcript byte equality.
+
+The current H44 projection is narrowly guarded: the one-shot publisher receives the prompt `MessageId`; only `TurnOutcome::Cancelled` plus the matching persisted prompt, a final plain user interruption row, and no assistant row emits the Native-shaped error result while leaving the print process successful. The Product test exercises that public path with a pending provider request, no tools, a temporary HOME/config/cwd, dummy credentials, and loopback-only endpoints.
+
+Process cleanup is bounded in the reviewed path: a `ChildGuard` kills/reaps on unwind, the explicit 60-second deadline kills then waits, the stub has a 10-second request read timeout, and releasing/dropping the channel lets its thread exit before join. I found no evidence of a leaked child for this no-tools test. The `wait_with_output` call itself has no separate timeout, but it follows a confirmed child exit or synchronous kill-and-reap path here.
+
+Keep the accepted coverage boundary visible: this proves SIGINT after the loopback POST is accepted while the response is withheld. It does not cover interruption before request admission, after response data starts, or the Native projection when compaction replaces the preserved query ID. Those remain unverified rather than allowed differences.

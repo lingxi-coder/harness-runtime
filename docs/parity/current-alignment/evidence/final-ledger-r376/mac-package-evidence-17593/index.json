@@ -1,0 +1,131 @@
+{
+  "schema": "r376-macos-evidence-archive-v1",
+  "receipt": "receipts/mac-package-final-17593.json",
+  "files": [
+    {
+      "role": "package wrapper exit",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mac-final-r376-17593-20261018T0916/wrapper.exit",
+      "bytes": 12,
+      "sha256": "bde294368bfed77c2cddf8cec271d398aee9cdbab3b26e1059281bd33adb0120",
+      "archived": "mac-package-evidence-17593/00-wrapper.exit"
+    },
+    {
+      "role": "package wrapper stdout",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mac-final-r376-17593-20261018T0916/wrapper.stdout.log",
+      "bytes": 1312,
+      "sha256": "d46de90df8b32e497e69287f302dfaa8cfdf85235efe2c3aa38b7164b429f2ac",
+      "archived": "mac-package-evidence-17593/01-wrapper.stdout.log"
+    },
+    {
+      "role": "Flare package log",
+      "path": "/private/tmp/flare-r342-r376-17593-20261018T0916.log",
+      "bytes": 28988,
+      "sha256": "bf89f96e5eff75657592da13cdf50560547976316b6fa9ac98c04f6077c6144a",
+      "archived": "mac-package-evidence-17593/02-flare-r342-r376-17593-20261018T0916.log"
+    },
+    {
+      "role": "static audit exit",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mac-final-r376-17593-20261018T0916/static-audit.exit",
+      "bytes": 12,
+      "sha256": "bde294368bfed77c2cddf8cec271d398aee9cdbab3b26e1059281bd33adb0120",
+      "archived": "mac-package-evidence-17593/03-static-audit.exit"
+    },
+    {
+      "role": "independent static audit log",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mac-final-r376-17593-20261018T0916/static-audit.log",
+      "bytes": 1737,
+      "sha256": "e1eb70818ea10aa610dd26e5069743cc62e35b04f7b714acf94ab9b1e6644d4a",
+      "archived": "mac-package-evidence-17593/04-static-audit.log"
+    },
+    {
+      "role": "packaged app.asar",
+      "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app/Contents/Resources/app.asar",
+      "bytes": 171192258,
+      "sha256": "21462a3c01035cd13bb3785dcfcc11ad474ea6f22b6fde0357db352fa23ecb06",
+      "archive_policy": "retained signed artifact outside Git; hash and exact path recorded"
+    },
+    {
+      "role": "Host driver exit",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mac-final-r376-17593-20261018T0916/host-driver.exit",
+      "bytes": 12,
+      "sha256": "bde294368bfed77c2cddf8cec271d398aee9cdbab3b26e1059281bd33adb0120",
+      "archived": "mac-package-evidence-17593/06-host-driver.exit"
+    },
+    {
+      "role": "packaged Host driver log",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mac-final-r376-17593-20261018T0916/host-driver.log",
+      "bytes": 4742,
+      "sha256": "30a5082efb2262086886ddbd517c30502682c37321e0f073271dc10e21b048b7",
+      "archived": "mac-package-evidence-17593/07-host-driver.log"
+    },
+    {
+      "role": "packaged Host driver result",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mac-final-r376-17593-20261018T0916/gui/packaged-host-mod-2026-10-18T09-35-08-620Z.json",
+      "bytes": 17281,
+      "sha256": "13f17b969ab19462cdc193dddb4804569d1429fe595c416a144cf16ff524217a",
+      "archived": "mac-package-evidence-17593/08-packaged-host-mod-2026-10-18T09-35-08-620Z.json"
+    },
+    {
+      "role": "actual visible CUA observation",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mac-final-r376-17593-20261018T0916/cua-observations.json",
+      "bytes": 2444,
+      "sha256": "289e82a2f2b7099beeea51576295979bbefeb98e911452b15baae4bdec8a59a1",
+      "archived": "mac-package-evidence-17593/09-cua-observations.json"
+    },
+    {
+      "role": "actual CUA screenshot",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mac-final-r376-17593-20261018T0916/cua-submit.png",
+      "bytes": 312371,
+      "sha256": "28be6f881ae2844132ea366dad0174632ec2cffb7feaabe4c5c870dcffde7b0c",
+      "archived": "mac-package-evidence-17593/10-cua-submit.png"
+    },
+    {
+      "role": "signed package ZIP",
+      "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64.zip",
+      "bytes": 281900096,
+      "sha256": "64c8a4d7a441f53c5dc9990d13f3ea4930f1ead72c2df52759565102f73481de",
+      "archive_policy": "retained signed artifact outside Git; hash and exact path recorded"
+    },
+    {
+      "role": "r376 package wrapper source",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/final-ledger-r376/run-repaired-h-package.sh",
+      "bytes": 1300,
+      "sha256": "719b4b94bada5b4726a619064d45eb9a93dfc17025ce1c368262aea76527e9c7",
+      "archived": "mac-package-evidence-17593/12-run-repaired-h-package.sh"
+    },
+    {
+      "role": "guarded Flare package runner source",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/product-final-r342-candidate/package-flare.sh",
+      "bytes": 2896,
+      "sha256": "37f8e4fe0abd303a59fae4598305f0fe12f0ecb0f1053c33557fc3ec05d4fc92",
+      "archived": "mac-package-evidence-17593/13-package-flare.sh"
+    },
+    {
+      "role": "package source guard source",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/product-final-r342-candidate/source_guard.py",
+      "bytes": 8826,
+      "sha256": "d1a855731b2c4ec0fcb880ef09513592d4aac95067210182383127185dc49f8d",
+      "archived": "mac-package-evidence-17593/14-source_guard.py"
+    },
+    {
+      "role": "independent package verifier source",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/acceptance/mac-package-audit-r354-prep/verify-final-macos-package.mjs",
+      "bytes": 3958,
+      "sha256": "d2ca70c7a0d19507f3452681481030f313a7e2e291c8e667d763a830f9b330fd",
+      "archived": "mac-package-evidence-17593/15-verify-final-macos-package.mjs"
+    },
+    {
+      "role": "packaged Host driver source",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/product-js-gates-fbe2a847-20261014/packaged-host-driver-r375/run-packaged-host-mod-smoke.mjs",
+      "bytes": 81139,
+      "sha256": "ce19225514a7ec1c438a237eb092a647bc9e1d30748c5b44019154885d5617ea",
+      "archived": "mac-package-evidence-17593/16-run-packaged-host-mod-smoke.mjs"
+    },
+    {
+      "role": "actual CUA final AX tree",
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mac-final-r376-17593-20261018T0916/cua-final-ax.txt",
+      "sha256": "ecfa802cc9b502b3acfdf969b84f11a5365c25dd4df8c36ee6b7abef37f44289",
+      "archived": "mac-package-evidence-17593/cua-final-ax.txt"
+    }
+  ]
+}

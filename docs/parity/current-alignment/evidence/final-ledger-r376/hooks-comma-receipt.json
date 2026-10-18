@@ -1,0 +1,20 @@
+{
+  "schema": "r376-hook-comma-gate-v1",
+  "status": "passed",
+  "base_harness": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+  "candidate": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+  "passed": 852,
+  "failed": 0,
+  "ignored": 1,
+  "focused_new_regression": 1,
+  "logs": {
+    "harness-repair-gates-r8/hooks-lib.log": "c81d10313ced358ad0bbd3d60814da563fea703df4622913956d7afa1dd594af",
+    "harness-repair-gates-r8/hooks-focused.log": "511659dfaf997fab9c220272f361771434b6d15fc03b0ba1a2be2520c5844862"
+  },
+  "source_sha256": {
+    "crates/hooks/src/matcher.rs": "b1e8942326d96eb62f29db71bc02ab814655ae39973d032a9e152fba88cc1de2",
+    "crates/hooks/src/registry.rs": "39bc30f6b99983429aea6082483e5e470131f036eed37eb1cab79b8c61db1b5e",
+    "crates/core/src/host/mod.rs": "26be137b5ca90dd2d47674366318e347d03d345c2926b701d0f750e82a3f49b4",
+    "crates/core/src/host/permission_gate.rs": "b0540cb766becf8085107029b564e68bcc6e58c7b2d36c8d5042fb9b452cad65"
+  }
+}

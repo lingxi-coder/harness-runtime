@@ -1,0 +1,278 @@
+
+=== ios-simulator-default ===
+   Compiling libc v0.2.186
+   Compiling serde_core v1.0.228
+   Compiling serde v1.0.228
+   Compiling parking_lot_core v0.9.12
+    Checking futures-util v0.3.32
+    Checking tracing v0.1.44
+   Compiling generic-array v0.14.7
+   Compiling thiserror v2.0.18
+    Checking errno v0.3.14
+    Checking signal-hook-registry v1.4.8
+    Checking socket2 v0.6.3
+    Checking parking_lot v0.12.5
+    Checking mio v1.2.0
+   Compiling zmij v1.0.21
+    Checking tokio v1.52.3
+   Compiling serde_json v1.0.150
+   Compiling unicode-joining-type v1.0.0
+    Checking crypto-common v0.1.7
+    Checking getrandom v0.2.17
+    Checking indexmap v2.14.2
+   Compiling zerocopy v0.8.48
+    Checking block-buffer v0.10.4
+   Compiling ring v0.17.14
+    Checking digest v0.10.7
+   Compiling num-traits v0.2.19
+    Checking cpufeatures v0.2.17
+   Compiling httparse v1.10.1
+    Checking idna_mapping v1.1.0
+    Checking idna_adapter v1.1.0
+    Checking idna v1.1.0
+   Compiling crc32fast v1.5.0
+    Checking url v2.5.8
+    Checking futures-executor v0.3.32
+   Compiling rustix v0.38.44
+    Checking tokio-util v0.7.18
+   Compiling crossbeam-utils v0.8.21
+   Compiling getrandom v0.4.3
+    Checking flate2 v1.1.9
+    Checking sha2 v0.10.9
+   Compiling thiserror v1.0.69
+   Compiling getrandom v0.3.4
+    Checking toml_datetime v0.6.11
+    Checking serde_spanned v0.6.9
+    Checking toml_edit v0.22.27
+   Compiling unicode-general-category v1.1.0
+    Checking uuid v1.26.1
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+    Checking tempfile v3.13.0
+   Compiling uncased v0.9.10
+    Checking ppv-lite86 v0.2.21
+    Checking json-projection v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking toml v0.8.23
+    Checking futures v0.3.32
+    Checking mobile-linux-api v0.1.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41)
+    Checking pear v0.2.9
+    Checking dashmap v6.2.1
+   Compiling schemars v0.8.22
+   Compiling figment v0.10.19
+    Checking fs2 v0.4.3
+    Checking branding v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking rooted-fs v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking jsonrpc v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking mcp-wire v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking device-api v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+   Compiling rustls v0.23.45
+    Checking secrecy v0.10.3
+    Checking tower v0.5.3
+    Checking h2 v0.4.19
+    Checking num-integer v0.1.46
+    Checking serde_urlencoded v0.7.1
+    Checking rustls-webpki v0.103.15
+    Checking core v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking rand_core v0.9.5
+    Checking chrono v0.4.44
+    Checking rand_chacha v0.9.0
+    Checking num-bigint v0.4.6
+    Checking opentelemetry v0.31.0
+    Checking rand v0.9.4
+    Checking pin-project v1.1.13
+    Checking tokio-stream v0.1.18
+    Checking hyper v1.9.0
+    Checking opentelemetry_sdk v0.31.0
+   Compiling protobuf v3.7.2
+   Compiling ref-cast v1.0.25
+    Checking prost v0.14.4
+    Checking hyper-util v0.1.20
+    Checking protobuf-support v3.7.2
+    Checking tokio-rustls v0.26.4
+   Compiling prometheus v0.14.0
+    Checking rand_core v0.6.4
+   Compiling ahash v0.8.12
+    Checking hmac v0.12.1
+    Checking rand_chacha v0.3.1
+    Checking opentelemetry-stdout v0.31.0
+    Checking num-rational v0.4.2
+    Checking hyper-timeout v0.5.2
+    Checking hyper-rustls v0.27.5
+    Checking tonic v0.14.2
+    Checking num-iter v0.1.45
+    Checking lingxi-hyper v1.9.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking num-complex v0.4.6
+    Checking num v0.4.3
+    Checking rand v0.8.6
+    Checking lingxi-hyper-util v0.1.21 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking fluent-uri v0.4.1
+    Checking tonic-prost v0.14.5
+    Checking opentelemetry-proto v0.31.0
+    Checking sha1 v0.10.6
+   Compiling chrono-tz v0.10.4
+    Checking tungstenite v0.24.0
+    Checking opentelemetry-prometheus v0.31.0
+    Checking referencing v0.46.10
+    Checking lingxi-hyper-rustls v0.27.5 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking fraction v0.15.4
+    Checking email_address v0.2.9
+   Compiling lingxi-llm-client v0.3.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking tokio-tungstenite v0.24.0
+    Checking jsonschema v0.46.10
+   Compiling crossbeam-epoch v0.9.21
+    Checking time v0.3.55
+    Checking crossbeam-deque v0.8.6
+    Checking ignore v0.4.23
+   Compiling aws-lc-sys v0.45.0
+   Compiling oid-registry v0.7.1
+    Checking asn1-rs v0.6.2
+    Checking fluent-uri v0.3.2
+    Checking boon v0.6.1
+    Checking der-parser v9.0.0
+    Checking dirs-sys v0.4.1
+    Checking x509-parser v0.16.0
+    Checking yasna v0.5.2
+    Checking which v6.0.3
+   Compiling visualization v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking dirs v5.0.1
+    Checking block-padding v0.3.3
+    Checking lsp-types v0.95.1
+    Checking inout v0.1.4
+    Checking png v0.17.16
+   Compiling zstd-safe v7.2.4
+    Checking image v0.24.9
+    Checking arc-swap v1.9.2
+    Checking zstd v0.13.3
+    Checking cipher v0.4.4
+    Checking compression-codecs v0.4.38
+   Compiling tree-sitter-language v0.1.7
+    Checking async-compression v0.4.42
+    Checking salsa20 v0.10.2
+    Checking tower-http v0.6.11
+    Checking pbkdf2 v0.12.2
+    Checking scrypt v0.11.0
+    Checking cbc v0.1.2
+    Checking aes v0.8.4
+    Checking reqwest v0.12.28
+    Checking lingxi-reqwest v0.12.29 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking pkcs5 v0.7.1
+   Compiling rquickjs-sys v0.14.0
+    Checking opentelemetry-http v0.31.0
+    Checking opentelemetry-otlp v0.31.1
+    Checking zerofrom v0.1.8
+    Checking pkcs8 v0.10.2
+    Checking yoke v0.8.3
+   Compiling tree-sitter-javascript v0.23.1
+   Compiling tree-sitter v0.25.10
+    Checking telemetry v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking secret v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking lsp v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking session v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+   Compiling cost v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking mobile-linux-core v0.1.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41)
+    Checking zerovec v0.11.8
+    Checking rquickjs-core v0.14.0
+    Checking nix v0.27.1
+    Checking serde_yaml v0.9.34+deprecated
+    Checking permission v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking rquickjs v0.14.0
+    Checking tinystr v0.8.4
+    Checking icu_locale_core v2.3.0
+    Checking potential_utf v0.1.6
+    Checking zerotrie v0.2.5
+    Checking workflow v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking icu_provider v2.3.1
+    Checking task-store v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+   Compiling icu_locale_fallback_data v2.3.0
+    Checking icu_collections v2.3.0
+   Compiling icu_normalizer_data v2.3.0
+   Compiling icu_locale_data v2.3.0
+   Compiling icu_collator_data v2.3.0
+    Checking icu_locale_fallback v2.3.0
+    Checking icu_normalizer v2.3.0
+   Compiling mbedtls-sys v3.6.2 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+   Compiling libz-sys v1.1.29
+    Checking icu_properties v2.3.0
+   Compiling command-api v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking icu_collator v2.3.1 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking hooks v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking icu_locale v2.3.1
+    Checking skill v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking string_cache v0.8.9
+   Compiling markup5ever v0.12.1
+   Compiling anyhow v1.0.104
+    Checking memmap2 v0.9.11
+    Checking grep-searcher v0.1.14
+    Checking outputstyles v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking half v2.7.1
+   Compiling html5ever v0.27.0
+    Checking ciborium-ll v0.2.2
+    Checking async-compat v0.2.5
+    Checking uniffi_pipeline v0.32.2
+   Compiling zip v2.4.2
+   Compiling pulldown-cmark v0.13.4
+    Checking zopfli v0.8.3
+    Checking uniffi_core v0.32.2
+    Checking ciborium v0.2.2
+    Checking xml5ever v0.18.1
+    Checking syntect v5.3.0-harness.1 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking markup5ever_rcdom v0.3.0
+    Checking uniffi v0.32.2
+    Checking htmd v0.1.6
+    Checking local-app v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+   Compiling ios-framework v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/ios/ffi)
+    Checking msgqueue v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking mobile-linux-ios v0.1.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41)
+   Compiling libssh2-sys v0.3.1 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+   Compiling libgit2-sys v0.18.5+1.9.4 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking llm-runtime v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking http-client v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking audio-runtime v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking migrations v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking platform-common v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking mcp v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking provider-config v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+   Compiling aws-lc-rs v1.18.1
+    Checking rcgen v0.13.2
+    Checking sandbox-runtime v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking platform-posix-minimal v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking sandbox v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking platform-ios v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-api v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking git2 v0.21.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking sidequery v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-file v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-shell-mobile v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-meta v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-mcp v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-ui v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-git-mobile v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking memory v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-web v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking agent v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-mobile v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-lsp v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-plan v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tasks v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking cron v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-cron v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-task v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-workflow v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking plugin v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking compaction v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking tool-skill v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking orchestrator v0.12.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking client v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking audio-provider v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/audio-provider)
+    Checking configuration-admin v0.1.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+    Checking harness-runtime v0.9.0 (https://github.com/lingxi-coder/harness-runtime.git?rev=4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1#4d6d0d6c)
+warning: unused import: `super::linux_types::MobileLinuxRuntimeModeFfi`
+  --> apps/ios/ffi/src/host.rs:22:5
+   |
+22 | use super::linux_types::MobileLinuxRuntimeModeFfi;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `ios-framework` (lib) generated 1 warning (run `cargo fix --lib -p ios-framework` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized] target(s) in 1m 38s
+exit_code=0

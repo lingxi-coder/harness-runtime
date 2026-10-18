@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized] target(s) in 0.29s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/hooks-639d761dd583b597)
+
+running 1 test
+test registry::match_event_matcher_tests::native_295_comma_mode_event_set_matches_directory_added_and_model_switches ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 852 filtered out; finished in 0.00s
+

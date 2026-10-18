@@ -1,0 +1,40 @@
+{
+  "schema": "claude-295-final-baseline-r376-v1",
+  "initial_baseline_sha256": "376077062b8829f6cde545cbb11f068cd2369564c0122e60b8a785186e0a7778",
+  "target_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "tested_implementation": {
+    "llm-client": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "harness-runtime": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+    "lingxi-app": "17593eaa66dc762d5c9c581ba348398c914bdbcd"
+  },
+  "repair_gate_receipt": {
+    "path": "repairs-final-17593-v2.json",
+    "sha256": "86f1d03e74063b3f1db4ec47416e924562bd9c08cbefdf9848fd347631e1465f"
+  },
+  "new_native_launches": 1,
+  "native_launch_accounting": {
+    "scope": "The two one-shot Native 2.1.295 alias/glob probe attempts in this cleanup batch; historical fixture captures are not counted.",
+    "attempts": [
+      {
+        "receipt": "native-ltr-alias-probe-run-once/receipt.json",
+        "status": "capture_invalid",
+        "native_process_count": 0
+      },
+      {
+        "receipt": "native-ltr-alias-probe-approved-endpoint-run/receipt.json",
+        "status": "capture_invalid",
+        "native_process_count": 1
+      }
+    ],
+    "interpretation": "Counts started Native processes from each runner receipt, including invalid captures; invalid attempts do not establish alias/glob semantics."
+  },
+  "native_alias_probe_semantics": {
+    "status": "capture_invalid",
+    "evidence": [
+      "native-ltr-alias-probe-plan.md",
+      "native-ltr-alias-probe-approved-endpoint-run/receipt.json"
+    ],
+    "limitation": "capture invalid; do not infer alias/glob semantics"
+  }
+}

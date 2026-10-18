@@ -1,0 +1,6 @@
+# Keep archived evidence bytes, including CRLF and raw patch context, intact.
+* -text
+*.patch -whitespace
+*.log -whitespace
+*.jsonl -whitespace
+*.raw -whitespace

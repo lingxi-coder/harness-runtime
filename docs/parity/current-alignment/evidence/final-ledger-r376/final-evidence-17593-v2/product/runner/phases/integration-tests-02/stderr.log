@@ -1,0 +1,9 @@
+   Compiling cli v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host)
+   Compiling bridge-server v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server)
+    Finished `test` profile [unoptimized] target(s) in 5.49s
+     Running tests/computer_access_fixture.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/computer_access_fixture-a6a9774457f55285)
+     Running tests/cli_repl.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli_repl-ff59dbb5d71e096b)
+     Running tests/cli_repl_signals.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli_repl_signals-aad4600f135b20fc)
+     Running tests/cli_resume.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli_resume-2ec338aad6b7e5aa)
+     Running tests/cli_subcommand_stubs.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli_subcommand_stubs-91954527af62fc4d)
+     Running tests/commands_native_cli.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/commands_native_cli-d388b2dc03f3cc92)

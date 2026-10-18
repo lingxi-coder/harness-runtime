@@ -1,0 +1,29 @@
+   Compiling core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+   Compiling telemetry v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry)
+   Compiling secret v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/secret)
+   Compiling llm-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime)
+   Compiling permission v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/permission)
+error[E0507]: cannot move out of a shared reference
+    --> crates/permission/src/policy_gate.rs:3737:9
+     |
+3737 | /         self.policy
+3738 | |             .as_ref()
+3739 | |             .clone()
+     | |____________________^ move occurs because value has type `PermissionPolicy`, which does not implement the `Copy` trait
+     |
+note: if `PermissionPolicy` implemented `Clone`, you could clone the value
+    --> crates/permission/src/policy.rs:552:1
+     |
+ 552 |   pub struct PermissionPolicy {
+     |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^ consider implementing `Clone` for this type
+     |
+    ::: crates/permission/src/policy_gate.rs:3737:9
+     |
+3737 | /         self.policy
+3738 | |             .as_ref()
+3739 | |             .clone()
+     | |____________________- you could clone this value
+
+For more information about this error, try `rustc --explain E0507`.
+error: could not compile `permission` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

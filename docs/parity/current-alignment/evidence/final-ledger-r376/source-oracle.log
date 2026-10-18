@@ -1,0 +1,18 @@
+PASS root-string (11 UTF-16 code units)
+PASS custom-prototype-getters-unsupported-values-array-extras (153 UTF-16 code units)
+PASS primitive-props (31 UTF-16 code units)
+PASS null-props (28 UTF-16 code units)
+PASS bigint-props-omission (15 UTF-16 code units)
+PASS text-props-children-metadata (58 UTF-16 code units)
+PASS children-inherited-index (90 UTF-16 code units)
+PASS children-array-hole (source-level rejection: a child that is neither a string nor an element)
+PASS button-hover-held-children-order (96 UTF-16 code units)
+PASS input-optional-undefined-callback-omission (80 UTF-16 code units)
+PASS select-hover-held-children-order (109 UTF-16 code units)
+PASS array-hole (source-level rejection: props with a hole in an array)
+PASS props-depth (source-level rejection: props nesting deeper than 32)
+PASS unified-props-budget (source-level rejection: props of more than 20000 values)
+PASS input-callbacks-excluded-from-unified-budget (40062 UTF-16 code units)
+source-oracle differential: 15 cases passed
+(node:87135) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)

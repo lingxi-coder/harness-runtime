@@ -1,0 +1,196 @@
+{
+  "target_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "recorded_at": "2026-10-18T04:34:21.524036+00:00",
+  "source_matrix_sha256": "e93551bdbb6ac06ffa477f25a6d08c22371e15b36df8a39d7d37f9670997e66b",
+  "contracts": [
+    {
+      "id": "M2-HTTP-1",
+      "requirement": "Compare the first physical Native Claude Messages request in headless print-text mode: HTTP/1 request line and query, raw header spelling/order/CRLF/framing, request-body bytes and offered response."
+    },
+    {
+      "id": "SDK-ERR-1",
+      "requirement": "Anthropic HTTP 400 with nested error.message containing one isolated UTF-16 unit, nested message null, and empty response body. Preserve response bytes and Native CLI result text without reserializing captured output."
+    },
+    {
+      "id": "HOST-ERR-1",
+      "requirement": "Replay captured HTTP error bodies through production `ApiService → ProviderApiAdapter → ConversationOrchestrator`; compare Native result text at `OutputStream` and persisted assistant rows."
+    },
+    {
+      "id": "HOST-ERR-STATUS-1",
+      "requirement": "Status-specific HTTP presentation for 403, 404, 413, plus separately scoped 401/500 responses with explicit `x-should-retry:false`."
+    },
+    {
+      "id": "HOST-REFUSAL-1",
+      "requirement": "Final Native terminal refusal presentation from stop reason/category/explanation, model display label, and interactive mode; compare exact JSON CLI result and persisted source fields."
+    },
+    {
+      "id": "CLI-ERR-1",
+      "requirement": "Replay the same bodies through the exact Native mode `--print --output-format json` and the pinned Product CLI entrypoint; compare raw stdout schema, error/status flags, final result text units, stderr and exit status."
+    },
+    {
+      "id": "SDK-ERR-2",
+      "requirement": "Statusless Anthropic SSE `event:error`, `data.type=error`, nested `timeout_error` with U+D800 message; compare no-start and partial-text-before-error cases plus a generic `api_error` control."
+    },
+    {
+      "id": "SDK-1",
+      "requirement": "Claude Messages/Foundry request method, URL, headers, ordered body fields, exact-string sidecars, final body string normalization, signing inputs, response and SSE frame bytes."
+    },
+    {
+      "id": "SDK-2",
+      "requirement": "Non-Anthropic providers retain their own URL, headers, body/signing, streaming, error and fallback contracts."
+    },
+    {
+      "id": "SDK-3",
+      "requirement": "Credential snapshot, account change, retry latch, body/stream fallback, cache and model selection agree at each physical attempt."
+    },
+    {
+      "id": "TURN-1",
+      "requirement": "`/` and unknown slash command fall back to ordinary turn with unchanged prompt; ParseFailure hint/refusal is checked per execution mode."
+    },
+    {
+      "id": "TURN-2",
+      "requirement": "Retry, cancellation, truncation, refusal and terminal result preserve event order and tool/transcript identity."
+    },
+    {
+      "id": "STOPDETAILS-1",
+      "requirement": "Anthropic refusal `stop_details.explanation` containing U+D800; compare raw response, public CLI result, and durable assistant row against fixed Native source units."
+    },
+    {
+      "id": "TURN-3",
+      "requirement": "Public CLI SIGINT while one provider request is in flight: terminal result envelope, interruption row, and persisted event order."
+    },
+    {
+      "id": "TOOL-1",
+      "requirement": "Tool registration with `isDeferred` absent, `false`, `true`; first physical Messages request's `tools` array and schemas."
+    },
+    {
+      "id": "TOOL-2",
+      "requirement": "Tool check/call, permission allow/deny/rewrite, result/error, pre-cancel and post-cancel behavior, process side effects and transcript mutation."
+    },
+    {
+      "id": "TOOL-3",
+      "requirement": "Oversized registered-tool string result: source preview UTF-16 units, Claude Messages request serialization, session JSONL row and persisted UTF-8 file bytes."
+    },
+    {
+      "id": "TOOL-4",
+      "requirement": "Cold resume of object-valued `tool_result.content`: JSON-stringification, 50,000 UTF-16-unit cut, code-point boundary and omitted-character count."
+    },
+    {
+      "id": "CMD-1",
+      "requirement": "Skill names with supplementary Unicode and punctuation resolve to the local skill; unpaired UTF-16 command input retains the Native persistence/final-wire boundary."
+    },
+    {
+      "id": "PROMPT-1",
+      "requirement": "Main, hook, child, fork and resume prompt assembly; CLAUDE.md/AGENTS, skill discovery/read, order and attachments."
+    },
+    {
+      "id": "PROMPT-2",
+      "requirement": "Context compaction, cache attribution, token limits, aliases and request counting use current model/protocol policy."
+    },
+    {
+      "id": "SESSION-1",
+      "requirement": "`session.append` middleware rewrite and raw returned event for user and system messages; preserve source UTF-16 units through Native result and candidate transcript path."
+    },
+    {
+      "id": "SESSION-3",
+      "requirement": "Cold `--resume` distinguishes exact persisted source units from Native's resumed public/API projection."
+    },
+    {
+      "id": "EFFORT-1",
+      "requirement": "A per-turn effort override survives a cold resume and is projected into the resumed model request without replacing the historical turn's system metadata."
+    },
+    {
+      "id": "PER-TURN-CONTROL-295",
+      "requirement": "The default main request includes the `per-turn-control-2026-07-01` beta and a per-message effort row only when the experimental-beta setting permits it, across first-party/Foundry and Sonnet/Fable routes."
+    },
+    {
+      "id": "SESSION-2",
+      "requirement": "Direct return, denial, thrown error, subscription removal and plugin/process shutdown."
+    },
+    {
+      "id": "SESSION-4",
+      "requirement": "JSONL persistence, parallel tail recovery, attachments, crash write, compact boundaries and rollback."
+    },
+    {
+      "id": "SESSION-5",
+      "requirement": "Generated session name and prompt-suggestion public scalar APIs when the model's final text contains an unpaired UTF-16 unit."
+    },
+    {
+      "id": "AGENT-1",
+      "requirement": "Agent/task spawn, offer, receipt, wait, stop, report admission, handback and nested/cold recovery."
+    },
+    {
+      "id": "MCP-1",
+      "requirement": "JSON-RPC initialize/discovery, tools/resources/prompts, input-required, auth, result/error/null presence and transport frames."
+    },
+    {
+      "id": "HOOK-1",
+      "requirement": "RegExp matcher and event source, registration/order, match/nonmatch and raw event payload."
+    },
+    {
+      "id": "HOOK-2",
+      "requirement": "Hook rewrite/refusal, commands/settings merge, env overlays, managed policy, built-in protected events and refresh."
+    },
+    {
+      "id": "HOOK-RELEASE-1",
+      "requirement": "Compare the Native public Stop `type:prompt` hook request across historical 2.1.293 and 2.1.294 without mutating either baseline."
+    },
+    {
+      "id": "AGENT-RELEASE-1",
+      "requirement": "Compare the Native public `Agent` → general-purpose child → `SubagentStop` prompt hook → parent continuation using preserved 2.1.293/2.1.294 evidence and the frozen 2.1.295 target."
+    },
+    {
+      "id": "FINAL-TARGET-1",
+      "requirement": "Freeze one Native version for the final alignment pass and close impacted acceptance gates against that exact binary."
+    },
+    {
+      "id": "MOD-1",
+      "requirement": "Public Mods middleware event ordering, `next(e)` rewrite/direct answer/error/deny, module load and unload boundary."
+    },
+    {
+      "id": "MOD-2",
+      "requirement": "`$.tool.register`, `$.tool.list/call/check`, command and prompt APIs; provider-facing schema/catalog order."
+    },
+    {
+      "id": "MOD-3",
+      "requirement": "ModUI subscriptions, events, resolution/render tree, update/disposal, restart and visible terminal/desktop surfaces."
+    },
+    {
+      "id": "CLIENT-1",
+      "requirement": "CLI, TUI, desktop and mobile callers preserve prompt, session, command, cancellation and transcript identity under current client protocol 25.0.0 (formal contract blessing passed; generated bindings pending); Local Apps Native parity is excluded; Local App tool bug fixes and current API integration remain in scope."
+    },
+    {
+      "id": "RUNTIME-1",
+      "requirement": "Bun worker startup/restart, filesystem/process/sandbox, env inheritance, cancellation/deadline, stdout/stderr and cleanup."
+    },
+    {
+      "id": "BUILD-1",
+      "requirement": "Three repositories resolve one candidate; dependency-complete checks, macOS production app and package, and required cross-platform checks."
+    },
+    {
+      "id": "BASH-INPUT-295",
+      "requirement": "Normalize Bash `tool_input.command_description` and `timeout_ms` aliases before `PreToolUse`, validation, and execution; preserve Native field priority and source units."
+    }
+  ],
+  "baseline": {
+    "llm-client": {
+      "head": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+      "branch": "codex/claude-alignment-integration",
+      "tracked_status": ""
+    },
+    "harness-runtime": {
+      "head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+      "branch": "codex/claude-alignment-integration",
+      "tracked_status": ""
+    },
+    "lingxi-app": {
+      "head": "f71087b428665c30d0bd752e16f76cb53ab7fef6",
+      "branch": "codex/claude-alignment-integration",
+      "tracked_status": ""
+    }
+  },
+  "native_current_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "contract_count": 42,
+  "count_note": "42 contract IDs. Historical 43 included a domain row MCP, separate from contract MCP-1."
+}

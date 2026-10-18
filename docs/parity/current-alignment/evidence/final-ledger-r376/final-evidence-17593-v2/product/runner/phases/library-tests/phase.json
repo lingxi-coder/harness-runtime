@@ -1,0 +1,795 @@
+{
+  "argv": [
+    "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--workspace",
+    "--all-features",
+    "--no-fail-fast",
+    "--message-format=json",
+    "--lib",
+    "--",
+    "--test-threads=1"
+  ],
+  "artifact_count": 9,
+  "artifact_identities": [
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/packages/config-requirements#0.1.0",
+      "config_requirements",
+      [
+        "lib"
+      ],
+      "packages/config-requirements/src/lib.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/tools/ios-use#tool-ios-use@0.12.0",
+      "tool_ios_use",
+      [
+        "lib"
+      ],
+      "tools/ios-use/src/lib.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/audio-provider#0.9.0",
+      "audio_provider",
+      [
+        "lib"
+      ],
+      "apps/audio-provider/src/lib.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui-core#0.12.0",
+      "tui_core",
+      [
+        "lib"
+      ],
+      "apps/cli/tui-core/src/lib.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui#0.12.0",
+      "tui",
+      [
+        "lib"
+      ],
+      "apps/cli/tui/src/lib.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/android/ffi#android-aar@0.9.0",
+      "android_aar",
+      [
+        "lib",
+        "cdylib"
+      ],
+      "apps/android/ffi/src/lib.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/ios/ffi#ios-framework@0.9.0",
+      "ios_framework",
+      [
+        "staticlib",
+        "cdylib",
+        "lib"
+      ],
+      "apps/ios/ffi/src/lib.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host#cli@0.12.0",
+      "cli",
+      [
+        "lib"
+      ],
+      "apps/cli/host/src/lib.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "bridge_server",
+      [
+        "lib"
+      ],
+      "apps/bridge-server/src/lib.rs"
+    ]
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app",
+  "disk_before": {
+    "minimum_free_bytes": 3221225472,
+    "results_free_bytes": 11239211008,
+    "target_free_bytes": 11239211008
+  },
+  "doc_test_names": null,
+  "ended_at_unix_ns": 1792314722559447000,
+  "environment": {
+    "CARGO_BUILD_JOBS": "6",
+    "CARGO_ENCODED_RUSTFLAGS": null,
+    "CARGO_HOME": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/cargo-home",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_NET_OFFLINE": "true",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_TARGET_DIR": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target",
+    "LINGXI_MOD_BUN_EXECUTABLE": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/bun-1.4.3/bun",
+    "PATH": "/Users/luolingfeng/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/bun-1.4.3:/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin:/Users/luolingfeng/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+    "RUSTDOCFLAGS": null,
+    "RUSTFLAGS": null,
+    "RUSTUP_TOOLCHAIN": "1.94.0",
+    "RUST_MIN_STACK": "16777216",
+    "actual_child_environment_sha256": "010fb6963cb677060b97d7bcc77f5f5ba7b1bfaa01d81b8969dfe0872c31c519",
+    "cargo_path": "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo",
+    "tool_versions": {
+      "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "rustdoc": "rustdoc 1.94.0 (4a4ef493e 2026-03-02)"
+    }
+  },
+  "executed_target_proofs": [
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/config_requirements-5d5ef0370d470538",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/packages/config-requirements#0.1.0",
+        "config_requirements",
+        [
+          "lib"
+        ],
+        "packages/config-requirements/src/lib.rs"
+      ],
+      "running_line": "Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/config_requirements-5d5ef0370d470538)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tool_ios_use-2500ee4cb3264801",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/tools/ios-use#tool-ios-use@0.12.0",
+        "tool_ios_use",
+        [
+          "lib"
+        ],
+        "tools/ios-use/src/lib.rs"
+      ],
+      "running_line": "Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tool_ios_use-2500ee4cb3264801)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/audio_provider-b75d3cbd4e807bbb",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/audio-provider#0.9.0",
+        "audio_provider",
+        [
+          "lib"
+        ],
+        "apps/audio-provider/src/lib.rs"
+      ],
+      "running_line": "Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/audio_provider-b75d3cbd4e807bbb)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tui_core-c96b676aa3b2c247",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui-core#0.12.0",
+        "tui_core",
+        [
+          "lib"
+        ],
+        "apps/cli/tui-core/src/lib.rs"
+      ],
+      "running_line": "Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tui_core-c96b676aa3b2c247)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tui-a9718b29f8718132",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui#0.12.0",
+        "tui",
+        [
+          "lib"
+        ],
+        "apps/cli/tui/src/lib.rs"
+      ],
+      "running_line": "Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tui-a9718b29f8718132)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/android_aar-a70e5fbef42a3546",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/android/ffi#android-aar@0.9.0",
+        "android_aar",
+        [
+          "lib",
+          "cdylib"
+        ],
+        "apps/android/ffi/src/lib.rs"
+      ],
+      "running_line": "Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/android_aar-a70e5fbef42a3546)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/ios_framework-96d38618f76d211c",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/ios/ffi#ios-framework@0.9.0",
+        "ios_framework",
+        [
+          "staticlib",
+          "cdylib",
+          "lib"
+        ],
+        "apps/ios/ffi/src/lib.rs"
+      ],
+      "running_line": "Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/ios_framework-96d38618f76d211c)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli-5389060e2a9c6bc8",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host#cli@0.12.0",
+        "cli",
+        [
+          "lib"
+        ],
+        "apps/cli/host/src/lib.rs"
+      ],
+      "running_line": "Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli-5389060e2a9c6bc8)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/bridge_server-0b6c785742834e24",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "bridge_server",
+        [
+          "lib"
+        ],
+        "apps/bridge-server/src/lib.rs"
+      ],
+      "running_line": "Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/bridge_server-0b6c785742834e24)"
+    }
+  ],
+  "exit_code": 0,
+  "expected_targets": [
+    {
+      "doctest": true,
+      "kind": [
+        "lib",
+        "cdylib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/android/ffi/Cargo.toml",
+      "package": "android-aar",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/android/ffi#android-aar@0.9.0",
+      "src_path": "apps/android/ffi/src/lib.rs",
+      "target_name": "android_aar",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/audio-provider/Cargo.toml",
+      "package": "audio-provider",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/audio-provider#0.9.0",
+      "src_path": "apps/audio-provider/src/lib.rs",
+      "target_name": "audio_provider",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server/Cargo.toml",
+      "package": "bridge-server",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "src_path": "apps/bridge-server/src/lib.rs",
+      "target_name": "bridge_server",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host/Cargo.toml",
+      "package": "cli",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host#cli@0.12.0",
+      "src_path": "apps/cli/host/src/lib.rs",
+      "target_name": "cli",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/packages/config-requirements/Cargo.toml",
+      "package": "config-requirements",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/packages/config-requirements#0.1.0",
+      "src_path": "packages/config-requirements/src/lib.rs",
+      "target_name": "config_requirements",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "staticlib",
+        "cdylib",
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/ios/ffi/Cargo.toml",
+      "package": "ios-framework",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/ios/ffi#ios-framework@0.9.0",
+      "src_path": "apps/ios/ffi/src/lib.rs",
+      "target_name": "ios_framework",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/tools/ios-use/Cargo.toml",
+      "package": "tool-ios-use",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/tools/ios-use#tool-ios-use@0.12.0",
+      "src_path": "tools/ios-use/src/lib.rs",
+      "target_name": "tool_ios_use",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui/Cargo.toml",
+      "package": "tui",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui#0.12.0",
+      "src_path": "apps/cli/tui/src/lib.rs",
+      "target_name": "tui",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui-core/Cargo.toml",
+      "package": "tui-core",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui-core#0.12.0",
+      "src_path": "apps/cli/tui-core/src/lib.rs",
+      "target_name": "tui_core",
+      "test": true
+    }
+  ],
+  "filtered_auxiliary_summaries": {
+    "failed": 0,
+    "filtered_out_tests": 0,
+    "ignored": 0,
+    "passed": 0,
+    "summary_count": 0
+  },
+  "fingerprint": "f6fbe3b047f91732265849d323aec620fd3f19d19c9f4ed66ea3b49bb7a9e7e1",
+  "git": {
+    "cargo_lock_sha256": "3bd1a0b3d965fa57c40d2f62ce366bc2a59e949818a92c67a65e21ef510f3ae5",
+    "cargo_manifest_sha256": "b615b9696584b73cb98ada561280e48cb80d3b8a323bbd2b223f11880a7ec4ce",
+    "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+    "source_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tree": "ca3bd296092d8e2d05180b188cfbd458d8338394"
+  },
+  "id": "library-tests",
+  "metadata": {
+    "doctest_targets": 9,
+    "identity_sha256": "e8e1fe2b04b3b8b275bada632d6746837b7f46865911440617e7a855edce7235",
+    "mtime_ns": 1792313076619372275,
+    "path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/metadata.json",
+    "pin_rows": {
+      "harness_lock_rows": 78,
+      "harness_manifest_rows": 39,
+      "harness_metadata_rows": 78,
+      "mobile_lock_rows": 5,
+      "mobile_manifest_rows": 3,
+      "mobile_metadata_rows": 5,
+      "sdk_lock_rows": 5,
+      "sdk_manifest_rows": 1,
+      "sdk_metadata_rows": 5
+    },
+    "sha256": "db73e1fa409183fd7443b811eb2190d72ab96416685843fbddff3b4582f84222",
+    "test_targets": 40,
+    "workspace_default_members": 6,
+    "workspace_members": 9
+  },
+  "plan_sha256": "5668f4030e21238e8b44dc05c6f32324ecb08b78b316d11bf4dee718d4ca8f58",
+  "post_phase_identity_check": {
+    "checked_at_unix_ns": 1792314721194290000,
+    "git": {
+      "cargo_lock_sha256": "3bd1a0b3d965fa57c40d2f62ce366bc2a59e949818a92c67a65e21ef510f3ae5",
+      "cargo_manifest_sha256": "b615b9696584b73cb98ada561280e48cb80d3b8a323bbd2b223f11880a7ec4ce",
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "source_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tree": "ca3bd296092d8e2d05180b188cfbd458d8338394"
+    },
+    "metadata_sha256": "db73e1fa409183fd7443b811eb2190d72ab96416685843fbddff3b4582f84222",
+    "unchanged": true
+  },
+  "retirement": [
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 990595828,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314458179669170,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/config_requirements-5d5ef0370d470538.d",
+        "sha256": "33b2180658a9d5785451b79b606521597f7a83ca690a523fde08dfb1dba5d669",
+        "size": 521
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991706786,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314458683346978,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/config_requirements-5d5ef0370d470538",
+        "sha256": "bb645d959ee18a0f31267e9abc5718f7724c34d6badc167cf706935d74eb2e9a",
+        "size": 2892896
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 990595861,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314458689251733,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/config-requirements-5d5ef0370d470538/test-lib-config_requirements.json",
+        "sha256": "555ae917bab32dac023fc2bf8e3631b685bec44fa1bc129c7ac08222a7e18cda",
+        "size": 678
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/packages/config-requirements#0.1.0",
+        "config_requirements",
+        [
+          "lib"
+        ],
+        "packages/config-requirements/src/lib.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991708173,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314488146233498,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tool_ios_use-2500ee4cb3264801.d",
+        "sha256": "e30799450c642c8ccae5e12a912c95248f31e646742854e6429d1b4e37cdfc65",
+        "size": 320
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991708217,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314489218016690,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tool_ios_use-2500ee4cb3264801",
+        "sha256": "62ccfed189e34791a6d4e52a72af7cc3b226001f07accf72bc942d74a500d6b8",
+        "size": 934288
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991708221,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314489223406763,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/tool-ios-use-2500ee4cb3264801/test-lib-tool_ios_use.json",
+        "sha256": "1eb0b071c6676d7f05addcebb6dff2ac4f88f6536634d47ba8a8ee17a13bbf8e",
+        "size": 843
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/tools/ios-use#tool-ios-use@0.12.0",
+        "tool_ios_use",
+        [
+          "lib"
+        ],
+        "tools/ios-use/src/lib.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991718769,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314551711398223,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/audio_provider-b75d3cbd4e807bbb.d",
+        "sha256": "79500c70ce932aeb4d4c5bf3aad2b97a50a2bdfe5b72c1a0ecf6944094cc57e1",
+        "size": 451
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991718815,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314553578378881,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/audio_provider-b75d3cbd4e807bbb",
+        "sha256": "57b5774d6a963e3185d429ba965318d560a9cbe813f83ca148277f4b3e53abcf",
+        "size": 48150480
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991718823,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314553591168835,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/audio-provider-b75d3cbd4e807bbb/test-lib-audio_provider.json",
+        "sha256": "8286c7d6d4303971d5d81953961cca70cb7ad246ab87fcc74503894920d61c79",
+        "size": 1228
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/audio-provider#0.9.0",
+        "audio_provider",
+        [
+          "lib"
+        ],
+        "apps/audio-provider/src/lib.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991718877,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314554793507228,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tui_core-c96b676aa3b2c247.d",
+        "sha256": "2c5eb2c985f4c9c1a38f5251429d7bc4744e9913875964e318b65e45ebbef831",
+        "size": 3630
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991718994,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314556852849296,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tui_core-c96b676aa3b2c247",
+        "sha256": "10a5841ed27e1c61b0c2323b2f66b1c35ff33686b1a0145b08a791c1ac0c6c26",
+        "size": 7579920
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991718997,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314556863923117,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/tui-core-c96b676aa3b2c247/test-lib-tui_core.json",
+        "sha256": "0defbe3da6452306d448ff75cd036a05aac68ccd22816793feed1f06973d005d",
+        "size": 1564
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui-core#0.12.0",
+        "tui_core",
+        [
+          "lib"
+        ],
+        "apps/cli/tui-core/src/lib.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991718935,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314555727954523,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tui-a9718b29f8718132.d",
+        "sha256": "c03b523660a296d3e53f37b1e6c339ff6e96169f3af7a580513f3330cf9538f3",
+        "size": 10272
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991719140,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314561951383292,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/tui-a9718b29f8718132",
+        "sha256": "d405badb08e00200bc06b45641a44b6168b0cb853a89a89144093c87be1482f8",
+        "size": 51882944
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991719153,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314561974217662,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/tui-a9718b29f8718132/test-lib-tui.json",
+        "sha256": "bb4b699d68709af92d3e14d62994a07d99dd8adead6bd188c954c38a5977460a",
+        "size": 2218
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui#0.12.0",
+        "tui",
+        [
+          "lib"
+        ],
+        "apps/cli/tui/src/lib.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991720528,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314608968397431,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/android_aar-a70e5fbef42a3546.d",
+        "sha256": "832da3485c493479710d36a55acfadc39b7c57bb0fbda6d5eb5af7d6f39e5cfd",
+        "size": 1513
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991720584,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314614504797493,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/android_aar-a70e5fbef42a3546",
+        "sha256": "1ee50fe477e0cdab32cfbde72e9f3745341eeabdd9019f248dd9ff3f0eef62b9",
+        "size": 229407712
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991720588,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314614527281728,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/android-aar-a70e5fbef42a3546/test-lib-android_aar.json",
+        "sha256": "594215781f3c5c61437230edf55c512c08f0beaf36a571cd938a2fc80836cd5a",
+        "size": 1575
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/android/ffi#android-aar@0.9.0",
+        "android_aar",
+        [
+          "lib",
+          "cdylib"
+        ],
+        "apps/android/ffi/src/lib.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991720529,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314608971594482,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/ios_framework-96d38618f76d211c.d",
+        "sha256": "3d38b7da02c9384bfc45c7cd3f5f25dc7dbe5856c1e22581b5a0951e81557b9c",
+        "size": 1355
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991720585,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314614643942443,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/ios_framework-96d38618f76d211c",
+        "sha256": "cbafe21132b811117400d719c2c5e0950e3f593c6f3a5ae26284cac7542b3a0b",
+        "size": 233000288
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991720591,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314614666240923,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/ios-framework-96d38618f76d211c/test-lib-ios_framework.json",
+        "sha256": "260c779fd86aef0a7c1dfed1c101c440b38fc94c5add6c99a76bc35864d491ee",
+        "size": 1734
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/ios/ffi#ios-framework@0.9.0",
+        "ios_framework",
+        [
+          "staticlib",
+          "cdylib",
+          "lib"
+        ],
+        "apps/ios/ffi/src/lib.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991720530,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314609554063990,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli-5389060e2a9c6bc8.d",
+        "sha256": "c64e9052bc634c46898c5193779c6d906a9da87ab7a46894509db5de7c56afec",
+        "size": 9331
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991720968,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314631601233722,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli-5389060e2a9c6bc8",
+        "sha256": "bdfe2fcbce8865105a66831b1a69361d83888c000630919e6fa93e2282aeabe9",
+        "size": 319477104
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991721092,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314631652639420,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/cli-5389060e2a9c6bc8/test-lib-cli.json",
+        "sha256": "f311831e71fceac0de4e9518def8b5ff632f6492a97fb51a0d41c916774ee2be",
+        "size": 3943
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host#cli@0.12.0",
+        "cli",
+        [
+          "lib"
+        ],
+        "apps/cli/host/src/lib.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991720703,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314621323624271,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/bridge_server-0b6c785742834e24.d",
+        "sha256": "2b6ca1b43ba5abe803bef524edb7ae584fa3e39c74d3d3e0efb19dd4281e3776",
+        "size": 4574
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991721173,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314641483873225,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/bridge_server-0b6c785742834e24",
+        "sha256": "17c7df8314093344a4fb5a45e83b2b3ca8ebd218a292d88f0f433b04cbd0f9e1",
+        "size": 317103232
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991721197,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314641532806601,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/bridge-server-0b6c785742834e24/test-lib-bridge_server.json",
+        "sha256": "6df79141fde411beb0d4c88a79f8d4474d69bc8abd7123094df0d0b406b2d613",
+        "size": 3240
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "bridge_server",
+        [
+          "lib"
+        ],
+        "apps/bridge-server/src/lib.rs"
+      ]
+    }
+  ],
+  "retirement_process_check": {
+    "checked_process_lines": 1427,
+    "command": [
+      "ps",
+      "-axo",
+      "pid=,comm=,args="
+    ],
+    "inactive": true
+  },
+  "started_at_unix_ns": 1792314456248782000,
+  "status": "passed",
+  "stderr_path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/phases/library-tests/stderr.log",
+  "stderr_sha256": "3fcd458081bfa3ec97d9520c28b9b2380d0cc2187c9f3d837c2df64749ef8f91",
+  "stdout_path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/phases/library-tests/stdout.jsonl",
+  "stdout_sha256": "3331ac184cbba605d8140ff3b517af4f04955154c9cfd514a7c298533e9daf4e",
+  "test_summary": {
+    "failed": 0,
+    "ignored": 2,
+    "passed": 2548
+  }
+}

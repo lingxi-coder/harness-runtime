@@ -1,0 +1,491 @@
+{
+  "argv": [
+    "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--workspace",
+    "--all-features",
+    "--no-fail-fast",
+    "--message-format=json",
+    "--test",
+    "batch_1_e2e",
+    "--test",
+    "parity_prompt_byte_locks",
+    "--test",
+    "prompt_override_bypass_test",
+    "--test",
+    "rate_limit_terminal_429_test",
+    "--test",
+    "structured_output_287_test",
+    "--",
+    "--test-threads=1"
+  ],
+  "artifact_count": 5,
+  "artifact_identities": [
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/test-harness#0.12.0",
+      "parity_prompt_byte_locks",
+      [
+        "test"
+      ],
+      "crates/test-harness/tests/parity_prompt_byte_locks.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator#0.12.0",
+      "prompt_override_bypass_test",
+      [
+        "test"
+      ],
+      "crates/orchestrator/tests/prompt_override_bypass_test.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator#0.12.0",
+      "rate_limit_terminal_429_test",
+      [
+        "test"
+      ],
+      "crates/orchestrator/tests/rate_limit_terminal_429_test.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/command-api#0.12.0",
+      "batch_1_e2e",
+      [
+        "test"
+      ],
+      "crates/command-api/tests/batch_1_e2e.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime#0.1.0",
+      "structured_output_287_test",
+      [
+        "test"
+      ],
+      "crates/llm-runtime/tests/structured_output_287_test.rs"
+    ]
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime",
+  "disk_before": {
+    "minimum_free_bytes": 3221225472,
+    "results_free_bytes": 8689520640,
+    "target_free_bytes": 8689520640
+  },
+  "doc_test_names": null,
+  "ended_at_unix_ns": 1792216678422024000,
+  "environment": {
+    "CARGO_BUILD_JOBS": "1",
+    "CARGO_ENCODED_RUSTFLAGS": null,
+    "CARGO_HOME": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/cargo-home",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_NET_OFFLINE": "true",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_TARGET_DIR": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target",
+    "LINGXI_MOD_BUN_EXECUTABLE": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/bun-1.4.3/bun",
+    "PATH": "/Applications/ChatGPT.app/Contents/Resources/codex-cli/codex-path:/Users/luolingfeng/.codex/tmp/arg0-macos/codex-arg0xLtPns:/Users/luolingfeng/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/override:/Users/luolingfeng/.grok/bin:/Users/luolingfeng/go/bin:/opt/homebrew/share/google-cloud-sdk/bin:/Users/luolingfeng/.bun/bin:/Users/luolingfeng/.bun/bin:/Users/luolingfeng/.bun/bin:/opt/homebrew/share/dotnet:/usr/local/share/dotnet:/Users/luolingfeng/.antigravity/antigravity/bin:/Users/luolingfeng/Library/pnpm:/Users/luolingfeng/.local/bin:/opt/homebrew/opt/libpq/bin:/opt/anaconda3/bin:/opt/anaconda3/condabin:/Users/luolingfeng/Google/google-cloud-sdk/bin:/Users/luolingfeng/.bun/bin:/Users/luolingfeng/.npm-global/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/Users/luolingfeng/.nvm/versions/node/v22.17.0/bin:/opt/homebrew/lib/ruby/gems/4.0.0/bin:/opt/homebrew/opt/ruby/bin:/Library/Frameworks/Python.framework/Versions/3.12/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/Library/Apple/usr/bin:/usr/local/MacGPG2/bin:/usr/local/share/dotnet:~/.dotnet/tools:/usr/local/go/bin:/Users/luolingfeng/.cargo/bin:/Users/luolingfeng/Library/Android/sdk/platform-tools:/Users/luolingfeng/Library/Android/sdk/tools:/Users/luolingfeng/Library/Android/sdk/tools/bin:/Users/luolingfeng/Library/Android/sdk/emulator:/Users/luolingfeng/Library/Android/sdk/cmake/3.30.5/bin:/Users/luolingfeng/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/Applications/ChatGPT.app/Contents/Resources:/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS",
+    "RUSTDOCFLAGS": null,
+    "RUSTFLAGS": null,
+    "RUSTUP_TOOLCHAIN": "1.94.0",
+    "RUST_MIN_STACK": "16777216",
+    "actual_child_environment_sha256": "00cf5b4b29e4975ac1f282a25096e0a48f9a4e1670861626592a4235307b2e80",
+    "cargo_path": "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo",
+    "tool_versions": {
+      "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "rustdoc": "rustdoc 1.94.0 (4a4ef493e 2026-03-02)"
+    }
+  },
+  "executed_target_proofs": [
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/parity_prompt_byte_locks-0b8a8d076afe943d",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/test-harness#0.12.0",
+        "parity_prompt_byte_locks",
+        [
+          "test"
+        ],
+        "crates/test-harness/tests/parity_prompt_byte_locks.rs"
+      ],
+      "running_line": "Running tests/parity_prompt_byte_locks.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/parity_prompt_byte_locks-0b8a8d076afe943d)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/prompt_override_bypass_test-79f3a03d57f8aac1",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator#0.12.0",
+        "prompt_override_bypass_test",
+        [
+          "test"
+        ],
+        "crates/orchestrator/tests/prompt_override_bypass_test.rs"
+      ],
+      "running_line": "Running tests/prompt_override_bypass_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/prompt_override_bypass_test-79f3a03d57f8aac1)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/rate_limit_terminal_429_test-8dddfe403c2b1a37",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator#0.12.0",
+        "rate_limit_terminal_429_test",
+        [
+          "test"
+        ],
+        "crates/orchestrator/tests/rate_limit_terminal_429_test.rs"
+      ],
+      "running_line": "Running tests/rate_limit_terminal_429_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/rate_limit_terminal_429_test-8dddfe403c2b1a37)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/batch_1_e2e-638e8b4db06d2dab",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/command-api#0.12.0",
+        "batch_1_e2e",
+        [
+          "test"
+        ],
+        "crates/command-api/tests/batch_1_e2e.rs"
+      ],
+      "running_line": "Running tests/batch_1_e2e.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/batch_1_e2e-638e8b4db06d2dab)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/structured_output_287_test-701777deba940e3d",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime#0.1.0",
+        "structured_output_287_test",
+        [
+          "test"
+        ],
+        "crates/llm-runtime/tests/structured_output_287_test.rs"
+      ],
+      "running_line": "Running tests/structured_output_287_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/structured_output_287_test-701777deba940e3d)"
+    }
+  ],
+  "exit_code": 0,
+  "expected_targets": [
+    {
+      "doctest": false,
+      "historical_binary": "batch_1_e2e-80ef349dffca2367",
+      "historical_binary_logical_bytes": 18489424,
+      "kind": [
+        "test"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/command-api/Cargo.toml",
+      "package": "command-api",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/command-api#0.12.0",
+      "src_path": "crates/command-api/tests/batch_1_e2e.rs",
+      "target_name": "batch_1_e2e",
+      "test": true
+    },
+    {
+      "doctest": false,
+      "historical_binary": "structured_output_287_test-5ea9927d47fce805",
+      "historical_binary_logical_bytes": 77976640,
+      "kind": [
+        "test"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime/Cargo.toml",
+      "package": "llm-runtime",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime#0.1.0",
+      "src_path": "crates/llm-runtime/tests/structured_output_287_test.rs",
+      "target_name": "structured_output_287_test",
+      "test": true
+    },
+    {
+      "doctest": false,
+      "historical_binary": "prompt_override_bypass_test-5895ece82237ba47",
+      "historical_binary_logical_bytes": 83271616,
+      "kind": [
+        "test"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator/Cargo.toml",
+      "package": "orchestrator",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator#0.12.0",
+      "src_path": "crates/orchestrator/tests/prompt_override_bypass_test.rs",
+      "target_name": "prompt_override_bypass_test",
+      "test": true
+    },
+    {
+      "doctest": false,
+      "historical_binary": "rate_limit_terminal_429_test-73bdb6a4ec4560b9",
+      "historical_binary_logical_bytes": 83272320,
+      "kind": [
+        "test"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator/Cargo.toml",
+      "package": "orchestrator",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator#0.12.0",
+      "src_path": "crates/orchestrator/tests/rate_limit_terminal_429_test.rs",
+      "target_name": "rate_limit_terminal_429_test",
+      "test": true
+    },
+    {
+      "doctest": false,
+      "historical_binary": "parity_prompt_byte_locks-f8235fbecd95ec64",
+      "historical_binary_logical_bytes": 51449936,
+      "kind": [
+        "test"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/test-harness/Cargo.toml",
+      "package": "test-harness",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/test-harness#0.12.0",
+      "src_path": "crates/test-harness/tests/parity_prompt_byte_locks.rs",
+      "target_name": "parity_prompt_byte_locks",
+      "test": true
+    }
+  ],
+  "filtered_auxiliary_summaries": {
+    "failed": 0,
+    "filtered_out_tests": 0,
+    "ignored": 0,
+    "passed": 0,
+    "summary_count": 0
+  },
+  "fingerprint": "35f0e448b6bc4fa3848d0d83944f64b9c6c7a1aeb83b675a9b16e9894ca65770",
+  "git": {
+    "cargo_lock_sha256": "2f9456e8b1d289bfc8dab0005a5ba9a865b7ccf044a16221a9ec214a9fec5409",
+    "head": "dc6ce1217143b693d97ab6278ff66568beea20d3",
+    "source_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tree": "fc3674d85ff66e1d88c903d842a2dae3175ab0d5"
+  },
+  "id": "integration-34",
+  "lock_sha256": "2f9456e8b1d289bfc8dab0005a5ba9a865b7ccf044a16221a9ec214a9fec5409",
+  "metadata": {
+    "doctest_targets": 73,
+    "identity_sha256": "f88f07c1968c05057069e54dcc6e9f0936451ee90c319291948b1ce1da985d02",
+    "mtime_ns": 1792215087197833376,
+    "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/r51-270/h-metadata.json",
+    "sha256": "2deed6cf3bfcbdfa26bd9e023b1dd63233354ebc340a5fbb40a2497277613f31",
+    "target_directory": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target",
+    "test_targets": 521,
+    "workspace_default_members": 67,
+    "workspace_members": 75,
+    "workspace_root": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime"
+  },
+  "plan_sha256": "27f72231954401064d226c47d1b4e36243bbb245739911f4b60fc60d7857081d",
+  "post_phase_identity_check": {
+    "checked_at_unix_ns": 1792216678031653000,
+    "git": {
+      "cargo_lock_sha256": "2f9456e8b1d289bfc8dab0005a5ba9a865b7ccf044a16221a9ec214a9fec5409",
+      "head": "dc6ce1217143b693d97ab6278ff66568beea20d3",
+      "source_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tree": "fc3674d85ff66e1d88c903d842a2dae3175ab0d5"
+    },
+    "metadata_mtime_ns": 1792215087197833376,
+    "metadata_sha256": "2deed6cf3bfcbdfa26bd9e023b1dd63233354ebc340a5fbb40a2497277613f31",
+    "unchanged": true
+  },
+  "retirement": [
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 989454244,
+        "mode": 420,
+        "mtime_ns": 1792216648288593800,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/parity_prompt_byte_locks-0b8a8d076afe943d.d",
+        "sha256": "cabf75be5989e7f862d738c1497232cb025a0006051e50af54ace891f22dbbe9",
+        "size": 431
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 989584849,
+        "mode": 493,
+        "mtime_ns": 1792216649319825608,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/parity_prompt_byte_locks-0b8a8d076afe943d",
+        "sha256": "8f431891d67d79bb4c883262a23b12c64eeaa751d210f7d68e586250d9503549",
+        "size": 55181168
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 989454259,
+        "mode": 420,
+        "mtime_ns": 1792216649329589778,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/test-harness-0b8a8d076afe943d/test-integration-test-parity_prompt_byte_locks.json",
+        "sha256": "d5d49e6329dc549502ecb959bed91b8ef9fc54ffa7869a007aaeb737c9bd2be2",
+        "size": 3965
+      },
+      "fingerprint_dir": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/test-harness-0b8a8d076afe943d",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/test-harness#0.12.0",
+        "parity_prompt_byte_locks",
+        [
+          "test"
+        ],
+        "crates/test-harness/tests/parity_prompt_byte_locks.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 989454262,
+        "mode": 420,
+        "mtime_ns": 1792216649449753614,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/prompt_override_bypass_test-79f3a03d57f8aac1.d",
+        "sha256": "41d012ef3d186cf161e539b5b0550c4aedebe52a725474323a87f74a3841f1b1",
+        "size": 446
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 989584866,
+        "mode": 493,
+        "mtime_ns": 1792216650705324134,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/prompt_override_bypass_test-79f3a03d57f8aac1",
+        "sha256": "a6320b321973bc0157e25a3bff7459ca972f1502a5498ddd024aeb7899f02c8d",
+        "size": 83635664
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 989454281,
+        "mode": 420,
+        "mtime_ns": 1792216650715571818,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/orchestrator-79f3a03d57f8aac1/test-integration-test-prompt_override_bypass_test.json",
+        "sha256": "acf3e3068cb37f5feb83f4b591f34b70a861664c84f884bd2f85bcdb3e81a1f9",
+        "size": 3774
+      },
+      "fingerprint_dir": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/orchestrator-79f3a03d57f8aac1",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator#0.12.0",
+        "prompt_override_bypass_test",
+        [
+          "test"
+        ],
+        "crates/orchestrator/tests/prompt_override_bypass_test.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 989454283,
+        "mode": 420,
+        "mtime_ns": 1792216650834411112,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/rate_limit_terminal_429_test-8dddfe403c2b1a37.d",
+        "sha256": "b9ab1207d2b480e2be42eff69574c915ae97e60f60cc8edd4750ff9d5d900630",
+        "size": 451
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 989584879,
+        "mode": 493,
+        "mtime_ns": 1792216652077572530,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/rate_limit_terminal_429_test-8dddfe403c2b1a37",
+        "sha256": "c5de8f841c907c59b9641d41fcaa6d96654a8979019f19eceb025a2b7b92114a",
+        "size": 83636336
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 989454299,
+        "mode": 420,
+        "mtime_ns": 1792216652088297895,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/orchestrator-8dddfe403c2b1a37/test-integration-test-rate_limit_terminal_429_test.json",
+        "sha256": "4838392be880bc8e1a600b48ce2ddb568dd3fc51980e9e0d4cffaa1e11023a88",
+        "size": 3777
+      },
+      "fingerprint_dir": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/orchestrator-8dddfe403c2b1a37",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator#0.12.0",
+        "rate_limit_terminal_429_test",
+        [
+          "test"
+        ],
+        "crates/orchestrator/tests/rate_limit_terminal_429_test.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 989454301,
+        "mode": 420,
+        "mtime_ns": 1792216652217034403,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/batch_1_e2e-638e8b4db06d2dab.d",
+        "sha256": "5c88b91d40ed8e6c9b131938e285b9b0b39ff65e5603421bcca8aa029e5aa8a4",
+        "size": 363
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 989584891,
+        "mode": 493,
+        "mtime_ns": 1792216653030319176,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/batch_1_e2e-638e8b4db06d2dab",
+        "sha256": "5a8d7f3624bf3272212e9d0c0223248b5d740ab05fa24e7c6971fb59bb0fb3ee",
+        "size": 18714944
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 989454315,
+        "mode": 420,
+        "mtime_ns": 1792216653037302470,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/command-api-638e8b4db06d2dab/test-integration-test-batch_1_e2e.json",
+        "sha256": "4b96f025d6fee462ad39d153d43f0f8d8538f695d69f8014b671ad364f083371",
+        "size": 2382
+      },
+      "fingerprint_dir": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/command-api-638e8b4db06d2dab",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/command-api#0.12.0",
+        "batch_1_e2e",
+        [
+          "test"
+        ],
+        "crates/command-api/tests/batch_1_e2e.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 989454317,
+        "mode": 420,
+        "mtime_ns": 1792216653302205957,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/structured_output_287_test-701777deba940e3d.d",
+        "sha256": "8d646155b8769113217b3ca7db3bec3b0c1fa02b28792217534bd6ff8e34d35a",
+        "size": 1328
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 989584919,
+        "mode": 493,
+        "mtime_ns": 1792216655160960352,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/structured_output_287_test-701777deba940e3d",
+        "sha256": "ea07aaab25ba5de42ca1c5685b148db246b2b46804fc407bb25308c7a025f203",
+        "size": 77739952
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 989454344,
+        "mode": 420,
+        "mtime_ns": 1792216655174968691,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/llm-runtime-701777deba940e3d/test-integration-test-structured_output_287_test.json",
+        "sha256": "1e60d05da84040bafdf9ccdad869bbca33bb62013968a7e58c367d38771ccfae",
+        "size": 2050
+      },
+      "fingerprint_dir": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/llm-runtime-701777deba940e3d",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime#0.1.0",
+        "structured_output_287_test",
+        [
+          "test"
+        ],
+        "crates/llm-runtime/tests/structured_output_287_test.rs"
+      ]
+    }
+  ],
+  "retirement_process_check": {
+    "checked_process_lines": 811,
+    "command": [
+      "ps",
+      "-axo",
+      "pid=,comm=,args="
+    ],
+    "inactive": true
+  },
+  "started_at_unix_ns": 1792216647790315000,
+  "status": "passed",
+  "stderr_path": "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-34/stderr.log",
+  "stderr_sha256": "189810b29dbd5b0adfa49b7110502f9efec7c27ef75a467f302c192d99ef4dd1",
+  "stdout_path": "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-34/stdout.jsonl",
+  "stdout_sha256": "d30cf5e304d3929bf5113951f0b888d4027811796466f1fa752d97c0c73b2051",
+  "test_summary": {
+    "failed": 0,
+    "ignored": 0,
+    "passed": 18
+  }
+}

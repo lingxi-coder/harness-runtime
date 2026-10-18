@@ -1,0 +1,133 @@
+{
+  "schema": "final-ledger-r376-platform-cargo-check-v1",
+  "status": "passed",
+  "candidate": {
+    "product": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+    "harness_runtime": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+    "llm_client": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "mobile_linux": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+  },
+  "checks": [
+    {
+      "name": "android-arm64-default",
+      "argv": [
+        "cargo",
+        "ndk",
+        "--target",
+        "arm64-v8a",
+        "--platform",
+        "28",
+        "--manifest-path",
+        "apps/android/ffi/Cargo.toml",
+        "check",
+        "-p",
+        "android-aar",
+        "--locked",
+        "--offline"
+      ],
+      "exit_code": 0,
+      "log": "acceptance/final-ledger-r376/final-evidence-17593-v2/platform/android-arm64-default.log",
+      "log_bytes": 9633,
+      "log_sha256": "63ed073b13b049eacb09d99c378397575478deae9cde37e2e18a3e0e8cb5e451"
+    },
+    {
+      "name": "android-x86_64-default",
+      "argv": [
+        "cargo",
+        "ndk",
+        "--target",
+        "x86_64",
+        "--platform",
+        "28",
+        "--manifest-path",
+        "apps/android/ffi/Cargo.toml",
+        "check",
+        "-p",
+        "android-aar",
+        "--locked",
+        "--offline"
+      ],
+      "exit_code": 0,
+      "log": "acceptance/final-ledger-r376/final-evidence-17593-v2/platform/android-x86_64-default.log",
+      "log_bytes": 9484,
+      "log_sha256": "ab4d6c87243ddba028bd6372479fc8eeaec9ab3b16035136cf7e43b4aeb00203"
+    },
+    {
+      "name": "android-arm64-computer-use",
+      "argv": [
+        "cargo",
+        "ndk",
+        "--target",
+        "arm64-v8a",
+        "--platform",
+        "28",
+        "--manifest-path",
+        "apps/android/ffi/Cargo.toml",
+        "check",
+        "-p",
+        "android-aar",
+        "--features",
+        "android-computer-use",
+        "--locked",
+        "--offline"
+      ],
+      "exit_code": 0,
+      "log": "acceptance/final-ledger-r376/final-evidence-17593-v2/platform/android-arm64-computer-use.log",
+      "log_bytes": 574,
+      "log_sha256": "41b76d53724671b1abdb24c54ed8ffcbb92a1772c6fabe9f73a9007d8383d7e0"
+    },
+    {
+      "name": "android-x86_64-computer-use",
+      "argv": [
+        "cargo",
+        "ndk",
+        "--target",
+        "x86_64",
+        "--platform",
+        "28",
+        "--manifest-path",
+        "apps/android/ffi/Cargo.toml",
+        "check",
+        "-p",
+        "android-aar",
+        "--features",
+        "android-computer-use",
+        "--locked",
+        "--offline"
+      ],
+      "exit_code": 0,
+      "log": "acceptance/final-ledger-r376/final-evidence-17593-v2/platform/android-x86_64-computer-use.log",
+      "log_bytes": 571,
+      "log_sha256": "d77b8d39bc4bab2db4a77801d1933d7fe992666a31a8590d39b5b0eb6b8b44be"
+    },
+    {
+      "name": "ios-simulator-default",
+      "argv": [
+        "cargo",
+        "check",
+        "--locked",
+        "--offline",
+        "-p",
+        "ios-framework",
+        "--target",
+        "aarch64-apple-ios-sim"
+      ],
+      "exit_code": 0,
+      "log": "acceptance/final-ledger-r376/final-evidence-17593-v2/platform/ios-simulator-default.log",
+      "log_bytes": 9857,
+      "log_sha256": "ce8c5e99e0af7d31bf0534af5c33734c2a64f5886f70c6f08325a09169189764"
+    }
+  ],
+  "source_guards": {
+    "before_and_after_each_check": "passed",
+    "identity": {
+      "product_sha": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "harness_sha": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "sdk_sha": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+      "mobile_sha": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+    }
+  },
+  "limits": [
+    "Cross-target compilation does not establish generated-language integration or physical-device behavior."
+  ]
+}

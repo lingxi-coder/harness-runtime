@@ -1,0 +1,19 @@
+diff --git a/crates/runtime/src/headless/run/control.rs b/crates/runtime/src/headless/run/control.rs
+--- a/crates/runtime/src/headless/run/control.rs
++++ b/crates/runtime/src/headless/run/control.rs
+@@ -1614,11 +1614,13 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-
++    use crate::headless::run::PrintAuxTaskGroup;
++
++    #[allow(clippy::too_many_arguments)]
+     async fn dispatch_initialize_alias_request(
+         runtime: &Runtime,
+         writer: &ControlPlaneWriter,
+-        outbound: &Arc<crate::headless::stream_json::OutboundTx>,
++        _outbound: &Arc<crate::headless::stream_json::OutboundTx>,
+         receiver: &mut tokio::sync::mpsc::UnboundedReceiver<
+             crate::headless::stream_json::OutboundMsg,
+         >,

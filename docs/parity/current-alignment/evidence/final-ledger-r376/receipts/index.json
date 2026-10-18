@@ -1,0 +1,27 @@
+[
+  {
+    "name": "h-full-r271-run.json",
+    "original": "/private/tmp/h-full-gate-final-r271-20261017/run.json",
+    "sha256": "864080986f8d38a182ee53caa35988412fe1c329523f216358254c865d56ff7c"
+  },
+  {
+    "name": "p-full-r375-run.json",
+    "original": "/private/tmp/product-full-r342-r375-20261018T014521Z-68469/runner/run.json",
+    "sha256": "71f9c8d34c051be9241612993f06832253fcb898fe9175278897c8609c4fc25f"
+  },
+  {
+    "name": "h-hooks-r375.json",
+    "original": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mod-ui-post-ack-r375-20261017/harness-receipt.json",
+    "sha256": "c77ded958dec9afb94e0d8cccdcfe6d3a71298d3919b5cdcf3594cd597b2c672"
+  },
+  {
+    "name": "p-final-r375.json",
+    "original": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mod-ui-post-ack-r375-20261017/product-receipt.json",
+    "sha256": "90b07244698f928e183ecc6caeb126b90d914afb97e003433baa32bcefe4763b"
+  },
+  {
+    "name": "mac-final-r375.json",
+    "original": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mac-final-r375-20261017/receipt.json",
+    "sha256": "a10fcbe7f39911e158ace3150c3c8a1a1dcf89fda65b4ec4a850e81c4aceee90"
+  }
+]

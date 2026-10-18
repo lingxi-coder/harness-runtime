@@ -1,0 +1,8 @@
+   Compiling cli v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host)
+    Finished `test` profile [unoptimized] target(s) in 3.75s
+     Running tests/cli_agents.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli_agents-715868132a173a5d)
+     Running tests/cli_argv_errors.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli_argv_errors-b9b75c1c4742053f)
+     Running tests/cli_auto_mode_setup.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli_auto_mode_setup-2016a0fd8509e7a2)
+     Running tests/cli_headless_session.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli_headless_session-b1cf11dcd6de5fef)
+     Running tests/cli_help.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli_help-d66a7a95382f44b6)
+     Running tests/cli_print.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/cli_print-ae018609b1507287)

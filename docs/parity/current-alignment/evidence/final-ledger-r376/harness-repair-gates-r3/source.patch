@@ -1,0 +1,3693 @@
+diff --git a/crates/agent/src/handle.rs b/crates/agent/src/handle.rs
+index 7aefdb24..df346218 100644
+--- a/crates/agent/src/handle.rs
++++ b/crates/agent/src/handle.rs
+@@ -357,25 +357,21 @@ pub struct PoolSubagentSpawner {
+     /// reads it via [`SubagentSpawner::resolve_name`]. Shared `Arc` so the same
+     /// map is visible across spawner clones. Sync agents are NOT registered.
+     name_registry: Arc<InMemoryAgentNameRegistry>,
+-    /// TOOL-WIDE deny-rule names from the boot permission policy, applied in
+-    /// [`Self::resolve_tools`] so a blanket-denied tool never leaks into a
+-    /// subagent's advertised wire `tools` array — matching claude-code, where
+-    /// `assembleToolPool` (the SAME pool builder used for coordinator workers,
+-    /// `runAgent.ts`) runs `filterToolsByDenyRules`. A SET-ONCE cell mirroring
++    /// Atomic Native alias/name/content deny snapshot applied in
++    /// [`Self::resolve_tools`] so a denied tool never leaks into a subagent's
++    /// advertised wire `tools` array. A SET-ONCE cell mirrors
+     /// [`Self::tool_registry`]: the permission policy is built at the composition
+-    /// root AFTER the spawner is boxed, so the host fills this once it exists via
+-    /// [`Self::tool_wide_deny_names_handle`]. Unfilled (the default / tests /
+-    /// no-enforcement) ⇒ NO names ⇒ the subagent tool pool is UNCHANGED
+-    /// (byte-identical / regression-safe). Each entry is matched against a
+-    /// resolved tool's name by [`permission::tool_wide_name_matches`] (exact name
+-    /// OR an `mcp__server` prefix).
+-    tool_wide_deny_names: Arc<std::sync::OnceLock<Vec<String>>>,
++    /// root AFTER the spawner is boxed, so the host fills this with
++    /// [`Self::tool_deny_context_handle`]. An unfilled cell uses the empty
++    /// context and leaves the pool unchanged.
++    tool_deny_context:
++        Arc<std::sync::OnceLock<lingxi_core::host::permission_gate::NativeMcpDenyContext>>,
+     /// Renderer for the subagent `<env>` block claude-code 2.1.186 appends to a
+     /// NON-fork subagent's system prompt after the `Notes:` trailer (`tIm` — see
+     /// `orchestrator::prompt::subagent_env`). Given a RESOLVED model id it returns
+     /// the byte-exact block (cwd / git / platform / shell / OS / model + cutoff);
+     /// the static environment inputs are captured at the composition root. A
+-    /// SET-ONCE cell mirroring [`Self::tool_wide_deny_names`]: the renderer is
++    /// SET-ONCE cell mirroring [`Self::tool_deny_context_handle`]: the renderer is
+     /// built at the composition root (which can reach the orchestrator formatter +
+     /// the git/uname probes; the `agent` crate cannot, to avoid a dep cycle) and
+     /// filled via [`Self::subagent_env_renderer_handle`] after the spawner is
+@@ -521,7 +517,7 @@ impl PoolSubagentSpawner {
+             allocated_transcript_paths: Arc::new(std::sync::Mutex::new(HashMap::new())),
+             transcript_fs: None,
+             name_registry: Arc::new(InMemoryAgentNameRegistry::new()),
+-            tool_wide_deny_names: Arc::new(std::sync::OnceLock::new()),
++            tool_deny_context: Arc::new(std::sync::OnceLock::new()),
+             subagent_env_renderer: Arc::new(std::sync::OnceLock::new()),
+             mcp_tool_builder: Arc::new(RuntimeLink::new()),
+             coordinator_mode: Arc::new(std::sync::OnceLock::new()),
+@@ -606,7 +602,7 @@ impl PoolSubagentSpawner {
+ 
+     /// Return a clone of the set-once subagent-`<env>`-renderer cell so the host
+     /// can fill it AFTER the orchestrator env formatter + probes are available
+-    /// (same cycle-break as [`Self::tool_wide_deny_names_handle`]). First fill
++    /// (same cycle-break as [`Self::tool_deny_context_handle`]). First fill
+     /// wins. Unfilled ⇒ no env block appended (byte-identical legacy).
+     #[must_use]
+     pub fn subagent_env_renderer_handle(&self) -> Arc<std::sync::OnceLock<SubagentEnvRenderer>> {
+@@ -679,23 +675,27 @@ impl PoolSubagentSpawner {
+         self
+     }
+ 
+-    /// Return a clone of the set-once tool-wide-deny-names cell so the host can
++    /// Return a clone of the set-once Native deny-context cell so the host can
+     /// fill it AFTER the permission policy is built (same cycle-break as
+     /// [`Self::tool_registry_handle`]). The subagent tool resolver
+-    /// ([`Self::resolve_tools`]) then strips any blanket-denied tool from each
+-    /// child's advertised pool (claude-code `filterToolsByDenyRules`). First fill
+-    /// wins. Unfilled ⇒ no filtering (byte-identical legacy).
++    /// ([`Self::resolve_tools`]) then strips denied tools from the child's
++    /// advertised pool using the same alias/content matcher as the parent.
++    /// First fill wins. Unfilled ⇒ an empty context.
+     #[must_use]
+-    pub fn tool_wide_deny_names_handle(&self) -> Arc<std::sync::OnceLock<Vec<String>>> {
+-        self.tool_wide_deny_names.clone()
++    pub fn tool_deny_context_handle(
++        &self,
++    ) -> Arc<std::sync::OnceLock<lingxi_core::host::permission_gate::NativeMcpDenyContext>> {
++        self.tool_deny_context.clone()
+     }
+ 
+-    /// Builder: set the tool-wide deny names immediately (tests). The boot path
+-    /// uses [`Self::tool_wide_deny_names_handle`] to fill it later (the policy
+-    /// does not exist at construction). Applied in [`Self::resolve_tools`].
++    /// Builder: set the Native deny context immediately (tests/minimal hosts).
++    /// The boot path uses [`Self::tool_deny_context_handle`] to fill it later.
+     #[must_use]
+-    pub fn with_tool_wide_deny_names(self, names: Vec<String>) -> Self {
+-        let _ = self.tool_wide_deny_names.set(names);
++    pub fn with_tool_deny_context(
++        self,
++        context: lingxi_core::host::permission_gate::NativeMcpDenyContext,
++    ) -> Self {
++        let _ = self.tool_deny_context.set(context);
+         self
+     }
+ 
+@@ -2129,17 +2129,17 @@ impl SubagentSpawner for PoolSubagentSpawner {
+     /// claude 2.1.238 `NJa` (@290291941) — the agent types every one of whose
+     /// tools is denied by the current permission settings. Computed over the
+     /// SAME merged catalog [`Self::listing_entries`] renders, against the boot
+-    /// policy's tool-wide deny names (the set-once cell filled by the
++    /// policy's Native deny context (the set-once cell filled by the
+     /// composition root; UNFILLED / EMPTY ⇒ nothing denied ⇒ empty result, so
+     /// this is regression-safe for every host that never wires it).
+     async fn tools_denied_agent_types(&self) -> Vec<String> {
+-        let empty: Vec<String> = Vec::new();
+-        let denied = self.tool_wide_deny_names.get().unwrap_or(&empty).clone();
++        let empty = lingxi_core::host::permission_gate::NativeMcpDenyContext::default();
++        let deny_context = self.tool_deny_context.get().unwrap_or(&empty);
+         let mut defs: Vec<AgentDefinition> = self.builtins.values().cloned().collect();
+         if let Some(catalog) = self.agent_catalog.get() {
+             defs.extend(catalog.read().await.iter().cloned());
+         }
+-        crate::tools_denied_agent_types(&defs, &denied)
++        crate::tools_denied_agent_types(&defs, deny_context)
+     }
+ 
+     /// Resolve the `required_mcp_servers` declared by `subagent_type`'s
+diff --git a/crates/agent/src/handle/spawn_context.rs b/crates/agent/src/handle/spawn_context.rs
+index 5f383e9d..037bbd5b 100644
+--- a/crates/agent/src/handle/spawn_context.rs
++++ b/crates/agent/src/handle/spawn_context.rs
+@@ -300,11 +300,10 @@ pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEnt
+ ///   contains `"*"`, so a wildcard list ([`AgentToolPolicy::All`]) is skipped.
+ /// * the surviving case is a non-empty, wildcard-free explicit allow-list; the
+ ///   agent stays available iff SOME entry is both un-denied (`!ak(t,{name:o})`,
+-///   a deny rule matched against the bare tool NAME ⇒ the port's tool-wide deny
+-///   names, matched with [`permission::tool_wide_name_matches`] — the SAME
+-///   matcher [`crate::tool_resolver::resolve_subagent_tools`] uses to strip the
+-///   spawn's pool, so this predicate cannot disagree with the pool the agent
+-///   would actually get) and usable
++///   a deny rule matched against the bare tool NAME using the same Native
++///   deny-context matcher [`crate::tool_resolver::resolve_subagent_tools`] uses
++///   to strip the spawn's pool, so this predicate cannot disagree with the pool
++///   the agent would actually get) and usable
+ ///   (`_Tv(o) = o!==cm||Vs(wjr)` — `WebFetch` additionally needs the
+ ///   `allow_web_fetch` entitlement,
+ ///   [`crate::builtins::web_fetch_policy_allowed`]).
+@@ -318,7 +317,7 @@ pub fn agent_listing_entries(defs: &[AgentDefinition]) -> Vec<SubagentListingEnt
+ #[must_use]
+ pub fn tools_denied_agent_types(
+     defs: &[AgentDefinition],
+-    tool_wide_deny: &[String],
++    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
+ ) -> Vec<String> {
+     let mut by_type: HashMap<String, &AgentDefinition> = HashMap::new();
+     for def in defs {
+@@ -326,7 +325,7 @@ pub fn tools_denied_agent_types(
+     }
+     let mut out: Vec<String> = by_type
+         .into_values()
+-        .filter(|def| every_tool_denied(def, tool_wide_deny))
++        .filter(|def| every_tool_denied(def, deny_context))
+         .map(|def| def.agent_type.clone())
+         .collect();
+     out.sort();
+@@ -335,7 +334,10 @@ pub fn tools_denied_agent_types(
+ 
+ /// claude `mdr(e,t)` (@290291941) = `NJa([e],t).length===0` — the single-agent
+ /// arm of [`tools_denied_agent_types`].
+-pub(super) fn every_tool_denied(def: &AgentDefinition, tool_wide_deny: &[String]) -> bool {
++pub(super) fn every_tool_denied(
++    def: &AgentDefinition,
++    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
++) -> bool {
+     // `r.source!=="built-in"` ⇒ kept (never withheld).
+     if !matches!(def.source, AgentSource::BuiltIn) {
+         return false;
+@@ -350,9 +352,7 @@ pub(super) fn every_tool_denied(def: &AgentDefinition, tool_wide_deny: &[String]
+     // `!r.tools.some(...)` — no entry is both un-denied and usable.
+     !names.iter().any(|name| {
+         let tool = rule_tool_name(name);
+-        let denied = tool_wide_deny
+-            .iter()
+-            .any(|d| permission::tool_wide_name_matches(d, tool));
++        let denied = permission::native_deny_context_matches_tool_name(deny_context, tool);
+         // `_Tv(o) = o !== cm || Vs(wjr)`
+         let usable = tool != crate::builtins::WEB_FETCH_TOOL_NAME
+             || crate::builtins::web_fetch_policy_allowed();
+@@ -748,12 +748,12 @@ impl PoolSubagentSpawner {
+             return Ok((Vec::new(), Vec::new(), false));
+         };
+         // Delegate to the shared resolver (single source of truth, also used by
+-        // the in-process teammate handler). The tool-wide deny names come from the
+-        // boot policy via the set-once cell. Tool prompts use the child's
++        // the in-process teammate handler). The Native deny-context snapshot comes
++        // from the boot policy via the set-once cell. Tool prompts use the child's
+         // admitted route directly; a same-named model on another profile must
+         // retain that profile's tool capability facts.
+-        let empty: Vec<String> = Vec::new();
+-        let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
++        let empty = lingxi_core::host::permission_gate::NativeMcpDenyContext::default();
++        let deny_context = self.tool_deny_context.get().unwrap_or(&empty);
+         let coordinator_mode = self
+             .coordinator_mode
+             .get()
+@@ -761,7 +761,7 @@ impl PoolSubagentSpawner {
+         crate::tool_resolver::resolve_subagent_tools_with_handback(
+             registry.as_ref(),
+             agent_def,
+-            denied,
++            deny_context,
+             child_selection,
+             depth,
+             coordinator_mode,
+diff --git a/crates/agent/src/handle/tests/tests.rs b/crates/agent/src/handle/tests/tests.rs
+index eb2078d6..63c80ba1 100644
+--- a/crates/agent/src/handle/tests/tests.rs
++++ b/crates/agent/src/handle/tests/tests.rs
+@@ -1,6 +1,7 @@
+ use super::*;
+ use async_trait::async_trait;
+ use lingxi_core::host::budget::{BudgetEnforcerHandle, BudgetError};
++use lingxi_core::host::permission_gate::{NativeMcpDenyContext, NativeMcpDenyRule};
+ use lingxi_core::host::tool_invoker::{SubagentInvocationContext, ToolInvoker, ToolInvokerError};
+ use lingxi_core::host::{BackgroundTaskHandle, RuntimeError, RuntimeSpawner};
+ use lingxi_core::types::utf16_json::Utf16JsonProjection;
+@@ -62,6 +63,20 @@ fn test_spawner(pool: Arc<StateMachinePool>) -> PoolSubagentSpawner {
+         .with_model_resolution_context_provider(route_provider)
+ }
+ 
++fn native_deny_context(names: &[&str]) -> NativeMcpDenyContext {
++    NativeMcpDenyContext {
++        tool_aliases: None,
++        deny_rules: names
++            .iter()
++            .map(|name| NativeMcpDenyRule {
++                tool_name: (*name).to_string(),
++                rule_content: None,
++                proxy_expansion: false,
++            })
++            .collect(),
++    }
++}
++
+ fn test_model_selection(
+     model: &str,
+     profile: Option<&str>,
+@@ -2900,7 +2915,7 @@ async fn resolve_tools_strips_tool_wide_denied_tool_from_subagent_pool() {
+     let pool = Arc::new(StateMachinePool::new(runtime, 4));
+     let spawner = test_spawner(pool)
+         .with_tool_registry(registry_with(&["Read", "Bash", "WebFetch"]))
+-        .with_tool_wide_deny_names(vec!["WebFetch".to_string()]);
++        .with_tool_deny_context(native_deny_context(&["WebFetch"]));
+ 
+     let (schemas, allowed) = spawner
+         .resolve_tools(
+@@ -2936,7 +2951,7 @@ async fn resolve_tools_mcp_server_deny_strips_all_server_tools_from_subagent() {
+             "mcp__github__issue",
+             "mcp__slack__post",
+         ]))
+-        .with_tool_wide_deny_names(vec!["mcp__github".to_string()]);
++        .with_tool_deny_context(native_deny_context(&["mcp__github"]));
+ 
+     let (schemas, _allowed) = spawner
+         .resolve_tools(
+@@ -2959,6 +2974,42 @@ async fn resolve_tools_mcp_server_deny_strips_all_server_tools_from_subagent() {
+     );
+ }
+ 
++#[tokio::test]
++async fn resolve_tools_strips_native_alias_denied_mcp_tool_from_subagent() {
++    let runtime = Arc::new(MockRuntimeSpawner::default());
++    let pool = Arc::new(StateMachinePool::new(runtime, 4));
++    let deny_context = NativeMcpDenyContext {
++        tool_aliases: Some(
++            Utf16JsonProjection::parse(
++                r#"{"mcp__legacy__create_issue":"mcp__linear__create_issue"}"#,
++            )
++            .expect("alias map is valid JSON"),
++        ),
++        deny_rules: vec![NativeMcpDenyRule {
++            tool_name: "mcp__legacy__create_issue".into(),
++            rule_content: None,
++            proxy_expansion: true,
++        }],
++    };
++    let spawner = test_spawner(pool)
++        .with_tool_registry(registry_with(&["mcp__linear__create_issue", "Read"]))
++        .with_tool_deny_context(deny_context);
++
++    let (schemas, allowed) = spawner
++        .resolve_tools(
++            &agent_def(AgentToolPolicy::All {
++                use_exact_tools: true,
++            }),
++            0,
++            &[],
++        )
++        .await
++        .expect("all-policy child catalog resolves after filtering");
++    let names: Vec<&str> = schemas.iter().map(|tool| tool.name.as_str()).collect();
++    assert_eq!(names, vec!["Read"]);
++    assert_eq!(allowed, vec!["Read"]);
++}
++
+ #[tokio::test]
+ async fn resolve_tools_empty_deny_leaves_subagent_pool_unchanged() {
+     // Regression safety: an unset / empty deny-names cell must leave the
+@@ -2979,7 +3030,7 @@ async fn resolve_tools_empty_deny_leaves_subagent_pool_unchanged() {
+         .expect("all policy should resolve without deny");
+     let empty_deny = test_spawner(pool)
+         .with_tool_registry(registry_with(&["Read", "Bash"]))
+-        .with_tool_wide_deny_names(vec![]);
++        .with_tool_deny_context(NativeMcpDenyContext::default());
+     let (schemas_b, allowed_b) = empty_deny
+         .resolve_tools(
+             &agent_def(AgentToolPolicy::All {
+@@ -4992,7 +5043,7 @@ fn tools_denied_agent_types_ports_nja_guards() {
+         agent_type: ty.into(),
+         ..agent_def(tools)
+     };
+-    let deny = vec!["Read".to_string(), "Edit".to_string()];
++    let deny_context = native_deny_context(&["Read", "Edit"]);
+ 
+     // Subject to the check: built-in + non-empty, wildcard-free explicit
+     // allow-list, every entry denied ⇒ unavailable.
+@@ -5044,11 +5095,38 @@ fn tools_denied_agent_types_ports_nja_guards() {
+         rule_form,
+     ];
+     assert_eq!(
+-        crate::tools_denied_agent_types(&defs, &deny),
++        crate::tools_denied_agent_types(&defs, &deny_context),
+         vec!["rule-form".to_string(), "statusline-setup".to_string()]
+     );
+     // No deny rules ⇒ nothing withheld (the regression-safe default).
+-    assert!(crate::tools_denied_agent_types(&defs, &[]).is_empty());
++    assert!(crate::tools_denied_agent_types(&defs, &NativeMcpDenyContext::default()).is_empty());
++}
++
++#[test]
++fn tools_denied_agent_types_use_native_tool_aliases() {
++    let def = AgentDefinition {
++        agent_type: "linear-worker".into(),
++        ..agent_def(AgentToolPolicy::Explicit(vec![
++            "mcp__linear__create_issue".into()
++        ]))
++    };
++    let context = NativeMcpDenyContext {
++        tool_aliases: Some(
++            Utf16JsonProjection::parse(
++                r#"{"mcp__legacy__create_issue":"mcp__linear__create_issue"}"#,
++            )
++            .expect("alias map is valid JSON"),
++        ),
++        deny_rules: vec![NativeMcpDenyRule {
++            tool_name: "mcp__legacy__create_issue".into(),
++            rule_content: None,
++            proxy_expansion: true,
++        }],
++    };
++    assert_eq!(
++        crate::tools_denied_agent_types(std::slice::from_ref(&def), &context),
++        vec!["linear-worker".to_string()]
++    );
+ }
+ 
+ /// claude `_Tv(o) = o!==cm||Vs(wjr)`: WebFetch counts as usable only while
+@@ -5062,9 +5140,16 @@ fn web_fetch_only_agent_follows_the_allow_web_fetch_term() {
+         ..agent_def(AgentToolPolicy::Explicit(vec!["WebFetch".into()]))
+     };
+     assert!(crate::builtins::web_fetch_policy_allowed());
+-    assert!(crate::tools_denied_agent_types(std::slice::from_ref(&wf), &[]).is_empty());
++    assert!(crate::tools_denied_agent_types(
++        std::slice::from_ref(&wf),
++        &NativeMcpDenyContext::default()
++    )
++    .is_empty());
+     assert_eq!(
+-        crate::tools_denied_agent_types(std::slice::from_ref(&wf), &["WebFetch".to_string()]),
++        crate::tools_denied_agent_types(
++            std::slice::from_ref(&wf),
++            &native_deny_context(&["WebFetch"])
++        ),
+         vec!["web-fetch".to_string()]
+     );
+ }
+diff --git a/crates/agent/src/tool_resolver.rs b/crates/agent/src/tool_resolver.rs
+index 2c31b11c..3060a1a8 100644
+--- a/crates/agent/src/tool_resolver.rs
++++ b/crates/agent/src/tool_resolver.rs
+@@ -355,7 +355,7 @@ fn auto_memory_enabled_for_flags(disabled: Option<&str>, simple: Option<&str>) -
+ /// [`crate::handle::PoolSubagentSpawner`] and the in-process teammate handler —
+ /// both must advertise the same `assembleToolPool`-equivalent pool (claude-code
+ /// `runAgent.ts`): [`AgentToolResolver::resolve`] over the registry's
+-/// `available_tools`, then the tool-wide deny filter
++/// `available_tools`, then the Native deny-context filter
+ /// (`filterToolsByDenyRules`), then wire serialization keyed on the subagent's
+ /// resolved model/profile (so route-gated tool prompts track the child's
+ /// provider as well as its model).
+@@ -363,11 +363,11 @@ fn auto_memory_enabled_for_flags(disabled: Option<&str>, simple: Option<&str>) -
+ /// The allow-list includes each resolved tool's `aliases()` so the runner's
+ /// dispatch guard accepts the SAME surface the inherited `RegistryToolInvoker`
+ /// does for tools that declare aliases; the advertised schemas stay
+-/// canonical-name-only. An empty `tool_wide_deny` drops nothing.
++/// canonical-name-only. An empty deny context drops nothing.
+ pub async fn resolve_subagent_tools(
+     registry: &tool_api::ToolRegistry,
+     agent_def: &AgentDefinition,
+-    tool_wide_deny: &[String],
++    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
+     child_selection: Option<&ResolvedModelSelection>,
+     // The resolved subagent's own recursion depth — gates its `Agent` tool
+     // against Claude's configured maximum. Threaded from the spawn request.
+@@ -390,7 +390,7 @@ pub async fn resolve_subagent_tools(
+     resolve_subagent_tools_with_handback(
+         registry,
+         agent_def,
+-        tool_wide_deny,
++        deny_context,
+         child_selection,
+         depth,
+         coordinator_mode,
+@@ -407,7 +407,7 @@ pub async fn resolve_subagent_tools(
+ pub async fn resolve_subagent_tools_with_handback(
+     registry: &tool_api::ToolRegistry,
+     agent_def: &AgentDefinition,
+-    tool_wide_deny: &[String],
++    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
+     child_selection: Option<&ResolvedModelSelection>,
+     // The resolved subagent's own recursion depth — gates its `Agent` tool
+     // against Claude's configured maximum. Threaded from the spawn request.
+@@ -456,13 +456,9 @@ pub async fn resolve_subagent_tools_with_handback(
+         depth,
+         coordinator_mode,
+     );
+-    if !tool_wide_deny.is_empty() {
+-        resolved.retain(|t| {
+-            !tool_wide_deny
+-                .iter()
+-                .any(|d| permission::tool_wide_name_matches(d, t.name()))
+-        });
+-    }
++    resolved.retain(|tool| {
++        !permission::native_deny_context_matches_tool_name(deny_context, tool.name())
++    });
+     if let AgentToolPolicy::Explicit(names) = &agent_def.tools {
+         if !names.is_empty() && resolved.is_empty() {
+             return Err(ToolResolutionError::EmptyExplicitToolSet(names.join(", ")));
+@@ -546,6 +542,7 @@ mod tests {
+     use super::*;
+     use crate::definition::{AgentModel, AgentSource};
+     use async_trait::async_trait;
++    use lingxi_core::host::permission_gate::{NativeMcpDenyContext, NativeMcpDenyRule};
+     use lingxi_core::types::utf16_json::Utf16JsonProjection;
+     use serde_json::Value;
+     use tool_api::context::ToolUseContext;
+@@ -655,6 +652,20 @@ mod tests {
+         })
+     }
+ 
++    fn deny_context(names: &[&str]) -> NativeMcpDenyContext {
++        NativeMcpDenyContext {
++            tool_aliases: None,
++            deny_rules: names
++                .iter()
++                .map(|name| NativeMcpDenyRule {
++                    tool_name: (*name).to_string(),
++                    rule_content: None,
++                    proxy_expansion: false,
++                })
++                .collect(),
++        }
++    }
++
+     #[test]
+     fn handback_injection_matches_pinned_spawn_conjunction() {
+         let fixture: Value = serde_json::from_str(include_str!(
+@@ -747,16 +758,32 @@ mod tests {
+             enabled: false,
+         }));
+         let definition = agent_def(AgentToolPolicy::Explicit(vec!["Read".into(), "LSP".into()]));
+-        let (schemas, allowed) =
+-            resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
+-                .await
+-                .expect("disabled LSP must not block the builder");
++        let (schemas, allowed) = resolve_subagent_tools(
++            &registry,
++            &definition,
++            &NativeMcpDenyContext::default(),
++            None,
++            0,
++            false,
++            &[],
++        )
++        .await
++        .expect("disabled LSP must not block the builder");
+         assert_eq!(allowed, vec!["Read"]);
+         assert_eq!(schemas.len(), 1);
+         assert_eq!(schemas[0].name, "Read");
+         let only_disabled = agent_def(AgentToolPolicy::Explicit(vec!["LSP".into()]));
+         assert!(matches!(
+-            resolve_subagent_tools(&registry, &only_disabled, &[], None, 0, false, &[],).await,
++            resolve_subagent_tools(
++                &registry,
++                &only_disabled,
++                &NativeMcpDenyContext::default(),
++                None,
++                0,
++                false,
++                &[],
++            )
++            .await,
+             Err(ToolResolutionError::EmptyExplicitToolSet(_))
+         ));
+     }
+@@ -767,22 +794,81 @@ mod tests {
+         registry.register_builtin(tool("Read"));
+         registry.register_builtin(tool("LSP"));
+         let definition = agent_def(AgentToolPolicy::Explicit(vec!["Read".into(), "LSP".into()]));
+-        let (_, allowed) = resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
+-            .await
+-            .unwrap();
++        let (_, allowed) = resolve_subagent_tools(
++            &registry,
++            &definition,
++            &NativeMcpDenyContext::default(),
++            None,
++            0,
++            false,
++            &[],
++        )
++        .await
++        .unwrap();
+         assert_eq!(allowed, vec!["LSP", "Read"]);
+-        let (_, allowed) =
+-            resolve_subagent_tools(&registry, &definition, &["LSP".into()], None, 0, false, &[])
+-                .await
+-                .unwrap();
++        let (_, allowed) = resolve_subagent_tools(
++            &registry,
++            &definition,
++            &deny_context(&["LSP"]),
++            None,
++            0,
++            false,
++            &[],
++        )
++        .await
++        .unwrap();
+         assert_eq!(allowed, vec!["Read"]);
+         registry.set_session_tool_allowlist(&["Read".into()]);
+         assert!(matches!(
+-            resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[],).await,
++            resolve_subagent_tools(
++                &registry,
++                &definition,
++                &NativeMcpDenyContext::default(),
++                None,
++                0,
++                false,
++                &[],
++            )
++            .await,
+             Err(ToolResolutionError::UnknownExplicitTools(_))
+         ));
+     }
+ 
++    #[tokio::test]
++    async fn child_catalog_filters_native_mcp_alias_deny() {
++        let mut registry = tool_api::ToolRegistry::new();
++        registry.register_builtin(tool("mcp__linear__create_issue"));
++        let deny_context = NativeMcpDenyContext {
++            tool_aliases: Some(
++                Utf16JsonProjection::parse(
++                    r#"{"mcp__legacy__create_issue":"mcp__linear__create_issue"}"#,
++                )
++                .expect("alias map is valid JSON"),
++            ),
++            deny_rules: vec![NativeMcpDenyRule {
++                tool_name: "mcp__legacy__create_issue".into(),
++                rule_content: None,
++                proxy_expansion: true,
++            }],
++        };
++        let definition = agent_def(AgentToolPolicy::All {
++            use_exact_tools: true,
++        });
++
++        let (schemas, allowed) =
++            resolve_subagent_tools(&registry, &definition, &deny_context, None, 0, false, &[])
++                .await
++                .expect("all-policy child catalog resolves after filtering");
++        assert!(
++            schemas.is_empty(),
++            "alias-denied tool must not be advertised"
++        );
++        assert!(
++            allowed.is_empty(),
++            "alias-denied tool must not be dispatchable"
++        );
++    }
++
+     fn pool(names: &[&'static str]) -> Vec<Arc<dyn Tool>> {
+         names.iter().map(|n| tool(n)).collect()
+     }
+@@ -809,7 +895,7 @@ mod tests {
+             let (schemas, _) = resolve_subagent_tools(
+                 &registry,
+                 &definition,
+-                &[],
++                &NativeMcpDenyContext::default(),
+                 Some(&selection),
+                 0,
+                 false,
+@@ -856,20 +942,36 @@ mod tests {
+                 .expect("Bash prompt description is a string")
+                 .to_owned()
+         };
+-        let (schemas, _) = resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
+-            .await
+-            .unwrap();
++        let (schemas, _) = resolve_subagent_tools(
++            &registry,
++            &definition,
++            &NativeMcpDenyContext::default(),
++            None,
++            0,
++            false,
++            &[],
++        )
++        .await
++        .unwrap();
+         assert!(description(schemas).contains("custom_verify: true"));
+ 
+         let blocked = agent_def(AgentToolPolicy::Except(vec!["Skill".into()]));
+-        let (schemas, _) = resolve_subagent_tools(&registry, &blocked, &[], None, 0, false, &[])
+-            .await
+-            .unwrap();
++        let (schemas, _) = resolve_subagent_tools(
++            &registry,
++            &blocked,
++            &NativeMcpDenyContext::default(),
++            None,
++            0,
++            false,
++            &[],
++        )
++        .await
++        .unwrap();
+         assert!(description(schemas).contains("custom_verify: false"));
+         let (schemas, _) = resolve_subagent_tools(
+             &registry,
+             &definition,
+-            &["Skill".into()],
++            &deny_context(&["Skill"]),
+             None,
+             0,
+             false,
+@@ -881,9 +983,17 @@ mod tests {
+ 
+         enabled.store(false, Ordering::Relaxed);
+         registry.reset_bash_precommit_prompt_session();
+-        let (schemas, _) = resolve_subagent_tools(&registry, &definition, &[], None, 0, false, &[])
+-            .await
+-            .unwrap();
++        let (schemas, _) = resolve_subagent_tools(
++            &registry,
++            &definition,
++            &NativeMcpDenyContext::default(),
++            None,
++            0,
++            false,
++            &[],
++        )
++        .await
++        .unwrap();
+         let prompt = description(schemas);
+         assert!(prompt.contains("custom_verify: false"));
+         assert!(prompt.contains("generation=1"));
+diff --git a/crates/core/src/host/mod.rs b/crates/core/src/host/mod.rs
+index ae30c302..d6915b65 100644
+--- a/crates/core/src/host/mod.rs
++++ b/crates/core/src/host/mod.rs
+@@ -349,8 +349,8 @@ pub use orchestrator::{
+ pub use panel_pool::{PanelPoolLease, PanelPoolPermit};
+ pub use permission_gate::{
+     AutoModePrompt, ClassifierOnlyOnBlock, ClassifierOnlyOutcome, ClassifierOnlyPolicy,
+-    ClassifierOnlyReviewRequest, PermissionDecision, PermissionDenial, PermissionGate,
+-    PermissionRequestSource,
++    ClassifierOnlyReviewRequest, NativeMcpDenyContext, NativeMcpDenyRule, PermissionDecision,
++    PermissionDenial, PermissionGate, PermissionRequestSource,
+ };
+ pub use platform::Platform;
+ pub use process::{
+diff --git a/crates/core/src/host/permission_gate.rs b/crates/core/src/host/permission_gate.rs
+index 57d51af7..9e9871ff 100644
+--- a/crates/core/src/host/permission_gate.rs
++++ b/crates/core/src/host/permission_gate.rs
+@@ -812,6 +812,22 @@ pub struct PermissionPolicyRuleFact {
+     pub pattern: Option<Utf16JsonProjection>,
+ }
+ 
++/// One live Native name-deny rule, retaining content and proxy-expansion scope.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct NativeMcpDenyRule {
++    pub tool_name: String,
++    pub rule_content: Option<Utf16JsonProjection>,
++    pub proxy_expansion: bool,
++}
++
++/// A single policy snapshot for Native `Hmn` / `Jqe` dropped-tool filtering.
++/// Aliases retain their original object keys, values and UTF-16 source units.
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++pub struct NativeMcpDenyContext {
++    pub tool_aliases: Option<Utf16JsonProjection>,
++    pub deny_rules: Vec<NativeMcpDenyRule>,
++}
++
+ /// One source-specific root used to resolve permission rule paths.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub struct PermissionPolicyRuleRoot {
+@@ -1603,6 +1619,25 @@ pub trait PermissionGate: Send + Sync {
+         Vec::new()
+     }
+ 
++    /// Effective aliases and deny rules from one live policy generation.
++    /// A name-only gate contributes its advertised blanket-deny facts; policy
++    /// owners override this to include content rules and aliases atomically.
++    async fn native_mcp_deny_context(&self) -> NativeMcpDenyContext {
++        NativeMcpDenyContext {
++            tool_aliases: None,
++            deny_rules: self
++                .tool_wide_deny_names()
++                .await
++                .into_iter()
++                .map(|tool_name| NativeMcpDenyRule {
++                    tool_name,
++                    rule_content: None,
++                    proxy_expansion: false,
++                })
++                .collect(),
++        }
++    }
++
+     /// If `Agent(<agent_type>)` is DENIED by a permission rule, the rule's source
+     /// identifier (claude-code `SettingSource` raw string — e.g. `localSettings`,
+     /// `projectSettings`, `cliArg`), else `None`.
+diff --git a/crates/hooks/src/matcher.rs b/crates/hooks/src/matcher.rs
+index d99c6dc5..4bbff563 100644
+--- a/crates/hooks/src/matcher.rs
++++ b/crates/hooks/src/matcher.rs
+@@ -8,9 +8,10 @@
+ //! exactly:
+ //!
+ //! 1. `*` / empty → match everything (short-circuit `true`).
+-//! 2. `^[A-Za-z0-9_|]+$` → a "simple" pattern with no regex metacharacters
+-//!    other than `|`: an exact match, or — when it contains `|` — a match
+-//!    against any pipe-separated segment (each `trim()`-med + legacy-normalized).
++//! 2. A "simple" pattern with no regex metacharacters other than the active
++//!    list separators: an exact match, or a match against any `|`-separated
++//!    segment (plus comma-separated segments in event comma mode; each is
++//!    `trim()`-med + legacy-normalized).
+ //! 3. Otherwise → treat the pattern as an anchored-or-not regex. An invalid
+ //!    regex logs and returns `false` (never panics), exactly like the TS
+ //!    `try { new RegExp(...) } catch { … return false }`.
+@@ -32,7 +33,7 @@ use rquickjs::{Context, Runtime};
+ use std::cell::RefCell;
+ use std::collections::HashMap;
+ 
+-/// the binary's `atf` membership exactly (note: `FileChanged`,
++/// Native 2.1.295's `J9` membership exactly (note: `FileChanged`,
+ /// `UserPromptSubmit`, `Stop`, the task/teammate events, etc. are NOT in it).
+ pub(crate) fn comma_mode_for(event_type: &HookEventType) -> bool {
+     matches!(
+@@ -48,6 +49,8 @@ pub(crate) fn comma_mode_for(event_type: &HookEventType) -> bool {
+             | HookEventType::Setup
+             | HookEventType::PreCompact
+             | HookEventType::PostCompact
++            | HookEventType::PreModelSwitch
++            | HookEventType::PostModelSwitch
+             | HookEventType::Notification
+             | HookEventType::SubagentStart
+             | HookEventType::SubagentStop
+@@ -55,6 +58,7 @@ pub(crate) fn comma_mode_for(event_type: &HookEventType) -> bool {
+             | HookEventType::ElicitationResult
+             | HookEventType::ConfigChange
+             | HookEventType::InstructionsLoaded
++            | HookEventType::DirectoryAdded
+     )
+ }
+ 
+@@ -110,11 +114,9 @@ pub fn matches_pattern(match_query: &str, matcher: &str) -> bool {
+ ///   tool events; the MCP server name / config source / load reason / changed
+ ///   file basename for the corresponding non-tool events).
+ /// * `matcher` (`t`) — the hook's declared pattern.
+-/// * `comma_mode` (`n`) — `true` for events in claude's comma-mode set (`atf`);
+-///   it widens the "simple pattern" char class to `^[a-zA-Z0-9_|, -]+$` (the
+-///   space + comma were always allowed in comma-mode; the **`-` hyphen is the
+-///   v2.1.195 addition**, so hyphenated names — e.g. MCP server names — match as
+-///   simple list entries) and splits the simple pattern on BOTH `|` and `,`.
++/// * `comma_mode` (`n`) — `true` for events in Native 2.1.295's `J9` set; it
++///   widens the simple-pattern character class to
++///   `^[a-zA-Z0-9_|, -]+$` and splits simple patterns on both `|` and `,`.
+ ///   When `false`, the classic `^[a-zA-Z0-9_|]+$` / `|`-only behavior applies.
+ /// * `tool_aliases` (`r`) — claude `toolPermissionContext.toolAliases`: an extra
+ ///   runtime alias map layered on top of the static legacy-tool-name map. It
+diff --git a/crates/hooks/src/registry.rs b/crates/hooks/src/registry.rs
+index eb8c550a..8a10f4b1 100644
+--- a/crates/hooks/src/registry.rs
++++ b/crates/hooks/src/registry.rs
+@@ -551,10 +551,9 @@ impl HookRegistry {
+         partition: HookSourcePartition,
+     ) -> Vec<&HookDefinition> {
+         let et = event.event_type();
+-        // Comma-mode (`atf`) widens the simple-pattern matcher (comma-separated
+-        // lists + the v2.1.195 hyphen) for this event type — claude
+-        // `matchesPattern`'s `n` argument. The port has no `toolAliases`, so the
+-        // `r` extra-alias map is `None`.
++        // Native 2.1.295's `J9` membership selects the widened simple-pattern
++        // matcher for this event. The port has no `toolAliases`, so the `r`
++        // extra-alias map is `None`.
+         let comma_mode = comma_mode_for(&et);
+         let if_target = Self::if_match_target(event);
+         let keep = |h: &&HookDefinition| -> bool {
+@@ -652,10 +651,9 @@ impl HookRegistry {
+             return Vec::new();
+         };
+         let et = event.event_type();
+-        // Comma-mode (`atf`) widens the simple-pattern matcher (comma-separated
+-        // lists + the v2.1.195 hyphen) for this event type — claude
+-        // `matchesPattern`'s `n` argument. The port has no `toolAliases`, so the
+-        // `r` extra-alias map is `None`.
++        // Native 2.1.295's `J9` membership selects the widened simple-pattern
++        // matcher for this event. The port has no `toolAliases`, so the `r`
++        // extra-alias map is `None`.
+         let comma_mode = comma_mode_for(&et);
+         let if_target = Self::if_match_target(event);
+         let keep = |h: &&HookDefinition| -> bool {
+@@ -703,10 +701,9 @@ impl HookRegistry {
+         _exclude_agent_id: AgentId,
+     ) -> Vec<&HookDefinition> {
+         let et = event.event_type();
+-        // Comma-mode (`atf`) widens the simple-pattern matcher (comma-separated
+-        // lists + the v2.1.195 hyphen) for this event type — claude
+-        // `matchesPattern`'s `n` argument. The port has no `toolAliases`, so the
+-        // `r` extra-alias map is `None`.
++        // Native 2.1.295's `J9` membership selects the widened simple-pattern
++        // matcher for this event. The port has no `toolAliases`, so the `r`
++        // extra-alias map is `None`.
+         let comma_mode = comma_mode_for(&et);
+         let if_target = Self::if_match_target(event);
+         let keep = |h: &&HookDefinition| -> bool {
+@@ -2091,6 +2088,88 @@ mod match_event_matcher_tests {
+         );
+     }
+ 
++    #[test]
++    fn native_295_comma_mode_event_set_matches_directory_added_and_model_switches() {
++        // Native 2.1.295's simple-list event set includes all three query
++        // sources below. Keep this version-bound regression separate from the
++        // retained 2.1.293 public matcher fixture.
++        let mut directory_reg = HookRegistry::new();
++        directory_reg.register(hook_with(
++            "directory-source-list",
++            HookEventType::DirectoryAdded,
++            Some("register_repo_root, slash_command"),
++        ));
++        let directory_event = |source: &str| HookEvent::DirectoryAdded {
++            directory: "/work/project".into(),
++            source: source.into(),
++        };
++        assert_eq!(
++            matched_names(&directory_reg, &directory_event("register_repo_root")),
++            vec!["directory-source-list"]
++        );
++        assert!(matched_names(&directory_reg, &directory_event("other")).is_empty());
++
++        let model_list = "claude-opus-4-6, claude-sonnet-4-5";
++        let mut pre_reg = HookRegistry::new();
++        pre_reg.register(hook_with(
++            "pre-model-list",
++            HookEventType::PreModelSwitch,
++            Some(model_list),
++        ));
++        let pre_event = |to_model: &str| HookEvent::PreModelSwitch {
++            from_model: "claude-sonnet-4-6".into(),
++            to_model: to_model.into(),
++            requested_model: None,
++            source: "picker".into(),
++            context_tokens: 0,
++            prompt_cache_warm: false,
++            cache_ttl: "5m".into(),
++            estimated_cache_write_usd: 0.0,
++            pricing: "default".into(),
++        };
++        assert_eq!(
++            matched_names(&pre_reg, &pre_event("claude-opus-4-6")),
++            vec!["pre-model-list"]
++        );
++        assert!(matched_names(&pre_reg, &pre_event("claude-haiku-4-5")).is_empty());
++
++        let mut post_reg = HookRegistry::new();
++        post_reg.register(hook_with(
++            "post-model-list",
++            HookEventType::PostModelSwitch,
++            Some(model_list),
++        ));
++        let post_event = |to_model: &str| HookEvent::PostModelSwitch {
++            from_model: "claude-sonnet-4-6".into(),
++            to_model: to_model.into(),
++            requested_model: None,
++            source: "picker".into(),
++            context_tokens: 0,
++            prompt_cache_warm: false,
++            cache_ttl: "5m".into(),
++            estimated_cache_write_usd: 0.0,
++            pricing: "default".into(),
++        };
++        assert_eq!(
++            matched_names(&post_reg, &post_event("claude-opus-4-6")),
++            vec!["post-model-list"]
++        );
++        assert!(matched_names(&post_reg, &post_event("claude-haiku-4-5")).is_empty());
++
++        // Metacharacters keep a comma-mode event on Native's RegExp branch.
++        let mut regex_reg = HookRegistry::new();
++        regex_reg.register(hook_with(
++            "directory-regex",
++            HookEventType::DirectoryAdded,
++            Some("^register_(?:repo_root|worktree)$"),
++        ));
++        assert_eq!(
++            matched_names(&regex_reg, &directory_event("register_repo_root")),
++            vec!["directory-regex"]
++        );
++        assert!(matched_names(&regex_reg, &directory_event("slash_command")).is_empty());
++    }
++
+     #[test]
+     fn matcher_filter_applies_to_plugin_hooks_too() {
+         let mut reg = HookRegistry::new();
+diff --git a/crates/orchestrator/src/conversation.rs b/crates/orchestrator/src/conversation.rs
+index 2e0ef176..cd296cb7 100644
+--- a/crates/orchestrator/src/conversation.rs
++++ b/crates/orchestrator/src/conversation.rs
+@@ -1938,8 +1938,11 @@ pub struct ConversationOrchestrator {
+     pub(crate) coordinator_simple_mode_override: Option<bool>,
+     #[cfg(test)]
+     pub(crate) coordinator_pool_override: Option<(bool, Vec<String>)>,
+-    /// Tool-wide denial snapshot captured when assembling the current wire pool.
+-    pub(crate) tool_pool_denied_names: std::sync::RwLock<Vec<String>>,
++    /// Atomic tool-wide/content denial and alias snapshot captured when
++    /// assembling the current wire pool. Reminders and dispatch lookups reuse
++    /// the same Native permission generation as the advertised catalog.
++    pub(crate) tool_pool_deny_context:
++        std::sync::RwLock<lingxi_core::host::permission_gate::NativeMcpDenyContext>,
+     /// Main-agent policy names from the current tool assembly, before coordinator filtering.
+     pub(crate) main_agent_tool_names: std::sync::RwLock<Option<std::collections::HashSet<String>>>,
+     /// Live coordinator-mode flag (`Ci()`). `None` is an ordinary session, so
+diff --git a/crates/orchestrator/src/conversation/drivers/mod.rs b/crates/orchestrator/src/conversation/drivers/mod.rs
+index 536518e7..629ee465 100644
+--- a/crates/orchestrator/src/conversation/drivers/mod.rs
++++ b/crates/orchestrator/src/conversation/drivers/mod.rs
+@@ -58,6 +58,10 @@ pub struct QueuedPromptInput {
+     pub message_origin: Option<Utf16JsonProjection>,
+     /// Native outer `promptSource` value when the source is known.
+     pub prompt_source: Option<Utf16JsonProjection>,
++    /// Original SDK `message.content` root shape when the ingress explicitly
++    /// supplied it: `Some(true)` is a JSON string, `Some(false)` is a block
++    /// array, and `None` means the source shape is unknown.
++    pub sdk_content_is_json_string: Option<bool>,
+     /// Trusted source kind stamped by a host and retained through durable
+     /// queue recovery. `DirectBash` is a one-step classification, never read
+     /// back from the rendered transcript row.
+@@ -94,6 +98,7 @@ impl Default for QueuedPromptInput {
+             mod_origin: None,
+             message_origin: None,
+             prompt_source: None,
++            sdk_content_is_json_string: None,
+             prompt_ingress_kind: None,
+             skip_model_query: false,
+             message_id: None,
+@@ -3628,6 +3633,12 @@ impl ConversationOrchestrator {
+     ) -> Result<TurnOutcome, OrchestratorError> {
+         let display = prompt.string_at("").unwrap_or_default().to_owned();
+         let native_user_source = crate::native_user_message_source::current().unwrap_or_default();
++        let sdk_content_is_json_string = (native_user_source
++            .prompt_source
++            .as_ref()
++            .and_then(|source| source.string_at(""))
++            == Some("sdk"))
++        .then(|| prompt.string_units("").is_some());
+         self.run_turn_streaming_inputs_locked(
+             turn_guard,
+             &display,
+@@ -3641,6 +3652,7 @@ impl ConversationOrchestrator {
+                 is_meta: !in_human_turn,
+                 message_origin: native_user_source.message_origin,
+                 prompt_source: native_user_source.prompt_source,
++                sdk_content_is_json_string,
+                 message_id,
+                 transcript_row_token: row_token.clone(),
+                 ..Default::default()
+diff --git a/crates/orchestrator/src/conversation/drivers/projected_content.rs b/crates/orchestrator/src/conversation/drivers/projected_content.rs
+index 07e7b08e..4803b448 100644
+--- a/crates/orchestrator/src/conversation/drivers/projected_content.rs
++++ b/crates/orchestrator/src/conversation/drivers/projected_content.rs
+@@ -7,6 +7,10 @@ use crate::error::OrchestratorError;
+ pub(super) struct ProjectedUserContent {
+     pub(super) blocks: Vec<ContentBlock>,
+     pub(super) text: Utf16JsonProjection,
++    /// Root representation of the SDK input before its text was normalized
++    /// into `ContentBlock`s. `false` means the original input was an array,
++    /// including a one-text-block array.
++    pub(super) source_was_json_string: bool,
+ }
+ 
+ pub(super) fn queued_human_content(
+@@ -81,7 +85,8 @@ pub(super) fn queued_human_rendered(
+ impl ProjectedUserContent {
+     pub(super) fn parse(content: &Utf16JsonProjection) -> Result<Self, OrchestratorError> {
+         content.validate().map_err(invalid_content)?;
+-        let blocks = if content.string_units("").is_some() {
++        let source_was_json_string = content.string_units("").is_some();
++        let blocks = if source_was_json_string {
+             vec![text_block(content.clone(), None)?]
+         } else if let Some(count) = content.array_len("") {
+             (0..count)
+@@ -109,7 +114,11 @@ impl ProjectedUserContent {
+             ));
+         };
+         let text = exact_blocks_text(&blocks);
+-        Ok(Self { blocks, text })
++        Ok(Self {
++            blocks,
++            text,
++            source_was_json_string,
++        })
+     }
+ 
+     pub(super) fn display_text(&self) -> &str {
+@@ -485,6 +494,62 @@ mod tests {
+         assert_eq!(metrics.stop_reason.as_deref(), Some("model_error"));
+     }
+ 
++    #[tokio::test]
++    async fn sdk_projected_single_text_block_keeps_jsonl_array_shape() {
++        let root = tempfile::tempdir().unwrap();
++        let path = root.path().join("transcript.jsonl");
++        let stream = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
++            message_start("assistant", "claude-sonnet-5"),
++            content_block_start_text(0),
++            text_delta(0, "done"),
++            content_block_stop(0),
++            message_delta_stop("end_turn"),
++            message_stop(),
++        ]]));
++        let writer = Arc::new(session::JsonlWriter::new(
++            path.clone(),
++            Arc::new(platform_posix::fs::PosixFileSystem::new(
++                root.path().to_path_buf(),
++            )),
++        ));
++        let orch = crate::ConversationOrchestrator::into_shared(
++            crate::ConversationOrchestrator::new_with_streaming(
++                crate::OrchestratorConfig::default(),
++                Arc::new(MockApiClient::new(Vec::new())),
++                stream,
++                Arc::new(tool_api::registry::ToolRegistry::new()),
++                noop_hook_executor(),
++                Arc::new(NoOpPermissionGate),
++                Arc::new(MockOutputStream::new()),
++                Arc::new(StaticMemoryProvider::empty()),
++                root.path().to_path_buf(),
++            )
++            .with_jsonl_writer(writer),
++        );
++        let incoming =
++            Utf16JsonProjection::parse(r#"[{"type":"text","text":"one block"}]"#).unwrap();
++
++        crate::native_user_message_source::with_sdk_source(
++            orch.run_turn_streaming_with_cancel_projected_content(
++                &incoming,
++                CancellationToken::new(),
++                None,
++            ),
++        )
++        .await
++        .unwrap();
++
++        let raw = std::fs::read_to_string(path).unwrap();
++        let row: Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
++        assert_eq!(row["promptSource"], "sdk");
++        let content = row["message"]["content"]
++            .as_array()
++            .expect("projected SDK content retains its original array shape");
++        assert_eq!(content.len(), 1);
++        assert_eq!(content[0]["type"], "text");
++        assert_eq!(content[0]["text"], "one block");
++    }
++
+     #[tokio::test]
+     async fn cancelled_projected_admission_does_not_wait_for_or_change_a_running_turn() {
+         let api = Arc::new(MockApiClient::new(Vec::new()));
+diff --git a/crates/orchestrator/src/conversation/drivers/streaming.rs b/crates/orchestrator/src/conversation/drivers/streaming.rs
+index d7e70cec..3c1fb5b3 100644
+--- a/crates/orchestrator/src/conversation/drivers/streaming.rs
++++ b/crates/orchestrator/src/conversation/drivers/streaming.rs
+@@ -30,10 +30,11 @@ use crate::turn_loop::{
+ };
+ use hooks::attachment::HookPublicationGuard;
+ 
+-// Cancel request opening without dropping foreground tool execution. An empty
+-// stream takes the normal executor cancellation and drain path.
+-async fn open_side_stream<F>(
+-    orch: &ConversationOrchestrator,
++// Cancel request opening before the first response stream exists. This is safe
++// for the foreground turn: no stream event has dispatched tools or produced a
++// partial assistant row yet. Once the stream is open, the pump owns the more
++// granular cancellation path that preserves completed blocks and settles tools.
++async fn open_cancelable_stream<F>(
+     cancel: &Option<CancellationToken>,
+     request: F,
+ ) -> Result<futures::stream::BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>
+@@ -45,14 +46,12 @@ where
+         >,
+     >,
+ {
+-    if orch.side_chat {
+-        if let Some(cancel) = cancel {
+-            return tokio::select! {
+-                biased;
+-                () = cancel.cancelled() => Ok(futures::stream::empty().boxed()),
+-                result = request => result,
+-            };
+-        }
++    if let Some(cancel) = cancel {
++        return tokio::select! {
++            biased;
++            () = cancel.cancelled() => Ok(futures::stream::empty().boxed()),
++            result = request => result,
++        };
+     }
+     request.await
+ }
+@@ -1285,8 +1284,7 @@ impl StreamingTurnDriver<'_> {
+             let request_dispatch_observer =
+                 observe_main_dispatch(orch.turn_request_dispatch_observer(), &orch.output);
+             orch.cancel_idle_compaction();
+-            open_side_stream(
+-                orch,
++            open_cancelable_stream(
+                 user_cancel,
+                 Box::pin(
+                     retry_scope.run(
+@@ -2458,8 +2456,7 @@ impl StreamingTurnDriver<'_> {
+                                 &orch.output,
+                             );
+                             orch.cancel_idle_compaction();
+-                            let retry_stream = open_side_stream(
+-                                orch,
++                            let retry_stream = open_cancelable_stream(
+                                 user_cancel,
+                                 Box::pin(
+                                     retry_scope.run(
+@@ -4103,6 +4100,9 @@ impl StreamingTurnDriver<'_> {
+         };
+         let prompt_projection =
+             screened_prompt.unwrap_or_else(|| super::source_string_projection(prompt));
++        let sdk_content_is_json_string = projected_content
++            .as_ref()
++            .map(|content| content.source_was_json_string);
+ 
+         // 1. Append the user prompt (+ any pasted images) to session history.
+         // `images` arrives already decoded (path-based callers ran `load_images`
+@@ -4179,6 +4179,7 @@ impl StreamingTurnDriver<'_> {
+                         text: prompt_projection.clone(),
+                         images,
+                         is_meta: !in_human_turn,
++                        sdk_content_is_json_string,
+                         message_id,
+                         transcript_row_token: row_token,
+                         ..Default::default()
+diff --git a/crates/orchestrator/src/conversation/model_reminders.rs b/crates/orchestrator/src/conversation/model_reminders.rs
+index 0f5d87fc..71901d3a 100644
+--- a/crates/orchestrator/src/conversation/model_reminders.rs
++++ b/crates/orchestrator/src/conversation/model_reminders.rs
+@@ -20,31 +20,11 @@ fn source_text_block(units: Vec<u16>) -> ContentBlock {
+     }
+ }
+ 
+-pub(super) fn native_mcp_dropped_tool_denied(rule_names: &[String], full_tool_name: &str) -> bool {
+-    rule_names.iter().any(|rule| {
+-        permission::tool_wide_name_matches(rule, full_tool_name)
+-            || (rule.contains('*') && native_tool_name_glob_matches(rule, full_tool_name))
+-    })
+-}
+-
+-fn native_tool_name_glob_matches(pattern: &str, value: &str) -> bool {
+-    let pattern = pattern.chars().collect::<Vec<_>>();
+-    let value = value.chars().collect::<Vec<_>>();
+-    let mut matched = vec![false; value.len() + 1];
+-    matched[0] = true;
+-    for pattern_character in pattern {
+-        if pattern_character == '*' {
+-            for index in 1..=value.len() {
+-                matched[index] |= matched[index - 1];
+-            }
+-        } else {
+-            for index in (1..=value.len()).rev() {
+-                matched[index] = matched[index - 1] && value[index - 1] == pattern_character;
+-            }
+-            matched[0] = false;
+-        }
+-    }
+-    matched[value.len()]
++pub(super) fn native_mcp_dropped_tool_denied(
++    context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
++    full_tool_name: &str,
++) -> bool {
++    permission::native_deny_context_matches_tool_name(context, full_tool_name)
+ }
+ 
+ /// Source-shaped projection of Native 2.1.295 `Hmn`: filter permission-denied
+@@ -53,7 +33,7 @@ fn native_tool_name_glob_matches(pattern: &str, value: &str) -> bool {
+ /// `addedEntries`.
+ fn native_mcp_dropped_tools_attachment(
+     snapshots: &[mcp::McpDroppedToolServerSnapshot],
+-    denied_rules: &[String],
++    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
+     prior_entries: &std::collections::HashSet<String>,
+ ) -> Option<crate::request_context::PromptIngressAttachment> {
+     let mut added = std::collections::BTreeSet::new();
+@@ -63,7 +43,7 @@ fn native_mcp_dropped_tools_attachment(
+         for dropped in &server.tools {
+             let normalized_tool = mcp::normalization::normalize_name_for_mcp(&dropped.tool_name);
+             let full_name = format!("mcp__{normalized_server}__{normalized_tool}");
+-            if native_mcp_dropped_tool_denied(denied_rules, &full_name) {
++            if native_mcp_dropped_tool_denied(deny_context, &full_name) {
+                 continue;
+             }
+             let name = mcp::registry::sanitize_native_mcp_text(&dropped.tool_name);
+@@ -576,7 +556,14 @@ impl ConversationOrchestrator {
+             return None;
+         }
+ 
+-        let denied_rules = self.perms.tool_wide_deny_names().await;
++        // `build_wire_tools` captured this snapshot before reminder production;
++        // reuse it so the advertised pool and Jqe projection cannot straddle a
++        // live permission update.
++        let deny_context = self
++            .tool_pool_deny_context
++            .read()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone();
+         let mut prior_entries = std::collections::HashSet::new();
+         {
+             let session = self.session.lock().await;
+@@ -602,7 +589,7 @@ impl ConversationOrchestrator {
+             }
+         }
+ 
+-        native_mcp_dropped_tools_attachment(&snapshots, &denied_rules, &prior_entries)
++        native_mcp_dropped_tools_attachment(&snapshots, &deny_context, &prior_entries)
+     }
+ 
+     pub(crate) async fn mcp_instructions_reminder_message(&self) -> Option<ConversationMessage> {
+@@ -618,6 +605,37 @@ mod tests {
+         mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
+         NoOpPermissionGate, StaticMemoryProvider,
+     };
++
++    fn native_deny_context(
++        rules: impl IntoIterator<Item = String>,
++    ) -> lingxi_core::host::permission_gate::NativeMcpDenyContext {
++        lingxi_core::host::permission_gate::NativeMcpDenyContext {
++            tool_aliases: None,
++            deny_rules: rules
++                .into_iter()
++                .map(
++                    |tool_name| lingxi_core::host::permission_gate::NativeMcpDenyRule {
++                        tool_name,
++                        rule_content: None,
++                        proxy_expansion: true,
++                    },
++                )
++                .collect(),
++        }
++    }
++
++    struct ToolWideOnlyGate;
++
++    #[async_trait::async_trait]
++    impl permission::PermissionGate for ToolWideOnlyGate {
++        async fn check(&self, _tool_name: &str, _input: &Source) -> permission::PermissionDecision {
++            permission::PermissionDecision::Allow
++        }
++
++        async fn tool_wide_deny_names(&self) -> Vec<String> {
++            vec!["mcp__linear".to_owned()]
++        }
++    }
+     use platform_posix::{fs::PosixFileSystem, mcp::PosixMcpTransport};
+     use serde_json::json;
+     use tool_api::registry::ToolRegistry;
+@@ -1043,7 +1061,7 @@ for line in sys.stdin:
+     fn native_hmn_factory_fixture_filters_sorts_deduplicates_and_suppresses_prior_entries() {
+         // Hmn synthesizes only `{name, mcpInfo:{serverName,toolName}}`; this
+         // fixture has no alias sources, so Native's content-rule alias walk
+-        // has no candidate. `denied_rules` are the live blanket-name/pattern
++        // has no candidate. The context carries the live blanket-name/pattern
+         // facts supplied by the permission gate.
+         let snapshots = vec![
+             dropped_tool_server(
+@@ -1064,11 +1082,12 @@ for line in sys.stdin:
+             ),
+             dropped_tool_server("denied", [("blocked".into(), "bad schema".into())]),
+         ];
+-        let denied_rules = vec!["mcp__zeta__skip*".to_owned(), "mcp__denied".to_owned()];
++        let deny_context =
++            native_deny_context(["mcp__zeta__skip*".to_owned(), "mcp__denied".to_owned()]);
+         let prior_entries = ["\"tool\" (MCP server \"alpha\"): \"bad schema\"".to_owned()]
+             .into_iter()
+             .collect();
+-        let row = native_mcp_dropped_tools_attachment(&snapshots, &denied_rules, &prior_entries)
++        let row = native_mcp_dropped_tools_attachment(&snapshots, &deny_context, &prior_entries)
+             .expect("three new non-denied entries remain");
+         let expected = vec![
+             "\"kept\" (MCP server \"alpha\"): \"bad schema\"".to_owned(),
+@@ -1091,7 +1110,7 @@ for line in sys.stdin:
+         // above and the row emitted here, just as transcript history does.
+         let mut all_prior = prior_entries.clone();
+         all_prior.extend(dropped_entries(&row));
+-        let repeated = native_mcp_dropped_tools_attachment(&snapshots, &denied_rules, &all_prior);
++        let repeated = native_mcp_dropped_tools_attachment(&snapshots, &deny_context, &all_prior);
+         assert!(
+             repeated.is_none(),
+             "Native Hmn must suppress the exact prior addedEntries: {:?}",
+@@ -1109,7 +1128,7 @@ for line in sys.stdin:
+         let prior = std::collections::HashSet::new();
+         let at_limit = native_mcp_dropped_tools_attachment(
+             &[dropped_tool_server("schema", make_tools(30))],
+-            &[],
++            &native_deny_context([]),
+             &prior,
+         )
+         .expect("30 distinct entries are individual rows");
+@@ -1120,7 +1139,7 @@ for line in sys.stdin:
+ 
+         let over_limit = native_mcp_dropped_tools_attachment(
+             &[dropped_tool_server("schema", make_tools(31))],
+-            &[],
++            &native_deny_context([]),
+             &prior,
+         )
+         .expect("31 distinct entries become one summary");
+@@ -1133,22 +1152,206 @@ for line in sys.stdin:
+     #[test]
+     fn native_mcp_drop_filter_matches_exact_server_prefix_and_pattern_denies() {
+         let name = "mcp__linear__create_issue";
++        let deny_context =
++            |rules: &[&str]| native_deny_context(rules.iter().map(|rule| (*rule).to_owned()));
+         assert!(native_mcp_dropped_tool_denied(
+-            &["mcp__linear__create_issue".into()],
++            &deny_context(&["mcp__linear__create_issue"]),
+             name,
+         ));
+         assert!(native_mcp_dropped_tool_denied(
+-            &["mcp__linear".into()],
++            &deny_context(&["mcp__linear"]),
+             name
+         ));
+         assert!(native_mcp_dropped_tool_denied(
+-            &["mcp__linear__create_*".into()],
++            &deny_context(&["mcp__linear__create_*"]),
+             name,
+         ));
+-        assert!(native_mcp_dropped_tool_denied(&["mcp__*".into()], name));
++        assert!(native_mcp_dropped_tool_denied(
++            &deny_context(&["mcp__*"]),
++            name
++        ));
+         assert!(!native_mcp_dropped_tool_denied(
+-            &["mcp__github__create_issue".into()],
++            &deny_context(&["mcp__github__create_issue"]),
+             name,
+         ));
+     }
++
++    #[tokio::test]
++    async fn native_mcp_default_gate_context_keeps_server_prefix_denies() {
++        let context = <ToolWideOnlyGate as permission::PermissionGate>::native_mcp_deny_context(
++            &ToolWideOnlyGate,
++        )
++        .await;
++        assert_eq!(context.tool_aliases, None);
++        assert_eq!(context.deny_rules.len(), 1);
++        assert_eq!(context.deny_rules[0].tool_name, "mcp__linear");
++        assert!(context.deny_rules[0].rule_content.is_none());
++        assert!(!context.deny_rules[0].proxy_expansion);
++        assert!(native_mcp_dropped_tool_denied(
++            &context,
++            "mcp__linear__create_issue"
++        ));
++    }
++
++    #[test]
++    fn native_jqe_resolves_exact_aliases_once_and_respects_proxy_expansion() {
++        use lingxi_core::host::permission_gate::{NativeMcpDenyContext, NativeMcpDenyRule};
++
++        let aliases = Source::parse(
++            r#"{"mcp__legacy__create_issue":"mcp__wrong__create_issue","mcp__chain__create_issue":"mcp__legacy__create_issue","mcp__legacy__create_issue":"mcp__linear__create_issue"}"#,
++        )
++        .unwrap();
++        let context = NativeMcpDenyContext {
++            tool_aliases: Some(aliases.clone()),
++            deny_rules: vec![NativeMcpDenyRule {
++                tool_name: "mcp__legacy__create_issue".into(),
++                rule_content: None,
++                proxy_expansion: true,
++            }],
++        };
++        assert!(native_mcp_dropped_tool_denied(
++            &context,
++            "mcp__linear__create_issue"
++        ));
++
++        let cli_rule = NativeMcpDenyContext {
++            tool_aliases: Some(aliases.clone()),
++            deny_rules: vec![NativeMcpDenyRule {
++                tool_name: "mcp__legacy__create_issue".into(),
++                rule_content: None,
++                proxy_expansion: false,
++            }],
++        };
++        assert!(!native_mcp_dropped_tool_denied(
++            &cli_rule,
++            "mcp__linear__create_issue"
++        ));
++
++        // Alias values are not followed recursively: the second key points to
++        // the first alias, not the canonical dropped tool.
++        let one_hop_only = NativeMcpDenyContext {
++            tool_aliases: Some(aliases),
++            deny_rules: vec![NativeMcpDenyRule {
++                tool_name: "mcp__chain__create_issue".into(),
++                rule_content: None,
++                proxy_expansion: true,
++            }],
++        };
++        assert!(!native_mcp_dropped_tool_denied(
++            &one_hop_only,
++            "mcp__linear__create_issue"
++        ));
++
++        let shadowed_alias = Source::parse(
++            r#"{"mcp__legacy__create_issue":"mcp__linear__create_issue","mcp__legacy__create_issue":"mcp__other__create_issue"}"#,
++        )
++        .unwrap();
++        let shadowed_context = NativeMcpDenyContext {
++            tool_aliases: Some(shadowed_alias),
++            deny_rules: vec![NativeMcpDenyRule {
++                tool_name: "mcp__legacy__create_issue".into(),
++                rule_content: None,
++                proxy_expansion: true,
++            }],
++        };
++        assert!(!native_mcp_dropped_tool_denied(
++            &shadowed_context,
++            "mcp__linear__create_issue"
++        ));
++    }
++
++    #[test]
++    fn native_alias_sources_follow_effective_object_entries_order() {
++        let aliases = Source::parse(
++            r#"{"10":"mcp__linear__create_issue","2":"mcp__linear__create_issue","alpha":"mcp__linear__create_issue","\ud800":"mcp__linear__create_issue"}"#,
++        )
++        .unwrap();
++        let source_names = permission::native_tool_alias_source_units(
++            Some(&aliases),
++            "mcp__linear__create_issue"
++                .encode_utf16()
++                .collect::<Vec<_>>()
++                .as_slice(),
++        )
++        .into_iter()
++        .map(|units| String::from_utf16_lossy(&units))
++        .collect::<Vec<_>>();
++        assert_eq!(source_names, ["2", "10", "alpha", "�"]);
++    }
++
++    #[test]
++    fn native_jqe_content_rules_match_only_source_alias_branches() {
++        use lingxi_core::host::permission_gate::{NativeMcpDenyContext, NativeMcpDenyRule};
++
++        let aliases =
++            Source::parse(r#"{"Read":"mcp__linear__create_issue","Bash":"mcp__bash__tool"}"#)
++                .unwrap();
++        let read_path_rule = NativeMcpDenyContext {
++            tool_aliases: Some(aliases.clone()),
++            deny_rules: vec![NativeMcpDenyRule {
++                tool_name: "Read".into(),
++                rule_content: Some(Source::from("//**")),
++                proxy_expansion: true,
++            }],
++        };
++        assert!(native_mcp_dropped_tool_denied(
++            &read_path_rule,
++            "mcp__linear__create_issue"
++        ));
++
++        let no_proxy_expansion = NativeMcpDenyContext {
++            tool_aliases: Some(aliases.clone()),
++            deny_rules: vec![NativeMcpDenyRule {
++                tool_name: "Read".into(),
++                rule_content: Some(Source::from("//**")),
++                proxy_expansion: false,
++            }],
++        };
++        assert!(!native_mcp_dropped_tool_denied(
++            &no_proxy_expansion,
++            "mcp__linear__create_issue"
++        ));
++
++        // Native also checks an alias-renamed rule when the original rule
++        // names the canonical tool; that branch does not require proxy
++        // expansion on the rule's source.
++        let canonical_content_rule = NativeMcpDenyContext {
++            tool_aliases: Some(aliases.clone()),
++            deny_rules: vec![NativeMcpDenyRule {
++                tool_name: "mcp__linear__create_issue".into(),
++                rule_content: Some(Source::from("//**")),
++                proxy_expansion: false,
++            }],
++        };
++        assert!(native_mcp_dropped_tool_denied(
++            &canonical_content_rule,
++            "mcp__linear__create_issue"
++        ));
++
++        let bash_space_rule = NativeMcpDenyContext {
++            tool_aliases: Some(aliases.clone()),
++            deny_rules: vec![NativeMcpDenyRule {
++                tool_name: "Bash".into(),
++                rule_content: Some(Source::from(" \u{feff}*")),
++                proxy_expansion: true,
++            }],
++        };
++        assert!(native_mcp_dropped_tool_denied(
++            &bash_space_rule,
++            "mcp__bash__tool"
++        ));
++
++        let ordinary_bash_rule = NativeMcpDenyContext {
++            tool_aliases: Some(aliases),
++            deny_rules: vec![NativeMcpDenyRule {
++                tool_name: "Bash".into(),
++                rule_content: Some(Source::from("rm -rf *")),
++                proxy_expansion: true,
++            }],
++        };
++        assert!(!native_mcp_dropped_tool_denied(
++            &ordinary_bash_rule,
++            "mcp__bash__tool"
++        ));
++    }
+ }
+diff --git a/crates/orchestrator/src/conversation/reminders.rs b/crates/orchestrator/src/conversation/reminders.rs
+index f52ebcbd..49eb045b 100644
+--- a/crates/orchestrator/src/conversation/reminders.rs
++++ b/crates/orchestrator/src/conversation/reminders.rs
+@@ -21,12 +21,12 @@ fn native_mcp_tool_identity(name: &str) -> Option<(&str, &str)> {
+ /// deliberately not a retraction cause.
+ fn native_mcp_revocation_cause(
+     name: &str,
+-    deny_rules: &[String],
++    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
+     state: Option<lingxi_core::host::McpActionState>,
+     config: Option<&mcp::McpServerConfig>,
+     failure: Option<&mcp::McpFailedServerSnapshot>,
+ ) -> Option<&'static str> {
+-    if super::model_reminders_impl::native_mcp_dropped_tool_denied(deny_rules, name) {
++    if super::model_reminders_impl::native_mcp_dropped_tool_denied(deny_context, name) {
+         return Some("denied");
+     }
+     let (_, tool_name) = native_mcp_tool_identity(name)?;
+@@ -3426,7 +3426,14 @@ message with multiple tool uses so they run concurrently."
+             needs_auth,
+             failed,
+         };
+-        let deny_rules = self.perms.tool_wide_deny_names().await;
++        // Tool-pool assembly ran earlier in this prepare cycle. Reuse its
++        // snapshot so retraction classification stays in the same permission
++        // generation as the outgoing catalog.
++        let deny_context = self
++            .tool_pool_deny_context
++            .read()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone();
+         let mut configs = std::collections::HashMap::new();
+         if let Some(registry) = &self.mcp_registry {
+             for name in prior_declared.as_deref().unwrap_or_default() {
+@@ -3451,7 +3458,7 @@ message with multiple tool uses so they run concurrently."
+                 let normalized_server = mcp::normalization::normalize_name_for_mcp(server_name);
+                 let cause = native_mcp_revocation_cause(
+                     name,
+-                    &deny_rules,
++                    &deny_context,
+                     mcp_states.get(&normalized_server).copied(),
+                     configs.get(&normalized_server).and_then(Option::as_ref),
+                     failed_by_name.get(&normalized_server).copied(),
+@@ -3941,6 +3948,21 @@ mod native_deferred_revocation_tests {
+         assert!(native_tool_change_api_system_message(&ordinary_tool_search, &[]).is_none());
+     }
+ 
++    fn deny_context(names: &[&str]) -> lingxi_core::host::permission_gate::NativeMcpDenyContext {
++        use lingxi_core::host::permission_gate::{NativeMcpDenyContext, NativeMcpDenyRule};
++        NativeMcpDenyContext {
++            tool_aliases: None,
++            deny_rules: names
++                .iter()
++                .map(|name| NativeMcpDenyRule {
++                    tool_name: (*name).to_owned(),
++                    rule_content: None,
++                    proxy_expansion: false,
++                })
++                .collect(),
++        }
++    }
++
+     #[test]
+     fn wgn_retains_only_native_revocation_causes() {
+         let blocked_config = {
+@@ -3972,7 +3994,7 @@ mod native_deferred_revocation_tests {
+         assert_eq!(
+             native_mcp_revocation_cause(
+                 "mcp__srv__tool",
+-                &["mcp__srv__to*".into()],
++                &deny_context(&["mcp__srv__to*"]),
+                 Some(lingxi_core::host::McpActionState::Connected),
+                 None,
+                 None,
+@@ -3983,7 +4005,7 @@ mod native_deferred_revocation_tests {
+         assert_eq!(
+             native_mcp_revocation_cause(
+                 "mcp__srv__write",
+-                &[],
++                &deny_context(&[]),
+                 Some(lingxi_core::host::McpActionState::Connected),
+                 Some(&blocked_config),
+                 None,
+@@ -3993,7 +4015,7 @@ mod native_deferred_revocation_tests {
+         assert_eq!(
+             native_mcp_revocation_cause(
+                 "mcp__srv__tool",
+-                &[],
++                &deny_context(&[]),
+                 Some(lingxi_core::host::McpActionState::Disabled),
+                 Some(&stdio_config()),
+                 None,
+@@ -4003,7 +4025,7 @@ mod native_deferred_revocation_tests {
+         assert_eq!(
+             native_mcp_revocation_cause(
+                 "mcp__srv__tool",
+-                &[],
++                &deny_context(&[]),
+                 Some(lingxi_core::host::McpActionState::Disabled),
+                 Some(&sdk_config),
+                 None,
+@@ -4013,7 +4035,7 @@ mod native_deferred_revocation_tests {
+         assert_eq!(
+             native_mcp_revocation_cause(
+                 "mcp__srv__tool",
+-                &[],
++                &deny_context(&[]),
+                 Some(lingxi_core::host::McpActionState::Failed),
+                 None,
+                 Some(&policy_failure),
+@@ -4030,7 +4052,7 @@ mod native_deferred_revocation_tests {
+         assert_eq!(
+             native_mcp_revocation_cause(
+                 "mcp__srv__tool",
+-                &[],
++                &deny_context(&[]),
+                 Some(lingxi_core::host::McpActionState::Failed),
+                 None,
+                 Some(&display_only_policy_failure),
+@@ -4041,7 +4063,7 @@ mod native_deferred_revocation_tests {
+         assert_eq!(
+             native_mcp_revocation_cause(
+                 "mcp__srv__tool",
+-                &[],
++                &deny_context(&[]),
+                 Some(lingxi_core::host::McpActionState::Failed),
+                 None,
+                 Some(&unconfigured_failure),
+@@ -4058,7 +4080,7 @@ mod native_deferred_revocation_tests {
+         assert_eq!(
+             native_mcp_revocation_cause(
+                 "mcp__srv__tool",
+-                &[],
++                &deny_context(&[]),
+                 Some(lingxi_core::host::McpActionState::Failed),
+                 None,
+                 Some(&disconnected),
+@@ -4067,7 +4089,7 @@ mod native_deferred_revocation_tests {
+             "Native disconnected and retrying failures are not retractedTools causes"
+         );
+         assert_eq!(
+-            native_mcp_revocation_cause("mcp__srv__tool", &[], None, None, None),
++            native_mcp_revocation_cause("mcp__srv__tool", &deny_context(&[]), None, None, None),
+             Some("not_configured"),
+             "Native maps a missing current MCP client row to not_configured"
+         );
+diff --git a/crates/orchestrator/src/conversation/tests/turn_admission_cancel_tests.rs b/crates/orchestrator/src/conversation/tests/turn_admission_cancel_tests.rs
+index 06cac149..aca65fb9 100644
+--- a/crates/orchestrator/src/conversation/tests/turn_admission_cancel_tests.rs
++++ b/crates/orchestrator/src/conversation/tests/turn_admission_cancel_tests.rs
+@@ -61,6 +61,7 @@ async fn assert_cancelled_admission(entry: Entry, precancelled: bool) {
+                     mod_origin: None,
+                     message_origin: None,
+                     prompt_source: None,
++                    sdk_content_is_json_string: None,
+                     prompt_ingress_kind: None,
+                     skip_model_query: false,
+                     message_id: None,
+diff --git a/crates/orchestrator/src/conversation/tooling.rs b/crates/orchestrator/src/conversation/tooling.rs
+index 3330cfb2..68b13831 100644
+--- a/crates/orchestrator/src/conversation/tooling.rs
++++ b/crates/orchestrator/src/conversation/tooling.rs
+@@ -1219,13 +1219,15 @@ impl ConversationOrchestrator {
+             registry.refresh_pending_servers().await;
+         }
+         let mut tools = self.tools.available_tools(&ToolStaticContext::default());
+-        let denied = self.perms.tool_wide_deny_names().await;
++        let deny_context = self.perms.native_mcp_deny_context().await;
+         *self
+-            .tool_pool_denied_names
++            .tool_pool_deny_context
+             .write()
+-            .unwrap_or_else(std::sync::PoisonError::into_inner) = denied.clone();
+-        if !denied.is_empty() {
+-            tools.retain(|t| !self.is_tool_pool_denied(t.as_ref()));
++            .unwrap_or_else(std::sync::PoisonError::into_inner) = deny_context.clone();
++        if !deny_context.deny_rules.is_empty() {
++            tools.retain(|tool| {
++                !self.is_tool_pool_denied_with_context(tool.as_ref(), &deny_context)
++            });
+         }
+         Self::apply_wait_for_mcp_servers_gate(&mut tools);
+         {
+diff --git a/crates/orchestrator/src/conversation/transcript.rs b/crates/orchestrator/src/conversation/transcript.rs
+index c5e4e45d..8703beae 100644
+--- a/crates/orchestrator/src/conversation/transcript.rs
++++ b/crates/orchestrator/src/conversation/transcript.rs
+@@ -455,6 +455,47 @@ fn compact_summary_content_source_if_unmodified(
+     Source::root_string(String::from_utf16_lossy(&units), units).ok()
+ }
+ 
++/// Headless SDK plain-text input is persisted as a JSON string by Native,
++/// while later injected rows such as `[Request interrupted by user]` use a
++/// text-block array. The ingress must explicitly identify the original SDK
++/// content root as a string; a normalized one-text-block projection may have
++/// come from an input array and is not sufficient evidence.
++fn sdk_plain_prompt_content_source(
++    message: &ConversationMessage,
++    prompt_source: Option<&Source>,
++    sdk_content_is_json_string: Option<bool>,
++) -> Option<Source> {
++    if prompt_source?.string_at("") != Some("sdk") {
++        return None;
++    }
++    if sdk_content_is_json_string != Some(true) {
++        return None;
++    }
++    let ConversationMessage::User {
++        content,
++        is_meta: false,
++        ..
++    } = message
++    else {
++        return None;
++    };
++    let [block] = content.as_slice() else {
++        return None;
++    };
++    match block {
++        lingxi_core::types::ContentBlock::Text {
++            text,
++            citations: None,
++        } => Source::root_string(text.clone(), text.encode_utf16().collect()).ok(),
++        lingxi_core::types::ContentBlock::TextJsUtf16 {
++            text,
++            utf16_code_units,
++            citations: None,
++        } => Source::root_string(text.clone(), utf16_code_units.clone()).ok(),
++        _ => None,
++    }
++}
++
+ fn mod_append_block_matches(
+     original: &lingxi_core::types::ContentBlock,
+     incoming: &Source,
+@@ -4176,6 +4217,17 @@ impl ConversationOrchestrator {
+                             .cloned(),
+                     )
+                 };
++                if let Some(content) = sdk_plain_prompt_content_source(
++                    msg,
++                    envelope
++                        .as_ref()
++                        .and_then(|value| value.prompt_source.as_ref()),
++                    queued_input.and_then(|input| input.sdk_content_is_json_string),
++                ) {
++                    jmsg.message
++                        .set_field("content", content)
++                        .expect("SDK plain prompt content is a valid JSON string");
++                }
+                 if let Some(envelope) = envelope {
+                     for (key, projection) in [
+                         ("verifiedSlackHumanTurn", envelope.verified_slack_human_turn),
+diff --git a/crates/orchestrator/src/conversation/wiring.rs b/crates/orchestrator/src/conversation/wiring.rs
+index 5a233713..cda3270b 100644
+--- a/crates/orchestrator/src/conversation/wiring.rs
++++ b/crates/orchestrator/src/conversation/wiring.rs
+@@ -213,7 +213,7 @@ impl ConversationOrchestrator {
+             coordinator_simple_mode_override: None,
+             #[cfg(test)]
+             coordinator_pool_override: None,
+-            tool_pool_denied_names: std::sync::RwLock::new(Vec::new()),
++            tool_pool_deny_context: std::sync::RwLock::new(Default::default()),
+             main_agent_tool_names: std::sync::RwLock::new(None),
+         }
+     }
+@@ -961,23 +961,37 @@ impl ConversationOrchestrator {
+     }
+ 
+     pub(crate) fn is_tool_pool_denied(&self, tool: &dyn tool_api::Tool) -> bool {
+-        let denied = self
+-            .tool_pool_denied_names
++        let context = self
++            .tool_pool_deny_context
+             .read()
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
+-        denied.iter().any(|rule| {
+-            std::iter::once(tool.name())
+-                .chain(tool.underlying_v1_tool_name())
+-                .chain(tool.family_parent_tool_name().filter(|name| {
+-                    self.tools.find_registered(name).is_some_and(|parent| {
+-                        parent.is_enabled(&tool_api::tool_trait::ToolStaticContext {
+-                            main_loop_model: self.tools.main_loop_model(),
+-                            ..Default::default()
+-                        })
+-                    })
+-                }))
+-                .chain(tool.aliases().iter().copied())
+-                .any(|name| permission::tool_wide_name_matches(rule, name))
++        self.is_tool_pool_denied_with_context(tool, &context)
++    }
++
++    pub(crate) fn is_tool_pool_denied_with_context(
++        &self,
++        tool: &dyn tool_api::Tool,
++        context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
++    ) -> bool {
++        let primary_name_denied = std::iter::once(tool.name())
++            .chain(tool.underlying_v1_tool_name())
++            .chain(tool.aliases().iter().copied())
++            .any(|name| permission::native_deny_context_matches_tool_name(context, name));
++        if primary_name_denied {
++            return true;
++        }
++        tool.family_parent_tool_name().is_some_and(|parent_name| {
++            self.tools
++                .find_registered(parent_name)
++                .is_some_and(|parent| {
++                    parent.is_enabled(&tool_api::tool_trait::ToolStaticContext {
++                        main_loop_model: self.tools.main_loop_model(),
++                        ..Default::default()
++                    }) && context
++                        .deny_rules
++                        .iter()
++                        .any(|rule| rule.rule_content.is_none() && rule.tool_name == parent_name)
++                })
+         })
+     }
+ 
+diff --git a/crates/orchestrator/src/streaming_executor_test.rs b/crates/orchestrator/src/streaming_executor_test.rs
+index 4ebdd4ba..67ab973f 100644
+--- a/crates/orchestrator/src/streaming_executor_test.rs
++++ b/crates/orchestrator/src/streaming_executor_test.rs
+@@ -2340,10 +2340,22 @@ mod tests {
+             assert!(unknown_tool_suffix_for(name, &orch).contains("disabled for this session"));
+         }
+         for denied in ["Read", "Agent"] {
+-            *orch.tool_pool_denied_names.write().unwrap() = vec![denied.into()];
++            *orch.tool_pool_deny_context.write().unwrap() =
++                lingxi_core::host::permission_gate::NativeMcpDenyContext {
++                    tool_aliases: None,
++                    deny_rules: vec![lingxi_core::host::permission_gate::NativeMcpDenyRule {
++                        tool_name: denied.into(),
++                        rule_content: None,
++                        proxy_expansion: false,
++                    }],
++                };
+             assert!(unknown_tool_suffix_for("Read", &orch).contains("disabled for this session"));
+         }
+-        orch.tool_pool_denied_names.write().unwrap().clear();
++        orch.tool_pool_deny_context
++            .write()
++            .unwrap()
++            .deny_rules
++            .clear();
+         *orch.main_agent_tool_names.write().unwrap() = Some(["Read".into()].into_iter().collect());
+         assert!(unknown_tool_suffix_for("Read", &orch).contains("disabled for this session"));
+         *orch.main_agent_tool_names.write().unwrap() = None;
+diff --git a/crates/orchestrator/src/turn_loop_test.rs b/crates/orchestrator/src/turn_loop_test.rs
+index 6b43729f..88cf110e 100644
+--- a/crates/orchestrator/src/turn_loop_test.rs
++++ b/crates/orchestrator/src/turn_loop_test.rs
+@@ -4594,6 +4594,28 @@ mod read_file_state_tests {
+         )
+     }
+ 
++    fn orch_with_policy_and_mcp_tools(
++        mcp_tools: Vec<Arc<dyn Tool>>,
++        policy: permission::PermissionPolicy,
++    ) -> ConversationOrchestrator {
++        use permission::PolicyPermissionGate;
++        let registry = ToolRegistry::new();
++        registry.register_mcp_tools(lingxi_core::types::McpConnectionId::new(), mcp_tools);
++        let gate: Arc<dyn lingxi_core::host::permission_gate::PermissionGate> = Arc::new(
++            PolicyPermissionGate::new(Arc::new(policy), Arc::new(NoOpPermissionGate)),
++        );
++        ConversationOrchestrator::new(
++            OrchestratorConfig::default(),
++            Arc::new(MockApiClient::new(vec![])),
++            Arc::new(registry),
++            crate::test_support::noop_hook_executor(),
++            gate,
++            Arc::new(MockOutputStream::new()),
++            Arc::new(StaticMemoryProvider::empty()),
++            PathBuf::from("/tmp"),
++        )
++    }
++
+     fn wire_tool_names(wire: &[lingxi_core::host::SourceToolWireDefinition]) -> Vec<String> {
+         wire.iter().map(|t| t.name.as_str().to_string()).collect()
+     }
+@@ -4648,6 +4670,110 @@ mod read_file_state_tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn build_wire_tools_uses_alias_aware_policy_snapshot_for_mcp_catalog() {
++        use permission::{
++            PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
++            PermissionRuleValue,
++        };
++
++        let cwd = PathBuf::from("/tmp");
++        let tools: Vec<Arc<dyn Tool>> = vec![
++            Arc::new(StubFileTool {
++                name: "mcp__linear__create_issue",
++                cwd: cwd.clone(),
++            }),
++            Arc::new(StubFileTool {
++                name: "mcp__slack__post_message",
++                cwd,
++            }),
++        ];
++        let policy = PermissionPolicy::from_rules(
++            permission::PermissionMode::Default,
++            [PermissionRule {
++                value: PermissionRuleValue {
++                    tool_name: "mcp__legacy__create_issue".into(),
++                    rule_content: None,
++                    original_rule: None,
++                },
++                behavior: PermissionBehavior::Deny,
++                source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
++            }],
++        )
++        .with_tool_aliases(Some(
++            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
++                r#"{"mcp__legacy__create_issue":"mcp__linear__create_issue"}"#,
++            )
++            .unwrap(),
++        ))
++        .unwrap();
++        let orch = orch_with_policy_and_mcp_tools(tools, policy);
++        assert_eq!(
++            wire_tool_names(&orch.build_wire_tools().await.unwrap().0),
++            ["mcp__slack__post_message"],
++            "the provider-visible catalog must apply the same alias-aware deny context as Jqe"
++        );
++        assert!(orch
++            .find_dispatchable_tool("mcp__linear__create_issue")
++            .is_none());
++        assert!(orch
++            .find_dispatchable_tool("mcp__slack__post_message")
++            .is_some());
++    }
++
++    #[tokio::test]
++    async fn build_wire_tools_only_projects_native_content_alias_denies() {
++        use permission::{
++            PermissionBehavior, PermissionPolicy, PermissionRule, PermissionRuleSource,
++            PermissionRuleValue,
++        };
++
++        let cwd = PathBuf::from("/tmp");
++        let tool = || {
++            Arc::new(StubFileTool {
++                name: "mcp__linear__create_issue",
++                cwd: cwd.clone(),
++            }) as Arc<dyn Tool>
++        };
++        let aliases = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(
++            r#"{"Read":"mcp__linear__create_issue"}"#,
++        )
++        .unwrap();
++        let make_policy = |content: &str| {
++            PermissionPolicy::from_rules(
++                permission::PermissionMode::Default,
++                [PermissionRule {
++                    value: PermissionRuleValue::from_rule_string(&format!("Read({content})")),
++                    behavior: PermissionBehavior::Deny,
++                    source: PermissionRuleSource::Settings(
++                        lingxi_core::types::SettingsScope::Project,
++                    ),
++                }],
++            )
++            .with_tool_aliases(Some(aliases.clone()))
++            .unwrap()
++        };
++
++        let ordinary_content = orch_with_policy_and_mcp_tools(vec![tool()], make_policy("src/**"));
++        assert_eq!(
++            wire_tool_names(&ordinary_content.build_wire_tools().await.unwrap().0),
++            ["mcp__linear__create_issue"],
++            "ordinary path content must not blanket-hide an aliased tool"
++        );
++
++        let native_special_alias =
++            orch_with_policy_and_mcp_tools(vec![tool()], make_policy("//**"));
++        assert!(
++            native_special_alias
++                .build_wire_tools()
++                .await
++                .unwrap()
++                .0
++                .is_empty(),
++            "the Native Read deny-family sentinel is projected through its alias source"
++        );
++    }
++
+     #[tokio::test]
+     async fn build_wire_tools_empty_deny_is_byte_identical() {
+         // Regression safety: with ZERO deny rules the filtered output must equal
+diff --git a/crates/orchestrator/tests/current_alignment_cancel.rs b/crates/orchestrator/tests/current_alignment_cancel.rs
+index 3187f4db..1105462b 100644
+--- a/crates/orchestrator/tests/current_alignment_cancel.rs
++++ b/crates/orchestrator/tests/current_alignment_cancel.rs
+@@ -1,8 +1,7 @@
+-//! Replay Native 2.1.293's in-flight CLI SIGINT boundary through the public
+-//! Orchestrator entrypoint, real ProviderApiAdapter/ApiService, and JSONL writer.
+-//! Native's process-level SIGINT wiring itself remains a separate Product gate.
++//! Replay Native 2.1.295's in-flight CLI SIGINT boundary through the public
++//! Orchestrator entrypoint, real ProviderApiAdapter/ApiService/HttpTransport,
++//! localhost HTTP, and JSONL writer. Native is never launched by this test.
+ 
+-use async_trait::async_trait;
+ use lingxi_core::host::{FileSystem, OutputEvent};
+ use lingxi_core::types::SessionId;
+ use llm_runtime::model::{thinking::ThinkingConfig, user_agent::UserAgentEnv};
+@@ -14,12 +13,15 @@ use orchestrator::{ConversationOrchestrator, OrchestratorConfig, ProviderApiAdap
+ use platform_posix::fs::PosixFileSystem;
+ use serde_json::{json, Value};
+ use session::jsonl::{reader::JsonlReader, writer::JsonlWriter, JsonlMessage};
++use std::io::Read;
++use std::net::{SocketAddr, TcpListener, TcpStream};
+ use std::sync::{
+-    atomic::{AtomicUsize, Ordering},
+-    Arc, Mutex,
++    atomic::{AtomicBool, Ordering},
++    Arc,
+ };
++use std::thread;
+ use tempfile::tempdir;
+-use tokio::sync::{watch, Notify};
++use tokio::sync::oneshot;
+ use tokio_util::sync::CancellationToken;
+ use tool_api::registry::ToolRegistry;
+ 
+@@ -27,75 +29,134 @@ const MODEL: &str = "claude-sonnet-4-5";
+ const PROMPT: &str = "Reply with the fixed cancellation probe result.";
+ const INTERRUPT: &str = "[Request interrupted by user]";
+ const SESSION_ID: &str = "00000000-0000-4000-8000-000000002940";
++const NATIVE_PROMPT_CONTENT: &[u8] = include_bytes!(
++    "../../../docs/parity/current-alignment/fixtures/cli-cancel-295/native-baseline/2.1.295/prompt-content.raw.json"
++);
++const NATIVE_INTERRUPT_CONTENT: &[u8] = include_bytes!(
++    "../../../docs/parity/current-alignment/fixtures/cli-cancel-295/native-baseline/2.1.295/interrupt-content.raw.json"
++);
+ 
+-#[derive(Debug, Clone, PartialEq, Eq)]
+-struct RequestShape {
+-    model: Option<String>,
+-    stream: Option<bool>,
++struct PendingHttpServer {
++    address: SocketAddr,
++    request: Option<oneshot::Receiver<Result<Vec<u8>, String>>>,
++    disconnected: Option<oneshot::Receiver<Result<bool, String>>>,
++    stop: Arc<AtomicBool>,
++    worker: Option<thread::JoinHandle<()>>,
+ }
+ 
+-fn request_shape(request: &lingxi_llm_client::HttpRequest) -> RequestShape {
+-    let body: Option<Value> = serde_json::from_slice(request.body.as_ref()).ok();
+-    RequestShape {
+-        model: body
+-            .as_ref()
+-            .and_then(|body| body.get("model"))
+-            .and_then(Value::as_str)
+-            .map(ToOwned::to_owned),
+-        stream: body
+-            .as_ref()
+-            .and_then(|body| body.get("stream"))
+-            .and_then(Value::as_bool),
++impl PendingHttpServer {
++    fn start() -> Self {
++        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback fixture");
++        listener
++            .set_nonblocking(true)
++            .expect("loopback fixture listener is nonblocking");
++        let address = listener.local_addr().expect("loopback address");
++        let (request_tx, request) = oneshot::channel();
++        let (disconnected_tx, disconnected) = oneshot::channel();
++        let stop = Arc::new(AtomicBool::new(false));
++        let worker_stop = stop.clone();
++        let worker = thread::spawn(move || {
++            let accepted = loop {
++                match listener.accept() {
++                    Ok((stream, _)) => break Ok(stream),
++                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
++                        if worker_stop.load(Ordering::Acquire) {
++                            break Err("loopback fixture stopped before accept".to_owned());
++                        }
++                        thread::sleep(std::time::Duration::from_millis(5));
++                    }
++                    Err(error) => break Err(error.to_string()),
++                }
++            };
++            let result = match accepted {
++                Ok(mut stream) => match stream
++                    .set_nonblocking(false)
++                    .and_then(|()| stream.set_read_timeout(Some(std::time::Duration::from_secs(5))))
++                    .map_err(|error| error.to_string())
++                    .and_then(|()| {
++                        read_http_request(&mut stream).map_err(|error| error.to_string())
++                    }) {
++                    Ok(request) => {
++                        let _ = request_tx.send(Ok(request));
++                        // Keep the socket open without sending response headers.
++                        // Dropping the pending reqwest send future must close it.
++                        let mut byte = [0_u8; 1];
++                        match stream.read(&mut byte) {
++                            Ok(0) => Ok(true),
++                            Ok(_) => Ok(false),
++                            Err(error) => Err(error.to_string()),
++                        }
++                    }
++                    Err(error) => {
++                        let _ = request_tx.send(Err(error.clone()));
++                        Err(error)
++                    }
++                },
++                Err(error) => {
++                    let _ = request_tx.send(Err(error.clone()));
++                    Err(error)
++                }
++            };
++            let _ = disconnected_tx.send(result);
++        });
++        Self {
++            address,
++            request: Some(request),
++            disconnected: Some(disconnected),
++            stop,
++            worker: Some(worker),
++        }
+     }
+ }
+ 
+-struct WaitForCancelTransport {
+-    calls: AtomicUsize,
+-    request_shapes: Mutex<Vec<RequestShape>>,
+-    opened: Arc<Notify>,
+-    release: watch::Receiver<bool>,
++impl Drop for PendingHttpServer {
++    fn drop(&mut self) {
++        self.stop.store(true, Ordering::Release);
++        if let Some(worker) = self.worker.take() {
++            let _ = worker.join();
++        }
++    }
+ }
+ 
+-#[async_trait]
+-impl Transport for WaitForCancelTransport {
+-    async fn send(
+-        &self,
+-        request: lingxi_llm_client::HttpRequest,
+-    ) -> Result<lingxi_llm_client::StreamResponse, lingxi_llm_client::protocol::LlmError> {
+-        self.calls.fetch_add(1, Ordering::SeqCst);
+-        self.request_shapes
+-            .lock()
+-            .expect("request-shape mutex")
+-            .push(request_shape(&request));
+-        self.opened.notify_one();
+-
+-        // Keep the physical provider request pending until the test cancels the
+-        // public turn and releases this deterministic transport gate.
+-        let mut release = self.release.clone();
+-        while !*release.borrow() {
+-            if release.changed().await.is_err() {
+-                break;
+-            }
++fn read_http_request(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
++    let mut request = Vec::new();
++    let mut chunk = [0_u8; 8192];
++    loop {
++        let read = stream.read(&mut chunk)?;
++        if read == 0 {
++            return Err(std::io::Error::new(
++                std::io::ErrorKind::UnexpectedEof,
++                "client closed before completing HTTP request",
++            ));
+         }
+-
+-        // Native's 2.1.293 fixture receives no response body before SIGINT.
+-        // Returning a successful empty SSE body models the closed response
+-        // boundary without inventing a provider error payload.
+-        Ok(lingxi_llm_client::HttpResponse {
+-            status: 200,
+-            headers: vec![("content-type".into(), "text/event-stream".into())],
+-            body: Vec::<u8>::new().into(),
++        request.extend_from_slice(&chunk[..read]);
++        let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n") else {
++            continue;
++        };
++        let headers = String::from_utf8_lossy(&request[..header_end]);
++        let content_length = headers
++            .lines()
++            .filter_map(|line| line.split_once(':'))
++            .find_map(|(name, value)| {
++                name.eq_ignore_ascii_case("content-length")
++                    .then(|| value.trim().parse::<usize>().ok())
++                    .flatten()
++            })
++            .unwrap_or(0);
++        let expected = header_end + 4 + content_length;
++        if request.len() >= expected {
++            request.truncate(expected);
++            return Ok(request);
+         }
+-        .into())
+     }
+ }
+ 
+-fn api_service(transport: Arc<WaitForCancelTransport>) -> Arc<ApiService> {
++fn api_service(base_url: &str, transport: Arc<dyn Transport>) -> Arc<ApiService> {
+     let config: ClientConfig = serde_json::from_value(json!({
+         "providers": [{
+             "provider_id": "anthropic_first_party",
+             "profile_name": "direct",
+-            "base_url": "https://api.anthropic.com",
++            "base_url": base_url,
+             "protocol": "anthropic_messages",
+             "auth": "none",
+             "credential": {"type": "none"},
+@@ -151,15 +212,13 @@ async fn native_inflight_sigint_contract_reaches_orchestrator_output_and_jsonl()
+     let transcript_path = dir.path().join("session.jsonl");
+     let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
+     let writer = Arc::new(JsonlWriter::new(transcript_path.clone(), fs.clone()));
+-    let opened = Arc::new(Notify::new());
+-    let (release_tx, release_rx) = watch::channel(false);
+-    let transport = Arc::new(WaitForCancelTransport {
+-        calls: AtomicUsize::new(0),
+-        request_shapes: Mutex::new(Vec::new()),
+-        opened: opened.clone(),
+-        release: release_rx,
+-    });
+-    let adapter = Arc::new(ProviderApiAdapter::new(api_service(transport.clone())));
++    let mut server = PendingHttpServer::start();
++    let base_url = format!("http://{}", server.address);
++    let transport: Arc<dyn Transport> = Arc::new(
++        lingxi_llm_client::HttpTransport::with_client_configurator(|builder| builder.no_proxy())
++            .expect("construct loopback-only HTTP transport"),
++    );
++    let adapter = Arc::new(ProviderApiAdapter::new(api_service(&base_url, transport)));
+     let output = Arc::new(MockOutputStream::new());
+     let orchestrator = ConversationOrchestrator::into_shared(
+         ConversationOrchestrator::new_with_streaming(
+@@ -185,29 +244,39 @@ async fn native_inflight_sigint_contract_reaches_orchestrator_output_and_jsonl()
+     let cancel = CancellationToken::new();
+     let turn_orchestrator = orchestrator.clone();
+     let turn_cancel = cancel.clone();
+-    let mut turn = tokio::spawn(async move {
+-        turn_orchestrator
+-            .run_turn_streaming_with_cancel(PROMPT, turn_cancel)
+-            .await
++    let turn = tokio::spawn(async move {
++        orchestrator::native_user_message_source::with_sdk_source(
++            turn_orchestrator.run_turn_streaming_with_cancel(PROMPT, turn_cancel),
++        )
++        .await
+     });
+ 
+-    if tokio::time::timeout(std::time::Duration::from_secs(5), opened.notified())
+-        .await
+-        .is_err()
+-    {
+-        cancel.cancel();
+-        let _ = release_tx.send(true);
+-        let turn_status = tokio::time::timeout(std::time::Duration::from_secs(5), &mut turn).await;
+-        panic!(
+-            "one provider request must enter the fixed waiting transport; calls={}, turn_status={turn_status:?}",
+-            transport.calls.load(Ordering::SeqCst)
+-        );
+-    }
+-    assert_eq!(transport.calls.load(Ordering::SeqCst), 1);
++    let raw_request = tokio::time::timeout(
++        std::time::Duration::from_secs(5),
++        server.request.take().expect("request receiver is present"),
++    )
++    .await
++    .expect("one provider HTTP request must arrive within five seconds")
++    .expect("HTTP fixture worker must report the request")
++    .expect("HTTP fixture must read the complete request");
++    let header_end = raw_request
++        .windows(4)
++        .position(|window| window == b"\r\n\r\n")
++        .expect("request headers terminate");
++    let request_line = String::from_utf8_lossy(&raw_request[..header_end]);
++    assert!(
++        request_line.starts_with("POST /v1/messages?beta=true "),
++        "{request_line}"
++    );
++    let request_body: Value = serde_json::from_slice(&raw_request[header_end + 4..])
++        .expect("streaming request body is JSON");
++    assert_eq!(request_body["model"], MODEL);
++    assert!(request_body["stream"].as_bool().unwrap_or(false));
++    assert!(request_body["messages"].to_string().contains(PROMPT));
++
++    // The server has received a complete request but is withholding response
++    // headers. Cancellation must drop the request-open future itself.
+     cancel.cancel();
+-    release_tx
+-        .send(true)
+-        .expect("release waiting provider response");
+ 
+     let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), turn)
+         .await
+@@ -215,20 +284,17 @@ async fn native_inflight_sigint_contract_reaches_orchestrator_output_and_jsonl()
+         .expect("turn task must not panic")
+         .expect("orchestrator cancellation is a completed turn outcome");
+     assert_eq!(outcome, TurnOutcome::Cancelled);
+-
+-    let shapes = transport
+-        .request_shapes
+-        .lock()
+-        .expect("request-shape mutex")
+-        .clone();
+-    assert_eq!(
+-        shapes,
+-        vec![RequestShape {
+-            model: Some(MODEL.to_owned()),
+-            stream: Some(true),
+-        }],
+-        "the fixed transport receives one streaming request and no retry"
+-    );
++    assert!(tokio::time::timeout(
++        std::time::Duration::from_secs(5),
++        server
++            .disconnected
++            .take()
++            .expect("disconnect receiver is present"),
++    )
++    .await
++    .expect("cancel must close the pending HTTP connection")
++    .expect("HTTP fixture worker must report socket closure")
++    .expect("HTTP fixture socket read succeeds"));
+ 
+     let events = output.snapshot().await;
+     let end_reasons = events
+@@ -240,7 +306,7 @@ async fn native_inflight_sigint_contract_reaches_orchestrator_output_and_jsonl()
+         .collect::<Vec<_>>();
+     assert_eq!(end_reasons, vec!["aborted_streaming"]);
+ 
+-    let rows = JsonlReader::new(transcript_path, fs)
++    let rows = JsonlReader::new(transcript_path.clone(), fs)
+         .read_all()
+         .await
+         .expect("read actual Orchestrator JSONL output");
+@@ -265,6 +331,37 @@ async fn native_inflight_sigint_contract_reaches_orchestrator_output_and_jsonl()
+         "an interrupted request with no response does not persist an assistant row"
+     );
+ 
++    // Native 2.1.295 stores the initial plain SDK prompt as a JSON string, but
++    // writes its injected interrupt as a text-block array. Compare those exact
++    // source slices from the real JSONL bytes, not normalized parsed values.
++    let transcript_raw = std::fs::read(&transcript_path).expect("read raw JSONL bytes");
++    let raw_rows = transcript_raw
++        .split(|byte| *byte == b'\n')
++        .filter(|row| !row.is_empty())
++        .collect::<Vec<_>>();
++    let prompt_slice_matches = raw_rows
++        .iter()
++        .filter(|row| {
++            row.windows(NATIVE_PROMPT_CONTENT.len())
++                .any(|w| w == NATIVE_PROMPT_CONTENT)
++        })
++        .count();
++    let interrupt_slice_matches = raw_rows
++        .iter()
++        .filter(|row| {
++            row.windows(NATIVE_INTERRUPT_CONTENT.len())
++                .any(|w| w == NATIVE_INTERRUPT_CONTENT)
++        })
++        .count();
++    assert_eq!(
++        prompt_slice_matches, 1,
++        "persist the Native prompt JSON slice byte-for-byte"
++    );
++    assert_eq!(
++        interrupt_slice_matches, 1,
++        "persist the Native interruption JSON slice byte-for-byte"
++    );
++
+     // Native creates message UUIDs and timestamps dynamically. Check their
+     // format and parent references without treating the full JSONL as a byte
+     // baseline; the observable prompt/interrupt text and order stay exact.
+diff --git a/crates/orchestrator/tests/queued_prompt_batch_test.rs b/crates/orchestrator/tests/queued_prompt_batch_test.rs
+index 0c32d21a..1d06c9f1 100644
+--- a/crates/orchestrator/tests/queued_prompt_batch_test.rs
++++ b/crates/orchestrator/tests/queued_prompt_batch_test.rs
+@@ -261,6 +261,7 @@ async fn queued_batch_preserves_each_meta_flag_uuid_and_jsonl_parent_in_one_turn
+                     .unwrap()
+                 }),
+                 prompt_source: None,
++                sdk_content_is_json_string: None,
+                 prompt_ingress_kind: None,
+                 skip_model_query: false,
+                 message_id: Some(ids[i]),
+diff --git a/crates/permission/src/lib.rs b/crates/permission/src/lib.rs
+index 7cc2a8b6..2ff5f95b 100644
+--- a/crates/permission/src/lib.rs
++++ b/crates/permission/src/lib.rs
+@@ -172,9 +172,11 @@ pub use persist::{
+     PersistError,
+ };
+ pub use policy::{
+-    job_tmp_session_allowance, tool_wide_name_matches, PermissionPolicy, SessionReadAllowance,
+-    JOB_TMP_READ_ALLOW_REASON, PROJECT_TEMP_READ_ALLOW_REASON, SCRATCHPAD_READ_ALLOW_REASON,
+-    TOOL_RESULT_READ_ALLOW_REASON,
++    job_tmp_session_allowance, native_deny_context_matches_tool_name,
++    native_rule_content_alias_matches, native_rule_content_matches_alias_source,
++    native_tool_alias_source_units, native_tool_wide_rule_matches, tool_wide_name_matches,
++    PermissionPolicy, SessionReadAllowance, JOB_TMP_READ_ALLOW_REASON,
++    PROJECT_TEMP_READ_ALLOW_REASON, SCRATCHPAD_READ_ALLOW_REASON, TOOL_RESULT_READ_ALLOW_REASON,
+ };
+ pub use policy_gate::{LiveModelContext, LiveModelProvider, PolicyPermissionGate};
+ pub use prompting_gate::InteractivePromptingGate;
+diff --git a/crates/permission/src/policy.rs b/crates/permission/src/policy.rs
+index b1f39081..7e777163 100644
+--- a/crates/permission/src/policy.rs
++++ b/crates/permission/src/policy.rs
+@@ -621,6 +621,10 @@ pub struct PermissionPolicy {
+     /// permission mode. `true` in any settings source wins (see
+     /// [`crate::loader::block_reads_outside_working_directories_from_settings_json`]).
+     pub block_reads_outside_working_directories: bool,
++    /// The exact Native `Options.toolAliases` source object. Keys and values
++    /// remain in the UTF-16 projection so alias source enumeration never
++    /// narrows JavaScript strings through Rust `String`.
++    pub tool_aliases: Option<Utf16JsonProjection>,
+     /// Minimal sandbox-runtime config for the bash sandbox-auto-allow layer
+     /// (`bashToolHasPermission`'s `isSandboxingEnabled() &&
+     /// isAutoAllowBashIfSandboxedEnabled() && shouldUseSandbox(input)` branch).
+@@ -825,6 +829,7 @@ impl PermissionPolicy {
+             stripped_positions: Vec::new(),
+             additional_working_dirs: AdditionalWorkingDirs::new(),
+             block_reads_outside_working_directories: false,
++            tool_aliases: None,
+             sandbox_runtime: None,
+             pwsh_parser: None,
+             plan_files: None,
+@@ -847,6 +852,30 @@ impl PermissionPolicy {
+         self
+     }
+ 
++    /// Attach the validated Native `Options.toolAliases` object.
++    ///
++    /// Native treats this as a one-hop string-to-string map. The complete
++    /// source projection is retained to preserve exact UTF-16 keys, values,
++    /// and JavaScript property order for alias-source matching.
++    pub fn with_tool_aliases(
++        mut self,
++        aliases: Option<Utf16JsonProjection>,
++    ) -> Result<Self, String> {
++        if let Some(source) = &aliases {
++            let Some(entries) = source.object_entries() else {
++                return Err("toolAliases must be an object of string values".to_owned());
++            };
++            if entries
++                .iter()
++                .any(|entry| entry.value.code_units().is_none())
++            {
++                return Err("toolAliases must be an object of string values".to_owned());
++            }
++        }
++        self.tool_aliases = aliases;
++        Ok(self)
++    }
++
+     /// Publish the session's plan-file identity holder — see
+     /// [`crate::plan_files`]. Without it the carve-out never fires.
+     #[must_use]
+@@ -1242,6 +1271,97 @@ impl PermissionPolicy {
+             .collect()
+     }
+ 
++    /// Snapshot the live name/content deny facts consumed by Native `Jqe`.
++    /// This intentionally retains content rules, unlike the advertised-tool
++    /// filter's [`Self::tool_wide_deny_names`], because Native only consults
++    /// selected content rules when `toolAliases` supplies alias sources.
++    #[must_use]
++    pub fn native_mcp_deny_context(
++        &self,
++    ) -> lingxi_core::host::permission_gate::NativeMcpDenyContext {
++        let mut deny_rules = self
++            .deny_rules
++            .values()
++            .flat_map(|rules| rules.iter())
++            .map(
++                |rule| lingxi_core::host::permission_gate::NativeMcpDenyRule {
++                    tool_name: rule.value.tool_name.clone(),
++                    rule_content: rule.value.rule_content.clone(),
++                    proxy_expansion: !matches!(
++                        rule.source,
++                        PermissionRuleSource::CliArg | PermissionRuleSource::ToolsNarrowing
++                    ),
++                },
++            )
++            .collect::<Vec<_>>();
++        deny_rules.sort_by(|left, right| {
++            left.tool_name
++                .cmp(&right.tool_name)
++                .then_with(|| left.proxy_expansion.cmp(&right.proxy_expansion))
++                .then_with(|| {
++                    left.rule_content
++                        .as_ref()
++                        .and_then(|content| content.string_units(""))
++                        .cmp(
++                            &right
++                                .rule_content
++                                .as_ref()
++                                .and_then(|content| content.string_units("")),
++                        )
++                })
++        });
++        lingxi_core::host::permission_gate::NativeMcpDenyContext {
++            tool_aliases: self.tool_aliases.clone(),
++            deny_rules,
++        }
++    }
++
++    /// Does this Native permission snapshot deny one provider-visible tool
++    /// name? This is the shared `Jqe` name/content projection used both by the
++    /// MCP dropped-tool reminder and by the outgoing tool catalog, so both
++    /// surfaces see one source-unit alias map and one permission generation.
++    #[must_use]
++    pub fn native_deny_context_matches_tool_name(
++        context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
++        tool_name: &str,
++    ) -> bool {
++        let tool_units = tool_name.encode_utf16().collect::<Vec<_>>();
++        let alias_sources =
++            native_tool_alias_source_units(context.tool_aliases.as_ref(), &tool_units);
++
++        context.deny_rules.iter().any(|rule| {
++            let Some(content) = &rule.rule_content else {
++                return native_tool_wide_rule_matches(
++                    &rule.tool_name,
++                    tool_name,
++                    context.tool_aliases.as_ref(),
++                    true,
++                    rule.proxy_expansion,
++                );
++            };
++
++            alias_sources.iter().any(|alias| {
++                alias.as_slice() != tool_units.as_slice()
++                    && ((rule.proxy_expansion
++                        && native_rule_content_matches_alias_source(
++                            &rule.tool_name,
++                            PermissionBehavior::Deny,
++                            content,
++                            alias,
++                        ))
++                        || (rule.tool_name == tool_name
++                            && String::from_utf16(alias).is_ok_and(|alias_name| {
++                                native_rule_content_matches_alias_source(
++                                    &alias_name,
++                                    PermissionBehavior::Deny,
++                                    content,
++                                    alias,
++                                )
++                            })))
++            })
++        })
++    }
++
+     /// The source of the highest-priority DENY rule that denies `Agent(<type>)`,
+     /// or `None` if no such rule exists.
+     ///
+@@ -2065,6 +2185,7 @@ impl PermissionPolicy {
+             stripped_positions: self.stripped_positions.clone(),
+             additional_working_dirs,
+             block_reads_outside_working_directories: self.block_reads_outside_working_directories,
++            tool_aliases: self.tool_aliases.clone(),
+             sandbox_runtime: self.sandbox_runtime.clone(),
+             pwsh_parser: self.pwsh_parser.clone(),
+             plan_files: self.plan_files.clone(),
+@@ -2912,9 +3033,17 @@ impl PermissionPolicy {
+                 return RulePatternMatch::NoMatch;
+             }
+             return kind(if rule.value.rule_content.is_none() {
+-                tool_wide_name_matches_opts(&rule.value.tool_name, tool_name, rule_uses_glob(rule))
++                self.native_tool_wide_rule_matches(rule, tool_name)
+             } else {
+                 rule.value.tool_name == tool_name
++                    || rule.value.rule_content.as_ref().is_some_and(|content| {
++                        native_rule_content_alias_matches_for_permission(
++                            rule,
++                            tool_name,
++                            content,
++                            self.tool_aliases.as_ref(),
++                        )
++                    })
+             });
+         };
+         let pattern_units = match rule.value.rule_content_units() {
+@@ -2926,11 +3055,7 @@ impl PermissionPolicy {
+                 // matches all of that server's tools). GLOB-01: DENY/ASK rules also
+                 // glob-match (`h8`/`kqe` pass `globMatching:!0`); ALLOW rules do not
+                 // (`nes` default opts).
+-                return kind(tool_wide_name_matches_opts(
+-                    &rule.value.tool_name,
+-                    tool_name,
+-                    rule_uses_glob(rule),
+-                ));
++                return kind(self.native_tool_wide_rule_matches(rule, tool_name));
+             }
+             // A malformed/non-string content rule is not tool-wide. In
+             // particular, never broaden an exact source rule whose units the
+@@ -2947,7 +3072,9 @@ impl PermissionPolicy {
+         // `deny:["Agent(subagent_type:foo*)"]` / `deny:["WebSearch(query:*secret*)"]`
+         // match, which the dedicated-key logic below cannot express. Gated on
+         // DENY/ASK (over-restrict only — never broadens an allow).
+-        if rule_uses_glob(rule) && rule.value.tool_name == tool_name {
++        if rule_uses_glob(rule)
++            && rule_content_tool_name_matches(rule, tool_name, self.tool_aliases.as_ref())
++        {
+             if let Some((field, pat)) = split_field_pattern_units(&pattern_units) {
+                 let dedicated_field = tool_rule_content_field(tool_name)
+                     .map(|field| field.encode_utf16().collect::<Vec<_>>());
+@@ -2965,6 +3092,7 @@ impl PermissionPolicy {
+                 }
+             }
+         }
++        let alias_group_ok = self.rule_matches_native_content_alias(rule, tool_name);
+         let group_ok = match file_tool_kind(tool_name) {
+             FileToolKind::NonFile => {
+                 // Shell tools: CONTENT rule matches the command (any-subcommand,
+@@ -3016,11 +3144,12 @@ impl PermissionPolicy {
+                     key_units == pattern_units
+                 });
+             }
+-            FileToolKind::Editor => rule.value.tool_name == "Edit",
++            FileToolKind::Editor => rule.value.tool_name == "Edit" || alias_group_ok,
+             FileToolKind::Reader => {
+                 rule.value.tool_name == "Read"
+                     || (rule.value.tool_name == "Edit"
+                         && matches!(rule.behavior, PermissionBehavior::Allow))
++                    || alias_group_ok
+             }
+         };
+         if !group_ok {
+@@ -3043,6 +3172,33 @@ impl PermissionPolicy {
+         )
+     }
+ 
++    fn native_tool_wide_rule_matches(&self, rule: &PermissionRule, tool_name: &str) -> bool {
++        let proxy_expansion = !matches!(rule.behavior, PermissionBehavior::Allow)
++            && !matches!(
++                rule.source,
++                PermissionRuleSource::CliArg | PermissionRuleSource::ToolsNarrowing
++            );
++        native_tool_wide_rule_matches(
++            &rule.value.tool_name,
++            tool_name,
++            self.tool_aliases.as_ref(),
++            rule_uses_glob(rule),
++            proxy_expansion,
++        )
++    }
++
++    fn rule_matches_native_content_alias(&self, rule: &PermissionRule, tool_name: &str) -> bool {
++        let Some(content) = rule.value.rule_content.as_ref() else {
++            return false;
++        };
++        native_rule_content_alias_matches_for_permission(
++            rule,
++            tool_name,
++            content,
++            self.tool_aliases.as_ref(),
++        )
++    }
++
+     fn rule_is_available_in_mode(&self, rule: &PermissionRule, mode: PermissionMode) -> bool {
+         (mode != PermissionMode::Auto && !self.apply_auto_mode_restrictions)
+             || !crate::dangerous_perms::is_dangerous_classifier_permission_with_flag(
+@@ -4249,6 +4405,242 @@ pub fn tool_wide_name_matches(rule_tool_name: &str, tool_name: &str) -> bool {
+     tool_wide_name_matches_opts(rule_tool_name, tool_name, false)
+ }
+ 
++/// Native `jW`: source-alias keys whose effective `Options.toolAliases` value
++/// is the canonical tool name. The projection is read as JavaScript
++/// `Object.entries`, including integer-index key ordering and last-wins
++/// duplicate properties, while key/value UTF-16 units remain intact.
++#[must_use]
++pub fn native_tool_alias_source_units(
++    aliases: Option<&Utf16JsonProjection>,
++    canonical_tool_units: &[u16],
++) -> Vec<Vec<u16>> {
++    let Some(aliases) = aliases else {
++        return Vec::new();
++    };
++    let Some(mut entries) = aliases.object_entries() else {
++        return Vec::new();
++    };
++    entries.sort_by(|left, right| {
++        match (
++            native_js_array_index(left.code_units),
++            native_js_array_index(right.code_units),
++        ) {
++            (Some(left), Some(right)) => left.cmp(&right),
++            (Some(_), None) => std::cmp::Ordering::Less,
++            (None, Some(_)) => std::cmp::Ordering::Greater,
++            (None, None) => std::cmp::Ordering::Equal,
++        }
++    });
++    entries
++        .into_iter()
++        .filter_map(|entry| {
++            let target = entry.value.code_units()?;
++            (target == canonical_tool_units).then(|| entry.code_units.to_vec())
++        })
++        .collect()
++}
++
++fn native_js_array_index(key_units: &[u16]) -> Option<u32> {
++    let key = String::from_utf16(key_units).ok()?;
++    let index = key.parse::<u32>().ok()?;
++    (index != u32::MAX && index.to_string() == key).then_some(index)
++}
++
++fn native_tool_alias_target_units(
++    aliases: Option<&Utf16JsonProjection>,
++    alias_source_units: &[u16],
++) -> Option<Vec<u16>> {
++    aliases?
++        .object_entries()?
++        .into_iter()
++        .find(|entry| entry.code_units == alias_source_units)
++        .and_then(|entry| entry.value.code_units().map(<[u16]>::to_vec))
++}
++
++/// Shared `Jqe` projection for MCP reminders and provider-visible tool pools.
++#[must_use]
++pub fn native_deny_context_matches_tool_name(
++    context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
++    tool_name: &str,
++) -> bool {
++    PermissionPolicy::native_deny_context_matches_tool_name(context, tool_name)
++}
++
++/// Native `P`'s tool-name matcher for a single source rule. Deny/ask use glob
++/// matching; allow uses neither glob nor proxy expansion. With proxy expansion
++/// enabled, Native `oZ` resolves a rule's one-hop alias target, and a glob can
++/// match the candidate tool's alias-source names. MCP server-prefix matching
++/// remains on the canonical candidate, as it is in Native `coversMcpTool`.
++#[must_use]
++pub fn native_tool_wide_rule_matches(
++    rule_tool_name: &str,
++    tool_name: &str,
++    aliases: Option<&Utf16JsonProjection>,
++    glob_matching: bool,
++    proxy_expansion: bool,
++) -> bool {
++    if tool_wide_name_matches_opts(rule_tool_name, tool_name, glob_matching) {
++        return true;
++    }
++    if !proxy_expansion {
++        return false;
++    }
++
++    let tool_units = tool_name.encode_utf16().collect::<Vec<_>>();
++    let rule_units = rule_tool_name.encode_utf16().collect::<Vec<_>>();
++    if native_tool_alias_target_units(aliases, &rule_units).as_deref()
++        == Some(tool_units.as_slice())
++    {
++        return true;
++    }
++    glob_matching
++        && rule_tool_name.contains('*')
++        && native_tool_alias_source_units(aliases, &tool_units)
++            .iter()
++            .any(|alias| glob_name_matches_units(&rule_units, &alias))
++}
++
++fn glob_name_matches_units(pattern: &[u16], value: &[u16]) -> bool {
++    let mut matched = vec![false; value.len() + 1];
++    matched[0] = true;
++    for pattern_unit in pattern {
++        if *pattern_unit == b'*' as u16 {
++            for index in 1..=value.len() {
++                matched[index] |= matched[index - 1];
++            }
++        } else {
++            for index in (1..=value.len()).rev() {
++                matched[index] = matched[index - 1] && value[index - 1] == *pattern_unit;
++            }
++            matched[0] = false;
++        }
++    }
++    matched[value.len()]
++}
++
++/// Native `S`'s source-dependent content alias branch. Only the source-bound
++/// Bash whitespace rule and Read/Edit-family negated path rules are inherited
++/// through aliases; ordinary content rules do not blanket-deny an aliased
++/// tool. The second `S` arm renames a canonical rule to the matching alias
++/// source, matching Native `H(m,n)`.
++#[must_use]
++pub fn native_rule_content_alias_matches(
++    rule_tool_name: &str,
++    canonical_tool_name: &str,
++    behavior: PermissionBehavior,
++    content: &Utf16JsonProjection,
++    aliases: Option<&Utf16JsonProjection>,
++    proxy_expansion: bool,
++) -> bool {
++    let canonical_units = canonical_tool_name.encode_utf16().collect::<Vec<_>>();
++    native_tool_alias_source_units(aliases, &canonical_units)
++        .iter()
++        .any(|alias| {
++            alias.as_slice() != canonical_units.as_slice()
++                && ((proxy_expansion
++                    && native_rule_content_matches_alias_source(
++                        rule_tool_name,
++                        behavior,
++                        content,
++                        alias,
++                    ))
++                    || (rule_tool_name == canonical_tool_name
++                        && String::from_utf16(alias).is_ok_and(|alias_name| {
++                            native_rule_content_matches_alias_source(
++                                &alias_name,
++                                behavior,
++                                content,
++                                alias,
++                            )
++                        })))
++        })
++}
++
++/// Native `y` for one rule and one alias source. This intentionally excludes
++/// ALLOW content rules and matches the source's action-specific Read/Edit
++/// family table plus its Bash whitespace sentinel.
++#[must_use]
++pub fn native_rule_content_matches_alias_source(
++    rule_tool_name: &str,
++    behavior: PermissionBehavior,
++    content: &Utf16JsonProjection,
++    alias_source_units: &[u16],
++) -> bool {
++    if behavior == PermissionBehavior::Allow {
++        return false;
++    }
++    let Some(content_units) = content.string_units("") else {
++        return false;
++    };
++    if rule_tool_name == "Bash" {
++        return alias_source_units == "Bash".encode_utf16().collect::<Vec<_>>()
++            && !content_units.is_empty()
++            && content_units
++                .iter()
++                .all(|unit| *unit == b'*' as u16 || native_javascript_whitespace(*unit));
++    }
++    if !native_special_path_negation_content(&content_units) {
++        return false;
++    }
++    let family: &[&str] = match (rule_tool_name, behavior) {
++        ("Read", PermissionBehavior::Deny) => &["Read", "Grep", "Glob", "Edit", "Write"],
++        ("Read", PermissionBehavior::Ask) => &["Read", "Grep", "Glob"],
++        ("Edit", PermissionBehavior::Deny | PermissionBehavior::Ask) => {
++            &["Edit", "Write", "NotebookEdit"]
++        }
++        _ => return false,
++    };
++    family
++        .iter()
++        .any(|name| alias_source_units == name.encode_utf16().collect::<Vec<_>>())
++}
++
++fn native_special_path_negation_content(content: &[u16]) -> bool {
++    const SLASH: u16 = b'/' as u16;
++    const STAR: u16 = b'*' as u16;
++    if !content.starts_with(&[SLASH, SLASH]) {
++        return false;
++    }
++    let mut normalized = Vec::with_capacity(content.len());
++    for unit in content {
++        if *unit != SLASH || normalized.last().copied() != Some(SLASH) {
++            normalized.push(*unit);
++        }
++    }
++    let mut index = 1;
++    if normalized.get(index..index + 4) == Some(&[SLASH, STAR, STAR, SLASH]) {
++        index += 4;
++    }
++    let star_start = index;
++    while normalized.get(index) == Some(&STAR) {
++        index += 1;
++    }
++    if index == star_start {
++        return false;
++    }
++    if normalized.get(index..index + 3) == Some(&[SLASH, STAR, STAR]) {
++        index += 3;
++    }
++    index == normalized.len()
++}
++
++fn native_javascript_whitespace(unit: u16) -> bool {
++    matches!(
++        unit,
++        0x0009..=0x000D
++            | 0x0020
++            | 0x00A0
++            | 0x1680
++            | 0x2000..=0x200A
++            | 0x2028
++            | 0x2029
++            | 0x202F
++            | 0x205F
++            | 0x3000
++            | 0xFEFF
++    )
++}
++
+ /// Glob-aware tool-wide name matcher — 1:1 with claude-code `URu` (`permissions.ts`).
+ ///
+ /// `glob == true` (the DENY walk `h8` and ASK walk `kqe`, both passing
+@@ -4259,10 +4651,11 @@ pub fn tool_wide_name_matches(rule_tool_name: &str, tool_name: &str) -> bool {
+ ///     `mcp__server__footool`).
+ ///
+ /// `glob == false` (the ALLOW walk `nes`, default opts) keeps exact-name /
+-/// MCP server-level matching only. Alias/`proxyExpansion` (`sDn`/`toolAliases`)
+-/// is NOT ported — no runtime tool-alias map is wired in the port, and the
+-/// legacy static aliases are already normalized at parse time
+-/// ([`crate::rule::normalize_legacy_tool_name`]); documented as a follow-up.
++/// MCP server-level matching only. Runtime `toolAliases` and
++/// source-dependent `proxyExpansion` are applied by
++/// [`native_tool_wide_rule_matches`] around this base name matcher. Legacy
++/// static aliases remain normalized at parse time
++/// ([`crate::rule::normalize_legacy_tool_name`]).
+ #[must_use]
+ fn tool_wide_name_matches_opts(rule_tool_name: &str, tool_name: &str, glob: bool) -> bool {
+     if rule_tool_name == tool_name {
+@@ -4306,6 +4699,55 @@ fn rule_uses_glob(rule: &PermissionRule) -> bool {
+     )
+ }
+ 
++/// Permission rule's source-bound `proxyExpansion` flag (`T` in the Native
++/// tool-rule matcher). ALLOW matching deliberately keeps the Native default
++/// options instead; this flag applies to DENY/ASK walks and alias-source
++/// content lookup.
++fn rule_allows_proxy_expansion(rule: &PermissionRule) -> bool {
++    !matches!(
++        rule.source,
++        PermissionRuleSource::CliArg | PermissionRuleSource::ToolsNarrowing
++    )
++}
++
++/// Generic Native `field:pattern` lookup accepts a rule under the actual tool
++/// name, or under a one-hop alias-source key. Native filters alias-source
++/// rules through `proxyExpansion`; a direct canonical rule is not filtered.
++fn rule_content_tool_name_matches(
++    rule: &PermissionRule,
++    canonical_tool_name: &str,
++    aliases: Option<&Utf16JsonProjection>,
++) -> bool {
++    if rule.value.tool_name == canonical_tool_name {
++        return true;
++    }
++    if !rule_allows_proxy_expansion(rule) {
++        return false;
++    }
++    native_tool_alias_source_units(
++        aliases,
++        &canonical_tool_name.encode_utf16().collect::<Vec<_>>(),
++    )
++    .iter()
++    .any(|alias| alias.as_slice() == rule.value.tool_name.encode_utf16().collect::<Vec<_>>())
++}
++
++fn native_rule_content_alias_matches_for_permission(
++    rule: &PermissionRule,
++    canonical_tool_name: &str,
++    content: &Utf16JsonProjection,
++    aliases: Option<&Utf16JsonProjection>,
++) -> bool {
++    native_rule_content_alias_matches(
++        &rule.value.tool_name,
++        canonical_tool_name,
++        rule.behavior,
++        content,
++        aliases,
++        rule_allows_proxy_expansion(rule),
++    )
++}
++
+ /// Split a `field:pattern` rule-content string on the FIRST `:` (claude-code
+ /// `Mjr`: `l=s.indexOf(":"); if(l<=0)continue`). Returns `(field, pattern)` with
+ /// both sides trimmed, or `None` when there is no `:`, the `:` is at position 0,
+diff --git a/crates/permission/src/policy_gate.rs b/crates/permission/src/policy_gate.rs
+index c963868e..f3bb916e 100644
+--- a/crates/permission/src/policy_gate.rs
++++ b/crates/permission/src/policy_gate.rs
+@@ -3714,6 +3714,12 @@ impl PermissionGate for PolicyPermissionGate {
+         self.live_policy().tool_wide_deny_names()
+     }
+ 
++    /// Capture the exact deny facts and Native alias map from one live-policy
++    /// generation for the dropped-MCP-tool reminder path.
++    async fn native_mcp_deny_context(&self) -> core_permission::NativeMcpDenyContext {
++        self.live_policy().native_mcp_deny_context()
++    }
++
+     /// Surface the source of a matching `Agent(<type>)` deny rule so the Agent
+     /// tool can reject a denied subagent type with the byte-exact
+     /// `AgentTypeError` message (claude-code `getDenyRuleForAgent`). The source is
+diff --git a/crates/permission/src/policy_test.rs b/crates/permission/src/policy_test.rs
+index 98449774..43a5ce7b 100644
+--- a/crates/permission/src/policy_test.rs
++++ b/crates/permission/src/policy_test.rs
+@@ -224,6 +224,254 @@ mod tests {
+         assert!(p.tool_wide_deny_names().is_empty());
+     }
+ 
++    #[test]
++    fn native_mcp_deny_context_preserves_alias_units_and_fork_state() {
++        let aliases = Utf16JsonProjection::parse(
++            r#"{"mcp__legacy__tool":"mcp__current__tool","\ud800":"mcp__current__tool"}"#,
++        )
++        .unwrap();
++        let rule = PermissionRule {
++            value: PermissionRuleValue::from_rule_string("Read(//**)"),
++            behavior: PermissionBehavior::Deny,
++            source: PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Project),
++        };
++        let policy = PermissionPolicy::from_rules(PermissionMode::Default, [rule])
++            .with_tool_aliases(Some(aliases.clone()))
++            .unwrap();
++
++        let context = policy.native_mcp_deny_context();
++        assert_eq!(context.tool_aliases, Some(aliases.clone()));
++        assert_eq!(context.deny_rules.len(), 1);
++        assert_eq!(context.deny_rules[0].tool_name, "Read");
++        assert_eq!(
++            context.deny_rules[0]
++                .rule_content
++                .as_ref()
++                .and_then(|value| value.string_units("")),
++            Some("//**".encode_utf16().collect::<Vec<_>>())
++        );
++        assert!(context.deny_rules[0].proxy_expansion);
++        assert_eq!(
++            policy
++                .fork_independent(PermissionMode::Plan)
++                .native_mcp_deny_context()
++                .tool_aliases,
++            Some(aliases)
++        );
++    }
++
++    #[test]
++    fn native_tool_alias_builder_rejects_non_object_or_non_string_values() {
++        let scalar = Utf16JsonProjection::from("not-an-object");
++        assert!(PermissionPolicy::new(PermissionMode::Default)
++            .with_tool_aliases(Some(scalar))
++            .is_err());
++
++        let non_string = Utf16JsonProjection::parse(r#"{"alias":false}"#).unwrap();
++        assert!(PermissionPolicy::new(PermissionMode::Default)
++            .with_tool_aliases(Some(non_string))
++            .is_err());
++
++        let duplicate_last_string =
++            Utf16JsonProjection::parse(r#"{"alias":false,"alias":"Read"}"#).unwrap();
++        let policy = PermissionPolicy::new(PermissionMode::Default)
++            .with_tool_aliases(Some(duplicate_last_string))
++            .expect("Native JSON.parse keeps the last duplicate value");
++        assert_eq!(
++            policy
++                .native_mcp_deny_context()
++                .tool_aliases
++                .as_ref()
++                .and_then(|aliases| aliases.string_at("/alias")),
++            Some("Read")
++        );
++
++        let duplicate_last_non_string =
++            Utf16JsonProjection::parse(r#"{"alias":"Read","alias":false}"#).unwrap();
++        assert!(PermissionPolicy::new(PermissionMode::Default)
++            .with_tool_aliases(Some(duplicate_last_non_string))
++            .is_err());
++    }
++
++    #[test]
++    fn native_alias_proxy_expansion_matches_only_native_rule_walks() {
++        use lingxi_core::types::SettingsScope;
++
++        let aliases = Utf16JsonProjection::parse(r#"{"ReadProxy":"Read"}"#).unwrap();
++        let make_policy = |behavior, source| {
++            PermissionPolicy::from_rules(
++                PermissionMode::Default,
++                [PermissionRule {
++                    value: PermissionRuleValue {
++                        tool_name: "ReadProxy".into(),
++                        rule_content: None,
++                        original_rule: None,
++                    },
++                    behavior,
++                    source,
++                }],
++            )
++            .with_tool_aliases(Some(aliases.clone()))
++            .unwrap()
++        };
++
++        let settings = PermissionRuleSource::Settings(SettingsScope::Project);
++        let denied = make_policy(PermissionBehavior::Deny, settings);
++        assert!(matches!(
++            denied.authorize("Read", &source_json!({})),
++            PermissionResult::Deny {
++                reason: PermissionDecisionReason::MatchedRule { .. },
++                ..
++            }
++        ));
++
++        let cli_deny = make_policy(PermissionBehavior::Deny, PermissionRuleSource::CliArg);
++        assert!(
++            matches!(
++                cli_deny.authorize("Read", &source_json!({})),
++                PermissionResult::Ask {
++                    reason: PermissionDecisionReason::PermissionMode { .. },
++                    ..
++                }
++            ),
++            "cliArg keeps Native proxyExpansion disabled"
++        );
++
++        let asked = make_policy(PermissionBehavior::Ask, settings);
++        assert!(matches!(
++            asked.authorize("Read", &source_json!({})),
++            PermissionResult::Ask {
++                reason: PermissionDecisionReason::MatchedRule { .. },
++                ..
++            }
++        ));
++
++        let cli_ask = make_policy(PermissionBehavior::Ask, PermissionRuleSource::CliArg);
++        assert!(matches!(
++            cli_ask.authorize("Read", &source_json!({})),
++            PermissionResult::Ask {
++                reason: PermissionDecisionReason::PermissionMode { .. },
++                ..
++            }
++        ));
++
++        let allowed = make_policy(PermissionBehavior::Allow, settings);
++        assert!(
++            matches!(
++                allowed.authorize("Read", &source_json!({})),
++                PermissionResult::Ask {
++                    reason: PermissionDecisionReason::PermissionMode { .. },
++                    ..
++                }
++            ),
++            "Native allow uses Q8t's default options without proxy expansion"
++        );
++
++        assert!(PermissionPolicy::native_deny_context_matches_tool_name(
++            &denied.native_mcp_deny_context(),
++            "Read"
++        ));
++
++        let lone_surrogate_alias = Utf16JsonProjection::parse(r#"{"a\ud800":"Read"}"#).unwrap();
++        assert!(
++            native_tool_wide_rule_matches("a*", "Read", Some(&lone_surrogate_alias), true, true,),
++            "glob matching must retain alias source code units instead of dropping lone surrogates"
++        );
++        assert!(
++            !native_tool_wide_rule_matches("a*", "Read", Some(&lone_surrogate_alias), true, false,),
++            "the same UTF-16 alias glob stays disabled for cliArg/toolsNarrowing"
++        );
++    }
++
++    #[test]
++    fn native_content_alias_match_keeps_source_and_rule_family_conditions() {
++        use lingxi_core::types::SettingsScope;
++
++        let read_alias = Utf16JsonProjection::parse(r#"{"Grep":"Read"}"#).unwrap();
++        let special_read_path = Utf16JsonProjection::from("//**");
++        assert!(native_rule_content_alias_matches(
++            "Read",
++            "Read",
++            PermissionBehavior::Deny,
++            &special_read_path,
++            Some(&read_alias),
++            true,
++        ));
++        assert!(native_rule_content_alias_matches(
++            "Read",
++            "Read",
++            PermissionBehavior::Ask,
++            &special_read_path,
++            Some(&read_alias),
++            true,
++        ));
++        assert!(!native_rule_content_alias_matches(
++            "Read",
++            "Read",
++            PermissionBehavior::Allow,
++            &special_read_path,
++            Some(&read_alias),
++            true,
++        ));
++        assert!(
++            !native_rule_content_alias_matches(
++                "Read",
++                "Read",
++                PermissionBehavior::Deny,
++                &special_read_path,
++                Some(&read_alias),
++                false,
++            ),
++            "cliArg/toolsNarrowing cannot use the proxy-enabled S arm"
++        );
++
++        let edit_alias = Utf16JsonProjection::parse(r#"{"Edit":"Read"}"#).unwrap();
++        assert!(native_rule_content_alias_matches(
++            "Edit",
++            "Read",
++            PermissionBehavior::Deny,
++            &special_read_path,
++            Some(&edit_alias),
++            true,
++        ));
++        let ordinary_path = Utf16JsonProjection::from("src/**");
++        assert!(
++            !native_rule_content_alias_matches(
++                "Read",
++                "Read",
++                PermissionBehavior::Deny,
++                &ordinary_path,
++                Some(&read_alias),
++                true,
++            ),
++            "ordinary content rules do not blanket-deny aliased tools"
++        );
++
++        let setting_rule = PermissionRule {
++            value: PermissionRuleValue {
++                tool_name: "Grep".into(),
++                rule_content: Some(Utf16JsonProjection::from("query:*secret*")),
++                original_rule: None,
++            },
++            behavior: PermissionBehavior::Deny,
++            source: PermissionRuleSource::Settings(SettingsScope::Project),
++        };
++        assert!(rule_content_tool_name_matches(
++            &setting_rule,
++            "Read",
++            Some(&read_alias)
++        ));
++        let cli_rule = PermissionRule {
++            source: PermissionRuleSource::CliArg,
++            ..setting_rule
++        };
++        assert!(!rule_content_tool_name_matches(
++            &cli_rule,
++            "Read",
++            Some(&read_alias)
++        ));
++    }
++
+     /// SECURITY (ultra-review HIGH): a command-Monitor is evaluated by the FULL
+     /// Bash resolver (oracle `Lon({...e,command},t)`), so a `Bash(curl:*)` deny
+     /// rule must HARD-DENY `Monitor{command:"curl …"}` — it previously evaded
+diff --git a/crates/runtime/src/desktop/assembly.rs b/crates/runtime/src/desktop/assembly.rs
+index ffc71e82..59b91099 100644
+--- a/crates/runtime/src/desktop/assembly.rs
++++ b/crates/runtime/src/desktop/assembly.rs
+@@ -738,6 +738,10 @@ pub async fn build(
+     output: Arc<dyn OutputStream>,
+     permission_sink: Arc<dyn PermissionRequestSink>,
+ ) -> Result<DesktopRuntime, BuildError> {
++    // Reject malformed embedding options before opening credential storage.
++    let _ = permission::PermissionPolicy::new(cfg.permission_mode)
++        .with_tool_aliases(cfg.tool_aliases.clone())
++        .map_err(BuildError::InvalidToolAliases)?;
+     let shared = build_shared_credential_stack_for_config(&cfg).await?;
+     build_with_credential_stack(cfg, output, permission_sink, shared).await
+ }
+@@ -847,6 +851,9 @@ pub async fn build_with_credential_stack(
+     permission_sink: Arc<dyn PermissionRequestSink>,
+     shared: SharedCredentialStack,
+ ) -> Result<DesktopRuntime, BuildError> {
++    let fallback_permission_policy = permission::PermissionPolicy::new(cfg.permission_mode)
++        .with_tool_aliases(cfg.tool_aliases.clone())
++        .map_err(BuildError::InvalidToolAliases)?;
+     let native_cron_seed = cron_native::should_start_native_scheduler(&cfg).then(|| {
+         let mut seed = cfg.clone();
+         seed.session_writer_lease = None;
+@@ -2036,12 +2043,10 @@ pub async fn build_with_credential_stack(
+     // fill once `mcp_registry` + `mcp_tool_ctx` exist (same cycle-break as the
+     // hook/skill cells above — see `mcp_tool_builder`'s doc in `agent::handle`).
+     let subagent_mcp_tool_builder_cell = subagent_spawner_concrete.mcp_tool_builder_handle();
+-    // FIX 1 (subagent pool): grab the set-once tool-wide-deny-names cell BEFORE
+-    // boxing, to fill once the permission policy is built (same cycle-break as
+-    // the registry/catalog/hook cells). Filled inside the enforcement branch
+-    // below from `policy.tool_wide_deny_names()`; left empty otherwise ⇒ the
+-    // subagent tool pool is unfiltered (byte-identical to before).
+-    let subagent_tool_wide_deny_cell = subagent_spawner_concrete.tool_wide_deny_names_handle();
++    // Fill the child tool-filter context after the permission policy exists,
++    // retaining aliases and source-specific content/proxy rules together.
++    // This set-once cell breaks the registry/policy construction cycle.
++    let subagent_tool_deny_context_cell = subagent_spawner_concrete.tool_deny_context_handle();
+     // (2.1.263 `bs(Rn)`) The spawn-time bypass clamps: an agent definition's
+     // `permissionMode: bypassPermissions` must NOT raise a restrictive parent
+     // session. Grabbed before boxing because `bypass_disabled` only exists once
+@@ -2859,6 +2864,8 @@ pub async fn build_with_credential_stack(
+         // stale-flag foot-gun.)
+         let mut policy =
+             permission::PermissionPolicy::from_rules(permission::PermissionMode::Default, rules)
++                .with_tool_aliases(cfg.tool_aliases.clone())
++                .map_err(BuildError::InvalidToolAliases)?
+                 .with_roots(roots)
+                 .with_working_dirs(additional_working_dirs)
+                 .with_block_reads_outside_working_directories(
+@@ -2914,12 +2921,9 @@ pub async fn build_with_credential_stack(
+         // Resolve the active Read(deny) rules to search-exclude globs while
+         // the policy is still in scope (before it moves into the gate).
+         read_deny_exclude_globs = permission::read_deny_exclude_globs(&policy, &cwd);
+-        // FIX 1 (subagent pool): hand the policy's TOOL-WIDE deny names to the
+-        // subagent spawner so a blanket-denied tool is stripped from each
+-        // child's advertised pool too (claude-code `assembleToolPool` →
+-        // `filterToolsByDenyRules`). Set-once; only meaningful when there are
+-        // tool-wide deny rules (empty otherwise ⇒ no child-pool filtering).
+-        let _ = subagent_tool_wide_deny_cell.set(policy.tool_wide_deny_names());
++        // Child catalogs use the same Native deny facts and alias map as
++        // their parent; content rules retain their source-specific scope.
++        let _ = subagent_tool_deny_context_cell.set(policy.native_mcp_deny_context());
+         let policy = Arc::new(policy);
+         // Share the boot policy into `tool_ctx` for the prompt shell-expansion
+         // gate (clone the `Arc` BEFORE `policy` moves into the gate below).
+@@ -3664,7 +3668,7 @@ pub async fn build_with_credential_stack(
+     // tool registry / skill loader exist (same deferred-fill the spawner uses).
+     let teammate_tool_registry_cell = teammate_handler.tool_registry_handle();
+     let teammate_skill_loader_cell = teammate_handler.skill_loader_handle();
+-    let teammate_tool_wide_deny_cell = teammate_handler.tool_wide_deny_names_handle();
++    let teammate_tool_deny_context_cell = teammate_handler.tool_deny_context_handle();
+     let teammate_strict_plugin_hooks_cell = teammate_handler.strict_plugin_only_hooks_handle();
+     let teammate_system_prompt_renderer_cell = teammate_handler.system_prompt_renderer_handle();
+     let teammate_native_settings_prompt_provider_cell =
+@@ -4509,7 +4513,7 @@ pub async fn build_with_credential_stack(
+         // regardless of any local enforcement toggle.
+         permission_policy: boot_permission_policy.clone().unwrap_or_else(|| {
+             Arc::new(
+-                permission::PermissionPolicy::new(cfg.permission_mode)
++                fallback_permission_policy
+                     // Same TS formula as the enforced boot policy above; no
+                     // settings were read on this path, so no killswitch term.
+                     .with_bypass_available(
+@@ -5470,13 +5474,11 @@ pub async fn build_with_credential_stack(
+         }));
+     }
+     // In-process teammate full parity (P1): advertise the SAME resolved tool pool
+-    // + apply the SAME tool-wide deny filter as the spawner, so a teammate can
+-    // actually use tools (not chat-only). The deny names are copied from the
+-    // spawner's already-filled cell (set in the enforcement branch above; empty /
+-    // unfilled ⇒ no filtering).
++    // Apply the spawner's same deny context to teammate catalogs, retaining
++    // the alias map and content/proxy scope from that policy generation.
+     let _ = teammate_tool_registry_cell.set(tools.clone());
+-    if let Some(deny) = subagent_tool_wide_deny_cell.get() {
+-        let _ = teammate_tool_wide_deny_cell.set(deny.clone());
++    if let Some(deny) = subagent_tool_deny_context_cell.get() {
++        let _ = teammate_tool_deny_context_cell.set(deny.clone());
+     }
+     // Capture the fully-wired restore inheritance before `tools` and `perms`
+     // move into the orchestrator. The actual cold restore runs later, after the
+diff --git a/crates/runtime/src/desktop/configuration.rs b/crates/runtime/src/desktop/configuration.rs
+index c844cba2..9f557aa6 100644
+--- a/crates/runtime/src/desktop/configuration.rs
++++ b/crates/runtime/src/desktop/configuration.rs
+@@ -449,6 +449,10 @@ pub struct DesktopConfig {
+     /// Precedence-ordered `.mcp.json` paths (project preferred over global)
+     /// handed to `mcp::load_mcp_json_with_precedence`.
+     pub mcp_paths: Vec<std::path::PathBuf>,
++    /// Native embedding `Options.toolAliases`, a single-hop name-to-name map.
++    /// The original JSON object preserves source key/value UTF-16 units.
++    /// Omission means no aliases; the policy builder validates supplied maps.
++    pub tool_aliases: Option<Utf16JsonProjection>,
+     /// When `true`, bind `NoOpPermissionGate` (the CLI default); when `false`,
+     /// the host binds the connection-scoped `AdapterPermissionGate`.
+     pub use_noop_permission_gate: bool,
+@@ -1206,6 +1210,7 @@ impl Default for DesktopConfig {
+             provider_profiles: None,
+             routing: None,
+             mcp_paths: Vec::new(),
++            tool_aliases: None,
+             use_noop_permission_gate: true,
+             deny_unresolved_ask: false,
+             is_tty: false,
+diff --git a/crates/runtime/src/desktop/mod.rs b/crates/runtime/src/desktop/mod.rs
+index 9d701d53..a66f3ceb 100644
+--- a/crates/runtime/src/desktop/mod.rs
++++ b/crates/runtime/src/desktop/mod.rs
+@@ -2981,6 +2981,9 @@ pub enum BuildError {
+     /// Explicit custom-agent configuration could not be parsed.
+     #[error("Invalid --agents configuration: {0}")]
+     InvalidAgents(String),
++    /// The embedding tool-alias map was not an object of string targets.
++    #[error("Invalid toolAliases configuration: {0}")]
++    InvalidToolAliases(String),
+     /// Custom beta headers were requested for a route/auth mode that cannot
+     /// safely carry Anthropic first-party API-key beta headers.
+     #[error("custom betas require a first-party Anthropic API-key session")]
+diff --git a/crates/runtime/src/desktop/tests/tests.rs b/crates/runtime/src/desktop/tests/tests.rs
+index a3331e3c..b2b3cead 100644
+--- a/crates/runtime/src/desktop/tests/tests.rs
++++ b/crates/runtime/src/desktop/tests/tests.rs
+@@ -4346,6 +4346,46 @@ async fn desktop_factory_exposes_admitted_native_classifier_policy_snapshot() {
+     assert!(snapshot.classifier_auto_mode_settings.is_some());
+ }
+ 
++#[tokio::test]
++async fn desktop_factory_carries_native_tool_aliases_into_the_live_policy() {
++    let (_tmp, mut cfg) = test_config(true);
++    cfg.restricted = true;
++    let aliases =
++        Utf16JsonProjection::parse(r#"{"friendly":"mcp__server__tool","source_\ud800":"Read"}"#)
++            .expect("source-preserving alias object");
++    cfg.tool_aliases = Some(aliases.clone());
++    let runtime = build(
++        cfg,
++        Arc::new(orchestrator::test_support::MockOutputStream::new()),
++        Arc::new(RecordingPermissionSink::default()),
++    )
++    .await
++    .expect("desktop alias composition");
++    let snapshot = runtime
++        .enforcing_permission_gate
++        .as_ref()
++        .expect("policy gate")
++        .native_mcp_deny_context()
++        .await;
++    assert_eq!(snapshot.tool_aliases, Some(aliases));
++}
++
++#[tokio::test]
++async fn desktop_factory_rejects_non_string_native_tool_alias_targets() {
++    let (_tmp, mut cfg) = test_config(true);
++    cfg.tool_aliases = Some(Utf16JsonProjection::parse(r#"{"friendly":false}"#).unwrap());
++    let result = build(
++        cfg,
++        Arc::new(orchestrator::test_support::MockOutputStream::new()),
++        Arc::new(RecordingPermissionSink::default()),
++    )
++    .await;
++    assert!(matches!(
++        result,
++        Err(super::BuildError::InvalidToolAliases(_))
++    ));
++}
++
+ #[tokio::test]
+ async fn failed_task_drain_preserves_desktop_runtime_authorities_for_retry() {
+     use platform_posix::{PosixFileSystem, PosixRuntime};
+diff --git a/crates/runtime/src/mobile/host/assembly.rs b/crates/runtime/src/mobile/host/assembly.rs
+index 0fed5e6e..6b8609f5 100644
+--- a/crates/runtime/src/mobile/host/assembly.rs
++++ b/crates/runtime/src/mobile/host/assembly.rs
+@@ -3873,6 +3873,7 @@ fn build_mobile_engine_on_worker(
+                                         pending_prompt_identity: None,
+                                         message_origin: None,
+                                         prompt_source: None,
++                                        sdk_content_is_json_string: None,
+                                         prompt_ingress_kind: None,
+                                         skip_model_query: false,
+                                         queue_priority: Some("later".into()),
+diff --git a/crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs b/crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs
+index 945429ff..f1d5fe85 100644
+--- a/crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs
++++ b/crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs
+@@ -154,7 +154,7 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
+     let (tools, _) = agent::resolve_subagent_tools(
+         &runtime.mcp_tool_registry,
+         &definition,
+-        &[],
++        &lingxi_core::host::permission_gate::NativeMcpDenyContext::default(),
+         None,
+         0,
+         false,
+@@ -170,7 +170,7 @@ async fn mobile_boot_reload_and_child_wire_share_custom_precommit_skills() {
+     let (tools, _) = agent::resolve_subagent_tools(
+         &runtime.mcp_tool_registry,
+         &definition,
+-        &[],
++        &lingxi_core::host::permission_gate::NativeMcpDenyContext::default(),
+         None,
+         0,
+         false,
+diff --git a/crates/tasks/src/handlers/in_process_teammate.rs b/crates/tasks/src/handlers/in_process_teammate.rs
+index 1f917302..3d81a8c8 100644
+--- a/crates/tasks/src/handlers/in_process_teammate.rs
++++ b/crates/tasks/src/handlers/in_process_teammate.rs
+@@ -618,11 +618,13 @@ pub struct InProcessTeammateHandler {
+     /// [`Self::tool_registry_handle`]). Unfilled (the default / tests) ⇒ no tools
+     /// advertised (chat-only — byte-identical to before this seam).
+     tool_registry: Arc<OnceLock<Arc<agent::ToolRegistry>>>,
+-    /// Tool-wide deny-rule names from the boot permission policy, applied in the
+-    /// per-spawn tool resolution so a blanket-denied tool never leaks into the
+-    /// teammate's advertised pool (claude-code `filterToolsByDenyRules`).
+-    /// SET-ONCE; unfilled ⇒ no filtering.
+-    tool_wide_deny_names: Arc<OnceLock<Vec<String>>>,
++    /// Native name/content deny snapshot from the boot permission policy,
++    /// applied in the per-spawn tool resolution so a denied tool never leaks
++    /// into the teammate's advertised pool (claude-code
++    /// `filterToolsByDenyRules`). The snapshot also carries `toolAliases`, so
++    /// child catalogs and dropped-tool reminders use the same alias semantics.
++    /// SET-ONCE; unfilled ⇒ the empty context.
++    tool_deny_context: Arc<OnceLock<lingxi_core::host::permission_gate::NativeMcpDenyContext>>,
+     /// Budget enforcer inherited by the teammate so its turns charge the shared
+     /// cumulative cost (claude-code teammates share the session budget). `None`
+     /// (the default / tests) ⇒ no per-turn budget gate.
+@@ -694,7 +696,7 @@ impl InProcessTeammateHandler {
+             instruction_provider: None,
+             new_diagnostics_source_factory: None,
+             tool_registry: Arc::new(OnceLock::new()),
+-            tool_wide_deny_names: Arc::new(OnceLock::new()),
++            tool_deny_context: Arc::new(OnceLock::new()),
+             budget_enforcer: None,
+             hook_executor: Arc::new(OnceLock::new()),
+             strict_plugin_only_hooks: Arc::new(OnceLock::new()),
+@@ -725,11 +727,13 @@ impl InProcessTeammateHandler {
+         self
+     }
+ 
+-    /// Return a clone of the set-once tool-wide-deny-names cell (filled from the
++    /// Return a clone of the set-once Native deny-context cell (filled from the
+     /// boot permission policy, like the spawner).
+     #[must_use]
+-    pub fn tool_wide_deny_names_handle(&self) -> Arc<OnceLock<Vec<String>>> {
+-        self.tool_wide_deny_names.clone()
++    pub fn tool_deny_context_handle(
++        &self,
++    ) -> Arc<OnceLock<lingxi_core::host::permission_gate::NativeMcpDenyContext>> {
++        self.tool_deny_context.clone()
+     }
+ 
+     /// Builder: inherit a budget enforcer so the teammate's turns charge the
+@@ -1241,12 +1245,12 @@ impl InProcessTeammateHandler {
+             Some(registry) => {
+                 let _has_task_list_tools =
+                     agent::augment_teammate_tool_policy(registry, &mut definition);
+-                let empty: Vec<String> = Vec::new();
+-                let denied = self.tool_wide_deny_names.get().unwrap_or(&empty);
++                let empty = lingxi_core::host::permission_gate::NativeMcpDenyContext::default();
++                let deny_context = self.tool_deny_context.get().unwrap_or(&empty);
+                 agent::resolve_subagent_tools(
+                     registry,
+                     &definition,
+-                    denied,
++                    deny_context,
+                     child_selection.as_ref(),
+                     0,
+                     // Every in-process teammate is a coordinator worker, so
+diff --git a/crates/tasks/src/handlers/in_process_teammate_test.rs b/crates/tasks/src/handlers/in_process_teammate_test.rs
+index 58a2bf43..bddd77d4 100644
+--- a/crates/tasks/src/handlers/in_process_teammate_test.rs
++++ b/crates/tasks/src/handlers/in_process_teammate_test.rs
+@@ -561,6 +561,9 @@ impl tool_api::Tool for RoutePromptTool {
+     fn name(&self) -> &str {
+         "RouteFacts"
+     }
++    fn aliases(&self) -> &[&str] {
++        &["legacy_route_facts"]
++    }
+     fn input_schema(&self) -> &Utf16JsonProjection {
+         static SCHEMA: OnceLock<Utf16JsonProjection> = OnceLock::new();
+         SCHEMA.get_or_init(|| {
+@@ -681,6 +684,71 @@ async fn teammate_tool_prompts_use_child_model_and_profile_for_duplicate_model_i
+     }
+ }
+ 
++#[tokio::test]
++async fn teammate_catalog_filters_canonical_tool_denied_through_alias_context() {
++    let mut registry = agent::ToolRegistry::new();
++    registry.register_builtin(Arc::new(RoutePromptTool));
++    let handler = model_test_handler(Some("parent-model")).with_tool_registry(Arc::new(registry));
++
++    // An empty/unfilled deny context preserves the existing no-alias behavior.
++    let baseline_definition = DefaultTeammateDefinition
++        .resolve(&lingxi_core::types::AgentId::new(), "worker")
++        .await
++        .unwrap();
++    let baseline = handler
++        .build_context(
++            lingxi_core::types::AgentId::new(),
++            "lead",
++            "alpha",
++            "do the task",
++            baseline_definition,
++        )
++        .await
++        .expect("empty deny context keeps the tool available");
++    assert_eq!(baseline.tool_schemas.len(), 1);
++    assert!(baseline
++        .allowed_tools
++        .iter()
++        .any(|name| name == "RouteFacts"));
++    assert!(baseline
++        .allowed_tools
++        .iter()
++        .any(|name| name == "legacy_route_facts"));
++
++    let deny_context = lingxi_core::host::permission_gate::NativeMcpDenyContext {
++        tool_aliases: Some(
++            Utf16JsonProjection::parse(r#"{"legacy_route_facts":"RouteFacts"}"#)
++                .expect("alias map source projection is valid JSON"),
++        ),
++        deny_rules: vec![lingxi_core::host::permission_gate::NativeMcpDenyRule {
++            tool_name: "legacy_route_facts".into(),
++            rule_content: None,
++            proxy_expansion: true,
++        }],
++    };
++    handler
++        .tool_deny_context_handle()
++        .set(deny_context)
++        .unwrap_or_else(|_| panic!("deny context cell is empty"));
++
++    let denied_definition = DefaultTeammateDefinition
++        .resolve(&lingxi_core::types::AgentId::new(), "worker")
++        .await
++        .unwrap();
++    let denied = handler
++        .build_context(
++            lingxi_core::types::AgentId::new(),
++            "lead",
++            "alpha",
++            "do the task",
++            denied_definition,
++        )
++        .await
++        .expect("alias deny filters the canonical tool in the teammate catalog");
++    assert!(denied.tool_schemas.is_empty());
++    assert!(denied.allowed_tools.is_empty());
++}
++
+ struct StaticSystemPromptRenderer(&'static str);
+ 
+ #[async_trait]

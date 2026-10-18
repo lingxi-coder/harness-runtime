@@ -1,0 +1,470 @@
+{
+  "outcome": "passed",
+  "stage": "complete",
+  "app": {
+    "bundleName": "LingXi Code.app",
+    "bundleId": "com.lingxi.code.development",
+    "version": "0.1.0",
+    "build": "0.1.0"
+  },
+  "packagedBun": {
+    "version": "1.4.3",
+    "revision": "c6da4a4d3010e5553438c60f6bd76d981976867c",
+    "sha256": "411603452b61c7bfcafc81269360e378e9aec1b3c59f5ddc3340a17ec2a838ed"
+  },
+  "fixture": {
+    "pluginId": "product-packaged-mod-smoke@acceptance",
+    "pluginVersion": "1.0.0"
+  },
+  "uiFixture": {
+    "pluginId": "packaged-host-client-ui-smoke@acceptance",
+    "pluginVersion": "1.0.0",
+    "clientKey": "host-client-form",
+    "module": "hooks/client.tsx"
+  },
+  "sessionId": "ced5b98c-d603-4de0-82d4-3787f96df7d8",
+  "providerCredentialCleanup": "cleared",
+  "stages": [
+    {
+      "stage": "enabled-startup",
+      "requestPath": "/v1/chat/completions",
+      "authorized": true,
+      "model": "smoke-model",
+      "lastUserMarkerLine": "[product-mod-active]PACKAGED_MOD_PROBE",
+      "lastUserTextSha256": "233d7dd8a47831270103410ce47e1c932884e519ca333f3ff8b332be2a621425",
+      "comparison": "exact terminal physical line; functional middleware check, not full request byte parity"
+    },
+    {
+      "stage": "packaged-read-tool-host-roundtrip",
+      "file": "tool-probe.txt",
+      "marker": "PACKAGED_TOOL_READ_MARKER",
+      "finalText": "PACKAGED_TOOL_READ_COMPLETED",
+      "route": "direct-read",
+      "toolCalls": [
+        {
+          "name": "Read",
+          "argumentNames": [
+            "file_path"
+          ],
+          "advertisedSchema": {
+            "name": "Read",
+            "required": [
+              "file_path"
+            ],
+            "properties": [
+              "file_path",
+              "limit",
+              "offset",
+              "pages"
+            ]
+          }
+        }
+      ],
+      "hostToolUseEvents": 1,
+      "successfulToolResultEvents": 1,
+      "readResultContainsMarker": true,
+      "providerFollowUpContainsMarker": true,
+      "parentSessionId": "ced5b98c-d603-4de0-82d4-3787f96df7d8",
+      "foreignSessionEvents": 0,
+      "isolatedSessionCount": 1,
+      "permissionModeRestored": "default"
+    },
+    {
+      "stage": "disabled-after-reload",
+      "requestPath": "/v1/chat/completions",
+      "authorized": true,
+      "model": "smoke-model",
+      "lastUserMarkerLine": "PACKAGED_MOD_PROBE",
+      "lastUserTextSha256": "1b590b26b98aec1edbbe45927ea3a37bc67b71870959da718e3700b865186f26",
+      "comparison": "exact terminal physical line; functional middleware check, not full request byte parity"
+    },
+    {
+      "stage": "enabled-after-reload",
+      "requestPath": "/v1/chat/completions",
+      "authorized": true,
+      "model": "smoke-model",
+      "lastUserMarkerLine": "[product-mod-active]PACKAGED_MOD_PROBE",
+      "lastUserTextSha256": "35327caf8dbf3e0d7ca9f6f82d64674be53393f6e72d8ad034b60f0725d1ee24",
+      "comparison": "exact terminal physical line; functional middleware check, not full request byte parity"
+    },
+    {
+      "stage": "enabled-after-restart",
+      "requestPath": "/v1/chat/completions",
+      "authorized": true,
+      "model": "smoke-model",
+      "lastUserMarkerLine": "[product-mod-active]PACKAGED_MOD_PROBE",
+      "lastUserTextSha256": "35327caf8dbf3e0d7ca9f6f82d64674be53393f6e72d8ad034b60f0725d1ee24",
+      "comparison": "exact terminal physical line; functional middleware check, not full request byte parity"
+    },
+    {
+      "stage": "mod-ui-host-api",
+      "pluginId": "packaged-host-client-ui-smoke@acceptance",
+      "module": "hooks/client.tsx",
+      "moduleHash": "5a57210a5fdad5c85162448b4be117bce5f27cfff62ba7bb51819fee37c78016",
+      "instanceId": "packaged-host-ui-api-ced5b98c-d603-4de0-82d4-3787f96df7d8",
+      "renderRevision": 15,
+      "clientRuntimeEpoch": 1,
+      "runtimeId": "mod-client-1-2",
+      "mountFrameSequence": 1,
+      "initialButtonHandle": 2,
+      "currentButtonHandle": 10,
+      "inputFrameSequence": 2,
+      "resultFrameSequence": 6,
+      "inputResult": "Input callback received: packaged-host-ui-value",
+      "buttonResult": "Packaged Host Client UISubmit callback accepted: packaged-host-ui-value",
+      "unmountHandled": true,
+      "drawUnmountHandled": true,
+      "staleControlHandled": false,
+      "staleRunHandled": false,
+      "staleRunEmittedFrame": false,
+      "visibleCuaExpectation": {
+        "component": "AbovePrompt",
+        "title": "Packaged Host Client UI",
+        "inputLabel": "Message",
+        "inputPlaceholder": "Type a value",
+        "buttonLabel": "Submit",
+        "initialResult": "Waiting for a value.",
+        "suggestedInputValue": "packaged-host-cua-value",
+        "afterInputResult": "Input callback received: packaged-host-cua-value",
+        "afterSubmitResult": "Submit callback accepted: packaged-host-cua-value"
+      }
+    }
+  ],
+  "toolReadHostEvidence": {
+    "stage": "packaged-read-tool-host-roundtrip",
+    "file": "tool-probe.txt",
+    "marker": "PACKAGED_TOOL_READ_MARKER",
+    "finalText": "PACKAGED_TOOL_READ_COMPLETED",
+    "route": "direct-read",
+    "toolCalls": [
+      {
+        "name": "Read",
+        "argumentNames": [
+          "file_path"
+        ],
+        "advertisedSchema": {
+          "name": "Read",
+          "required": [
+            "file_path"
+          ],
+          "properties": [
+            "file_path",
+            "limit",
+            "offset",
+            "pages"
+          ]
+        }
+      }
+    ],
+    "hostToolUseEvents": 1,
+    "successfulToolResultEvents": 1,
+    "readResultContainsMarker": true,
+    "providerFollowUpContainsMarker": true,
+    "parentSessionId": "ced5b98c-d603-4de0-82d4-3787f96df7d8",
+    "foreignSessionEvents": 0,
+    "isolatedSessionCount": 1,
+    "permissionModeRestored": "default"
+  },
+  "modUiHostEvidence": {
+    "stage": "mod-ui-host-api",
+    "pluginId": "packaged-host-client-ui-smoke@acceptance",
+    "module": "hooks/client.tsx",
+    "moduleHash": "5a57210a5fdad5c85162448b4be117bce5f27cfff62ba7bb51819fee37c78016",
+    "instanceId": "packaged-host-ui-api-ced5b98c-d603-4de0-82d4-3787f96df7d8",
+    "renderRevision": 15,
+    "clientRuntimeEpoch": 1,
+    "runtimeId": "mod-client-1-2",
+    "mountFrameSequence": 1,
+    "initialButtonHandle": 2,
+    "currentButtonHandle": 10,
+    "inputFrameSequence": 2,
+    "resultFrameSequence": 6,
+    "inputResult": "Input callback received: packaged-host-ui-value",
+    "buttonResult": "Packaged Host Client UISubmit callback accepted: packaged-host-ui-value",
+    "unmountHandled": true,
+    "drawUnmountHandled": true,
+    "staleControlHandled": false,
+    "staleRunHandled": false,
+    "staleRunEmittedFrame": false,
+    "visibleCuaExpectation": {
+      "component": "AbovePrompt",
+      "title": "Packaged Host Client UI",
+      "inputLabel": "Message",
+      "inputPlaceholder": "Type a value",
+      "buttonLabel": "Submit",
+      "initialResult": "Waiting for a value.",
+      "suggestedInputValue": "packaged-host-cua-value",
+      "afterInputResult": "Input callback received: packaged-host-cua-value",
+      "afterSubmitResult": "Submit callback accepted: packaged-host-cua-value"
+    }
+  },
+  "providerRequestCount": 8,
+  "providerRequests": [
+    {
+      "path": "/v1/chat/completions",
+      "method": "POST",
+      "authorized": true,
+      "model": "smoke-model",
+      "lastUserTextSha256": "233d7dd8a47831270103410ce47e1c932884e519ca333f3ff8b332be2a621425",
+      "lastUserMarkerLine": "[product-mod-active]PACKAGED_MOD_PROBE",
+      "lastUserText": "[redacted non-marker prompt]"
+    },
+    {
+      "path": "/v1/chat/completions",
+      "method": "POST",
+      "authorized": true,
+      "model": "smoke-model",
+      "lastUserTextSha256": "b23dc32c7490f9c43738e45bf564739d2594f0f0171cecabb045614298ae6073",
+      "lastUserMarkerLine": "[redacted non-marker line]",
+      "lastUserText": "PACKAGED_TOOL_PROBE",
+      "advertisedToolNames": [
+        "Agent",
+        "AskUserQuestion",
+        "Bash",
+        "computer",
+        "Edit",
+        "EnterPlanMode",
+        "ExitPlanMode",
+        "Glob",
+        "Grep",
+        "ListAgents",
+        "McpAuth",
+        "NotebookEdit",
+        "ObserverReport",
+        "PowerShell",
+        "Read",
+        "ReportFindings",
+        "Skill",
+        "Sleep",
+        "speech",
+        "ToolSearch",
+        "Visualization",
+        "voice",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ],
+      "toolCallName": "Read",
+      "toolCallArgumentNames": [
+        "file_path"
+      ],
+      "toolSchemaEvidence": {
+        "name": "Read",
+        "required": [
+          "file_path"
+        ],
+        "properties": [
+          "file_path",
+          "limit",
+          "offset",
+          "pages"
+        ]
+      },
+      "toolSearchResultHadReadSchema": false
+    },
+    {
+      "path": "/v1/chat/completions",
+      "method": "POST",
+      "authorized": true,
+      "model": "smoke-model",
+      "lastUserTextSha256": "d1b5389a85a66596a261545470fb784c0be377158bbf7e47a9671ee84dfcc533",
+      "lastUserMarkerLine": "[redacted non-marker line]",
+      "lastUserText": "PACKAGED_TOOL_PROBE",
+      "advertisedToolNames": [
+        "Agent",
+        "AskUserQuestion",
+        "Bash",
+        "computer",
+        "Edit",
+        "EnterPlanMode",
+        "ExitPlanMode",
+        "Glob",
+        "Grep",
+        "ListAgents",
+        "McpAuth",
+        "NotebookEdit",
+        "ObserverReport",
+        "PowerShell",
+        "Read",
+        "ReportFindings",
+        "Skill",
+        "Sleep",
+        "speech",
+        "ToolSearch",
+        "Visualization",
+        "voice",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write"
+      ],
+      "toolSearchResultHadReadSchema": false,
+      "toolResultContainsMarker": true
+    },
+    {
+      "path": "/v1/chat/completions",
+      "method": "POST",
+      "authorized": true,
+      "model": "smoke-model",
+      "lastUserTextSha256": "1b590b26b98aec1edbbe45927ea3a37bc67b71870959da718e3700b865186f26",
+      "lastUserMarkerLine": "PACKAGED_MOD_PROBE",
+      "lastUserText": "[redacted non-marker prompt]"
+    },
+    {
+      "path": "/v1/chat/completions",
+      "method": "POST",
+      "authorized": true,
+      "model": "smoke-model",
+      "lastUserTextSha256": "35327caf8dbf3e0d7ca9f6f82d64674be53393f6e72d8ad034b60f0725d1ee24",
+      "lastUserMarkerLine": "[product-mod-active]PACKAGED_MOD_PROBE",
+      "lastUserText": "[redacted non-marker prompt]"
+    },
+    {
+      "path": "/v1/chat/completions",
+      "method": "POST",
+      "authorized": true,
+      "model": "smoke-model",
+      "lastUserTextSha256": "35327caf8dbf3e0d7ca9f6f82d64674be53393f6e72d8ad034b60f0725d1ee24",
+      "lastUserMarkerLine": "[product-mod-active]PACKAGED_MOD_PROBE",
+      "lastUserText": "[redacted non-marker prompt]"
+    },
+    {
+      "path": "/v1/chat/completions",
+      "method": "POST",
+      "authorized": true,
+      "model": "smoke-model",
+      "lastUserTextSha256": "08f058e68378fb01d0ffc8bd5a4b9b4dcd3486e602c25a3fd71eb26aff42fe49",
+      "lastUserMarkerLine": "[product-mod-active]PACKAGED_MOD_PROBE",
+      "lastUserText": "[redacted non-marker prompt]"
+    },
+    {
+      "path": "/v1/chat/completions",
+      "method": "POST",
+      "authorized": true,
+      "model": "smoke-model",
+      "lastUserTextSha256": "08f058e68378fb01d0ffc8bd5a4b9b4dcd3486e602c25a3fd71eb26aff42fe49",
+      "lastUserMarkerLine": "[product-mod-active]PACKAGED_MOD_PROBE",
+      "lastUserText": "[redacted non-marker prompt]"
+    }
+  ],
+  "retainedIsolatedRoot": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-bkHCNj",
+  "handoff": {
+    "id": "packaged-host-51832-2026-10-18T09-30-29-978Z",
+    "root": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-bkHCNj",
+    "appPid": 52288,
+    "cdpPort": 62762,
+    "workspace": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-bkHCNj/workspace",
+    "userDataDir": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-bkHCNj/home/Library/Application Support/LingXi Code",
+    "configHome": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-bkHCNj/home/.lingxi",
+    "pluginRoot": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-bkHCNj/home/.lingxi/plugins/cache/acceptance/product-packaged-mod-smoke/1.0.0",
+    "uiPluginRoot": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-bkHCNj/home/.lingxi/plugins/cache/acceptance/packaged-host-client-ui-smoke/1.0.0",
+    "uiPluginId": "packaged-host-client-ui-smoke@acceptance",
+    "settingsPath": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-bkHCNj/home/.lingxi/settings.json",
+    "providerBaseUrl": "http://127.0.0.1:62687/v1",
+    "sessionId": "ced5b98c-d603-4de0-82d4-3787f96df7d8",
+    "toolReadHostEvidence": {
+      "stage": "packaged-read-tool-host-roundtrip",
+      "file": "tool-probe.txt",
+      "marker": "PACKAGED_TOOL_READ_MARKER",
+      "finalText": "PACKAGED_TOOL_READ_COMPLETED",
+      "route": "direct-read",
+      "toolCalls": [
+        {
+          "name": "Read",
+          "argumentNames": [
+            "file_path"
+          ],
+          "advertisedSchema": {
+            "name": "Read",
+            "required": [
+              "file_path"
+            ],
+            "properties": [
+              "file_path",
+              "limit",
+              "offset",
+              "pages"
+            ]
+          }
+        }
+      ],
+      "hostToolUseEvents": 1,
+      "successfulToolResultEvents": 1,
+      "readResultContainsMarker": true,
+      "providerFollowUpContainsMarker": true,
+      "parentSessionId": "ced5b98c-d603-4de0-82d4-3787f96df7d8",
+      "foreignSessionEvents": 0,
+      "isolatedSessionCount": 1,
+      "permissionModeRestored": "default"
+    },
+    "modUiHostEvidence": {
+      "stage": "mod-ui-host-api",
+      "pluginId": "packaged-host-client-ui-smoke@acceptance",
+      "module": "hooks/client.tsx",
+      "moduleHash": "5a57210a5fdad5c85162448b4be117bce5f27cfff62ba7bb51819fee37c78016",
+      "instanceId": "packaged-host-ui-api-ced5b98c-d603-4de0-82d4-3787f96df7d8",
+      "renderRevision": 15,
+      "clientRuntimeEpoch": 1,
+      "runtimeId": "mod-client-1-2",
+      "mountFrameSequence": 1,
+      "initialButtonHandle": 2,
+      "currentButtonHandle": 10,
+      "inputFrameSequence": 2,
+      "resultFrameSequence": 6,
+      "inputResult": "Input callback received: packaged-host-ui-value",
+      "buttonResult": "Packaged Host Client UISubmit callback accepted: packaged-host-ui-value",
+      "unmountHandled": true,
+      "drawUnmountHandled": true,
+      "staleControlHandled": false,
+      "staleRunHandled": false,
+      "staleRunEmittedFrame": false,
+      "visibleCuaExpectation": {
+        "component": "AbovePrompt",
+        "title": "Packaged Host Client UI",
+        "inputLabel": "Message",
+        "inputPlaceholder": "Type a value",
+        "buttonLabel": "Submit",
+        "initialResult": "Waiting for a value.",
+        "suggestedInputValue": "packaged-host-cua-value",
+        "afterInputResult": "Input callback received: packaged-host-cua-value",
+        "afterSubmitResult": "Submit callback accepted: packaged-host-cua-value"
+      }
+    },
+    "visibleUiExpected": {
+      "component": "AbovePrompt",
+      "title": "Packaged Host Client UI",
+      "inputLabel": "Message",
+      "inputPlaceholder": "Type a value",
+      "buttonLabel": "Submit",
+      "initialResult": "Waiting for a value.",
+      "suggestedInputValue": "packaged-host-cua-value",
+      "afterInputResult": "Input callback received: packaged-host-cua-value",
+      "afterSubmitResult": "Submit callback accepted: packaged-host-cua-value"
+    },
+    "sidebarGestureFixtures": {
+      "alpha": "ced5b98c-d603-4de0-82d4-3787f96df7d8",
+      "beta": "c54d4034-590e-43a3-82a3-262859858ff3",
+      "gamma": "b8eccbc9-98ba-4f61-9a6b-e90cbfbfd773",
+      "expectedInitialOrder": [
+        "ced5b98c-d603-4de0-82d4-3787f96df7d8",
+        "c54d4034-590e-43a3-82a3-262859858ff3",
+        "b8eccbc9-98ba-4f61-9a6b-e90cbfbfd773"
+      ],
+      "initialOrderVerification": "pending-visible-CUA",
+      "selected": "c54d4034-590e-43a3-82a3-262859858ff3",
+      "note": "public API state setup only; actual click/drag/hold require CUA and persisted readback"
+    },
+    "desktopSettingsPath": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-bkHCNj/home/Library/Application Support/LingXi Code/settings.v1.json",
+    "pendingCuaChecks": [
+      "Click Sidebar Alpha, drag Sidebar Gamma before Alpha, then inspect persisted order; no synthetic gesture claim.",
+      "Use CUA to confirm the real AbovePrompt form, Message input, Submit button and initial result.",
+      "Type packaged-host-cua-value and confirm the visible Input callback result updates.",
+      "Click Submit and confirm the visible Submit callback result updates."
+    ],
+    "stopFile": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-bkHCNj/STOP-HANDOFF",
+    "timeoutSeconds": 1800,
+    "stopReason": "control-file"
+  },
+  "providerCapturePath": "/var/folders/2c/gch8wj4s0d52rygkyd6b9f_h0000gn/T/lingxi-packaged-host-mod-bkHCNj/provider-capture.json"
+}

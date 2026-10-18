@@ -1,0 +1,1 @@
+{"type":"user","message":{"role":"user","content":"List the available tool names. Do not call tools. Reply exactly OK."},"parent_tool_use_id":null}

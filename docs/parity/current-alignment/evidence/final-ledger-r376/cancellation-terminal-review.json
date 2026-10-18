@@ -1,0 +1,73 @@
+{
+  "schema": "cancellation-terminal-independent-review-v3",
+  "review_revision": "r10-final",
+  "recommendation": "no_confirmed_source_blocker_in_known_scope",
+  "reviewed_heads": {
+    "harness": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+    "harness_parent": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+    "product": "8610f0535e719537e953ea553de3196f40a821ba"
+  },
+  "reviewed_inputs": {
+    "harness_runtime_run_rs_sha256": "f9afe39ea99eaffa8afb3097b53bfab8aa17ae13f3e28788a40aca768f30b8ee",
+    "harness_runtime_run_rs_diff_sha256": "0c24a988c61843714e5afaba51de859ec0efc60c2b52e491592cf041594ffd00",
+    "product_commands_native_cli_rs_sha256": "af62c3656a9d8b9b833c7b4766909c4a95d34ba9846bbdb885d53d9eda0ab1f0",
+    "product_commands_native_cli_rs_diff_sha256": "5948eddc84d4eb55fdb269663eeaaf2bd0e2814a8896615650e16a69b8cf4e91",
+    "fixtures": {
+      "README.md": "bc39c56ab085796bbb1e0ff25220e625e3f776d3453a23f41c44b070ba570184",
+      "stdout.raw": "589d30e369a75200eef22c16e72fc068716736f988352f1748991f9a559525c2",
+      "prompt-content.raw.json": "63738af050e51a7c05269ea26e17169ada3ac1ba1d41fec1ff88be3a8fb9647b",
+      "interrupt-content.raw.json": "ad710d55159f0013958b33520d37ce6d14c6f3647d93c09d005c7e545bebe228"
+    }
+  },
+  "r10_gate_evidence": {
+    "source": "acceptance/final-ledger-r376/harness-repair-gates-r10",
+    "reviewed_harness_commit": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+    "runtime_lib": {
+      "passed": 1468,
+      "failed": 0,
+      "ignored": 0,
+      "exit_code": 0
+    },
+    "fmt_exit_code": 0,
+    "changed_clippy_exit_code": 0,
+    "executed_by_reviewer": false
+  },
+  "prior_finding_resolution": {
+    "id": "CANCEL-HISTORY-BOUNDARY-1",
+    "status": "resolved_for_identity_preserving_compaction",
+    "evidence": "r10 passes the query MessageId through the existing public streaming entry point and searches history by that ID. Its positive publisher test replaces the old history prefix with a compact summary while retaining the query ID."
+  },
+  "confirmed_source_behavior_unverified_against_native": [
+    {
+      "id": "CANCEL-COMPACTION-ID-REFRESH-2",
+      "status": "unverified_not_allowed_difference",
+      "source_behavior_confirmed": "If a session.compact Mod returns changed rows, the compaction handler applies the Mod result and refreshes IDs on both summary and preserved tail rows. The cancellation classifier then fails to find the original query ID and takes the old success projection.",
+      "native_claim": "None. The extracted abort path only establishes aborted_streaming with a plain interruption user row; the Native print serializer for this Mod-renumbered history is unavailable, so its envelope and num_turns are unknown.",
+      "review_classification": "Do not report as a confirmed source parity bug and do not classify as an allowed difference. Keep the case unverified."
+    }
+  ],
+  "other_unverified_boundary": {
+    "status": "unverified_not_allowed_difference",
+    "details": "Cancellation before turn admission leaves no stored query row with the allocated ID, so this classifier does not match. A later loop-top cancellation after prompt admission but before model dispatch can append the plain interruption row and match. Native evidence covers only cancellation after the loopback POST was accepted; do not infer the print result for the post-admission/pre-request case."
+  },
+  "confirmed_test_boundaries": [
+    "The positive publisher test manually replaces history with a compact summary, the same query ID, and the interrupt row; it does not cover a Mod that regenerates preserved-tail IDs.",
+    "Negative tests retain success projection for partial assistant output and the tool-use interruption string.",
+    "Product --output-format json routes through StreamJsonStream and the changed one-shot publisher; multi-turn --input-format stream-json remains on the generic publisher.",
+    "The Product integration test compares selected result fields and raw content tokens, not whole stdout or transcript bytes."
+  ],
+  "timeout_review": {
+    "child_exit_deadline_seconds": 60,
+    "stub_request_read_timeout_seconds": 10,
+    "deadlock_confirmed": false,
+    "caveat": "wait_with_output() has no timeout after child exit/kill, so the deadline strictly bounds child-exit observation rather than every hypothetical descendant-held-pipe failure."
+  },
+  "checks_not_run_by_reviewer": ["Cargo", "Native"],
+  "source_or_test_files_modified_by_reviewer": false,
+  "preserved_prior_reviews": [
+    "cancellation-terminal-review-r9.md",
+    "cancellation-terminal-review-r9.json",
+    "cancellation-terminal-review-r10-initial.md",
+    "cancellation-terminal-review-r10-initial.json"
+  ]
+}

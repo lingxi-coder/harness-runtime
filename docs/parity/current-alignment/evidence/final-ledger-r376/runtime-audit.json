@@ -1,0 +1,2069 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-audit.v1",
+  "purpose": "Runtime/tools/permission/MCP/commands/skills/agents/tasks/prompt/session contract evidence audit for Claude Code 2.1.295",
+  "disposition": "Runtime audit for Native Claude Code 2.1.295. Current H candidate is 44f2eef5baf8ae16254934dbca451cbfd528d955; H r10 formatting, Runtime library (1468/0/0), and changed-package Clippy passed. Product 17593eaa66dc762d5c9c581ba348398c914bdbcd full gate passed 2740/0/4 across 8 phases, 40 executable targets and 9 doctest targets; the public SIGINT regression and run04 passed on the pinned Product/H/SDK set. Five Android/iOS platform logs and the final macOS package gate passed, including scoped actual visible CUA. The 20-phase finalizer passed. Native alias probe remains capture_invalid and Native LTr regex semantics remain unknown. Cancellation evidence remains limited to the captured stream-opening shape; no universal Native byte-parity claim is made.",
+  "scope": {
+    "native_version": "2.1.295",
+    "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+    "current_heads": {
+      "harness_runtime": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "llm_client": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+      "product": "17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    },
+    "source_matrix": "harness-runtime/docs/parity/current-alignment/current-matrix.md",
+    "source_matrix_sha256": "e93551bdbb6ac06ffa477f25a6d08c22371e15b36df8a39d7d37f9670997e66b",
+    "scope_exclusions": [
+      "Remote parity is excluded.",
+      "Local Apps Native parity is excluded; only Local App bug fixes remain in scope.",
+      "Computer Use implementation from other sessions is preserved and outside this runtime audit."
+    ],
+    "audit_cutoff": "2026-10-18 final receipts; H candidate 44f2eef5baf8ae16254934dbca451cbfd528d955; Product candidate 17593eaa66dc762d5c9c581ba348398c914bdbcd",
+    "baseline_heads": {
+      "harness_runtime": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+      "llm_client": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+      "product": "f71087b428665c30d0bd752e16f76cb53ab7fef6"
+    },
+    "harness_delivery": {
+      "head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "based_on_delivered_head": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+      "pushed_to_main": null,
+      "remote_divergence": "not verified for H 44f2 candidate",
+      "r10_source_delta": "crates/runtime/src/headless/run.rs only",
+      "source_reuse_binding": "The r6/r7/r8 gates and r6 test-only follow-up proof remain bound to H b3864c6. H r10 independently verifies the changed Runtime source on 44f2 with fmt, runtime-lib 1468/0/0, and changed-package Clippy. Do not treat the r10 affected gates as a full-workspace rerun."
+    },
+    "product_pending": {
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "tracked_source_status": "Tracked source is committed at Product 17593; current P status shows only untracked acceptance/ artifacts.",
+      "dirty_rust_files": [],
+      "preflight": {
+        "path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045",
+        "identities_file": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/identities.txt",
+        "pins": {
+          "product": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+          "harness": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+          "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+          "mobile": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+        },
+        "progress_log": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/gate-logs/progress.log",
+        "progress_log_sha256": "a6b2e3d5b7811aa619b71a5f38525b49f57a223fd20142f9ec963a547e3918ee",
+        "phases": {
+          "metadata": {
+            "status": "passed",
+            "exit_code": 0
+          },
+          "source-validator": {
+            "status": "passed",
+            "exit_code": 0,
+            "log_sha256": "1b8d41fbaa7aa2cfea5b431d177824001a74e56c1eacf24db9020493d43aade7"
+          },
+          "fmt": {
+            "status": "passed",
+            "exit_code": 0,
+            "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          },
+          "check": {
+            "status": "passed",
+            "exit_code": 0,
+            "log_sha256": "282fc6a591558776f68ff0fd52883446c628806d43367d2ff3815c00453ed860"
+          },
+          "clippy": {
+            "status": "passed",
+            "exit_code": 0,
+            "log_sha256": "d2b6780620588a8c704c8f40100a90c2ebd106dd9c62d62541d045490c53843a"
+          },
+          "skill-cold": {
+            "status": "passed",
+            "exit_code": 0,
+            "log_sha256": "cdc1a1516862cc5ffd58c727d11d2b86bebfafdee3ff892dbcdab60bd5ec9cd1",
+            "result": "cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire: 1 passed, 0 failed, 0 ignored, 2 filtered; 7.90s"
+          }
+        },
+        "full_runner": {
+          "status": "passed",
+          "receipt": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/run.json",
+          "sha256": "6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e",
+          "aggregate": {
+            "passed": 2740,
+            "failed": 0,
+            "ignored": 4
+          },
+          "coverage": {
+            "phases": 8,
+            "executable_test_targets": 40,
+            "doctest_targets": 9
+          },
+          "fingerprint": "f6fbe3b047f91732265849d323aec620fd3f19d19c9f4ed66ea3b49bb7a9e7e1"
+        }
+      },
+      "public_cli_sigint_regression": {
+        "source": "lingxi-app/apps/cli/host/tests/commands_native_cli.rs",
+        "source_sha256": "af62c3656a9d8b9b833c7b4766909c4a95d34ba9846bbdb885d53d9eda0ab1f0",
+        "test": "public_cli_sigint_during_stream_open_matches_native_2_1_295",
+        "status": "passed_in_Product_17593_full_runner_and_run04",
+        "selector": "cargo test -p lingxi-cli --test commands_native_cli public_cli_sigint_during_stream_open_matches_native_2_1_295 -- --exact",
+        "fixture": "lingxi-app/apps/cli/host/tests/fixtures/cli-cancel-native-295/",
+        "evidence": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/phases/integration-tests-02/stdout.jsonl",
+        "evidence_sha256": "9f7afbbfdd3115a64e974cc30926a49d779182f595ce3e770adde9960eac1efb",
+        "phase_receipt": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/phases/integration-tests-02/phase.json",
+        "phase_receipt_sha256": "d33cc492ef3bb4430a5d75ff407d1f6fbe0a70111b92118e3bf659945fdcac84",
+        "phase_result": "integration-tests-02: 20 passed, 0 failed, 2 ignored; the named public SIGINT regression logged ok",
+        "focused_group_result": "3 passed, 0 failed, 0 ignored",
+        "run04": {
+          "status": "passed",
+          "receipt": "acceptance/final-ledger-r376/cli-sigint-candidate-run-04-17593eaa66-20261018T091547Z-1496/receipt.json",
+          "sha256": "a99af6f15e9dd53646658065b00e391e8331db97f2fab61608ce8f1d1a7bde0e",
+          "product_head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+          "harness_head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+          "elapsed_seconds": 4.071,
+          "candidate_exit_code": 0,
+          "sigint_after_full_post_accepted": true,
+          "provider_response_sent": false,
+          "timed_out": false,
+          "forced_cleanup": false,
+          "checks": "15/15 true",
+          "terminal_fields_match_native_constraints": true,
+          "no_assistant_transcript_row": true,
+          "prompt_and_interrupt_content_slices_match_native": true,
+          "comparison_limit": "Exact byte comparison covers stable prompt/interruption content slices only. Full stdout/session row bytes are not compared because UUID, timestamp, cwd, duration and envelope fields are dynamic."
+        },
+        "run04_receipt": "acceptance/final-ledger-r376/cli-sigint-candidate-run-04-17593eaa66-20261018T091547Z-1496/receipt.json",
+        "run04_receipt_sha256": "a99af6f15e9dd53646658065b00e391e8331db97f2fab61608ce8f1d1a7bde0e"
+      },
+      "full_runner": {
+        "status": "complete",
+        "path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/run.json",
+        "sha256": "6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e",
+        "recorded_head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+        "pins": {
+          "harness": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+          "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+          "mobile": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+        },
+        "aggregate": {
+          "passed": 2740,
+          "failed": 0,
+          "ignored": 4
+        },
+        "coverage": {
+          "phases": 8,
+          "executable_test_targets": 40,
+          "doctest_targets": 9
+        },
+        "runner_fingerprint": "f6fbe3b047f91732265849d323aec620fd3f19d19c9f4ed66ea3b49bb7a9e7e1",
+        "metadata_sha256": "db73e1fa409183fd7443b811eb2190d72ab96416685843fbddff3b4582f84222",
+        "identity_sha256": "e8e1fe2b04b3b8b275bada632d6746837b7f46865911440617e7a855edce7235",
+        "plan_sha256": "5668f4030e21238e8b44dc05c6f32324ecb08b78b316d11bf4dee718d4ca8f58",
+        "source_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "phase_results": {
+          "library-tests": "2,548 passed, 0 failed, 2 ignored",
+          "binary-tests-01": "2 passed, 0 failed",
+          "integration-tests-01": "49 passed, 0 failed",
+          "integration-tests-02": "20 passed, 0 failed, 2 ignored",
+          "integration-tests-03": "15 passed, 0 failed",
+          "integration-tests-04": "98 passed, 0 failed",
+          "integration-tests-05": "8 passed, 0 failed",
+          "doctests": "9 targets passed"
+        },
+        "reuse_limit": "Complete Product gate for the pinned P/H/SDK/Mobile identities. It establishes this suite result, not universal Native byte parity or untested cancellation shapes."
+      },
+      "pending": [],
+      "runner_receipt": {
+        "status": "passed",
+        "path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/run.json",
+        "sha256": "6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e",
+        "aggregate": {
+          "passed": 2740,
+          "failed": 0,
+          "ignored": 4
+        },
+        "coverage": {
+          "phases": 8,
+          "executable_test_targets": 40,
+          "doctest_targets": 9
+        }
+      },
+      "cli_8mib": {
+        "status": "passed",
+        "log": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/gate-logs/cli-8mib.log",
+        "sha256": "327a9cc97dc67d29d71ddabf56815175076fa9baa95e659ec61505ff13e11c4b",
+        "progress_log": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/gate-logs/progress.log",
+        "progress_log_sha256": "a6b2e3d5b7811aa619b71a5f38525b49f57a223fd20142f9ec963a547e3918ee",
+        "result": "8 MiB CLI acceptance phase exited 0"
+      },
+      "platform_acceptance": {
+        "status": "passed",
+        "root": "/private/tmp/repaired-h-product-r376-17593eaa66-20261018T083723Z-63256/platform",
+        "log_count": 5,
+        "logs": {
+          "android-arm64-computer-use.log": {
+            "status": "passed",
+            "sha256": "41b76d53724671b1abdb24c54ed8ffcbb92a1772c6fabe9f73a9007d8383d7e0"
+          },
+          "android-arm64-default.log": {
+            "status": "passed",
+            "sha256": "63ed073b13b049eacb09d99c378397575478deae9cde37e2e18a3e0e8cb5e451"
+          },
+          "android-x86_64-computer-use.log": {
+            "status": "passed",
+            "sha256": "d77b8d39bc4bab2db4a77801d1933d7fe992666a31a8590d39b5b0eb6b8b44be"
+          },
+          "android-x86_64-default.log": {
+            "status": "passed",
+            "sha256": "ab4d6c87243ddba028bd6372479fc8eeaec9ab3b16035136cf7e43b4aeb00203"
+          },
+          "ios-simulator-default.log": {
+            "status": "passed",
+            "sha256": "ce8c5e99e0af7d31bf0534af5c33734c2a64f5886f70c6f08325a09169189764"
+          }
+        },
+        "reuse_limit": "All five Android/iOS platform logs pass on the pinned Product/H/SDK/Mobile set; the separate macOS package receipt also passed and is recorded at scope.product_pending.mac_package."
+      },
+      "standalone_run04": {
+        "status": "passed",
+        "receipt": "acceptance/final-ledger-r376/cli-sigint-candidate-run-04-17593eaa66-20261018T091547Z-1496/receipt.json",
+        "sha256": "a99af6f15e9dd53646658065b00e391e8331db97f2fab61608ce8f1d1a7bde0e",
+        "product_head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+        "harness_head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+        "elapsed_seconds": 4.071,
+        "candidate_exit_code": 0,
+        "sigint_after_full_post_accepted": true,
+        "provider_response_sent": false,
+        "timed_out": false,
+        "forced_cleanup": false,
+        "checks": "15/15 true",
+        "terminal_fields_match_native_constraints": true,
+        "no_assistant_transcript_row": true,
+        "prompt_and_interrupt_content_slices_match_native": true,
+        "comparison_limit": "Exact byte comparison covers stable prompt/interruption content slices only. Full stdout/session row bytes are not compared because UUID, timestamp, cwd, duration and envelope fields are dynamic."
+      },
+      "acceptance_status": "passed_for_recorded_product_gates",
+      "mac_package": {
+        "status": "passed",
+        "receipt": "acceptance/final-ledger-r376/receipts/mac-package-final-17593.json",
+        "sha256": "6e4f1ce2eba4d069f9219603b6043b64ce0cb8f2e7b4e71645710e2b37fbb337",
+        "pins": {
+          "product": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+          "harness": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+          "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e"
+        },
+        "static_audit": "passed",
+        "startup_smoke": "passed",
+        "independent_audit": "passed",
+        "actual_visible_cua": {
+          "status": "passed",
+          "typed_then_appended": "packaged-host-cua-valuexy",
+          "submit_result": "Submit callback accepted: packaged-host-cua-valuexy",
+          "screenshot_sha256": "28be6f881ae2844132ea366dad0174632ec2cffb7feaabe4c5c870dcffde7b0c"
+        },
+        "cleanup": {
+          "provider_credentials": "cleared",
+          "app_pid_52288": "exited"
+        },
+        "package_sha256": "64c8a4d7a441f53c5dc9990d13f3ea4930f1ead72c2df52759565102f73481de",
+        "app_asar_sha256": "21462a3c01035cd13bb3785dcfcc11ad474ea6f22b6fde0357db352fa23ecb06",
+        "limitations": [
+          "Development signing only; no notarization or stapling claim.",
+          "Visible CUA evidence covers the recorded packaged form and Submit flow only.",
+          "This package receipt does not certify all Native parity contracts."
+        ]
+      },
+      "finalizer": {
+        "status": "passed",
+        "repair_receipt": "acceptance/final-ledger-r376/repairs-final-17593-v2.json",
+        "repair_receipt_sha256": "86f1d03e74063b3f1db4ec47416e924562bd9c08cbefdf9848fd347631e1465f",
+        "baseline_receipt": "acceptance/final-ledger-r376/final-baseline-17593-v2.json",
+        "baseline_receipt_sha256": "32663a6fb64ab1563d6d0ebd54181412ab8611c09994425b9bb4a2452ea8a4e3",
+        "selected_gate_phase_count": 20,
+        "product_runner_phase_count": 8,
+        "binding": "The receipts bind Product 17593/H 44f2/SDK a363; final-baseline references the exact repairs receipt hash."
+      }
+    },
+    "prior_main_delivery_b3864c6": {
+      "head": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+      "pushed_to_main": true,
+      "remote_divergence": "0/0 (Root-verified)",
+      "source_reuse_binding": "acceptance/final-ledger-r376/r6-test-only-followup-proof.json + harness-stage-gate-receipt.json; do not transfer r6 gate results to another H source patch without this exact proof chain"
+    }
+  },
+  "evidence_reuse": {
+    "H_r271": {
+      "path": "/private/tmp/h-full-gate-final-r271-20261017/run.json",
+      "recorded_head": "dc6ce1217143b693d97ab6278ff66568beea20d3",
+      "status": "complete",
+      "aggregate": {
+        "passed": 20471,
+        "failed": 0,
+        "ignored": 7
+      },
+      "selected_phases": {
+        "integration-05": "MCP roundtrip/result-presence targets passed; phase aggregate 11 passed, 0 failed.",
+        "integration-06": "Glob output/reminder targets passed; phase aggregate 6 passed, 0 failed.",
+        "integration-08": "current_alignment_cancel executed; phase aggregate 15 passed, 0 failed.",
+        "integration-24": "bash_input_validation executed; phase passed."
+      },
+      "reuse_limit": "H run commit differs from current H HEAD. Reuse only reviewed paths whose current Git blob OIDs match the run commit; do not treat the run as a blanket full-current-HEAD proof."
+    },
+    "H_r296_runtime": {
+      "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/h-r296/runtime-lib-allfeatures.log",
+      "selected_results": [
+        "headless::run::native_commands_295_replay_tests::native_295_commands_fixture_replay_through_headless_entry passed in 1463-test all-features runtime library run."
+      ],
+      "other_source": "focused-profile-switch.log: selected profile-switch test passed 1/1."
+    },
+    "Product_r375": {
+      "path": "/private/tmp/product-full-r342-r375-20261018T014521Z-68469/runner/run.json",
+      "recorded_head": "f71087b428665c30d0bd752e16f76cb53ab7fef6",
+      "status": "complete",
+      "selected_targets": {
+        "integration-tests-02/commands_native_cli": "passed; product phase aggregate 18 passed, 0 failed, 2 ignored.",
+        "integration-tests-04/provider_error_cli": "6 passed, 0 failed."
+      },
+      "reuse_limit": "Product run HEAD equals the current Product HEAD. The CLI tests intentionally compare selected raw fields/units and constraints; they do not assert complete stdout byte equality."
+    },
+    "X5e_r46": {
+      "path": "acceptance/r46-sessionx-native-replay-20261014-01/freeze-end.json",
+      "selected_results": [
+        "route_lines_uses_native_javascript_trim_for_each_jsonl_row: 1 passed, 0 failed.",
+        "typed_row_routing_matches_a_full_route_with_escaped_types: 1 passed, 0 failed."
+      ],
+      "other_result": "The same freeze records an earlier native_295_commands fixture replay ordering failure. That result is superseded by the applied request-order repair and passing current H r296 runtime replay; it must not be carried forward as current."
+    },
+    "H_r3": {
+      "path": "acceptance/final-ledger-r376/harness-repair-run-r3.log",
+      "status": "historical selected gates passed; superseded by final source-bound r6/r7/r8 receipts",
+      "selected_results": {
+        "orchestrator-lib": "2,103 passed",
+        "runtime-lib": "1,465 passed with --test-threads=2; the earlier parallel 1-failure run was retained, and its target passed in isolated and 2-thread reruns",
+        "changed-clippy": "passed (exit 0)",
+        "actual-http-cancel": "current_alignment_cancel 1/1 passed; the test reaches the loopback provider HTTP path and verifies Orchestrator output/JSONL cancellation/session projection"
+      },
+      "reuse_limit": "Retained for historical context only. Use H_final_stage_gate plus r6-test-only-followup-proof for final H status and permitted source reuse."
+    },
+    "H_r2": {
+      "path": "acceptance/final-ledger-r376/harness-repair-run-r2.log",
+      "status": "historical selected gates passed; superseded by final source-bound r6 receipt",
+      "selected_results": {
+        "permission-lib": "1,777 passed",
+        "agent-lib": "724 passed",
+        "tasks-lib": "555 passed",
+        "orchestrator-lib": "2,103 passed",
+        "actual-http-cancel": "cancel-inflight selector 1/1 passed"
+      },
+      "reuse_limit": "Retained for historical context only. Use H_final_stage_gate plus r6-test-only-followup-proof for final H status and permitted source reuse."
+    },
+    "H_r5_cutoff": {
+      "path": "acceptance/final-ledger-r376/harness-repair-run-r5.log",
+      "status": "superseded historical cutoff; not the final H result",
+      "selected_results": {
+        "fmt": "passed (exit 0)",
+        "permission-lib": "1,779 passed (exit 0)",
+        "agent-lib": "compiling; no result receipt at cutoff; two unused PermissionGate imports were reported in agent/tasks and Root owns the follow-up source cleanup/r6 rerun"
+      },
+      "reuse_limit": "Use the r6/r7/r8 final source-bound receipts below for H b3864c6; the r5 partial gate is retained only as history."
+    },
+    "TURN3_public_cli_candidate": {
+      "receipt": "acceptance/final-ledger-r376/cli-sigint-candidate-run-03/receipt.json",
+      "sha256": "c9703e2f1e3aa7ea4e22f85ead483c4682c8ab1e42d0f94f3643974ecb65dbf3",
+      "status": "observed candidate failure, current Product r375 binary",
+      "result": "one loopback provider POST was accepted; SIGINT was sent while waiting; candidate timed out at 62.329 s and was killed; no terminal JSON envelope or interruption JSONL row was observed",
+      "reuse_limit": "This establishes a concrete public CLI behavior mismatch for the tested candidate but does not localize the responsible source branch."
+    },
+    "Native_alias_probe": {
+      "receipt": "acceptance/final-ledger-r376/native-ltr-alias-probe-approved-endpoint-run/receipt.json",
+      "sha256": "a85c269e7cb21c8df4abed2884d72c0174a727ebc32a5f67b8ecc680ca880514",
+      "status": "capture_invalid; no semantic inference",
+      "observed": "Pinned process ACKed initialize, made one accepted loopback Messages POST and exited normally; positive Edit-deny control failed and all six aliased canonical tools remained advertised.",
+      "reuse_limit": "The invalid positive control means no LTr glob/newline/content outcome can be inferred. Root directed that no repeat be run."
+    },
+    "H_final_stage_gate": {
+      "path": "acceptance/final-ledger-r376/harness-stage-gate-receipt.json",
+      "sha256": "d4f3a66dc99d329caad1338a3ae870f3a44d55fa13856be55fdfbfb33ec26c53",
+      "status": "passed",
+      "harness_sha": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+      "base_harness": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+      "sdk_sha": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+      "final_source_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+      "test_only_followup_proof": {
+        "path": "acceptance/final-ledger-r376/r6-test-only-followup-proof.json",
+        "sha256": "9769a9edd2268fc241f3d7476c3f02eb85b31ff898c2b576edecd7cbe83a81db",
+        "status": "verified",
+        "path_delta": "crates/runtime/src/headless/run/control.rs only",
+        "delta": "cfg(test) import/name/lint annotation only; production prefix hash unchanged; all other source diff sections identical",
+        "previous_source_patch_sha256": "003a26f77af1f79c8af2dbce79bed0f3b5c28af6810c4e7ec93433668d9d733b",
+        "current_source_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+        "reused_phases": [
+          "permission-lib",
+          "agent-lib",
+          "tasks-lib",
+          "cancel-inflight",
+          "orchestrator-lib"
+        ]
+      },
+      "phases": {
+        "r6": {
+          "permission-lib": "1,779 passed",
+          "agent-lib": "725 passed",
+          "tasks-lib": "555 passed",
+          "cancel-inflight": "1 passed (actual loopback HTTP cancellation)",
+          "orchestrator-lib": "2,103 passed"
+        },
+        "r7": {
+          "runtime-lib": "1,466 passed",
+          "changed-clippy": "passed for the seven affected package set"
+        },
+        "r8": {
+          "hooks-lib": "852 passed, 0 failed, 1 ignored",
+          "hooks-focused": "1 passed",
+          "changed-docs": "passed; 233 warnings, no new changed-line warning; existing private-link warning on a modified line"
+        }
+      },
+      "phase_receipts": "See per-phase paths and SHA-256 values in this receipt. r6 reused results are valid for b3864c6 only because the referenced test-only follow-up proof verified production-prefix and all-other-source identity.",
+      "delivery": "Pushed to main; remote divergence 0/0 (Root-verified)",
+      "scope": "Affected H source gates plus proof-bounded test-only reuse; not a blanket full-workspace rerun or universal Native-byte pass"
+    },
+    "H_r6": {
+      "path": "acceptance/final-ledger-r376/harness-repair-gates-r6/",
+      "status": "passed; exact source reuse bound by H_final_stage_gate.test_only_followup_proof",
+      "selected_results": {
+        "permission-lib": "1,779 passed",
+        "agent-lib": "725 passed",
+        "tasks-lib": "555 passed",
+        "cancel-inflight": "1/1 actual loopback HTTP cancellation",
+        "orchestrator-lib": "2,103 passed"
+      },
+      "source_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+      "reuse_limit": "The test-only follow-up proof verifies only the cfg(test) changes in runtime/src/headless/run/control.rs and identical production prefix/all other source diff sections; the stage receipt binds this to final H b3864c6."
+    },
+    "H_r7": {
+      "path": "acceptance/final-ledger-r376/harness-repair-gates-r7/",
+      "status": "passed on final source patch f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+      "selected_results": {
+        "runtime-lib": "1,466 passed",
+        "changed-clippy": "passed for seven affected packages"
+      },
+      "reuse_limit": "Bound to H b3864c6 by harness-stage-gate-receipt.json."
+    },
+    "H_r8": {
+      "path": "acceptance/final-ledger-r376/harness-repair-gates-r8/",
+      "status": "passed on final source patch f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+      "selected_results": {
+        "hooks-lib": "852 passed, 0 failed, 1 ignored",
+        "hooks-focused": "1 passed",
+        "normal-docs": "passed; 233 warnings, no new changed-line warning; the existing private-item link warning is on a modified line"
+      },
+      "reuse_limit": "Bound to H b3864c6 by harness-stage-gate-receipt.json; not warnings-as-errors Rustdoc and not a blanket full-workspace rerun."
+    },
+    "Product_r376_skill_cold": {
+      "path": "/private/tmp/product-full-r342-r376-20261018T072935Z-27472/gate-logs/skill-cold.log",
+      "sha256": "e3ab386928af15579a3fce03e68d0386c716e3e3dbf11d44fa963af028421aff",
+      "status": "passed; exact selected cold-resume regression",
+      "command": "cargo test --locked --offline -p cli --test commands_native_cli cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire -- --exact --nocapture",
+      "result": "test cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire ... ok; 1 passed, 0 failed, 0 ignored, 1 filtered; finished in 7.00s; progress.log records EXIT skill-cold 0",
+      "identity_file": "/private/tmp/product-full-r342-r376-20261018T072935Z-27472/identities.txt",
+      "identity_file_sha256": "5371ff391a9adf284d4b316bb9d897b6d3f3354504d96abad9e4ffbc031bd69d",
+      "pins": {
+        "product": "8610f0535e719537e953ea553de3196f40a821ba",
+        "harness": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+        "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+        "mobile": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+      },
+      "source_guard": {
+        "pre": "/private/tmp/product-full-r342-r376-20261018T072935Z-27472/gate-logs/source-guard-skill-cold-pre.json",
+        "pre_sha256": "4c7432ff3bc525deffe81cf7dbb56d41516e91b8e8c0af7be27c295a2db010f0",
+        "post": "/private/tmp/product-full-r342-r376-20261018T072935Z-27472/gate-logs/source-guard-skill-cold-post.json",
+        "post_sha256": "626433d473206406810b664f0833ee74fff40275e38a90a3478715390026c6e7",
+        "both_status": "guarded",
+        "note": "These guard snapshots verify dependency pin/free-space preconditions; Product source identity is bound by identities.txt and the runner metadata/run receipt."
+      },
+      "source_test": "lingxi-app/apps/cli/host/tests/commands_native_cli.rs SHA-256 d44afa576bd609361b7944c6b20c1b58bf635d015371cf1717e56274d039dbf1",
+      "observed_behavior": "First CLI process consumes the pinned unpaired-surrogate Skill fixture and persists escaped \\ud800 plus U+D800 source units. A fresh CLI process resumes the same session, emits one request, preserves the original U+D800 row in JSONL, projects it to U+FFFD in the Anthropic request, includes the continuation prompt once and retains the session.",
+      "boundary": "This closes the Product two-process cold-resume regression for the fixed fixture. The Native fixture is for the first turn only; no Native cold-resume transcript/request oracle exists, so this does not establish complete Native cold-byte parity.",
+      "supersedes_stale_attempt": {
+        "path": "acceptance/final-ledger-r376/skill-cold-current.log",
+        "sha256": "4dda0c16e246e46d68b87fcc9358c231d0fcfba3e4694cb626c30c7086bb6439",
+        "mtime": "2026-10-17 22:12:13",
+        "status": "older pre-r376 compile attempt failed before the test ran; not evidence for Product 8610",
+        "reason": "The authoritative current-head run is the r376 gate log above, with an explicit test result and Product 8610 identity."
+      },
+      "full_runner_snapshot_after_focused_test": {
+        "path": "/private/tmp/product-full-r342-r376-20261018T072935Z-27472/runner/run.json",
+        "sha256_at_snapshot": "887a8a8ff3fd9ab7faf4a4d09ad6d88634a42455be8534b80eee0f0a6a9669c7",
+        "product_head": "8610f0535e719537e953ea553de3196f40a821ba",
+        "state": "blocked by disk safety stop after four phases passed",
+        "passed_phases": {
+          "library-tests": {
+            "status": "passed",
+            "phase_json_sha256": "ed4c834dab96d703cdfd67e8559b73b50d9db1506d6d86d3da4a9a13a88d957f",
+            "failed": 0,
+            "ignored": 2,
+            "passed": 2548,
+            "exit_code": 0
+          },
+          "binary-tests-01": {
+            "status": "passed",
+            "phase_json_sha256": "4559b80571ed8f5201477406af287e4542d002573b7089ef5f234e671975bd9e",
+            "failed": 0,
+            "ignored": 0,
+            "passed": 2,
+            "exit_code": 0
+          },
+          "integration-tests-01": {
+            "status": "passed",
+            "phase_json_sha256": "d83c6bca1b5c2d9bab8a66209809584536f69ed8d6b6a8cc90403833890ddc05",
+            "failed": 0,
+            "ignored": 0,
+            "passed": 49,
+            "exit_code": 0
+          },
+          "integration-tests-02": {
+            "status": "passed",
+            "phase_json_sha256": "21bd595a516a415ea7de90e3bccb746ebb503cc777de6078e7861a4bab524d21",
+            "failed": 0,
+            "ignored": 2,
+            "passed": 19,
+            "exit_code": 0
+          }
+        },
+        "failure": "target/results free=586092544 bytes; minimum=3221225472 bytes",
+        "boundary": "This is the later full-runner state, not the focused cold test receipt. The isolated gate log, command and EXIT 0 marker are the direct cold-test evidence."
+      }
+    },
+    "H_r10": {
+      "path": "acceptance/final-ledger-r376/harness-repair-gates-r10/",
+      "candidate_head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "source_patch_sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03",
+      "status": "passed",
+      "selected_results": {
+        "runtime-lib": {
+          "result": "1468 passed, 0 failed, 0 ignored",
+          "log": "acceptance/final-ledger-r376/harness-repair-gates-r10/runtime-lib.log",
+          "sha256": "c632575a78d8bd17e13f52a2b2703106d990f2a1ea0315ff74dbf4c15c03a24a",
+          "selector": "pending_stream_interrupt_publishes_native_error_frame_but_exits_successfully"
+        },
+        "fmt": {
+          "exit_code": 0,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "changed-clippy": {
+          "exit_code": 0,
+          "log_sha256": "6a6ac311fc8ba74d7c2ebba02937f97dda309ae395d57223022104b6b1bfa35d"
+        }
+      },
+      "source_delta": "Only crates/runtime/src/headless/run.rs changed from H b3864c6.",
+      "scope_limit": "The native terminal projection is gated to an interrupted print query with a plain user interruption row and no assistant row. Compact-regenerated message IDs, partial assistant output, pre-admission cancellation, and other cancellation shapes have no Native proof and remain unverified.",
+      "reuse_limit": "This is an affected-source/runtime gate, not a blanket full-workspace or Native-byte pass. Earlier r6/r7/r8 results remain historically bound to b3864c6.",
+      "source_patch_sha_file_sha256": "01e670a77ff5ea631810445974c4cff267374f16197a8e9167101c1715667318"
+    },
+    "Product_8610_run04": {
+      "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/final-ledger-r376/cli-sigint-candidate-run-04-8610f0535e-20261018T075836Z-74204/receipt.json",
+      "sha256": "4cc1362958a66392e097b9c38670bbe65d2179f13f4a60a4e9cd9d6c6b14008b",
+      "product_head": "8610f0535e719537e953ea553de3196f40a821ba",
+      "status": "failed",
+      "checks": {
+        "product_cli_binary_bound_to_requested_gate": true,
+        "one_accepted_dummy_key_messages_post": true,
+        "request_is_fixed_model_stream_and_prompt": true,
+        "sigint_sent_after_full_post_accepted": true,
+        "stub_sent_no_provider_response": true,
+        "process_exited_without_forced_cleanup": true,
+        "process_exit_code_matches_native": true,
+        "stdout_terminal_fields_match_native_constraints": false,
+        "one_session_transcript_found_and_rows_parse": true,
+        "prompt_content_slice_byte_matches_native": true,
+        "interrupt_content_slice_byte_matches_native": true,
+        "prompt_precedes_interrupt": true,
+        "no_assistant_transcript_row": true,
+        "session_bearing_rows_use_fixed_bare_uuid": true,
+        "single_process_under_60s": true
+      },
+      "stdout_terminal_fields": {
+        "type": "result",
+        "is_error": false,
+        "terminal_reason": "completed",
+        "subtype": "success",
+        "stop_reason": "end_turn",
+        "num_turns": 1,
+        "session_id": "00000000-0000-4000-8000-000000002940"
+      },
+      "native_terminal_fields": {
+        "type": "result",
+        "is_error": true,
+        "terminal_reason": "aborted_streaming",
+        "subtype": "error_during_execution",
+        "stop_reason": null,
+        "num_turns": 2,
+        "session_id": "00000000-0000-4000-8000-000000002940",
+        "errors": [
+          "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"
+        ]
+      },
+      "result": "One accepted loopback POST, SIGINT after the complete request, withheld provider response, normal exit 0 and prompt/interruption rows; the stdout terminal-field comparison failed.",
+      "reuse_limit": "This is bound to Product 8610 only. It proves neither behavior nor failure for Product 17593."
+    },
+    "Product_17593_preflight": {
+      "path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045",
+      "identities": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/identities.txt",
+      "status": "passed: metadata/source-validator/fmt/check/Clippy/skill-cold; full runner complete",
+      "progress_log_sha256": "a6b2e3d5b7811aa619b71a5f38525b49f57a223fd20142f9ec963a547e3918ee",
+      "pins": {
+        "product": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+        "harness": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+        "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+        "mobile": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+      },
+      "full_runner_receipt": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/run.json",
+      "skill_cold_log_sha256": "cdc1a1516862cc5ffd58c727d11d2b86bebfafdee3ff892dbcdab60bd5ec9cd1",
+      "full_runner_sha256": "6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e"
+    },
+    "Product_17593_sigint_test": {
+      "path": "lingxi-app/apps/cli/host/tests/commands_native_cli.rs",
+      "sha256": "af62c3656a9d8b9b833c7b4766909c4a95d34ba9846bbdb885d53d9eda0ab1f0",
+      "test": "public_cli_sigint_during_stream_open_matches_native_2_1_295",
+      "status": "passed in Product 17593 full-runner integration-tests-02",
+      "selector": "cargo test -p lingxi-cli --test commands_native_cli public_cli_sigint_during_stream_open_matches_native_2_1_295 -- --exact",
+      "native_fixture": "lingxi-app/apps/cli/host/tests/fixtures/cli-cancel-native-295/",
+      "scope": "One public CLI state from the 2.1.295 capture: complete streaming POST accepted, no provider response, SIGINT, and no assistant row. Other cancellation shapes are not implied.",
+      "phase_result": "20 passed, 0 failed, 2 ignored; named public_cli_sigint_during_stream_open_matches_native_2_1_295 logged ok",
+      "focused_group_result": "3 passed, 0 failed, 0 ignored",
+      "stdout_jsonl": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/phases/integration-tests-02/stdout.jsonl",
+      "stdout_jsonl_sha256": "9f7afbbfdd3115a64e974cc30926a49d779182f595ce3e770adde9960eac1efb",
+      "phase_receipt": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/phases/integration-tests-02/phase.json",
+      "phase_receipt_sha256": "d33cc492ef3bb4430a5d75ff407d1f6fbe0a70111b92118e3bf659945fdcac84",
+      "standalone_run04": "passed; 15/15 checks true, process exit 0, no forced cleanup, elapsed 4.071s"
+    },
+    "Product_17593_full_runner": {
+      "status": "complete",
+      "path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/run.json",
+      "sha256": "6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e",
+      "recorded_head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "pins": {
+        "harness": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+        "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+        "mobile": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+      },
+      "aggregate": {
+        "passed": 2740,
+        "failed": 0,
+        "ignored": 4
+      },
+      "coverage": {
+        "phases": 8,
+        "executable_test_targets": 40,
+        "doctest_targets": 9
+      },
+      "runner_fingerprint": "f6fbe3b047f91732265849d323aec620fd3f19d19c9f4ed66ea3b49bb7a9e7e1",
+      "metadata_sha256": "db73e1fa409183fd7443b811eb2190d72ab96416685843fbddff3b4582f84222",
+      "identity_sha256": "e8e1fe2b04b3b8b275bada632d6746837b7f46865911440617e7a855edce7235",
+      "plan_sha256": "5668f4030e21238e8b44dc05c6f32324ecb08b78b316d11bf4dee718d4ca8f58",
+      "source_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "phase_results": {
+        "library-tests": "2,548 passed, 0 failed, 2 ignored",
+        "binary-tests-01": "2 passed, 0 failed",
+        "integration-tests-01": "49 passed, 0 failed",
+        "integration-tests-02": "20 passed, 0 failed, 2 ignored",
+        "integration-tests-03": "15 passed, 0 failed",
+        "integration-tests-04": "98 passed, 0 failed",
+        "integration-tests-05": "8 passed, 0 failed",
+        "doctests": "9 targets passed"
+      },
+      "reuse_limit": "Complete Product gate for the pinned P/H/SDK/Mobile identities. It establishes this suite result, not universal Native byte parity or untested cancellation shapes."
+    },
+    "Product_17593_cli_8mib": {
+      "status": "passed",
+      "log": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/gate-logs/cli-8mib.log",
+      "sha256": "327a9cc97dc67d29d71ddabf56815175076fa9baa95e659ec61505ff13e11c4b",
+      "progress_log": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/gate-logs/progress.log",
+      "progress_log_sha256": "a6b2e3d5b7811aa619b71a5f38525b49f57a223fd20142f9ec963a547e3918ee",
+      "result": "8 MiB CLI acceptance phase exited 0"
+    },
+    "Product_17593_five_platforms": {
+      "status": "passed",
+      "root": "/private/tmp/repaired-h-product-r376-17593eaa66-20261018T083723Z-63256/platform",
+      "log_count": 5,
+      "logs": {
+        "android-arm64-computer-use.log": {
+          "status": "passed",
+          "sha256": "41b76d53724671b1abdb24c54ed8ffcbb92a1772c6fabe9f73a9007d8383d7e0"
+        },
+        "android-arm64-default.log": {
+          "status": "passed",
+          "sha256": "63ed073b13b049eacb09d99c378397575478deae9cde37e2e18a3e0e8cb5e451"
+        },
+        "android-x86_64-computer-use.log": {
+          "status": "passed",
+          "sha256": "d77b8d39bc4bab2db4a77801d1933d7fe992666a31a8590d39b5b0eb6b8b44be"
+        },
+        "android-x86_64-default.log": {
+          "status": "passed",
+          "sha256": "ab4d6c87243ddba028bd6372479fc8eeaec9ab3b16035136cf7e43b4aeb00203"
+        },
+        "ios-simulator-default.log": {
+          "status": "passed",
+          "sha256": "ce8c5e99e0af7d31bf0534af5c33734c2a64f5886f70c6f08325a09169189764"
+        }
+      },
+      "reuse_limit": "All five Android/iOS platform logs pass on the pinned Product/H/SDK/Mobile set; the separate macOS package receipt also passed and is recorded at scope.product_pending.mac_package."
+    },
+    "Product_17593_run04": {
+      "status": "passed",
+      "receipt": "acceptance/final-ledger-r376/cli-sigint-candidate-run-04-17593eaa66-20261018T091547Z-1496/receipt.json",
+      "sha256": "a99af6f15e9dd53646658065b00e391e8331db97f2fab61608ce8f1d1a7bde0e",
+      "product_head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "harness_head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "elapsed_seconds": 4.071,
+      "candidate_exit_code": 0,
+      "sigint_after_full_post_accepted": true,
+      "provider_response_sent": false,
+      "timed_out": false,
+      "forced_cleanup": false,
+      "checks": "15/15 true",
+      "terminal_fields_match_native_constraints": true,
+      "no_assistant_transcript_row": true,
+      "prompt_and_interrupt_content_slices_match_native": true,
+      "comparison_limit": "Exact byte comparison covers stable prompt/interruption content slices only. Full stdout/session row bytes are not compared because UUID, timestamp, cwd, duration and envelope fields are dynamic."
+    },
+    "Product_17593_mac_package": {
+      "status": "passed",
+      "receipt": "acceptance/final-ledger-r376/receipts/mac-package-final-17593.json",
+      "sha256": "6e4f1ce2eba4d069f9219603b6043b64ce0cb8f2e7b4e71645710e2b37fbb337",
+      "pins": {
+        "product": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+        "harness": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+        "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e"
+      },
+      "static_audit": "passed",
+      "startup_smoke": "passed",
+      "independent_audit": "passed",
+      "actual_visible_cua": {
+        "status": "passed",
+        "typed_then_appended": "packaged-host-cua-valuexy",
+        "submit_result": "Submit callback accepted: packaged-host-cua-valuexy",
+        "screenshot_sha256": "28be6f881ae2844132ea366dad0174632ec2cffb7feaabe4c5c870dcffde7b0c"
+      },
+      "cleanup": {
+        "provider_credentials": "cleared",
+        "app_pid_52288": "exited"
+      },
+      "package_sha256": "64c8a4d7a441f53c5dc9990d13f3ea4930f1ead72c2df52759565102f73481de",
+      "app_asar_sha256": "21462a3c01035cd13bb3785dcfcc11ad474ea6f22b6fde0357db352fa23ecb06",
+      "limitations": [
+        "Development signing only; no notarization or stapling claim.",
+        "Visible CUA evidence covers the recorded packaged form and Submit flow only.",
+        "This package receipt does not certify all Native parity contracts."
+      ]
+    },
+    "Product_17593_finalizer": {
+      "status": "passed",
+      "repair_receipt": "acceptance/final-ledger-r376/repairs-final-17593-v2.json",
+      "repair_receipt_sha256": "86f1d03e74063b3f1db4ec47416e924562bd9c08cbefdf9848fd347631e1465f",
+      "baseline_receipt": "acceptance/final-ledger-r376/final-baseline-17593-v2.json",
+      "baseline_receipt_sha256": "32663a6fb64ab1563d6d0ebd54181412ab8611c09994425b9bb4a2452ea8a4e3",
+      "selected_gate_phase_count": 20,
+      "product_runner_phase_count": 8,
+      "binding": "The receipts bind Product 17593/H 44f2/SDK a363; final-baseline references the exact repairs receipt hash."
+    }
+  },
+  "findings": [
+    {
+      "contracts": [
+        "TURN-1",
+        "CMD-1"
+      ],
+      "status": "Product-17593-two-process-cold-resume-regression-passes; Native-cold-oracle-unavailable",
+      "source_fingerprints": [
+        "harness-runtime/crates/runtime/src/headless/run.rs",
+        "harness-runtime/crates/runtime/src/headless/run/native_commands_295_replay_test.rs",
+        "lingxi-app/apps/cli/host/tests/commands_native_cli.rs"
+      ],
+      "best_evidence": [
+        "Product 17593 full gate skill-cold selector: cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire passed 1/1 (7.90s, exit 0).",
+        "First process preserves the source \\ud800/U+D800 row; a fresh CLI process resumes the same session, sends U+FFFD in the Anthropic request, includes continuation once, and preserves the original session row.",
+        "The Product 17593 full runner passed 2740 tests with 0 failures and 4 ignored across 8 phases."
+      ],
+      "boundary": "The fixed Product cold Skill case passes, but its Native fixture is first-turn only; no exact Native cold-resume byte comparison is claimed.",
+      "current_source_sha256": [
+        {
+          "path": "lingxi-app/apps/cli/host/tests/commands_native_cli.rs",
+          "sha256": "af62c3656a9d8b9b833c7b4766909c4a95d34ba9846bbdb885d53d9eda0ab1f0",
+          "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+        }
+      ]
+    },
+    {
+      "contracts": [
+        "TURN-2"
+      ],
+      "status": "bounded-current-regression-evidence",
+      "source_fingerprints": [
+        "harness-runtime/crates/orchestrator/tests/current_alignment_cancel.rs"
+      ],
+      "best_evidence": [
+        "H r271 current_alignment_refusal/cancel selectors passed; H r3 orchestrator-lib passed 2,103 tests."
+      ],
+      "boundary": "No single Native 2.1.295 end-to-end sequence claims every retry, refusal, cancellation, truncation and transcript ordering.",
+      "current_source_sha256": []
+    },
+    {
+      "contracts": [
+        "TURN-3"
+      ],
+      "status": "H-source-and-runtime-pass; Product-17593-regression-and-run04-pass-for-captured-case",
+      "source_fingerprints": [
+        "harness-runtime/crates/runtime/src/headless/run.rs",
+        "harness-runtime/crates/runtime/src/headless/run/native_commands_295_replay_test.rs",
+        "lingxi-app/apps/cli/host/tests/commands_native_cli.rs",
+        "lingxi-app/apps/cli/host/tests/fixtures/cli-cancel-native-295/"
+      ],
+      "best_evidence": [
+        "Product 17593 full runner completed 2740 passed, 0 failed, 4 ignored; 8 phases, 40 executable targets and 9 doctest targets.",
+        "The named public CLI SIGINT regression passed in integration-tests-02; phase aggregate 20 passed, 0 failed, 2 ignored, with focused group 3 passed, 0 failed.",
+        "Product 17593 run04 receipt acceptance/final-ledger-r376/cli-sigint-candidate-run-04-17593eaa66-20261018T091547Z-1496/receipt.json (a99af6f15e9dd53646658065b00e391e8331db97f2fab61608ce8f1d1a7bde0e) passed 15/15 checks, process exit 0, no forced cleanup and elapsed 4.071s.",
+        "Mac package receipt acceptance/final-ledger-r376/receipts/mac-package-final-17593.json (6e4f1ce2eba4d069f9219603b6043b64ce0cb8f2e7b4e71645710e2b37fbb337) passed static, startup, independent audit and actual visible CUA; cleanup cleared credentials and PID 52288 exited.",
+        "Product 8610 run04 receipt 4cc1362958a66392e097b9c38670bbe65d2179f13f4a60a4e9cd9d6c6b14008b remains the historical mismatch."
+      ],
+      "minimal_selector": "No further Product selector for this captured case; macOS package/static/startup/Host/visible-CUA gates are also complete on the pinned candidate.",
+      "boundary": "Only the captured no-assistant stream-opening cancellation shape is verified; other cancellation shapes and whole stdout/session byte parity remain unverified.",
+      "current_source_sha256": [
+        {
+          "path": "harness-runtime/crates/runtime/src/headless/run.rs",
+          "sha256": "f9afe39ea99eaffa8afb3097b53bfab8aa17ae13f3e28788a40aca768f30b8ee",
+          "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+        },
+        {
+          "path": "harness-runtime/crates/runtime/src/headless/run/native_commands_295_replay_test.rs",
+          "sha256": "d681b4ff368211505c364542e94c48702dde3b4a8892ad25441e7ad4831be89d",
+          "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+        },
+        {
+          "path": "harness-runtime/crates/orchestrator/tests/current_alignment_cancel.rs",
+          "sha256": "6b10d3bc5d799d08bac4cb5b63271d4a99cc2be50e3a5c52fd265dbe69d9793e",
+          "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+        },
+        {
+          "path": "lingxi-app/apps/cli/host/tests/commands_native_cli.rs",
+          "sha256": "af62c3656a9d8b9b833c7b4766909c4a95d34ba9846bbdb885d53d9eda0ab1f0",
+          "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+        },
+        {
+          "path": "lingxi-app/apps/cli/host/src/headless_host.rs",
+          "sha256": "55b342766853843a3360cf7d3b006b5277e43a2a4d22efdda04814a45af98102",
+          "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+        },
+        {
+          "path": "lingxi-app/apps/cli/host/src/repl_loop.rs",
+          "sha256": "467c5cf2992b9500ee2fdb022b76ea8ea2153f997ad85a7411d358d8fe4da173",
+          "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+        },
+        {
+          "path": "lingxi-app/apps/cli/host/tests/cli_repl_signals.rs",
+          "sha256": "bdc208cecf0cf0303145e9f9e1ed2090ce51859106b9f089ac7dd613f12963a3",
+          "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+        }
+      ]
+    },
+    {
+      "contracts": [
+        "TOOL-1",
+        "TOOL-2"
+      ],
+      "status": "source-repair-and-r6-live-consumer-regressions-passed-on-final-H",
+      "source_fingerprints": [
+        "harness-runtime/crates/permission/src/policy.rs",
+        "harness-runtime/crates/permission/src/policy_gate.rs",
+        "harness-runtime/crates/orchestrator/src/conversation/tooling.rs",
+        "harness-runtime/crates/agent/src/tool_resolver.rs",
+        "harness-runtime/crates/tasks/src/handlers/in_process_teammate.rs"
+      ],
+      "best_evidence": [
+        "H r6 permission-lib 1,779, Agent-lib 725, Tasks-lib 555 and Orchestrator-lib 2,103 passed on the final source-bound H candidate.",
+        "Live PermissionGate reads for child catalog, denied-agent roster and teammate catalog are exercised by named r6 selectors."
+      ],
+      "minimal_selectors": [],
+      "boundary": "Source reuse is bound to H b3864c6 by the stage-gate receipt and verified test-only follow-up proof; no full Native request-byte or live Foundry claim.",
+      "current_source_sha256": []
+    },
+    {
+      "contracts": [
+        "BASH-INPUT-295"
+      ],
+      "status": "pinned-production-fixture-regression-pass",
+      "source_fingerprints": [
+        "harness-runtime/crates/test-harness/tests/bash_input_validation.rs"
+      ],
+      "best_evidence": [
+        "H r271 integration-24 passed the five pinned 2.1.295 Bash input cases; H r5 permission-lib passed 1,779."
+      ],
+      "boundary": "ProcessRunner is counted/mocked; no shell side effect is claimed.",
+      "current_source_sha256": []
+    },
+    {
+      "related_contracts": [
+        "TURN-1",
+        "TOOL-2"
+      ],
+      "label": "Glob wrapper and total_tokens_reminder persistence",
+      "status": "source-repair-and-r6-live-consumer-regressions-passed-on-final-H",
+      "source_fingerprints": [
+        "harness-runtime/crates/orchestrator/tests/current_alignment_glob_mod_output.rs",
+        "harness-runtime/crates/orchestrator/tests/current_alignment_glob_three_requests.rs",
+        "harness-runtime/crates/orchestrator/src/conversation/drivers/prepare.rs"
+      ],
+      "best_evidence": [
+        "H r6 permission-lib 1,779, Agent-lib 725, Tasks-lib 555 and Orchestrator-lib 2,103 passed on the final source-bound H candidate.",
+        "Live PermissionGate reads for child catalog, denied-agent roster and teammate catalog are exercised by named r6 selectors."
+      ],
+      "boundary": "Source reuse is bound to H b3864c6 by the stage-gate receipt and verified test-only follow-up proof; no full Native request-byte or live Foundry claim.",
+      "current_source_sha256": [],
+      "minimal_selectors": []
+    },
+    {
+      "contracts": [
+        "CLI-ERR-1"
+      ],
+      "status": "current-public-cli-selected-error-fields-pass",
+      "source_fingerprints": [
+        "lingxi-app/apps/cli/host/tests/provider_error_cli.rs"
+      ],
+      "best_evidence": [
+        "Product r375 integration-tests-04 provider_error_cli passed 6/6 against loopback and fixed Native 2.1.295 captures."
+      ],
+      "boundary": "Dynamic UUID/duration use constraints; whole stdout is not asserted byte-identical.",
+      "current_source_sha256": []
+    },
+    {
+      "contracts": [
+        "PROMPT-1"
+      ],
+      "status": "composition-acceptance-bounded; no-specific-source-mismatch-found",
+      "source_fingerprints": [
+        "harness-runtime/crates/orchestrator/src/conversation/drivers/prepare.rs",
+        "harness-runtime/crates/runtime/src/headless/run.rs"
+      ],
+      "best_evidence": [
+        "Fixed command/Skill and separate hook/child/fork/resume source regressions cover bounded paths."
+      ],
+      "boundary": "No one complete main+hook+child+fork+resume 2.1.295 byte fixture; this is an evidence boundary.",
+      "current_source_sha256": []
+    },
+    {
+      "contracts": [
+        "SESSION-1"
+      ],
+      "status": "candidate-persistence-path-reviewed; Native-durable-row-oracle-absent",
+      "source_fingerprints": [
+        "harness-runtime/crates/session/src/agent_rows.rs",
+        "harness-runtime/crates/session/src/jsonl/writer.rs",
+        "harness-runtime/crates/session/src/jsonl/durable_writer.rs"
+      ],
+      "best_evidence": [
+        "Native plugin-test capture contains raw system append event but emits no JSONL rows."
+      ],
+      "boundary": "No source mismatch is established from absent output; do not claim durable byte parity.",
+      "current_source_sha256": [
+        {
+          "path": "harness-runtime/crates/session/src/jsonl/reader.rs",
+          "sha256": "877d4fbc313fa3e29e1ed2c768c7864219b41fc6d30a5cf47e7f43922d85bcd0"
+        },
+        {
+          "path": "harness-runtime/crates/session/src/jsonl/loader.rs",
+          "sha256": "2ec3583e89d5e8ada609c7593cdb627cb0359fe7b1faff50c153b56453c13dbb"
+        },
+        {
+          "path": "harness-runtime/crates/session/src/jsonl/writer.rs",
+          "sha256": "c2c49ad1bea90e14ccaec6973da5ff4202be52f26976f29dc2f094b529103409"
+        },
+        {
+          "path": "harness-runtime/crates/session/src/jsonl/durable_writer.rs",
+          "sha256": "bb374fe66ee76641e408ca14ff5524db2f21a6f663842103fcf15f967a5037b1"
+        },
+        {
+          "path": "harness-runtime/crates/session/src/agent_rows.rs",
+          "sha256": "6204ad15df029a69e6c34d2d6220b39ec7bfd278fbe183458b30ddbd267c96dd"
+        },
+        {
+          "path": "harness-runtime/crates/session/src/jsonl/schema.rs",
+          "sha256": "0898b0ec6e7ade3aa4c230c0c76e1f6db45c9f985b4e9f66b1311a6d4031cd8a"
+        }
+      ]
+    },
+    {
+      "contracts": [
+        "CMD-1",
+        "SESSION-3"
+      ],
+      "status": "Product-17593-two-process-cold-resume-regression-passes; Native-cold-oracle-unavailable",
+      "source_fingerprints": [
+        "lingxi-app/apps/cli/host/tests/commands_native_cli.rs",
+        "harness-runtime/crates/session/src/jsonl/reader.rs"
+      ],
+      "best_evidence": [
+        "Product 17593 full gate skill-cold selector: cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire passed 1/1 (7.90s, exit 0).",
+        "First process preserves the source \\ud800/U+D800 row; a fresh CLI process resumes the same session, sends U+FFFD in the Anthropic request, includes continuation once, and preserves the original session row.",
+        "The Product 17593 full runner passed 2740 tests with 0 failures and 4 ignored across 8 phases."
+      ],
+      "current_source_sha256": [
+        {
+          "path": "lingxi-app/apps/cli/host/tests/commands_native_cli.rs",
+          "sha256": "af62c3656a9d8b9b833c7b4766909c4a95d34ba9846bbdb885d53d9eda0ab1f0",
+          "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+        }
+      ],
+      "native_boundary": "Pinned Native data is a first-turn oracle only. There is no Native cold-resume row/request capture; Product regression closure does not imply exact Native cold-byte parity."
+    },
+    {
+      "contracts": [
+        "SESSION-4"
+      ],
+      "status": "source-fix-and-focused-tests-pass",
+      "source_fingerprints": [
+        "harness-runtime/crates/session/src/jsonl/reader.rs",
+        "harness-runtime/crates/session/src/jsonl/loader.rs"
+      ],
+      "best_evidence": [
+        "r46 FEFF/NEL row-trim and typed-row routing selectors each pass 1/1 on current source SHA."
+      ],
+      "boundary": "Not a claim over every malformed/torn-tail or Native loader mode.",
+      "current_source_sha256": []
+    },
+    {
+      "contracts": [
+        "SESSION-5"
+      ],
+      "status": "Native-public-scalar-oracle-unavailable; no-confirmed-source-mismatch",
+      "source_fingerprints": [
+        "harness-runtime/crates/orchestrator/src/conversation/prompt_suggestion.rs",
+        "harness-runtime/crates/orchestrator/src/conversation/tests/generated_session_name_tests.rs"
+      ],
+      "best_evidence": [
+        "r3 generated-session-name test confirms candidate preservation of lone-surrogate source units; prompt suggestion rejects non-scalar UTF-16 via String::from_utf16."
+      ],
+      "boundary": "The candidate branch facts do not bind Native public name/suggestion results. Only a fixed Native U+D800 post-turn result would resolve this row; no broad byte capture is proposed.",
+      "current_source_sha256": [
+        {
+          "path": "harness-runtime/crates/orchestrator/src/conversation/prompt_suggestion.rs",
+          "sha256": "bc52c472635bce48de5e80349c16ea990079aefe154dfd5959e49db6e03b79d9"
+        },
+        {
+          "path": "harness-runtime/crates/orchestrator/src/conversation/tests/generated_session_name_tests.rs",
+          "sha256": "03421208751c6dcce87911140dfed7de26ada6c364cc0c408e7de7697c2c2a78"
+        }
+      ]
+    },
+    {
+      "contracts": [
+        "AGENT-1"
+      ],
+      "status": "live-alias-child-and-roster-regressions-pass-on-final-H-b3864c6",
+      "source_fingerprints": [
+        "harness-runtime/crates/agent/src/handle.rs",
+        "harness-runtime/crates/agent/src/handle/spawn_context.rs",
+        "harness-runtime/crates/agent/src/tool_resolver.rs",
+        "harness-runtime/crates/agent/src/handle/tests/tests.rs"
+      ],
+      "best_evidence": [
+        "H r6 Agent-lib passed 725 including current live gate child resolver, denied-agent roster and alias-aware child catalog selectors.",
+        "H final source reuse is strictly bound to stage-gate receipt and test-only follow-up proof."
+      ],
+      "boundary": "This is selected source/regression evidence, not a complete Native lifecycle byte trace.",
+      "current_source_sha256": [
+        {
+          "path": "harness-runtime/crates/agent/src/handle.rs",
+          "sha256": "80f42c5f33f1de940ded84525115f3b1b6f56a5565193f999eb0b0c785228819"
+        },
+        {
+          "path": "harness-runtime/crates/agent/src/handle/spawn_context.rs",
+          "sha256": "cc34b76577d0a769155a984ec51e5952eddd9ebc7907ca053a8a12fe581380e1"
+        },
+        {
+          "path": "harness-runtime/crates/agent/src/tool_resolver.rs",
+          "sha256": "51fac235967a719ee0c9b75df3a3f631f288636c05e23481772cf770d26eb6bc"
+        },
+        {
+          "path": "harness-runtime/crates/agent/src/handle/tests/tests.rs",
+          "sha256": "a31760aad7b2c1bf781eb9583a21071dddc3f441f742f7ec53b3ccf4c7a217c9"
+        }
+      ]
+    },
+    {
+      "contracts": [
+        "MCP-1"
+      ],
+      "status": "source-repair-and-H-r6-regressions-pass; Native-LTr-semantics-unresolved",
+      "source_fingerprints": [
+        "acceptance/source-alignment-295-r31/native-policy-source/src_190596738.js",
+        "acceptance/source-alignment-295-r31/native-policy-source/src_194447854.js",
+        "acceptance/source-alignment-295-r31/native-policy-source/src_191029614.js",
+        "harness-runtime/crates/permission/src/policy.rs",
+        "harness-runtime/crates/agent/src/tool_resolver.rs",
+        "harness-runtime/crates/tasks/src/handlers/in_process_teammate.rs"
+      ],
+      "best_evidence": [
+        "H r6 permission 1,779; Agent 725; Tasks 555; Orchestrator 2,103 passed on final candidate with source reuse bound by receipts.",
+        "The one approved Native run remains capture_invalid due to failed Edit positive control; it gives no alias or LTr semantic result."
+      ],
+      "minimal_selectors": [],
+      "boundary": "H source/regression closure does not bind Native LTr flags or line-terminator semantics; no byte parity claim.",
+      "current_source_sha256": [
+        {
+          "path": "harness-runtime/crates/permission/src/policy.rs",
+          "sha256": "ff96a989722577d5051e23ae21c88e164f7e61a54bb0e1d311fafc29f4e7ce80"
+        },
+        {
+          "path": "harness-runtime/crates/permission/src/policy_gate.rs",
+          "sha256": "e7af99cb954cc33915e5404d11e4e37ec2406aeba58cecf55c01d98bc6e75f0f"
+        },
+        {
+          "path": "harness-runtime/crates/permission/src/policy_gate_test.rs",
+          "sha256": "5a15a8a63d6bcbf5dae73735e6b43772c318bca1628f4e905e047255816ba01e"
+        },
+        {
+          "path": "harness-runtime/crates/permission/src/policy_test.rs",
+          "sha256": "4b985c3a0930c107ad24c085bb027cafba6d35b9f748977b87b99e5910aca1c3"
+        },
+        {
+          "path": "harness-runtime/crates/orchestrator/src/conversation/model.rs",
+          "sha256": "edb8f65a91bd7e9e2b0e5434da00bbb02056f5dc303e8c44815aed3974aafc8d"
+        },
+        {
+          "path": "harness-runtime/crates/orchestrator/src/conversation/tooling.rs",
+          "sha256": "1565294c9efdab174e4d425e6d9126e87de6775ec0409a12a8a99963eca96936"
+        },
+        {
+          "path": "harness-runtime/crates/orchestrator/src/conversation/model_reminders.rs",
+          "sha256": "560221305b5b65950a5f42fb700364df078fa14766eadf935aeac223123b5820"
+        },
+        {
+          "path": "harness-runtime/crates/orchestrator/src/conversation/reminders.rs",
+          "sha256": "7f54e5229f9c61eb9212f0c6e3e225ec534e8ec4195d79ff6ab17a9877563baa"
+        },
+        {
+          "path": "harness-runtime/crates/orchestrator/src/conversation/wiring.rs",
+          "sha256": "8801f42a95c6614cac1d79f76043894ad7df6bb272019bfe9de6ad7d1d83432b"
+        },
+        {
+          "path": "harness-runtime/crates/orchestrator/src/conversation/prompt_suggestion.rs",
+          "sha256": "bc52c472635bce48de5e80349c16ea990079aefe154dfd5959e49db6e03b79d9"
+        },
+        {
+          "path": "harness-runtime/crates/orchestrator/src/conversation/tests/generated_session_name_tests.rs",
+          "sha256": "03421208751c6dcce87911140dfed7de26ada6c364cc0c408e7de7697c2c2a78"
+        },
+        {
+          "path": "harness-runtime/crates/agent/src/handle.rs",
+          "sha256": "80f42c5f33f1de940ded84525115f3b1b6f56a5565193f999eb0b0c785228819"
+        },
+        {
+          "path": "harness-runtime/crates/agent/src/handle/spawn_context.rs",
+          "sha256": "cc34b76577d0a769155a984ec51e5952eddd9ebc7907ca053a8a12fe581380e1"
+        },
+        {
+          "path": "harness-runtime/crates/agent/src/tool_resolver.rs",
+          "sha256": "51fac235967a719ee0c9b75df3a3f631f288636c05e23481772cf770d26eb6bc"
+        },
+        {
+          "path": "harness-runtime/crates/agent/src/handle/tests/tests.rs",
+          "sha256": "a31760aad7b2c1bf781eb9583a21071dddc3f441f742f7ec53b3ccf4c7a217c9"
+        },
+        {
+          "path": "harness-runtime/crates/tasks/src/handlers/in_process_teammate.rs",
+          "sha256": "2f67d43fa34bca970bc782821957482e00aa002a26ccfa23a7db6c4831099e19"
+        },
+        {
+          "path": "harness-runtime/crates/tasks/src/handlers/in_process_teammate_test.rs",
+          "sha256": "50e9020d526b331639f40b2cf3e1d277b1ee5f1ce29c1dd8c073a2f48c0c3b8a"
+        },
+        {
+          "path": "harness-runtime/crates/runtime/src/desktop/assembly.rs",
+          "sha256": "b2c1e3508d8ac68b2ffe9401c810373580685a92e15c15daf085779262372f4e"
+        }
+      ]
+    },
+    {
+      "contracts": [
+        "AGENT-RELEASE-1"
+      ],
+      "status": "version-bounded-lifecycle-regressions-pass",
+      "source_fingerprints": [
+        "harness-runtime/crates/agent/src/pool.rs",
+        "harness-runtime/crates/orchestrator/src/conversation/model.rs"
+      ],
+      "best_evidence": [
+        "H r3 orchestrator-lib and prior r271 subagent/realtime lifecycle target gates passed; Native lifecycle receipts are 2.1.293/2.1.294."
+      ],
+      "boundary": "Fixed lifecycle reachability only; not exact complete 2.1.295 public-chain bytes.",
+      "current_source_sha256": []
+    },
+    {
+      "contracts": [
+        "TOOL-3",
+        "TOOL-4"
+      ],
+      "status": "reviewed-projection-paths; historical fixture/version limits",
+      "source_fingerprints": [
+        "harness-runtime/crates/orchestrator/tests/current_alignment_tool_result_persist.rs",
+        "harness-runtime/crates/runtime/src/headless/stream_json.rs",
+        "harness-runtime/crates/session/src/jsonl/writer.rs",
+        "harness-runtime/crates/session/src/jsonl/reader.rs"
+      ],
+      "best_evidence": [
+        "TOOL-3 selected controlled persistence path passed against 2.1.293 fixture.",
+        "TOOL-4 2.1.293 object-valued result helper passed 1/1; current stream JSON frame carries ToolResultProjection."
+      ],
+      "boundary": "No full current public cold-resume replay/2.1.295 durable-row byte oracle; no concrete current source defect found.",
+      "current_source_sha256": [
+        {
+          "path": "harness-runtime/crates/runtime/src/headless/stream_json.rs",
+          "sha256": "3e045fe1764172a892dd27f117661db7b0d6cc511955f95fa3a0c6b0d2a72f29"
+        },
+        {
+          "path": "harness-runtime/crates/session/src/jsonl/reader.rs",
+          "sha256": "877d4fbc313fa3e29e1ed2c768c7864219b41fc6d30a5cf47e7f43922d85bcd0"
+        },
+        {
+          "path": "harness-runtime/crates/session/src/jsonl/loader.rs",
+          "sha256": "2ec3583e89d5e8ada609c7593cdb627cb0359fe7b1faff50c153b56453c13dbb"
+        },
+        {
+          "path": "harness-runtime/crates/session/src/jsonl/writer.rs",
+          "sha256": "c2c49ad1bea90e14ccaec6973da5ff4202be52f26976f29dc2f094b529103409"
+        },
+        {
+          "path": "harness-runtime/crates/session/src/jsonl/durable_writer.rs",
+          "sha256": "bb374fe66ee76641e408ca14ff5524db2f21a6f663842103fcf15f967a5037b1"
+        },
+        {
+          "path": "harness-runtime/crates/session/src/jsonl/schema.rs",
+          "sha256": "0898b0ec6e7ade3aa4c230c0c76e1f6db45c9f985b4e9f66b1311a6d4031cd8a"
+        },
+        {
+          "path": "harness-runtime/crates/orchestrator/tests/current_alignment_tool_result_persist.rs",
+          "sha256": "7e7677d84e28b2368bbca49b8c2fae7421b9ebf68a0f5b16c260210a1a80f588"
+        }
+      ]
+    }
+  ],
+  "actual_source_gaps_found": [
+    {
+      "contract": "TURN-3",
+      "kind": "Historical Product 8610 public terminal-field mismatch; repaired and verified on Product 17593 for the captured stream-opening state",
+      "status": "H 44f2 source fix/regression pass; Product 17593 regression and run04 pass for captured case",
+      "evidence": "Product 8610 run04 receipt SHA-256 4cc1362958a66392e097b9c38670bbe65d2179f13f4a60a4e9cd9d6c6b14008b recorded the old mismatch. Product 17593 run04 receipt acceptance/final-ledger-r376/cli-sigint-candidate-run-04-17593eaa66-20261018T091547Z-1496/receipt.json (a99af6f15e9dd53646658065b00e391e8331db97f2fab61608ce8f1d1a7bde0e) passes all 15 checks: accepted POST, SIGINT before provider response, exit 0 without forced cleanup, matching terminal constraints, matching stable content slices, and no assistant transcript row.",
+      "minimum_selector": "No additional selector for the captured stream-opening case; retain other cancellation shapes as unverified.",
+      "boundary": "Verified only for the pinned no-assistant stream-opening case. Compact-regenerated IDs, partial assistant output, pre-admission cancellation and other turn shapes remain unverified."
+    },
+    {
+      "contract": "MCP-1",
+      "kind": "recovered source mismatch; repaired in candidate",
+      "status": "source repair and current H r6 regression gates passed on b3864c6; no remaining H source selector",
+      "native_chain": "Pinned de(e) reads toolPermissionContext.toolAliases; Hmn caller tJr passes the context to Jqe; rdo/Jqe/S/y define one-hop alias-source matching, walk-specific proxyExpansion and source-family content checks.",
+      "repair": "Shared source-unit matcher is used by authorize, provider catalog, dropped-MCP reminder/retraction, child and teammate catalog and built-in denied-agent roster. Alias context is snapshotted from PermissionGate where appropriate; child/roster/teammate paths now read the live provider on each resolution.",
+      "evidence": "r6 permission 1,779; Agent 725; Tasks 555; Orchestrator 2,103, bound to the final source patch by harness-stage-gate-receipt.json and verified r6-test-only-followup-proof.json.",
+      "remaining_source_selectors": [],
+      "boundary": "Native LTr is still unknown, separately from H source closure. The approved Native run remains capture_invalid."
+    }
+  ],
+  "unresolved_source_semantics": [
+    {
+      "contracts": [
+        "TOOL-1",
+        "MCP-1"
+      ],
+      "native_symbol": "LTr",
+      "status": "Native implementation body unavailable; public initialize ingress confirmed; sole approved probe capture_invalid",
+      "evidence": "Bounded source/REA inspection found the call target/name but not the Native implementation body. Pinned 2.1.295 schema tBn accepts optional toolAliases on a client stream-json initialize control_request; startup copies it into Options/toolPermissionContext. No --tool-aliases CLI flag exists.",
+      "probe": {
+        "receipt": "acceptance/final-ledger-r376/native-ltr-alias-probe-approved-endpoint-run/receipt.json",
+        "sha256": "a85c269e7cb21c8df4abed2884d72c0174a727ebc32a5f67b8ecc680ca880514",
+        "operational_result": "one pinned Native process; initialize ACK; one accepted localhost provider POST; normal exit",
+        "capture_validity": "invalid: positive Edit-deny control failed and canonical tools remained advertised",
+        "inference": "none about alias matching, newline semantics, LTr flags, or byte parity; Root directed no rerun"
+      },
+      "candidate_behavior": "H uses the recovered call-site walk rules and source-unit UTF-16 matching. Its dotall contract is not an independent binding of Native regex flags.",
+      "limit": "Native regex flags and line-terminator behavior remain unknown; this is a Native oracle limit, not a confirmed current H source mismatch.",
+      "native_run": "One approved probe started a pinned process, ACKed initialize, made one accepted localhost provider POST and exited normally, but positive Edit-deny control failed and all six canonical tools remained advertised. Capture invalid; no inference; no repeat per Root direction."
+    }
+  ],
+  "minimal_unverified_public_acceptance": [],
+  "no_current_gap_claims_for": [
+    "Glob wrapper/total_tokens_reminder persistence: H r271 integration-06 passes the captured 2.1.293 sequence; no broad raw-byte claim.",
+    "TURN-3: H r10 source/runtime and Product 17593 public regression plus run04 pass for the no-assistant stream-opening shape. Product 8610 run04 remains a historical older-candidate failure; other cancellation shapes are unverified.",
+    "CLI provider-error JSON envelope: Product 17593 integration-tests-04 passed 98/0/0; selected provider_error_cli checks compare raw fields/constraints, not complete stdout bytes.",
+    "X5e small-file JSONL trim/routing: applied reader/loader fix and focused FEFF/NEL plus typed-route regressions pass.",
+    "Foundry ToolSearch capability: route-scoped negative capability has source and regression evidence; no live Foundry service behavior is claimed.",
+    "MCP alias source repair: current H r6 source-bound permission/Agent/Tasks/Orchestrator gates pass; Native LTr regex semantics remain unknown and the prior probe is capture_invalid.",
+    "SESSION-1/TOOL-4/SESSION-5: Native durable/scalar evidence limits do not establish current source defects."
+  ],
+  "contracts": [
+    {
+      "id": "TURN-1",
+      "source_status": "source-and-regression-closed-for-reviewed-fixed-2.1.295-command-cases",
+      "status": "bounded-pass",
+      "evidence": [
+        "H r296 native_295_commands_fixture_replay_through_headless_entry passed.",
+        "Product r375 commands_native_cli passed on Product HEAD f71087b4; fixed one-process cases include Unicode/punctuation Skills and unpaired-surrogate request projection.",
+        "Product 17593 full gate passed skill-cold selector cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire 1/1; the full runner completed."
+      ],
+      "limitations": [
+        "The fixed two-process Product Skill cold-resume case now passes; this uses a pinned first-turn Native fixture and does not provide a Native cold-resume byte oracle."
+      ]
+    },
+    {
+      "id": "TURN-2",
+      "source_status": "bounded-source-and-regression-evidence; no single-sequence Native parity claim",
+      "status": "bounded-evidence",
+      "evidence": [
+        "H r271 integration-08 current_alignment_refusal and cancellation selectors passed; H r3 orchestrator-lib 2,103 tests passed."
+      ],
+      "limitations": [
+        "No single pinned 2.1.295 sequence covers every retry, cancellation, refusal, truncation, terminal result and transcript/tool ordering branch."
+      ]
+    },
+    {
+      "id": "TURN-3",
+      "source_status": "H 44f2 no-assistant stream-opening projection and r10 gates pass; Product 17593 regression/run04 pass for captured shape.",
+      "status": "H-source-pass; Product-17593-captured-stream-case-pass",
+      "evidence": [
+        "H 44f2 changes only crates/runtime/src/headless/run.rs. The r10 pending_stream_interrupt_publishes_native_error_frame_but_exits_successfully selector passed in the 1468/0/0 Runtime library run; fmt and changed-package Clippy passed.",
+        "Product 17593 full runner completed 2740 passed, 0 failed, 4 ignored across 8 phases, 40 executable targets and 9 doctest targets. The public CLI SIGINT regression logged ok in integration-tests-02 (20/0/2 phase; focused group 3/0/0).",
+        "Product 17593 run04 receipt acceptance/final-ledger-r376/cli-sigint-candidate-run-04-17593eaa66-20261018T091547Z-1496/receipt.json (a99af6f15e9dd53646658065b00e391e8331db97f2fab61608ce8f1d1a7bde0e) passed 15/15 checks in 4.071s: POST accepted, response withheld, SIGINT delivered, exit 0 without forced cleanup, terminal fields and stable content slices match constraints, no assistant row.",
+        "Final macOS package receipt passed static audit, startup smoke, independent audit and the recorded visible CUA Submit flow; credentials were cleared and app PID 52288 exited."
+      ],
+      "limitations": [
+        "The Native cancellation fixture covers one public print-JSON case after a full streaming POST is accepted and before any provider response; it establishes no behavior for compact-regenerated message IDs, partial assistant output, pre-admission cancellation, cancellation after response data, or other turn shapes.",
+        "The run04 comparison checks stable prompt/interruption content slices and selected terminal/transcript constraints, not whole stdout/session byte equality.",
+        "The macOS receipt is development-signed without notarization/stapling and scopes actual visible CUA to the recorded packaged form and Submit flow; it does not certify all Native parity contracts.",
+        "Product 8610 run04 is retained as a historical failure and does not decide Product 17593."
+      ]
+    },
+    {
+      "id": "TOOL-1",
+      "source_status": "Alias source mismatch repaired; current H r6 permission, Agent, Tasks and Orchestrator gates pass on source-bound final H b3864c6",
+      "status": "source-repair-and-live-consumer-regressions-passed",
+      "evidence": [
+        "H final stage gate is bound to b3864c6 by harness-stage-gate-receipt.json and verified r6-test-only-followup-proof.json.",
+        "r6 permission-lib 1,779; Agent-lib 725; Tasks-lib 555; Orchestrator-lib 2,103 passed.",
+        "Live PermissionGate reads for child catalog, denied-agent roster and teammate catalog are covered by current selectors in the r6 Agent/Tasks receipts."
+      ],
+      "limitations": [
+        "No complete Native provider request-byte equality or live Foundry service behavior is claimed."
+      ]
+    },
+    {
+      "id": "TOOL-2",
+      "source_status": "source-reviewed; current permission/Bash fixture regressions pass",
+      "status": "bounded-pass",
+      "evidence": [
+        "H r271 integration-24 bash_input_validation exercised five pinned 2.1.295 input fixtures through production schema/permission checks.",
+        "H r5 permission-lib passed 1,779 tests."
+      ],
+      "limitations": [
+        "The Bash test injects a counted ProcessRunner and does not launch a shell side effect."
+      ]
+    },
+    {
+      "id": "TOOL-3",
+      "source_status": "historical source/fixture review; selected tool-result persistence regression passes",
+      "status": "bounded-helper-and-production-persistence-evidence",
+      "evidence": [
+        "H r271 integration-36 passed current_alignment_tool_result_persist against the Native 2.1.293 fixture; source preview UTF-16 units, outgoing projection and persisted UTF-8 bytes are checked."
+      ],
+      "limitations": [
+        "This is a controlled registered-tool persistence path, not a full Agent/tool/CLI replay or whole-row cross-run byte golden; Native oracle is 2.1.293."
+      ]
+    },
+    {
+      "id": "TOOL-4",
+      "source_status": "reviewed source projection path is closed; public 2.1.295 full cold-resume acceptance is not established",
+      "status": "source-closed-on-reviewed-helper-path; evidence-version-bounded",
+      "evidence": [
+        "The preserved Native 2.1.293 object-valued tool_result fixture checks JSON stringification, the 50,000 UTF-16-unit boundary and omitted marker; its helper selector passed 1/1.",
+        "Current headless stream_json carries ToolResultProjection through enqueue_tool_result_frame/build_tool_result_frame; session JSONL writer/reader paths are present in the current source."
+      ],
+      "limitations": [
+        "No specific current H source mismatch is established. The historical helper receipt does not prove a full current Host/SDK/CLI cold-resume path or 2.1.295 durable-row byte parity; do not reopen broad collection for this alone."
+      ]
+    },
+    {
+      "id": "CMD-1",
+      "source_status": "Product 17593 isolated --resume regression passed; exact Native cold-resume oracle remains unavailable",
+      "status": "Product-17593-cold-resume-regression-pass; Native-cold-oracle-unavailable",
+      "evidence": [
+        "H r296 headless command replay and Product r375 commands_native_cli pass; Product checks exact U+D800 JSONL source units and outgoing request projection.",
+        "Product 17593 full gate skill-cold selector cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire passed 1/1 (7.90s, exit 0); it persists U+D800 in source JSONL and projects U+FFFD in the resumed Anthropic request."
+      ],
+      "limitations": [
+        "The Native oracle covers the first-turn fixture only; no Native cold-resume trace proves the exact resumed request bytes. Product cold regression closure does not imply exact Native cold-byte parity."
+      ]
+    },
+    {
+      "id": "PROMPT-1",
+      "source_status": "staged attachment implementation present; separate path regressions pass",
+      "status": "composition-acceptance-bounded",
+      "evidence": [
+        "Current command/Skill replay checks fixed attachment order/request projection; prepare.rs owns staged composition and hook/child/fork/resume paths have separate bounded evidence."
+      ],
+      "limitations": [
+        "No single 2.1.295 fixture compares the complete main + hook + child + fork + resume composition byte-for-byte. No concrete current source mismatch was found."
+      ]
+    },
+    {
+      "id": "SESSION-1",
+      "source_status": "candidate append-to-transcript/JSONL path reviewed; Native durable-row oracle absent",
+      "status": "source-reviewed; native-persistence-evidence-unavailable",
+      "evidence": [
+        "Pinned Native 2.1.295 plugin-test capture exposes the raw system append event but contains no corresponding JSONL rows.",
+        "Candidate persistence path is implemented through session agent-row and JSONL writer/durable-writer modules; the available Native capture cannot compare their resulting row bytes."
+      ],
+      "limitations": [
+        "No source discrepancy is established by a capture that has no durable output. Do not claim durable-byte parity or schedule a broad capture solely to manufacture absent Native rows."
+      ]
+    },
+    {
+      "id": "SESSION-3",
+      "source_status": "Product 17593 isolated --resume regression passed; exact Native cold-resume oracle remains unavailable",
+      "status": "Product-17593-cold-resume-regression-pass; Native-cold-oracle-unavailable",
+      "evidence": [
+        "The Product 17593 full gate includes skill-cold: cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire passed 1/1 (7.90 s, exit 0) in /private/tmp/product-full-r342-r376-20261018T084434Z-98045/gate-logs/skill-cold.log.",
+        "Two independent CLI processes use one session: first writes the escaped U+D800 Skill row; cold resume retains U+D800 in JSONL, normalizes the resumed Anthropic request to U+FFFD, emits one continuation request, and keeps the same session.",
+        "The same pinned Product 17593 full runner completed 2740/0/4 across 8 phases."
+      ],
+      "limitations": [
+        "This is the Product cold-resume regression using the pinned Native first-turn fixture. No Native cold-resume JSONL/request capture exists, so exact Native cold-flow parity remains unproven."
+      ]
+    },
+    {
+      "id": "SESSION-2",
+      "source_status": "historical worker receipts retained; current full return/unload lifecycle is not closed by those receipts",
+      "status": "bounded-evidence; current-corewriter-receipt-not-included",
+      "evidence": [
+        "Preserved session.append worker receipts distinguish rewrite/deny/throw result objects from direct-return behavior; Corewriter owns the direct path review/gate."
+      ],
+      "limitations": [
+        "Do not claim direct return, denial, throw, subscriber removal, plugin unload or process shutdown parity without the current Corewriter receipt. This audit does not identify a current source defect."
+      ]
+    },
+    {
+      "id": "SESSION-4",
+      "source_status": "X5e trim and routing repair applied; focused source regressions pass",
+      "status": "bounded-source-and-regression-pass",
+      "evidence": [
+        "Current reader SHA-256 877d4fbc313fa3e29e1ed2c768c7864219b41fc6d30a5cf47e7f43922d85bcd0 and loader 2ec3583e89d5e8ada609c7593cdb627cb0359fe7b1faff50c153b56453c13dbb.",
+        "r46 FEFF/NEL trim and typed-row routing selectors each passed 1/1; r271 reuses unchanged blobs."
+      ],
+      "limitations": [
+        "Closes the recovered small-file JSONL trim difference (FEFF trimmed, NEL retained) and selected routing case; not every malformed/torn-tail loader mode."
+      ]
+    },
+    {
+      "id": "SESSION-5",
+      "source_status": "candidate source behavior is specific but Native public scalar result is unavailable; no source mismatch established",
+      "status": "native-oracle-unverified; no-confirmed-source-gap",
+      "evidence": [
+        "Generated session-name parser preserves lone-surrogate source units; r3 orchestrator test conversation::conversation_test::generated_session_name_tests::keeps_unpaired_name_units_from_source_json passed.",
+        "prompt_suggestion.rs converts the final UTF-16 units with String::from_utf16 and returns ModError for ill-formed scalar text."
+      ],
+      "limitations": [
+        "These are candidate facts only. Without a corresponding Native public name/suggestion result, the apparent branch difference is not a proven semantic mismatch. A fixed Native response with U+D800 and the resulting public name/suggestion values would be the narrow oracle if this row is release-blocking; no broad byte capture is warranted."
+      ]
+    },
+    {
+      "id": "AGENT-1",
+      "source_status": "Current alias-aware child resolver, catalog and denied-agent roster regressions pass on final H b3864c6",
+      "status": "source-and-current-regression-pass-bounded-lifecycle",
+      "evidence": [
+        "H r6 Agent-lib passed 725 tests, including resolve_tools_reads_live_gate_for_native_alias_denied_mcp_tool, tools_denied_agent_roster_reads_live_permission_gate_each_call, tools_denied_agent_types_use_native_tool_aliases and child_catalog_filters_native_mcp_alias_deny.",
+        "Exact final source binding is through harness-stage-gate-receipt.json plus the verified r6 test-only follow-up proof."
+      ],
+      "limitations": [
+        "Does not prove every Native spawn/offer/receipt/wait/stop/report/handback/nested-cold ordering in one public chain."
+      ]
+    },
+    {
+      "id": "MCP-1",
+      "source_status": "Recovered Native alias/content mismatch repaired; current permission and live consumers pass H final r6 gates; Native LTr semantics remain unbound",
+      "status": "source-repair-and-current-H-regressions-passed; native-regex-semantics-unresolved",
+      "evidence": [
+        "Pinned de(e)/Hmn/Jqe/rdo/S/y source confirms one-hop alias source matching, per-walk proxyExpansion and source-specific content branches.",
+        "H r6 permission 1,779, Agent 725, Tasks 555 and Orchestrator 2,103 passed; live catalog/reminder/child/teammate/roster consumers use the repaired shared context/matcher paths.",
+        "The approved Native probe remains capture_invalid because its positive Edit-deny control failed. Its initialize ACK, one POST and normal exit do not validate alias semantics."
+      ],
+      "limitations": [
+        "No remaining H source mismatch is established by current gates. Native LTr implementation body, regex flags and line-terminator behavior remain unknown; do not call the invalid probe a pass or infer parity."
+      ],
+      "source_fingerprints": [
+        "harness-runtime/crates/agent/src/handle.rs@sha256:14360556d5c8f7fb1e0fdedbfbff2a2c67f5217bfc07e83f5311f4b18f826d90",
+        "harness-runtime/crates/agent/src/handle/spawn_context.rs@sha256:fb8a51b8484b3a5934ef5922b9a0f41c55456a459a6bb64d4cf75688ef7ea9e0",
+        "harness-runtime/crates/agent/src/tool_resolver.rs@sha256:51fac235967a719ee0c9b75df3a3f631f288636c05e23481772cf770d26eb6bc",
+        "harness-runtime/crates/agent/src/handle/tests/tests.rs@sha256:743d62bf3f8227d9254594850179462bfe46af7f905d954c82b8b1d4a52e4cad",
+        "harness-runtime/crates/tasks/src/handlers/in_process_teammate.rs@sha256:951845428bbe1192bc64efaf64f965d912d88a7c521604696b8cbb6fbeff1f41",
+        "harness-runtime/crates/tasks/src/handlers/in_process_teammate_test.rs@sha256:0b0190e4429f0a3366f980c535cbb4811343ca2610562db7d734eef08d4e0ec5",
+        "harness-runtime/crates/runtime/src/desktop/assembly.rs@sha256:df204c6629226bbd2271b0b670f75c651365d01f7b65c850b8bd664a7941cd7f"
+      ],
+      "minimal_selector": [
+        "cargo test --locked --offline -p agent --lib child_catalog_filters_native_mcp_alias_deny",
+        "cargo test --locked --offline -p agent --lib resolve_tools_strips_native_alias_denied_mcp_tool_from_subagent",
+        "cargo test --locked --offline -p agent --lib tools_denied_agent_types_use_native_tool_aliases",
+        "cargo test --locked --offline -p tasks --lib teammate_catalog_filters_canonical_tool_denied_through_alias_context"
+      ]
+    },
+    {
+      "id": "AGENT-RELEASE-1",
+      "source_status": "preserved Native lifecycle receipts are version-bounded; current H lifecycle regression gates pass",
+      "status": "version-bounded-lifecycle-evidence",
+      "evidence": [
+        "H r3 orchestrator-lib passed; prior H r271 integration-28 subagent start/stop hook and integration-05 realtime agent tests passed.",
+        "Immutable Native public lifecycle receipts cover 2.1.293/2.1.294."
+      ],
+      "limitations": [
+        "These receipts prove fixed lifecycle reachability, not child reasoning quality or exact 2.1.295 public-chain bytes; no new Native capture is required."
+      ]
+    },
+    {
+      "id": "BASH-INPUT-295",
+      "source_status": "pinned 2.1.295 Bash fixture-backed production gate passes",
+      "status": "bounded-pass",
+      "evidence": [
+        "H r271 integration-24 bash_input_validation passed alias-priority, non-string alias, timeout alias and lone-surrogate fixtures; H r5 permission-lib passed 1,779 tests."
+      ],
+      "limitations": [
+        "ProcessRunner is mocked; no operating-system shell side effect is claimed."
+      ]
+    }
+  ],
+  "remaining_source_selectors": [],
+  "evidence_only_unbound": [
+    {
+      "contract": "SESSION-1",
+      "reason": "Native 2.1.295 plugin-test capture includes append event but no JSONL row; candidate persistence source path is present and no mismatch is established."
+    },
+    {
+      "contract": "TOOL-4",
+      "reason": "Reviewed projection/frame source and preserved 2.1.293 helper fixture; no current source defect found, but no full 2.1.295 public Host/SDK/CLI cold-resume byte oracle."
+    },
+    {
+      "contract": "SESSION-5",
+      "reason": "Candidate generated-name parser preserves U+D800; candidate suggestion path rejects ill-formed UTF-16. No Native public scalar result exists, so semantics are unverified rather than a confirmed source mismatch."
+    },
+    {
+      "contract": "PROMPT-1",
+      "reason": "No single complete main+hook+child+fork+resume byte fixture; individual source paths and regressions are bounded and no current mismatch is identified."
+    },
+    {
+      "contract": "SESSION-3",
+      "reason": "Product 17593 two-process cold-resume regression passes; only an exact Native cold-resume JSONL/request oracle is absent. The existing Native fixture covers the first turn only, so no Native cold-byte parity claim is made."
+    },
+    {
+      "contract": "TURN-3",
+      "reason": "The pinned Native 2.1.295 cancellation fixture is limited to SIGINT after POST acceptance and before response data, producing no assistant row. Compact-regenerated message IDs, partial assistant output and pre-admission cancellation have no Native oracle; the H source must not be generalized to those shapes."
+    }
+  ],
+  "current_candidate_source_sha256": [
+    {
+      "path": "harness-runtime/crates/agent/src/handle.rs",
+      "sha256": "80f42c5f33f1de940ded84525115f3b1b6f56a5565193f999eb0b0c785228819",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/agent/src/handle/spawn_context.rs",
+      "sha256": "cc34b76577d0a769155a984ec51e5952eddd9ebc7907ca053a8a12fe581380e1",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/agent/src/handle/tests/tests.rs",
+      "sha256": "a31760aad7b2c1bf781eb9583a21071dddc3f441f742f7ec53b3ccf4c7a217c9",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/agent/src/tool_resolver.rs",
+      "sha256": "51fac235967a719ee0c9b75df3a3f631f288636c05e23481772cf770d26eb6bc",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/core/src/host/permission_gate.rs",
+      "sha256": "b0540cb766becf8085107029b564e68bcc6e58c7b2d36c8d5042fb9b452cad65",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/orchestrator/src/conversation/model.rs",
+      "sha256": "edb8f65a91bd7e9e2b0e5434da00bbb02056f5dc303e8c44815aed3974aafc8d",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/orchestrator/src/conversation/model_reminders.rs",
+      "sha256": "560221305b5b65950a5f42fb700364df078fa14766eadf935aeac223123b5820",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/orchestrator/src/conversation/prompt_suggestion.rs",
+      "sha256": "bc52c472635bce48de5e80349c16ea990079aefe154dfd5959e49db6e03b79d9",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/orchestrator/src/conversation/reminders.rs",
+      "sha256": "7f54e5229f9c61eb9212f0c6e3e225ec534e8ec4195d79ff6ab17a9877563baa",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/orchestrator/src/conversation/tests/generated_session_name_tests.rs",
+      "sha256": "03421208751c6dcce87911140dfed7de26ada6c364cc0c408e7de7697c2c2a78",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/orchestrator/src/conversation/tooling.rs",
+      "sha256": "1565294c9efdab174e4d425e6d9126e87de6775ec0409a12a8a99963eca96936",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/orchestrator/src/conversation/wiring.rs",
+      "sha256": "8801f42a95c6614cac1d79f76043894ad7df6bb272019bfe9de6ad7d1d83432b",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/orchestrator/tests/current_alignment_cancel.rs",
+      "sha256": "6b10d3bc5d799d08bac4cb5b63271d4a99cc2be50e3a5c52fd265dbe69d9793e",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/orchestrator/tests/current_alignment_tool_result_persist.rs",
+      "sha256": "7e7677d84e28b2368bbca49b8c2fae7421b9ebf68a0f5b16c260210a1a80f588",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/permission/src/policy.rs",
+      "sha256": "ff96a989722577d5051e23ae21c88e164f7e61a54bb0e1d311fafc29f4e7ce80",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/permission/src/policy_gate.rs",
+      "sha256": "e7af99cb954cc33915e5404d11e4e37ec2406aeba58cecf55c01d98bc6e75f0f",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/permission/src/policy_gate_test.rs",
+      "sha256": "5a15a8a63d6bcbf5dae73735e6b43772c318bca1628f4e905e047255816ba01e",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/permission/src/policy_test.rs",
+      "sha256": "4b985c3a0930c107ad24c085bb027cafba6d35b9f748977b87b99e5910aca1c3",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/runtime/src/desktop/assembly.rs",
+      "sha256": "b2c1e3508d8ac68b2ffe9401c810373580685a92e15c15daf085779262372f4e",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/runtime/src/headless/run.rs",
+      "sha256": "f9afe39ea99eaffa8afb3097b53bfab8aa17ae13f3e28788a40aca768f30b8ee",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/runtime/src/headless/run/control.rs",
+      "sha256": "b14bbf4742307b413f91eea28ca22712211f68386d4aae16a393f100546da788",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/runtime/src/headless/run/native_commands_295_replay_test.rs",
+      "sha256": "d681b4ff368211505c364542e94c48702dde3b4a8892ad25441e7ad4831be89d",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/runtime/src/headless/stream_json.rs",
+      "sha256": "3e045fe1764172a892dd27f117661db7b0d6cc511955f95fa3a0c6b0d2a72f29",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs",
+      "sha256": "1edae41b5fff283ae601db9ccee43abb28b3471168dd80dea15eb84a56205ee4",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/session/src/agent_rows.rs",
+      "sha256": "6204ad15df029a69e6c34d2d6220b39ec7bfd278fbe183458b30ddbd267c96dd",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/session/src/jsonl/durable_writer.rs",
+      "sha256": "bb374fe66ee76641e408ca14ff5524db2f21a6f663842103fcf15f967a5037b1",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/session/src/jsonl/loader.rs",
+      "sha256": "2ec3583e89d5e8ada609c7593cdb627cb0359fe7b1faff50c153b56453c13dbb",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/session/src/jsonl/reader.rs",
+      "sha256": "877d4fbc313fa3e29e1ed2c768c7864219b41fc6d30a5cf47e7f43922d85bcd0",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/session/src/jsonl/schema.rs",
+      "sha256": "0898b0ec6e7ade3aa4c230c0c76e1f6db45c9f985b4e9f66b1311a6d4031cd8a",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/session/src/jsonl/writer.rs",
+      "sha256": "c2c49ad1bea90e14ccaec6973da5ff4202be52f26976f29dc2f094b529103409",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/tasks/src/handlers/in_process_teammate.rs",
+      "sha256": "2f67d43fa34bca970bc782821957482e00aa002a26ccfa23a7db6c4831099e19",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "harness-runtime/crates/tasks/src/handlers/in_process_teammate_test.rs",
+      "sha256": "50e9020d526b331639f40b2cf3e1d277b1ee5f1ce29c1dd8c073a2f48c0c3b8a",
+      "source_revision": "H 44f2eef5baf8ae16254934dbca451cbfd528d955"
+    },
+    {
+      "path": "lingxi-app/apps/bridge-server/src/driver.rs",
+      "sha256": "c42b6633969606a4551c257315d40f96d55edd7d20dddd99b20baad6aed0672f",
+      "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    },
+    {
+      "path": "lingxi-app/apps/bridge-server/src/server.rs",
+      "sha256": "7ce654e10b04ddd1c690074e3f1bd19062b32786b75ab60459b69115707e82e6",
+      "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    },
+    {
+      "path": "lingxi-app/apps/cli/host/src/headless_host.rs",
+      "sha256": "55b342766853843a3360cf7d3b006b5277e43a2a4d22efdda04814a45af98102",
+      "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    },
+    {
+      "path": "lingxi-app/apps/cli/host/src/loop_wakeup.rs",
+      "sha256": "89d95f3afa2f8ebc1131dfaf5e74d7190952df972109eaf8b445ea91711e2ce6",
+      "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    },
+    {
+      "path": "lingxi-app/apps/cli/host/src/repl.rs",
+      "sha256": "b91aae579e9edb82bf222a15eefef89c8dd9dbf62face3c830d158dadccffd74",
+      "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    },
+    {
+      "path": "lingxi-app/apps/cli/host/src/repl_loop.rs",
+      "sha256": "467c5cf2992b9500ee2fdb022b76ea8ea2153f997ad85a7411d358d8fe4da173",
+      "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    },
+    {
+      "path": "lingxi-app/apps/cli/host/tests/cli_repl_signals.rs",
+      "sha256": "bdc208cecf0cf0303145e9f9e1ed2090ce51859106b9f089ac7dd613f12963a3",
+      "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    },
+    {
+      "path": "lingxi-app/apps/cli/host/tests/commands_native_cli.rs",
+      "sha256": "af62c3656a9d8b9b833c7b4766909c4a95d34ba9846bbdb885d53d9eda0ab1f0",
+      "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    },
+    {
+      "path": "lingxi-app/apps/cli/host/tests/provider_error_cli.rs",
+      "sha256": "d55d16712af8fa1c9d66f9abecf66e85ef7899fc1b91cb424aa12166a08e89f8",
+      "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    },
+    {
+      "path": "lingxi-app/apps/cli/host/tests/fixtures/cli-cancel-native-295/README.md",
+      "sha256": "bc39c56ab085796bbb1e0ff25220e625e3f776d3453a23f41c44b070ba570184",
+      "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    },
+    {
+      "path": "lingxi-app/apps/cli/host/tests/fixtures/cli-cancel-native-295/stdout.raw",
+      "sha256": "589d30e369a75200eef22c16e72fc068716736f988352f1748991f9a559525c2",
+      "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    },
+    {
+      "path": "lingxi-app/apps/cli/host/tests/fixtures/cli-cancel-native-295/prompt-content.raw.json",
+      "sha256": "63738af050e51a7c05269ea26e17169ada3ac1ba1d41fec1ff88be3a8fb9647b",
+      "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    },
+    {
+      "path": "lingxi-app/apps/cli/host/tests/fixtures/cli-cancel-native-295/interrupt-content.raw.json",
+      "sha256": "ad710d55159f0013958b33520d37ce6d14c6f3647d93c09d005c7e545bebe228",
+      "source_revision": "Product 17593eaa66dc762d5c9c581ba348398c914bdbcd"
+    }
+  ],
+  "current_candidate_sha256": [
+    "harness-runtime/crates/agent/src/handle.rs@sha256:80f42c5f33f1de940ded84525115f3b1b6f56a5565193f999eb0b0c785228819 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/agent/src/handle/spawn_context.rs@sha256:cc34b76577d0a769155a984ec51e5952eddd9ebc7907ca053a8a12fe581380e1 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/agent/src/handle/tests/tests.rs@sha256:a31760aad7b2c1bf781eb9583a21071dddc3f441f742f7ec53b3ccf4c7a217c9 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/agent/src/tool_resolver.rs@sha256:51fac235967a719ee0c9b75df3a3f631f288636c05e23481772cf770d26eb6bc (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/core/src/host/permission_gate.rs@sha256:b0540cb766becf8085107029b564e68bcc6e58c7b2d36c8d5042fb9b452cad65 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/orchestrator/src/conversation/model.rs@sha256:edb8f65a91bd7e9e2b0e5434da00bbb02056f5dc303e8c44815aed3974aafc8d (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/orchestrator/src/conversation/model_reminders.rs@sha256:560221305b5b65950a5f42fb700364df078fa14766eadf935aeac223123b5820 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/orchestrator/src/conversation/prompt_suggestion.rs@sha256:bc52c472635bce48de5e80349c16ea990079aefe154dfd5959e49db6e03b79d9 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/orchestrator/src/conversation/reminders.rs@sha256:7f54e5229f9c61eb9212f0c6e3e225ec534e8ec4195d79ff6ab17a9877563baa (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/orchestrator/src/conversation/tests/generated_session_name_tests.rs@sha256:03421208751c6dcce87911140dfed7de26ada6c364cc0c408e7de7697c2c2a78 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/orchestrator/src/conversation/tooling.rs@sha256:1565294c9efdab174e4d425e6d9126e87de6775ec0409a12a8a99963eca96936 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/orchestrator/src/conversation/wiring.rs@sha256:8801f42a95c6614cac1d79f76043894ad7df6bb272019bfe9de6ad7d1d83432b (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/orchestrator/tests/current_alignment_cancel.rs@sha256:6b10d3bc5d799d08bac4cb5b63271d4a99cc2be50e3a5c52fd265dbe69d9793e (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/orchestrator/tests/current_alignment_tool_result_persist.rs@sha256:7e7677d84e28b2368bbca49b8c2fae7421b9ebf68a0f5b16c260210a1a80f588 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/permission/src/policy.rs@sha256:ff96a989722577d5051e23ae21c88e164f7e61a54bb0e1d311fafc29f4e7ce80 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/permission/src/policy_gate.rs@sha256:e7af99cb954cc33915e5404d11e4e37ec2406aeba58cecf55c01d98bc6e75f0f (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/permission/src/policy_gate_test.rs@sha256:5a15a8a63d6bcbf5dae73735e6b43772c318bca1628f4e905e047255816ba01e (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/permission/src/policy_test.rs@sha256:4b985c3a0930c107ad24c085bb027cafba6d35b9f748977b87b99e5910aca1c3 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/runtime/src/desktop/assembly.rs@sha256:b2c1e3508d8ac68b2ffe9401c810373580685a92e15c15daf085779262372f4e (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/runtime/src/headless/run.rs@sha256:f9afe39ea99eaffa8afb3097b53bfab8aa17ae13f3e28788a40aca768f30b8ee (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/runtime/src/headless/run/control.rs@sha256:b14bbf4742307b413f91eea28ca22712211f68386d4aae16a393f100546da788 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/runtime/src/headless/run/native_commands_295_replay_test.rs@sha256:d681b4ff368211505c364542e94c48702dde3b4a8892ad25441e7ad4831be89d (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/runtime/src/headless/stream_json.rs@sha256:3e045fe1764172a892dd27f117661db7b0d6cc511955f95fa3a0c6b0d2a72f29 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs@sha256:1edae41b5fff283ae601db9ccee43abb28b3471168dd80dea15eb84a56205ee4 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/session/src/agent_rows.rs@sha256:6204ad15df029a69e6c34d2d6220b39ec7bfd278fbe183458b30ddbd267c96dd (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/session/src/jsonl/durable_writer.rs@sha256:bb374fe66ee76641e408ca14ff5524db2f21a6f663842103fcf15f967a5037b1 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/session/src/jsonl/loader.rs@sha256:2ec3583e89d5e8ada609c7593cdb627cb0359fe7b1faff50c153b56453c13dbb (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/session/src/jsonl/reader.rs@sha256:877d4fbc313fa3e29e1ed2c768c7864219b41fc6d30a5cf47e7f43922d85bcd0 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/session/src/jsonl/schema.rs@sha256:0898b0ec6e7ade3aa4c230c0c76e1f6db45c9f985b4e9f66b1311a6d4031cd8a (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/session/src/jsonl/writer.rs@sha256:c2c49ad1bea90e14ccaec6973da5ff4202be52f26976f29dc2f094b529103409 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/tasks/src/handlers/in_process_teammate.rs@sha256:2f67d43fa34bca970bc782821957482e00aa002a26ccfa23a7db6c4831099e19 (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "harness-runtime/crates/tasks/src/handlers/in_process_teammate_test.rs@sha256:50e9020d526b331639f40b2cf3e1d277b1ee5f1ce29c1dd8c073a2f48c0c3b8a (H 44f2eef5baf8ae16254934dbca451cbfd528d955)",
+    "lingxi-app/apps/bridge-server/src/driver.rs@sha256:c42b6633969606a4551c257315d40f96d55edd7d20dddd99b20baad6aed0672f (Product 17593eaa66dc762d5c9c581ba348398c914bdbcd)",
+    "lingxi-app/apps/bridge-server/src/server.rs@sha256:7ce654e10b04ddd1c690074e3f1bd19062b32786b75ab60459b69115707e82e6 (Product 17593eaa66dc762d5c9c581ba348398c914bdbcd)",
+    "lingxi-app/apps/cli/host/src/headless_host.rs@sha256:55b342766853843a3360cf7d3b006b5277e43a2a4d22efdda04814a45af98102 (Product 17593eaa66dc762d5c9c581ba348398c914bdbcd)",
+    "lingxi-app/apps/cli/host/src/loop_wakeup.rs@sha256:89d95f3afa2f8ebc1131dfaf5e74d7190952df972109eaf8b445ea91711e2ce6 (Product 17593eaa66dc762d5c9c581ba348398c914bdbcd)",
+    "lingxi-app/apps/cli/host/src/repl.rs@sha256:b91aae579e9edb82bf222a15eefef89c8dd9dbf62face3c830d158dadccffd74 (Product 17593eaa66dc762d5c9c581ba348398c914bdbcd)",
+    "lingxi-app/apps/cli/host/src/repl_loop.rs@sha256:467c5cf2992b9500ee2fdb022b76ea8ea2153f997ad85a7411d358d8fe4da173 (Product 17593eaa66dc762d5c9c581ba348398c914bdbcd)",
+    "lingxi-app/apps/cli/host/tests/cli_repl_signals.rs@sha256:bdc208cecf0cf0303145e9f9e1ed2090ce51859106b9f089ac7dd613f12963a3 (Product 17593eaa66dc762d5c9c581ba348398c914bdbcd)",
+    "lingxi-app/apps/cli/host/tests/commands_native_cli.rs@sha256:af62c3656a9d8b9b833c7b4766909c4a95d34ba9846bbdb885d53d9eda0ab1f0 (Product 17593eaa66dc762d5c9c581ba348398c914bdbcd)",
+    "lingxi-app/apps/cli/host/tests/provider_error_cli.rs@sha256:d55d16712af8fa1c9d66f9abecf66e85ef7899fc1b91cb424aa12166a08e89f8 (Product 17593eaa66dc762d5c9c581ba348398c914bdbcd)",
+    "lingxi-app/apps/cli/host/tests/fixtures/cli-cancel-native-295/README.md@sha256:bc39c56ab085796bbb1e0ff25220e625e3f776d3453a23f41c44b070ba570184 (Product 17593eaa66dc762d5c9c581ba348398c914bdbcd)",
+    "lingxi-app/apps/cli/host/tests/fixtures/cli-cancel-native-295/stdout.raw@sha256:589d30e369a75200eef22c16e72fc068716736f988352f1748991f9a559525c2 (Product 17593eaa66dc762d5c9c581ba348398c914bdbcd)",
+    "lingxi-app/apps/cli/host/tests/fixtures/cli-cancel-native-295/prompt-content.raw.json@sha256:63738af050e51a7c05269ea26e17169ada3ac1ba1d41fec1ff88be3a8fb9647b (Product 17593eaa66dc762d5c9c581ba348398c914bdbcd)",
+    "lingxi-app/apps/cli/host/tests/fixtures/cli-cancel-native-295/interrupt-content.raw.json@sha256:ad710d55159f0013958b33520d37ce6d14c6f3647d93c09d005c7e545bebe228 (Product 17593eaa66dc762d5c9c581ba348398c914bdbcd)"
+  ],
+  "source_reuse_rule": "The H r6/r7/r8 receipt and r6 test-only follow-up proof are bound to H b3864c6. H r10 is independently bound to H 44f2eef5baf8ae16254934dbca451cbfd528d955 and its one-file run.rs delta through the r10 Runtime/fmt/changed-Clippy logs. Product 8610 full-gate/run04 receipts remain historical. Product 17593 full-runner evidence, passing run04 and passing macOS package receipt are bound to the recorded P/H/SDK/Mobile pins and receipts. The run04 receipt checks stable content slices and selected terminal/transcript constraints, not complete stdout/session bytes. The package visible CUA scope is the recorded form and Submit flow; development signing does not imply notarization. No universal Native byte-parity claim is made.",
+  "product_evidence_cutoff": {
+    "product_head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+    "pins": {
+      "harness": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+      "mobile": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+    },
+    "preflight": {
+      "path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045",
+      "identities_file": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/identities.txt",
+      "pins": {
+        "product": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+        "harness": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+        "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+        "mobile": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+      },
+      "progress_log": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/gate-logs/progress.log",
+      "progress_log_sha256": "a6b2e3d5b7811aa619b71a5f38525b49f57a223fd20142f9ec963a547e3918ee",
+      "phases": {
+        "metadata": {
+          "status": "passed",
+          "exit_code": 0
+        },
+        "source-validator": {
+          "status": "passed",
+          "exit_code": 0,
+          "log_sha256": "1b8d41fbaa7aa2cfea5b431d177824001a74e56c1eacf24db9020493d43aade7"
+        },
+        "fmt": {
+          "status": "passed",
+          "exit_code": 0,
+          "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "check": {
+          "status": "passed",
+          "exit_code": 0,
+          "log_sha256": "282fc6a591558776f68ff0fd52883446c628806d43367d2ff3815c00453ed860"
+        },
+        "clippy": {
+          "status": "passed",
+          "exit_code": 0,
+          "log_sha256": "d2b6780620588a8c704c8f40100a90c2ebd106dd9c62d62541d045490c53843a"
+        },
+        "skill-cold": {
+          "status": "passed",
+          "exit_code": 0,
+          "log_sha256": "cdc1a1516862cc5ffd58c727d11d2b86bebfafdee3ff892dbcdab60bd5ec9cd1",
+          "result": "cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire: 1 passed, 0 failed, 0 ignored, 2 filtered; 7.90s"
+        }
+      },
+      "full_runner": {
+        "status": "passed",
+        "receipt": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/run.json",
+        "sha256": "6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e",
+        "aggregate": {
+          "passed": 2740,
+          "failed": 0,
+          "ignored": 4
+        },
+        "coverage": {
+          "phases": 8,
+          "executable_test_targets": 40,
+          "doctest_targets": 9
+        },
+        "fingerprint": "f6fbe3b047f91732265849d323aec620fd3f19d19c9f4ed66ea3b49bb7a9e7e1"
+      }
+    },
+    "public_sigint_regression": {
+      "source": "lingxi-app/apps/cli/host/tests/commands_native_cli.rs",
+      "source_sha256": "af62c3656a9d8b9b833c7b4766909c4a95d34ba9846bbdb885d53d9eda0ab1f0",
+      "test": "public_cli_sigint_during_stream_open_matches_native_2_1_295",
+      "status": "passed_in_Product_17593_full_runner_and_run04",
+      "selector": "cargo test -p lingxi-cli --test commands_native_cli public_cli_sigint_during_stream_open_matches_native_2_1_295 -- --exact",
+      "fixture": "lingxi-app/apps/cli/host/tests/fixtures/cli-cancel-native-295/",
+      "evidence": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/phases/integration-tests-02/stdout.jsonl",
+      "evidence_sha256": "9f7afbbfdd3115a64e974cc30926a49d779182f595ce3e770adde9960eac1efb",
+      "phase_receipt": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/phases/integration-tests-02/phase.json",
+      "phase_receipt_sha256": "d33cc492ef3bb4430a5d75ff407d1f6fbe0a70111b92118e3bf659945fdcac84",
+      "phase_result": "integration-tests-02: 20 passed, 0 failed, 2 ignored; the named public SIGINT regression logged ok",
+      "focused_group_result": "3 passed, 0 failed, 0 ignored",
+      "run04": {
+        "status": "passed",
+        "receipt": "acceptance/final-ledger-r376/cli-sigint-candidate-run-04-17593eaa66-20261018T091547Z-1496/receipt.json",
+        "sha256": "a99af6f15e9dd53646658065b00e391e8331db97f2fab61608ce8f1d1a7bde0e",
+        "product_head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+        "harness_head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+        "elapsed_seconds": 4.071,
+        "candidate_exit_code": 0,
+        "sigint_after_full_post_accepted": true,
+        "provider_response_sent": false,
+        "timed_out": false,
+        "forced_cleanup": false,
+        "checks": "15/15 true",
+        "terminal_fields_match_native_constraints": true,
+        "no_assistant_transcript_row": true,
+        "prompt_and_interrupt_content_slices_match_native": true,
+        "comparison_limit": "Exact byte comparison covers stable prompt/interruption content slices only. Full stdout/session row bytes are not compared because UUID, timestamp, cwd, duration and envelope fields are dynamic."
+      }
+    },
+    "full_runner": {
+      "status": "complete",
+      "path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/run.json",
+      "sha256": "6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e",
+      "recorded_head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "pins": {
+        "harness": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+        "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+        "mobile": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+      },
+      "aggregate": {
+        "passed": 2740,
+        "failed": 0,
+        "ignored": 4
+      },
+      "coverage": {
+        "phases": 8,
+        "executable_test_targets": 40,
+        "doctest_targets": 9
+      },
+      "runner_fingerprint": "f6fbe3b047f91732265849d323aec620fd3f19d19c9f4ed66ea3b49bb7a9e7e1",
+      "metadata_sha256": "db73e1fa409183fd7443b811eb2190d72ab96416685843fbddff3b4582f84222",
+      "identity_sha256": "e8e1fe2b04b3b8b275bada632d6746837b7f46865911440617e7a855edce7235",
+      "plan_sha256": "5668f4030e21238e8b44dc05c6f32324ecb08b78b316d11bf4dee718d4ca8f58",
+      "source_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "phase_results": {
+        "library-tests": "2,548 passed, 0 failed, 2 ignored",
+        "binary-tests-01": "2 passed, 0 failed",
+        "integration-tests-01": "49 passed, 0 failed",
+        "integration-tests-02": "20 passed, 0 failed, 2 ignored",
+        "integration-tests-03": "15 passed, 0 failed",
+        "integration-tests-04": "98 passed, 0 failed",
+        "integration-tests-05": "8 passed, 0 failed",
+        "doctests": "9 targets passed"
+      },
+      "reuse_limit": "Complete Product gate for the pinned P/H/SDK/Mobile identities. It establishes this suite result, not universal Native byte parity or untested cancellation shapes."
+    },
+    "pending": [],
+    "historical_product_8610_run04": "Failed only the terminal-field comparison; retained at evidence_reuse.Product_8610_run04 and not transferred to Product 17593.",
+    "cli_8mib": {
+      "status": "passed",
+      "log": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/gate-logs/cli-8mib.log",
+      "sha256": "327a9cc97dc67d29d71ddabf56815175076fa9baa95e659ec61505ff13e11c4b",
+      "progress_log": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/gate-logs/progress.log",
+      "progress_log_sha256": "a6b2e3d5b7811aa619b71a5f38525b49f57a223fd20142f9ec963a547e3918ee",
+      "result": "8 MiB CLI acceptance phase exited 0"
+    },
+    "five_platforms": {
+      "status": "passed",
+      "root": "/private/tmp/repaired-h-product-r376-17593eaa66-20261018T083723Z-63256/platform",
+      "log_count": 5,
+      "logs": {
+        "android-arm64-computer-use.log": {
+          "status": "passed",
+          "sha256": "41b76d53724671b1abdb24c54ed8ffcbb92a1772c6fabe9f73a9007d8383d7e0"
+        },
+        "android-arm64-default.log": {
+          "status": "passed",
+          "sha256": "63ed073b13b049eacb09d99c378397575478deae9cde37e2e18a3e0e8cb5e451"
+        },
+        "android-x86_64-computer-use.log": {
+          "status": "passed",
+          "sha256": "d77b8d39bc4bab2db4a77801d1933d7fe992666a31a8590d39b5b0eb6b8b44be"
+        },
+        "android-x86_64-default.log": {
+          "status": "passed",
+          "sha256": "ab4d6c87243ddba028bd6372479fc8eeaec9ab3b16035136cf7e43b4aeb00203"
+        },
+        "ios-simulator-default.log": {
+          "status": "passed",
+          "sha256": "ce8c5e99e0af7d31bf0534af5c33734c2a64f5886f70c6f08325a09169189764"
+        }
+      },
+      "reuse_limit": "All five Android/iOS platform logs pass on the pinned Product/H/SDK/Mobile set; the separate macOS package receipt also passed and is recorded at scope.product_pending.mac_package."
+    },
+    "standalone_run04": {
+      "status": "passed",
+      "receipt": "acceptance/final-ledger-r376/cli-sigint-candidate-run-04-17593eaa66-20261018T091547Z-1496/receipt.json",
+      "sha256": "a99af6f15e9dd53646658065b00e391e8331db97f2fab61608ce8f1d1a7bde0e",
+      "product_head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "harness_head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "elapsed_seconds": 4.071,
+      "candidate_exit_code": 0,
+      "sigint_after_full_post_accepted": true,
+      "provider_response_sent": false,
+      "timed_out": false,
+      "forced_cleanup": false,
+      "checks": "15/15 true",
+      "terminal_fields_match_native_constraints": true,
+      "no_assistant_transcript_row": true,
+      "prompt_and_interrupt_content_slices_match_native": true,
+      "comparison_limit": "Exact byte comparison covers stable prompt/interruption content slices only. Full stdout/session row bytes are not compared because UUID, timestamp, cwd, duration and envelope fields are dynamic."
+    },
+    "mac_package": {
+      "status": "passed",
+      "receipt": "acceptance/final-ledger-r376/receipts/mac-package-final-17593.json",
+      "sha256": "6e4f1ce2eba4d069f9219603b6043b64ce0cb8f2e7b4e71645710e2b37fbb337",
+      "pins": {
+        "product": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+        "harness": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+        "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e"
+      },
+      "static_audit": "passed",
+      "startup_smoke": "passed",
+      "independent_audit": "passed",
+      "actual_visible_cua": {
+        "status": "passed",
+        "typed_then_appended": "packaged-host-cua-valuexy",
+        "submit_result": "Submit callback accepted: packaged-host-cua-valuexy",
+        "screenshot_sha256": "28be6f881ae2844132ea366dad0174632ec2cffb7feaabe4c5c870dcffde7b0c"
+      },
+      "cleanup": {
+        "provider_credentials": "cleared",
+        "app_pid_52288": "exited"
+      },
+      "package_sha256": "64c8a4d7a441f53c5dc9990d13f3ea4930f1ead72c2df52759565102f73481de",
+      "app_asar_sha256": "21462a3c01035cd13bb3785dcfcc11ad474ea6f22b6fde0357db352fa23ecb06",
+      "limitations": [
+        "Development signing only; no notarization or stapling claim.",
+        "Visible CUA evidence covers the recorded packaged form and Submit flow only.",
+        "This package receipt does not certify all Native parity contracts."
+      ]
+    },
+    "finalizer": {
+      "status": "passed",
+      "repair_receipt": "acceptance/final-ledger-r376/repairs-final-17593-v2.json",
+      "repair_receipt_sha256": "86f1d03e74063b3f1db4ec47416e924562bd9c08cbefdf9848fd347631e1465f",
+      "baseline_receipt": "acceptance/final-ledger-r376/final-baseline-17593-v2.json",
+      "baseline_receipt_sha256": "32663a6fb64ab1563d6d0ebd54181412ab8611c09994425b9bb4a2452ea8a4e3",
+      "selected_gate_phase_count": 20,
+      "product_runner_phase_count": 8,
+      "binding": "The receipts bind Product 17593/H 44f2/SDK a363; final-baseline references the exact repairs receipt hash."
+    },
+    "acceptance_status": "passed_for_recorded_product_gates"
+  }
+}

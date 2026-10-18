@@ -1,0 +1,266 @@
+{
+  "schema": "native-2.1.295-ltr-alias-probe-v1",
+  "status": "capture_invalid",
+  "native_process_started": true,
+  "native_sha256_expected": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "fixed_inputs": {
+    "model": "claude-sonnet-4-5",
+    "session_id": "00000000-0000-4000-8000-000000002950",
+    "prompt": "List the available tool names. Do not call tools. Reply exactly OK.",
+    "initialize_request_id": "alias-glob-initialize-1",
+    "settings_deny": [
+      "lf_a*b",
+      "cr_a*b",
+      "ls_a*b",
+      "ps_a*b",
+      "suffix_a*b",
+      "pos_a*b"
+    ],
+    "tool_aliases": {
+      "lf_a\nb": "Read",
+      "cr_a\rb": "Bash",
+      "ls_a\u2028b": "Glob",
+      "ps_a\u2029b": "Grep",
+      "suffix_ab\n": "Write",
+      "pos_ab": "Edit"
+    },
+    "tools_argument": "Read,Bash,Glob,Grep,Write,Edit,NotebookEdit",
+    "tool_search": "disabled"
+  },
+  "native_process_count": 1,
+  "provider_request_count": 1,
+  "checks": {
+    "pinned_native_sha256": true,
+    "one_native_process": true,
+    "initialize_ack_success": true,
+    "one_accepted_loopback_messages_post": true,
+    "request_is_fixed_model_streaming": true,
+    "positive_edit_deny_observed": false,
+    "unaliased_notebookedit_presence_control": true,
+    "fixed_sse_reply_sent": true,
+    "normal_exit_without_forced_cleanup": true,
+    "one_session_file_or_none": true,
+    "within_60_seconds": true
+  },
+  "interpretation": "capture invalid; do not infer alias/glob semantics",
+  "failures": [],
+  "native_binding": {
+    "path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+  },
+  "invocation": {
+    "args": [
+      "--setting-sources",
+      "project",
+      "--strict-mcp-config",
+      "--permission-mode",
+      "dontAsk",
+      "--print",
+      "--input-format",
+      "stream-json",
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--tools",
+      "Read,Bash,Glob,Grep,Write,Edit,NotebookEdit",
+      "--max-turns",
+      "1",
+      "--max-budget-usd",
+      "1",
+      "--model",
+      "claude-sonnet-4-5",
+      "--session-id",
+      "00000000-0000-4000-8000-000000002950"
+    ],
+    "cwd": "/private/tmp/native-ltr-alias-_i53ujut/cwd",
+    "env_keys": [
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_BASE_URL",
+      "ANTHROPIC_MAX_RETRIES",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+      "CLAUDE_CODE_ENABLE_TOOL_SEARCH",
+      "CLAUDE_CONFIG_DIR",
+      "DISABLE_TELEMETRY",
+      "DO_NOT_TRACK",
+      "ENABLE_TOOL_SEARCH",
+      "HOME",
+      "LANG",
+      "NO_PROXY",
+      "PATH",
+      "TERM",
+      "TMPDIR",
+      "TZ",
+      "no_proxy"
+    ]
+  },
+  "loopback_requests": [
+    {
+      "method": "POST",
+      "path": "/v1/messages?beta=true",
+      "accepted": true,
+      "loopback_peer": true,
+      "dummy_key_matched": true,
+      "request_bytes": 52810,
+      "request_sha256": "092e2b0d7d52ea47eda63d2349e19ec48bb08f85456c02faf2f0369a91bb626d",
+      "request_stream": true,
+      "request_model": "claude-sonnet-4-5",
+      "tool_names": [
+        "Bash",
+        "Edit",
+        "Glob",
+        "Grep",
+        "NotebookEdit",
+        "Read",
+        "Write"
+      ]
+    }
+  ],
+  "observed_tool_names": [
+    "Bash",
+    "Edit",
+    "Glob",
+    "Grep",
+    "NotebookEdit",
+    "Read",
+    "Write"
+  ],
+  "alias_observations": [
+    {
+      "case": "LF-internal",
+      "alias_source_utf16_units": [
+        108,
+        102,
+        95,
+        97,
+        10,
+        98
+      ],
+      "canonical_tool": "Read",
+      "deny_pattern": "lf_a*b",
+      "canonical_tool_present_in_provider_catalog": true
+    },
+    {
+      "case": "CR-internal",
+      "alias_source_utf16_units": [
+        99,
+        114,
+        95,
+        97,
+        13,
+        98
+      ],
+      "canonical_tool": "Bash",
+      "deny_pattern": "cr_a*b",
+      "canonical_tool_present_in_provider_catalog": true
+    },
+    {
+      "case": "LS-internal",
+      "alias_source_utf16_units": [
+        108,
+        115,
+        95,
+        97,
+        8232,
+        98
+      ],
+      "canonical_tool": "Glob",
+      "deny_pattern": "ls_a*b",
+      "canonical_tool_present_in_provider_catalog": true
+    },
+    {
+      "case": "PS-internal",
+      "alias_source_utf16_units": [
+        112,
+        115,
+        95,
+        97,
+        8233,
+        98
+      ],
+      "canonical_tool": "Grep",
+      "deny_pattern": "ps_a*b",
+      "canonical_tool_present_in_provider_catalog": true
+    },
+    {
+      "case": "terminal-newline control",
+      "alias_source_utf16_units": [
+        115,
+        117,
+        102,
+        102,
+        105,
+        120,
+        95,
+        97,
+        98,
+        10
+      ],
+      "canonical_tool": "Write",
+      "deny_pattern": "suffix_a*b",
+      "canonical_tool_present_in_provider_catalog": true
+    },
+    {
+      "case": "plain-positive control",
+      "alias_source_utf16_units": [
+        112,
+        111,
+        115,
+        95,
+        97,
+        98
+      ],
+      "canonical_tool": "Edit",
+      "deny_pattern": "pos_a*b",
+      "canonical_tool_present_in_provider_catalog": true
+    }
+  ],
+  "provider_request": {
+    "path": "provider-request.raw.json",
+    "bytes": 52810,
+    "sha256": "092e2b0d7d52ea47eda63d2349e19ec48bb08f85456c02faf2f0369a91bb626d",
+    "model": "claude-sonnet-4-5",
+    "stream": true
+  },
+  "provider_response": {
+    "path": "provider-response.raw.sse",
+    "bytes": 747,
+    "sha256": "1884e8116accdeb47f5290aa9eb4016c8522f30d388a89b0bec61b09edabcdec"
+  },
+  "stdout": {
+    "path": "stdout.raw",
+    "bytes": 21134,
+    "sha256": "10f67431380d86ca0b758ab408c2b752eb9d4296bc984d6ca379bc7dbfb7ac40"
+  },
+  "stderr": {
+    "path": "stderr.raw",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "initialize_frame": {
+    "path": "initialize-frame.raw.jsonl",
+    "sha256": "58cd6145b7a3982a6b57be0a95b371b5b1d5384ddd5712d49fd4dd2ce0117bcc"
+  },
+  "initialize_ack": {
+    "path": "initialize-ack.raw.jsonl",
+    "sha256": "11ca8ebcebb22821d5ff0fbd13789634ad2da591c3770dc9b9d2ba24679ce832"
+  },
+  "user_frame": {
+    "path": "user-frame.raw.jsonl",
+    "sha256": "4792553db93e2afee0dab81a501a4157347a2a2ac7f832a8f1334b266cd3c6fa"
+  },
+  "session": {
+    "present": true,
+    "path": "session.raw.jsonl",
+    "bytes": 102132,
+    "sha256": "2f646b2a5d59f9e75d4353cd5527654fe9cdeb226667573582384c34a18801ca"
+  },
+  "native_exit_code": 0,
+  "forced_cleanup": null,
+  "elapsed_seconds": 0.989,
+  "temp_isolation": {
+    "root": "/private/tmp/native-ltr-alias-_i53ujut",
+    "removed": true
+  },
+  "network_boundary": "The only configured provider endpoint is an ephemeral 127.0.0.1 Messages stub; environment is rebuilt without inherited credentials/proxies, and telemetry/nonessential traffic is disabled. This reuses the checked-in cli-cancel-295 isolation posture; it is not an OS-level egress sandbox.",
+  "native_source_boundary": "The public initialize toolAliases field is source-confirmed. This run observes only provider tool-name presence for the fixed request; it does not establish complete Native raw request/session byte parity or bind unavailable Native LTr regex flags beyond these observed cases."
+}

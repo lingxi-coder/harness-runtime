@@ -1,0 +1,218 @@
+{
+  "schema": "canonical-preservation-final-17593/v1",
+  "recorded_utc": "2026-10-18T09:40:43.112002+00:00",
+  "canonical_before": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/final-ledger-r376/canonical-before.json",
+    "sha256": "2cfa1515af06b7d11ccdbc688ebddb9b16bed4651972d019c3186f5ad840b9e8",
+    "repositories": {
+      "harness-runtime": {
+        "repo": "/Users/luolingfeng/lingxi/harness-runtime",
+        "head": "1a95887481789b43af01467a9115d94abecc7b07",
+        "branch": "main",
+        "tracked_status": " M packages/webrtc/Cargo.lock\n M packages/webrtc/Cargo.toml\n M packages/webrtc/DEVICE_VALIDATION.md\n M packages/webrtc/README.md\n M packages/webrtc/compose.yaml\n M packages/webrtc/core/src/lib.rs\n M packages/webrtc/core/src/transport.rs\n M packages/webrtc/core/src/transport_tests.rs\n M packages/webrtc/media/src/lib.rs\n M packages/webrtc/media/src/video_ports.rs\n M packages/webrtc/mobile/include/lingxi_webrtc.h\n M packages/webrtc/mobile/src/lib.rs\n M packages/webrtc/mobile/src/probe_session.rs\n M packages/webrtc/platform/android-probe/app/src/main/cpp/bridge.cpp\n M packages/webrtc/platform/android-probe/app/src/main/java/com/lingxi/webrtc/probe/MainActivity.java\n M packages/webrtc/platform/android-probe/app/src/main/java/com/lingxi/webrtc/probe/MediaService.java\n M packages/webrtc/platform/android-probe/app/src/main/java/com/lingxi/webrtc/probe/NativeBridge.java\n M packages/webrtc/platform/ios-probe/Sources/NativeDevices.m\n M packages/webrtc/platform/ios-probe/Sources/main.m\n M packages/webrtc/platform/ios-probe/project.yml\n M packages/webrtc/test-server/src/main.rs\n M packages/webrtc/vendor/README.md\n",
+        "unstaged_sha256": "9553e817ebd835cccd53842af0c7001592ea9a4324384ea84d59a4e66c332291",
+        "staged_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "matches_before": {
+          "head": true,
+          "branch": true,
+          "tracked_status": true,
+          "unstaged_sha256": true,
+          "staged_sha256": true
+        },
+        "unchanged_since_before": true,
+        "tracked_dirty_files": [
+          {
+            "status": " M",
+            "path": "packages/webrtc/Cargo.lock",
+            "sha256": "4171160a4cb9be25d850a8b8060d4e04f407f8dc417b187fac28f99427c1dc00"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/Cargo.toml",
+            "sha256": "3f22e59c9fa18bcba2835705ef32b8b0652e9b42b137140ed9d8a14f164d218e"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/DEVICE_VALIDATION.md",
+            "sha256": "911cc1aedd3f06774e382193de21db5c24f2a631bfb531059fcf1d6becb930c4"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/README.md",
+            "sha256": "2661b730dab62ee6643c4ecb2e15e6b6dd5e883e5197e3c8e3ebaf8fb4bbb57a"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/compose.yaml",
+            "sha256": "5ad63213df1f58519161fe2981f3786bd0b35353e83980190007adb09ab6363a"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/core/src/lib.rs",
+            "sha256": "42eb9949f950dc0f647f0565b2d15d112c565f37c21665ba39c902e058f912fe"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/core/src/transport.rs",
+            "sha256": "ed05204447cf0dd478da88c94a65872054920c140d1a79f647964193a368e07b"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/core/src/transport_tests.rs",
+            "sha256": "bd57e11b4a26cf23b2c5437140aadf5103268241e1f9decc902f6b83712844b0"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/media/src/lib.rs",
+            "sha256": "a22267d3d94074d7c86adef4565712c695ef06d32eefeb4e25311e624e908da4"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/media/src/video_ports.rs",
+            "sha256": "88c7c5d4687791c17d5020946123c99267b08cc345939ca1ff3f8bf8c7ce9518"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/mobile/include/lingxi_webrtc.h",
+            "sha256": "8cc9e123115fcd4a7820257461ad06501720aa9fd56d49d4eabe702a8c58aaf3"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/mobile/src/lib.rs",
+            "sha256": "bba1d5703632b43255d6292eb2b79e61b744c89d8f0825fe53cd6492b133cbb8"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/mobile/src/probe_session.rs",
+            "sha256": "1bd435cb52ca09d692750546004c5e332061c7376555fab566d9366ae5902dc9"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/platform/android-probe/app/src/main/cpp/bridge.cpp",
+            "sha256": "769ef1949db691af5e743cda96ac716fb25783c7599f05459f65cd3f170c9d89"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/platform/android-probe/app/src/main/java/com/lingxi/webrtc/probe/MainActivity.java",
+            "sha256": "2473ea9e8c169ef64fdbcbe8286e92f27bb1d163d88ddae76090be1758072e0c"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/platform/android-probe/app/src/main/java/com/lingxi/webrtc/probe/MediaService.java",
+            "sha256": "b51b05841f7e413c6872423df0b220a1a53ea1b48d0f4f45fb7f32be871e72b9"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/platform/android-probe/app/src/main/java/com/lingxi/webrtc/probe/NativeBridge.java",
+            "sha256": "d1ebf3a0185ca6d35f7bf50c1ed338c86c65c08241b738e3ce0ce60e0e7f655f"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/platform/ios-probe/Sources/NativeDevices.m",
+            "sha256": "bfc221951de034731dfb7669b265939948d430326b38a255826a31b6700ff22b"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/platform/ios-probe/Sources/main.m",
+            "sha256": "bd873abf7ae8d1b9a9d1ab18757c4372adc725a05e644b01ab0af48351e0f4b7"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/platform/ios-probe/project.yml",
+            "sha256": "ec3ce350cac8bfb721e3024815c6cab6229186755df3ac3dad14025cde4505fc"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/test-server/src/main.rs",
+            "sha256": "757501f0e2c44fed3c3acd9d44599f042b6fa0301ff048d5148a0a8035af8307"
+          },
+          {
+            "status": " M",
+            "path": "packages/webrtc/vendor/README.md",
+            "sha256": "2ab250c8f5300517e09fac47c63ac6470d6ff4b1995c8b9d8bcf5ff86bb759ad"
+          }
+        ]
+      },
+      "lingxi-app": {
+        "repo": "/Users/luolingfeng/lingxi/lingxi-app",
+        "head": "3af47d77fcff4273fc2f235af0b1ed77b13919eb",
+        "branch": "main",
+        "tracked_status": " M apps/ios/native/Resources/Localizable.xcstrings\n M apps/ios/native/Sources/Settings/ProviderPages.swift\n M apps/ios/native/UITests/DesktopSettingsUITests.swift\n M apps/ios/native/UITests/LingxiCodeUITests.swift\n",
+        "unstaged_sha256": "d85495e07659712cc8a485dede4cb28f37e1be961a29d59c4be2767c44dbf68d",
+        "staged_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "matches_before": {
+          "head": true,
+          "branch": true,
+          "tracked_status": true,
+          "unstaged_sha256": true,
+          "staged_sha256": true
+        },
+        "unchanged_since_before": true,
+        "tracked_dirty_files": [
+          {
+            "status": " M",
+            "path": "apps/ios/native/Resources/Localizable.xcstrings",
+            "sha256": "380303f8b4edc5dad889a4ec602407d8959f4e65e0526a972451c6624737bafd"
+          },
+          {
+            "status": " M",
+            "path": "apps/ios/native/Sources/Settings/ProviderPages.swift",
+            "sha256": "85344828c0ca2b610fc7bcc0a3d8e20095e05a5ee3d35d2d50d17716a2ddb475"
+          },
+          {
+            "status": " M",
+            "path": "apps/ios/native/UITests/DesktopSettingsUITests.swift",
+            "sha256": "78aa4bba240e5bb31636e9f8822036cce916efd93b830b0e0cd903fea17a93ca"
+          },
+          {
+            "status": " M",
+            "path": "apps/ios/native/UITests/LingxiCodeUITests.swift",
+            "sha256": "8b0aca0dae30f76f7f9de2af6a22da97ab38574c1a026504e1ca87eba74cb699"
+          }
+        ]
+      }
+    }
+  },
+  "integrated_source": {
+    "S": {
+      "repo": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client",
+      "head": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+      "expected_head": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+      "head_matches_expected": true,
+      "branch": "codex/claude-alignment-integration",
+      "tracked_status": "",
+      "tracked_clean": true,
+      "origin_main_divergence": {
+        "ahead": 0,
+        "behind": 0
+      }
+    },
+    "H": {
+      "repo": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime",
+      "head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "expected_head": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "head_matches_expected": true,
+      "branch": "codex/claude-alignment-integration",
+      "tracked_status": "",
+      "tracked_clean": true,
+      "origin_main_divergence": {
+        "ahead": 0,
+        "behind": 0
+      }
+    },
+    "P": {
+      "repo": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app",
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "expected_head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "head_matches_expected": true,
+      "branch": "codex/claude-alignment-integration",
+      "tracked_status": "",
+      "tracked_clean": true,
+      "origin_main_divergence": {
+        "ahead": 4,
+        "behind": 0
+      }
+    }
+  },
+  "divergence_basis": "local origin/main tracking refs; no network fetch performed in this check"
+}

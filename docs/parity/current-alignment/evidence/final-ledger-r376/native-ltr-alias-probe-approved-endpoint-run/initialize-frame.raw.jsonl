@@ -1,0 +1,1 @@
+{"type":"control_request","request_id":"alias-glob-initialize-1","request":{"subtype":"initialize","toolAliases":{"lf_a\nb":"Read","cr_a\rb":"Bash","ls_a\u2028b":"Glob","ps_a\u2029b":"Grep","suffix_ab\n":"Write","pos_ab":"Edit"}}}

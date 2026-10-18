@@ -1,0 +1,621 @@
+    Checking tokio-util v0.7.18
+    Checking rustls v0.23.45
+    Checking jsonrpc v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/jsonrpc)
+    Checking mcp-wire v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp-wire)
+    Checking core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+    Checking tokio-rustls v0.26.4
+    Checking tower v0.5.3
+    Checking h2 v0.4.19
+    Checking hyper v1.9.0
+    Checking hyper-util v0.1.20
+    Checking async-compression v0.4.44
+    Checking tower-http v0.6.11
+    Checking opentelemetry_sdk v0.31.0
+    Checking hyper-timeout v0.5.2
+    Checking tonic v0.14.2
+    Checking hyper-rustls v0.27.5
+    Checking reqwest v0.12.28
+    Checking tonic-prost v0.14.5
+    Checking opentelemetry-proto v0.31.0
+    Checking opentelemetry-http v0.31.0
+    Checking opentelemetry-prometheus v0.31.0
+    Checking opentelemetry-otlp v0.31.1
+    Checking opentelemetry-stdout v0.31.0
+    Checking lingxi-hyper-util v0.1.21 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking lingxi-hyper-rustls v0.27.5 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking tungstenite v0.24.0
+    Checking tokio-tungstenite v0.24.0
+    Checking lingxi-reqwest v0.12.29 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking lingxi-llm-client v0.3.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking telemetry v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry)
+    Checking secret v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/secret)
+    Checking permission v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/permission)
+    Checking sandbox-runtime v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sandbox-runtime)
+    Checking lsp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/lsp)
+    Checking sandbox v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sandbox)
+    Checking visualization v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/visualization)
+    Checking session v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/session)
+    Checking cost v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/cost)
+    Checking hooks v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/hooks)
+    Checking workflow v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/workflow)
+    Checking task-store v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/task-store)
+    Checking skill v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/skill)
+    Checking lopdf v0.45.0
+    Checking outputstyles v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/outputstyles)
+    Checking async-compat v0.2.5
+    Checking uniffi_core v0.32.2
+    Checking git2 v0.21.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/git2-rs/git2)
+    Checking llm-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime)
+    Checking http-client v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/http-client)
+    Checking uniffi v0.32.2
+    Checking tokio-tungstenite v0.21.0
+    Checking local-app v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/local-app)
+    Checking platform-macos-computer-control v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/macos-computer-control)
+    Checking audio-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/audio-runtime)
+    Checking msgqueue v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/msgqueue)
+ Documenting permission v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/permission)
+error: unresolved link to `GhSource`
+    --> crates/permission/src/auto_mode_io.rs:1079:23
+     |
+1079 | /// Real-subprocess [`GhSource`] — the `gh` calls `x1d` and `Xsy` make.
+     |                       ^^^^^^^^ no item named `GhSource` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+     = note: `-D rustdoc::broken-intra-doc-links` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(rustdoc::broken_intra_doc_links)]`
+
+error: unresolved link to `gh_env_overrides`
+    --> crates/permission/src/auto_mode_io.rs:1081:34
+     |
+1081 | /// Every invocation runs with [`gh_env_overrides`] applied. That is the
+     |                                  ^^^^^^^^^^^^^^^^ no item named `gh_env_overrides` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+error: unresolved link to `AllProjectsSource`
+    --> crates/permission/src/auto_mode_io.rs:1422:23
+     |
+1422 | /// Real-filesystem [`AllProjectsSource`] — the `W1d` sweep over every project's
+     |                       ^^^^^^^^^^^^^^^^^ no item named `AllProjectsSource` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+error: unresolved link to `ShellHistorySource`
+    --> crates/permission/src/auto_mode_io.rs:1561:23
+     |
+1561 | /// Real-filesystem [`ShellHistorySource`].
+     |                       ^^^^^^^^^^^^^^^^^^ no item named `ShellHistorySource` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+error: public documentation for `settings_section_size_warning` links to private item `AUTO_MODE_SECTION_WARN_BYTES`
+    --> crates/permission/src/auto_mode_setup.rs:1117:7
+     |
+1117 | /// [`AUTO_MODE_SECTION_WARN_BYTES`] and [`SETTINGS_MAX_BYTES`].
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+     = note: `-D rustdoc::private-intra-doc-links` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[allow(rustdoc::private_intra_doc_links)]`
+
+error: public documentation for `settings_section_size_warning` links to private item `SETTINGS_MAX_BYTES`
+    --> crates/permission/src/auto_mode_setup.rs:1117:44
+     |
+1117 | /// [`AUTO_MODE_SECTION_WARN_BYTES`] and [`SETTINGS_MAX_BYTES`].
+     |                                            ^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `node_type_id` links to private item `DANGEROUS_TYPES`
+   --> crates/permission/src/bash_ast_security.rs:833:45
+    |
+833 | /// `-2` (pre-check); `"ERROR"` → `-1`; a [`DANGEROUS_TYPES`] member → its
+    |                                             ^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `walk_program` links to private item `collect_commands`
+    --> crates/permission/src/bash_ast_security.rs:3547:44
+     |
+3547 | /// TS `walkProgram` (ast.ts:462). Drive [`collect_commands`] over the program
+     |                                            ^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `bash_command_clamp` links to private item `crate::PermissionPolicy::bash_command_clamp_deny`
+  --> crates/permission/src/bash_command_clamp.rs:26:9
+   |
+26 | //! * [`crate::PermissionPolicy::bash_command_clamp_deny`], reached from
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: unresolved link to `HostContextRecord::may_carry_user_intent`
+   --> crates/permission/src/classifier.rs:206:22
+    |
+206 | ///   a boundary". [`HostContextRecord::may_carry_user_intent`] is what filters
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `HostContextRecord` in scope
+
+error: public documentation for `boot_agent_may_adopt_bypass` links to private item `CliModeSettings::bg_bypass_disclaimer_gate_trips`
+    --> crates/permission/src/cli_mode.rs:1108:8
+     |
+1108 | /// ([`CliModeSettings::bg_bypass_disclaimer_gate_trips`]); upstream applies them
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `command_path_deny_targets` links to private item `PathGuard::Check`
+    --> crates/permission/src/command_path_containment.rs:1742:7
+     |
+1742 | /// [`PathGuard::Check`] (a resolved absolute path) rather than only out-of-cwd
+     |       ^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `source_display` links to private item `crate::shadow::format_source`
+   --> crates/permission/src/dangerous_perms.rs:305:48
+    |
+305 |     /// `formatPermissionSource` (`XUl`) via [`crate::shadow::format_source`]:
+    |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `SubstitutionRemoval` links to private item `check_dangerous_removal_inner`
+   --> crates/permission/src/dangerous_removal.rs:516:7
+    |
+516 | /// [`check_dangerous_removal_inner`], which recurses through
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `SubstitutionRemoval` links to private item `active_command_substitutions`
+   --> crates/permission/src/dangerous_removal.rs:517:7
+    |
+517 | /// [`active_command_substitutions`] to depth 8. Only these two shapes were
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `dangerous_rm_on_variable_path` links to private item `okg_re`
+    --> crates/permission/src/dangerous_removal.rs:1088:21
+     |
+1088 | /// path (matches [`okg_re`]) and returns the FIRST `(command_name, target)`
+     |                     ^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `filesystem` links to private item `expand_path`
+  --> crates/permission/src/filesystem.rs:34:9
+   |
+34 | //! - [`expand_path`] itself is lexical, matching the orchestrator's `expandPath`
+   |         ^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `input_path_for_tool` links to private item `input_path_field_for_tool`
+   --> crates/permission/src/filesystem.rs:143:7
+    |
+143 | /// [`input_path_field_for_tool`]; `Glob`/`Grep` default their search root to
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `test_rule_pattern` links to private item `pattern_with_root`
+   --> crates/permission/src/filesystem.rs:776:62
+    |
+776 | /// 2. Resolve the pattern's `(relativePattern, root)` via [`pattern_with_root`]
+    |                                                              ^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `test_rule_pattern` links to private item `pattern_with_root`
+   --> crates/permission/src/filesystem.rs:794:56
+    |
+794 | /// ⚠️ The negation is resolved on the pattern AFTER [`pattern_with_root`], not
+    |                                                       ^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `path_in_working_path` links to private item `rewrite_private_symlinks`
+    --> crates/permission/src/filesystem.rs:1277:21
+     |
+1277 | ///    false, and [`rewrite_private_symlinks`] matches the prefix case-sensitively).
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `git_bare_repo` links to private item `is_standalone_git_dir`
+  --> crates/permission/src/git_bare_repo.rs:20:53
+   |
+20 | //!   distinguishes it from a planted bare repo — [`is_standalone_git_dir`]
+   |                                                     ^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `headless_gate` links to private item `crate::policy_gate::DENIAL_WORKAROUND_GUIDANCE`
+  --> crates/permission/src/headless_gate.rs:24:8
+   |
+24 | //! ([`crate::policy_gate::DENIAL_WORKAROUND_GUIDANCE`]). This gate reproduces
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: unresolved link to `crate::PolicyPermissionGate::check_with_context_or_abort`
+  --> crates/permission/src/layers.rs:41:7
+   |
+41 | //! [`crate::PolicyPermissionGate::check_with_context_or_abort`] and
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the struct `PolicyPermissionGate` has no field or associated item named `check_with_context_or_abort`
+
+error: unresolved link to `crate::PolicyPermissionGate::resolve_detailed_or_abort`
+  --> crates/permission/src/layers.rs:42:7
+   |
+42 | //! [`crate::PolicyPermissionGate::resolve_detailed_or_abort`] — the two
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the struct `PolicyPermissionGate` has no field or associated item named `resolve_detailed_or_abort`
+
+error: unresolved link to `PathBuf`
+   --> crates/permission/src/loader.rs:546:35
+    |
+546 | /// the RAW settings strings as [`PathBuf`]s (relative / `~`-prefixed / absolute) —
+    |                                   ^^^^^^^ no item named `PathBuf` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+error: unresolved link to `LXe`
+  --> crates/permission/src/mcp_policy.rs:31:63
+   |
+31 | //! [`crate::PermissionRuleSource::McpServerPolicy`] bucket [`LXe`] builds: a
+   |                                                               ^^^ no item named `LXe` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+error: unresolved link to `PermissionPolicy`
+  --> crates/permission/src/mcp_policy.rs:54:7
+   |
+54 | //! [`PermissionPolicy`]'s
+   |       ^^^^^^^^^^^^^^^^ no item named `PermissionPolicy` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+error: unresolved link to `ceiling_ask_beats_a_higher_priority_allow_rule`
+  --> crates/permission/src/mcp_policy.rs:60:7
+   |
+60 | //! [`ceiling_ask_beats_a_higher_priority_allow_rule`] below.
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `ceiling_ask_beats_a_higher_priority_allow_rule` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+error: unresolved link to `mcp`
+  --> crates/permission/src/mcp_policy.rs:96:7
+   |
+96 | //! [`mcp`] registry and the [`crate::PolicyPermissionGate`] together is the
+   |       ^^^ no item named `mcp` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+error: unresolved link to `PermissionPolicy::from_rules`
+   --> crates/permission/src/mcp_policy.rs:100:7
+    |
+100 | //! [`PermissionPolicy::from_rules`] (or splice it into the live rule state the
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `PermissionPolicy` in scope
+
+error: public documentation for `mode_policy` links to private item `AUTO_MODE_SAFE_TOOLS`
+ --> crates/permission/src/mode_policy.rs:3:9
+  |
+3 | //! * [`AUTO_MODE_SAFE_TOOLS`] is the AUTO-mode set — the 2.1.270 `ojo` set read
+  |         ^^^^^^^^^^^^^^^^^^^^ this item is private
+  |
+  = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `mode_policy` links to private item `PLAN_SAFE_TOOLS`
+ --> crates/permission/src/mode_policy.rs:6:9
+  |
+6 | //! * [`PLAN_SAFE_TOOLS`] is the PLAN-mode mutation-block allowlist: in `Plan`
+  |         ^^^^^^^^^^^^^^^ this item is private
+  |
+  = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `is_plan_safe_tool` links to private item `PLAN_SAFE_TOOLS`
+   --> crates/permission/src/mode_policy.rs:153:41
+    |
+153 | /// planning-safe tools enumerated in [`PLAN_SAFE_TOOLS`] or installed by a
+    |                                         ^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: unresolved link to `crate::PolicyPermissionGate::set_permission_mode`
+   --> crates/permission/src/policy.rs:572:12
+    |
+572 |     /// ([`crate::PolicyPermissionGate::set_permission_mode`]) with the byte-exact
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the struct `PolicyPermissionGate` has no field or associated item named `set_permission_mode`
+
+error: public documentation for `apply_auto_mode_restrictions` links to private item `Self::rule_is_available_in_mode`
+   --> crates/permission/src/policy.rs:681:25
+    |
+681 |     /// suspension in [`Self::rule_is_available_in_mode`], and the loop-tool
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `apply_auto_mode_restrictions` links to private item `Self::rule_is_available_in_mode`
+   --> crates/permission/src/policy.rs:698:43
+    |
+698 |     /// which this port applies through [`Self::rule_is_available_in_mode`] —
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: unresolved link to `Self::rule_matches`
+    --> crates/permission/src/policy.rs:1409:26
+     |
+1409 |     /// Rule matching ([`Self::rule_matches`]): TOOL-WIDE rules match by exact
+     |                          ^^^^^^^^^^^^^^^^^^ the struct `PermissionPolicy` has no field or associated item named `rule_matches`
+
+error: public documentation for `restore_dangerous` links to private item `Self::stripped_positions`
+    --> crates/permission/src/policy.rs:2952:56
+     |
+2952 |     /// pre-strip contents (positions included — see [`Self::stripped_positions`]).
+     |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: unresolved link to `RegistryToolInvoker`
+  --> crates/permission/src/policy_gate.rs:23:13
+   |
+23 | //! path ([`RegistryToolInvoker`]) is now ALSO gated (phase 3b — closed the
+   |             ^^^^^^^^^^^^^^^^^^^ no item named `RegistryToolInvoker` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+error: public documentation for `apply_permission_update` links to private item `Self::mode_override`
+    --> crates/permission/src/policy_gate.rs:2572:35
+     |
+2572 |     /// interior-mutable state, [`Self::mode_override`]):
+     |                                   ^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `apply_permission_update` links to private item `Self::mode_override`
+    --> crates/permission/src/policy_gate.rs:2586:34
+     |
+2586 |     ///   but leaves the typed [`Self::mode_override`] unchanged.
+     |                                  ^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `prompts_unavailable_deny_message` links to private item `PROMPTS_UNAVAILABLE_ASYNC_AGENT_REASON`
+    --> crates/permission/src/policy_gate.rs:4202:101
+     |
+4202 | ...:{type:"asyncAgent", reason: `` [`PROMPTS_UNAVAILABLE_ASYNC_AGENT_REASON`] `}}`.
+     |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: unresolved link to `validate_statements`
+  --> crates/permission/src/powershell_containment.rs:13:49
+   |
+13 | //! node model, then runs the pure validation [`validate_statements`] (`Z_u`) over
+   |                                                 ^^^^^^^^^^^^^^^^^^^ no item named `validate_statements` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+error: public documentation for `format_dir_list` links to private item `DIR_LIST_MAX`
+    --> crates/permission/src/powershell_containment.rs:1330:7
+     |
+1330 | /// [`DIR_LIST_MAX`] quoted dirs joined by `", "`, else the first five plus
+     |       ^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: unresolved link to `xgg-style`
+    --> crates/permission/src/powershell_containment.rs:2011:69
+     |
+2011 | /// Validate a parsed PowerShell command (claude-code `Z_u`): run [`xgg`-style]
+     |                                                                     ^^^^^^^^^^ no item named `xgg-style` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+error: public documentation for `read_deny_globs` links to private item `crate::filesystem::pattern_with_root`
+  --> crates/permission/src/read_deny_globs.rs:10:18
+   |
+10 | //!   (LingXi: [`crate::filesystem::pattern_with_root`] +
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: unresolved link to `crate::filesystem::root_path_for_source`
+  --> crates/permission/src/read_deny_globs.rs:11:9
+   |
+11 | //!   [`crate::filesystem::root_path_for_source`]), collapse repeated slashes,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `root_path_for_source` in module `filesystem`
+
+error: public documentation for `read_deny_globs` links to private item `relativize_for_cwd`
+  --> crates/permission/src/read_deny_globs.rs:16:22
+   |
+16 | //!   `H_m`/`AHo` ([`relativize_for_cwd`]) — producing a `/`-anchored glob
+   |                      ^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `read_deny_globs` links to private item `crate::filesystem::pattern_with_root`
+  --> crates/permission/src/read_deny_globs.rs:21:10
+   |
+21 | //! by [`crate::filesystem::pattern_with_root`], which already omits them).
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: unresolved link to `READONLY_COMMANDS`
+  --> crates/permission/src/read_only_command.rs:18:63
+   |
+18 | //! machine 1:1 is a separate effort; here we port the BASE [`READONLY_COMMANDS`]
+   |                                                               ^^^^^^^^^^^^^^^^^ no item named `READONLY_COMMANDS` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+error: public documentation for `read_only_command` links to private item `git_subcommand_is_read_only`
+  --> crates/permission/src/read_only_command.rs:22:7
+   |
+22 | //! [`git_subcommand_is_read_only`]). The gh/docker/ripgrep per-flag tables
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `lingxi_settings_source` links to private item `crate::shadow::format_source`
+   --> crates/permission/src/rule.rs:329:11
+    |
+329 |     /// [`crate::shadow::format_source`] (`"user settings"` etc.). Byte-locked to
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: unresolved link to `Self::bau_refuses`
+  --> crates/permission/src/sandbox_auto_allow.rs:99:45
+   |
+99 |     /// PLUS the BAu refusal battery (see [`Self::bau_refuses`]) — without which a
+   |                                             ^^^^^^^^^^^^^^^^^ the struct `SandboxAutoAllowConfig` has no field or associated item named `bau_refuses`
+
+error: public documentation for `wog_allows_when_too_complex` links to private item `bau_refuses`
+   --> crates/permission/src/sandbox_auto_allow.rs:114:13
+    |
+114 |     /// / [`bau_refuses`]). Returns `true` iff the command may be auto-allowed —
+    |             ^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `sed_redirect_borne` links to private item `x6s`
+  --> crates/permission/src/sed_redirect_borne.rs:12:26
+   |
+12 | //! extra destination ([`x6s`]), an unquoted/backslash heredoc delimiter
+   |                          ^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `sed_redirect_borne` links to private item `q6s`
+  --> crates/permission/src/sed_redirect_borne.rs:13:8
+   |
+13 | //! ([`q6s`]), any expansion node ([`y6s`]), an ansi-c / translated string
+   |        ^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `sed_redirect_borne` links to private item `y6s`
+  --> crates/permission/src/sed_redirect_borne.rs:13:38
+   |
+13 | //! ([`q6s`]), any expansion node ([`y6s`]), an ansi-c / translated string
+   |                                      ^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `sed_redirect_borne` links to private item `j6s`
+  --> crates/permission/src/sed_redirect_borne.rs:14:8
+   |
+14 | //! ([`j6s`]), an unescaped expansion/glob/brace in the redirect's raw text
+   |        ^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `sed_redirect_borne` links to private item `dollar_jd`
+  --> crates/permission/src/sed_redirect_borne.rs:15:8
+   |
+15 | //! ([`dollar_jd`]), a non-simple target component ([`z6s`]), or a `=`-prefixed
+   |        ^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `sed_redirect_borne` links to private item `z6s`
+  --> crates/permission/src/sed_redirect_borne.rs:15:55
+   |
+15 | //! ([`dollar_jd`]), a non-simple target component ([`z6s`]), or a `=`-prefixed
+   |                                                       ^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `sed_redirect_borne` links to private item `xse`
+  --> crates/permission/src/sed_redirect_borne.rs:28:50
+   |
+28 | //!   + unquotes the command name. This port's [`xse`] reuses
+   |                                                  ^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `sed_redirect_borne` links to private item `strip_command_builtin_noglob`
+  --> crates/permission/src/sed_redirect_borne.rs:32:10
+   |
+32 | //!   ([`strip_command_builtin_noglob`]) and the first-token unquote
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `sed_redirect_borne` links to private item `unquote_first_token`
+  --> crates/permission/src/sed_redirect_borne.rs:33:10
+   |
+33 | //!   ([`unquote_first_token`]) — driven to a fixed point. The only structural
+   |          ^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `sed_validation` links to private item `has_file_args`
+  --> crates/permission/src/sed_validation.rs:50:60
+   |
+50 | //!   objects — the only consumer of that distinction is [`has_file_args`], where
+   |                                                            ^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `sed_redirect_borne_verdict` links to private item `sed_precheck_verdict`
+   --> crates/permission/src/sed_validation.rs:151:11
+    |
+151 | ///    ([`sed_precheck_verdict`]) → [`SedVerdict::Unsafe`] with
+    |           ^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `sed_auto_allow_verdict` links to private item `sed_command_is_allowed_by_allowlist`
+    --> crates/permission/src/sed_validation.rs:1282:54
+     |
+1282 | /// `acceptEdits` mode. Composes the byte-faithful [`sed_command_is_allowed_by_allowlist`]
+     |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: unresolved link to `Self::read_block_paths`
+  --> crates/permission/src/working_dirs.rs:20:37
+   |
+20 | //! The source is not decoration: [`Self::read_block_paths`] (`mEt`) drops
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^ no item named `read_block_paths` in module `working_dirs`
+
+error: public documentation for `honour_hook_allow` links to private item `Self::rule_or_safety_verdict`
+    --> crates/permission/src/policy_gate.rs:3569:11
+     |
+3569 |     /// [`Self::rule_or_safety_verdict`]: an ask rule (the reason the gate resolved
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `check_in_plan_mode` links to private item `Self::decide`
+    --> crates/permission/src/policy_gate.rs:3598:31
+     |
+3598 |     /// [`Self::check`] via [`Self::decide`].
+     |                               ^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: public documentation for `permission_mode` links to private item `Self::effective_mode`
+    --> crates/permission/src/policy_gate.rs:3945:22
+     |
+3945 |     /// boot mode ([`Self::effective_mode`]). Lets the in-process `/resume`
+     |                      ^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+error: unclosed HTML tag `file`
+  --> crates/permission/src/auto_mode_recon.rs:50:44
+   |
+50 |     /// "Found N inert autoMode entries in <file>" recon-status note). `0` when the
+   |                                            ^^^^^^
+   |
+   = note: `-D rustdoc::invalid-html-tags` implied by `-D warnings`
+   = help: to override `-D warnings` add `#[allow(rustdoc::invalid_html_tags)]`
+
+error: could not document `permission`
+warning: build failed, waiting for other jobs to finish...

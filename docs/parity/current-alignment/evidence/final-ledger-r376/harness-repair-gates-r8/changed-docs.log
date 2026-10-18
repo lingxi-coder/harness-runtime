@@ -1,0 +1,1925 @@
+    Checking core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+ Documenting core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+warning: unresolved link to `12`
+    --> crates/core/src/host/fusion.rs:3223:18
+     |
+3223 |     /// Finding [12]: this run's realized output-token spend so far, when
+     |                  ^^ no item named `12` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+     = note: `#[warn(rustdoc::broken_intra_doc_links)]` on by default
+
+warning: unresolved link to `3`
+    --> crates/core/src/host/fusion.rs:3255:28
+     |
+3255 |     /// [Round-12 finding [3]] How many panels the SPAWNER has provably
+     |                            ^ no item named `3` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `Self::emit_coordinator_status`
+    --> crates/core/src/host/orchestrator.rs:3492:37
+     |
+3492 |     /// additive-default shape as [`Self::emit_coordinator_status`].
+     |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `OrchestratorHandle` has no associated item named `emit_coordinator_status`
+
+warning: unresolved link to `tool_api::ToolError::Aborted`
+    --> crates/core/src/host/orchestrator.rs:4317:11
+     |
+4317 |     /// [`tool_api::ToolError::Aborted`].
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `tool_api` in scope
+
+warning: unresolved link to `RouterAction::EndOfStream`
+    --> crates/core/src/host/orchestrator.rs:4662:58
+     |
+4662 |     /// Called by the streaming loop immediately after [`RouterAction::EndOfStream`]
+     |                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `RouterAction` in scope
+
+warning: unresolved link to `PermissionDecisionReason`
+   --> crates/core/src/host/permission_gate.rs:170:27
+    |
+170 |     /// policy result's [`PermissionDecisionReason`].
+    |                           ^^^^^^^^^^^^^^^^^^^^^^^^ no item named `PermissionDecisionReason` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `PolicyPermissionGate`
+    --> crates/core/src/host/permission_gate.rs:1422:21
+     |
+1422 |     /// Called by [`PolicyPermissionGate`] on its local Deny decision. Additive
+     |                     ^^^^^^^^^^^^^^^^^^^^ no item named `PolicyPermissionGate` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `PolicyPermissionGate`
+    --> crates/core/src/host/permission_gate.rs:1818:40
+     |
+1818 |     /// the CLI/config default. Only [`PolicyPermissionGate`] overrides this;
+     |                                        ^^^^^^^^^^^^^^^^^^^^ no item named `PolicyPermissionGate` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `crate::host::…`
+   --> crates/core/src/host/subagent_spawn.rs:226:40
+    |
+226 |     /// precedence over the resolved [`crate::host::…`] agent definition's model
+    |                                        ^^^^^^^^^^^^^^ no item named `…` in module `host`
+
+warning: unresolved link to `1`
+   --> crates/core/src/host/subagent_spawn.rs:611:33
+    |
+611 |     /// output tokens. Finding [1]: before this field existed, a subagent's
+    |                                 ^ no item named `1` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `Self::model`
+   --> crates/core/src/host/subagent_spawn.rs:687:46
+    |
+687 |         /// Provider profile used to route [`Self::model`], when pinned.
+    |                                              ^^^^^^^^^^^ the enum `SubagentObservation` has no variant or associated item named `model`
+
+warning: unresolved link to `9`
+   --> crates/core/src/host/subagent_spawn.rs:883:57
+    |
+883 |         /// `api_error_partial` salvage path). Finding [9]: a caller that
+    |                                                         ^ no item named `9` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `9`
+   --> crates/core/src/host/subagent_spawn.rs:897:63
+    |
+897 |         /// successfully BEFORE the one that failed (Finding [9]/[11]):
+    |                                                               ^ no item named `9` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `11`
+   --> crates/core/src/host/subagent_spawn.rs:897:67
+    |
+897 |         /// successfully BEFORE the one that failed (Finding [9]/[11]):
+    |                                                                   ^^ no item named `11` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `AgentDefinition`
+    --> crates/core/src/host/subagent_spawn.rs:1068:31
+     |
+1068 | /// built-in + user/project [`AgentDefinition`]s.
+     |                               ^^^^^^^^^^^^^^^ no item named `AgentDefinition` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `TaskHandler::send_message`
+   --> crates/core/src/host/team_spawn.rs:135:11
+    |
+135 |     /// [`TaskHandler::send_message`], so a coordinator `SendMessage` actually
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `TaskHandler` in scope
+
+warning: unresolved link to `tool_api::ToolError::model_facing_message`
+   --> crates/core/src/host/tool_invoker.rs:529:11
+    |
+529 |     /// [`tool_api::ToolError::model_facing_message`]. `NotFound` carries only
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `tool_api` in scope
+
+warning: public documentation for `traffic_mode` links to private item `env_present`
+  --> crates/core/src/host/traffic_mode.rs:28:9
+   |
+28 | //!   [`env_present`] (present && non-empty), NOT [`crate::host::env::is_env_truthy`].
+   |         ^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+   = note: `#[warn(rustdoc::private_intra_doc_links)]` on by default
+
+warning: public documentation for `company_announcements` links to private item `PROCESS_MEMO`
+  --> crates/core/src/settings/company_announcements.rs:28:22
+   |
+28 | //! process-global [`PROCESS_MEMO`] = the `Wxo` cache) and pairs it with the
+   |                      ^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `new` links to private item `PROCESS_MEMO`
+  --> crates/core/src/settings/company_announcements.rs:93:66
+   |
+93 |     /// Construct an empty memo. `const` so the process-global [`PROCESS_MEMO`]
+   |                                                                  ^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `startup_announcement` links to private item `PROCESS_MEMO`
+   --> crates/core/src/settings/company_announcements.rs:177:55
+    |
+177 | /// Composition-root entry using the process-global [`PROCESS_MEMO`] (the `Wxo`
+    |                                                       ^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `memory::auto_memory_enabled`
+    --> crates/core/src/settings/schema.rs:1295:53
+     |
+1295 |     /// (`dLt()`, oracle `src_166572870.js`); see [`memory::auto_memory_enabled`]
+     |                                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `memory` in scope
+
+warning: unresolved link to `llm_runtime::model::allowlist`
+    --> crates/core/src/settings/schema.rs:1454:40
+     |
+1454 |     /// administrators. Consumed via [`llm_runtime::model::allowlist`] — matcher +
+     |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `llm_runtime` in scope
+
+warning: unresolved link to `0`
+    --> crates/core/src/settings/schema.rs:1757:38
+     |
+1757 |     ///   argv fallback.  Only chain[0] is used; longer chains log a warning.
+     |                                      ^ no item named `0` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `content_blocks`
+   --> crates/core/src/types/messages.rs:478:53
+    |
+478 |         /// the egress `tool_result.content` when [`content_blocks`] is `None`).
+    |                                                     ^^^^^^^^^^^^^^ no item named `content_blocks` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `content`
+   --> crates/core/src/types/messages.rs:497:27
+    |
+497 |         /// stringified [`content`]. Every non-MCP tool leaves this `None`, so its
+    |                           ^^^^^^^ no item named `content` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: this URL is not a hyperlink
+    --> crates/core/src/settings/schema.rs:1528:26
+     |
+1528 |     /// wildcard (e.g. \"https://hooks.example.com/*\"). When set, HTTP hooks with
+     |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: bare URLs are not automatically turned into clickable links
+     = note: `#[warn(rustdoc::bare_urls)]` on by default
+help: use an automatic link instead
+     |
+1528 |     /// wildcard (e.g. \"<https://hooks.example.com/>*\"). When set, HTTP hooks with
+     |                          +                          +
+
+warning: `core` (lib doc) generated 27 warnings (run `cargo fix --lib -p core` to apply 1 suggestion)
+    Checking telemetry v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry)
+    Checking secret v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/secret)
+    Checking visualization v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/visualization)
+    Checking lsp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/lsp)
+    Checking session v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/session)
+    Checking llm-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime)
+    Checking permission v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/permission)
+    Checking sandbox v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sandbox)
+    Checking http-client v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/http-client)
+    Checking migrations v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/migrations)
+    Checking platform-common v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/common)
+    Checking mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp)
+    Checking hooks v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/hooks)
+    Checking tool-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tool-api)
+    Checking cost v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/cost)
+    Checking workflow v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/workflow)
+    Checking task-store v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/task-store)
+    Checking skill v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/skill)
+    Checking outputstyles v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/outputstyles)
+    Checking tool-file v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/file)
+    Checking sidequery v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sidequery)
+    Checking memory v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/memory)
+    Checking agent v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/agent)
+    Checking local-app v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/local-app)
+    Checking tool-ui v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/ui)
+    Checking tasks v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tasks)
+    Checking tool-web v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/web)
+    Checking fusion v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/fusion)
+    Checking tool-shell v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/shell)
+    Checking provider-config v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/provider-config)
+    Checking tool-git-mobile v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/git-mobile)
+    Checking cron v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/cron)
+    Checking coordinator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/coordinator)
+    Checking tool-plan v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/plan)
+    Checking command-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/command-api)
+    Checking tool-cron v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/cron)
+    Checking tool-workflow v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/workflow)
+    Checking tool-task v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/task)
+    Checking compaction v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/compaction)
+    Checking tool-skill v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/skill)
+    Checking plugin v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/plugin)
+    Checking orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+    Checking tool-worktree v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/worktree)
+    Checking tool-shell-mobile v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/shell-mobile)
+    Checking tool-android-use v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/android-use)
+    Checking tool-lsp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/lsp)
+    Checking tool-agent v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/agent)
+    Checking tool-mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/mcp)
+    Checking tool-meta v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/meta)
+    Checking tool-computer-use v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/computer-use)
+    Checking tool-mobile v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/mobile)
+    Checking platform-posix v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/posix)
+    Checking platform-posix-minimal v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/posix-minimal)
+    Checking platform-macos-computer-control v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/macos-computer-control)
+    Checking msgqueue v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/msgqueue)
+    Checking audio-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/audio-runtime)
+ Documenting orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+warning: public documentation for `api_error_copy` links to private item `AUTH_COMMAND`
+  --> crates/orchestrator/src/api_error_copy.rs:18:56
+   |
+18 | //! ⚠️ Every user-facing auth instruction here names [`AUTH_COMMAND`]
+   |                                                       ^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+   = note: `#[warn(rustdoc::private_intra_doc_links)]` on by default
+
+warning: public documentation for `ErrorRouteTag` links to private item `ErrorRoute`
+   --> crates/orchestrator/src/api_error_copy.rs:645:21
+    |
+645 | /// Owned twin of [`ErrorRoute`], for carrying a route on
+    |                     ^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `run_turn_streaming_with_cancel` links to private item `Self::try_run_turn_streaming`
+    --> crates/orchestrator/src/conversation/drivers/mod.rs:3257:35
+     |
+3257 |     /// message), threaded INTO [`Self::try_run_turn_streaming`] rather than raced
+     |                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `run_turn_streaming_with_cancel_image_sources` links to private item `Self::load_images`
+    --> crates/orchestrator/src/conversation/drivers/mod.rs:3388:60
+     |
+3388 |     /// The path-based entry above decodes its paths via [`Self::load_images`] then
+     |                                                            ^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `run_turn_streaming_with_cancel_image_sources` links to private item `Self::try_run_turn_streaming`
+    --> crates/orchestrator/src/conversation/drivers/mod.rs:3390:11
+     |
+3390 |     /// [`Self::try_run_turn_streaming`] core — which appends the images to the
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `with_prompt_probe_cwd_resolver` links to private item `Self::build_prompt_context`
+   --> crates/orchestrator/src/conversation/wiring.rs:418:52
+    |
+418 |     /// resolver performs that guest→host hop in [`Self::build_prompt_context`];
+    |                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `with_memory_prefetch` links to private item `Self::relevant_memory_reminder_messages`
+   --> crates/orchestrator/src/conversation/wiring.rs:840:25
+    |
+840 |     /// strict no-op ([`Self::relevant_memory_reminder_messages`] returns empty),
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `with_skill_discovery_prefetch` links to private item `Self::start_skill_discovery_prefetch`
+    --> crates/orchestrator/src/conversation/wiring.rs:1094:31
+     |
+1094 |     /// unwired build keeps [`Self::start_skill_discovery_prefetch`] +
+     |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `with_skill_discovery_prefetch` links to private item `Self::skill_discovery_reminder_message`
+    --> crates/orchestrator/src/conversation/wiring.rs:1095:11
+     |
+1095 |     /// [`Self::skill_discovery_reminder_message`] strict no-ops and the locked
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `with_async_hook_responses` links to private item `Self::async_hook_response_mod_messages`
+    --> crates/orchestrator/src/conversation/wiring.rs:1124:38
+     |
+1124 |     /// back into the next turn by [`Self::async_hook_response_mod_messages`]
+     |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `Self::task_notification_reminder_messages`
+    --> crates/orchestrator/src/conversation/wiring.rs:1138:11
+     |
+1138 |     /// [`Self::task_notification_reminder_messages`] (claude-code's per-task-type
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the struct `ConversationOrchestrator` has no field or associated item named `task_notification_reminder_messages`
+     |
+     = note: `#[warn(rustdoc::broken_intra_doc_links)]` on by default
+
+warning: public documentation for `with_todo_reminder_tasks` links to private item `Self::todo_reminder_message`
+    --> crates/orchestrator/src/conversation/wiring.rs:1242:28
+     |
+1242 |     /// `task_reminder` ([`Self::todo_reminder_message`], the binary's `B4p`).
+     |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `OrchestratorHandle::fork_conversation`
+    --> crates/orchestrator/src/conversation/wiring.rs:1328:41
+     |
+1328 |     /// `BackgroundAgentSpawner`), so [`OrchestratorHandle::fork_conversation`]
+     |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `OrchestratorHandle` in scope
+
+warning: unresolved link to `OrchestratorHandle::fork_to_background_session`
+    --> crates/orchestrator/src/conversation/wiring.rs:1363:11
+     |
+1363 |     /// [`OrchestratorHandle::fork_to_background_session`] can copy the live
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `OrchestratorHandle` in scope
+
+warning: unresolved link to `Self::new_diagnostics_source`
+    --> crates/orchestrator/src/conversation/wiring.rs:1419:11
+     |
+1419 |     /// [`Self::new_diagnostics_source`] / [`Self::new_diagnostics_reminder_message`].
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the struct `ConversationOrchestrator` has no field or associated item named `new_diagnostics_source`
+
+warning: public documentation for `with_new_diagnostics_source` links to private item `Self::new_diagnostics_reminder_message`
+    --> crates/orchestrator/src/conversation/wiring.rs:1419:46
+     |
+1419 |     /// [`Self::new_diagnostics_source`] / [`Self::new_diagnostics_reminder_message`].
+     |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `new` links to private item `NoStreamingApiClient`
+    --> crates/orchestrator/src/conversation/wiring.rs:1438:15
+     |
+1438 |     /// the [`NoStreamingApiClient`] stub so any `run_turn_streaming`
+     |               ^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `Self::nested_memory_roots`
+    --> crates/orchestrator/src/conversation/wiring.rs:1492:23
+     |
+1492 |     /// probes. See [`Self::nested_memory_roots`].
+     |                       ^^^^^^^^^^^^^^^^^^^^^^^^^ the struct `ConversationOrchestrator` has no field or associated item named `nested_memory_roots`
+
+warning: public documentation for `SessionMemoryHandle` links to private item `ConversationOrchestrator::maybe_extract_session_memory`
+    --> crates/orchestrator/src/conversation/runtime.rs:2185:18
+     |
+2185 | /// Everything [`ConversationOrchestrator::maybe_extract_session_memory`] needs to
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `ProviderApiAdapter`
+   --> crates/orchestrator/src/conversation.rs:539:47
+    |
+539 |     /// their existing behavior. Production [`ProviderApiAdapter`] sends the
+    |                                               ^^^^^^^^^^^^^^^^^^ no item named `ProviderApiAdapter` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `ProviderApiAdapter`
+   --> crates/orchestrator/src/conversation.rs:592:19
+    |
+592 | /// Production: [`ProviderApiAdapter`] (Task 6) drives `ModelRuntime`
+    |                   ^^^^^^^^^^^^^^^^^^ no item named `ProviderApiAdapter` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: public documentation for `load_image_source` links to private item `detect_media_type_from_bytes`
+   --> crates/orchestrator/src/image_input.rs:103:8
+    |
+103 | /// ([`detect_media_type_from_bytes`], the authoritative source — TS
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `load_image_source` links to private item `media_type_for`
+   --> crates/orchestrator/src/image_input.rs:105:8
+    |
+105 | /// ([`media_type_for`] — TS imageResizer.ts:186 `metadata.format ?? ext`) and
+    |        ^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `format` links to private item `using_your_tools`
+   --> crates/orchestrator/src/prompt/body_sections.rs:583:57
+    |
+583 | /// * `tool_names` — drives `# Using your tools` (see [`using_your_tools`]).
+    |                                                         ^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `conditional_rules` links to private item `relative_path_for_match`
+  --> crates/orchestrator/src/prompt/conditional_rules.rs:16:7
+   |
+16 | //! [`relative_path_for_match`] — the only disk access here), and
+   |       ^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `status_block`
+ --> crates/orchestrator/src/prompt/git_status.rs:2:18
+  |
+2 | //! bool, plus [`status_block`] which builds the v2.1.183 `gitStatus` system-
+  |                  ^^^^^^^^^^^^ no item named `status_block` in scope
+  |
+  = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `crate::turn_loop::goal_clear_bucket`
+  --> crates/orchestrator/src/prompt/goal_interruption.rs:21:7
+   |
+21 | //! [`crate::turn_loop::goal_clear_bucket`] (it predates the retry/pause tiers).
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `goal_clear_bucket` in module `turn_loop`
+
+warning: unresolved link to `crate::turn_loop::goal_clear_bucket`
+   --> crates/orchestrator/src/prompt/goal_interruption.rs:206:48
+    |
+206 | /// Returns `None` for the arms the existing [`crate::turn_loop::goal_clear_bucket`]
+    |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `goal_clear_bucket` in module `turn_loop`
+
+warning: public documentation for `plan_reminder` links to private item `OU_PHASE4`
+  --> crates/orchestrator/src/prompt/plan_reminder.rs:17:57
+   |
+17 | //! * `OU_`  — "### Phase 4: Final Plan" block (const [`OU_PHASE4`])
+   |                                                         ^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `plan_reminder` links to private item `LIP_EXIT_TAIL`
+  --> crates/orchestrator/src/prompt/plan_reminder.rs:18:56
+   |
+18 | //! * `lIp()`— "### Call ExitPlanMode" tail   (const [`LIP_EXIT_TAIL`])
+   |                                                        ^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `plan_reminder` links to private item `AIP_BANNER`
+  --> crates/orchestrator/src/prompt/plan_reminder.rs:19:59
+   |
+19 | //! * `aIp`  — the full-variant plan-mode banner (const [`AIP_BANNER`])
+   |                                                           ^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `escape_reminder_text` links to private item `escape_control_chars`
+  --> crates/orchestrator/src/prompt/sanitize.rs:74:7
+   |
+74 | /// [`escape_control_chars`]. Used on values the oracle treats as fully
+   |       ^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `escape_reminder_path` links to private item `escape_control_chars`
+  --> crates/orchestrator/src/prompt/sanitize.rs:82:7
+   |
+82 | /// [`escape_control_chars`]. `&` is deliberately NOT escaped — paths routinely
+   |       ^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `skill_listing` links to private item `crate::conversation::ConversationOrchestrator::skill_listing_reminder_message`
+  --> crates/orchestrator/src/prompt/skill_listing.rs:11:7
+   |
+11 | //! [`crate::conversation::ConversationOrchestrator::skill_listing_reminder_message`].
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `ConversationOrchestrator`
+   --> crates/orchestrator/src/provider_adapter.rs:114:33
+    |
+114 |     /// `Arc<AtomicBool>` the [`ConversationOrchestrator`] holds). When the flag
+    |                                 ^^^^^^^^^^^^^^^^^^^^^^^^ no item named `ConversationOrchestrator` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `load_session`
+  --> crates/orchestrator/src/resume.rs:53:27
+   |
+53 |     /// Bubbled up from [`load_session`].
+   |                           ^^^^^^^^^^^^ no item named `load_session` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: public documentation for `state_from_messages` links to private item `build_state_from_jsonl`
+   --> crates/orchestrator/src/resume.rs:681:55
+    |
+681 | /// per-line mapping [`replay_session_state`] uses ([`build_state_from_jsonl`]) so
+    |                                                       ^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `build_background_tasks` links to private item `keep_task`
+  --> crates/orchestrator/src/stop_hook_snapshot.rs:91:34
+   |
+91 | /// array. Each kept task (see [`keep_task`]) maps to `{id, type, status,
+   |                                  ^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `ConversationOrchestrator::todo_reminder_message`
+ --> crates/orchestrator/src/todo_reminder_tasks_provider.rs:6:20
+  |
+6 | //! that list to [`ConversationOrchestrator::todo_reminder_message`] by resolving
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `ConversationOrchestrator` in scope
+
+warning: public documentation for `check_token_budget` links to private item `COMPLETION_THRESHOLD`
+   --> crates/orchestrator/src/token_budget.rs:137:15
+    |
+137 | /// - Under [`COMPLETION_THRESHOLD`] and not diminishing → `Continue` (and the
+    |               ^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `transcript_paths` links to private item `crate::conversation::ConversationOrchestrator::computed_transcript_path`
+ --> crates/orchestrator/src/transcript_paths.rs:6:7
+  |
+6 | //! [`crate::conversation::ConversationOrchestrator::computed_transcript_path`]
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+  |
+  = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `MockStreamingApiClient`
+  |
+  = note: the link appears in this line:
+          
+          - [`MockStreamingApiClient`] — implements [`crate::conversation::StreamingApiClient`]
+             ^^^^^^^^^^^^^^^^^^^^^^^^
+  = note: no item named `MockStreamingApiClient` in scope
+  = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `MockToolDispatchClock`
+  |
+  = note: the link appears in this line:
+          
+          - [`MockToolDispatchClock`] — records the wall-clock instant each
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  = note: no item named `MockToolDispatchClock` in scope
+  = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: public documentation for `generate_recap` links to private item `ConversationOrchestrator::generate_recap_query`
+    --> crates/orchestrator/src/handle_impl.rs:2120:11
+     |
+2120 |     /// [`ConversationOrchestrator::generate_recap_query`] with a fresh
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `answer_side_question` links to private item `ConversationOrchestrator::answer_side_question_query`
+    --> crates/orchestrator/src/handle_impl.rs:2171:11
+     |
+2171 |     /// [`ConversationOrchestrator::answer_side_question_query`] with a fresh
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `OrchestratorApiClient::list_model_listings`
+    --> crates/orchestrator/src/handle_impl.rs:3484:24
+     |
+3484 |     /// api client's [`OrchestratorApiClient::list_model_listings`], which the
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `OrchestratorApiClient` in scope
+
+warning: unresolved link to `OrchestratorApiClient::last_rate_limit_info`
+    --> crates/orchestrator/src/handle_impl.rs:3519:24
+     |
+3519 |     /// Delegates to [`OrchestratorApiClient::last_rate_limit_info`] on the
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `OrchestratorApiClient` in scope
+
+warning: unclosed HTML tag `tool`
+  --> crates/orchestrator/src/prompt/end_conversation.rs:98:44
+   |
+98 | /// dash is em-dash U+2014; "considers the <tool> tool\u{2026}" uses the U+2026
+   |                                            ^^^^^^
+   |
+   = note: `#[warn(rustdoc::invalid_html_tags)]` on by default
+
+warning: unclosed HTML tag `env`
+ --> crates/orchestrator/src/prompt/subagent_env.rs:7:40
+  |
+7 | //! the subagent now carries the FULL `<env>` block — a change from v2.1.183,
+  |                                        ^^^^^
+
+warning: unclosed HTML tag `env`
+  --> crates/orchestrator/src/prompt/subagent_env.rs:10:15
+   |
+10 | //! distinct `<env>`-wrapped subagent form (capitalized `Yes`/`No`, no static
+   |               ^^^^^
+
+warning: `format` is both a function and a macro
+  --> crates/orchestrator/src/prompt/body_sections.rs:25:34
+   |
+25 | //! The body block returned by [`format`] intentionally starts with one LF. That
+   |                                  ^^^^^^ ambiguous link
+   |
+help: to link to the function, add parentheses
+   |
+25 | //! The body block returned by [`format()`] intentionally starts with one LF. That
+   |                                        ++
+help: to link to the macro, add an exclamation mark
+   |
+25 | //! The body block returned by [`format!`] intentionally starts with one LF. That
+   |                                        +
+
+warning: `format` is both a function and a macro
+ --> crates/orchestrator/src/prompt/memory_block.rs:8:22
+  |
+8 | //! The formatter ([`format`]) emits the preamble + per-file
+  |                      ^^^^^^ ambiguous link
+  |
+help: to link to the function, add parentheses
+  |
+8 | //! The formatter ([`format()`]) emits the preamble + per-file
+  |                            ++
+help: to link to the macro, add an exclamation mark
+  |
+8 | //! The formatter ([`format!`]) emits the preamble + per-file
+  |                            +
+
+warning: `orchestrator` (lib doc) generated 52 warnings
+ Documenting tasks v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tasks)
+warning: public documentation for `in_process_teammate` links to private item `check_and_claim_next_task`
+  --> crates/tasks/src/handlers/in_process_teammate.rs:43:44
+   |
+43 | //!    then (only when none exists) runs [`check_and_claim_next_task`]. A claimed
+   |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+   = note: `#[warn(rustdoc::private_intra_doc_links)]` on by default
+
+warning: public documentation for `in_process_teammate` links to private item `claimed_task_prompt`
+  --> crates/tasks/src/handlers/in_process_teammate.rs:44:17
+   |
+44 | //!    task's [`claimed_task_prompt`] is self-injected wearing the
+   |                 ^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `local_workflow` links to private item `concurrency_cap`
+  --> crates/tasks/src/handlers/local_workflow.rs:23:56
+   |
+23 | //!   spawns its subagents concurrently — bounded by [`concurrency_cap`], in the
+   |                                                        ^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `with_output_pool_cell` links to private item `Self::output_pool_cell`
+    --> crates/tasks/src/handlers/local_workflow.rs:1000:57
+     |
+1000 |     /// main-loop and all-workflow output tokens. See [`Self::output_pool_cell`].
+     |                                                         ^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `with_turn_baseline_cell` links to private item `Self::turn_baseline_cell`
+    --> crates/tasks/src/handlers/local_workflow.rs:1020:11
+     |
+1020 |     /// [`Self::turn_baseline_cell`].
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `MAX_TASK_OUTPUT_BYTES` links to private item `utf16_units`
+  --> crates/tasks/src/output_manager.rs:27:49
+   |
+27 | /// So [`TaskOutputManager::append`] counting [`utf16_units`] and
+   |                                                 ^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `MAX_TASK_OUTPUT_BYTES` links to private item `TaskOutputManager::validate_terminal_result`
+  --> crates/tasks/src/output_manager.rs:28:7
+   |
+28 | /// [`TaskOutputManager::validate_terminal_result`] counting `str::len` are BOTH
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `TaskNotification`
+    --> crates/tasks/src/registry.rs:3792:21
+     |
+3792 |     /// Returns a [`TaskNotification`]
+     |                     ^^^^^^^^^^^^^^^^ no item named `TaskNotification` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+     = note: `#[warn(rustdoc::broken_intra_doc_links)]` on by default
+
+warning: unresolved link to `LocalWorkflowTaskState`
+    --> crates/tasks/src/handle.rs:1080:25
+     |
+1080 |     /// straight from [`LocalWorkflowTaskState`], which the reduced [`TaskRecord`]
+     |                         ^^^^^^^^^^^^^^^^^^^^^^ no item named `LocalWorkflowTaskState` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: redundant explicit link target
+   --> crates/tasks/src/handlers/local_bash.rs:110:33
+    |
+110 |     /// returned [`TaskHandle`](crate::task_trait::TaskHandle) is activated by
+    |                   ------------  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ explicit target is redundant
+    |                   |
+    |                   because label contains path that resolves to same destination
+    |
+    = note: when a link's destination is not specified,
+            the label is used to resolve intra-doc links
+    = note: `#[warn(rustdoc::redundant_explicit_links)]` on by default
+help: remove explicit link target
+    |
+110 -     /// returned [`TaskHandle`](crate::task_trait::TaskHandle) is activated by
+110 +     /// returned [`TaskHandle`] is activated by
+    |
+
+warning: redundant explicit link target
+ --> crates/tasks/src/state.rs:1:59
+  |
+1 | //! Polymorphic task state — one variant per [`TaskType`](crate::id::TaskType).
+  |                                               ----------  ^^^^^^^^^^^^^^^^^^^ explicit target is redundant
+  |                                               |
+  |                                               because label contains path that resolves to same destination
+  |
+  = note: when a link's destination is not specified,
+          the label is used to resolve intra-doc links
+help: remove explicit link target
+  |
+1 - //! Polymorphic task state — one variant per [`TaskType`](crate::id::TaskType).
+1 + //! Polymorphic task state — one variant per [`TaskType`].
+  |
+
+warning: `tasks` (lib doc) generated 11 warnings
+ Documenting agent v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/agent)
+warning: unresolved link to `orchestrator::STRUCTURED_OUTPUT_TOOL_NAME`
+   --> crates/agent/src/builtins.rs:338:7
+    |
+338 | /// [`orchestrator::STRUCTURED_OUTPUT_TOOL_NAME`] (`"StructuredOutput"`).
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `orchestrator` in scope
+    |
+    = note: `#[warn(rustdoc::broken_intra_doc_links)]` on by default
+
+warning: public documentation for `fork_agent_definition` links to private item `crate::handle::PoolSubagentSpawner::lookup_definition`
+   --> crates/agent/src/builtins.rs:741:7
+    |
+741 | /// [`crate::handle::PoolSubagentSpawner::lookup_definition`] when
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+    = note: `#[warn(rustdoc::private_intra_doc_links)]` on by default
+
+warning: unresolved link to `AGENT_COLORS`
+   --> crates/agent/src/definition.rs:108:62
+    |
+108 |     /// Validated agent color name (claude `color`, one of [`AGENT_COLORS`]).
+    |                                                              ^^^^^^^^^^^^ no item named `AGENT_COLORS` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: public documentation for `fork` links to private item `crate::handle::PoolSubagentSpawner::lookup_definition`
+  --> crates/agent/src/fork.rs:13:7
+   |
+13 | //! [`crate::handle::PoolSubagentSpawner::lookup_definition`].
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `DefaultModelProvider` links to private item `PoolSubagentSpawner::default_model`
+   --> crates/agent/src/handle.rs:415:7
+    |
+415 | /// [`PoolSubagentSpawner::default_model`]. Wired at the composition root; see
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `DefaultModelProvider` links to private item `PoolSubagentSpawner::default_model_provider`
+   --> crates/agent/src/handle.rs:416:7
+    |
+416 | /// [`PoolSubagentSpawner::default_model_provider`].
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `spawn_bypass_gates_handle` links to private item `Self::spawn_bypass_gates`
+   --> crates/agent/src/handle.rs:639:11
+    |
+639 |     /// [`Self::spawn_bypass_gates`]). Grab this BEFORE boxing the spawner and
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `default_model_provider_handle` links to private item `Self::default_model`
+   --> crates/agent/src/handle.rs:684:40
+    |
+684 |     /// supersedes the boot snapshot [`Self::default_model`] for spawns whose
+    |                                        ^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `with_model_restriction_opt` links to private item `Self::model_restriction`
+   --> crates/agent/src/handle.rs:764:11
+    |
+764 |     /// [`Self::model_restriction`] field doc.
+    |           ^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `SubagentContext::hook_executor`
+   --> crates/agent/src/handle.rs:807:46
+    |
+807 |     /// doc. Threaded onto every child via [`SubagentContext::hook_executor`].
+    |                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `SubagentContext` in scope
+
+warning: unresolved link to `SubagentContext::skill_loader`
+   --> crates/agent/src/handle.rs:852:15
+    |
+852 |     /// via [`SubagentContext::skill_loader`].
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `SubagentContext` in scope
+
+warning: unresolved link to `AgentSource::Settings(lingxi_core::types::SettingsScope::Project)`
+  --> crates/agent/src/hooks_trust.rs:37:37
+   |
+37 | //! that must prove folder trust: [`AgentSource::Settings(lingxi_core::types::SettingsScope::Project)`] (`projectSettings`) —
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the enum `AgentSource` has no variant or associated item named `Settings(lingxi_core`
+
+warning: unresolved link to `AgentSource::Settings(lingxi_core::types::SettingsScope::Project)`
+  --> crates/agent/src/hooks_trust.rs:75:12
+   |
+75 | /// Only [`AgentSource::Settings(lingxi_core::types::SettingsScope::Project)`] (`"projectSettings"`) falls through to the
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the enum `AgentSource` has no variant or associated item named `Settings(lingxi_core`
+
+warning: public documentation for `SpawnBypassGates` links to private item `effective_child_mode`
+  --> crates/agent/src/permission_mode.rs:86:14
+   |
+86 | /// inside [`effective_child_mode`].
+   |              ^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `9`
+  --> crates/agent/src/runner.rs:71:23
+   |
+71 |         /// (Finding [9]): a mid-stream provider error whose already-produced
+   |                       ^ no item named `9` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `9`
+  --> crates/agent/src/runner.rs:92:32
+   |
+92 |         /// carries). Finding [9]/[11]: a `Failed` termination (provider
+   |                                ^ no item named `9` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `11`
+  --> crates/agent/src/runner.rs:92:36
+   |
+92 |         /// carries). Finding [9]/[11]: a `Failed` termination (provider
+   |                                    ^^ no item named `11` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: public documentation for `agent_listing` links to private item `Self::listing_entries`
+    --> crates/agent/src/handle.rs:2091:11
+     |
+2091 |     /// [`Self::listing_entries`].
+     |           ^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `tools_denied_agent_types` links to private item `Self::listing_entries`
+    --> crates/agent/src/handle.rs:2102:31
+     |
+2102 |     /// SAME merged catalog [`Self::listing_entries`] renders, against the live
+     |                               ^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: `agent` (lib doc) generated 19 warnings
+ Documenting permission v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/permission)
+warning: unresolved link to `GhSource`
+    --> crates/permission/src/auto_mode_io.rs:1079:23
+     |
+1079 | /// Real-subprocess [`GhSource`] — the `gh` calls `x1d` and `Xsy` make.
+     |                       ^^^^^^^^ no item named `GhSource` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+     = note: `#[warn(rustdoc::broken_intra_doc_links)]` on by default
+
+warning: unresolved link to `gh_env_overrides`
+    --> crates/permission/src/auto_mode_io.rs:1081:34
+     |
+1081 | /// Every invocation runs with [`gh_env_overrides`] applied. That is the
+     |                                  ^^^^^^^^^^^^^^^^ no item named `gh_env_overrides` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `AllProjectsSource`
+    --> crates/permission/src/auto_mode_io.rs:1422:23
+     |
+1422 | /// Real-filesystem [`AllProjectsSource`] — the `W1d` sweep over every project's
+     |                       ^^^^^^^^^^^^^^^^^ no item named `AllProjectsSource` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `ShellHistorySource`
+    --> crates/permission/src/auto_mode_io.rs:1561:23
+     |
+1561 | /// Real-filesystem [`ShellHistorySource`].
+     |                       ^^^^^^^^^^^^^^^^^^ no item named `ShellHistorySource` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: public documentation for `settings_section_size_warning` links to private item `AUTO_MODE_SECTION_WARN_BYTES`
+    --> crates/permission/src/auto_mode_setup.rs:1117:7
+     |
+1117 | /// [`AUTO_MODE_SECTION_WARN_BYTES`] and [`SETTINGS_MAX_BYTES`].
+     |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+     = note: `#[warn(rustdoc::private_intra_doc_links)]` on by default
+
+warning: public documentation for `settings_section_size_warning` links to private item `SETTINGS_MAX_BYTES`
+    --> crates/permission/src/auto_mode_setup.rs:1117:44
+     |
+1117 | /// [`AUTO_MODE_SECTION_WARN_BYTES`] and [`SETTINGS_MAX_BYTES`].
+     |                                            ^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `node_type_id` links to private item `DANGEROUS_TYPES`
+   --> crates/permission/src/bash_ast_security.rs:833:45
+    |
+833 | /// `-2` (pre-check); `"ERROR"` → `-1`; a [`DANGEROUS_TYPES`] member → its
+    |                                             ^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `walk_program` links to private item `collect_commands`
+    --> crates/permission/src/bash_ast_security.rs:3547:44
+     |
+3547 | /// TS `walkProgram` (ast.ts:462). Drive [`collect_commands`] over the program
+     |                                            ^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `bash_command_clamp` links to private item `crate::PermissionPolicy::bash_command_clamp_deny`
+  --> crates/permission/src/bash_command_clamp.rs:26:9
+   |
+26 | //! * [`crate::PermissionPolicy::bash_command_clamp_deny`], reached from
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `HostContextRecord::may_carry_user_intent`
+   --> crates/permission/src/classifier.rs:206:22
+    |
+206 | ///   a boundary". [`HostContextRecord::may_carry_user_intent`] is what filters
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `HostContextRecord` in scope
+
+warning: public documentation for `boot_agent_may_adopt_bypass` links to private item `CliModeSettings::bg_bypass_disclaimer_gate_trips`
+    --> crates/permission/src/cli_mode.rs:1108:8
+     |
+1108 | /// ([`CliModeSettings::bg_bypass_disclaimer_gate_trips`]); upstream applies them
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `command_path_deny_targets` links to private item `PathGuard::Check`
+    --> crates/permission/src/command_path_containment.rs:1742:7
+     |
+1742 | /// [`PathGuard::Check`] (a resolved absolute path) rather than only out-of-cwd
+     |       ^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `source_display` links to private item `crate::shadow::format_source`
+   --> crates/permission/src/dangerous_perms.rs:305:48
+    |
+305 |     /// `formatPermissionSource` (`XUl`) via [`crate::shadow::format_source`]:
+    |                                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `SubstitutionRemoval` links to private item `check_dangerous_removal_inner`
+   --> crates/permission/src/dangerous_removal.rs:516:7
+    |
+516 | /// [`check_dangerous_removal_inner`], which recurses through
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `SubstitutionRemoval` links to private item `active_command_substitutions`
+   --> crates/permission/src/dangerous_removal.rs:517:7
+    |
+517 | /// [`active_command_substitutions`] to depth 8. Only these two shapes were
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `dangerous_rm_on_variable_path` links to private item `okg_re`
+    --> crates/permission/src/dangerous_removal.rs:1088:21
+     |
+1088 | /// path (matches [`okg_re`]) and returns the FIRST `(command_name, target)`
+     |                     ^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `filesystem` links to private item `expand_path`
+  --> crates/permission/src/filesystem.rs:34:9
+   |
+34 | //! - [`expand_path`] itself is lexical, matching the orchestrator's `expandPath`
+   |         ^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `input_path_for_tool` links to private item `input_path_field_for_tool`
+   --> crates/permission/src/filesystem.rs:143:7
+    |
+143 | /// [`input_path_field_for_tool`]; `Glob`/`Grep` default their search root to
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `test_rule_pattern` links to private item `pattern_with_root`
+   --> crates/permission/src/filesystem.rs:776:62
+    |
+776 | /// 2. Resolve the pattern's `(relativePattern, root)` via [`pattern_with_root`]
+    |                                                              ^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `test_rule_pattern` links to private item `pattern_with_root`
+   --> crates/permission/src/filesystem.rs:794:56
+    |
+794 | /// ⚠️ The negation is resolved on the pattern AFTER [`pattern_with_root`], not
+    |                                                       ^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `path_in_working_path` links to private item `rewrite_private_symlinks`
+    --> crates/permission/src/filesystem.rs:1277:21
+     |
+1277 | ///    false, and [`rewrite_private_symlinks`] matches the prefix case-sensitively).
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `git_bare_repo` links to private item `is_standalone_git_dir`
+  --> crates/permission/src/git_bare_repo.rs:20:53
+   |
+20 | //!   distinguishes it from a planted bare repo — [`is_standalone_git_dir`]
+   |                                                     ^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `headless_gate` links to private item `crate::policy_gate::DENIAL_WORKAROUND_GUIDANCE`
+  --> crates/permission/src/headless_gate.rs:24:8
+   |
+24 | //! ([`crate::policy_gate::DENIAL_WORKAROUND_GUIDANCE`]). This gate reproduces
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `crate::PolicyPermissionGate::check_with_context_or_abort`
+  --> crates/permission/src/layers.rs:41:7
+   |
+41 | //! [`crate::PolicyPermissionGate::check_with_context_or_abort`] and
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the struct `PolicyPermissionGate` has no field or associated item named `check_with_context_or_abort`
+
+warning: unresolved link to `crate::PolicyPermissionGate::resolve_detailed_or_abort`
+  --> crates/permission/src/layers.rs:42:7
+   |
+42 | //! [`crate::PolicyPermissionGate::resolve_detailed_or_abort`] — the two
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the struct `PolicyPermissionGate` has no field or associated item named `resolve_detailed_or_abort`
+
+warning: unresolved link to `PathBuf`
+   --> crates/permission/src/loader.rs:546:35
+    |
+546 | /// the RAW settings strings as [`PathBuf`]s (relative / `~`-prefixed / absolute) —
+    |                                   ^^^^^^^ no item named `PathBuf` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `LXe`
+  --> crates/permission/src/mcp_policy.rs:31:63
+   |
+31 | //! [`crate::PermissionRuleSource::McpServerPolicy`] bucket [`LXe`] builds: a
+   |                                                               ^^^ no item named `LXe` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `PermissionPolicy`
+  --> crates/permission/src/mcp_policy.rs:54:7
+   |
+54 | //! [`PermissionPolicy`]'s
+   |       ^^^^^^^^^^^^^^^^ no item named `PermissionPolicy` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `ceiling_ask_beats_a_higher_priority_allow_rule`
+  --> crates/permission/src/mcp_policy.rs:60:7
+   |
+60 | //! [`ceiling_ask_beats_a_higher_priority_allow_rule`] below.
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `ceiling_ask_beats_a_higher_priority_allow_rule` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `mcp`
+  --> crates/permission/src/mcp_policy.rs:96:7
+   |
+96 | //! [`mcp`] registry and the [`crate::PolicyPermissionGate`] together is the
+   |       ^^^ no item named `mcp` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `PermissionPolicy::from_rules`
+   --> crates/permission/src/mcp_policy.rs:100:7
+    |
+100 | //! [`PermissionPolicy::from_rules`] (or splice it into the live rule state the
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `PermissionPolicy` in scope
+
+warning: public documentation for `mode_policy` links to private item `AUTO_MODE_SAFE_TOOLS`
+ --> crates/permission/src/mode_policy.rs:3:9
+  |
+3 | //! * [`AUTO_MODE_SAFE_TOOLS`] is the AUTO-mode set — the 2.1.270 `ojo` set read
+  |         ^^^^^^^^^^^^^^^^^^^^ this item is private
+  |
+  = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `mode_policy` links to private item `PLAN_SAFE_TOOLS`
+ --> crates/permission/src/mode_policy.rs:6:9
+  |
+6 | //! * [`PLAN_SAFE_TOOLS`] is the PLAN-mode mutation-block allowlist: in `Plan`
+  |         ^^^^^^^^^^^^^^^ this item is private
+  |
+  = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `is_plan_safe_tool` links to private item `PLAN_SAFE_TOOLS`
+   --> crates/permission/src/mode_policy.rs:153:41
+    |
+153 | /// planning-safe tools enumerated in [`PLAN_SAFE_TOOLS`] or installed by a
+    |                                         ^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `crate::PolicyPermissionGate::set_permission_mode`
+   --> crates/permission/src/policy.rs:572:12
+    |
+572 |     /// ([`crate::PolicyPermissionGate::set_permission_mode`]) with the byte-exact
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the struct `PolicyPermissionGate` has no field or associated item named `set_permission_mode`
+
+warning: public documentation for `apply_auto_mode_restrictions` links to private item `Self::rule_is_available_in_mode`
+   --> crates/permission/src/policy.rs:681:25
+    |
+681 |     /// suspension in [`Self::rule_is_available_in_mode`], and the loop-tool
+    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `apply_auto_mode_restrictions` links to private item `Self::rule_is_available_in_mode`
+   --> crates/permission/src/policy.rs:698:43
+    |
+698 |     /// which this port applies through [`Self::rule_is_available_in_mode`] —
+    |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `Self::rule_matches`
+    --> crates/permission/src/policy.rs:1403:26
+     |
+1403 |     /// Rule matching ([`Self::rule_matches`]): TOOL-WIDE rules match by exact
+     |                          ^^^^^^^^^^^^^^^^^^ the struct `PermissionPolicy` has no field or associated item named `rule_matches`
+
+warning: public documentation for `restore_dangerous` links to private item `Self::stripped_positions`
+    --> crates/permission/src/policy.rs:2946:56
+     |
+2946 |     /// pre-strip contents (positions included — see [`Self::stripped_positions`]).
+     |                                                        ^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `RegistryToolInvoker`
+  --> crates/permission/src/policy_gate.rs:23:13
+   |
+23 | //! path ([`RegistryToolInvoker`]) is now ALSO gated (phase 3b — closed the
+   |             ^^^^^^^^^^^^^^^^^^^ no item named `RegistryToolInvoker` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: public documentation for `apply_permission_update` links to private item `Self::mode_override`
+    --> crates/permission/src/policy_gate.rs:2581:35
+     |
+2581 |     /// interior-mutable state, [`Self::mode_override`]):
+     |                                   ^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `apply_permission_update` links to private item `Self::mode_override`
+    --> crates/permission/src/policy_gate.rs:2595:34
+     |
+2595 |     ///   but leaves the typed [`Self::mode_override`] unchanged.
+     |                                  ^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `prompts_unavailable_deny_message` links to private item `PROMPTS_UNAVAILABLE_ASYNC_AGENT_REASON`
+    --> crates/permission/src/policy_gate.rs:4224:101
+     |
+4224 | ...:{type:"asyncAgent", reason: `` [`PROMPTS_UNAVAILABLE_ASYNC_AGENT_REASON`] `}}`.
+     |                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `validate_statements`
+  --> crates/permission/src/powershell_containment.rs:13:49
+   |
+13 | //! node model, then runs the pure validation [`validate_statements`] (`Z_u`) over
+   |                                                 ^^^^^^^^^^^^^^^^^^^ no item named `validate_statements` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: public documentation for `format_dir_list` links to private item `DIR_LIST_MAX`
+    --> crates/permission/src/powershell_containment.rs:1330:7
+     |
+1330 | /// [`DIR_LIST_MAX`] quoted dirs joined by `", "`, else the first five plus
+     |       ^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `xgg-style`
+    --> crates/permission/src/powershell_containment.rs:2011:69
+     |
+2011 | /// Validate a parsed PowerShell command (claude-code `Z_u`): run [`xgg`-style]
+     |                                                                     ^^^^^^^^^^ no item named `xgg-style` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: public documentation for `read_deny_globs` links to private item `crate::filesystem::pattern_with_root`
+  --> crates/permission/src/read_deny_globs.rs:10:18
+   |
+10 | //!   (LingXi: [`crate::filesystem::pattern_with_root`] +
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `crate::filesystem::root_path_for_source`
+  --> crates/permission/src/read_deny_globs.rs:11:9
+   |
+11 | //!   [`crate::filesystem::root_path_for_source`]), collapse repeated slashes,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `root_path_for_source` in module `filesystem`
+
+warning: public documentation for `read_deny_globs` links to private item `relativize_for_cwd`
+  --> crates/permission/src/read_deny_globs.rs:16:22
+   |
+16 | //!   `H_m`/`AHo` ([`relativize_for_cwd`]) — producing a `/`-anchored glob
+   |                      ^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `read_deny_globs` links to private item `crate::filesystem::pattern_with_root`
+  --> crates/permission/src/read_deny_globs.rs:21:10
+   |
+21 | //! by [`crate::filesystem::pattern_with_root`], which already omits them).
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `READONLY_COMMANDS`
+  --> crates/permission/src/read_only_command.rs:18:63
+   |
+18 | //! machine 1:1 is a separate effort; here we port the BASE [`READONLY_COMMANDS`]
+   |                                                               ^^^^^^^^^^^^^^^^^ no item named `READONLY_COMMANDS` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: public documentation for `read_only_command` links to private item `git_subcommand_is_read_only`
+  --> crates/permission/src/read_only_command.rs:22:7
+   |
+22 | //! [`git_subcommand_is_read_only`]). The gh/docker/ripgrep per-flag tables
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `lingxi_settings_source` links to private item `crate::shadow::format_source`
+   --> crates/permission/src/rule.rs:329:11
+    |
+329 |     /// [`crate::shadow::format_source`] (`"user settings"` etc.). Byte-locked to
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `Self::bau_refuses`
+  --> crates/permission/src/sandbox_auto_allow.rs:99:45
+   |
+99 |     /// PLUS the BAu refusal battery (see [`Self::bau_refuses`]) — without which a
+   |                                             ^^^^^^^^^^^^^^^^^ the struct `SandboxAutoAllowConfig` has no field or associated item named `bau_refuses`
+
+warning: public documentation for `wog_allows_when_too_complex` links to private item `bau_refuses`
+   --> crates/permission/src/sandbox_auto_allow.rs:114:13
+    |
+114 |     /// / [`bau_refuses`]). Returns `true` iff the command may be auto-allowed —
+    |             ^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `sed_redirect_borne` links to private item `x6s`
+  --> crates/permission/src/sed_redirect_borne.rs:12:26
+   |
+12 | //! extra destination ([`x6s`]), an unquoted/backslash heredoc delimiter
+   |                          ^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `sed_redirect_borne` links to private item `q6s`
+  --> crates/permission/src/sed_redirect_borne.rs:13:8
+   |
+13 | //! ([`q6s`]), any expansion node ([`y6s`]), an ansi-c / translated string
+   |        ^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `sed_redirect_borne` links to private item `y6s`
+  --> crates/permission/src/sed_redirect_borne.rs:13:38
+   |
+13 | //! ([`q6s`]), any expansion node ([`y6s`]), an ansi-c / translated string
+   |                                      ^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `sed_redirect_borne` links to private item `j6s`
+  --> crates/permission/src/sed_redirect_borne.rs:14:8
+   |
+14 | //! ([`j6s`]), an unescaped expansion/glob/brace in the redirect's raw text
+   |        ^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `sed_redirect_borne` links to private item `dollar_jd`
+  --> crates/permission/src/sed_redirect_borne.rs:15:8
+   |
+15 | //! ([`dollar_jd`]), a non-simple target component ([`z6s`]), or a `=`-prefixed
+   |        ^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `sed_redirect_borne` links to private item `z6s`
+  --> crates/permission/src/sed_redirect_borne.rs:15:55
+   |
+15 | //! ([`dollar_jd`]), a non-simple target component ([`z6s`]), or a `=`-prefixed
+   |                                                       ^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `sed_redirect_borne` links to private item `xse`
+  --> crates/permission/src/sed_redirect_borne.rs:28:50
+   |
+28 | //!   + unquotes the command name. This port's [`xse`] reuses
+   |                                                  ^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `sed_redirect_borne` links to private item `strip_command_builtin_noglob`
+  --> crates/permission/src/sed_redirect_borne.rs:32:10
+   |
+32 | //!   ([`strip_command_builtin_noglob`]) and the first-token unquote
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `sed_redirect_borne` links to private item `unquote_first_token`
+  --> crates/permission/src/sed_redirect_borne.rs:33:10
+   |
+33 | //!   ([`unquote_first_token`]) — driven to a fixed point. The only structural
+   |          ^^^^^^^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `sed_validation` links to private item `has_file_args`
+  --> crates/permission/src/sed_validation.rs:50:60
+   |
+50 | //!   objects — the only consumer of that distinction is [`has_file_args`], where
+   |                                                            ^^^^^^^^^^^^^ this item is private
+   |
+   = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `sed_redirect_borne_verdict` links to private item `sed_precheck_verdict`
+   --> crates/permission/src/sed_validation.rs:151:11
+    |
+151 | ///    ([`sed_precheck_verdict`]) → [`SedVerdict::Unsafe`] with
+    |           ^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `sed_auto_allow_verdict` links to private item `sed_command_is_allowed_by_allowlist`
+    --> crates/permission/src/sed_validation.rs:1282:54
+     |
+1282 | /// `acceptEdits` mode. Composes the byte-faithful [`sed_command_is_allowed_by_allowlist`]
+     |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unresolved link to `Self::read_block_paths`
+  --> crates/permission/src/working_dirs.rs:20:37
+   |
+20 | //! The source is not decoration: [`Self::read_block_paths`] (`mEt`) drops
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^ no item named `read_block_paths` in module `working_dirs`
+
+warning: public documentation for `honour_hook_allow` links to private item `Self::rule_or_safety_verdict`
+    --> crates/permission/src/policy_gate.rs:3578:11
+     |
+3578 |     /// [`Self::rule_or_safety_verdict`]: an ask rule (the reason the gate resolved
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `check_in_plan_mode` links to private item `Self::decide`
+    --> crates/permission/src/policy_gate.rs:3607:31
+     |
+3607 |     /// [`Self::check`] via [`Self::decide`].
+     |                               ^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: public documentation for `permission_mode` links to private item `Self::effective_mode`
+    --> crates/permission/src/policy_gate.rs:3967:22
+     |
+3967 |     /// boot mode ([`Self::effective_mode`]). Lets the in-process `/resume`
+     |                      ^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unclosed HTML tag `file`
+  --> crates/permission/src/auto_mode_recon.rs:50:44
+   |
+50 |     /// "Found N inert autoMode entries in <file>" recon-status note). `0` when the
+   |                                            ^^^^^^
+   |
+   = note: `#[warn(rustdoc::invalid_html_tags)]` on by default
+
+warning: `permission` (lib doc) generated 72 warnings
+    Checking client v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/client)
+    Checking bridge v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/bridge)
+    Checking configuration-admin v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/configuration-admin)
+ Documenting harness-runtime v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/runtime)
+warning: unresolved link to `platforms/posix::watch_helper`
+  --> crates/runtime/src/desktop/file_changed_watch.rs:44:8
+   |
+44 | //! ([`platforms/posix::watch_helper`]) watches a DIRECTORY recursively and
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `platforms/posix` in scope
+   |
+   = note: `#[warn(rustdoc::broken_intra_doc_links)]` on by default
+
+warning: unresolved link to `CommandRegistry`
+  --> crates/runtime/src/desktop/fork_resume.rs:32:50
+   |
+32 | /// A [`ForkCapableSkills`] backed by the live [`CommandRegistry`], bound AFTER
+   |                                                  ^^^^^^^^^^^^^^^ no item named `CommandRegistry` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `ConversationOrchestrator::fire_config_change`
+  --> crates/runtime/src/desktop/settings_watch.rs:19:7
+   |
+19 | //! [`ConversationOrchestrator::fire_config_change`] best-effort.
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `ConversationOrchestrator` in scope
+
+warning: unresolved link to `ConversationOrchestrator::fire_config_change`
+  --> crates/runtime/src/desktop/settings_watch.rs:72:7
+   |
+72 | /// [`ConversationOrchestrator::fire_config_change`]); unit tests inject a
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `ConversationOrchestrator` in scope
+
+warning: unresolved link to `connected_provider_fallback`
+   --> crates/runtime/src/desktop/configuration.rs:417:50
+    |
+417 |     /// boot-time connected-provider fallback ([`connected_provider_fallback`]).
+    |                                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `connected_provider_fallback` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `StaticMemoryProvider::empty`
+   --> crates/runtime/src/desktop/configuration.rs:517:11
+    |
+517 |     /// [`StaticMemoryProvider::empty`], so a default build loads NO memory and
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `StaticMemoryProvider` in scope
+
+warning: unresolved link to `StaticMemoryProvider::with_files`
+   --> crates/runtime/src/desktop/configuration.rs:524:21
+    |
+524 |     /// in-memory [`StaticMemoryProvider::with_files`] and never touch the real
+    |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `StaticMemoryProvider` in scope
+
+warning: unresolved link to `ThinkingConfig::Adaptive`
+   --> crates/runtime/src/desktop/configuration.rs:720:11
+    |
+720 |     /// [`ThinkingConfig::Adaptive`] — byte-identical to the pre-resolver boot.
+    |           ^^^^^^^^^^^^^^^^^^^^^^^^ no item named `ThinkingConfig` in scope
+
+warning: unresolved link to `BuildError::TmuxRequiresWorktree`
+   --> crates/runtime/src/desktop/configuration.rs:746:41
+    |
+746 |     /// None` is a hard boot failure ([`BuildError::TmuxRequiresWorktree`]),
+    |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `BuildError` in scope
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:146:33
+    |
+146 | /// Extracted verbatim out of [`build`] so that headless one-shot commands
+    |                                 ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:158:15
+    |
+158 |     /// See [`build`] for the resolution rules behind `http`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:160:15
+    |
+160 |     /// See [`build`] for the resolution rules behind `clock`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:162:15
+    |
+162 |     /// See [`build`] for the resolution rules behind `mcp_oauth_storage`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:164:15
+    |
+164 |     /// See [`build`] for the resolution rules behind `credentials`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:166:15
+    |
+166 |     /// See [`build`] for the resolution rules behind `auth`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:168:15
+    |
+168 |     /// See [`build`] for the resolution rules behind `subscription`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:173:15
+    |
+173 |     /// See [`build`] for the resolution rules behind `resolved_anthropic_api_key`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:175:15
+    |
+175 |     /// See [`build`] for the resolution rules behind `is_subscriber`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:177:15
+    |
+177 |     /// See [`build`] for the resolution rules behind `openai_oauth_handle`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:179:15
+    |
+179 |     /// See [`build`] for the resolution rules behind `pricing`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:181:15
+    |
+181 |     /// See [`build`] for the resolution rules behind `chains`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:183:15
+    |
+183 |     /// See [`build`] for the resolution rules behind `model_providers`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `8`
+   --> crates/runtime/src/desktop/credentials.rs:191:33
+    |
+191 |     /// Round-4 review finding [8]: a refreshable `fusion::ModelSource` over
+    |                                 ^ no item named `8` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:202:15
+    |
+202 |     /// See [`build`] for the resolution rules behind `default_listings`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:204:15
+    |
+204 |     /// See [`build`] for the resolution rules behind `default_model_id`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:206:15
+    |
+206 |     /// See [`build`] for the resolution rules behind `default_model_profile`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:212:15
+    |
+212 |     /// See [`build`] for the resolution rules behind `provider_availability`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:214:15
+    |
+214 |     /// See [`build`] for the resolution rules behind `default_model_fallback`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:216:15
+    |
+216 |     /// See [`build`] for the resolution rules behind `model_provenance`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:218:15
+    |
+218 |     /// See [`build`] for the resolution rules behind `session_model_restriction`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:229:15
+    |
+229 |     /// See [`build`] for the resolution rules behind `model_setting_for_spawns`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:233:15
+    |
+233 |     /// See [`build`] for the resolution rules behind `llm_runtime`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:239:15
+    |
+239 |     /// See [`build`] for the resolution rules behind `llm_transport`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:241:15
+    |
+241 |     /// See [`build`] for the resolution rules behind `cost_estimator`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+   --> crates/runtime/src/desktop/credentials.rs:243:15
+    |
+243 |     /// See [`build`] for the resolution rules behind `subscriber_state`.
+    |               ^^^^^ no item named `build` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build`
+    --> crates/runtime/src/desktop/credentials.rs:1592:36
+     |
+1592 | /// Differences from the service [`build`] constructs, all of them the absence
+     |                                    ^^^^^ no item named `build` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `5`
+   --> crates/runtime/src/desktop/fusion_services.rs:359:52
+    |
+359 |     /// re-probe answered. Round-5 review finding [5]: the re-probe bottoms
+    |                                                    ^ no item named `5` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `15`
+    --> crates/runtime/src/desktop/fusion_services.rs:1012:29
+     |
+1012 | /// round-5 review finding [15]. A no-op in a process with no desktop runtime
+     |                             ^^ no item named `15` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `2`
+    --> crates/runtime/src/desktop/fusion_services.rs:1030:23
+     |
+1030 | /// Round-12 finding [2]: without this, deleting a provider key (or signing
+     |                       ^ no item named `2` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: public documentation for `terminal_slash_commands` links to private item `build_init_projection`
+   --> crates/runtime/src/headless/stream_json.rs:742:64
+    |
+742 |     /// after `slash_commands` and only when non-empty — see [`build_init_projection`].
+    |                                                                ^^^^^^^^^^^^^^^^^^^^^ this item is private
+    |
+    = note: this link will resolve properly if you pass `--document-private-items`
+    = note: `#[warn(rustdoc::private_intra_doc_links)]` on by default
+
+warning: unresolved link to `set_init_params`
+    --> crates/runtime/src/headless/stream_json.rs:1416:56
+     |
+1416 |     /// emit_tool_call, etc.) are fully wired.  Call [`set_init_params`]
+     |                                                        ^^^^^^^^^^^^^^^ no item named `set_init_params` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `emit_init`
+    --> crates/runtime/src/headless/stream_json.rs:1417:18
+     |
+1417 |     /// before [`emit_init`] / [`emit_status`] to fill in the session-level
+     |                  ^^^^^^^^^ no item named `emit_init` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `emit_status`
+    --> crates/runtime/src/headless/stream_json.rs:1417:34
+     |
+1417 |     /// before [`emit_init`] / [`emit_status`] to fill in the session-level
+     |                                  ^^^^^^^^^^^ no item named `emit_status` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `set_init_params`
+    --> crates/runtime/src/headless/stream_json.rs:1523:21
+     |
+1523 |     /// Panics if [`set_init_params`] has not been called yet.
+     |                     ^^^^^^^^^^^^^^^ no item named `set_init_params` in scope
+     |
+     = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `harness_runtime::desktop::DesktopConfig`
+ --> crates/runtime/src/mobile/host/configuration.rs:7:28
+  |
+7 | /// The mobile analog of [`harness_runtime::desktop::DesktopConfig`]: every value the host
+  |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no item named `harness_runtime` in scope
+
+warning: unresolved link to `build_mobile`
+  --> crates/runtime/src/mobile/host/configuration.rs:11:61
+   |
+11 | /// separately, through the `Arc<dyn Platform>` passed to [`build_mobile`].
+   |                                                             ^^^^^^^^^^^^ no item named `build_mobile` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `AdapterPermissionGate`
+  --> crates/runtime/src/mobile/host/configuration.rs:17:7
+   |
+17 | /// [`AdapterPermissionGate`] (a phone has no always-allow CLI mode).
+   |       ^^^^^^^^^^^^^^^^^^^^^ no item named `AdapterPermissionGate` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `StaticMemoryProvider`
+  --> crates/runtime/src/mobile/host/configuration.rs:90:11
+   |
+90 |     /// [`StaticMemoryProvider`], so a default build loads NO memory and the host
+   |           ^^^^^^^^^^^^^^^^^^^^ no item named `StaticMemoryProvider` in scope
+   |
+   = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `build_mobile_engine`
+   --> crates/runtime/src/mobile/host/configuration.rs:218:57
+    |
+218 |     /// Mobile Linux runtime. The capability probe in [`build_mobile_engine`]
+    |                                                         ^^^^^^^^^^^^^^^^^^^ no item named `build_mobile_engine` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `MobileRuntime`
+   --> crates/runtime/src/mobile/host/configuration.rs:291:40
+    |
+291 | /// Errors surfaced while building a [`MobileRuntime`].
+    |                                        ^^^^^^^^^^^^^ no item named `MobileRuntime` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `ListenerSink`
+   --> crates/runtime/src/mobile/host.rs:374:61
+    |
+374 |     /// re-surface it; the adapter already feeds it via a [`ListenerSink`].
+    |                                                             ^^^^^^^^^^^^ no item named `ListenerSink` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: unresolved link to `ListenerSink`
+   --> crates/runtime/src/mobile/host.rs:376:68
+    |
+376 |     /// The connection's [`client::adapter::ClientEventSink`] (a [`ListenerSink`]
+    |                                                                    ^^^^^^^^^^^^ no item named `ListenerSink` in scope
+    |
+    = help: to escape `[` and `]` characters, add '\' before them like `\[` or `\]`
+
+warning: public documentation for `emit_forwarded_subagent_message` links to private item `Self::build_forwarded_subagent_frame`
+    --> crates/runtime/src/headless/stream_json.rs:3036:11
+     |
+3036 |     /// [`Self::build_forwarded_subagent_frame`]; a no-op when the flag is off or
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this item is private
+     |
+     = note: this link will resolve properly if you pass `--document-private-items`
+
+warning: unclosed HTML tag `Rx`
+   --> crates/runtime/src/headless/stream_json.rs:975:49
+    |
+975 |     /// are not Clone — so we use a Mutex<Option<Rx>> to hand it off.
+    |                                                 ^^^^
+    |
+    = note: `#[warn(rustdoc::invalid_html_tags)]` on by default
+help: try marking as source code
+    |
+975 |     /// are not Clone — so we use a `Mutex<Option<Rx>>` to hand it off.
+    |                                     +                 +
+
+warning: `harness-runtime` (lib doc) generated 54 warnings
+    Finished `dev` profile [unoptimized] target(s) in 1m 15s
+   Generated /Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/doc/agent/index.html and 5 other files

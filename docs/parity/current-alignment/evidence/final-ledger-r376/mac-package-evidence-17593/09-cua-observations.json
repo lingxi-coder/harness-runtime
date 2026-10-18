@@ -1,0 +1,53 @@
+{
+  "schema": "mac-cua-evidence-r376-v1",
+  "status": "passed",
+  "recorded_at": "2026-10-18T09:35:28.435246+00:00",
+  "observation_method": "actual-visible-CUA",
+  "native_version": "2.1.295",
+  "product_sha": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+  "harness_sha": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+  "sdk_sha": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+  "app_path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-17593eaa66-r342-20261018T091621Z/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app",
+  "app_pid": 52288,
+  "driver_result_sha256": "13f17b969ab19462cdc193dddb4804569d1429fe595c416a144cf16ff524217a",
+  "screenshot_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mac-final-r376-17593-20261018T0916/cua-submit.png",
+  "screenshot_sha256": "28be6f881ae2844132ea366dad0174632ec2cffb7feaabe4c5c870dcffde7b0c",
+  "visible_ui": {
+    "title": "Packaged Host Client UI",
+    "input_label": "Message",
+    "input_placeholder": "Type a value",
+    "button_label": "Submit",
+    "initial_result": "Waiting for a value."
+  },
+  "native_cua_actions": [
+    {
+      "typeText": "packaged-host-cua-value",
+      "visible_input": "packaged-host-cua-value",
+      "visible_result": "Input callback received: packaged-host-cua-value",
+      "focus": "Message"
+    },
+    {
+      "typeText": "xy",
+      "visible_input": "packaged-host-cua-valuexy",
+      "visible_result": "Input callback received: packaged-host-cua-valuexy",
+      "focus": "Message"
+    },
+    {
+      "click": "Submit",
+      "visible_result": "Submit callback accepted: packaged-host-cua-valuexy",
+      "focus": "Submit"
+    }
+  ],
+  "routing_observations": [
+    "Exact signed app path; Window menu restored main window",
+    "Initial coordinate attempts returned noWindowsAvailable; no input success claimed",
+    "Running app name binding, native window actions and Tab; full HTML AX tree became available",
+    "AX Sidebar Alpha selected; Mod surface mounted",
+    "Actual AX Message focus, native typeText twice, actual Submit click; each value/result observed"
+  ],
+  "optional_sidebar_drag": "not executed; no gesture pass claimed",
+  "ax_evidence": {
+    "path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/mac-final-r376-17593-20261018T0916/cua-final-ax.txt",
+    "sha256": "ecfa802cc9b502b3acfdf969b84f11a5365c25dd4df8c36ee6b7abef37f44289"
+  }
+}

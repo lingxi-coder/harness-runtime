@@ -1,0 +1,484 @@
+{
+  "schema": "final-ledger-r376-sdk-audit-v1",
+  "scope": "SDK, HTTP request, provider errors, refusal/stop-details, retry/model/effort and compaction contract audit",
+  "target": {
+    "native_version": "2.1.295",
+    "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+  },
+  "candidate": {
+    "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "harness": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+    "product": "f71087b428665c30d0bd752e16f76cb53ab7fef6"
+  },
+  "source_reuse": {
+    "tested_harness_head": "dc6ce1217143b693d97ab6278ff66568beea20d3",
+    "tested_sdk_pin": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "current_harness_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+    "current_sdk_head": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "current_cargo_lock_sha256": "2f9456e8b1d289bfc8dab0005a5ba9a865b7ccf044a16221a9ec214a9fec5409",
+    "r271_cargo_lock_sha256": "2f9456e8b1d289bfc8dab0005a5ba9a865b7ccf044a16221a9ec214a9fec5409",
+    "selected_contract_sources_unchanged_since_tested_harness_head": true,
+    "changed_paths_after_tested_harness_head": [
+      "crates/hooks/src/mod_ui_client_host.rs",
+      "crates/hooks/src/mod_ui_client_worker.mjs",
+      "crates/hooks/src/mod_ui_client_worker.test.mjs",
+      "crates/hooks/src/mods.rs",
+      "crates/hooks/src/mods_worker.mjs",
+      "crates/runtime/src/desktop/assembly.rs",
+      "crates/runtime/src/desktop/tests/tests.rs"
+    ],
+    "full_gate": {
+      "path": "/private/tmp/h-full-gate-final-r271-20261017/run.json",
+      "sha256": "864080986f8d38a182ee53caa35988412fe1c329523f216358254c865d56ff7c",
+      "passed": 20471,
+      "failed": 0,
+      "ignored": 7
+    },
+    "source_sha256": {
+      "harness-runtime/crates/llm-runtime/tests/current_alignment_http_layout_293_test.rs": "03e9ee7528d953025a049d294bc948ed403c5608b6548687d78db59f6c67f208",
+      "harness-runtime/crates/orchestrator/tests/provider_error_output_293_test.rs": "86e7bffe3aa288981116bba083ed588a163c545400689d2f9fa67ea1472b8348",
+      "harness-runtime/crates/orchestrator/tests/current_alignment_refusal.rs": "53c40af295a2220c4372ccc1461f38ba584df3a1a77619436d75c87ba8b88068",
+      "harness-runtime/crates/orchestrator/tests/effort_cold_resume_295_test.rs": "ce5fab26e4d05fad7af6001c304ae890304de99b6fcba2487424ea10b965aded",
+      "harness-runtime/crates/llm-runtime/src/execution_context.rs": "e0ea09853986a7f87c62371ddf53878cc03da74b22653e7909cb12f71ce3aca3",
+      "harness-runtime/crates/orchestrator/src/conversation/compaction.rs": "90a996afdc10e5e8c045adf17655d07f4a529dd4a81bbab59cf62d42905c46a3",
+      "llm-client/src/codecs/anthropic/stream.rs": "21ede35455b34fd55e470ad357a6b1b930bd93fbe6b068087859c9171cd433eb",
+      "llm-client/tests/anthropic_message_controls.rs": "cfb92c2991d5573eabcbd82fec982d2c239e9abde558f2c4a855559120db1d56"
+    },
+    "current_sdk_checks": {
+      "default_library_log": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+      "default_library_log_sha256": "d55062100110f0324ddf6d374b1722525806d4c25d92c2f545dd143cf19fb678",
+      "default_library_tests": {
+        "passed": 620,
+        "failed": 0,
+        "ignored": 0
+      },
+      "context_policy_log": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/context-policy.log",
+      "context_policy_log_sha256": "7b1afc518b3303318cf106e2536f35379bc2828f0097fd4b6c09d1cb19e8e93b",
+      "context_policy_tests": 13,
+      "coverage_note": "Current SDK a363 library test receipts are distinct from raw Native parity evidence; focused anthropic_message_controls integration target is running in the root task.",
+      "anthropic_message_controls_log": "acceptance/final-ledger-r376/sdk-message-controls.log",
+      "anthropic_message_controls_log_sha256": "bb3867b012d93e77479d23fb974cdf736798a84ccdef39169ba8c9a84956adbe",
+      "anthropic_message_controls_tests": {
+        "passed": 18,
+        "failed": 0,
+        "ignored": 0
+      },
+      "anthropic_message_controls_status": "passed_current_sdk_a363"
+    },
+    "source_binding_followup": {
+      "scope": "Only existing Native 2.1.295 extracted source and current SDK receipts were mapped; no Cargo or Native process was run.",
+      "native_295_classifier_chunk_sha256": "ae64b2c8c87be0e990738da478adbbe5cd6a8201cef7953d7684cf59bd780120",
+      "native_295_final_normalizer_chunk_sha256": "125f57566b99b67ce958d77cd787163124654cbbb3bdd6f3a92dfd38955a2317",
+      "current_sdk_test_log": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+      "current_sdk_test_count": "620 passed / 0 failed; statusless decoder test line 192; SigV4 tests lines 76-99",
+      "native_293_same_function_source_available": false,
+      "statusless_sse_295_full_parser_binding_available": false
+    }
+  },
+  "receipts": {
+    "http_phase": {
+      "path": "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-27/phase.json",
+      "sha256": "b574e3f71c6b89c660816e0cfc1bd894fd898304247c59fe1e3881b1d973f670",
+      "target": "harness-runtime/crates/llm-runtime/tests/current_alignment_http_layout_293_test.rs",
+      "combined_passed": 25,
+      "combined_failed": 0,
+      "stdout_path": "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-27/stdout.jsonl",
+      "test_line": 638
+    },
+    "provider_error_phase": {
+      "path": "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-07/phase.json",
+      "sha256": "f4ec594853adc4db341e86482fe944fe25ebc6c398ced04cd4182ec7795c499b",
+      "target": "harness-runtime/crates/orchestrator/tests/provider_error_output_293_test.rs",
+      "combined_passed": 35,
+      "combined_failed": 0,
+      "stdout_path": "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-07/stdout.jsonl",
+      "test_line": 669
+    },
+    "refusal_phase": {
+      "path": "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-08/phase.json",
+      "sha256": "49713af7e0d6f33380a30080b6d2373ee44a86dc795990b6c4153ab1e1e723f7",
+      "target": "harness-runtime/crates/orchestrator/tests/current_alignment_refusal.rs",
+      "combined_passed": 15,
+      "combined_failed": 0,
+      "stdout_path": "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-08/stdout.jsonl",
+      "test_line": 589
+    },
+    "effort_phase": {
+      "path": "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-10/phase.json",
+      "sha256": "b2b48eff697f714e2a348438cc7d54a8c826223a214efdb9d326080efb98934c",
+      "target": "harness-runtime/crates/orchestrator/tests/effort_cold_resume_295_test.rs",
+      "combined_passed": 14,
+      "combined_failed": 0,
+      "stdout_path": "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-10/stdout.jsonl",
+      "test_line": 596
+    },
+    "unit_libraries_phase": {
+      "path": "/private/tmp/h-full-gate-final-r271-20261017/phases/unit-libraries/phase.json",
+      "sha256": "11b275006a74db22278ed744446ddc27eb686398e54816c252beda4cee96d9df",
+      "passed": 18334,
+      "failed": 0,
+      "ignored": 1,
+      "stdout_path": "/private/tmp/h-full-gate-final-r271-20261017/phases/unit-libraries/stdout.jsonl",
+      "budget_test_lines": [
+        2899,
+        8860,
+        11066
+      ]
+    },
+    "product_r375_provider_error_cli": {
+      "run_path": "/private/tmp/product-full-r342-r375-20261018T014521Z-68469/runner/run.json",
+      "run_sha256": "71f9c8d34c051be9241612993f06832253fcb898fe9175278897c8609c4fc25f",
+      "phase_path": "/private/tmp/product-full-r342-r375-20261018T014521Z-68469/runner/phases/integration-tests-04/phase.json",
+      "phase_sha256": "65c439d7d15a6d8c9ad61962cf0a7b4d2e84578d38d69a3582686bacac46786d",
+      "stdout_path": "/private/tmp/product-full-r342-r375-20261018T014521Z-68469/runner/phases/integration-tests-04/stdout.jsonl",
+      "stdout_sha256": "01e3e8a6432eeb78ce021b706bff0d88f937743afd96f620433b5063b1f74440",
+      "target": "lingxi-app/apps/cli/host/tests/provider_error_cli.rs",
+      "target_passed_tests": 3,
+      "target_failed_tests": 0,
+      "phase_passed": 98,
+      "phase_failed": 0,
+      "stdout_test_lines": [
+        973,
+        974,
+        975,
+        977
+      ],
+      "target_passed_test_functions": 3,
+      "selected_cli_invocations": 6,
+      "selected_invocation_subset": [
+        "three HTTP 400 error bodies: lone surrogate, empty body, null message",
+        "one HTTP 413 error body",
+        "one explicit no-stream control",
+        "one default print-text control"
+      ],
+      "runtime_audit_reference": "acceptance/final-ledger-r376/runtime-audit.json",
+      "runtime_audit_disposition": "current Product r375 provider_error_cli target passed for the bounded 6/6 invocation subset; full stdout byte equality is intentionally not asserted"
+    }
+  },
+  "contracts": [
+    {
+      "id": "M2-HTTP-1",
+      "status": "partial_raw_http_pass_with_constraints",
+      "evidence": [
+        "harness-runtime/docs/parity/current-alignment/fixtures/http-layout-295/README.md",
+        "harness-runtime/docs/parity/current-alignment/fixtures/http-layout-295/native-baseline/2.1.295/native-comparison-293-vs-295.json",
+        "harness-runtime/crates/llm-runtime/tests/current_alignment_http_layout_293_test.rs",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-27/phase.json"
+      ],
+      "limitations": [
+        "Candidate raw capture exercises ApiService and built-in HttpTransport directly, not Product CLI assembly.",
+        "Only dynamic Host is constrained in headers; body comparison fixes exactly the 64-byte device_id at bytes 628-691. The body is not claimed whole-byte identical.",
+        "The exact 862-byte Native response is offered and the decoded fixed text is checked; raw response bytes are not independently captured from the candidate client boundary."
+      ],
+      "minimal_missing_validation": [
+        "One pinned Product 2.1.295 headless print-text capture of the assembled first request and client-observed response, if the ledger requires Product-level raw HTTP closure."
+      ],
+      "source_status": "closed_for_tested_ApiService_path; no source defect identified",
+      "byte_status": "raw request line/header/body compared on SDK a363 with dynamic Host and 64-byte device_id constraints; Product raw assembly boundary remains unverified"
+    },
+    {
+      "id": "SDK-ERR-1",
+      "status": "verified_with_cross_version_raw_input_equivalence",
+      "evidence": [
+        "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/receipt.json",
+        "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/comparison-to-293.json",
+        "harness-runtime/crates/orchestrator/tests/provider_error_output_293_test.rs",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-07/phase.json"
+      ],
+      "limitations": [
+        "Candidate replays the 2.1.293 frozen fixture; the 2.1.295 three selected 400 response bodies have the same raw SHA-256 and Native result-string literals are recorded equal.",
+        "This verifies the current SDK/error-text behavior, not a full CLI JSON stdout envelope."
+      ],
+      "minimal_missing_validation": [],
+      "source_status": "closed for the three 400 SDK/error-text cases",
+      "byte_status": "selected raw 295 response hashes equal the 293 replay inputs; untouched Native result literals match cross-version"
+    },
+    {
+      "id": "HOST-ERR-1",
+      "status": "verified_host_boundary",
+      "evidence": [
+        "harness-runtime/crates/orchestrator/tests/provider_error_output_293_test.rs",
+        "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/comparison-to-293.json",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-07/phase.json"
+      ],
+      "limitations": [
+        "Checks exact result UTF-16 units at OutputStream and persisted assistant JSONL; not Product CLI stdout."
+      ],
+      "minimal_missing_validation": [],
+      "source_status": "closed at Host output and persistence boundaries",
+      "byte_status": "exact UTF-16 result units verified; not whole CLI envelope bytes"
+    },
+    {
+      "id": "HOST-ERR-STATUS-1",
+      "status": "verified_host_boundary_with_500_authority_constraint",
+      "evidence": [
+        "harness-runtime/crates/orchestrator/tests/provider_error_output_293_test.rs",
+        "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/comparison-to-293.json",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-07/phase.json"
+      ],
+      "limitations": [
+        "Covers 403/404/413 and x-should-retry:false 401/500; 500 result authority is constrained to the actual loopback gateway host/port.",
+        "No full stdout envelope byte-equality claim."
+      ],
+      "minimal_missing_validation": [],
+      "source_status": "closed for tested status presentations and no-retry cases",
+      "byte_status": "result literal cross-version pass with only 500 listener authority constraint; candidate Host text/source units asserted"
+    },
+    {
+      "id": "HOST-REFUSAL-1",
+      "status": "partial_host_boundary_pass",
+      "evidence": [
+        "harness-runtime/docs/parity/current-alignment/fixtures/stop-details-295/README.md",
+        "harness-runtime/crates/orchestrator/tests/current_alignment_refusal.rs",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-08/phase.json"
+      ],
+      "limitations": [
+        "Exact Native result text units and persisted category/explanation are asserted at Host boundaries; public CLI model-display and interactive-mode composition are not."
+      ],
+      "minimal_missing_validation": [
+        "One public CLI refusal replay checking the requested display label, interactive mode, JSON result, and durable source fields."
+      ],
+      "source_status": "closed at Host refusal text and persistence boundaries",
+      "byte_status": "Native 2.1.295 result UTF-16 and durable explanation/category units asserted; public CLI presentation not established"
+    },
+    {
+      "id": "CLI-ERR-1",
+      "status": "selected_current_product_cli_cases_pass",
+      "evidence": [
+        "acceptance/final-ledger-r376/runtime-audit.json",
+        "lingxi-app/apps/cli/host/tests/provider_error_cli.rs",
+        "/private/tmp/product-full-r342-r375-20261018T014521Z-68469/runner/phases/integration-tests-04/phase.json",
+        "/private/tmp/product-full-r342-r375-20261018T014521Z-68469/runner/phases/integration-tests-04/stdout.jsonl",
+        "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/receipt.json"
+      ],
+      "limitations": [
+        "The six successful invocations are three 400 error bodies, one 413 body, one no-stream control and one print-text control; they are not six distinct HTTP error statuses.",
+        "The assertions compare the raw result-string literal and selected fixed top-level field slices with generated-field constraints; complete stdout JSON byte equality is not claimed."
+      ],
+      "minimal_missing_validation": [],
+      "source_status": "current pinned Product CLI entrypoint regression passed on f71087b4 for the bounded six-invocation subset",
+      "byte_status": "The three 400 error cases and 413 compare raw result literals/fixed field slices, UTF-16 units, stderr and exit; generated fields are constrained; full stdout bytes are not compared"
+    },
+    {
+      "id": "SDK-ERR-2",
+      "status": "current_sdk_message_unit_pass_295_classifier_mapped_293_comparison_unresolved",
+      "evidence": [
+        "acceptance/source-alignment-295-r30/native-classifier-context/manifest.json",
+        "acceptance/source-alignment-295-r30/native-classifier-context/src_194447854.js",
+        "llm-client/src/codecs/anthropic/stream.rs",
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+        "harness-runtime/docs/parity/current-alignment/fixtures/statusless-stream-error/README.md",
+        "harness-runtime/docs/parity/current-alignment/fixtures/statusless-stream-error/native-baseline/native-receipt.json"
+      ],
+      "limitations": [
+        "The 2.1.295 extracted function proves target-version timeout_error classification but not exact SSE event parsing or message extraction.",
+        "The only checked-in public statusless SSE Native oracle is 2.1.293. Its no-start timeout, partial-text timeout, and api_error outputs are documented in the fixture README; it does not expose the SDK intermediate string.",
+        "No retained 2.1.293 extracted source hash is available to prove the 2.1.295 classifier/message function is identical across versions."
+      ],
+      "minimal_missing_validation": [
+        "Keep the Native cross-version classifier/message comparison as an explicit evidence limit; no additional collection was done in this source-binding update."
+      ],
+      "source_status": "Current SDK decoder/message projection regression passes; Native 2.1.295 source confirms timeout_error classification; no source evidence proves the full SSE parser/message branch is byte-identical to 2.1.293.",
+      "byte_status": "SDK preserves statusless error source UTF-16 and maps timeout to ProviderTimeout(status=None); Native 2.1.293 has the three public SSE outcomes; no 2.1.295 statusless SSE public capture.",
+      "native_source_binding": {
+        "binary_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+        "chunk_path": "acceptance/source-alignment-295-r30/native-classifier-context/src_194447854.js",
+        "chunk_sha256": "ae64b2c8c87be0e990738da478adbbe5cd6a8201cef7953d7684cf59bd780120",
+        "manifest_path": "acceptance/source-alignment-295-r30/native-classifier-context/manifest.json",
+        "selectors": "Native source names timeout_error and api_error as known error kinds in HY; Edr maps server-side timeout_error to timedOut.",
+        "binding_limit": "This chunk binding establishes the 2.1.295 error-kind classifier only. It does not include the statusless SSE parser/message extraction branch. No retained 2.1.293 extracted source hash was found for a same-function comparison."
+      },
+      "candidate_source_binding": {
+        "path": "llm-client/src/codecs/anthropic/stream.rs",
+        "sha256": "21ede35455b34fd55e470ad357a6b1b930bd93fbe6b068087859c9171cd433eb",
+        "selector": "stop_delta_tests::stream_error_text_keeps_native_statusless_units_and_timeout_role",
+        "receipt": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+        "receipt_line": 192,
+        "result": "The current 620-test SDK library run passed this direct decoder case; it preserves the error/message source units and distinguishes timeout_error as ProviderTimeout { status: None }. It is SDK unit evidence, not a native SSE transport or CLI replay."
+      }
+    },
+    {
+      "id": "SDK-1",
+      "status": "partial_current_first_party_wire_coverage",
+      "evidence": [
+        "acceptance/source-alignment-295-r30/sdk-request.md",
+        "acceptance/source-alignment-295-r30/native-classifier-context/manifest.json",
+        "acceptance/source-alignment-295-r31/mcp-sanitizer-source/manifest.json",
+        "acceptance/source-alignment-295-r31/mcp-sanitizer-source/src_186231195.js",
+        "llm-client/src/hosting/mod.rs",
+        "llm-client/src/exact_json.rs",
+        "llm-client/src/client/executor.rs",
+        "llm-client/src/client/prepared.rs",
+        "llm-client/src/codecs/anthropic/encode.rs",
+        "llm-client/src/auth/sigv4.rs",
+        "llm-client/tests/anthropic_message_controls.rs",
+        "acceptance/final-ledger-r376/sdk-message-controls.log",
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-27/phase.json"
+      ],
+      "limitations": [
+        "Historical Native 2.1.295 source bindings establish the Foundry route gate, request-history generator and exact-value final body normalization without treating them as a raw candidate byte comparison.",
+        "Current SDK route controls and library tests pass, but the physical raw HTTP candidate fixture is first-party only; there is no Foundry raw request/response capture in this audit.",
+        "SigV4 has current SDK source/vector coverage for AWS signing. No comparable Foundry/first-party Native physical signing bytes are claimed.",
+        "Response and SSE frame source/regression behavior is covered by SDK unit tests, but no one Native 2.1.295 full request/response stream capture compares those bytes for Foundry."
+      ],
+      "minimal_missing_validation": [
+        "No source defect is identified. Keep Foundry/response-frame raw-wire evidence bounded to source and existing regressions unless strict public raw-byte parity is required."
+      ],
+      "source_status": "Foundry route admission, exact-value final-body normalization and current route controls are source-bound; no implementation defect found. SigV4 remains a distinct AWS/Bedrock source contract.",
+      "byte_status": "The Native 2.1.295 source binds Foundry route eligibility and final string normalization; the current request gate remains raw-byte proof for first-party only. Foundry, signing and response-frame physical bytes are not compared.",
+      "native_source_binding": {
+        "native_binary_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+        "request_analysis": "acceptance/source-alignment-295-r30/sdk-request.md",
+        "request_generator_chunk": {
+          "path": "acceptance/source-alignment-295-r30/native-classifier-context/src_202924418.js",
+          "sha256": "2612bbe89324a30f9c773abfc2cc83802fd0340cd6283094ea1ed0413ba21e9d",
+          "selector": "ad",
+          "binary_offset": 203050026
+        },
+        "main_query_chunk": {
+          "path": "acceptance/source-alignment-295-r30/native-classifier-context/src_194447854.js",
+          "sha256": "ae64b2c8c87be0e990738da478adbbe5cd6a8201cef7953d7684cf59bd780120"
+        },
+        "final_value_normalizer": {
+          "path": "acceptance/source-alignment-295-r31/mcp-sanitizer-source/src_186231195.js",
+          "sha256": "125f57566b99b67ce958d77cd787163124654cbbb3bdd6f3a92dfd38955a2317",
+          "selector": "Yc/cf/t1e; binary offsets 186233438, 186233487, 186233606"
+        },
+        "route_binding": "sdk-request.md maps vh/Gyo to first-party, Anthropic AWS/GCP and Foundry route admission; it distinguishes Bedrock/Vertex from the Anthropic AWS/GCP identities.",
+        "sidecar_binding": "The Native final-value walk visits JSON string values, preserves keys, and leaves histories/sidecars intact; request normalizer is final-dispatch only."
+      },
+      "candidate_source_binding": {
+        "paths": {
+          "Foundry codec": "llm-client/src/hosting/mod.rs",
+          "final JSON value normalizer": "llm-client/src/exact_json.rs",
+          "generation dispatch": "llm-client/src/client/executor.rs and llm-client/src/client/prepared.rs",
+          "Anthropic encoding": "llm-client/src/codecs/anthropic/encode.rs",
+          "SigV4/AWS signing": "llm-client/src/auth/sigv4.rs",
+          "route controls": "llm-client/tests/anthropic_message_controls.rs"
+        },
+        "source_sha256": {
+          "llm-client/src/auth/sigv4.rs": "2d12ffdc07a7fe78974bd29e3415e509ccf63b4cfa4d770cecd3f732c039ade2",
+          "llm-client/src/exact_json.rs": "842aafbe93f610d35ce537619a486e9217dd487e46b76c6bb2db87e15ee15cc1",
+          "llm-client/src/hosting/mod.rs": "e306e816bd9be12ebcbdef0ed8e7a5b06d10025e7e9a7dba9c54bef6c694dd3c",
+          "llm-client/src/codecs/anthropic/encode.rs": "272d426bd8e7d115d2b89ced2de8d986ffcce6127e72d9cbe3fdaf8ef5b6e979",
+          "llm-client/src/client/executor.rs": "b19c1810dd28375fd9c767b8b42877ada462f395f78a87a1f701a83ea6756bc3",
+          "llm-client/src/client/prepared.rs": "364ba72c77e3ec32c95e843667548f9daf7b350aade0311eec605fb16cea561c",
+          "llm-client/tests/anthropic_message_controls.rs": "cfb92c2991d5573eabcbd82fec982d2c239e9abde558f2c4a855559120db1d56"
+        },
+        "receipts": [
+          "acceptance/final-ledger-r376/sdk-message-controls.log: 18/18 current a363 controls passed; includes Foundry/effort route and beta behavior.",
+          "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log: 620/620 current a363 library tests passed; SigV4 source vectors run at lines 76-99.",
+          "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-27/phase.json: current-lock a363 first-party raw HTTP test passed."
+        ],
+        "signing_scope": "The retained source binds current SDK SigV4 request canonicalization/vector tests for AWS signing. It does not make a Foundry or first-party Native signing/physical-wire claim; the Native route source describes Foundry as its own endpoint/auth route."
+      }
+    },
+    {
+      "id": "SDK-2",
+      "status": "current_sdk_provider_regression_pass",
+      "evidence": [
+        "acceptance/final-ledger-r376/gates-audit.json",
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+        "llm-client/src/providers/",
+        "harness-runtime/Cargo.lock"
+      ],
+      "limitations": [
+        "Current source/unit regressions do not imply external physical HTTP captures for every Non-Anthropic provider."
+      ],
+      "minimal_missing_validation": [],
+      "source_status": "closed for mapped current SDK provider/codec regressions: 620 default-library tests passed at a363; no implementation gap identified",
+      "byte_status": "Native raw byte differential is not applicable to the independent Non-Anthropic provider contracts in this row"
+    },
+    {
+      "id": "SDK-3",
+      "status": "source_regression_closed_current_pin",
+      "evidence": [
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+        "harness-runtime/crates/llm-runtime/src/execution_context.rs",
+        "harness-runtime/crates/llm-runtime/src/client.rs",
+        "harness-runtime/crates/llm-runtime/src/service.rs",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/unit-libraries/phase.json"
+      ],
+      "limitations": [
+        "The current a363 tests separately cover configuration snapshots, credential/account replacement, retry classification, stream fallback/exact-string controls, cache policy, and model selection/latches; H r271 covers the operation physical-dispatch budget and selected 2.1.295 request/error paths. This is not a whole-request byte pass across every attempt."
+      ],
+      "minimal_missing_validation": [],
+      "source_status": "closed for mapped credential/account snapshots, retry classification/latch, fallback stream/exact-string controls, cache policy and model selection semantics across a363 SDK tests and current H dispatch gates",
+      "byte_status": "Source regression pass; no all-attempt physical wire byte comparison is claimed or needed to establish the reviewed source semantics"
+    },
+    {
+      "id": "STOPDETAILS-1",
+      "status": "partial_native_host_projection_pass",
+      "evidence": [
+        "harness-runtime/docs/parity/current-alignment/fixtures/stop-details-295/README.md",
+        "harness-runtime/crates/orchestrator/tests/current_alignment_refusal.rs",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-08/phase.json"
+      ],
+      "limitations": [
+        "Raw Native SSE, Host result-text units, and durable explanation units are checked; exact public CLI JSON stdout is not."
+      ],
+      "minimal_missing_validation": [
+        "One public CLI 2.1.295 refusal JSON-result projection preserving exact explanation source units."
+      ],
+      "source_status": "closed at SDK/Host result and durable-row boundaries",
+      "byte_status": "Native 2.1.295 raw SSE fixture plus exact result/explanation UTF-16 units; public CLI JSON output remains unverified"
+    },
+    {
+      "id": "PROMPT-2",
+      "status": "source_closed_current_regressions",
+      "evidence": [
+        "harness-runtime/crates/llm-runtime/src/execution_context.rs",
+        "harness-runtime/crates/orchestrator/src/conversation/compaction.rs",
+        "harness-runtime/crates/compaction/src/autocompact.rs",
+        "harness-runtime/crates/compaction/src/orchestrator.rs",
+        "harness-runtime/crates/sidequery/src/provider_side_query.rs",
+        "harness-runtime/crates/sidequery/src/forked_agent.rs",
+        "harness-runtime/crates/llm-runtime/src/client.rs",
+        "harness-runtime/crates/llm-runtime/src/service.rs",
+        "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/logs/sdk-a363c5b3/lib-default-actualhost.log",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/unit-libraries/phase.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "limitations": [
+        "Current-matrix.md still says no equivalent Harness operation budget; that source note is stale. The current ApiAttemptsLeft producer/consumer chain and named tests are verified. SDK a363 tests cover cache allowlist/TTL/model families, token limits and aliases; H current tests cover the shared physical attempt budget."
+      ],
+      "minimal_missing_validation": [],
+      "source_status": "closed for ApiAttemptsLeft source gap and mapped cache/model/token/request-policy semantics",
+      "byte_status": "Source/regression coverage; not a raw public CLI request byte claim"
+    },
+    {
+      "id": "EFFORT-1",
+      "status": "source_projection_closed_fixture_value_limited",
+      "evidence": [
+        "harness-runtime/docs/parity/current-alignment/fixtures/per-turn-effort/README.md",
+        "harness-runtime/crates/orchestrator/tests/effort_cold_resume_295_test.rs",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-10/phase.json"
+      ],
+      "limitations": [
+        "r271 cold-resume test preserves historical low and emits current default medium, while Native capture uses resumed high. The level literal difference is a bounded fixture-value limit, not a demonstrated implementation gap.",
+        "Current anthropic_message_controls source/regression covers exact effort levels and first-party/Foundry projection."
+      ],
+      "minimal_missing_validation": [],
+      "source_status": "closed for per-turn level projection and cold-resume historical/current message placement; the current 18-case message-controls target covers explicit effort levels",
+      "byte_status": "Candidate fresh-process test checks exact marker placement in parsed request JSON; not full raw request-byte identity"
+    },
+    {
+      "id": "PER-TURN-CONTROL-295",
+      "status": "current_sdk_route_control_matrix_pass",
+      "evidence": [
+        "llm-client/tests/anthropic_message_controls.rs",
+        "acceptance/final-ledger-r376/sdk-message-controls.log",
+        "harness-runtime/docs/parity/current-alignment/fixtures/per-turn-effort/README.md",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-27/phase.json",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-10/phase.json"
+      ],
+      "limitations": [
+        "The 18-case SDK target closes implementation/control regressions; public raw-wire evidence remains limited to the captured 2.1.295 first-party request and effort-resume fixture."
+      ],
+      "minimal_missing_validation": [],
+      "source_status": "closed for current SDK first-party/Foundry and beta/effort controls; existing a363 anthropic_message_controls target passed 18/18",
+      "byte_status": "Current SDK source regression pass plus separate raw first-party Native 2.1.295 beta-header check; not raw byte capture of every route/model pair"
+    }
+  ]
+}

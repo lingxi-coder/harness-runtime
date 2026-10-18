@@ -1,0 +1,12 @@
+   Compiling android-aar v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/android/ffi)
+   Compiling tool-ios-use v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/tools/ios-use)
+    Finished `test` profile [unoptimized] target(s) in 4.66s
+   Doc-tests android_aar
+   Doc-tests audio_provider
+   Doc-tests bridge_server
+   Doc-tests cli
+   Doc-tests config_requirements
+   Doc-tests ios_framework
+   Doc-tests tool_ios_use
+   Doc-tests tui
+   Doc-tests tui_core

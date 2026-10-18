@@ -1,0 +1,397 @@
+{
+  "schema": "final-ledger-r376-hook-mod-runtime-audit-v3",
+  "native_version": "2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "candidate": {
+    "llm_client_sha": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "harness_sha": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+    "product_sha": "17593eaa66dc762d5c9c581ba348398c914bdbcd"
+  },
+  "candidate_state": {
+    "commit_status": "Current final Harness candidate is 44f2eef5baf8ae16254934dbca451cbfd528d955. Product candidate 17593eaa66dc762d5c9c581ba348398c914bdbcd passed its production gates and five platform checks, then passed the final signed macOS package, static audit, startup smoke, packaged Host flow, and scoped actual-visible CUA input/append/Submit flow. The tested app process 52288 exited and provider credentials were cleared. Package and CUA evidence are scoped to this recorded macOS form/Submit flow; no notarization, physical-device GUI, optional sidebar drag, or all-contract Native parity claim is made. SDK pin a363c5b3a237d53eea12c3abfb3b98648ef15d3e is unchanged.",
+    "hook_gate_scope": "The r8 hooks-comma-receipt.json records the focused regression 1/1 and all-features Hooks library result 852 passed, 0 failed, 1 ignored, executed on H b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b. Its four source hashes exactly match current H 44f2eef5baf8ae16254934dbca451cbfd528d955; r8 is reused as source-bound evidence, not represented as a new Hooks execution on H44. No Product repin or blanket cross-contract pass is implied.",
+    "native_probe_exclusion": "acceptance/final-ledger-r376/native-ltr-alias-probe-approved-endpoint-run/receipt.json reports native_process_count=1 but status=capture_invalid (positive_edit_deny_observed=false). It is an initialize-alias probe, not a Mods probe, and does not count as Native Mods capture evidence.",
+    "h44_r10_gate_scope": {
+      "candidate_harness_sha": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+      "execution_head_recorded": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+      "execution_source_snapshot": "r10 ran with a dirty crates/runtime/src/headless/run.rs; source.patch and source-current.patch are identical and the source-followup proof confirms that snapshot is the final H44 source delta from 4d6d0d6.",
+      "source_followup_proof": {
+        "path": "acceptance/final-ledger-r376/r8-r10-source-followup-proof.json",
+        "sha256": "21cd1e2da2464ee8c492a00f63ba38ce4f900ed96f361ef6a5b951cac9791a46",
+        "status": "verified_source_delta",
+        "changed_paths": [
+          "crates/runtime/src/headless/run.rs"
+        ]
+      },
+      "runtime_lib": {
+        "status": "passed_on_final_source_snapshot",
+        "result": "1468 passed, 0 failed, 0 ignored",
+        "log": "acceptance/final-ledger-r376/harness-repair-gates-r10/runtime-lib.log",
+        "log_sha256": "c632575a78d8bd17e13f52a2b2703106d990f2a1ea0315ff74dbf4c15c03a24a",
+        "exit_code": 0,
+        "exit_file_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+      },
+      "fmt": {
+        "status": "passed",
+        "exit_code": 0,
+        "log": "acceptance/final-ledger-r376/harness-repair-gates-r10/fmt.log",
+        "exit_file_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+      },
+      "changed_clippy": {
+        "status": "passed",
+        "exit_code": 0,
+        "log": "acceptance/final-ledger-r376/harness-repair-gates-r10/changed-clippy.log",
+        "log_sha256": "6a6ac311fc8ba74d7c2ebba02937f97dda309ae395d57223022104b6b1bfa35d",
+        "exit_file_sha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+      },
+      "execution_boundary": "The r10 execution HEAD was b386 with the final source delta present in the working tree; this is not described as a clean-checkout rerun at H44.",
+      "recorded_candidate_head_file": {
+        "path": "acceptance/final-ledger-r376/harness-repair-gates-r10/candidate-head.txt",
+        "contents": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+        "sha256": "bd9f1db83b8b1a19c4ca2d8e4814c93d7047a89b3c629277e67c18540330c17b"
+      },
+      "source_patch_sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03",
+      "source_current_patch_sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03"
+    },
+    "product_gate_status": {
+      "candidate_product_sha": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "status": "production_gates_passed",
+      "runner": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045",
+      "run_receipt": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/run.json",
+      "run_receipt_sha256": "6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e",
+      "run_status": "complete",
+      "actual_test_summary": {
+        "passed": 2740,
+        "failed": 0,
+        "ignored": 4
+      },
+      "test_target_coverage": {
+        "executable_targets": 40,
+        "doctest_targets": 9
+      },
+      "passed_gates": [
+        "source-validator",
+        "fmt",
+        "check",
+        "clippy",
+        "skill-cold-resume",
+        "full-runner",
+        "cli-8mib"
+      ],
+      "gate_log": "/private/tmp/repaired-h-product-r376-17593eaa66-20261018T083723Z-63256/product.log",
+      "gate_log_sha256": "fd8370bcfb57a2d78fca5cd112ed0dae40c2f3e8f0484ff793ba20ca9dd4688d",
+      "all_phases_passed": true,
+      "historical_counts_used_as_acceptance": false,
+      "package_status": "passed",
+      "gui_status": "passed_scoped_actual_visible_cua",
+      "note": "Production-code and five-platform gates passed on Product P17593/H44/SDK a363. The current signed macOS package, static audit, startup, Host smoke, and actual visible CUA input/append/Submit flow also passed. The package receipt does not claim notarization, physical-device acceptance, optional sidebar drag, or all 42 Native parity contracts.",
+      "package_receipt": "acceptance/final-ledger-r376/receipts/mac-package-final-17593.json",
+      "package_receipt_sha256": "6e4f1ce2eba4d069f9219603b6043b64ce0cb8f2e7b4e71645710e2b37fbb337",
+      "package_zip_sha256": "64c8a4d7a441f53c5dc9990d13f3ea4930f1ead72c2df52759565102f73481de",
+      "app_asar_sha256": "21462a3c01035cd13bb3785dcfcc11ad474ea6f22b6fde0357db352fa23ecb06",
+      "actual_cua": {
+        "observation_method": "actual-visible-CUA",
+        "scope": "recorded signed packaged Host Client form and Submit flow",
+        "app_pid": 52288,
+        "app_exited": true,
+        "provider_credential_cleanup": "cleared",
+        "input_then_append": "packaged-host-cua-valuexy",
+        "submit_result": "Submit callback accepted: packaged-host-cua-valuexy",
+        "screenshot_sha256": "28be6f881ae2844132ea366dad0174632ec2cffb7feaabe4c5c870dcffde7b0c"
+      },
+      "package_limits": [
+        "development signing only; no notarization or stapling",
+        "no physical-device GUI acceptance",
+        "no optional sidebar drag",
+        "receipt does not certify all 42 Native parity contracts"
+      ]
+    },
+    "platform_gate_status": {
+      "candidate_pins": {
+        "product": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+        "harness": "44f2eef5baf8ae16254934dbca451cbfd528d955",
+        "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+        "mobile": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+      },
+      "status": "passed",
+      "passed": 5,
+      "failed": 0,
+      "runner_directory": "/private/tmp/repaired-h-product-r376-17593eaa66-20261018T083723Z-63256/platform",
+      "identities_file": "/private/tmp/repaired-h-product-r376-17593eaa66-20261018T083723Z-63256/platform/identities.txt",
+      "identities_sha256": "67fa02c564b51f8bb97fe865aea6b403fc21f231f04bc433ca5af9753cee2a20",
+      "combined_log": "/private/tmp/repaired-h-product-r376-17593eaa66-20261018T083723Z-63256/platform.log",
+      "combined_log_sha256": "54d5bdbde1aeb0012379cb6278e801116cc4368dea7f13e350be570974738c35",
+      "checks": [
+        {
+          "name": "android-arm64-default",
+          "exit_code": 0,
+          "log_sha256": "63ed073b13b049eacb09d99c378397575478deae9cde37e2e18a3e0e8cb5e451"
+        },
+        {
+          "name": "android-x86_64-default",
+          "exit_code": 0,
+          "log_sha256": "ab4d6c87243ddba028bd6372479fc8eeaec9ab3b16035136cf7e43b4aeb00203"
+        },
+        {
+          "name": "android-arm64-computer-use",
+          "exit_code": 0,
+          "log_sha256": "41b76d53724671b1abdb24c54ed8ffcbb92a1772c6fabe9f73a9007d8383d7e0"
+        },
+        {
+          "name": "android-x86_64-computer-use",
+          "exit_code": 0,
+          "log_sha256": "d77b8d39bc4bab2db4a77801d1933d7fe992666a31a8590d39b5b0eb6b8b44be"
+        },
+        {
+          "name": "ios-simulator-default",
+          "exit_code": 0,
+          "log_sha256": "ce8c5e99e0af7d31bf0534af5c33734c2a64f5886f70c6f08325a09169189764"
+        }
+      ],
+      "scope_limit": "These are five Rust target cargo check results, not package linking or GUI/device acceptance."
+    },
+    "package_gui_status": {
+      "status": "passed_scoped",
+      "receipt": "acceptance/final-ledger-r376/receipts/mac-package-final-17593.json",
+      "receipt_sha256": "6e4f1ce2eba4d069f9219603b6043b64ce0cb8f2e7b4e71645710e2b37fbb337",
+      "archive_index": "acceptance/final-ledger-r376/mac-package-evidence-17593/index.json",
+      "archive_index_sha256": "16d0352055eb03f71cc81317d1941f4caa14425c71d5d312a21876eeae549212",
+      "signed_zip_sha256": "64c8a4d7a441f53c5dc9990d13f3ea4930f1ead72c2df52759565102f73481de",
+      "checks": {
+        "static": "passed",
+        "startup_smoke": "passed",
+        "independent_audit": "passed",
+        "packaged_host": "passed",
+        "actual_visible_cua": "passed"
+      },
+      "actual_cua_sequence": [
+        "type packaged-host-cua-value",
+        "append xy",
+        "click Submit"
+      ],
+      "visible_submit_result": "Submit callback accepted: packaged-host-cua-valuexy",
+      "app_pid": 52288,
+      "app_process": "exited",
+      "provider_credential_cleanup": "cleared",
+      "scope": "Only the recorded packaged Host Client form/Submit flow; not a complete Native public Mods lifecycle comparison."
+    },
+    "finalizer_status": {
+      "status": "passed",
+      "receipt": "acceptance/final-ledger-r376/repairs-final-17593-v2.json",
+      "receipt_sha256": "86f1d03e74063b3f1db4ec47416e924562bd9c08cbefdf9848fd347631e1465f",
+      "selected_phase_count": 20,
+      "product_runner_phase_count": 8,
+      "package_receipt_sha256": "6e4f1ce2eba4d069f9219603b6043b64ce0cb8f2e7b4e71645710e2b37fbb337",
+      "harness_final_source_patch_matches_r10": true
+    }
+  },
+  "evidence_semantics": {
+    "static_native_source": "Pinned extraction/review from Native source; not execution.",
+    "native_source_oracle_execution": "Extracted Native code executed under Bun; not a Native process or public CLI capture.",
+    "candidate_gate": "Candidate unit, worker, integration, or package checks.",
+    "native_public_capture": "Output from the pinned Native public CLI with raw artifacts retained.",
+    "policy": "Implementation/source closure and raw Native public-capture coverage are reported separately. A historical Native public capture is not relabeled across versions. Extracted-source execution is not Native process execution. Missing public capture alone is an evidence boundary, not a known source defect.",
+    "candidate_closed_evidence_limited": "Candidate source behavior and scoped candidate gates are closed; same-version Native public capture is absent. This status does not mean implementation remains incomplete."
+  },
+  "contracts": [
+    {
+      "id": "HOOK-1",
+      "status": "candidate_closed_evidence_limited",
+      "source_status": "Native 2.1.295 J9 includes DirectoryAdded, PreModelSwitch, and PostModelSwitch in comma mode; candidate comma_mode_for had omitted them and H b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b added all three. The r8 focused and full Hooks gates were executed on b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b; their matcher/registry source hashes exactly match current final H 44f2eef5baf8ae16254934dbca451cbfd528d955, so the closed source and gate evidence are reused for H44 without claiming a new Hooks execution.",
+      "verification_classes": [
+        "static_native_source_2.1.295_matcher_and_event_query",
+        "candidate_gate_current_ignored_matcher_corpus_1_of_1_before_event_set_fix",
+        "candidate_source_fix_committed_harness_b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+        "candidate_gate_native_295_comma_regression_r8_1_of_1_commit_bound",
+        "candidate_gate_hooks_all_features_lib_r8_852_passed_0_failed_1_ignored_executed_on_b386_source_hash_reused_at_H44",
+        "candidate_source_hash_reuse_b386_to_H44_no_new_hooks_execution"
+      ],
+      "raw_evidence_status": "Public Native matcher fixture is 2.1.293 and covers eight Native-comparable cases. No 2.1.295 public matcher capture is recorded. The separate initialize-alias Native process run has status=capture_invalid and is not a Mods probe; it does not change this evidence limit.",
+      "evidence": [
+        "acceptance/source-alignment-295-r30/mods-api-source/src_194447854.js: Native chunk offset 194447854, SHA-256 ae64b2c8c87be0e990738da478adbbe5cd6a8201cef7953d7684cf59bd780120; J9 includes DirectoryAdded, PreModelSwitch, and PostModelSwitch; tan at 197396236 implements the event-specific simple-list grammar and Q9 at 197398966 has the JavaScript RegExp fallback.",
+        "harness-runtime/crates/hooks/src/matcher.rs: committed candidate SHA-256 b1e8942326d96eb62f29db71bc02ab814655ae39973d032a9e152fba88cc1de2; comma_mode_for includes all three J9 members; is_simple_pattern_units and matches_pattern_source_with/js_regexp_test retain the list/RegExp branches and JavaScript units.",
+        "harness-runtime/crates/hooks/src/registry.rs: committed candidate SHA-256 39bc30f6b99983429aea6082483e5e470131f036eed37eb1cab79b8c61db1b5e; match_event_matcher_tests::native_295_comma_mode_event_set_matches_directory_added_and_model_switches covers positive and negative comma-list queries for all three events plus positive/negative non-simple RegExp cases on DirectoryAdded.",
+        "acceptance/final-ledger-r376/hooks-comma-receipt.json (schema r376-hook-comma-gate-v1): candidate b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b; focused_new_regression=1; passed=852, failed=0, ignored=1. It binds matcher.rs b1e8942326d96eb62f29db71bc02ab814655ae39973d032a9e152fba88cc1de2, registry.rs 39bc30f6b99983429aea6082483e5e470131f036eed37eb1cab79b8c61db1b5e, core/src/host/mod.rs 26be137b5ca90dd2d47674366318e347d03d345c2926b701d0f750e82a3f49b4, and core/src/host/permission_gate.rs b0540cb766becf8085107029b564e68bcc6e58c7b2d36c8d5042fb9b452cad65.",
+        "acceptance/final-ledger-r376/harness-repair-gates-r8/hooks-focused.log: SHA-256 511659dfaf997fab9c220272f361771434b6d15fc03b0ba1a2be2520c5844862; focused new regression 1 passed, 0 failed. acceptance/final-ledger-r376/harness-repair-gates-r8/hooks-lib.log: SHA-256 c81d10313ced358ad0bbd3d60814da563fea703df4622913956d7afa1dd594af; all-features Hooks library 852 passed, 0 failed, 1 ignored.",
+        "acceptance/final-ledger-r376/hook-corpus.log: root ignored-corpus test passed 1/1 before the source fix; its 12 cases did not cover the three omitted event-set members.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/hook-regexp/native-receipt.json: pinned public Native CLI fixture is 2.1.293; its eight comparable event inputs use source=startup.",
+        "Current H 44f2eef5baf8ae16254934dbca451cbfd528d955 retains the exact r8 receipt hashes for matcher.rs b1e8942326d96eb62f29db71bc02ab814655ae39973d032a9e152fba88cc1de2 and registry.rs 39bc30f6b99983429aea6082483e5e470131f036eed37eb1cab79b8c61db1b5e. r8 ran on b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b; the H44 source proof shows only crates/runtime/src/headless/run.rs changed since that pin, so these gates are reused by exact source identity, not newly executed at H44."
+      ],
+      "limitations": [
+        "Only eight corpus rows have a Native public comparison; the four source_projection_only rows are candidate assertions only.",
+        "The 2.1.293 public fixture is historical evidence and is not represented as a 2.1.295 public result.",
+        "No same-version 2.1.295 public matcher output is available; the retained 2.1.293 receipt remains historical evidence.",
+        "The separate initialize-alias probe receipt is capture_invalid and is not a Mods probe or Mods capture.",
+        "This classic HookRegistry matcher is distinct from the Mods on() event-pattern grammar and the URL matcher functions yu/PT/Ao in src_188693222.js.",
+        "The focused and full Hooks suites were executed on H b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b. H 44f2eef5baf8ae16254934dbca451cbfd528d955 reuses them because the audited Hooks sources are byte-identical; no clean-checkout Hooks rerun at H44 is claimed. Product P17593 production/platform/package gates passed for the recorded scope; this does not provide a same-version Native matcher output."
+      ],
+      "source_unresolved": [],
+      "minimal_missing_validation": []
+    },
+    {
+      "id": "HOOK-2",
+      "status": "partial",
+      "source_status": "Candidate production path and unchanged-Core tests are source-closed for the audited normalization, Due validation, URL semantics, and display-sanitizer contract. The r271 Core results remain reusable because the audited Core paths are unchanged in the final H44 source snapshot. No same-version Native public settings result is available.",
+      "verification_classes": [
+        "static_native_source_2.1.295",
+        "native_source_oracle_execution_49_cases_under_bun_1.4.3",
+        "candidate_core_unit_library_gate_r271_reused_core_unchanged_through_4d6d0d6",
+        "candidate_hooks_gate_r375_851_pass_1_ignored_historical",
+        "candidate_core_gate_r271_reused_audited_sources_unchanged_at_H44"
+      ],
+      "raw_evidence_status": "No Native public settings CLI capture. Extracted Native JavaScript executed under Bun is source-oracle evidence, not a Native process result.",
+      "evidence": [
+        "harness-runtime/crates/core/src/settings/mod.rs registers native_policy_hook_settings; native_policy_static_defaults.rs invokes normalize_native_hook_settings and validate_native_hooks_due.",
+        "Production policy collection supplies exact URL/display inputs to NativePolicyJsSemanticsRegistry. The pinned URL and display semantics are sourced from src_186231195.js, SHA-256 125f57566b99b67ce958d77cd787163124654cbbb3bdd6f3a92dfd38955a2317.",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/unit-libraries/stdout.jsonl: seven native_policy_hook_settings tests pass at lines 4351-4357, settings merger tests at 4260-4287, and eight native_extra_known_marketplaces Due tests at 4298-4305. Core source is unchanged through Harness 4d6d0d6.",
+        "The historical r375 Hooks receipt records 851 passed, 0 failed, 1 ignored; it is distinct from the Core unit-library run and does not represent a new H44 gate.",
+        "acceptance/source-alignment-295-r31/static-defaults-next-batch/hook-settings-oracle/receipt.json records the 49-case extracted-source Bun oracle and labels the Rust module acceptance-only.",
+        "H44 r10 source-followup proof records only crates/runtime/src/headless/run.rs as the final delta; the audited Core settings sources remain unchanged, so the previously passing r271 unit-library selectors are reused rather than claimed as a new H44 execution."
+      ],
+      "limitations": [
+        "The production/candidate source closure does not supply a same-version Native public settings result.",
+        "The source oracle is not Native CLI output or a current Cargo gate."
+      ],
+      "source_unresolved": [],
+      "minimal_missing_validation": []
+    },
+    {
+      "id": "HOOK-RELEASE-1",
+      "status": "complete",
+      "source_status": "Closed for the narrow historical 2.1.293 versus 2.1.294 Stop type:prompt request comparison only.",
+      "verification_classes": [
+        "native_public_capture_2.1.293",
+        "native_public_capture_2.1.294",
+        "native_public_capture_2.1.295_retained",
+        "raw_request_byte_comparison"
+      ],
+      "raw_evidence_status": "Three version-pinned receipts and the original raw request bytes are retained.",
+      "evidence": [
+        "harness-runtime/docs/parity/current-alignment/fixtures/stop-prompt-hook/README.md documents the isolated runner and immutable request artifacts.",
+        "The 2.1.293 and 2.1.294 receipts each record one public Stop type:prompt request and exit code 0.",
+        "comparison-2.1.293-vs-2.1.294-vs-2.1.295.json compares system and messages bytes without normalization."
+      ],
+      "limitations": [
+        "Historical release comparison only; not candidate parity or model-judgment quality.",
+        "SubagentStop is outside scope."
+      ],
+      "source_unresolved": [],
+      "minimal_missing_validation": []
+    },
+    {
+      "id": "MOD-1",
+      "status": "partial",
+      "source_status": "Native 2.1.295 on() grammar/order and runtime projection are source-reviewed. The candidate direct-return host/transcript path is closed by the reused r271 integration result; its relevant Agent/transcript source remains unchanged in the final H 44f2eef5baf8ae16254934dbca451cbfd528d955 snapshot.",
+      "verification_classes": [
+        "static_native_source_2.1.295_registration",
+        "native_public_capture_2.1.293_session_append",
+        "candidate_hooks_gate_r375",
+        "candidate_signed_package_middleware_start_reload_restart",
+        "candidate_gate_r271_integration_39_reused_agent_source_unchanged_at_H44"
+      ],
+      "raw_evidence_status": "Native public session.append cases are 2.1.293. No 2.1.295 public middleware dispatch result or explicit-unload capture is present.",
+      "evidence": [
+        "acceptance/source-alignment-295-r30/mods-product.md pins on() grammar, supported events, duplicate rules, first-registration order, callback linkage, and plugin.register projection.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/mod-middleware/native-receipt.json retains four 2.1.293 session.append cases: rewrite, direct return, cancellation, and throw.",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-39/stdout.jsonl:713 reports native_session_append_middleware_contract_reaches_host_and_transcript ... ok; the relevant Agent/transcript source remains unchanged in the final H44 source snapshot; this is reused evidence, not a new integration execution at H44.",
+        "Current r375 Hooks tests cover wrapper/order, rewrite/direct-answer/failure/cancellation and unload by plugin; the signed package receipt covers startup, reload disable/re-enable, and restart."
+      ],
+      "limitations": [
+        "The old worker intermediate direct-return difference is not the public contract; the reused production test closes the current host/transcript result path.",
+        "Native process exit does not prove a supported per-handler/module unload event; the on() return is not an unsubscribe handle."
+      ],
+      "source_unresolved": [],
+      "minimal_missing_validation": []
+    },
+    {
+      "id": "MOD-2",
+      "status": "partial",
+      "source_status": "Source-closed for the Native 2.1.295 tool, command, prompt, list/check/call, dynamic-MCP registration, tool.describe, and deferred provider-catalog chain. Candidate isDeferred value/presence and provider-wire marker are source/test-bound; the r271 tests are reused on H44 because the audited paths remain unchanged, not claimed as a new H44 test run.",
+      "verification_classes": [
+        "static_native_source_2.1.295_api_routes_and_catalog",
+        "candidate_hooks_api_tests_r375",
+        "candidate_packaged_read_tool_roundtrip",
+        "candidate_gate_r271_mod_register_and_deferred_wire_tests_reused_sources_unchanged_at_H44"
+      ],
+      "raw_evidence_status": "The retained Native public tool.register capture is 2.1.293, including its 25-tool catalog slice. No 2.1.295 public list/check/call, command, prompt, or catalog result capture is present.",
+      "evidence": [
+        "acceptance/source-alignment-295-r30/mods-api-source/src_189676409.js: chunk offset 189676409, 243580 bytes, SHA-256 52ad1c53312d15fbf90ddb548c9692e6598ead6e35398c38be9ac9d0c6806555. CT (binary offset 189895956), Nw (189883144), and sT (189889728) expose exact $.tool, $.command, and $.prompt method argument/validation routes.",
+        "acceptance/source-alignment-295-r30/mods-api-source/src_194447854.js: SHA-256 ae64b2c8c87be0e990738da478adbbe5cd6a8201cef7953d7684cf59bd780120. Wj/AHo/PHo/MHo implement tool call/check/list/register; TCo/RCo/xCo command list/register/run; Pvo/Pme/o7o/sXt prompt submit/read/suggest/compose. tZt/ZJt at binary offset 196877559 maps isDeferred presence to anthropic/alwaysLoad metadata; V2n at 194899401 and provider builder vL carry the resolved deferred/listed state through tool.describe to provider defer_loading.",
+        "harness-runtime/crates/orchestrator/src/turn_loop/tool_dispatch.rs::mod_tool_register_spec preserves optional isDeferred; ModRegisteredTool::should_defer/always_load maps its three states. core::host::SourceToolWireDefinition carries defer_loading to the provider wire.",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/unit-libraries/stdout.jsonl: lines 12212-12214 pass the isDeferred presence, invalid-type, and source-schema tests; line 12407 passes mod_tool_describe_rewrites_wire_and_deferral_until_invalidated. These source paths remain unchanged in final H44; the r271 selectors are reused by source identity, not represented as a new H44 run.",
+        "acceptance/source-alignment-295-r30/mcp-tools.md documents the 2.1.295 typed output-validation branch for $.tool.call; current Hooks receipt covers API cases and the packaged host receipt has a Read roundtrip."
+      ],
+      "limitations": [
+        "The historical 2.1.293 public capture is not a 2.1.295 public output/catalog result.",
+        "Candidate API tests and package Read roundtrip are candidate evidence, not Native public output."
+      ],
+      "source_unresolved": [],
+      "minimal_missing_validation": []
+    },
+    {
+      "id": "MOD-3",
+      "status": "partial",
+      "source_status": "Native 2.1.295 exportTree serialization is source-closed against the retained worker snapshot by the executed 15-case raw-output/error differential. Product P 17593eaa66dc762d5c9c581ba348398c914bdbcd production gates, five-platform checks, final signed macOS package/static/startup/Host gates, and the recorded actual-visible CUA form/Submit flow all passed. That CUA acceptance is limited to the archived packaged form; Native public lifecycle and visual parity evidence remain separate limits.",
+      "verification_classes": [
+        "native_source_oracle_execution_15_of_15_retained_worker_snapshot",
+        "historical_candidate_node_worker_suite_r375_21_of_21",
+        "candidate_product_p17593_production_gates_2740_passed_0_failed_4_ignored",
+        "candidate_product_p17593_platform_checks_5_of_5_passed",
+        "historical_candidate_signed_package_host_ui_api_r375",
+        "historical_candidate_actual_cua_gui_r375",
+        "candidate_p17593_signed_package_static_startup_host_gate_passed",
+        "candidate_p17593_actual_visible_cua_input_append_submit_passed_scoped"
+      ],
+      "raw_evidence_status": "No Native public ModUI lifecycle capture exists. Current P17593 packaged Host UI form/Submit flow passed actual-visible CUA; this is candidate package evidence, not a Native public API lifecycle capture. Visual comparison is excluded.",
+      "evidence": [
+        "acceptance/final-ledger-r376/source-oracle-receipt.json records 15/15, worker SHA-256 2ee0d2b88a6c2aa565a929cf23d058dc8283b9d308c30b6b7e1f9ec132c12c1f, extracted-source log SHA-256 0761972925540b952f2ea1b56bf794e05629b9cd40c31fc04e5631a596384f03, results SHA-256 3898ab57a4de299de8bfeb7bbb2657657913545c04590314b5d6a96e565b3f02, and native_cli_launches=0.",
+        "Native source is src_192995347.js, artifact offset 192995347, SHA-256 cfaaecaee8d26184f098f50f71d96e032ee78508ff5e67f8e8e7a979344223a3; source-oracle-receipt.json records zero Native CLI launches.",
+        "acceptance/mod-ui-post-ack-r375-20261017/node-worker.log records the historical r375 21/21 worker tests; mac-final r375 includes signed-package host UI/API and actual CUA typing plus Submit.",
+        "mod_ui_client_worker.test.mjs verifies a post before callback Promise yield is correlated and a continuation post is an independent update; runHeldCore intentionally does not await callback Promises.",
+        "Current P17593 production runner `/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/run.json` is complete and source-pinned to H44/SDK a363: 2740 passed, 0 failed, 4 ignored across 40 executable test targets and 9 doctest targets; its `product.log` records source-validator, fmt, check, clippy, skill-cold-resume, full-runner, and cli-8mib exits all 0. Run receipt SHA-256 is 6729deeabce19dd5736f157529625103510d85fd48c7544a8c11c9c04202858e.",
+        "The five P17593/H44 platform checks passed (Android arm64/x86_64 default and computer-use, iOS simulator default) under `/private/tmp/repaired-h-product-r376-17593eaa66-20261018T083723Z-63256/platform`; platform identities and individual log hashes are recorded in candidate_state.platform_gate_status.",
+        "acceptance/final-ledger-r376/receipts/mac-package-final-17593.json (SHA-256 6e4f1ce2eba4d069f9219603b6043b64ce0cb8f2e7b4e71645710e2b37fbb337) records current P17593/H44/SDK a363 signed macOS package with static audit, startup smoke, independent audit, packaged Host driver, and actual CUA all passed. Signed ZIP SHA-256 is 64c8a4d7a441f53c5dc9990d13f3ea4930f1ead72c2df52759565102f73481de; app.asar SHA-256 is 21462a3c01035cd13bb3785dcfcc11ad474ea6f22b6fde0357db352fa23ecb06.",
+        "The archived actual-visible CUA sequence entered `packaged-host-cua-value`, appended `xy`, then clicked Submit; final callback text was `Submit callback accepted: packaged-host-cua-valuexy`. App PID 52288 exited and provider credential cleanup was cleared. Screenshot SHA-256 is 28be6f881ae2844132ea366dad0174632ec2cffb7feaabe4c5c870dcffde7b0c; `mac-package-evidence-17593/index.json` maps the archived evidence hashes.",
+        "Finalizer `acceptance/final-ledger-r376/repairs-final-17593-v2.json` (SHA-256 86f1d03e74063b3f1db4ec47416e924562bd9c08cbefdf9848fd347631e1465f) passed all 20 selected phases and records the 8-phase Product runner; final H44 source patch matches the r10 source snapshot."
+      ],
+      "limitations": [
+        "The source-oracle and Node worker evidence are retained historical results, not validation of the current Product candidate 17593eaa66dc762d5c9c581ba348398c914bdbcd.",
+        "Source-oracle execution is not a Native process or public UI capture.",
+        "Native public subscription/update/dispose/restart remains uncaptured; this is an evidence limit.",
+        "Visual layout comparison is explicitly outside this contract.",
+        "The current CUA is limited to the archived packaged Host Client form and Submit flow; it does not establish physical-device GUI acceptance, optional sidebar drag, visual Native parity, or Native public subscription/update/dispose/restart semantics.",
+        "Development signing passed; notarization and stapling are not claimed. The package receipt explicitly does not certify all 42 Native parity contracts."
+      ],
+      "source_unresolved": [],
+      "minimal_missing_validation": []
+    },
+    {
+      "id": "RUNTIME-1",
+      "status": "partial",
+      "source_status": "Native 2.1.295 public Mods API wrappers and host RPC/stream bindings are source-mapped for env, filesystem, process.run/spawn, stdio chunk validation, and stream cancellation. Candidate Bun subprocess topology is a product-owned implementation and is not asserted to be Native process-isomorphic.",
+      "verification_classes": [
+        "static_native_source_2.1.295_host_api_and_stream_binding",
+        "candidate_focused_bun_gate_4_of_4",
+        "candidate_signed_package_bun_identity",
+        "candidate_packaged_startup_reload_restart",
+        "candidate_hooks_runtime_tests_r375_historical",
+        "candidate_harness_runtime_lib_r10_1468_passed_on_final_H44_source_snapshot"
+      ],
+      "raw_evidence_status": "No Native public worker lifecycle capture. Source wrappers describe the API boundary; they are not a Native process/OS effects run.",
+      "evidence": [
+        "Native src_189676409.js at chunk offset 189676409, SHA-256 52ad1c53312d15fbf90ddb548c9692e6598ead6e35398c38be9ac9d0c6806555: jw env.get/set, Fw fs.read/write/list/exists/stat/ancestors, Yw process.run/spawn, zr/Fi stdout/stderr chunk validation.",
+        "Native src_189920606.js at offset 189920606, SHA-256 51b6fc78c996ca2cd60cfd83b0aa6f1030a41205e512b261b4e28c99c0ab3529: hostOps/no and hostStreamOps/io pass cancellation signals; iterator release aborts the host stream.",
+        "Candidate Bun 1.4.3 revision c6da4a4d3010e5553438c60f6bd76d981976867c; focused Electron mod-bun gate passed 4/4, H runtime tests and signed package identity/startup/reload/restart evidence are retained.",
+        "H r10 runtime-lib.log records 1468 passed, 0 failed, 0 ignored (SHA-256 c632575a78d8bd17e13f52a2b2703106d990f2a1ea0315ff74dbf4c15c03a24a); fmt and changed-clippy exits are 0. The recorded execution HEAD was b386 with dirty crates/runtime/src/headless/run.rs, and r8-r10-source-followup-proof.json verifies the captured source snapshot equals the final H44 delta. This is not a clean-checkout rerun and does not substitute for Native public worker lifecycle evidence or the historical Node worker suite."
+      ],
+      "limitations": [
+        "Native source maps API requests and chunk/cancellation shape, not the underlying host OS implementation effects.",
+        "The packaged candidate process model does not have to reproduce Native host RPC topology; no architecture-equivalence claim is made.",
+        "The absence of a Native lifecycle capture limits raw evidence only; no candidate/source discrepancy was found in the mapped interface.",
+        "The r10 Harness runtime library result is source-snapshot-bound to H44 but is not a new execution of the ModUI Node worker tests or a Product/package gate."
+      ],
+      "source_unresolved": [],
+      "minimal_missing_validation": []
+    }
+  ]
+}

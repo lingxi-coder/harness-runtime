@@ -1,0 +1,21 @@
+{
+  "schema": "sdk-message-controls-r376-v1",
+  "status": "passed",
+  "sdk": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "-p",
+    "lingxi-llm-client",
+    "--test",
+    "anthropic_message_controls"
+  ],
+  "passed": 18,
+  "failed": 0,
+  "ignored": 0,
+  "native_launches": 0,
+  "evidence_class": "production codec/client regression; not Native public CLI capture",
+  "log_sha256": "bb3867b012d93e77479d23fb974cdf736798a84ccdef39169ba8c9a84956adbe"
+}

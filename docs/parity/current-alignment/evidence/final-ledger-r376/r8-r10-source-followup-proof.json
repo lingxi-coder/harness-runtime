@@ -1,0 +1,97 @@
+{
+  "schema": "r376-r8-final-single-production-file-proof-v1",
+  "status": "verified_source_delta",
+  "gate_status": "not_assessed_by_source_proof",
+  "intermediate_deltas": {
+    "r8_to_r9_changed_paths": [
+      "crates/runtime/src/headless/run.rs"
+    ],
+    "r9_to_final_changed_paths": [
+      "crates/runtime/src/headless/run.rs"
+    ]
+  },
+  "previous_snapshot": {
+    "name": "r8",
+    "base_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+    "candidate_head": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+    "source_patch": "harness-repair-gates-r8/source.patch",
+    "source_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825",
+    "source_current_patch_sha256": "f2aaccf175b1d7adba53455ea8f9b7bda1adc4447aff709b65b67bbbb15f9825"
+  },
+  "intermediate_snapshots": [
+    {
+      "name": "r9",
+      "base_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+      "candidate_head": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+      "source_patch": "harness-repair-gates-r9/source.patch",
+      "source_patch_sha256": "8470e956a493f59b7bbbd932af78b849c612822f3d6da342abd8e89006a2e51b",
+      "source_current_patch_sha256": "8470e956a493f59b7bbbd932af78b849c612822f3d6da342abd8e89006a2e51b"
+    }
+  ],
+  "current_snapshot": {
+    "name": "r10",
+    "base_head": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+    "candidate_head": "b3864c6ca6c16ed682a333ad96f7ad59cd05fb0b",
+    "source_patch": "harness-repair-gates-r10/source.patch",
+    "source_patch_sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03",
+    "source_current_patch_sha256": "aa95365607a0df95face1742afdd947974bce322964dbc4b7df477f11b3a4f03"
+  },
+  "all_other_source_diff_sections_identical": true,
+  "changed_paths": [
+    "crates/runtime/src/headless/run.rs"
+  ],
+  "unchanged_source_section_sha256": {
+    "crates/agent/src/handle.rs": "af7cedcadbdb10a445e4138fca2966201cf8b3b90f37590302809d0b2e37133d",
+    "crates/agent/src/handle/spawn_context.rs": "d2cea5165b48b9e5e474c03491897a3e61c2bbf9dda934447edc48cd360f6adf",
+    "crates/agent/src/handle/tests/tests.rs": "f462e6db5fc664397a7c3cbeef4889d79c7ee31245058937fab9c06752a3719d",
+    "crates/agent/src/tool_resolver.rs": "f7aeb0f9518088f4a0eae514f15ac61c6e7ab48e406b3a5f89d25891e120819a",
+    "crates/core/src/host/mod.rs": "e008ffd1db65ffa868261da2236c1a705adef650a877bf57e885eb7b83d9ffb2",
+    "crates/core/src/host/permission_gate.rs": "a58a1a04b95044ed4fdde77442a3435bea04d42ebaa4dc7f5246b492bc3c0be3",
+    "crates/hooks/src/matcher.rs": "97ed9ad380b87955ce6ccbbe34fa5b5a6777e1407353a621133ae83e4e9e86c5",
+    "crates/hooks/src/registry.rs": "3fe05de2a047664cec46d8e84d05f03bd6eab5f97275f4741d124ac06b0d4588",
+    "crates/orchestrator/src/conversation.rs": "1cc4ba7978469654916d38fcb1f75b06eae88b590107b25c5d81338714935b9e",
+    "crates/orchestrator/src/conversation/drivers/mod.rs": "e864143a97c3aeabfbb9f3b5e5797488da6d52b4dc30d3038c43861c8d6a5edc",
+    "crates/orchestrator/src/conversation/drivers/projected_content.rs": "51caa4d79525cea8f2dede66da590e14e89fe9dd5c042bae03408279372a8bb4",
+    "crates/orchestrator/src/conversation/drivers/streaming.rs": "8b6a6b8ca06f342246470960d07831678aeed169dfd7db471cf1352e19008287",
+    "crates/orchestrator/src/conversation/model.rs": "b2b070bff2dd0131d3cc826fae11afa7743b00f22353caaf2d042714b45132d3",
+    "crates/orchestrator/src/conversation/model_reminders.rs": "2760ff721e93468851d0b974bcceb34c67a32e72f3bf2c8aec2fa41e71ebaf3c",
+    "crates/orchestrator/src/conversation/reminders.rs": "5df8f2b60add653de748aa1dc35d5f01c7af3d797d94de4fe5d6ce9f6d66fe9e",
+    "crates/orchestrator/src/conversation/tests/turn_admission_cancel_tests.rs": "898eb96e3b2fa8dc9c7f9c8a41ea5722c7edbf9e989891fe0d1309f40ac85069",
+    "crates/orchestrator/src/conversation/tooling.rs": "84b54fef5a2c71cab63c3001daf4a5a35801d13a9fb708fb920f3ca5b22527a0",
+    "crates/orchestrator/src/conversation/transcript.rs": "caf08757d4913232f59dcd876d54939e281f5edee6f13d4e599f4705e66229c7",
+    "crates/orchestrator/src/conversation/wiring.rs": "83cdb00dc6b00e9ede93d5444d61043bf8c9ac1d44932a2cfb4f2643230ad994",
+    "crates/orchestrator/src/streaming_executor_test.rs": "f1a70d5f7e76d6cf13a9d96a874059d2e405b8442d1cfc5352d59f85007274b5",
+    "crates/orchestrator/src/turn_loop_test.rs": "d8694db0e87ad40505013125665f5ffc95e2ae2060b7138fa26a72be7aa2bd27",
+    "crates/orchestrator/tests/current_alignment_cancel.rs": "5b3b667c0aa1d311a1f8a95a666ce6484b38b193d17e2ab8faf47da939f45316",
+    "crates/orchestrator/tests/queued_prompt_batch_test.rs": "c5e00663323f41f9c3ac92b9769f19e6fdadd36a62ab43047a7ef9214f686318",
+    "crates/permission/src/lib.rs": "cffe884e83c9c917b0b942f1783ea91d89a309abe1016eb09cb5ec7ea1194a8b",
+    "crates/permission/src/policy.rs": "9552f8e53edc76970d0ad74336c577b3d1665b4081d4403e62072bca297c03eb",
+    "crates/permission/src/policy_gate.rs": "f409fd5a7e3388b6ae4e7c68a4c44bf89ee1a5cba2bb860ccb0ba3726e59dab1",
+    "crates/permission/src/policy_gate_test.rs": "c32075741a4fe596cc1e098fa684f2677fae148ce9c4a775c887e810e4eb8ef8",
+    "crates/permission/src/policy_test.rs": "5c6795b533a42b9ed205e976a3258ce89b270d75a39e39ed52487524d96b0a51",
+    "crates/runtime/src/desktop/assembly.rs": "0d70648d3a506421466d35767c4c3bbe5dac91c4f68647c4ef1fb63fd1337a6f",
+    "crates/runtime/src/desktop/configuration.rs": "8681b822c6ecf39e79da69df42dbc963a14757aec91b54acb7568937373623f7",
+    "crates/runtime/src/desktop/mod.rs": "3fa373b791aab9d28c5ae568482abdb94a249cbfbcd73e2e190dc6d5cfe0d880",
+    "crates/runtime/src/desktop/tests/tests.rs": "2a9ce879910c649cc0e82ecee56972328426967094ae1ef73443b1400b9c6965",
+    "crates/runtime/src/headless/run/control.rs": "05486191c5f2f4a219ceb20d25e725d88ae15b6097a4207a978c94e025c34c19",
+    "crates/runtime/src/mobile/host/assembly.rs": "d0e73c631169dd664353ddee4edfcf180e830f52fce545695e957a25a4c602bf",
+    "crates/runtime/src/mobile/host/tests/bash_precommit_wiring_tests.rs": "88c375912d128e0597c8120e4be9fbef2b695dd879c85321d87db1df401f0b45",
+    "crates/tasks/src/handlers/in_process_teammate.rs": "0f1c9ddca8bc315ae0b1fdde586385234b95cd794e47b14cfd36b5872290b44e",
+    "crates/tasks/src/handlers/in_process_teammate_test.rs": "8863db0daff26ee69df08b7bbdace8aca1bbb5bcb552cdb61cdb819f4e0383d0"
+  },
+  "delta": {
+    "path": "crates/runtime/src/headless/run.rs",
+    "patch": "r8-r10-production-delta.patch",
+    "patch_sha256": "863c0349d3a5f2faec585297f536d0143bc7abb08a31bb4bc4afe0c23b897127",
+    "previous_git_blob": "4d79728988a711186e03d14b8a6bb03def0b5e4b",
+    "current_git_blob": "e5e62cb9e44035ccbe047192b1c6516bdb9a6bee",
+    "previous_content_sha256": "6dcb5b8af25527b0cc5b4f113a56981475b68c02f3cf9e522faaec4d8853b0ff",
+    "current_content_sha256": "f9afe39ea99eaffa8afb3097b53bfab8aa17ae13f3e28788a40aca768f30b8ee",
+    "baseline_git_blob": "4d79728988a711186e03d14b8a6bb03def0b5e4b"
+  },
+  "required_final_gates": [
+    "fmt",
+    "runtime-lib",
+    "changed-clippy"
+  ]
+}

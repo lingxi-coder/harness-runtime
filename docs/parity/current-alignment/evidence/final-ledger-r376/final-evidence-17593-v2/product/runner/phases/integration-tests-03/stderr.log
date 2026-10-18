@@ -1,0 +1,8 @@
+   Compiling bridge-server v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server)
+    Finished `test` profile [unoptimized] target(s) in 9.48s
+     Running tests/driver_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/driver_test-c2b598e3a8b88e9c)
+     Running tests/e2e_audio_assembly_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_audio_assembly_test-abb1242941b65dc5)
+     Running tests/e2e_audio_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_audio_test-59840b03a5d9caf9)
+     Running tests/e2e_computer_access_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_computer_access_test-9c0063cea93bfee5)
+     Running tests/e2e_permission_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_permission_test-dd53af2a746d0a3f)
+     Running tests/e2e_serve_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_serve_test-8e0149db45866ed5)

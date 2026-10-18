@@ -1,0 +1,575 @@
+{
+  "argv": [
+    "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--workspace",
+    "--all-features",
+    "--no-fail-fast",
+    "--message-format=json",
+    "--test",
+    "driver_test",
+    "--test",
+    "e2e_audio_assembly_test",
+    "--test",
+    "e2e_audio_test",
+    "--test",
+    "e2e_computer_access_test",
+    "--test",
+    "e2e_permission_test",
+    "--test",
+    "e2e_serve_test",
+    "--",
+    "--test-threads=1"
+  ],
+  "artifact_count": 6,
+  "artifact_identities": [
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "driver_test",
+      [
+        "test"
+      ],
+      "apps/bridge-server/tests/driver_test.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "e2e_audio_test",
+      [
+        "test"
+      ],
+      "apps/bridge-server/tests/e2e_audio_test.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "e2e_serve_test",
+      [
+        "test"
+      ],
+      "apps/bridge-server/tests/e2e_serve_test.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "e2e_computer_access_test",
+      [
+        "test"
+      ],
+      "apps/bridge-server/tests/e2e_computer_access_test.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "e2e_audio_assembly_test",
+      [
+        "test"
+      ],
+      "apps/bridge-server/tests/e2e_audio_assembly_test.rs"
+    ],
+    [
+      "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "e2e_permission_test",
+      [
+        "test"
+      ],
+      "apps/bridge-server/tests/e2e_permission_test.rs"
+    ]
+  ],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app",
+  "disk_before": {
+    "minimum_free_bytes": 3221225472,
+    "results_free_bytes": 7866671104,
+    "target_free_bytes": 7866671104
+  },
+  "doc_test_names": null,
+  "ended_at_unix_ns": 1792314864832186000,
+  "environment": {
+    "CARGO_BUILD_JOBS": "6",
+    "CARGO_ENCODED_RUSTFLAGS": null,
+    "CARGO_HOME": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/cargo-home",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_NET_OFFLINE": "true",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_TARGET_DIR": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target",
+    "LINGXI_MOD_BUN_EXECUTABLE": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/bun-1.4.3/bun",
+    "PATH": "/Users/luolingfeng/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/bun-1.4.3:/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin:/Users/luolingfeng/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+    "RUSTDOCFLAGS": null,
+    "RUSTFLAGS": null,
+    "RUSTUP_TOOLCHAIN": "1.94.0",
+    "RUST_MIN_STACK": "16777216",
+    "actual_child_environment_sha256": "010fb6963cb677060b97d7bcc77f5f5ba7b1bfaa01d81b8969dfe0872c31c519",
+    "cargo_path": "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo",
+    "tool_versions": {
+      "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "rustdoc": "rustdoc 1.94.0 (4a4ef493e 2026-03-02)"
+    }
+  },
+  "executed_target_proofs": [
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/driver_test-c2b598e3a8b88e9c",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "driver_test",
+        [
+          "test"
+        ],
+        "apps/bridge-server/tests/driver_test.rs"
+      ],
+      "running_line": "Running tests/driver_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/driver_test-c2b598e3a8b88e9c)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_audio_test-59840b03a5d9caf9",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "e2e_audio_test",
+        [
+          "test"
+        ],
+        "apps/bridge-server/tests/e2e_audio_test.rs"
+      ],
+      "running_line": "Running tests/e2e_audio_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_audio_test-59840b03a5d9caf9)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_serve_test-8e0149db45866ed5",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "e2e_serve_test",
+        [
+          "test"
+        ],
+        "apps/bridge-server/tests/e2e_serve_test.rs"
+      ],
+      "running_line": "Running tests/e2e_serve_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_serve_test-8e0149db45866ed5)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_computer_access_test-9c0063cea93bfee5",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "e2e_computer_access_test",
+        [
+          "test"
+        ],
+        "apps/bridge-server/tests/e2e_computer_access_test.rs"
+      ],
+      "running_line": "Running tests/e2e_computer_access_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_computer_access_test-9c0063cea93bfee5)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_audio_assembly_test-abb1242941b65dc5",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "e2e_audio_assembly_test",
+        [
+          "test"
+        ],
+        "apps/bridge-server/tests/e2e_audio_assembly_test.rs"
+      ],
+      "running_line": "Running tests/e2e_audio_assembly_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_audio_assembly_test-abb1242941b65dc5)"
+    },
+    {
+      "executable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_permission_test-dd53af2a746d0a3f",
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "e2e_permission_test",
+        [
+          "test"
+        ],
+        "apps/bridge-server/tests/e2e_permission_test.rs"
+      ],
+      "running_line": "Running tests/e2e_permission_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_permission_test-dd53af2a746d0a3f)"
+    }
+  ],
+  "exit_code": 0,
+  "expected_targets": [
+    {
+      "doctest": false,
+      "kind": [
+        "test"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server/Cargo.toml",
+      "package": "bridge-server",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "src_path": "apps/bridge-server/tests/driver_test.rs",
+      "target_name": "driver_test",
+      "test": true
+    },
+    {
+      "doctest": false,
+      "kind": [
+        "test"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server/Cargo.toml",
+      "package": "bridge-server",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "src_path": "apps/bridge-server/tests/e2e_audio_assembly_test.rs",
+      "target_name": "e2e_audio_assembly_test",
+      "test": true
+    },
+    {
+      "doctest": false,
+      "kind": [
+        "test"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server/Cargo.toml",
+      "package": "bridge-server",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "src_path": "apps/bridge-server/tests/e2e_audio_test.rs",
+      "target_name": "e2e_audio_test",
+      "test": true
+    },
+    {
+      "doctest": false,
+      "kind": [
+        "test"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server/Cargo.toml",
+      "package": "bridge-server",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "src_path": "apps/bridge-server/tests/e2e_computer_access_test.rs",
+      "target_name": "e2e_computer_access_test",
+      "test": true
+    },
+    {
+      "doctest": false,
+      "kind": [
+        "test"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server/Cargo.toml",
+      "package": "bridge-server",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "src_path": "apps/bridge-server/tests/e2e_permission_test.rs",
+      "target_name": "e2e_permission_test",
+      "test": true
+    },
+    {
+      "doctest": false,
+      "kind": [
+        "test"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server/Cargo.toml",
+      "package": "bridge-server",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "src_path": "apps/bridge-server/tests/e2e_serve_test.rs",
+      "target_name": "e2e_serve_test",
+      "test": true
+    }
+  ],
+  "filtered_auxiliary_summaries": {
+    "failed": 0,
+    "filtered_out_tests": 0,
+    "ignored": 0,
+    "passed": 0,
+    "summary_count": 0
+  },
+  "fingerprint": "f6fbe3b047f91732265849d323aec620fd3f19d19c9f4ed66ea3b49bb7a9e7e1",
+  "git": {
+    "cargo_lock_sha256": "3bd1a0b3d965fa57c40d2f62ce366bc2a59e949818a92c67a65e21ef510f3ae5",
+    "cargo_manifest_sha256": "b615b9696584b73cb98ada561280e48cb80d3b8a323bbd2b223f11880a7ec4ce",
+    "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+    "source_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tree": "ca3bd296092d8e2d05180b188cfbd458d8338394"
+  },
+  "id": "integration-tests-03",
+  "metadata": {
+    "doctest_targets": 9,
+    "identity_sha256": "e8e1fe2b04b3b8b275bada632d6746837b7f46865911440617e7a855edce7235",
+    "mtime_ns": 1792313076619372275,
+    "path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/metadata.json",
+    "pin_rows": {
+      "harness_lock_rows": 78,
+      "harness_manifest_rows": 39,
+      "harness_metadata_rows": 78,
+      "mobile_lock_rows": 5,
+      "mobile_manifest_rows": 3,
+      "mobile_metadata_rows": 5,
+      "sdk_lock_rows": 5,
+      "sdk_manifest_rows": 1,
+      "sdk_metadata_rows": 5
+    },
+    "sha256": "db73e1fa409183fd7443b811eb2190d72ab96416685843fbddff3b4582f84222",
+    "test_targets": 40,
+    "workspace_default_members": 6,
+    "workspace_members": 9
+  },
+  "plan_sha256": "5668f4030e21238e8b44dc05c6f32324ecb08b78b316d11bf4dee718d4ca8f58",
+  "post_phase_identity_check": {
+    "checked_at_unix_ns": 1792314863722696000,
+    "git": {
+      "cargo_lock_sha256": "3bd1a0b3d965fa57c40d2f62ce366bc2a59e949818a92c67a65e21ef510f3ae5",
+      "cargo_manifest_sha256": "b615b9696584b73cb98ada561280e48cb80d3b8a323bbd2b223f11880a7ec4ce",
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "source_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tree": "ca3bd296092d8e2d05180b188cfbd458d8338394"
+    },
+    "metadata_sha256": "db73e1fa409183fd7443b811eb2190d72ab96416685843fbddff3b4582f84222",
+    "unchanged": true
+  },
+  "retirement": [
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991731798,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314839394409328,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/driver_test-c2b598e3a8b88e9c.d",
+        "sha256": "75b730668a0976a1ee1c10f1ccb6aa5c9c0c584d05ac32598f91c69c4365ec0e",
+        "size": 363
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991731903,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314842009103337,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/driver_test-c2b598e3a8b88e9c",
+        "sha256": "9370d2fbfe0d5055068dcd6e1e63174676805ba1e0e008c863848ab3e3f1fc57",
+        "size": 96600560
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991731937,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314842024677422,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/bridge-server-c2b598e3a8b88e9c/test-integration-test-driver_test.json",
+        "sha256": "e65251df66f2587163000489a129a698d58d2b804754185e72ecd86841df99fd",
+        "size": 3315
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "driver_test",
+        [
+          "test"
+        ],
+        "apps/bridge-server/tests/driver_test.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991731799,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314839394452955,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_audio_test-59840b03a5d9caf9.d",
+        "sha256": "eb7cafa251f1cc3936807d2fae71f02d6712be2f04b76247076e7c29ff76bbca",
+        "size": 378
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991732025,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314844749205674,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_audio_test-59840b03a5d9caf9",
+        "sha256": "4efd35097fb8d049f25dcf05b77e042d795e20efaeaf5328c836bc26fd253f6b",
+        "size": 23956768
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991732030,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314844773828329,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/bridge-server-59840b03a5d9caf9/test-integration-test-e2e_audio_test.json",
+        "sha256": "17897987b1b3b146abce9ba878e682f36cf68868d9c227ea6f7ce58519102a91",
+        "size": 3317
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "e2e_audio_test",
+        [
+          "test"
+        ],
+        "apps/bridge-server/tests/e2e_audio_test.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991731800,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314839394879469,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_serve_test-8e0149db45866ed5.d",
+        "sha256": "61107540f8cee7172e7d25e67836771d03bbe6da14fe933f21ca27de3ef75bbf",
+        "size": 378
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991732043,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314847359806052,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_serve_test-8e0149db45866ed5",
+        "sha256": "6d174a90bcf52422c48a140f05f4cb36aa680ec3afe9b1bb7afef0b195f07eed",
+        "size": 305040752
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991732130,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314847553185948,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/bridge-server-8e0149db45866ed5/test-integration-test-e2e_serve_test.json",
+        "sha256": "5e9286c38f203180208a865267ac0b1becf3dd7a2e171f9207484dd4bbe7374e",
+        "size": 3320
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "e2e_serve_test",
+        [
+          "test"
+        ],
+        "apps/bridge-server/tests/e2e_serve_test.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991731802,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314839399550081,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_computer_access_test-9c0063cea93bfee5.d",
+        "sha256": "d73f093ebf50fce94ef40cd5a49dc06cb9f14e483d974cc0233856f18b63fd9e",
+        "size": 585
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991732117,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314847635505684,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_computer_access_test-9c0063cea93bfee5",
+        "sha256": "0e305f2ceda79247bc97e3574a12a4f712727d8ca9520b1fddc443cd55be958e",
+        "size": 105625728
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991732145,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314847661896257,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/bridge-server-9c0063cea93bfee5/test-integration-test-e2e_computer_access_test.json",
+        "sha256": "e3f6c8aba2086f79f625e594fd410ad13af94e12a6d8911882006022424949fe",
+        "size": 3329
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "e2e_computer_access_test",
+        [
+          "test"
+        ],
+        "apps/bridge-server/tests/e2e_computer_access_test.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991731801,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314839394925679,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_audio_assembly_test-abb1242941b65dc5.d",
+        "sha256": "47a029a333506aa28b78a67c59b93f1b114d14bfc056ea5da3f8bf1f97f8d663",
+        "size": 423
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991732079,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314847631994491,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_audio_assembly_test-abb1242941b65dc5",
+        "sha256": "ce6298eb4d1aefbb9140f42e33ff6db45d45cc1481f55e02cd183252acfb22b8",
+        "size": 305140016
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991732150,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314847666173766,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/bridge-server-abb1242941b65dc5/test-integration-test-e2e_audio_assembly_test.json",
+        "sha256": "b538216e2901866a0a6e26a75604262c424d919f45990b2f9310c9f637ce0079",
+        "size": 3327
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "e2e_audio_assembly_test",
+        [
+          "test"
+        ],
+        "apps/bridge-server/tests/e2e_audio_assembly_test.rs"
+      ]
+    },
+    {
+      "deleted": true,
+      "dep_info": {
+        "device": 16777234,
+        "inode": 991731803,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314839401238512,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_permission_test-dd53af2a746d0a3f.d",
+        "sha256": "7d2b2863259f35d231a5cf465e13375e2ee06436dc6017cd9ce81a52dcfcc6b8",
+        "size": 527
+      },
+      "executable": {
+        "device": 16777234,
+        "inode": 991732136,
+        "links": 1,
+        "mode": 493,
+        "mtime_ns": 1792314848107444910,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/e2e_permission_test-dd53af2a746d0a3f",
+        "sha256": "d4fb7ee34f7f0a7e5f55d73844d3eed338d5338eb397138e631253bf709fbf0a",
+        "size": 105599328
+      },
+      "fingerprint": {
+        "device": 16777234,
+        "inode": 991732162,
+        "links": 1,
+        "mode": 420,
+        "mtime_ns": 1792314848155541077,
+        "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/bridge-server-dd53af2a746d0a3f/test-integration-test-e2e_permission_test.json",
+        "sha256": "39b79d28ac0216b78475c0b9279a470eb0525d000ca4c4e9fa4cca33e4343f54",
+        "size": 3324
+      },
+      "identity": [
+        "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+        "e2e_permission_test",
+        [
+          "test"
+        ],
+        "apps/bridge-server/tests/e2e_permission_test.rs"
+      ]
+    }
+  ],
+  "retirement_process_check": {
+    "checked_process_lines": 1465,
+    "command": [
+      "ps",
+      "-axo",
+      "pid=,comm=,args="
+    ],
+    "inactive": true
+  },
+  "started_at_unix_ns": 1792314838651222000,
+  "status": "passed",
+  "stderr_path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/phases/integration-tests-03/stderr.log",
+  "stderr_sha256": "8c6e5e753320a7c6d2488df2c54df6024e7cb63d234b875a95cfa099eb2eda4d",
+  "stdout_path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/phases/integration-tests-03/stdout.jsonl",
+  "stdout_sha256": "f4a3afe0ebb6432c59d9e2e9ab39c30d6241f5bc4785c8ff16cbe86b372159ea",
+  "test_summary": {
+    "failed": 0,
+    "ignored": 0,
+    "passed": 15
+  }
+}

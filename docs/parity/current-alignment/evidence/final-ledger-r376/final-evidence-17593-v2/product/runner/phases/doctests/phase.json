@@ -1,0 +1,236 @@
+{
+  "argv": [
+    "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo",
+    "test",
+    "--locked",
+    "--offline",
+    "--workspace",
+    "--all-features",
+    "--no-fail-fast",
+    "--message-format=json",
+    "--doc",
+    "--",
+    "--test-threads=1"
+  ],
+  "artifact_count": 0,
+  "artifact_identities": [],
+  "cwd": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app",
+  "disk_before": {
+    "minimum_free_bytes": 3221225472,
+    "results_free_bytes": 9665056768,
+    "target_free_bytes": 9665056768
+  },
+  "doc_test_names": [
+    "android_aar",
+    "audio_provider",
+    "bridge_server",
+    "cli",
+    "config_requirements",
+    "ios_framework",
+    "tool_ios_use",
+    "tui",
+    "tui_core"
+  ],
+  "ended_at_unix_ns": 1792314921292923000,
+  "environment": {
+    "CARGO_BUILD_JOBS": "6",
+    "CARGO_ENCODED_RUSTFLAGS": null,
+    "CARGO_HOME": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/cargo-home",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_NET_OFFLINE": "true",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_TARGET_DIR": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target",
+    "LINGXI_MOD_BUN_EXECUTABLE": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/bun-1.4.3/bun",
+    "PATH": "/Users/luolingfeng/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin:/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/bun-1.4.3:/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin:/Users/luolingfeng/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+    "RUSTDOCFLAGS": null,
+    "RUSTFLAGS": null,
+    "RUSTUP_TOOLCHAIN": "1.94.0",
+    "RUST_MIN_STACK": "16777216",
+    "actual_child_environment_sha256": "010fb6963cb677060b97d7bcc77f5f5ba7b1bfaa01d81b8969dfe0872c31c519",
+    "cargo_path": "/Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/bin/cargo",
+    "tool_versions": {
+      "cargo": "cargo 1.94.0 (85eff7c80 2026-01-15)",
+      "rustc": "rustc 1.94.0 (4a4ef493e 2026-03-02)",
+      "rustdoc": "rustdoc 1.94.0 (4a4ef493e 2026-03-02)"
+    }
+  },
+  "executed_target_proofs": [],
+  "exit_code": 0,
+  "expected_targets": [
+    {
+      "doctest": true,
+      "kind": [
+        "lib",
+        "cdylib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/android/ffi/Cargo.toml",
+      "package": "android-aar",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/android/ffi#android-aar@0.9.0",
+      "src_path": "apps/android/ffi/src/lib.rs",
+      "target_name": "android_aar",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/audio-provider/Cargo.toml",
+      "package": "audio-provider",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/audio-provider#0.9.0",
+      "src_path": "apps/audio-provider/src/lib.rs",
+      "target_name": "audio_provider",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server/Cargo.toml",
+      "package": "bridge-server",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/bridge-server#0.9.0",
+      "src_path": "apps/bridge-server/src/lib.rs",
+      "target_name": "bridge_server",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host/Cargo.toml",
+      "package": "cli",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/host#cli@0.12.0",
+      "src_path": "apps/cli/host/src/lib.rs",
+      "target_name": "cli",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/packages/config-requirements/Cargo.toml",
+      "package": "config-requirements",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/packages/config-requirements#0.1.0",
+      "src_path": "packages/config-requirements/src/lib.rs",
+      "target_name": "config_requirements",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "staticlib",
+        "cdylib",
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/ios/ffi/Cargo.toml",
+      "package": "ios-framework",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/ios/ffi#ios-framework@0.9.0",
+      "src_path": "apps/ios/ffi/src/lib.rs",
+      "target_name": "ios_framework",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/tools/ios-use/Cargo.toml",
+      "package": "tool-ios-use",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/tools/ios-use#tool-ios-use@0.12.0",
+      "src_path": "tools/ios-use/src/lib.rs",
+      "target_name": "tool_ios_use",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui/Cargo.toml",
+      "package": "tui",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui#0.12.0",
+      "src_path": "apps/cli/tui/src/lib.rs",
+      "target_name": "tui",
+      "test": true
+    },
+    {
+      "doctest": true,
+      "kind": [
+        "lib"
+      ],
+      "manifest_path": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui-core/Cargo.toml",
+      "package": "tui-core",
+      "package_id": "path+file:///Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/lingxi-app/apps/cli/tui-core#0.12.0",
+      "src_path": "apps/cli/tui-core/src/lib.rs",
+      "target_name": "tui_core",
+      "test": true
+    }
+  ],
+  "filtered_auxiliary_summaries": {
+    "failed": 0,
+    "filtered_out_tests": 0,
+    "ignored": 0,
+    "passed": 0,
+    "summary_count": 0
+  },
+  "fingerprint": "f6fbe3b047f91732265849d323aec620fd3f19d19c9f4ed66ea3b49bb7a9e7e1",
+  "git": {
+    "cargo_lock_sha256": "3bd1a0b3d965fa57c40d2f62ce366bc2a59e949818a92c67a65e21ef510f3ae5",
+    "cargo_manifest_sha256": "b615b9696584b73cb98ada561280e48cb80d3b8a323bbd2b223f11880a7ec4ce",
+    "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+    "source_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "tree": "ca3bd296092d8e2d05180b188cfbd458d8338394"
+  },
+  "id": "doctests",
+  "metadata": {
+    "doctest_targets": 9,
+    "identity_sha256": "e8e1fe2b04b3b8b275bada632d6746837b7f46865911440617e7a855edce7235",
+    "mtime_ns": 1792313076619372275,
+    "path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/metadata.json",
+    "pin_rows": {
+      "harness_lock_rows": 78,
+      "harness_manifest_rows": 39,
+      "harness_metadata_rows": 78,
+      "mobile_lock_rows": 5,
+      "mobile_manifest_rows": 3,
+      "mobile_metadata_rows": 5,
+      "sdk_lock_rows": 5,
+      "sdk_manifest_rows": 1,
+      "sdk_metadata_rows": 5
+    },
+    "sha256": "db73e1fa409183fd7443b811eb2190d72ab96416685843fbddff3b4582f84222",
+    "test_targets": 40,
+    "workspace_default_members": 6,
+    "workspace_members": 9
+  },
+  "plan_sha256": "5668f4030e21238e8b44dc05c6f32324ecb08b78b316d11bf4dee718d4ca8f58",
+  "post_phase_identity_check": {
+    "checked_at_unix_ns": 1792314921286782000,
+    "git": {
+      "cargo_lock_sha256": "3bd1a0b3d965fa57c40d2f62ce366bc2a59e949818a92c67a65e21ef510f3ae5",
+      "cargo_manifest_sha256": "b615b9696584b73cb98ada561280e48cb80d3b8a323bbd2b223f11880a7ec4ce",
+      "head": "17593eaa66dc762d5c9c581ba348398c914bdbcd",
+      "source_status_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tree": "ca3bd296092d8e2d05180b188cfbd458d8338394"
+    },
+    "metadata_sha256": "db73e1fa409183fd7443b811eb2190d72ab96416685843fbddff3b4582f84222",
+    "unchanged": true
+  },
+  "retirement": [],
+  "retirement_process_check": null,
+  "started_at_unix_ns": 1792314914199793000,
+  "status": "passed",
+  "stderr_path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/phases/doctests/stderr.log",
+  "stderr_sha256": "3746d683917cdf74347d694aa713f47406db6fc6156a7ca86b8fc711645510e8",
+  "stdout_path": "/private/tmp/product-full-r342-r376-20261018T084434Z-98045/runner/phases/doctests/stdout.jsonl",
+  "stdout_sha256": "dbf777efe6783d82a24611db61ad54005abba0e1012a82b253143296b3fd0b56",
+  "test_summary": {
+    "failed": 0,
+    "ignored": 0,
+    "passed": 0
+  }
+}

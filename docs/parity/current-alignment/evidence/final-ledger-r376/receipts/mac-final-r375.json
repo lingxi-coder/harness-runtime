@@ -1,0 +1,68 @@
+{
+  "status": "delivered",
+  "recorded_at": "2026-10-18T02:08:35.772273+00:00",
+  "native_version": "2.1.295",
+  "bun": "1.4.3",
+  "branch": "codex/claude-alignment-integration",
+  "main_commits": {
+    "llm-client": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "harness-runtime": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+    "lingxi-app": "f71087b428665c30d0bd752e16f76cb53ab7fef6"
+  },
+  "remote_verified": true,
+  "head_origin_main_divergence": {
+    "llm-client": [
+      0,
+      0
+    ],
+    "harness-runtime": [
+      0,
+      0
+    ],
+    "lingxi-app": [
+      0,
+      0
+    ]
+  },
+  "canonical_concurrent_changes_preserved": true,
+  "harness_tests": {
+    "passed": 851,
+    "failed": 0,
+    "ignored": 1,
+    "worker_node": 21,
+    "desktop_check": "passed",
+    "clippy": "passed"
+  },
+  "product_tests": {
+    "passed": 2738,
+    "failed": 0,
+    "ignored": 4,
+    "targets": 40,
+    "doctest_targets": 9,
+    "cli_8mib": "passed",
+    "check": "passed",
+    "clippy": "passed"
+  },
+  "signed_package": {
+    "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-f71087b42-r375-20261017/LingXi-Code-0.1.0-mac-arm64/LingXi Code.app",
+    "zip": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/packages/p-f71087b42-r375-20261017/LingXi-Code-0.1.0-mac-arm64.zip",
+    "zip_sha256": "62e2746aa9c4966ee618839210d597903f5ba755571f3ad61ac356a8f8fdfd6c",
+    "static": "passed",
+    "startup_smoke": "passed",
+    "independent_audit": "passed",
+    "actual_cua_gui": "passed",
+    "typed": "packaged-host-cua-valuexy",
+    "submit_result": "Submit callback accepted: packaged-host-cua-valuexy"
+  },
+  "cleanup": {
+    "providerCredentialCleanup": "cleared",
+    "app_pid_4528": "exited",
+    "caffeinate_pid_37077": "exited"
+  },
+  "limits": [
+    "Async callback Promise continuations retain independent post semantics",
+    "Other platforms compile/contracts, not physical-device GUI acceptance",
+    "Optional sidebar drag not executed this batch",
+    "Development signing; no notarization claim"
+  ]
+}

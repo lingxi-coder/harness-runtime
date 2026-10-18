@@ -1,0 +1,33 @@
+{
+  "status": "passed",
+  "harness_sha": "4d6d0d6c428e6624a303f5e2a5c96eb4a392f1a1",
+  "sdk_sha": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+  "native_version": "2.1.295",
+  "bun": "1.4.3",
+  "rust": "1.94.0",
+  "source_diff_sha256": "4328739884d7cbce397318c6329e8ac6f03c1634ee0743a55fd7f147c27966bf",
+  "checks": {
+    "fmt": "passed",
+    "node_worker": {
+      "passed": 21,
+      "failed": 0
+    },
+    "hooks_lib": {
+      "passed": 851,
+      "failed": 0,
+      "ignored": 1
+    },
+    "desktop_check": "passed",
+    "hooks_all_targets_all_features_clippy": "passed"
+  },
+  "logs": {
+    "fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "node-worker.log": "f2725e24247d6300cd3afd94f2dfc56cd7890645dec50657e72e4a15d084732b",
+    "hooks-lib.log": "3b68a17f0a14bbd0467afd92690dcb91d80c02c36e04589b44082279edb68993",
+    "desktop-check.log": "663851bab12293672c2670c151037460069035ff67fe59d63ea433fd55f11b14",
+    "clippy.log": "bb8a397a070392ffa80c4a5270000711b70f6b5f33c303564d3cb13d3c638491"
+  },
+  "scope": "affected Harness production chain; unchanged SDK and tokenizer matrices not repeated",
+  "review": "../../harness-runtime/acceptance/mod-ui-post-ack-r375-20261017/independent-review.md",
+  "push": "pending Product gates and signed GUI acceptance"
+}

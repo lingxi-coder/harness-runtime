@@ -1,0 +1,54 @@
+{
+  "sdk": [
+    "M2-HTTP-1",
+    "SDK-ERR-1",
+    "HOST-ERR-1",
+    "HOST-ERR-STATUS-1",
+    "HOST-REFUSAL-1",
+    "CLI-ERR-1",
+    "SDK-ERR-2",
+    "SDK-1",
+    "SDK-2",
+    "SDK-3",
+    "STOPDETAILS-1",
+    "PROMPT-2",
+    "EFFORT-1",
+    "PER-TURN-CONTROL-295"
+  ],
+  "mods": [
+    "HOOK-1",
+    "HOOK-2",
+    "HOOK-RELEASE-1",
+    "MOD-1",
+    "MOD-2",
+    "MOD-3",
+    "RUNTIME-1"
+  ],
+  "gates": [
+    "CLIENT-1",
+    "BUILD-1"
+  ],
+  "root": [
+    "FINAL-TARGET-1"
+  ],
+  "runtime": [
+    "TURN-1",
+    "TURN-2",
+    "TURN-3",
+    "TOOL-1",
+    "TOOL-2",
+    "TOOL-3",
+    "TOOL-4",
+    "CMD-1",
+    "PROMPT-1",
+    "SESSION-1",
+    "SESSION-3",
+    "SESSION-2",
+    "SESSION-4",
+    "SESSION-5",
+    "AGENT-1",
+    "MCP-1",
+    "AGENT-RELEASE-1",
+    "BASH-INPUT-295"
+  ]
+}
