@@ -1244,6 +1244,10 @@ impl ConversationOrchestrator {
     ) -> Result<TurnOutcome, OrchestratorError> {
         self.cancel_idle_compaction();
         let _turn_guard = self.turn_gate.lock().await;
+        // The caller may have observed a pending task notification before a
+        // different owner consumed it. Keep that no-work recheck from exposing
+        // the preceding query's yielded-user count to headless publication.
+        self.clear_completed_query_user_events();
         if cancel.is_cancelled() || !registry.has_pending_task_notifications_for(None).await {
             // The host already reserved its UI/permission lifecycle. Close it
             // even when a preceding turn consumed this completion at the gate.
@@ -3188,10 +3192,15 @@ impl ConversationOrchestrator {
                 )
             })
         };
+        // We own turn_gate and have no admitted turn here. Start a fresh
+        // query-local counter so this pre-admission shutdown cannot inherit
+        // the previous query's yielded rows or terminal metadata.
+        self.begin_turn_metrics();
         if !already_recorded {
             self.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
                 .await;
         }
+        self.complete_turn_metrics(None);
     }
 
     /// Drive one user prompt through a REPL turn until `end_turn`,

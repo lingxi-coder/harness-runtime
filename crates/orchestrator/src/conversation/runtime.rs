@@ -577,6 +577,10 @@ impl TurnExecutionMetricsState {
         }
     }
 
+    fn clear_completed_query_user_events(&mut self) {
+        self.completed_query_user_events = None;
+    }
+
     fn query_tool_dispatch_cancelled(&self) -> bool {
         self.active_query_user_events
             .is_some_and(|events| events.cancelled_during_tool_dispatch)
@@ -606,6 +610,16 @@ impl ConversationOrchestrator {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let metrics = state.completed_query_user_events?;
         Some((metrics.yielded_users, metrics.interruption))
+    }
+
+    /// Clear only the completed query-row snapshot. Callers must hold the
+    /// turn gate so an active query's metrics can never be displaced.
+    pub(super) fn clear_completed_query_user_events(&self) {
+        self.prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear_completed_query_user_events();
     }
 
     pub(super) fn begin_turn_metrics(&self) {
@@ -2551,6 +2565,13 @@ mod turn_timing_tests {
                 interruption: Some(QueryUserInterruptionKind::Tools),
                 cancelled_during_tool_dispatch: true,
             })
+        );
+
+        state.clear_completed_query_user_events();
+        assert_eq!(state.completed_query_user_events, None);
+        assert!(
+            state.completed.is_some(),
+            "other completed metrics stay intact"
         );
 
         state.begin_turn();

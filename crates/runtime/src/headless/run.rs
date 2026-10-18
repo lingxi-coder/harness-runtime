@@ -331,7 +331,31 @@ impl NativeQueryResultPublisher<'_> {
         result: &Result<orchestrator::TurnOutcome, orchestrator::OrchestratorError>,
         queued: usize,
     ) {
-        self.publish_with_cancelled_query(result, queued, None)
+        self.publish_with_cancelled_query(result, queued, None, None)
+            .await;
+    }
+
+    async fn publish_completed_query(
+        &mut self,
+        result: &Result<orchestrator::TurnOutcome, orchestrator::OrchestratorError>,
+        queued: usize,
+    ) {
+        let yielded_query_users = self
+            .runtime
+            .orchestrator
+            .completed_query_user_events()
+            .map(|(yielded_users, _)| yielded_users);
+        self.publish_query_result(result, queued, yielded_query_users)
+            .await;
+    }
+
+    async fn publish_query_result(
+        &mut self,
+        result: &Result<orchestrator::TurnOutcome, orchestrator::OrchestratorError>,
+        queued: usize,
+        yielded_query_users: Option<u64>,
+    ) {
+        self.publish_with_cancelled_query(result, queued, None, yielded_query_users)
             .await;
     }
 
@@ -344,8 +368,18 @@ impl NativeQueryResultPublisher<'_> {
         queued: usize,
     ) {
         let cancelled_print_query = cancelled_print_query_result(self.runtime, result);
-        self.publish_with_cancelled_query(result, queued, cancelled_print_query)
-            .await;
+        let yielded_query_users = self
+            .runtime
+            .orchestrator
+            .completed_query_user_events()
+            .map(|(yielded_users, _)| yielded_users);
+        self.publish_with_cancelled_query(
+            result,
+            queued,
+            cancelled_print_query,
+            yielded_query_users,
+        )
+        .await;
     }
 
     async fn publish_with_cancelled_query(
@@ -353,6 +387,7 @@ impl NativeQueryResultPublisher<'_> {
         result: &Result<orchestrator::TurnOutcome, orchestrator::OrchestratorError>,
         queued: usize,
         cancelled_print_query: Option<CancelledPrintQueryResult>,
+        yielded_query_users: Option<u64>,
     ) {
         if self.runtime.policy_helper_refusal.current().is_some() {
             return;
@@ -402,6 +437,7 @@ impl NativeQueryResultPublisher<'_> {
             queued,
             self.next_index,
             cancelled_print_query.as_ref(),
+            yielded_query_users,
         )
         .await;
         if self.runtime.policy_helper_refusal.current().is_some() {
@@ -1504,7 +1540,21 @@ async fn run_stream_json_input_loop_inner(
                     control_plane.set_active_turn(cancel.clone()).await;
                     let result = runtime.orchestrator.run_task_notification_rewake(runtime.task_registry.as_ref(), cancel).await;
                     control_plane.clear_active_turn().await;
-                    publisher.publish(&result, input_rx.len().await).await;
+                    let yielded_query_users = runtime
+                        .orchestrator
+                        .completed_query_user_events()
+                        .map(|(yielded_users, _)| yielded_users);
+                    if yielded_query_users.is_some() {
+                        publisher
+                            .publish_query_result(&result, input_rx.len().await, yielded_query_users)
+                            .await;
+                    } else {
+                        // A notification consumed while this wake waited for
+                        // turn_gate never started a query. Preserve the
+                        // existing no-work result path and don't reuse a stale
+                        // query-row count.
+                        publisher.publish(&result, input_rx.len().await).await;
+                    }
                     if let Err(error) = result { last_turn_err = Some(error); break; }
 
                 }
@@ -1720,6 +1770,7 @@ async fn run_stream_json_input_loop_inner(
                 input_rx.len().await,
                 publisher.next_index,
                 None,
+                None,
             )
             .await;
             run_stream_compact_command(
@@ -1820,7 +1871,9 @@ async fn run_stream_json_input_loop_inner(
             last_turn_err = Some(orchestrator::OrchestratorError::Internal(error.to_string()));
             break;
         }
-        publisher.publish(&turn_result, input_rx.len().await).await;
+        publisher
+            .publish_completed_query(&turn_result, input_rx.len().await)
+            .await;
         if let Err(error) = emit_turn_terminal_lifecycle(
             &queue_lifecycle,
             turn.uuid.as_deref(),
@@ -2593,6 +2646,7 @@ async fn set_result_position(
     queued: usize,
     index: u64,
     cancelled_print_query: Option<&CancelledPrintQueryResult>,
+    yielded_query_users: Option<u64>,
 ) {
     let metrics = runtime.orchestrator.completed_turn_metrics();
     let subagent_stats = runtime.agent_session_statistics().await;
@@ -2616,7 +2670,12 @@ async fn set_result_position(
             result_index: index,
             num_turns: cancelled_print_query
                 .map(|result| result.num_turns)
-                .or_else(|| metrics.as_ref().map(|value| u64::from(value.num_turns))),
+                .or_else(|| {
+                    native_print_query_num_turns(
+                        yielded_query_users,
+                        metrics.as_ref().map(|value| u64::from(value.num_turns)),
+                    )
+                }),
             api_error_status: metrics.as_ref().and_then(|value| value.api_error_status),
             stop_reason: if let Some(cancelled) = cancelled_print_query {
                 // Preserve Native's null stop reason for cancellation; do not
@@ -2658,9 +2717,7 @@ fn cancelled_print_query_result_from_events(
         orchestrator::QueryUserInterruptionKind::Streaming => "aborted_streaming",
         orchestrator::QueryUserInterruptionKind::Tools => "aborted_tools",
     };
-    // Native's print query starts at one and increments for each user row
-    // yielded during the query, without filtering meta or tool-result rows.
-    let num_turns = yielded_users.checked_add(1)?;
+    let num_turns = native_print_query_num_turns(Some(yielded_users), None)?;
     // Native ZVo deliberately suppresses the execution diagnostic when the
     // final query stop reason was end_turn.
     if stop_reason.as_deref() == Some("end_turn") {
@@ -2677,6 +2734,18 @@ fn cancelled_print_query_result_from_events(
     })
 }
 
+/// Native's public print result count is query-local: start at one, then add
+/// each yielded user row. It is distinct from the orchestrator's admitted
+/// model-turn count, which may stay unchanged for an in-place refusal retry.
+fn native_print_query_num_turns(
+    yielded_query_users: Option<u64>,
+    fallback_turn_count: Option<u64>,
+) -> Option<u64> {
+    yielded_query_users
+        .and_then(|yielded_users| yielded_users.checked_add(1))
+        .or(fallback_turn_count)
+}
+
 #[cfg(test)]
 mod result_publication_tests {
     use super::*;
@@ -2688,6 +2757,17 @@ mod result_publication_tests {
     const USER_INTERRUPTION_MESSAGE: &str = "[Request interrupted by user]";
     const USER_INTERRUPTION_FOR_TOOL_USE_MESSAGE: &str =
         "[Request interrupted by user for tool use]";
+
+    #[test]
+    fn print_result_num_turns_counts_yielded_users_not_admitted_model_turns() {
+        // A same-model refusal retry yields the meta nudge as a user row but
+        // does not consume a second admitted model turn.
+        assert_eq!(native_print_query_num_turns(Some(1), Some(1)), Some(2));
+        assert_eq!(native_print_query_num_turns(Some(0), Some(1)), Some(1));
+        assert_eq!(native_print_query_num_turns(Some(2), Some(4)), Some(3));
+        assert_eq!(native_print_query_num_turns(None, Some(4)), Some(4));
+        assert_eq!(native_print_query_num_turns(None, None), None);
+    }
 
     #[test]
     fn print_cancellation_projection_uses_yielded_user_events_and_native_guards() {
@@ -2804,7 +2884,7 @@ mod result_publication_tests {
         )
         .expect("a typed interruption produces the Native print error projection");
         publisher
-            .publish_with_cancelled_query(&result, 0, Some(cancelled_projection))
+            .publish_with_cancelled_query(&result, 0, Some(cancelled_projection), None)
             .await;
 
         assert!(runtime
@@ -2971,6 +3051,7 @@ mod result_publication_tests {
                         )),
                         None,
                     ),
+                    None,
                 )
                 .await;
 
