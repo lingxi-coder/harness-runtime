@@ -260,6 +260,17 @@ struct NativeQueryResultPublisher<'a> {
     last_result_failed: bool,
 }
 
+/// The pinned Native cancellation capture's result shape applies only when a
+/// print query was interrupted before any assistant row was produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CancelledWithoutAssistantResult {
+    diagnostic: String,
+    num_turns: u64,
+    terminal_reason: String,
+}
+
+const USER_INTERRUPTION_MESSAGE: &str = "[Request interrupted by user]";
+
 impl NativeQueryResultPublisher<'_> {
     async fn should_hold_results(&mut self) -> bool {
         let input_closed = self
@@ -321,9 +332,29 @@ impl NativeQueryResultPublisher<'_> {
         result: &Result<orchestrator::TurnOutcome, orchestrator::OrchestratorError>,
         queued: usize,
     ) {
+        self.publish_with_turn_message_id(result, queued, None)
+            .await;
+    }
+
+    /// Publish a one-shot print result with the stable id assigned to its user
+    /// query. The Native 2.1.295 interrupted-stream result is only projected
+    /// when cancellation appended its plain user interruption row and this
+    /// query produced no assistant row.
+    async fn publish_with_turn_message_id(
+        &mut self,
+        result: &Result<orchestrator::TurnOutcome, orchestrator::OrchestratorError>,
+        queued: usize,
+        turn_message_id: Option<lingxi_core::types::MessageId>,
+    ) {
         if self.runtime.policy_helper_refusal.current().is_some() {
             return;
         }
+        let cancelled_without_assistant = match turn_message_id {
+            Some(message_id) => {
+                cancelled_without_assistant_result(self.runtime, result, message_id).await
+            }
+            None => None,
+        };
         if result.is_ok() {
             self.runtime.execution_interrupted.store(
                 matches!(result, Ok(orchestrator::TurnOutcome::Cancelled)),
@@ -363,58 +394,83 @@ impl NativeQueryResultPublisher<'_> {
                 .await
                 .map(|stats| serde_json::to_value(stats).expect("agent statistics")),
         );
-        set_result_position(self.runtime, self.stream, queued, self.next_index).await;
+        set_result_position(
+            self.runtime,
+            self.stream,
+            queued,
+            self.next_index,
+            cancelled_without_assistant.as_ref(),
+        )
+        .await;
         if self.runtime.policy_helper_refusal.current().is_some() {
             return;
         }
-        self.last_result_failed = result.is_err()
-            || self
-                .runtime
-                .orchestrator
-                .completed_turn_metrics()
-                .and_then(|metrics| metrics.api_error_stop_reason)
-                .is_some();
-        match result {
-            Ok(_) => {
-                let text = self.stream.get_last_result_text().await;
-                if self.last_result_failed {
-                    self.runtime.record_execution_error(
-                        self.runtime
-                            .orchestrator
-                            .session()
-                            .lock()
-                            .await
-                            .history
-                            .last()
-                            .map(|message| message.text_content())
-                            .unwrap_or_default(),
-                    );
+        self.last_result_failed = cancelled_without_assistant.is_none()
+            && (result.is_err()
+                || self
+                    .runtime
+                    .orchestrator
+                    .completed_turn_metrics()
+                    .and_then(|metrics| metrics.api_error_stop_reason)
+                    .is_some());
+        if let Some(cancelled) = cancelled_without_assistant {
+            // This Native result envelope is an execution-error payload, while
+            // user SIGINT still exits successfully. Keep protocol error state
+            // separate from the process exit decision.
+            self.stream
+                .emit_result_error(
+                    "error_during_execution",
+                    vec![cancelled.diagnostic],
+                    &cost,
+                    self.fast_mode_state,
+                    self.fast_mode_disabled_reason,
+                    self.betas,
+                )
+                .await;
+            self.last_error_published = true;
+        } else {
+            match result {
+                Ok(_) => {
+                    let text = self.stream.get_last_result_text().await;
+                    if self.last_result_failed {
+                        self.runtime.record_execution_error(
+                            self.runtime
+                                .orchestrator
+                                .session()
+                                .lock()
+                                .await
+                                .history
+                                .last()
+                                .map(|message| message.text_content())
+                                .unwrap_or_default(),
+                        );
+                    }
+                    self.stream
+                        .emit_result_success(
+                            &text,
+                            "end_turn",
+                            &cost,
+                            self.fast_mode_state,
+                            self.fast_mode_disabled_reason,
+                            self.betas,
+                        )
+                        .await;
+                    self.last_error_published = false;
                 }
-                self.stream
-                    .emit_result_success(
-                        &text,
-                        "end_turn",
-                        &cost,
-                        self.fast_mode_state,
-                        self.fast_mode_disabled_reason,
-                        self.betas,
-                    )
-                    .await;
-                self.last_error_published = false;
-            }
-            Err(error) => {
-                self.runtime.record_execution_error(error);
-                self.stream
-                    .emit_result_error(
-                        stream_json_error_subtype(error),
-                        vec![error.to_string()],
-                        &cost,
-                        self.fast_mode_state,
-                        self.fast_mode_disabled_reason,
-                        self.betas,
-                    )
-                    .await;
-                self.last_error_published = true;
+                Err(error) => {
+                    self.runtime.record_execution_error(error);
+                    self.stream
+                        .emit_result_error(
+                            stream_json_error_subtype(error),
+                            vec![error.to_string()],
+                            &cost,
+                            self.fast_mode_state,
+                            self.fast_mode_disabled_reason,
+                            self.betas,
+                        )
+                        .await;
+                    self.last_error_published = true;
+                }
             }
         }
         self.next_index = self.next_index.saturating_add(1);
@@ -878,6 +934,17 @@ async fn run_stream_json_print_inner(
 
     // ③ Run the turn — streaming callbacks (emit_text / emit_tool_call /
     //    emit_message_start / emit_message_boundary) fire on the stream.
+    // Only the streaming, non-structured turn needs a stable transcript anchor
+    // for the pinned interrupted-stream result projection. It is passed into
+    // the existing Orchestrator entry point so compaction can rebuild history
+    // without invalidating the identity.
+    let turn_message_id = if !argv.no_stream
+        && !(runtime.structured_output_slot.is_some() && argv.json_schema.is_some())
+    {
+        Some(lingxi_core::types::MessageId::new())
+    } else {
+        None
+    };
     let turn_result =
         if let (Some(slot), Some(_schema)) = (&runtime.structured_output_slot, &argv.json_schema) {
             match execute_structured_output(
@@ -930,10 +997,11 @@ async fn run_stream_json_print_inner(
                     json!({"kind":"sdk"}),
                     runtime
                         .orchestrator
-                        .run_turn_streaming_with_cancel_image_sources(
+                        .run_turn_streaming_with_cancel_image_sources_and_message_id(
                             &prompt,
                             argv.prompt_images.clone(),
                             runtime.turn_cancel(),
+                            turn_message_id,
                         ),
                 ),
             )
@@ -958,7 +1026,9 @@ async fn run_stream_json_print_inner(
     };
     // Native holds closed-input results while delegated agents/workflows or
     // their completion notifications remain; suggestions share this boundary.
-    publisher.publish(&turn_result, 0).await;
+    publisher
+        .publish_with_turn_message_id(&turn_result, 0, turn_message_id)
+        .await;
     if publisher.last_result_failed {
         prompt_suggestions.discard();
         stop_print_tasks(runtime).await;
@@ -1649,7 +1719,14 @@ async fn run_stream_json_input_loop_inner(
             // This local command publishes a zeroed result, not an admitted
             // model query carrying the inbound SDK request marker.
             let _ = stream.begin_request_markers(None, Vec::new(), false);
-            set_result_position(runtime, &stream, input_rx.len().await, publisher.next_index).await;
+            set_result_position(
+                runtime,
+                &stream,
+                input_rx.len().await,
+                publisher.next_index,
+                None,
+            )
+            .await;
             run_stream_compact_command(
                 argv,
                 runtime,
@@ -2509,6 +2586,7 @@ async fn set_result_position(
     stream: &StreamJsonStream,
     queued: usize,
     index: u64,
+    cancelled_without_assistant: Option<&CancelledWithoutAssistantResult>,
 ) {
     let metrics = runtime.orchestrator.completed_turn_metrics();
     let subagent_stats = runtime.agent_session_statistics().await;
@@ -2524,20 +2602,94 @@ async fn set_result_position(
     });
     stream
         .set_result_metadata(crate::headless::stream_json::StreamJsonResultMetadata {
-            is_error: api_error,
-            terminal_reason,
+            is_error: api_error || cancelled_without_assistant.is_some(),
+            terminal_reason: cancelled_without_assistant
+                .map(|result| result.terminal_reason.clone())
+                .or(terminal_reason),
             queued_turn_count: u64::try_from(queued).unwrap_or(u64::MAX),
             result_index: index,
-            num_turns: metrics.as_ref().map(|value| u64::from(value.num_turns)),
+            num_turns: cancelled_without_assistant
+                .map(|result| result.num_turns)
+                .or_else(|| metrics.as_ref().map(|value| u64::from(value.num_turns))),
             api_error_status: metrics.as_ref().and_then(|value| value.api_error_status),
-            stop_reason: api_error_stop_reason
-                .or_else(|| metrics.and_then(|value| value.model_stop_reason)),
+            stop_reason: if cancelled_without_assistant.is_some() {
+                None
+            } else {
+                api_error_stop_reason.or_else(|| metrics.and_then(|value| value.model_stop_reason))
+            },
             subagent_stats: subagent_stats.map(|stats| {
                 serde_json::to_value(stats).expect("agent statistics are JSON scalars")
             }),
             ..Default::default()
         })
         .await;
+}
+
+async fn cancelled_without_assistant_result(
+    runtime: &Runtime,
+    result: &Result<orchestrator::TurnOutcome, orchestrator::OrchestratorError>,
+    turn_message_id: lingxi_core::types::MessageId,
+) -> Option<CancelledWithoutAssistantResult> {
+    if !matches!(result, Ok(orchestrator::TurnOutcome::Cancelled)) {
+        return None;
+    }
+    let session_handle = runtime.orchestrator.session();
+    let (result_type, num_turns) = {
+        let session = session_handle.lock().await;
+        // History compaction can replace or shorten its prefix while this
+        // request is in flight. Anchor the result to the persisted prompt ID,
+        // which the streaming entry point carries through that replacement.
+        let query_start = session
+            .history
+            .iter()
+            .position(|message| message.id() == turn_message_id)?;
+        let current_turn = session.history.get(query_start..)?;
+        let last = current_turn.last()?;
+        let result_type = match last {
+            lingxi_core::types::ConversationMessage::User { is_meta: false, .. }
+                if last.text_content() == USER_INTERRUPTION_MESSAGE =>
+            {
+                "user"
+            }
+            _ => return None,
+        };
+        if current_turn.iter().any(|message| {
+            matches!(
+                message,
+                lingxi_core::types::ConversationMessage::Assistant { .. }
+            )
+        }) {
+            return None;
+        }
+        let user_messages = current_turn
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    lingxi_core::types::ConversationMessage::User { is_meta: false, .. }
+                )
+            })
+            .count();
+        (result_type, u64::try_from(user_messages).ok()?)
+    };
+    if num_turns == 0 {
+        return None;
+    }
+    let stop_reason = runtime
+        .orchestrator
+        .completed_turn_metrics()
+        .and_then(|metrics| metrics.model_stop_reason)
+        .unwrap_or_else(|| "null".to_owned());
+    Some(CancelledWithoutAssistantResult {
+        diagnostic: format!(
+            "[ede_diagnostic] result_type={result_type} last_content_type=n/a stop_reason={stop_reason}"
+        ),
+        num_turns,
+        terminal_reason: turn_outcome_terminal_reason(
+            &orchestrator::TurnOutcome::Cancelled,
+        )
+        .to_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -2547,6 +2699,175 @@ mod result_publication_tests {
     use lingxi_core::host::task_registry::{TaskCreateInput, TaskRegistryHandle};
     use orchestrator::test_support::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn pending_stream_interrupt_publishes_native_error_frame_but_exits_successfully() {
+        let root = tempfile::tempdir().unwrap();
+        let (output, receive) = tokio::io::duplex(128 * 1024);
+        let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(output)));
+        let runtime = super::tests::fixture_runtime(stream.clone(), root.path()).await;
+        let session_handle = runtime.orchestrator.session();
+        let turn_message_id = lingxi_core::types::MessageId::new();
+        {
+            let mut session = session_handle.lock().await;
+            session
+                .history
+                .push(lingxi_core::types::ConversationMessage::user(
+                    lingxi_core::types::MessageId::new(),
+                    "older context row".into(),
+                ));
+            let interruption_id = lingxi_core::types::MessageId::new();
+            session
+                .history
+                .push(lingxi_core::types::ConversationMessage::user(
+                    turn_message_id,
+                    "query prompt".into(),
+                ));
+            session
+                .history
+                .push(lingxi_core::types::ConversationMessage::user(
+                    interruption_id,
+                    USER_INTERRUPTION_MESSAGE.into(),
+                ));
+
+            // Model a compaction replacement that drops old history while
+            // retaining the in-flight query's stable message ID.
+            session.history = vec![
+                lingxi_core::types::ConversationMessage::compact_summary(
+                    lingxi_core::types::MessageId::new(),
+                    "compacted older context".into(),
+                ),
+                lingxi_core::types::ConversationMessage::user(
+                    turn_message_id,
+                    "query prompt".into(),
+                ),
+                lingxi_core::types::ConversationMessage::user(
+                    interruption_id,
+                    USER_INTERRUPTION_MESSAGE.into(),
+                ),
+            ];
+        }
+        let mut publisher = NativeQueryResultPublisher {
+            runtime: &runtime,
+            stream: &stream,
+            prompt_suggestions: SdkPromptSuggestions::new(false),
+            suggestion_turn_origin: None,
+            input_status: None,
+            result_hold: Default::default(),
+            max_budget_usd: None,
+            fast_mode_state: "off",
+            fast_mode_disabled_reason: None,
+            betas: &[],
+            next_index: 0,
+            last_error_published: false,
+            last_result_failed: false,
+        };
+
+        publisher
+            .publish_with_turn_message_id(
+                &Ok(orchestrator::TurnOutcome::Cancelled),
+                0,
+                Some(turn_message_id),
+            )
+            .await;
+
+        assert!(runtime
+            .execution_interrupted
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert!(publisher.last_error_published);
+        assert!(
+            !publisher.last_result_failed,
+            "an interrupted result is an error frame but Native print mode exits 0"
+        );
+        stream.finish().await.unwrap();
+        let mut lines = tokio::io::BufReader::new(receive).lines();
+        let result = next_result(&mut lines, &mut Vec::new()).await;
+        assert_eq!(result["type"], "result");
+        assert_eq!(result["is_error"], true);
+        assert_eq!(result["terminal_reason"], "aborted_streaming");
+        assert_eq!(result["subtype"], "error_during_execution");
+        assert_eq!(result["stop_reason"], serde_json::Value::Null);
+        assert_eq!(result["num_turns"], 2);
+        assert_eq!(
+            result["errors"][0],
+            "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"
+        );
+    }
+
+    #[tokio::test]
+    async fn other_cancelled_turn_shapes_keep_the_existing_success_projection() {
+        for (assistant_before_interrupt, interruption) in [
+            (true, USER_INTERRUPTION_MESSAGE),
+            (false, "[Request interrupted by user for tool use]"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let (output, receive) = tokio::io::duplex(128 * 1024);
+            let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(output)));
+            let runtime = super::tests::fixture_runtime(stream.clone(), root.path()).await;
+            let session_handle = runtime.orchestrator.session();
+            let turn_message_id = lingxi_core::types::MessageId::new();
+            {
+                let mut session = session_handle.lock().await;
+                session
+                    .history
+                    .push(lingxi_core::types::ConversationMessage::user(
+                        turn_message_id,
+                        "turn prompt".into(),
+                    ));
+                if assistant_before_interrupt {
+                    session
+                        .history
+                        .push(lingxi_core::types::ConversationMessage::Assistant {
+                            id: lingxi_core::types::MessageId::new(),
+                            content: vec![lingxi_core::types::ContentBlock::Text {
+                                text: "partial answer".into(),
+                                citations: None,
+                            }],
+                            stop_reason: None,
+                            resumable: None,
+                            per_turn_effort: None,
+                        });
+                }
+                session
+                    .history
+                    .push(lingxi_core::types::ConversationMessage::user(
+                        lingxi_core::types::MessageId::new(),
+                        interruption.into(),
+                    ));
+            }
+            let mut publisher = NativeQueryResultPublisher {
+                runtime: &runtime,
+                stream: &stream,
+                prompt_suggestions: SdkPromptSuggestions::new(false),
+                suggestion_turn_origin: None,
+                input_status: None,
+                result_hold: Default::default(),
+                max_budget_usd: None,
+                fast_mode_state: "off",
+                fast_mode_disabled_reason: None,
+                betas: &[],
+                next_index: 0,
+                last_error_published: false,
+                last_result_failed: false,
+            };
+            publisher
+                .publish_with_turn_message_id(
+                    &Ok(orchestrator::TurnOutcome::Cancelled),
+                    0,
+                    Some(turn_message_id),
+                )
+                .await;
+
+            assert!(!publisher.last_result_failed);
+            assert!(!publisher.last_error_published);
+            stream.finish().await.unwrap();
+            let mut lines = tokio::io::BufReader::new(receive).lines();
+            let result = next_result(&mut lines, &mut Vec::new()).await;
+            assert_eq!(result["subtype"], "success");
+            assert_eq!(result["terminal_reason"], "completed");
+            assert_eq!(result["is_error"], false);
+        }
+    }
 
     #[tokio::test]
     async fn graceful_model_error_keeps_success_envelope_but_fails_execution() {
