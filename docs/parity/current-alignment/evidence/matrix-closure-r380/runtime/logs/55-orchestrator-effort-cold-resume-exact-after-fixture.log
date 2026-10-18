@@ -1,0 +1,10 @@
+$ source '/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/frozen-build-env.sh' && cargo test --locked --offline -p orchestrator --test effort_cold_resume_295_test cold_resume_295_fresh_process_preserves_effort_into_next_sdk_request -- --exact --nocapture
+   Compiling orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+    Finished `test` profile [unoptimized] target(s) in 2.28s
+     Running tests/effort_cold_resume_295_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/effort_cold_resume_295_test-4390b19af851ab93)
+
+running 1 test
+test cold_resume_295_fresh_process_preserves_effort_into_next_sdk_request ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+

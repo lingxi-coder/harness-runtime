@@ -21,6 +21,9 @@ pub enum CodecError {
     /// JSON parse failed.
     #[error("json parse error: {0}")]
     Json(#[from] serde_json::Error),
+    /// A protocol-specific decoder rejected a framed message.
+    #[error("message decode failed: {0}")]
+    MessageDecode(String),
     /// Underlying I/O error from the framed transport.
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -31,6 +34,25 @@ pub const DEFAULT_MAX_HEADER_SIZE: usize = 64 * 1024;
 
 /// Default maximum frame size — matches Claude Code's 32 MiB LSP body cap.
 pub const DEFAULT_MAX_FRAME_SIZE: usize = 32 * 1024 * 1024;
+
+/// Decoder behavior when a complete line contains a message rejected by its
+/// configured decode policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeErrorHandling {
+    /// Surface the error and terminate this framed stream, preserving the
+    /// generic JSON-RPC codec's historical behavior.
+    Return,
+    /// Emit a diagnostic and continue at the next line boundary. Protocols
+    /// whose source transport catches per-line decode errors can opt into this.
+    Skip,
+}
+
+/// A protocol-specific decoder for one complete framed JSON message.
+pub type MessageDecoder = fn(&[u8]) -> Result<Message, CodecError>;
+
+fn decode_generic_message(frame: &[u8]) -> Result<Message, CodecError> {
+    Ok(serde_json::from_slice(frame)?)
+}
 
 /// `Content-Length: N\r\n\r\n<json>` codec — LSP and modern MCP framing.
 ///
@@ -230,12 +252,16 @@ fn is_header_name_token(name: &str) -> bool {
 #[derive(Debug)]
 pub struct LineCodec {
     max_frame_size: usize,
+    decoder: MessageDecoder,
+    decode_error_handling: DecodeErrorHandling,
 }
 
 impl Default for LineCodec {
     fn default() -> Self {
         Self {
             max_frame_size: DEFAULT_MAX_FRAME_SIZE,
+            decoder: decode_generic_message,
+            decode_error_handling: DecodeErrorHandling::Return,
         }
     }
 }
@@ -244,7 +270,27 @@ impl LineCodec {
     /// Construct a codec with a custom max frame size in bytes.
     #[must_use]
     pub fn with_max_frame_size(max_frame_size: usize) -> Self {
-        Self { max_frame_size }
+        Self {
+            max_frame_size,
+            ..Self::default()
+        }
+    }
+
+    /// Construct a line codec with a protocol-specific frame decoder.
+    ///
+    /// The generic decoder and its error behavior remain the default. MCP
+    /// stdio selects `Skip` to mirror its source transport's per-line error
+    /// callback, which continues reading the next line after a bad message.
+    #[must_use]
+    pub fn with_decoder(
+        decoder: MessageDecoder,
+        decode_error_handling: DecodeErrorHandling,
+    ) -> Self {
+        Self {
+            max_frame_size: DEFAULT_MAX_FRAME_SIZE,
+            decoder,
+            decode_error_handling,
+        }
     }
 }
 
@@ -292,8 +338,13 @@ impl Decoder for LineCodec {
                 return Err(CodecError::FrameTooLarge(line.len(), self.max_frame_size));
             }
 
-            let msg: Message = serde_json::from_slice(&line)?;
-            return Ok(Some(msg));
+            match (self.decoder)(&line) {
+                Ok(message) => return Ok(Some(message)),
+                Err(error) if self.decode_error_handling == DecodeErrorHandling::Skip => {
+                    tracing::warn!(%error, "line codec: rejected message frame; skipping line");
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
 }
@@ -523,6 +574,13 @@ mod line_codec_tests {
     use crate::messages::{Id, JsonPayload, Request};
     use serde_json::json;
 
+    fn reject_test_frame(frame: &[u8]) -> Result<Message, CodecError> {
+        if frame == b"invalid" {
+            return Err(CodecError::MessageDecode("test rejection".into()));
+        }
+        Ok(serde_json::from_slice(frame)?)
+    }
+
     #[test]
     fn encode_appends_lf_only() {
         let req = Request::new("ping", None, Id::Number(1));
@@ -568,6 +626,21 @@ mod line_codec_tests {
         buf.extend_from_slice(b"\n");
         let m = codec.decode(&mut buf).unwrap().expect("frame");
         assert!(matches!(m, Message::Request(_)));
+    }
+
+    #[test]
+    fn configured_decoder_can_skip_bad_line_and_continue() {
+        let mut codec = LineCodec::with_decoder(reject_test_frame, DecodeErrorHandling::Skip);
+        let mut buf = BytesMut::from(
+            &b"invalid\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n"[..],
+        );
+
+        let decoded = codec
+            .decode(&mut buf)
+            .expect("skip rejected frame")
+            .unwrap();
+        assert!(matches!(decoded, Message::Notification(_)));
+        assert!(codec.decode(&mut buf).unwrap().is_none());
     }
 
     #[test]

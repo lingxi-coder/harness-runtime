@@ -1,0 +1,35 @@
+{
+  "schema": "lingxi.claude-alignment-mcp-roots-replay-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:09:18.398145Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "package": "mcp",
+  "command": "cargo test --locked --offline -p mcp --test input_required_native_295_roots_test native_295_roots_list_replays_loose_params_and_forwards_captured_roots_response -- --exact",
+  "sourceHashFiles": [
+    "r380-mcp-roots-replay-sourcehashes-pre.txt",
+    "r380-mcp-roots-replay-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 2339,
+  "sourceStableDuringRun": true,
+  "sourceHashes": {
+    "Cargo.lock": "0e68e5a6f54332b205d579a6ce2e8c66975c34e10468ebebbbe79d8a40664451",
+    "crates/mcp/Cargo.toml": "10aa567cf472c1eac04ced9932e18a5cbc1fa5e2ea524a523cb4a51ff1efd131",
+    "crates/mcp/tests/input_required_native_295_roots_test.rs": "0543f17427e623a3446dc8b54c39687e4794a574423dc5ace5efaa141e13a763"
+  },
+  "fixtureRoots": [
+    "crates/mcp/tests/fixtures/native_mcp_roots_295"
+  ],
+  "exitCode": 0,
+  "testsSelected": 1,
+  "testsPassed": 1,
+  "testsFailed": 0,
+  "log": "logs/50-mcp-roots-replay.log",
+  "logSha256": "3877647bcd45022bb3c56c1e48bad626bc56620f38d8bbbc78ec4e65d8bc646d",
+  "sourceFilesChangedDuringRun": []
+}

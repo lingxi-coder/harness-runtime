@@ -1,0 +1,148 @@
+{
+  "status": "captured",
+  "native_binary": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "public_entrypoint": "pinned Native 2.1.295 CLI --print --output-format json",
+  "argv": [
+    "/usr/bin/sandbox-exec",
+    "-f",
+    "/private/tmp/r380-refusal-tools-q9jor8ck/native-child-network.sbpl",
+    "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "--bare",
+    "--print",
+    "--output-format",
+    "json",
+    "--tools",
+    "Bash",
+    "--allowedTools",
+    "Bash",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002952",
+    "Exercise the fixed synthetic refusal boundary response."
+  ],
+  "environment": {
+    "PATH": "/usr/bin:/bin",
+    "HOME": "/private/tmp/r380-refusal-tools-q9jor8ck/home",
+    "TMPDIR": "/private/tmp/r380-refusal-tools-q9jor8ck/tmp",
+    "LANG": "C.UTF-8",
+    "TZ": "UTC",
+    "TERM": "dumb",
+    "CLAUDE_CONFIG_DIR": "/private/tmp/r380-refusal-tools-q9jor8ck/config",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:58084",
+    "CLAUDE_CODE_DISABLE_REFUSAL_RETRY": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_TELEMETRY": "1",
+    "DO_NOT_TRACK": "1"
+  },
+  "dummy_api_key": {
+    "variable": "ANTHROPIC_API_KEY",
+    "value": "r380-refusal-disabled-localhost-dummy-key",
+    "real_secret_used": false
+  },
+  "refusal_retry_disabled": "1",
+  "fallback_configuration": "none; isolated HOME/config and project-only settings source",
+  "network_boundary": {
+    "listener": "127.0.0.1:58084",
+    "sandbox": "deny outbound except this exact loopback port; deny inbound",
+    "workspace_file_read_denied": "/Users/luolingfeng/lingxi",
+    "workspace_file_write_denied": "/Users/luolingfeng/lingxi",
+    "proxy_environment_inherited": false
+  },
+  "fixed_sse": {
+    "path": "capture/provider-response.sse.raw",
+    "sha256": "e229014104b365a2ce0c89402bc7f6ed7cd9ad9f0c7009ec7f909c9bf2c63f75",
+    "event_order": [
+      "message_start",
+      "text_block",
+      "Bash tool_use #1",
+      "Bash tool_use #2",
+      "message_delta(refusal)",
+      "message_stop"
+    ],
+    "tool_use_count": 2,
+    "tool_names": [
+      "Bash",
+      "Bash"
+    ],
+    "tool_ids": [
+      "toolu_r380_first",
+      "toolu_r380_second"
+    ],
+    "first_command": "/usr/bin/python3 -c \"import pathlib,time; pathlib.Path('.r380-refusal-first.marker').write_text('started_ns='+str(time.time_ns())+'\\n')\"; /bin/sleep 2; /usr/bin/python3 -c \"import pathlib,time; pathlib.Path('.r380-refusal-first.marker').open('a').write('completed_ns='+str(time.time_ns())+'\\n')\"",
+    "second_command": "/usr/bin/python3 -c \"import pathlib,time; pathlib.Path('.r380-refusal-second.marker').write_text('queued_ran_ns='+str(time.time_ns())+'\\n')\"",
+    "stop_reason": "refusal",
+    "stop_details": {
+      "type": "refusal",
+      "explanation": "R380 synthetic refusal fixture."
+    }
+  },
+  "request_count": {
+    "total": 0,
+    "post": 0,
+    "expected_post": 1
+  },
+  "requests": [],
+  "server_errors": [],
+  "server_thread_still_alive": false,
+  "native_exit_code": 65,
+  "timed_out": false,
+  "process_timeout_seconds": 18,
+  "owned_process_group_cleanup": null,
+  "elapsed_seconds": 0.103,
+  "launch_error": null,
+  "raw_artifacts": {
+    "stdout": {
+      "path": "run-001/capture/native.stdout.raw",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "stderr": {
+      "path": "run-001/capture/native.stderr.raw",
+      "bytes": 179,
+      "sha256": "3f827ee2cc715694479806b13991e4a9ecd5ccfcb59931f7708215bcfa59ae6b"
+    },
+    "session_jsonl": {
+      "path": "run-001/capture/native.session.jsonl.raw",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "found": false
+    },
+    "first_tool_marker": {
+      "path": "run-001/capture/marker-first.raw",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "contents": ""
+    },
+    "second_tool_marker": {
+      "path": "run-001/capture/marker-second.raw",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "contents": ""
+    },
+    "marker_timestamps_ns": {
+      "first_started": null,
+      "first_completed": null,
+      "second_queued_ran": null,
+      "refusal_final_segment_send_started": null,
+      "first_started_before_refusal_final_segment": null,
+      "first_completed_before_refusal_final_segment": null,
+      "second_ran_before_refusal_final_segment": null
+    },
+    "provider_sse": {
+      "path": "capture/provider-response.sse.raw",
+      "bytes": 2092,
+      "sha256": "e229014104b365a2ce0c89402bc7f6ed7cd9ad9f0c7009ec7f909c9bf2c63f75"
+    },
+    "provider_http": {
+      "path": "capture/provider-response.http.raw",
+      "bytes": 2185,
+      "sha256": "e08a3be752eec7e8894e35693d81103f32a70bc8ba90a61a2c7ee1a203b5b382"
+    }
+  },
+  "scratch_cleanup": "only this invocation's /private/tmp/r380-refusal-tools-* directory; capture files remain under acceptance",
+  "scope": "one synthetic refusal SSE with two Bash tool blocks; not a general Native parity claim",
+  "runner_sha256": "8f09d3fde38327c790474bce847402020ae145eabb4aabc7effcaf3b6c3efdac",
+  "scratch_removed": true
+}

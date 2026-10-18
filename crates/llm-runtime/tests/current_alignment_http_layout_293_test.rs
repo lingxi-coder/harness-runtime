@@ -42,7 +42,7 @@ const SDK_SYSTEM: &str = "You are a Claude agent, built on Anthropic's Claude Ag
 const CUSTOM_SYSTEM: &str = "You are a local deterministic headless fixture.";
 const KEY_ENV: &str = "LINGXI_M2_HTTP_LAYOUT_DUMMY_KEY";
 const NATIVE_ASSUME_FIRST_PARTY_ENV: &str = "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL";
-const NATIVE_BARE_ENV: &str = "CLAUDE_CODE_SIMPLE";
+const BARE_POLICY_ENV: &str = branding::SIMPLE_ENV;
 const DUMMY_KEY: &str = "sk-ant-headless-local-fixture-only";
 static HTTP_LAYOUT_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -293,7 +293,7 @@ async fn capture_anthropic(
     // The checked-in Native capture ran without the process-level assume gate.
     // Host NativeFetch admission below is a separate explicit endpoint choice.
     let _native_assume = EnvRestore::set(NATIVE_ASSUME_FIRST_PARTY_ENV, None);
-    let _bare = EnvRestore::set(NATIVE_BARE_ENV, Some("1"));
+    let _bare = EnvRestore::set(BARE_POLICY_ENV, Some("1"));
     let base_url = format!("http://{address}");
     // Native's TBC predicate reads ANTHROPIC_BASE_URL from the process
     // environment. The explicit service endpoint selects the loopback route

@@ -1,0 +1,63 @@
+{
+  "target": "Claude Code 2.1.295",
+  "binary_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "query_source_sha256": "2612bbe89324a30f9c773abfc2cc83802fd0340cd6283094ea1ed0413ba21e9d",
+  "classification": "source-semantic proof, not public byte capture",
+  "assertion": "Safety retry reuses Pe.turnCount; native fallback reissues current API stream; only ordinary next turn increases turn count.",
+  "excerpts": [
+    {
+      "name": "initial_turn_count",
+      "query_local_offset": 126413,
+      "absolute_binary_offset": 203050831,
+      "excerpt_start": 203050651,
+      "excerpt_end_exclusive": 203051101,
+      "sha256": "e6e40caf6817f0959c80418c28b37fead8a0e947c1e3c10da413ae976588c010",
+      "source": "=\"sdk\",le=Y&&!e.toolUseContext.agentId;if(Y)try{sSo(),_hs()}catch(p){c(p)}let qe=ei(e.messages),it=Ap(qe),W={guards:{...Rs,refusalRetrySpent:!1,stopHookActive:e.stopHookActive??!1,turnCount:1},messages:e.messages,toolUseContext:e.toolUseContext,compactTracking:void 0,transition:void 0},at=void 0,St=Cl(),ft=Sos(qe,W.toolUseContext,b);using Et=nJr(W.messages,W.toolUseContext,b,ft);if(Et&&rJr()){let p=[];try{if(le)CA(\"memory_recall_wait\");let Pe;try"
+    },
+    {
+      "name": "read_turn_count",
+      "query_local_offset": 130904,
+      "absolute_binary_offset": 203055322,
+      "excerpt_start": 203055142,
+      "excerpt_end_exclusive": 203055592,
+      "sha256": "8e8b35b298bc4e280b5ec3cd70fcf34dc4fd2c27723100eeba0c68dbf81d283a",
+      "source": "unt:Ht,hasAttemptedReactiveCompact:To,reactiveCompactDeeperPass:gn,thinkingOnlyNudged:Ls,malformedToolUseRetried:dd,refusalRetrySpent:ud,stopHookActive:Co,stopHookBlockingCount:br,turnCount:yn}=Pe,cd=W.transition===void 0?e.maxOutputTokensOverride:void 0,Qe=Po;if(Rl(W.transition,p.agentId),yield{type:\"stream_request_start\"},Hf(\"query_fn_entry\"),!p.agentId)Um(\"query_started\");let qs=performance.now(),je=p.queryTracking?{chainId:p.queryTracking.cha"
+    },
+    {
+      "name": "refusal_reissue",
+      "query_local_offset": 175765,
+      "absolute_binary_offset": 203100183,
+      "excerpt_start": 203100003,
+      "excerpt_end_exclusive": 203100453,
+      "sha256": "9a39c1cb01ac7795a2f0f713839ea61ff96d850e7c7bbe7f5d0f123359efcacd",
+      "source": "Source:b,queryChainId:mt,queryDepth:je.depth,deps:w,makeUserMessage:xe}),kept:ie}}catch(z){c(z)}if(A)yield A;if(ae){yield*ae.notRun,yield ae.notice,yield ae.nudge,W={guards:{...Pe,refusalRetrySpent:!0,...Rt.length>0&&{stopHookBlockingCount:0}},messages:[...P,...ae.kept,...$e,...ae.notRun,ae.nudge],toolUseContext:p,compactTracking:Je,transition:{reason:\"refusal_retry\",model:Se},prevToolDurations:ge.toolDurations.length>0?[...ge.toolDurations]:void"
+    },
+    {
+      "name": "ordinary_next_turn_increment",
+      "query_local_offset": 192500,
+      "absolute_binary_offset": 203116918,
+      "excerpt_start": 203116738,
+      "excerpt_end_exclusive": 203117188,
+      "sha256": "90eb442ee0a340b8b7d75efce3b59e1938c6795348303e4b1c3be7a9be1ad479",
+      "source": "pped)if(te!==void 0)yield{type:\"command_lifecycle\",uuid:te,state:\"started\"},yield{type:\"command_lifecycle\",uuid:te,state:\"completed\"};for(let te of Nr.notices)yield te;let h=0,A=0,ae,z=id(GKo(()=>be,{latch:!1})),ie=new Set,re=An.filter(SEt),V=0;for await(let te of rle(null,be,null,An,w,[...P,...X,...$e],b,{conversationLatches:Tt})){let he;if(te.attachment.type===\"queued_command\"&&te.attachment.commandMode!==void 0){if(he=re[V],V++,he!==void 0&&!z"
+    },
+    {
+      "name": "max_turn_check",
+      "query_local_offset": 195052,
+      "absolute_binary_offset": 203119470,
+      "excerpt_start": 203119290,
+      "excerpt_end_exclusive": 203119740,
+      "sha256": "ce3320000b46663eb029f943d60f246fcdbcbebbf3e749b3f4eb1bc0736eda6f",
+      "source": "t:$e.length,fileChangeAttachmentCount:Md,queryChainId:mt,queryDepth:je.depth});let Ed={...be,queryTracking:je};if(Yn!==void 0)return yield tn({type:\"max_turns_reached\",maxTurns:Yn,turnCount:Kn},w),io(p,b),yield*Gt(be,[...P,...X,...$e],{stopHookActive:Co}),{reason:\"max_turns\",turnCount:Kn};Hf(\"query_recursive_call\"),W={guards:{...Pe,...Rs,turnCount:Kn},messages:[...P,...X,...$e],toolUseContext:Ed,compactTracking:Je,pendingToolUseSummary:ri,transit"
+    },
+    {
+      "name": "ordinary_next_state",
+      "query_local_offset": 195212,
+      "absolute_binary_offset": 203119630,
+      "excerpt_start": 203119450,
+      "excerpt_end_exclusive": 203119900,
+      "sha256": "ce963cd3cd32c29f2a7f97f202b71b62140a4767e3707675958f138768e335fd",
+      "source": "eached\",maxTurns:Yn,turnCount:Kn},w),io(p,b),yield*Gt(be,[...P,...X,...$e],{stopHookActive:Co}),{reason:\"max_turns\",turnCount:Kn};Hf(\"query_recursive_call\"),W={guards:{...Pe,...Rs,turnCount:Kn},messages:[...P,...X,...$e],toolUseContext:Ed,compactTracking:Je,pendingToolUseSummary:ri,transition:{reason:\"next_turn\"},prevToolDurations:ge.toolDurations.length>0?[...ge.toolDurations]:void 0}}}function Op(e,o,n,r){switch(e){case\"overloaded\":case\"server_"
+    }
+  ]
+}

@@ -395,6 +395,8 @@ impl ConversationOrchestrator {
             is_compact_summary: false,
             is_visible_in_transcript_only: false,
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             origin: None,
             turn_origin: None,
             turn_companion: None,

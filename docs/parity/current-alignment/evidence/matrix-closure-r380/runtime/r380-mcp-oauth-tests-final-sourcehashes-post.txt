@@ -1,0 +1,6 @@
+36a7f0878a2683de100d1e9a5b80eb1642ee37d22450005534d477bb64107551  crates/mcp/src/oauth.rs
+1018497841abd2c516a43104482095bb4d271099109881be1f341817511c2b68  crates/mcp/src/oauth/callback.rs
+397beb19d13d786d6294c9b0f38cc86736a6eb1393b2ac1213944b8cdb235889  crates/mcp/src/registry/authentication.rs
+0b1b89254611b6cccb77b13b7abae0bd529811ef7b1fd355757660f8794a0289  crates/mcp/src/registry/tests/tests.rs
+6f461870286bfe2112e6398dd3b1609f82dc49d7feb1694f333f70ecdeff0c38  crates/mcp/tests/oauth_flow_test.rs
+2f9456e8b1d289bfc8dab0005a5ba9a865b7ccf044a16221a9ec214a9fec5409  Cargo.lock

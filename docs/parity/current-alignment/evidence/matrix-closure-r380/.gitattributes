@@ -1,0 +1,3 @@
+# Preserve immutable capture, source-probe and log bytes exactly.
+# This directory contains evidence; production source checks remain unchanged.
+* -text -whitespace

@@ -1,0 +1,82 @@
+164-   Compiling nu-ansi-term v0.50.3
+165-   Compiling platform-posix v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/posix)
+166-   Compiling orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+167:warning: unused import: `NATIVE_REFUSAL_SAFETY_RETRY_USER_MESSAGE`
+168-  --> crates/orchestrator/src/turn_loop.rs:99:5
+169-   |
+170-99 |     NATIVE_REFUSAL_SAFETY_RETRY_USER_MESSAGE,
+171-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+172-   |
+173-   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+174-
+175-   Compiling tracing-subscriber v0.3.23
+176-   Compiling tool-mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/mcp)
+177:error[E0308]: mismatched types
+178-   --> crates/orchestrator/src/streaming_executor.rs:794:60
+179-    |
+180-794 |                 result.publication_guard = Some(Arc::clone(&guard));
+181-    |                                                 ---------- ^^^^^^ expected `&Arc<dyn HookPublicationGuard>`, found `&Arc<ToolDispatchPublicationFence>`
+182-    |                                                 |
+183-    |                                                 arguments to this function are incorrect
+184-    |
+185-    = note: expected reference `&std::sync::Arc<dyn HookPublicationGuard>`
+186-               found reference `&std::sync::Arc<ToolDispatchPublicationFence>`
+187-    = help: `ToolDispatchPublicationFence` implements `HookPublicationGuard` so you could box the found value and coerce it to the trait object `Box<dyn HookPublicationGuard>`, you will have to change the expected type as well
+188-note: method defined here
+189-   --> /Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/clone.rs:236:8
+190-    |
+191-236 |     fn clone(&self) -> Self;
+192-    |        ^^^^^
+193-
+194:error[E0308]: mismatched types
+195-   --> crates/orchestrator/src/streaming_executor.rs:837:52
+196-    |
+197-837 |                 publication_guard: Some(Arc::clone(&publication_guard)),
+198-    |                                         ---------- ^^^^^^^^^^^^^^^^^^ expected `&Arc<dyn HookPublicationGuard>`, found `&Arc<ToolDispatchPublicationFence>`
+199-    |                                         |
+200-    |                                         arguments to this function are incorrect
+201-    |
+202-    = note: expected reference `&std::sync::Arc<dyn HookPublicationGuard>`
+203-               found reference `&std::sync::Arc<ToolDispatchPublicationFence>`
+204-    = help: `ToolDispatchPublicationFence` implements `HookPublicationGuard` so you could box the found value and coerce it to the trait object `Box<dyn HookPublicationGuard>`, you will have to change the expected type as well
+205-note: method defined here
+206-   --> /Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/clone.rs:236:8
+207-    |
+208-236 |     fn clone(&self) -> Self;
+209-    |        ^^^^^
+210-
+211:error[E0631]: type mismatch in function arguments
+212-   --> crates/orchestrator/src/turn_loop/refusal_retry.rs:57:22
+213-    |
+214- 57 |         .is_some_and(ConversationOrchestrator::route_uses_native_model_catalog)
+215-    |          ----------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected due to this
+216-    |          |
+217-    |          required by a bound introduced by this call
+218-    |
+219-   ::: crates/orchestrator/src/conversation/model.rs:112:5
+220-    |
+221-112 |     pub(crate) fn route_uses_native_model_catalog(route: &llm_runtime::MediaRoute) -> bool {
+222-    |     -------------------------------------------------------------------------------------- found signature defined here
+223-    |
+224-    = note: expected function signature `fn(MediaRoute) -> _`
+225-               found function signature `fn(&MediaRoute) -> _`
+226-note: required by a bound in `std::option::Option::<T>::is_some_and`
+227-   --> /Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:661:44
+228-    |
+229-661 |     pub const fn is_some_and(self, f: impl [const] FnOnce(T) -> bool + [const] Destruct) -> bool {
+230-    |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Option::<T>::is_some_and`
+231-help: consider wrapping the function in a closure
+--
+239-112 +     pub(crate) fn route_uses_native_model_catalog(route: llm_runtime::MediaRoute) -> bool {
+240-    |
+241-
+242:error[E0063]: missing fields `refusal_api_error_staged` and `refusal_retry_had_interrupted_tool` in initializer of `PumpedTurn`
+243-    --> crates/orchestrator/src/conversation/drivers/mod.rs:4290:5
+244-     |
+245-4290 |     PumpedTurn {
+246-     |     ^^^^^^^^^^ missing `refusal_api_error_staged` and `refusal_retry_had_interrupted_tool`
+247-
+248-Some errors have detailed explanations: E0063, E0308, E0631.
+249-For more information about an error, try `rustc --explain E0063`.
+250:warning: `orchestrator` (lib) generated 1 warning
+251:error: could not compile `orchestrator` (lib) due to 4 previous errors; 1 warning emitted

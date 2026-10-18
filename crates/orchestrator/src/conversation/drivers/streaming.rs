@@ -198,6 +198,7 @@ struct PumpedStreamingIteration<'a> {
     settlement: crate::streaming_loop::StreamToolSettlement,
     next_mod_response: Option<OpenedStreamingIteration<'a>>,
     exec: crate::streaming_executor::StreamingToolExecutor<'a>,
+    request_model: String,
     model: String,
     model_profile: Option<String>,
     wire_tools: Vec<lingxi_core::host::SourceToolWireDefinition>,
@@ -786,6 +787,8 @@ enum FinalizedStreamingIteration<'a> {
 struct FinalizedStreamingData<'a> {
     pumped: crate::streaming_loop::PumpedTurn,
     next_mod_response: Option<OpenedStreamingIteration<'a>>,
+    request_model: String,
+    native_catalog_refusal: bool,
     assistant_id: MessageId,
     tool_prevent_continuation: bool,
     post_tool_batch_dispatch: crate::turn_loop::PostToolBatchDispatch,
@@ -793,6 +796,7 @@ struct FinalizedStreamingData<'a> {
     partial_finalize: Option<crate::streaming_loop::PartialFinalizeCause>,
     partial_finalize_notice_id: Option<MessageId>,
     aborted_during_stream: bool,
+    refusal_tool_uses_settled: bool,
 }
 
 impl StreamingTurnDriver<'_> {
@@ -1588,6 +1592,7 @@ impl StreamingTurnDriver<'_> {
                                     query_history: request_history.clone(),
                                     assistant_message: assistant_message.clone(),
                                     same_turn_tool_uses: prior_tool_uses.clone(),
+                                    refusal_call_boundary: None,
                                 },
                             )
                             .await?;
@@ -2024,6 +2029,7 @@ impl StreamingTurnDriver<'_> {
                     query_history: request_history.clone(),
                     assistant_message: assistant_message.clone(),
                     same_turn_tool_uses: prior_tool_uses.clone(),
+                    refusal_call_boundary: None,
                 },
             )
             .await?;
@@ -2989,6 +2995,7 @@ impl StreamingTurnDriver<'_> {
             settlement,
             next_mod_response,
             exec,
+            request_model,
             model: response_model,
             model_profile: response_profile,
             wire_tools,
@@ -3023,6 +3030,7 @@ impl StreamingTurnDriver<'_> {
             mut settlement,
             next_mod_response,
             mut exec,
+            request_model,
             model,
             model_profile,
             wire_tools,
@@ -3322,6 +3330,8 @@ impl StreamingTurnDriver<'_> {
                 api_error_status: None,
                 terminal_reason: None,
                 inner_stop_reason: None,
+                inner_stop_details: None,
+                refused_message_id: None,
                 truncated_after_output: crate::streaming_loop::partial_is_text_continuable(&pumped),
             };
             partial_finalize_notice_id = Some(
@@ -3357,13 +3367,38 @@ impl StreamingTurnDriver<'_> {
             .as_ref()
             .is_some_and(CancellationToken::is_cancelled);
 
+        // Ko gates both refusal tool settlement and the same-model retry. When
+        // Ko is false, Native keeps the ordinary tool executor live: queued
+        // calls can finish, their results feed the generic needsFollowUp pass,
+        // and a refusal API-error row is persisted before those results.
+        let native_catalog_refusal = pumped.stop_reason.as_deref() == Some("refusal")
+            && pumped.server_fallback_events.is_empty()
+            && !aborted_during_stream
+            && crate::turn_loop::native_refusal_retry_route(orch, &request_model).await;
+        let refusal_retry_enabled = crate::turn_loop::native_refusal_retry_enabled(
+            &orch.config.query_source,
+            loop_state.recovery.refusal_retry_spent,
+        );
+        let refusal_tool_uses_settled = native_catalog_refusal && refusal_retry_enabled;
+        if native_catalog_refusal && !refusal_retry_enabled && !pumped.tool_uses.is_empty() {
+            pumped.refusal_api_error_staged = orch
+                .stage_refusal_api_error_row(
+                    &request_model,
+                    pumped.stop_details.as_ref(),
+                    pumped.response_message_id.as_deref(),
+                )
+                .await?;
+        }
+
         let (tool_prevent_continuation, post_tool_batch_dispatch) = orch
             .drive_streaming_tools(
                 &mut exec,
                 &mut pumped,
                 &mut settlement,
                 &tool_use_parent_uuids,
+                assistant_id,
                 &assistant_uuid,
+                refusal_tool_uses_settled,
             )
             .await?;
 
@@ -3371,6 +3406,8 @@ impl StreamingTurnDriver<'_> {
             FinalizedStreamingData {
                 pumped,
                 next_mod_response,
+                request_model,
+                native_catalog_refusal,
                 assistant_id,
                 tool_prevent_continuation,
                 post_tool_batch_dispatch,
@@ -3378,6 +3415,7 @@ impl StreamingTurnDriver<'_> {
                 partial_finalize,
                 partial_finalize_notice_id,
                 aborted_during_stream,
+                refusal_tool_uses_settled,
             },
         ))
     }
@@ -3740,6 +3778,8 @@ impl StreamingTurnDriver<'_> {
                 let FinalizedStreamingData {
                     pumped,
                     next_mod_response,
+                    request_model,
+                    native_catalog_refusal,
                     assistant_id,
                     tool_prevent_continuation,
                     post_tool_batch_dispatch,
@@ -3747,6 +3787,7 @@ impl StreamingTurnDriver<'_> {
                     partial_finalize,
                     partial_finalize_notice_id,
                     aborted_during_stream,
+                    refusal_tool_uses_settled,
                 } = finalized;
 
                 // A3: accumulate this step's output tokens (TS
@@ -3906,19 +3947,33 @@ impl StreamingTurnDriver<'_> {
                     .decide_streaming_disposition(
                         loop_state,
                         &pumped,
+                        &request_model,
+                        native_catalog_refusal,
                         assistant_id,
                         tool_prevent_continuation,
                         post_tool_batch_dispatch,
                         pre_batch_mcp_tool_count,
+                        refusal_tool_uses_settled,
                     )
                     .await?
                 {
                     StreamingIterationDisposition::Continue(transition) => {
+                        if transition == crate::turn_loop::NativeQueryTransition::RefusalReissue {
+                            loop_state.refusal_reissue_pending = true;
+                        }
                         loop_state.native_query_depth = crate::turn_loop::native_query_depth_after(
                             loop_state.native_query_depth,
                             transition,
                         );
-                        let next = if pumped.tool_uses.is_empty() {
+                        let next = if transition
+                            == crate::turn_loop::NativeQueryTransition::RefusalReissue
+                        {
+                            // A refusal retry/fallback is a new model reissue,
+                            // not the next pre-opened response from an old Mod
+                            // stream. Returning to the outer loop runs the
+                            // one-shot refusal-reissue guard before that call.
+                            None
+                        } else if pumped.tool_uses.is_empty() {
                             next_mod_response
                         } else {
                             Self::next_mod_response(next_mod_response).await
@@ -4111,6 +4166,7 @@ impl StreamingTurnDriver<'_> {
         // 1. Append the user prompt (+ any pasted images) to session history.
         // `images` arrives already decoded (path-based callers ran `load_images`
         // first; the bridge converts inline `ImageRefDto`s straight to sources).
+        let mut reused_unanswered_user_row = false;
         let submissions: Vec<(QueuedPromptInput, ConversationMessage)> = match queued_inputs {
             Some(inputs) => {
                 let mut submissions = Vec::with_capacity(inputs.len());
@@ -4162,20 +4218,54 @@ impl StreamingTurnDriver<'_> {
                 submissions
             }
             None => {
-                let mut message = super::user_message_from_projection(
-                    message_id.unwrap_or_default(),
-                    &prompt_projection,
-                    !in_human_turn,
-                    images.clone(),
-                );
-                let native_source =
-                    crate::native_user_message_source::current().unwrap_or_default();
-                orch.apply_native_user_message_source(&mut message, &native_source)
+                let resumed_unanswered_user = if in_human_turn && !transient_rewake {
+                    if let Some(message_id) = message_id {
+                        let session = orch.session.lock().await;
+                        session
+                            .message_turn_is_unanswered(message_id)
+                            .then(|| {
+                                session
+                                    .history
+                                    .iter()
+                                    .find(|message| {
+                                        message.id() == message_id
+                                            && matches!(
+                                                message,
+                                                ConversationMessage::User { is_meta: false, .. }
+                                            )
+                                    })
+                                    .cloned()
+                            })
+                            .flatten()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let mut message = match resumed_unanswered_user {
+                    Some(message) => {
+                        reused_unanswered_user_row = true;
+                        message
+                    }
+                    None => super::user_message_from_projection(
+                        message_id.unwrap_or_default(),
+                        &prompt_projection,
+                        !in_human_turn,
+                        images.clone(),
+                    ),
+                };
+                if !reused_unanswered_user_row {
+                    orch.apply_native_user_message_source(
+                        &mut message,
+                        &crate::native_user_message_source::current().unwrap_or_default(),
+                    )
                     .await;
-                if let (Some(projected), ConversationMessage::User { content, .. }) =
-                    (projected_content, &mut message)
-                {
-                    *content = projected.blocks;
+                    if let (Some(projected), ConversationMessage::User { content, .. }) =
+                        (projected_content, &mut message)
+                    {
+                        *content = projected.blocks;
+                    }
                 }
                 vec![(
                     QueuedPromptInput {
@@ -4346,19 +4436,21 @@ impl StreamingTurnDriver<'_> {
                 for (index, ((input, message), context)) in
                     submissions.iter().zip(&mod_contexts).enumerate()
                 {
-                    if let Some(identity) = &input.pending_prompt_identity {
-                        let persisted_message = orch
-                            .persist_pending_prompt_queued_message_once(
-                                message,
-                                input,
-                                &identity.prompt_id,
-                            )
-                            .await?;
-                        orch.append_pending_prompt_message_to_history_once(&persisted_message)
-                            .await?;
-                    } else {
-                        orch.session.lock().await.history.push(message.clone());
-                        orch.persist_queued_message_to_jsonl(message, input).await;
+                    if !reused_unanswered_user_row {
+                        if let Some(identity) = &input.pending_prompt_identity {
+                            let persisted_message = orch
+                                .persist_pending_prompt_queued_message_once(
+                                    message,
+                                    input,
+                                    &identity.prompt_id,
+                                )
+                                .await?;
+                            orch.append_pending_prompt_message_to_history_once(&persisted_message)
+                                .await?;
+                        } else {
+                            orch.session.lock().await.history.push(message.clone());
+                            orch.persist_queued_message_to_jsonl(message, input).await;
+                        }
                     }
                     if index == primary && !input.is_meta {
                         crate::request_context::persist_prompt_ingress_after_user(

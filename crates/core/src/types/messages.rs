@@ -1076,6 +1076,28 @@ pub enum ConversationMessage {
             skip_serializing_if = "Option::is_none"
         )]
         turn_origin: Option<Utf16JsonProjection>,
+        /// Native marks a user interruption row with this flag when the query
+        /// was interrupted by service shutdown. `None` matches the omitted
+        /// native slot; `Some(false)` is retained when reading an explicit
+        /// false value even though the Native producer currently emits only
+        /// `true` or omission.
+        #[serde(
+            default,
+            rename = "interruptedByShutdown",
+            skip_serializing_if = "Option::is_none"
+        )]
+        interrupted_by_shutdown: Option<bool>,
+        /// Refusal response ID attached to a Native safety-classifier retry
+        /// nudge. This stays in transcript metadata, outside provider and Mods
+        /// projections, and preserves the original JavaScript UTF-16 string.
+        #[serde(
+            default,
+            rename = "refusedMessageId",
+            serialize_with = "serialize_optional_root_string_projection",
+            deserialize_with = "deserialize_optional_root_string_projection",
+            skip_serializing_if = "Option::is_none"
+        )]
+        refused_message_id: Option<Utf16JsonProjection>,
         /// Model-facing representation of an admitted user row, when it differs
         /// from the original transcript row.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1179,6 +1201,11 @@ impl<'de> Deserialize<'de> for ConversationMessage {
                     usage_limit_note: raw_optional(&mut fields, "usageLimitNote")?,
                     origin: raw_optional_projection(&mut fields, "origin")?,
                     turn_origin: raw_optional_projection(&mut fields, "turnOrigin")?,
+                    interrupted_by_shutdown: raw_optional(&mut fields, "interruptedByShutdown")?,
+                    refused_message_id: raw_optional_root_string_projection(
+                        &mut fields,
+                        "refusedMessageId",
+                    )?,
                     api_message_override: raw_optional_nullable(
                         &mut fields,
                         "api_message_override",
@@ -1337,6 +1364,8 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             api_message_override: None,
         }
     }
@@ -1360,6 +1389,8 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             api_message_override: None,
         }
     }
@@ -1423,6 +1454,8 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             api_message_override: None,
         }
     }
@@ -1440,6 +1473,8 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             api_message_override: None,
         }
     }
@@ -1460,6 +1495,8 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             api_message_override: None,
         }
     }
@@ -1525,6 +1562,8 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             api_message_override: None,
         }
     }
@@ -1556,6 +1595,8 @@ impl ConversationMessage {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             api_message_override: None,
         }
     }
@@ -1945,6 +1986,8 @@ mod tests {
             origin: None,
             turn_origin: None,
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
         };
         let line = serde_json::to_string(&m).unwrap();
         // A non-meta user message must NOT serialize an `is_meta` field
@@ -2030,6 +2073,80 @@ mod tests {
             serde_json::to_string(&message).unwrap(),
             r#"{"role":"user","id":"11111111-1111-1111-1111-111111111111","content":[{"type":"text","text":"hello"}]}"#
         );
+    }
+
+    #[test]
+    fn shutdown_interruption_metadata_preserves_native_optional_boolean() {
+        let id = MessageId::from_uuid(
+            uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap(),
+        );
+        let plain = ConversationMessage::user(id, "[Request interrupted by user]".into());
+        let ConversationMessage::User {
+            interrupted_by_shutdown: absent,
+            ..
+        } = &plain
+        else {
+            panic!("user row");
+        };
+        assert_eq!(*absent, None);
+        assert!(!serde_json::to_string(&plain)
+            .unwrap()
+            .contains("interruptedByShutdown"));
+
+        let flagged: ConversationMessage = serde_json::from_str(
+            r#"{"role":"user","id":"11111111-1111-1111-1111-111111111111","content":[],"interruptedByShutdown":true}"#,
+        )
+        .unwrap();
+        let encoded = serde_json::to_string(&flagged).unwrap();
+        assert!(encoded.contains("\"interruptedByShutdown\":true"));
+        let decoded: ConversationMessage = serde_json::from_str(&encoded).unwrap();
+        let ConversationMessage::User {
+            interrupted_by_shutdown,
+            ..
+        } = decoded
+        else {
+            panic!("user row");
+        };
+        assert_eq!(interrupted_by_shutdown, Some(true));
+
+        let explicit_false: ConversationMessage = serde_json::from_str(
+            r#"{"role":"user","id":"11111111-1111-1111-1111-111111111111","content":[],"interruptedByShutdown":false}"#,
+        )
+        .unwrap();
+        let ConversationMessage::User {
+            interrupted_by_shutdown,
+            ..
+        } = explicit_false
+        else {
+            panic!("user row");
+        };
+        assert_eq!(interrupted_by_shutdown, Some(false));
+    }
+
+    #[test]
+    fn refused_message_id_is_optional_and_preserves_exact_utf16_source() {
+        let absent = ConversationMessage::user(MessageId::new(), "retry".into());
+        assert!(!serde_json::to_string(&absent)
+            .unwrap()
+            .contains("refusedMessageId"));
+
+        let message: ConversationMessage = serde_json::from_str(
+            r#"{"role":"user","id":"11111111-1111-1111-1111-111111111111","content":[],"refusedMessageId":"A\ud800B"}"#,
+        )
+        .unwrap();
+        let ConversationMessage::User {
+            refused_message_id: Some(refused_message_id),
+            ..
+        } = &message
+        else {
+            panic!("refusedMessageId must hydrate onto the user DTO")
+        };
+        assert_eq!(
+            refused_message_id.string_units(""),
+            Some(vec![0x0041, 0xd800, 0x0042])
+        );
+        let encoded = serde_json::to_string(&message).unwrap();
+        assert!(encoded.contains("\"refusedMessageId\":\"A\\ud800B\""));
     }
 
     #[test]

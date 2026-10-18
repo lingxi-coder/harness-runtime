@@ -369,7 +369,7 @@ impl McpRegistry {
                     &registry.catalog_changes,
                     &server_name,
                     connection_id,
-                    &notification.method,
+                    notification.method.code_units(),
                     Some("notification"),
                 );
             }
@@ -451,7 +451,13 @@ impl McpRegistry {
                             if !notification_matches_subscription(&notification, &subscription_id) {
                                 continue;
                             }
-                            if notification.method == "notifications/subscriptions/acknowledged" {
+                            if notification
+                                .method
+                                .code_units()
+                                .iter()
+                                .copied()
+                                .eq("notifications/subscriptions/acknowledged".encode_utf16())
+                            {
                                 self.record_listener_open(&server_name, open_telemetry)
                                     .await;
                                 emit_listen_reopen(&listen_reopen_payload(
@@ -466,7 +472,7 @@ impl McpRegistry {
                                 &self.catalog_changes,
                                 &server_name,
                                 connection_id,
-                                &notification.method,
+                                notification.method.code_units(),
                                 Some("notification"),
                             );
                         }

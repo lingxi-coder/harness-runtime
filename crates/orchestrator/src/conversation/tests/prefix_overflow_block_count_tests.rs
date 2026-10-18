@@ -27,6 +27,8 @@ fn counts_documents_and_images_across_user_and_assistant() {
     let msgs = vec![
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {

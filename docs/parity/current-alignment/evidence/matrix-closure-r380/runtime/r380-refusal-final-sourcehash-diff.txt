@@ -1,0 +1,11 @@
+--- /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/matrix-closure-r379/runtime/r380-refusal-final-sourcehashes-pre.txt	2026-10-18 09:36:03
++++ /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/matrix-closure-r379/runtime/r380-refusal-final-sourcehashes-post.txt	2026-10-18 09:37:48
+@@ -7,7 +7,7 @@
+ 740db73088af93a3545da067bd1c1b66c8d3031ac706802ca1c3f9ac6ac654b8  crates/orchestrator/src/turn_loop/error_reporting.rs
+ 3905b72a7a1a69bd8b7eb974bfb8b242df641e341731878bb86f2a31cd0cb4a1  crates/orchestrator/src/turn_loop/refusal_retry.rs
+ b4123c26064aec3029682f6f459c72e77ba0c9955beaf050a78045b0eeb24dbe  crates/orchestrator/src/turn_loop/visible_response.rs
+-c392749ab5294659b246edc038bd236cf8d5419f3fdc76917c02d863002a28f4  crates/orchestrator/tests/current_alignment_refusal.rs
++e6047f712f633b33a848501af7c6b5376f43a8367ec827d7fd9693cf777d2024  crates/orchestrator/tests/current_alignment_refusal.rs
+ 36a7f0878a2683de100d1e9a5b80eb1642ee37d22450005534d477bb64107551  crates/mcp/src/oauth.rs
+ 1018497841abd2c516a43104482095bb4d271099109881be1f341817511c2b68  crates/mcp/src/oauth/callback.rs
+ 397beb19d13d786d6294c9b0f38cc86736a6eb1393b2ac1213944b8cdb235889  crates/mcp/src/registry/authentication.rs

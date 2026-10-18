@@ -486,6 +486,8 @@ pub fn filter_messages_to_fingerprints<S: BuildHasher>(
                 usage_limit_note,
                 origin,
                 turn_origin,
+                interrupted_by_shutdown,
+                refused_message_id,
             } => Ok(ConversationMessage::User {
                 id,
                 content: filter_blocks_to_fingerprints(content, wanted)?,
@@ -497,6 +499,8 @@ pub fn filter_messages_to_fingerprints<S: BuildHasher>(
                 usage_limit_note,
                 origin,
                 turn_origin,
+                interrupted_by_shutdown,
+                refused_message_id,
             }),
             ConversationMessage::Assistant {
                 id,
@@ -807,6 +811,8 @@ fn rewrite_message_for_nonvision(
             usage_limit_note,
             origin,
             turn_origin,
+            interrupted_by_shutdown,
+            refused_message_id,
         } => Ok(ConversationMessage::User {
             id,
             content: rewrite_blocks_for_nonvision(content, documents_supported)?,
@@ -818,6 +824,8 @@ fn rewrite_message_for_nonvision(
             usage_limit_note,
             origin,
             turn_origin,
+            interrupted_by_shutdown,
+            refused_message_id,
         }),
         ConversationMessage::Assistant {
             id,
@@ -987,6 +995,8 @@ fn build_messages(packet: &VisionPacket, batch: &[DelegationMedia]) -> Vec<Conve
     }
     messages.push(ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: MessageId::new(),
         content,
         is_meta: false,
@@ -1639,6 +1649,8 @@ mod tests {
     fn user_message(content: Vec<ContentBlock>) -> ConversationMessage {
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content,
             is_meta: false,

@@ -216,6 +216,8 @@ pub fn build_forked_messages(
     if tool_uses.is_empty() {
         return vec![ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![child_message_block(directive)],
             is_meta: false,
@@ -250,6 +252,8 @@ pub fn build_forked_messages(
         cloned_assistant,
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content,
             is_meta: false,
@@ -285,6 +289,8 @@ pub fn build_forked_context(
         let mut prefix = messages.to_vec();
         prefix.push(ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![child_message_block(directive)],
             is_meta: false,
@@ -495,6 +501,8 @@ Your directive: Fix the bug in foo.rs";
     fn is_in_fork_child_detects_boilerplate_tag() {
         let child = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![child_message_block(&source_text("do it"))],
             is_meta: false,

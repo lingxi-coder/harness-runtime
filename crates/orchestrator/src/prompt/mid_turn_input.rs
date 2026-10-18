@@ -55,9 +55,12 @@ pub enum MidTurnInputPoint {
 /// [`CancelReasonFlag`] so it is `Copy`, lock-free, and cheap to poll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelReason {
-    /// A user pressed Ctrl+C / ESC (or any non-queue cancel). The DEFAULT —
-    /// the loop injects the existing interrupt message (Ctrl+C UX unchanged).
+    /// A user pressed Ctrl+C / ESC (or another non-queue, non-shutdown cancel).
+    /// The default: inject the existing unflagged interruption row.
     UserInterrupt,
+    /// The host is shutting down the service. The loop still injects the
+    /// Native shutdown marker, tagged `interruptedByShutdown: true`.
+    ServiceShutdown,
     /// A `Now`-priority command was enqueued, which aborts the in-flight turn so
     /// the urgent command runs next. The loop ends the turn WITHOUT injecting
     /// the user-interrupt message (the command is the "interruption").
@@ -67,18 +70,21 @@ pub enum CancelReason {
 impl CancelReason {
     const USER_INTERRUPT: u8 = 0;
     const QUEUE_NOW_COMMAND: u8 = 1;
+    const SERVICE_SHUTDOWN: u8 = 2;
 
     const fn to_u8(self) -> u8 {
         match self {
             Self::UserInterrupt => Self::USER_INTERRUPT,
             Self::QueueNowCommand => Self::QUEUE_NOW_COMMAND,
+            Self::ServiceShutdown => Self::SERVICE_SHUTDOWN,
         }
     }
 
     const fn from_u8(v: u8) -> Self {
         match v {
             Self::QUEUE_NOW_COMMAND => Self::QueueNowCommand,
-            // Any other value (incl. the 0 default) is a plain user interrupt —
+            Self::SERVICE_SHUTDOWN => Self::ServiceShutdown,
+            // Any other value (including the un-set sentinel) is a plain user interrupt —
             // the safe-backward default so an un-set flag never mislabels.
             _ => Self::UserInterrupt,
         }
@@ -98,18 +104,25 @@ pub struct CancelReasonFlag {
 }
 
 impl CancelReasonFlag {
+    const UNSET: u8 = 3;
+
     /// A fresh flag defaulting to [`CancelReason::UserInterrupt`].
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(AtomicU8::new(CancelReason::UserInterrupt.to_u8())),
+            inner: Arc::new(AtomicU8::new(Self::UNSET)),
         }
     }
 
-    /// Record the reason the turn is being cancelled. Call BEFORE firing the
-    /// token so the loop reads the right reason when it observes cancellation.
+    /// Record the first reason the turn is being cancelled. Call BEFORE firing
+    /// the token so a racing later cancellation source cannot relabel the cause.
     pub fn set(&self, reason: CancelReason) {
-        self.inner.store(reason.to_u8(), Ordering::SeqCst);
+        let _ = self.inner.compare_exchange(
+            Self::UNSET,
+            reason.to_u8(),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
     }
 
     /// Read the current reason. An un-set flag reads [`CancelReason::UserInterrupt`].
@@ -121,8 +134,7 @@ impl CancelReasonFlag {
     /// Reset to the default ([`CancelReason::UserInterrupt`]) at turn start so a
     /// stale `QueueNowCommand` from a prior turn cannot mislabel this one.
     pub fn reset(&self) {
-        self.inner
-            .store(CancelReason::UserInterrupt.to_u8(), Ordering::SeqCst);
+        self.inner.store(Self::UNSET, Ordering::SeqCst);
     }
 }
 
@@ -257,6 +269,19 @@ mod tests {
     }
 
     #[test]
+    fn first_cancel_reason_wins_until_the_next_turn_reset() {
+        let flag = CancelReasonFlag::new();
+        flag.set(CancelReason::QueueNowCommand);
+        flag.set(CancelReason::UserInterrupt);
+        assert_eq!(flag.get(), CancelReason::QueueNowCommand);
+
+        flag.reset();
+        flag.set(CancelReason::ServiceShutdown);
+        flag.set(CancelReason::UserInterrupt);
+        assert_eq!(flag.get(), CancelReason::ServiceShutdown);
+    }
+
+    #[test]
     fn cancel_reason_u8_roundtrip_and_unknown_is_user_interrupt() {
         assert_eq!(
             CancelReason::from_u8(CancelReason::UserInterrupt.to_u8()),
@@ -265,6 +290,10 @@ mod tests {
         assert_eq!(
             CancelReason::from_u8(CancelReason::QueueNowCommand.to_u8()),
             CancelReason::QueueNowCommand
+        );
+        assert_eq!(
+            CancelReason::from_u8(CancelReason::ServiceShutdown.to_u8()),
+            CancelReason::ServiceShutdown
         );
         // An out-of-range byte falls back to UserInterrupt (safe default).
         assert_eq!(CancelReason::from_u8(99), CancelReason::UserInterrupt);

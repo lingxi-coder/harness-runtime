@@ -1,0 +1,11 @@
+{
+  "candidate-clearance-r380.md": "ec9a2683c23c187fb729f382bc01ab0266ff6f274c5a9a961162daf8d9bd232e",
+  "checklist.json": "1fb10e587c85c4858284bf5565ab40dd0018c5c56ddac24811c2224ed3277e75",
+  "final-source-review-r380.md": "96dd3c5742ee26875e6ad60669a36430d77a94cb5de362134eea969545683cb3",
+  "jsonrpc-test-unused-binding-r380.json": "deb7a8cc283ee87a2004e1d8c92478a258bbb890346f45dd83f40621e6347710",
+  "max-turn-source-bindings-r380.json": "671c00d5004e2d39394c4ffe60d5fb8f5e590c34302b47389f5b2f57e43b733d",
+  "mcp-safe-integer-range-equivalence-r380.json": "00b58b072c085145365f89c6e6dcab82c72c47c00e5f24f4c301ed2fdf5686f4",
+  "native-mcp-message-schema-r380.md": "d7db72db04e3e8cc428696725723a8e29b2f2ed98986d5b01aa64c740d88de38",
+  "r380-current-rustfmt-check.json": "0019b46e858838ca1752a12e105537c7b413caca65526d0ed4937fdde65dcf8a",
+  "r380-mechanical-format-receipt.json": "9bf4bd364e1ccd585977b7698bf15e9c25918f5115dd9ea832951eaed160ae27"
+}

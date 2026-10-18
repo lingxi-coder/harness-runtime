@@ -1,0 +1,40 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-mcp-oauth-final-r380.v1",
+  "recordedAtUtc": "2026-10-18T16:34:23Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": ["--locked", "--offline"],
+  "features": [],
+  "sandboxPermissions": "require_escalated",
+  "authorization": "Root approved both final OAuth targets with localhost access after the MCP owner froze source.",
+  "sourceStableDuringBatch": true,
+  "sourceHashFiles": [
+    "r380-mcp-oauth-tests-final-sourcehashes-pre.txt",
+    "r380-mcp-oauth-tests-final-sourcehashes-post.txt"
+  ],
+  "commands": [
+    {
+      "command": "cargo test --locked --offline -p mcp --lib oauth",
+      "exitCode": 0,
+      "testsSelected": 81,
+      "testsPassed": 81,
+      "testsFailed": 0,
+      "log": "logs/18-mcp-oauth-lib-final.log"
+    },
+    {
+      "command": "cargo test --locked --offline -p mcp --test oauth_flow_test",
+      "exitCode": 0,
+      "testsSelected": 31,
+      "testsPassed": 31,
+      "testsFailed": 0,
+      "log": "logs/19-mcp-oauth-flow-final.log"
+    }
+  ],
+  "summary": {
+    "selectedTests": 112,
+    "passed": 112,
+    "failed": 0
+  },
+  "scope": "Final frozen-source MCP OAuth unit and integration tests only. No Orchestrator or other target was run."
+}

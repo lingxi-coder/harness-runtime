@@ -1,0 +1,69 @@
+rustc 1.94.0 (4a4ef493e 2026-03-02)
+     Locking 230 packages to latest compatible versions
+   Compiling tokio v1.53.1
+   Compiling lingxi-hyper v1.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper)
+   Compiling lingxi-hyper-util v0.1.21 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-util)
+   Compiling async-compression v0.4.44
+warning: unused variable: `timer`
+    --> /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-util/src/client/legacy/client.rs:1509:32
+     |
+1509 |     pub fn timer<M>(&mut self, timer: M) -> &mut Self
+     |                                ^^^^^ help: if this is intentional, prefix it with an underscore: `_timer`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling tower v0.5.3
+   Compiling tokio-rustls v0.26.5
+warning: `lingxi-hyper-util` (lib) generated 1 warning (run `cargo fix --lib -p lingxi-hyper-util` to apply 1 suggestion)
+   Compiling tokio-util v0.7.19
+   Compiling lingxi-hyper-rustls v0.27.5 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-rustls)
+warning: unused macro definition: `debug`
+  --> /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-rustls/src/lib.rs:53:18
+   |
+53 |     macro_rules! debug    ( ($($tt:tt)*) => {{}} );
+   |                  ^^^^^
+   |
+   = note: `#[warn(unused_macros)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `debug`
+  --> /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-rustls/src/lib.rs:55:20
+   |
+55 |     pub(crate) use debug;
+   |                    ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `lingxi-hyper-rustls` (lib) generated 2 warnings (run `cargo fix --lib -p lingxi-hyper-rustls` to apply 1 suggestion)
+   Compiling tower-http v0.6.11
+   Compiling lingxi-reqwest v0.12.29 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-reqwest)
+   Compiling lingxi-llm-client v0.3.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client)
+   Compiling r380-foundry-public-transport-probe v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/matrix-closure-r379/sdk/foundry-public-transport-probe)
+warning: unused import: `futures::StreamExt`
+ --> tests/foundry_public_transport.rs:1:5
+  |
+1 | use futures::StreamExt;
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `r380-foundry-public-transport-probe` (test "foundry_public_transport") generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 33.19s
+     Running tests/foundry_public_transport.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/foundry_public_transport-71ad6038605f9198)
+
+running 1 test
+
+thread 'foundry_public_sdk_sends_and_consumes_one_localhost_sse_exchange' (58432188) panicked at tests/foundry_public_transport.rs:341:5:
+assertion `left == right` failed
+  left: ["message_delta"]
+ right: ["message_start", "message_delta"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test foundry_public_sdk_sends_and_consumes_one_localhost_sse_exchange ... FAILED
+
+failures:
+
+failures:
+    foundry_public_sdk_sends_and_consumes_one_localhost_sse_exchange
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+error: test failed, to rerun pass `--test foundry_public_transport`

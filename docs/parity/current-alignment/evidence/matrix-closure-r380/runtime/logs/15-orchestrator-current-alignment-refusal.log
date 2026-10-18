@@ -1,0 +1,251 @@
+   Compiling smallvec v1.15.1
+   Compiling hashbrown v0.17.1
+   Compiling parking_lot_core v0.9.12
+   Compiling parking_lot v0.12.5
+   Compiling indexmap v2.14.2
+   Compiling tokio v1.52.3
+   Compiling tracing-core v0.1.36
+   Compiling tracing v0.1.44
+   Compiling serde_json v1.0.150
+   Compiling log v0.4.29
+   Compiling regex-automata v0.4.14
+   Compiling tokio-util v0.7.18
+   Compiling idna v1.1.0
+   Compiling url v2.5.8
+   Compiling simd-adler32 v0.3.9
+   Compiling miniz_oxide v0.8.9
+   Compiling rustls v0.23.45
+   Compiling flate2 v1.1.9
+   Compiling toml_edit v0.22.27
+   Compiling tokio-rustls v0.26.4
+   Compiling fancy-regex v0.18.0
+   Compiling toml v0.8.23
+   Compiling json-projection v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/json-projection)
+   Compiling h2 v0.4.19
+   Compiling tower v0.5.3
+   Compiling dashmap v6.2.1
+   Compiling hyper v1.9.0
+   Compiling schemars v0.8.22
+   Compiling hyper-util v0.1.20
+   Compiling figment v0.10.19
+   Compiling jsonrpc v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/jsonrpc)
+   Compiling mcp-wire v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp-wire)
+   Compiling core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+   Compiling compression-codecs v0.4.39
+   Compiling async-compression v0.4.44
+   Compiling tower-http v0.6.11
+   Compiling regex v1.12.3
+   Compiling opentelemetry v0.31.0
+   Compiling chrono v0.4.44
+   Compiling opentelemetry_sdk v0.31.0
+   Compiling hyper-timeout v0.5.2
+   Compiling tokio-stream v0.1.18
+   Compiling tonic v0.14.2
+   Compiling hyper-rustls v0.27.5
+   Compiling reqwest v0.12.28
+   Compiling tonic-prost v0.14.5
+   Compiling opentelemetry-proto v0.31.0
+   Compiling opentelemetry-http v0.31.0
+   Compiling prometheus v0.14.0
+   Compiling opentelemetry-prometheus v0.31.0
+   Compiling opentelemetry-otlp v0.31.1
+   Compiling opentelemetry-stdout v0.31.0
+   Compiling telemetry v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry)
+   Compiling bstr v1.12.1
+   Compiling lingxi-hyper v1.9.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling lingxi-hyper-util v0.1.21 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling tungstenite v0.24.0
+   Compiling lingxi-hyper-rustls v0.27.5 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling referencing v0.46.3
+   Compiling globset v0.4.15
+   Compiling syn v3.0.3
+   Compiling jsonschema v0.46.3
+   Compiling ignore v0.4.23
+   Compiling chrono-tz v0.10.4
+   Compiling lingxi-reqwest v0.12.29 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling tokio-tungstenite v0.24.0
+   Compiling synstructure v0.14.0
+   Compiling serde_core v1.0.228
+   Compiling tree-sitter-language v0.1.7
+   Compiling lingxi-llm-client v0.3.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling secret v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/secret)
+   Compiling zerofrom-derive v0.1.8
+   Compiling permission v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/permission)
+   Compiling rquickjs-sys v0.14.0
+   Compiling memchr v2.8.0
+   Compiling zerofrom v0.1.8
+   Compiling yoke-derive v0.8.4
+   Compiling rustversion v1.0.22
+   Compiling stable_deref_trait v1.2.1
+   Compiling yoke v0.8.3
+   Compiling boon v0.6.1
+   Compiling lsp-types v0.95.1
+   Compiling sandbox-runtime v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sandbox-runtime)
+   Compiling tree-sitter v0.25.10
+   Compiling fdeflate v0.3.7
+   Compiling tree-sitter-javascript v0.23.1
+   Compiling color_quant v1.1.0
+   Compiling weezl v0.1.12
+   Compiling gif v0.13.3
+   Compiling llm-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime)
+   Compiling migrations v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/migrations)
+   Compiling mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp)
+   Compiling png v0.17.16
+   Compiling rquickjs-core v0.14.0
+   Compiling sandbox v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sandbox)
+   Compiling lsp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/lsp)
+   Compiling visualization v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/visualization)
+   Compiling zerovec-derive v0.11.6
+   Compiling streaming-iterator v0.1.9
+   Compiling jpeg-decoder v0.3.2
+   Compiling zerovec v0.11.8
+   Compiling image v0.24.9
+   Compiling session v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/session)
+   Compiling arc-swap v1.9.2
+   Compiling rquickjs v0.14.0
+   Compiling unsafe-libyaml v0.2.11
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling tool-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tool-api)
+   Compiling writeable v0.6.4
+   Compiling http-client v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/http-client)
+   Compiling hooks v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/hooks)
+   Compiling mobile-linux-core v0.1.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41)
+   Compiling platform-common v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/common)
+   Compiling tinystr v0.8.4
+   Compiling litemap v0.8.3
+   Compiling icu_locale_core v2.3.0
+   Compiling cost v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/cost)
+   Compiling potential_utf v0.1.6
+   Compiling zerotrie v0.2.5
+   Compiling icu_provider v2.3.1
+   Compiling sidequery v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sidequery)
+   Compiling icu_locale_fallback_data v2.3.0
+   Compiling glob v0.3.3
+   Compiling icu_collections v2.3.0
+   Compiling memory v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/memory)
+   Compiling workflow v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/workflow)
+   Compiling icu_normalizer_data v2.3.0
+   Compiling agent v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/agent)
+   Compiling task-store v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/task-store)
+   Compiling icu_locale_data v2.3.0
+   Compiling icu_collator_data v2.3.0
+   Compiling icu_locale_fallback v2.3.0
+   Compiling write16 v1.0.0
+   Compiling utf16_iter v1.0.5
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling command-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/command-api)
+   Compiling icu_collator v2.3.1 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/icu_collator)
+   Compiling icu_locale v2.3.1
+   Compiling encoding_rs v0.8.35
+   Compiling tasks v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tasks)
+   Compiling grep-matcher v0.1.7
+   Compiling sys-locale v0.3.2
+   Compiling encoding_rs_io v0.1.7
+   Compiling memmap2 v0.9.11
+   Compiling notify v8.2.0
+   Compiling cron v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/cron)
+   Compiling tool-cron v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/cron)
+   Compiling grep-searcher v0.1.14
+   Compiling grep-regex v0.1.13
+   Compiling similar v2.7.0
+   Compiling tool-file v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/file)
+   Compiling compaction v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/compaction)
+   Compiling tool-skill v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/skill)
+   Compiling tool-task v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/task)
+   Compiling notify-debouncer-mini v0.6.0
+   Compiling tool-workflow v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/workflow)
+   Compiling outputstyles v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/outputstyles)
+   Compiling skill v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/skill)
+   Compiling sharded-slab v0.1.7
+   Compiling matchers v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling thread_local v1.1.9
+   Compiling nu-ansi-term v0.50.3
+   Compiling platform-posix v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/posix)
+   Compiling orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+warning: unused import: `NATIVE_REFUSAL_SAFETY_RETRY_USER_MESSAGE`
+  --> crates/orchestrator/src/turn_loop.rs:99:5
+   |
+99 |     NATIVE_REFUSAL_SAFETY_RETRY_USER_MESSAGE,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling tracing-subscriber v0.3.23
+   Compiling tool-mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/mcp)
+error[E0308]: mismatched types
+   --> crates/orchestrator/src/streaming_executor.rs:794:60
+    |
+794 |                 result.publication_guard = Some(Arc::clone(&guard));
+    |                                                 ---------- ^^^^^^ expected `&Arc<dyn HookPublicationGuard>`, found `&Arc<ToolDispatchPublicationFence>`
+    |                                                 |
+    |                                                 arguments to this function are incorrect
+    |
+    = note: expected reference `&std::sync::Arc<dyn HookPublicationGuard>`
+               found reference `&std::sync::Arc<ToolDispatchPublicationFence>`
+    = help: `ToolDispatchPublicationFence` implements `HookPublicationGuard` so you could box the found value and coerce it to the trait object `Box<dyn HookPublicationGuard>`, you will have to change the expected type as well
+note: method defined here
+   --> /Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/clone.rs:236:8
+    |
+236 |     fn clone(&self) -> Self;
+    |        ^^^^^
+
+error[E0308]: mismatched types
+   --> crates/orchestrator/src/streaming_executor.rs:837:52
+    |
+837 |                 publication_guard: Some(Arc::clone(&publication_guard)),
+    |                                         ---------- ^^^^^^^^^^^^^^^^^^ expected `&Arc<dyn HookPublicationGuard>`, found `&Arc<ToolDispatchPublicationFence>`
+    |                                         |
+    |                                         arguments to this function are incorrect
+    |
+    = note: expected reference `&std::sync::Arc<dyn HookPublicationGuard>`
+               found reference `&std::sync::Arc<ToolDispatchPublicationFence>`
+    = help: `ToolDispatchPublicationFence` implements `HookPublicationGuard` so you could box the found value and coerce it to the trait object `Box<dyn HookPublicationGuard>`, you will have to change the expected type as well
+note: method defined here
+   --> /Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/clone.rs:236:8
+    |
+236 |     fn clone(&self) -> Self;
+    |        ^^^^^
+
+error[E0631]: type mismatch in function arguments
+   --> crates/orchestrator/src/turn_loop/refusal_retry.rs:57:22
+    |
+ 57 |         .is_some_and(ConversationOrchestrator::route_uses_native_model_catalog)
+    |          ----------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected due to this
+    |          |
+    |          required by a bound introduced by this call
+    |
+   ::: crates/orchestrator/src/conversation/model.rs:112:5
+    |
+112 |     pub(crate) fn route_uses_native_model_catalog(route: &llm_runtime::MediaRoute) -> bool {
+    |     -------------------------------------------------------------------------------------- found signature defined here
+    |
+    = note: expected function signature `fn(MediaRoute) -> _`
+               found function signature `fn(&MediaRoute) -> _`
+note: required by a bound in `std::option::Option::<T>::is_some_and`
+   --> /Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/option.rs:661:44
+    |
+661 |     pub const fn is_some_and(self, f: impl [const] FnOnce(T) -> bool + [const] Destruct) -> bool {
+    |                                            ^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Option::<T>::is_some_and`
+help: consider wrapping the function in a closure
+    |
+ 57 |         .is_some_and(|route: MediaRoute| ConversationOrchestrator::route_uses_native_model_catalog(&route))
+    |                      +++++++++++++++++++                                                          ++++++++
+help: consider adjusting the signature so it does not borrow its argument
+   --> crates/orchestrator/src/conversation/model.rs:112:58
+    |
+112 -     pub(crate) fn route_uses_native_model_catalog(route: &llm_runtime::MediaRoute) -> bool {
+112 +     pub(crate) fn route_uses_native_model_catalog(route: llm_runtime::MediaRoute) -> bool {
+    |
+
+error[E0063]: missing fields `refusal_api_error_staged` and `refusal_retry_had_interrupted_tool` in initializer of `PumpedTurn`
+    --> crates/orchestrator/src/conversation/drivers/mod.rs:4290:5
+     |
+4290 |     PumpedTurn {
+     |     ^^^^^^^^^^ missing `refusal_api_error_staged` and `refusal_retry_had_interrupted_tool`
+
+Some errors have detailed explanations: E0063, E0308, E0631.
+For more information about an error, try `rustc --explain E0063`.
+warning: `orchestrator` (lib) generated 1 warning
+error: could not compile `orchestrator` (lib) due to 4 previous errors; 1 warning emitted

@@ -1,0 +1,33 @@
+{
+  "schema": "lingxi.claude-alignment-mcp-wire-notification-utf16-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:06:30.009873Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "package": "mcp-wire",
+  "command": "cargo test --locked --offline -p mcp-wire --lib mcp_capabilities_and_notifications_preserve_exact_source_json -- --exact",
+  "sourceHashFiles": [
+    "r380-mcp-wire-notification-utf16-sourcehashes-pre.txt",
+    "r380-mcp-wire-notification-utf16-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 6,
+  "sourceStableDuringRun": true,
+  "sourceHashes": {
+    "Cargo.lock": "0e68e5a6f54332b205d579a6ce2e8c66975c34e10468ebebbbe79d8a40664451",
+    "crates/mcp-wire/Cargo.toml": "9738dc7739010f8f07d224f8623ceebb3b004c25ac3fcd34da4e08ee2955d47c",
+    "crates/mcp-wire/src/transport.rs": "f742c09d41b9dbab9e6a7eddc177edd1e894ff5d2e64ce9572c29c96c37d5ec0",
+    "crates/core/src/types/utf16_json.rs": "f036cdcd18319f98d9e9a8eb4ce62e355cd81b2fd31ed51bd73098a5094fc472"
+  },
+  "exitCode": 0,
+  "testsSelected": 0,
+  "testsPassed": 0,
+  "testsFailed": 0,
+  "log": "logs/47-mcp-wire-notification-utf16-exact.log",
+  "logSha256": "bbbbd2e154052101625b0b18c301a6360332f2fd5db85ada806e41254808a148",
+  "sourceFilesChangedDuringRun": []
+}

@@ -1,0 +1,27 @@
+    Finished `test` profile [unoptimized] target(s) in 0.26s
+     Running tests/mid_turn_input_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mid_turn_input_test-8d989385fa514f96)
+
+running 12 tests
+test batched_pre_model_shutdown_emits_the_same_shutdown_discriminator ... ok
+test the_batched_path_has_no_late_drain ... ok
+test mid_turn_source_injects_queued_text_into_first_model_call ... ok
+test cold_shutdown_redelivery_reuses_the_original_user_row ... ok
+test mid_turn_input_is_preserved_when_max_turns_ends_streaming_loop ... ok
+test no_source_is_noop_only_seed_prompt_reaches_model ... ok
+test mid_turn_input_arriving_during_final_response_continues_the_turn ... ok
+[turn-diagnostic] tool call started id=toolu_57a0c24e4ec345228824df80f7210fd6 name=CancelTool cancel_present=true cancelled=false
+[turn-diagnostic] tool call started id=toolu_8e7e36b2623f4aa08be1b67f9aa2c801 name=EndsTurn cancel_present=true cancelled=false
+[turn-diagnostic] tool call started id=toolu_6f04dd6c5d9148f9ad5a8fd2779a99d2 name=CancelTool cancel_present=true cancelled=false
+[turn-diagnostic] tool call started id=toolu_e3e3365548204257922ce847d230ba87 name=CancelTool cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_8e7e36b2623f4aa08be1b67f9aa2c801 name=EndsTurn elapsed_ms=0 outcome=ok
+test only_the_non_cancelable_batched_entry_drains_at_the_top_of_its_loop ... ok
+test a_tool_requested_end_does_not_take_the_late_drain ... ok
+[turn-diagnostic] tool call returned id=toolu_e3e3365548204257922ce847d230ba87 name=CancelTool elapsed_ms=23 outcome=error
+test service_shutdown_abort_injects_shutdown_discriminator ... ok
+[turn-diagnostic] tool call returned id=toolu_57a0c24e4ec345228824df80f7210fd6 name=CancelTool elapsed_ms=24 outcome=error
+[turn-diagnostic] tool call returned id=toolu_6f04dd6c5d9148f9ad5a8fd2779a99d2 name=CancelTool elapsed_ms=25 outcome=error
+test now_command_abort_does_not_inject_interrupt_message ... ok
+test user_interrupt_default_injects_interrupt_message ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+

@@ -1,0 +1,30 @@
+{
+  "schema": "lingxi.claude-alignment-orchestrator-mcp-error-roundtrip-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:11:34.583161Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "package": "orchestrator",
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_native_mcp_roundtrip native_295_mcp_error_details_cross_orchestrator_sdk_and_jsonl -- --exact",
+  "sourceHashFiles": [
+    "r380-orchestrator-mcp-error-roundtrip-sourcehashes-pre.txt",
+    "r380-orchestrator-mcp-error-roundtrip-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 2343,
+  "sourceStableDuringRun": true,
+  "fixtureRoots": [
+    "docs/parity/current-alignment/fixtures/mcp-roundtrip/native-baseline/structured-content-lone"
+  ],
+  "exitCode": 0,
+  "testsSelected": 1,
+  "testsPassed": 1,
+  "testsFailed": 0,
+  "log": "logs/52-orchestrator-mcp-error-roundtrip.log",
+  "logSha256": "0281df1e6c6735baa85283df16c067d2134cd8324daf5f947f38c8bb94d9fbc1",
+  "sourceFilesChangedDuringRun": []
+}

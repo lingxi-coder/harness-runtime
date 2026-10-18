@@ -1,0 +1,11 @@
+[package]
+name = "r379-sdk-current-vector-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+lingxi-llm-client = { path = "../../../../../llm-client" }
+serde_json = "=1.0.151"

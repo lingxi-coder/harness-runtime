@@ -1,0 +1,75 @@
+$ source /Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/frozen-build-env.sh && cargo test --locked --offline -p agent --test current_alignment_mod_append -- --nocapture
+Frozen build env SHA-256: 6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1
+--- cargo output ---
+   Compiling tokio v1.52.3
+   Compiling opentelemetry-stdout v0.31.0
+   Compiling referencing v0.46.3
+   Compiling jsonschema v0.46.3
+   Compiling tokio-util v0.7.18
+   Compiling tokio-rustls v0.26.4
+   Compiling mcp-wire v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp-wire)
+   Compiling h2 v0.4.19
+   Compiling tower v0.5.3
+   Compiling jsonrpc v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/jsonrpc)
+   Compiling hyper v1.9.0
+   Compiling core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+   Compiling hyper-util v0.1.20
+   Compiling async-compression v0.4.44
+   Compiling tower-http v0.6.11
+   Compiling hyper-timeout v0.5.2
+   Compiling tokio-stream v0.1.18
+   Compiling tonic v0.14.2
+   Compiling hyper-rustls v0.27.5
+   Compiling reqwest v0.12.28
+   Compiling tonic-prost v0.14.5
+   Compiling opentelemetry-proto v0.31.0
+   Compiling opentelemetry-http v0.31.0
+   Compiling opentelemetry-otlp v0.31.1
+   Compiling lingxi-hyper v1.9.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling lingxi-hyper-util v0.1.21 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling lingxi-hyper-rustls v0.27.5 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling lingxi-reqwest v0.12.29 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling lingxi-llm-client v0.3.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling telemetry v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry)
+   Compiling tokio-tungstenite v0.24.0
+   Compiling secret v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/secret)
+   Compiling permission v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/permission)
+   Compiling boon v0.6.1
+   Compiling lsp-types v0.95.1
+   Compiling sandbox-runtime v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sandbox-runtime)
+   Compiling tree-sitter v0.25.10
+   Compiling sandbox v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sandbox)
+   Compiling lsp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/lsp)
+   Compiling visualization v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/visualization)
+   Compiling session v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/session)
+   Compiling cost v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/cost)
+   Compiling hooks v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/hooks)
+   Compiling llm-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime)
+   Compiling migrations v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/migrations)
+   Compiling mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp)
+   Compiling http-client v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/http-client)
+   Compiling platform-common v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/common)
+   Compiling tool-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tool-api)
+   Compiling workflow v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/workflow)
+   Compiling sidequery v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sidequery)
+   Compiling task-store v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/task-store)
+   Compiling platform-posix v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/posix)
+   Compiling memory v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/memory)
+   Compiling agent v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/agent)
+   Compiling tasks v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tasks)
+   Compiling cron v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/cron)
+   Compiling tool-cron v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/cron)
+   Compiling coordinator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/coordinator)
+   Compiling compaction v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/compaction)
+   Compiling test-harness v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/test-harness)
+    Finished `test` profile [unoptimized] target(s) in 1m 15s
+     Running tests/current_alignment_mod_append.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_mod_append-8b12771b82f930a1)
+
+running 3 tests
+test source_derived_user_lone_session_append_rewrite_preserves_return_and_transcript_units ... ok
+test native_system_lone_session_append_reaches_bun_worker_and_host_writer ... ok
+CURRENT_ALIGNMENT_MOD_APPEND={"worker_stage":[{"case":"rewrite","core_next_inputs":[{"message":{"type":"user","content":[{"type":"text","text":"native-prefix:fixture-input"}]},"door":"user","origin":{"kind":"core"},"uuid":"00000000-0000-4000-8000-000000000001"}],"result":{"message":{"type":"user","content":[{"type":"text","text":"native-prefix:fixture-input"}]},"uuid":"00000000-0000-4000-8000-000000000001"}},{"case":"direct","core_next_inputs":[],"result":{"uuid":"00000000-0000-4000-8000-000000000002","message":{"type":"user","content":[{"type":"text","text":"native-direct-return"}]}}},{"case":"cancel","core_next_inputs":[{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"door":"user","origin":{"kind":"core"},"uuid":"00000000-0000-4000-8000-000000000003"}],"result":{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"uuid":"00000000-0000-4000-8000-000000000003"}},{"case":"throw","core_next_inputs":[{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"door":"user","origin":{"kind":"core"},"uuid":"00000000-0000-4000-8000-000000000004"}],"result":{"message":{"type":"user","content":[{"type":"text","text":"fixture-input"}]},"uuid":"00000000-0000-4000-8000-000000000004"}}],"transcript_terminal":[{"case":"rewrite","text":"native-prefix:fixture-input"},{"case":"direct","text":"fixture-input"},{"case":"cancel","text":"fixture-input"},{"case":"throw","text":"fixture-input"}],"persisted_texts":["native-prefix:fixture-input","fixture-input","fixture-input","fixture-input"]}
+test native_session_append_middleware_contract_reaches_host_and_transcript ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+

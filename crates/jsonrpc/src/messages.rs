@@ -88,15 +88,15 @@ impl<'de> Deserialize<'de> for JsonPayload {
 pub const JSONRPC_VERSION: &str = "2.0";
 
 /// JSON-RPC 2.0 reserved error code: invalid JSON was received.
-pub const PARSE_ERROR: i32 = -32700;
+pub const PARSE_ERROR: i64 = -32700;
 /// JSON-RPC 2.0 reserved error code: the JSON sent is not a valid Request object.
-pub const INVALID_REQUEST: i32 = -32600;
+pub const INVALID_REQUEST: i64 = -32600;
 /// JSON-RPC 2.0 reserved error code: method does not exist or is not available.
-pub const METHOD_NOT_FOUND: i32 = -32601;
+pub const METHOD_NOT_FOUND: i64 = -32601;
 /// JSON-RPC 2.0 reserved error code: invalid method parameter(s).
-pub const INVALID_PARAMS: i32 = -32602;
+pub const INVALID_PARAMS: i64 = -32602;
 /// JSON-RPC 2.0 reserved error code: internal JSON-RPC error.
-pub const INTERNAL_ERROR: i32 = -32603;
+pub const INTERNAL_ERROR: i64 = -32603;
 
 /// JSON-RPC 2.0 request/response identifier. Permitted shapes per spec are
 /// number, string, or null; this enum models the two non-null cases. A null
@@ -286,6 +286,13 @@ impl fmt::Display for JsonRpcString {
     }
 }
 
+/// Compare a Rust string to exact UTF-16 units, without using lossy display.
+impl PartialEq<&str> for JsonRpcString {
+    fn eq(&self, other: &&str) -> bool {
+        self.0.iter().copied().eq(other.encode_utf16())
+    }
+}
+
 impl Serialize for JsonRpcString {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -323,8 +330,9 @@ pub struct Request {
     pub jsonrpc: String,
     /// Request id.
     pub id: Id,
-    /// Method name (e.g. `"initialize"`, `"tools/list"`).
-    pub method: String,
+    /// Method name (e.g. `"initialize"`, `"tools/list"`) with exact UTF-16
+    /// code units retained for JavaScript-compatible peer strings.
+    pub method: JsonRpcString,
     /// Optional parameters — serialized as either an object or an array.
     #[serde(
         default,
@@ -342,8 +350,9 @@ pub struct Request {
 pub struct Notification {
     /// MUST equal `"2.0"`.
     pub jsonrpc: String,
-    /// Method name.
-    pub method: String,
+    /// Method name with exact UTF-16 code units retained for
+    /// JavaScript-compatible peer strings.
+    pub method: JsonRpcString,
     /// Optional parameters.
     #[serde(
         default,
@@ -380,7 +389,7 @@ pub struct Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResponseError {
     /// One of the JSON-RPC 2.0 codes or an application-defined code.
-    pub code: i32,
+    pub code: i64,
     /// Human-readable error.
     pub message: JsonRpcString,
     /// Optional remote source data. This is retained as raw JSON so generic
@@ -465,7 +474,7 @@ impl<'de> Deserialize<'de> for Message {
                             id_seen = true;
                             id = map.next_value::<Option<Id>>()?;
                         }
-                        "method" => method = Some(map.next_value::<String>()?),
+                        "method" => method = Some(map.next_value::<JsonRpcString>()?),
                         "params" => params = Some(map.next_value::<JsonPayload>()?),
                         "result" => result = Some(map.next_value::<JsonPayload>()?),
                         "error" => error = Some(map.next_value::<ResponseError>()?),
@@ -527,7 +536,7 @@ impl<'de> Deserialize<'de> for Message {
 
 impl Request {
     /// Build a fresh request with `jsonrpc = "2.0"`.
-    pub fn new(method: impl Into<String>, params: Option<JsonPayload>, id: Id) -> Self {
+    pub fn new(method: impl Into<JsonRpcString>, params: Option<JsonPayload>, id: Id) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.into(),
             id,
@@ -539,7 +548,7 @@ impl Request {
 
 impl Notification {
     /// Build a fresh notification with `jsonrpc = "2.0"`.
-    pub fn new(method: impl Into<String>, params: Option<JsonPayload>) -> Self {
+    pub fn new(method: impl Into<JsonRpcString>, params: Option<JsonPayload>) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.into(),
             method: method.into(),
@@ -647,6 +656,35 @@ mod tests {
     }
 
     #[test]
+    fn request_and_notification_methods_keep_unpaired_utf16_units() {
+        let request: Message =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":1,"method":"m\ud800","params":null}"#)
+                .unwrap();
+        let Message::Request(request) = request else {
+            panic!("expected request")
+        };
+        assert_eq!(request.method.code_units(), &[b'm' as u16, 0xd800]);
+        assert_ne!(
+            request.method,
+            JsonRpcString::from_code_units(vec![b'm' as u16, 0xfffd])
+        );
+        let request_wire = serde_json::to_string(&Message::Request(request)).unwrap();
+        assert!(request_wire.contains(r#""method":"m\ud800""#));
+        assert!(!request_wire.contains('�'));
+
+        let notification: Message =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","method":"n\udfff"}"#).unwrap();
+        let Message::Notification(notification) = notification else {
+            panic!("expected notification")
+        };
+        assert_eq!(notification.method.code_units(), &[b'n' as u16, 0xdfff]);
+        let notification_wire =
+            serde_json::to_string(&Message::Notification(notification)).unwrap();
+        assert!(notification_wire.contains(r#""method":"n\udfff""#));
+        assert!(!notification_wire.contains('�'));
+    }
+
+    #[test]
     fn request_wire_shape_has_jsonrpc_id_method_params() {
         let req = Request {
             jsonrpc: JSONRPC_VERSION.into(),
@@ -717,6 +755,28 @@ mod tests {
             v.get("result").is_none(),
             "error response must omit result field"
         );
+    }
+
+    #[test]
+    fn response_error_preserves_native_safe_integer_code_range() {
+        for (wire, expected) in [
+            (
+                r#"{"code":9007199254740991,"message":"high"}"#,
+                9_007_199_254_740_991_i64,
+            ),
+            (
+                r#"{"code":-9007199254740991,"message":"low"}"#,
+                -9_007_199_254_740_991_i64,
+            ),
+        ] {
+            let error: ResponseError = serde_json::from_str(wire).unwrap();
+            assert_eq!(error.code, expected);
+            let serialized = serde_json::to_string(&error).unwrap();
+            let code_field = format!(r#""code":{expected}"#);
+            assert!(serialized.contains(code_field.as_str()));
+            let roundtrip: ResponseError = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(roundtrip.code, expected);
+        }
     }
 
     #[test]

@@ -1,0 +1,30 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-mid-turn-input-compile-diagnostic-r380.v1",
+  "recordedAtUtc": "2026-10-18T17:35:00Z",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "command": "cargo test --locked --offline -p orchestrator --test mid_turn_input_test",
+  "sourceHashFiles": [
+    "r380-mid-turn-sourcehashes-pre.txt",
+    "r380-mid-turn-sourcehashes-post-initial-compile-error.txt"
+  ],
+  "sourceStableDuringRun": true,
+  "sourceFingerprintCount": 110,
+  "exitCode": 101,
+  "testsSelected": 0,
+  "testsPassed": 0,
+  "testsFailed": 0,
+  "phase": "integration-test compilation",
+  "diagnostics": [
+    "mid_turn_input_test.rs:650 passes &str to ConversationMessage::user which now expects String.",
+    "mid_turn_input_test.rs:652 passes &str to ConversationMessage::user which now expects String."
+  ],
+  "log": "logs/38-orchestrator-mid-turn-input.log",
+  "logSha256": "e249e7f815a15dc9daab76eb55ee35ffd9821872e8020bd0797b7ebb2cbe654a",
+  "scope": "Compile diagnostic only; no mid-turn tests ran."
+}

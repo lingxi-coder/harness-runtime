@@ -864,6 +864,8 @@ fn source_user_message(
         .expect("source user text is a root string");
     ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id,
         content: vec![ContentBlock::TextJsUtf16 {
             text: String::from_utf16_lossy(&units),
@@ -1186,6 +1188,8 @@ mod tests {
     fn tool_result_msg() -> ConversationMessage {
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
@@ -1630,6 +1634,8 @@ mod tests {
     fn summarize_all_split_keeps_tool_results_with_their_call() {
         let tool_result = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
@@ -2182,6 +2188,8 @@ mod tests {
     async fn media_recovery_retries_same_prefix_once_with_stripped_images() {
         let image = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Image {
                 source: lingxi_core::types::ImageSource::Url {

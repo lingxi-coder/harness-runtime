@@ -1,0 +1,89 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-orchestrator-refusal-test-result-r380.v1",
+  "recordedAtUtc": "2026-10-18T17:07:42Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_refusal",
+  "sandboxPermissions": "require_escalated; Root authorized local loopback for this target",
+  "sourceHashFiles": [
+    "r380-refusal-final-target-retry3-sourcehashes-pre.txt",
+    "r380-refusal-final-target-retry3-sourcehashes-post.txt"
+  ],
+  "sourceStableDuringRun": true,
+  "sourceFingerprintCount": 17,
+  "exitCode": 101,
+  "testsSelected": 13,
+  "testsPassed": 5,
+  "testsFailed": 8,
+  "passed": [
+    "refusal_safety_classifier_retry_stays_on_native_model_routes",
+    "batched_native_refusal_closes_tool_uses_before_dispatch_and_retries_once",
+    "refusal_safety_retry_respects_disable_environment_flag",
+    "auxiliary_native_tool_refusal_runs_queued_work_and_follows_up",
+    "refusal_safety_retry_is_skipped_for_auxiliary_queries"
+  ],
+  "failures": [
+    {
+      "test": "native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl",
+      "category": "retry_request_count_review",
+      "location": "current_alignment_refusal.rs:1398",
+      "detail": "Observed 1 where Native safety-classifier retry expected 2."
+    },
+    {
+      "test": "refusal_safety_retry_matches_native_query_source_classifier",
+      "category": "retry_request_count_review",
+      "location": "current_alignment_refusal.rs:1665",
+      "detail": "For querySource repl_main_thread, observed 1 where expected 2."
+    },
+    {
+      "test": "refusal_reissue_credit_does_not_cover_a_normal_next_turn_at_max_turns_one",
+      "category": "turn_credit_boundary_review",
+      "location": "current_alignment_refusal.rs:2312",
+      "detail": "The expected MaxTurnsReached { max_turns: 1 } outcome did not occur."
+    },
+    {
+      "test": "spent_native_refusal_retry_runs_later_tool_uses_and_follows_up",
+      "category": "followup_turn_outcome_review",
+      "location": "current_alignment_refusal.rs:2194",
+      "detail": "Outcome did not match EndTurn { turn_count: 2 }."
+    },
+    {
+      "test": "tool_bearing_native_refusal_keeps_completed_and_never_dispatches_queued_calls",
+      "category": "retry_request_count_review",
+      "location": "current_alignment_refusal.rs:1829",
+      "detail": "Observed 1 where one-shot same-model retry expected 2."
+    },
+    {
+      "test": "refusal_safety_retry_marker_does_not_suppress_a_later_user_turn",
+      "category": "retry_request_count_review",
+      "location": "current_alignment_refusal.rs:1612",
+      "detail": "Observed 2 where two-user-turn retry count expected 4."
+    },
+    {
+      "test": "native_same_model_refusal_retry_precedes_configured_refusal_fallback",
+      "category": "fallback_order_request_count_review",
+      "location": "current_alignment_refusal.rs:2260",
+      "detail": "Observed 2 where test expected 3."
+    },
+    {
+      "test": "native_refusal_closes_a_permission_waiting_tool_before_physical_call",
+      "category": "permission_wait_retry_timeout",
+      "location": "current_alignment_refusal.rs:1994",
+      "detail": "Timed out waiting for the Native refusal retry while original permission was pending."
+    }
+  ],
+  "log": "logs/26-orchestrator-current-alignment-refusal-retry3.log",
+  "logSha256": "a50e22f3c1fee7b5a12f79c8e6939f16007bdac703e70acc52520fe8b89899cd",
+  "previousDiagnosticReceipts": [
+    "r380-orchestrator-refusal-final-compile-error.receipt.json",
+    "r380-orchestrator-refusal-final-retry-compile-error.receipt.json",
+    "r380-orchestrator-refusal-final-test-failures.receipt.json"
+  ],
+  "scope": "RefusalReissue max-turn-credit protocol candidate; runtime target compiled and executed, but 8 assertions remain unresolved. No workspace/runtime library gate was run."
+}

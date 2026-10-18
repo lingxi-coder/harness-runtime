@@ -1,0 +1,41 @@
+   Compiling orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+    Finished `test` profile [unoptimized] target(s) in 2.62s
+     Running tests/mid_turn_input_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mid_turn_input_test-8d989385fa514f96)
+
+running 12 tests
+test batched_pre_model_shutdown_emits_the_same_shutdown_discriminator ... FAILED
+test the_batched_path_has_no_late_drain ... ok
+test no_source_is_noop_only_seed_prompt_reaches_model ... ok
+test mid_turn_source_injects_queued_text_into_first_model_call ... ok
+test cold_shutdown_redelivery_reuses_the_original_user_row ... FAILED
+test mid_turn_input_is_preserved_when_max_turns_ends_streaming_loop ... ok
+test mid_turn_input_arriving_during_final_response_continues_the_turn ... ok
+test only_the_non_cancelable_batched_entry_drains_at_the_top_of_its_loop ... ok
+test a_tool_requested_end_does_not_take_the_late_drain ... ok
+test service_shutdown_abort_injects_shutdown_discriminator ... ok
+test now_command_abort_does_not_inject_interrupt_message ... ok
+test user_interrupt_default_injects_interrupt_message ... ok
+
+failures:
+
+---- batched_pre_model_shutdown_emits_the_same_shutdown_discriminator stdout ----
+
+thread 'batched_pre_model_shutdown_emits_the_same_shutdown_discriminator' (59768852) panicked at crates/orchestrator/tests/mid_turn_input_test.rs:616:5:
+batched and streaming cancellation use the same shutdown marker
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- cold_shutdown_redelivery_reuses_the_original_user_row stdout ----
+
+thread 'cold_shutdown_redelivery_reuses_the_original_user_row' (59768853) panicked at crates/orchestrator/tests/mid_turn_input_test.rs:677:5:
+assertion `left == right` failed: cold redelivery must not append another user row with the same UUID
+  left: 2
+ right: 1
+
+
+failures:
+    batched_pre_model_shutdown_emits_the_same_shutdown_discriminator
+    cold_shutdown_redelivery_reuses_the_original_user_row
+
+test result: FAILED. 10 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+error: test failed, to rerun pass `-p orchestrator --test mid_turn_input_test`

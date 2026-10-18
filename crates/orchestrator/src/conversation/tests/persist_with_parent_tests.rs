@@ -230,6 +230,8 @@ async fn w1_defer_attachment_can_commit_during_session_append_and_assistant_uses
 
     let tool_result = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id,
@@ -1159,6 +1161,8 @@ async fn denied_tool_result_line_carries_tool_denial_kind() {
 
     let msg = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
@@ -1240,6 +1244,8 @@ async fn tool_result_line_carries_structured_result_and_source_assistant_uuid() 
     let message_id = lingxi_core::types::MessageId::new();
     let msg = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: message_id,
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
@@ -1314,6 +1320,8 @@ async fn error_tool_result_persists_the_bare_error_string() {
 
     let msg = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
@@ -1361,6 +1369,8 @@ async fn mcp_result_line_carries_mcp_meta_as_a_top_level_sibling() {
 
     let msg = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
@@ -1415,6 +1425,8 @@ async fn mcp_end_turn_result_persists_only_mcp_meta() {
 
     let msg = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
@@ -1464,6 +1476,8 @@ async fn native_end_turn_result_persists_tool_ends_turn() {
 
     let msg = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid,
@@ -1557,6 +1571,8 @@ async fn two_tool_results_in_one_user_message_get_no_head_keys() {
     };
     let msg = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![mk(a), mk(b)],
         is_meta: false,
@@ -1583,6 +1599,8 @@ async fn allowed_tool_result_line_has_no_denial_kind() {
 
     let msg = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: lingxi_core::types::ToolUseId::new(),
@@ -2019,6 +2037,8 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
             error: Some("max_output_tokens"),
             api_error_status: None,
             inner_stop_reason: None,
+            inner_stop_details: None,
+            refused_message_id: None,
             truncated_after_output: false,
             terminal_reason: None,
         }),
@@ -2050,6 +2070,8 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
             error: Some("invalid_request"),
             api_error_status: None,
             inner_stop_reason: Some("refusal"),
+            inner_stop_details: None,
+            refused_message_id: None,
             truncated_after_output: false,
             terminal_reason: None,
         }),
@@ -2080,6 +2102,8 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
             error: Some("rate_limit"),
             api_error_status: Some(429),
             inner_stop_reason: None,
+            inner_stop_details: None,
+            refused_message_id: None,
             truncated_after_output: false,
             terminal_reason: None,
         }),
@@ -2112,6 +2136,8 @@ async fn synthetic_api_error_envelope_stamps_top_level_fields() {
             error: Some("server_error"),
             api_error_status: None,
             inner_stop_reason: None,
+            inner_stop_details: None,
+            refused_message_id: None,
             truncated_after_output: true,
             terminal_reason: None,
         }),
@@ -2574,6 +2600,8 @@ async fn assistant_turn_persists_one_line_per_content_block_with_per_tool_repare
     // Persist a tool_result for A and for B; each must parent to ITS line.
     let tr_a = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: id_a.clone(),
@@ -2594,6 +2622,8 @@ async fn assistant_turn_persists_one_line_per_content_block_with_per_tool_repare
         .await;
     let tr_b = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: id_b.clone(),
@@ -2766,6 +2796,8 @@ async fn terminal_stream_blocks_append_once_and_preserve_tool_parent_after_final
     let parent_id = lingxi_core::types::MessageId::new();
     orch.persist_message_to_jsonl(&ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: parent_id,
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "prompt".into(),
@@ -3167,6 +3199,8 @@ async fn preappended_stream_result_keeps_raw_query_history_and_dispatches_append
     let tool_use_id = lingxi_core::types::ToolUseId::new();
     let raw = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id,
@@ -3617,6 +3651,8 @@ async fn batched_parallel_results_keep_individual_metadata_and_shared_assistant_
     for (id, text) in [(&mcp_id, "mcp"), (&native_id, "native")] {
         let result = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::ToolResult {
                 tool_use_id: id.clone(),

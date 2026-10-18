@@ -415,6 +415,9 @@ const RECOGNIZED_EXTRA: &[&str] = &[
     "apiErrorStatus",
     "effort",
     "perTurnEffort",
+    "promptSource",
+    "interruptedMessageId",
+    "interruptedByShutdown",
     // SC-07: emitted by the common trailer (arm h), immediately before
     // `userType`, so it must not also fall out of the unrecognized-key tail.
     SESSION_KIND_KEY,
@@ -484,7 +487,7 @@ const USER_HEAD_EXTRA: &[&str] = &[
 ];
 
 /// `extra` keys emitted BETWEEN `timestamp` and the common trailer, in this
-/// exact order — claude's tool-result head.
+/// exact order — claude's tool-result/interruption head.
 ///
 /// Census of every `toolDenialKind`-bearing line in real 2.1.220 transcripts
 /// (14 records across 5 envelope variants, which differ only in the optional
@@ -634,6 +637,9 @@ impl Serialize for JsonlMessage {
             push_extra_projection(&mut fields, &self.extra, "isCompactSummary");
             push_projection(&mut fields, "uuid", string_projection(&self.uuid));
             push_projection(&mut fields, "timestamp", string_projection(&self.timestamp));
+            // Native 2.1.295 writes the safety-refusal response id on its
+            // retry nudge immediately after the UUID/timestamp pair.
+            push_extra_projection(&mut fields, &self.extra, "refusedMessageId");
         } else if is_assistant && is_api_error {
             push_projection(&mut fields, "type", string_projection(&self.message_type));
             push_projection(&mut fields, "uuid", string_projection(&self.uuid));
@@ -646,6 +652,7 @@ impl Serialize for JsonlMessage {
                 "truncatedAfterOutput",
                 "isApiErrorMessage",
                 "apiErrorStatus",
+                "refusedMessageId",
             ] {
                 push_extra_projection(&mut fields, &self.extra, key);
             }
@@ -721,6 +728,13 @@ impl Serialize for JsonlMessage {
         if let Some(origin) = &self.origin_projection {
             push_projection(&mut fields, "origin", origin.clone());
         }
+        for key in [
+            "promptSource",
+            "interruptedMessageId",
+            "interruptedByShutdown",
+        ] {
+            push_extra_projection(&mut fields, &self.extra, key);
+        }
 
         if let Some(value) = extra_projection(&self.extra, SESSION_KIND_KEY) {
             push_projection(&mut fields, SESSION_KIND_KEY, value);
@@ -759,7 +773,10 @@ impl Serialize for JsonlMessage {
                     || key == crate::jsonl::exact_json::PRIVATE_SOURCE_KEY_ORDER_KEY
                     || RECOGNIZED_EXTRA.contains(&key.as_str())
                     || (is_user
-                        && (USER_HEAD_EXTRA.contains(&key.as_str()) || key == "usageLimitNote"))
+                        && (USER_HEAD_EXTRA.contains(&key.as_str())
+                            || key == "usageLimitNote"
+                            || key == "refusedMessageId"))
+                    || (is_assistant && is_api_error && key == "refusedMessageId")
                     || (is_scheduled_fire && SCHEDULED_FIRE_HEAD.contains(&key.as_str()))
                     || (is_model_fallback && MODEL_FALLBACK_HEAD.contains(&key.as_str()))
                     || (is_refusal_fallback && REFUSAL_FALLBACK_HEAD.contains(&key.as_str()))
@@ -1426,4 +1443,135 @@ fn loop_turn_companion_matches_2_1_270_oracle_bytes() {
         .next()
         .unwrap();
     assert_eq!(serde_json::to_string(&row).unwrap(), expected);
+}
+
+#[cfg(test)]
+mod shutdown_interruption_tests {
+    use super::{JsonlMessage, Utf16JsonProjection};
+
+    fn user_row(extra: Utf16JsonProjection) -> JsonlMessage {
+        JsonlMessage {
+            message_type: "user".into(),
+            uuid: "u".into(),
+            parent_uuid: None,
+            session_id: "s".into(),
+            timestamp: "t".into(),
+            cwd: "/c".into(),
+            version: "v".into(),
+            message: Utf16JsonProjection::parse(r#"{"role":"user","content":"A\ud800B"}"#).unwrap(),
+            is_sidechain: false,
+            user_type: Some("external".into()),
+            git_branch: None,
+            entrypoint: Some("cli".into()),
+            slug: None,
+            prompt_id: None,
+            logical_parent_uuid: None,
+            extra,
+            attachment_projection: None,
+            tool_use_result_projection: None,
+            mcp_meta_projection: None,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin_projection: None,
+            turn_origin_projection: None,
+        }
+    }
+
+    #[test]
+    fn interruption_flag_uses_native_slot_and_preserves_utf16_payload() {
+        let extra = Utf16JsonProjection::parse(
+            r#"{"promptSource":"cli","interruptedMessageId":"message-id","interruptedByShutdown":true}"#,
+        )
+        .unwrap();
+        let row = user_row(extra);
+        let line = serde_json::to_string(&row).unwrap();
+        let timestamp = line.find("\"timestamp\":\"t\"").unwrap();
+        let prompt_source = line.find("\"promptSource\":\"cli\"").unwrap();
+        let interrupted_id = line
+            .find("\"interruptedMessageId\":\"message-id\"")
+            .unwrap();
+        let shutdown = line.find("\"interruptedByShutdown\":true").unwrap();
+        let trailer = line.find("\"userType\":\"external\"").unwrap();
+        assert!(timestamp < prompt_source);
+        assert!(prompt_source < interrupted_id);
+        assert!(interrupted_id < shutdown);
+        assert!(shutdown < trailer);
+        assert!(
+            line.contains(r#"\ud800"#),
+            "UTF-16 carrier remains exact: {line}"
+        );
+
+        let cold: JsonlMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            cold.extra
+                .at_pointer("/interruptedByShutdown")
+                .and_then(lingxi_core::types::utf16_json::JsonValueView::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            cold.message.string_units("/content"),
+            Some(vec![65, 0xd800, 66])
+        );
+    }
+
+    #[test]
+    fn interruption_flag_omits_absence_and_retains_explicit_false() {
+        let absent =
+            serde_json::to_string(&user_row(Utf16JsonProjection::parse("{}").unwrap())).unwrap();
+        assert!(!absent.contains("interruptedByShutdown"));
+
+        let false_extra = Utf16JsonProjection::parse(r#"{"interruptedByShutdown":false}"#).unwrap();
+        let explicit_false = serde_json::to_string(&user_row(false_extra)).unwrap();
+        assert!(explicit_false.contains("\"interruptedByShutdown\":false"));
+    }
+
+    #[test]
+    fn refusal_message_id_uses_native_user_slot_and_preserves_utf16_payload() {
+        let extra = Utf16JsonProjection::parse(r#"{"refusedMessageId":"A\ud800B"}"#).unwrap();
+        let row = user_row(extra);
+        let line = serde_json::to_string(&row).unwrap();
+        let timestamp = line.find("\"timestamp\":\"t\"").unwrap();
+        let refused = line.find("\"refusedMessageId\":\"A\\ud800B\"").unwrap();
+        let trailer = line.find("\"userType\":\"external\"").unwrap();
+        assert!(
+            timestamp < refused && refused < trailer,
+            "Native slot: {line}"
+        );
+
+        let cold: JsonlMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            cold.extra.string_units("/refusedMessageId"),
+            Some(vec![65, 0xd800, 66])
+        );
+        let absent =
+            serde_json::to_string(&user_row(Utf16JsonProjection::parse("{}").unwrap())).unwrap();
+        assert!(!absent.contains("refusedMessageId"));
+    }
+
+    #[test]
+    fn refusal_message_id_on_assistant_api_error_roundtrips_in_its_native_head() {
+        let mut row = user_row(
+            Utf16JsonProjection::parse(
+                r#"{"isApiErrorMessage":true,"apiErrorStatus":422,"refusedMessageId":"A\ud800B"}"#,
+            )
+            .unwrap(),
+        );
+        row.message_type = "assistant".into();
+        row.message = Utf16JsonProjection::parse(r#"{"role":"assistant","content":[]}"#).unwrap();
+        let line = serde_json::to_string(&row).unwrap();
+        let timestamp = line.find("\"timestamp\":\"t\"").unwrap();
+        let status = line.find("\"apiErrorStatus\":422").unwrap();
+        let refused = line.find("\"refusedMessageId\":\"A\\ud800B\"").unwrap();
+        let trailer = line.find("\"userType\":\"external\"").unwrap();
+        assert!(
+            timestamp < status && status < refused && refused < trailer,
+            "{line}"
+        );
+
+        let cold: JsonlMessage = serde_json::from_str(&line).unwrap();
+        assert_eq!(
+            cold.extra.string_units("/refusedMessageId"),
+            Some(vec![65, 0xd800, 66])
+        );
+    }
 }

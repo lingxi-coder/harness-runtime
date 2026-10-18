@@ -275,7 +275,7 @@ mod tests {
                 ua,
                 config.anthropic_compatible_version.as_deref().unwrap()
             ),
-            "claude-cli/2.1.293 (external, sdk-cli, agent-sdk/fixture, client-app/embedding)"
+            "claude-cli/2.1.295 (external, sdk-cli, agent-sdk/fixture, client-app/embedding)"
         );
         let identity = config.request_identity.unwrap();
         assert_eq!(
@@ -372,9 +372,9 @@ mod tests {
         assert_eq!(
             llm_runtime::model::user_agent::user_agent(
                 config.user_agent_environment.as_ref().unwrap(),
-                "2.1.293"
+                super::super::CLAUDE_CODE_REFERENCE_VERSION
             ),
-            "claude-cli/2.1.293 (external, sdk-cli)"
+            "claude-cli/2.1.295 (external, sdk-cli)"
         );
     }
     #[test]

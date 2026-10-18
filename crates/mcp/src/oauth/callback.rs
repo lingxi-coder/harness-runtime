@@ -44,6 +44,11 @@ pub struct CallbackParams {
     pub state: String,
 }
 
+struct CallbackResult {
+    params: CallbackParams,
+    issuer: Option<String>,
+}
+
 /// A bound loopback listener whose port is known before any browser hits it.
 ///
 /// Construct with [`CallbackListener::bind`] (which accepts `port == 0` for an
@@ -94,6 +99,36 @@ impl CallbackListener {
         expected_state: &str,
         redirect_uri: &str,
     ) -> Result<CallbackParams, CallbackError> {
+        self.accept_inner(expected_state, redirect_uri, None, false)
+            .await
+    }
+
+    /// Accept a callback and apply the RFC 9207 checks used by the current
+    /// standard OAuth provider. The public `CallbackParams` shape stays stable;
+    /// `iss` is consumed here after state and provider-error handling.
+    pub(crate) async fn accept_with_issuer(
+        self,
+        expected_state: &str,
+        redirect_uri: &str,
+        expected_issuer: Option<&str>,
+        issuer_parameter_supported: bool,
+    ) -> Result<CallbackParams, CallbackError> {
+        self.accept_inner(
+            expected_state,
+            redirect_uri,
+            expected_issuer,
+            issuer_parameter_supported,
+        )
+        .await
+    }
+
+    async fn accept_inner(
+        self,
+        expected_state: &str,
+        redirect_uri: &str,
+        expected_issuer: Option<&str>,
+        issuer_parameter_supported: bool,
+    ) -> Result<CallbackParams, CallbackError> {
         loop {
             let (stream, _) = self
                 .listener
@@ -101,7 +136,14 @@ impl CallbackListener {
                 .await
                 .map_err(|e| CallbackError::Bind(e.to_string()))?;
             match handle_connection(stream, expected_state, redirect_uri).await {
-                Ok(Some(params)) => return Ok(params),
+                Ok(Some(result)) => {
+                    validate_callback_issuer(
+                        result.issuer.as_deref(),
+                        expected_issuer,
+                        issuer_parameter_supported,
+                    )?;
+                    return Ok(result.params);
+                }
                 // Non-/callback path (e.g. favicon) — already 404'd; keep waiting.
                 Ok(None) => continue,
                 Err(e) => return Err(e),
@@ -121,7 +163,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     expected_state: &str,
     redirect_uri: &str,
-) -> Result<Option<CallbackParams>, CallbackError> {
+) -> Result<Option<CallbackResult>, CallbackError> {
     let mut buf = vec![0u8; 4096];
     let n = stream
         .read(&mut buf)
@@ -159,15 +201,22 @@ If your OAuth provider redirected here, the registered redirect_uri must be {red
     let mut state = None;
     let mut error = None;
     let mut error_description = None;
-    for kv in query.split('&') {
-        if let Some(v) = kv.strip_prefix("code=") {
-            code = Some(url_decode(v));
-        } else if let Some(v) = kv.strip_prefix("state=") {
-            state = Some(url_decode(v));
-        } else if let Some(v) = kv.strip_prefix("error=") {
-            error = Some(url_decode(v));
-        } else if let Some(v) = kv.strip_prefix("error_description=") {
-            error_description = Some(url_decode(v));
+    let mut issuer = None;
+    let mut issuer_seen = false;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        let value = value.into_owned();
+        match key.as_ref() {
+            "code" if code.is_none() => code = Some(value),
+            "state" if state.is_none() => state = Some(value),
+            "error" if error.is_none() => error = Some(value),
+            "error_description" if error_description.is_none() => error_description = Some(value),
+            // URLSearchParams decodes keys as well as values and returns the
+            // first duplicate. Empty `iss` is falsy in the SDK helper.
+            "iss" if !issuer_seen => {
+                issuer = (!value.is_empty()).then_some(value);
+                issuer_seen = true;
+            }
+            _ => {}
         }
     }
 
@@ -209,7 +258,30 @@ If your OAuth provider redirected here, the registered redirect_uri must be {red
     );
     let _ = write_response(&mut stream, "200 OK", &body).await;
 
-    Ok(Some(CallbackParams { code, state }))
+    Ok(Some(CallbackResult {
+        params: CallbackParams { code, state },
+        issuer,
+    }))
+}
+
+fn validate_callback_issuer(
+    issuer: Option<&str>,
+    expected_issuer: Option<&str>,
+    issuer_parameter_supported: bool,
+) -> Result<(), CallbackError> {
+    // The SDK skips this check when RFC 8414 metadata has no issuer value.
+    let Some(expected_issuer) = expected_issuer else {
+        return Ok(());
+    };
+    match issuer {
+        Some(issuer) if issuer != expected_issuer => Err(CallbackError::InvalidRequest(
+            "authorization response issuer does not match metadata issuer".into(),
+        )),
+        None if issuer_parameter_supported => Err(CallbackError::InvalidRequest(
+            "authorization response is missing the required issuer".into(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// HTML-escape per claude-code's `DGr`/`xId` (binary offsets 204622512 /
@@ -409,6 +481,105 @@ mod tests {
         let _ = send_get(port, "/callback?code=a%2Fb&state=ST").await;
         let params = server.await.expect("join").expect("ok");
         assert_eq!(params.code, "a/b");
+    }
+
+    #[tokio::test]
+    async fn issuer_is_required_only_when_metadata_advertises_support() {
+        let listener = CallbackListener::bind(0).await.expect("bind");
+        let port = listener.port();
+        let server = tokio::spawn(async move {
+            listener
+                .accept_with_issuer("S", RU, Some("https://as.example.com"), true)
+                .await
+        });
+        let response = send_get(port, "/callback?code=abc&state=S").await;
+        let error = server
+            .await
+            .expect("join")
+            .expect_err("missing iss rejected");
+        assert!(matches!(error, CallbackError::InvalidRequest(_)));
+        assert!(response.contains("200 OK"));
+    }
+
+    #[tokio::test]
+    async fn present_issuer_must_match_even_without_support_flag() {
+        let listener = CallbackListener::bind(0).await.expect("bind");
+        let port = listener.port();
+        let server = tokio::spawn(async move {
+            listener
+                .accept_with_issuer("S", RU, Some("https://as.example.com"), false)
+                .await
+        });
+        let response = send_get(
+            port,
+            "/callback?code=abc&state=S&iss=https%3A%2F%2Fattacker.example",
+        )
+        .await;
+        let error = server
+            .await
+            .expect("join")
+            .expect_err("mismatched iss rejected");
+        assert!(matches!(error, CallbackError::InvalidRequest(_)));
+        assert!(response.contains("200 OK"));
+    }
+
+    #[tokio::test]
+    async fn percent_encoded_issuer_parameter_name_is_still_validated() {
+        let listener = CallbackListener::bind(0).await.unwrap();
+        let port = listener.port();
+        let accept = tokio::spawn(async move {
+            listener
+                .accept_with_issuer("S", RU, Some("https://as.example.com"), false)
+                .await
+        });
+        let response = send_get(
+            port,
+            "/callback?code=abc&state=S&%69ss=https%3A%2F%2Fattacker.example",
+        )
+        .await;
+        assert!(response.contains("200 OK"));
+        assert!(matches!(
+            accept.await.unwrap(),
+            Err(CallbackError::InvalidRequest(message))
+                if message.contains("issuer does not match")
+        ));
+    }
+
+    #[tokio::test]
+    async fn missing_issuer_is_allowed_when_metadata_does_not_advertise_support() {
+        let listener = CallbackListener::bind(0).await.expect("bind");
+        let port = listener.port();
+        let server = tokio::spawn(async move {
+            listener
+                .accept_with_issuer("S", RU, Some("https://as.example.com"), false)
+                .await
+        });
+        let _ = send_get(port, "/callback?code=abc&state=S").await;
+        assert_eq!(
+            server.await.expect("join").expect("iss is optional").code,
+            "abc"
+        );
+    }
+
+    #[tokio::test]
+    async fn issuer_is_not_checked_when_metadata_has_no_issuer() {
+        let listener = CallbackListener::bind(0).await.expect("bind");
+        let port = listener.port();
+        let server =
+            tokio::spawn(async move { listener.accept_with_issuer("S", RU, None, true).await });
+        let _ = send_get(
+            port,
+            "/callback?code=abc&state=S&iss=https%3A%2F%2Fother.example",
+        )
+        .await;
+        assert_eq!(
+            server
+                .await
+                .expect("join")
+                .expect("no expected issuer")
+                .code,
+            "abc"
+        );
     }
 
     #[tokio::test]

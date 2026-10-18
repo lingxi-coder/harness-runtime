@@ -1,0 +1,18 @@
+128-    Checking migrations v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/migrations)
+129-    Checking mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp)
+130:warning: unused import: `std::collections::HashMap`
+131-  --> crates/mcp/src/oauth.rs:60:5
+132-   |
+133-60 | use std::collections::HashMap;
+134-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+135-   |
+136-   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+137-
+138:warning: unused imports: `Mutex as StdMutex`, `OnceLock`, and `Weak`
+139-  --> crates/mcp/src/oauth.rs:61:22
+140-   |
+141-61 | use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+142-   |                      ^^^^^^^^^^^^^^^^^  ^^^^^^^^  ^^^^
+143-
+144:warning: `mcp` (lib) generated 2 warnings (run `cargo fix --lib -p mcp` to apply 2 suggestions)
+145-    Finished `dev` profile [unoptimized] target(s) in 41.61s

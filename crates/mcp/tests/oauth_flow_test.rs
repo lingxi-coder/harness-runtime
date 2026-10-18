@@ -56,6 +56,177 @@ struct MockAs {
     refresh_body: String,
 }
 
+/// Source-faithful standard OAuth fixture: a valid PRM binds the MCP server
+/// URL to an AS whose RFC 8414 metadata publishes an issuer and issuer-support
+/// flag. Refresh responses are configurable to exercise retry/fallback policy.
+struct StandardOAuthAs {
+    requests: Mutex<Vec<HttpRequest>>,
+    refresh_status: u16,
+    refresh_body: String,
+    concurrent_winner: Mutex<Option<(Arc<MemStorage>, String, oauth::StoredTokens)>>,
+}
+
+impl StandardOAuthAs {
+    fn new(refresh_status: u16, refresh_body: &str) -> Arc<Self> {
+        Arc::new(Self {
+            requests: Mutex::new(Vec::new()),
+            refresh_status,
+            refresh_body: refresh_body.into(),
+            concurrent_winner: Mutex::new(None),
+        })
+    }
+
+    fn with_concurrent_winner(self: Arc<Self>, storage: &Arc<MemStorage>, key: &str) -> Arc<Self> {
+        self.with_refresh_race_record(
+            storage,
+            key,
+            oauth::StoredTokens {
+                access_token: "access-winner".into(),
+                refresh_token: Some("refresh-winner".into()),
+                expires_at_millis: oauth::OAuthExpiry::Number(4_600_000.0),
+                client_id: Some("client-current".into()),
+                client_secret: None,
+                step_up_scope: None,
+            },
+        )
+    }
+
+    fn with_refresh_race_record(
+        self: Arc<Self>,
+        storage: &Arc<MemStorage>,
+        key: &str,
+        record: oauth::StoredTokens,
+    ) -> Arc<Self> {
+        *self.concurrent_winner.lock().unwrap() = Some((storage.clone(), key.into(), record));
+        self
+    }
+
+    fn requests(&self) -> Vec<HttpRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+/// Standard-OAuth mock that fails a fixed number of token POSTs with one
+/// source-classified network error before keeping the refresh grant failing.
+/// This exposes the SDK's 500 ms fetch retry inside each outer refresh try.
+struct RetryableStandardOAuthAs {
+    token_attempts: AtomicUsize,
+    failures: usize,
+}
+
+impl RetryableStandardOAuthAs {
+    fn new(failures: usize) -> Arc<Self> {
+        Arc::new(Self {
+            token_attempts: AtomicUsize::new(0),
+            failures,
+        })
+    }
+
+    fn token_attempts(&self) -> usize {
+        self.token_attempts.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl HttpTransport for RetryableStandardOAuthAs {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        let request_body = req.body.as_deref().unwrap_or("");
+        if req.url == "https://as.example.com/token"
+            && request_body.contains("grant_type=refresh_token")
+        {
+            let attempt = self.token_attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < self.failures {
+                return Err(HttpError::Connection("ECONNRESET".into()));
+            }
+            return Ok(HttpResponse {
+                status: 200,
+                headers: vec![],
+                body: r#"{"access_token":"refreshed","refresh_token":"refresh-2","token_type":"Bearer","expires_in":3600}"#.into(),
+                body_bytes: Vec::new(),
+            });
+        }
+        let (status, body) = if req.url
+            == "https://mcp.example.com/.well-known/oauth-protected-resource/v1"
+        {
+            (
+                200,
+                r#"{"resource":"https://mcp.example.com/","authorization_servers":["https://as.example.com"]}"#,
+            )
+        } else if req.url == "https://as.example.com/.well-known/oauth-authorization-server" {
+            (
+                200,
+                r#"{"issuer":"https://as.example.com","authorization_response_iss_parameter_supported":true,"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#,
+            )
+        } else {
+            (404, "")
+        };
+        Ok(HttpResponse {
+            status,
+            headers: vec![],
+            body: body.into(),
+            body_bytes: Vec::new(),
+        })
+    }
+
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+        Err(HttpError::InvalidRequest("sse unused".into()))
+    }
+}
+
+#[async_trait]
+impl HttpTransport for StandardOAuthAs {
+    async fn request(&self, req: HttpRequest) -> Result<HttpResponse, HttpError> {
+        let request_body = req.body.as_deref().unwrap_or("");
+        let concurrent_winner = if req.url == "https://as.example.com/token"
+            && request_body.contains("grant_type=refresh_token")
+        {
+            self.concurrent_winner.lock().unwrap().take()
+        } else {
+            None
+        };
+        if let Some((storage, key, record)) = concurrent_winner {
+            store_oauth_test_tokens(&storage, &key, &record).await;
+        }
+        let (status, response_body) = if req.url
+            == "https://mcp.example.com/.well-known/oauth-protected-resource/v1"
+        {
+            (
+                200,
+                r#"{"resource":"https://mcp.example.com/","authorization_servers":["https://as.example.com"]}"#.to_string(),
+            )
+        } else if req.url == "https://as.example.com/.well-known/oauth-authorization-server" {
+            (
+                200,
+                r#"{"issuer":"https://as.example.com","authorization_response_iss_parameter_supported":true,"authorization_endpoint":"https://as.example.com/authorize","token_endpoint":"https://as.example.com/token"}"#.to_string(),
+            )
+        } else if req.url == "https://as.example.com/token"
+            && request_body.contains("grant_type=refresh_token")
+        {
+            (self.refresh_status, self.refresh_body.clone())
+        } else if req.url == "https://as.example.com/token"
+            && request_body.contains("grant_type=authorization_code")
+        {
+            (
+                200,
+                r#"{"access_token":"access-standard","refresh_token":"refresh-standard","token_type":"Bearer","expires_in":3600}"#.to_string(),
+            )
+        } else {
+            (404, String::new())
+        };
+        self.requests.lock().unwrap().push(req);
+        Ok(HttpResponse {
+            status,
+            headers: vec![],
+            body: response_body,
+            body_bytes: Vec::new(),
+        })
+    }
+
+    async fn stream_sse(&self, _req: HttpRequest) -> Result<SseStream, HttpError> {
+        Err(HttpError::InvalidRequest("sse unused".into()))
+    }
+}
+
 impl MockAs {
     fn new(exchange_body: &str, refresh_body: &str) -> Arc<Self> {
         Arc::new(Self {
@@ -419,6 +590,10 @@ fn oauth_block(client_id: Option<&str>) -> McpOAuthConfigDto {
 /// Fire a fake-browser GET to the loopback `/callback` once `auth_url` is
 /// surfaced. Extracts the redirect port + `state` from the URL.
 async fn drive_browser(auth_url: &str) {
+    drive_browser_with_issuer(auth_url, None).await;
+}
+
+async fn drive_browser_with_issuer(auth_url: &str, issuer: Option<&str>) {
     // redirect_uri=http%3A%2F%2Flocalhost%3A{port}%2Fcallback
     let port = auth_url
         .split("localhost%3A")
@@ -438,8 +613,11 @@ async fn drive_browser(auth_url: &str) {
             tokio::net::TcpStream::connect(("127.0.0.1", port.parse::<u16>().unwrap())).await
         {
             use tokio::io::AsyncWriteExt;
+            let issuer = issuer
+                .map(|issuer| format!("&iss={}", urlencoding::encode(issuer)))
+                .unwrap_or_default();
             let req = format!(
-                "GET /callback?code=auth-code-xyz&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                "GET /callback?code=auth-code-xyz&state={state}{issuer} HTTP/1.1\r\nHost: localhost\r\n\r\n"
             );
             let _ = s.write_all(req.as_bytes()).await;
             return;
@@ -468,7 +646,7 @@ fn url_capture() -> (
 
 #[tokio::test]
 async fn full_flow_attaches_bearer_and_persists_tokens() {
-    let exchange = r#"{"access_token":"access-1","refresh_token":"refresh-1","expires_in":3600}"#;
+    let exchange = r#"{"access_token":"access-1","refresh_token":"refresh-1","token_type":"Bearer","expires_in":3600}"#;
     let mock_as = MockAs::new(exchange, "{}");
     let transport = RecordingTransport::new(0);
     let storage = MemStorage::new();
@@ -548,6 +726,550 @@ async fn full_flow_attaches_bearer_and_persists_tokens() {
 }
 
 #[tokio::test]
+async fn standard_oauth_carries_validated_resource_and_checks_metadata_issuer() {
+    let as_http = StandardOAuthAs::new(
+        200,
+        r#"{"access_token":"unused","token_type":"Bearer","expires_in":3600}"#,
+    );
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, mut url_rx) = url_capture();
+    let config = http_cfg(
+        "resource-issuer",
+        Some(oauth_block(Some("configured-client"))),
+    );
+    let registry = McpRegistry::new(transport as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+        http: as_http.clone() as Arc<dyn HttpTransport>,
+        clock: clock as Arc<dyn Clock>,
+        storage: storage as Arc<dyn SecureStorage>,
+        on_authorization_url: on_url,
+        xaa_config: None,
+    });
+
+    let browser = tokio::spawn(async move {
+        let url = url_rx.recv().await.expect("authorize URL surfaced");
+        drive_browser_with_issuer(&url, Some("https://as.example.com")).await;
+        url
+    });
+    registry
+        .connect(config)
+        .await
+        .expect("issuer and state accepted");
+    let authorize_url = browser.await.unwrap();
+    let authorize_url = url::Url::parse(&authorize_url).unwrap();
+    let authorize_resource = authorize_url
+        .query_pairs()
+        .find_map(|(key, value)| (key == "resource").then(|| value.into_owned()));
+    assert_eq!(
+        authorize_resource.as_deref(),
+        Some("https://mcp.example.com/")
+    );
+
+    let requests = as_http.requests();
+    let code_grant = requests
+        .iter()
+        .find(|request| {
+            request.url == "https://as.example.com/token"
+                && request
+                    .body
+                    .as_deref()
+                    .is_some_and(|body| body.contains("grant_type=authorization_code"))
+        })
+        .expect("authorization-code grant was sent");
+    assert_eq!(
+        form_value(code_grant.body.as_deref().unwrap(), "resource").as_deref(),
+        Some("https://mcp.example.com/")
+    );
+}
+
+#[tokio::test]
+async fn configured_auth_metadata_still_carries_the_validated_prm_resource() {
+    let as_http = StandardOAuthAs::new(
+        200,
+        r#"{"access_token":"unused","token_type":"Bearer","expires_in":3600}"#,
+    );
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, mut url_rx) = url_capture();
+    let mut oauth_config = oauth_block(Some("configured-client"));
+    oauth_config.auth_server_metadata_url =
+        Some("https://as.example.com/.well-known/oauth-authorization-server".into());
+    let config = http_cfg("configured-prm-resource", Some(oauth_config));
+    let registry = McpRegistry::new(transport as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+        http: as_http.clone() as Arc<dyn HttpTransport>,
+        clock: clock as Arc<dyn Clock>,
+        storage: storage as Arc<dyn SecureStorage>,
+        on_authorization_url: on_url,
+        xaa_config: None,
+    });
+
+    let browser = tokio::spawn(async move {
+        let url = url_rx.recv().await.expect("authorize URL surfaced");
+        drive_browser_with_issuer(&url, Some("https://as.example.com")).await;
+        url
+    });
+    registry
+        .connect(config)
+        .await
+        .expect("configured metadata and PRM resource accepted");
+
+    let authorize_url = url::Url::parse(&browser.await.unwrap()).unwrap();
+    assert_eq!(
+        authorize_url
+            .query_pairs()
+            .find_map(|(key, value)| (key == "resource").then(|| value.into_owned()))
+            .as_deref(),
+        Some("https://mcp.example.com/")
+    );
+    let requests = as_http.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url
+                == "https://mcp.example.com/.well-known/oauth-protected-resource/v1")
+            .count(),
+        1,
+        "configured AS metadata must not suppress the PRM probe"
+    );
+    let code_grant = requests
+        .iter()
+        .find(|request| {
+            request.url == "https://as.example.com/token"
+                && request
+                    .body
+                    .as_deref()
+                    .is_some_and(|body| body.contains("grant_type=authorization_code"))
+        })
+        .expect("authorization-code grant was sent");
+    assert_eq!(
+        form_value(code_grant.body.as_deref().unwrap(), "resource").as_deref(),
+        Some("https://mcp.example.com/")
+    );
+}
+
+#[tokio::test]
+async fn standard_oauth_issuer_mismatch_stops_before_code_grant() {
+    let as_http = StandardOAuthAs::new(200, "{}");
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, mut url_rx) = url_capture();
+    let config = http_cfg("wrong-issuer", Some(oauth_block(Some("configured-client"))));
+    let registry = McpRegistry::new(transport as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+        http: as_http.clone() as Arc<dyn HttpTransport>,
+        clock: clock as Arc<dyn Clock>,
+        storage: storage as Arc<dyn SecureStorage>,
+        on_authorization_url: on_url,
+        xaa_config: None,
+    });
+
+    let browser = tokio::spawn(async move {
+        let url = url_rx.recv().await.expect("authorize URL surfaced");
+        drive_browser_with_issuer(&url, Some("https://attacker.example")).await;
+    });
+    let error = registry
+        .connect(config)
+        .await
+        .expect_err("a mismatched RFC 9207 issuer must abort");
+    browser.await.unwrap();
+    assert!(error.to_string().contains("issuer"), "got {error}");
+    assert!(
+        as_http.requests().iter().all(|request| !request
+            .body
+            .as_deref()
+            .is_some_and(|body| body.contains("grant_type=authorization_code"))),
+        "issuer rejection must happen before token exchange"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn standard_oauth_refreshes_at_300_seconds_retries_transient_errors_and_keeps_current_token()
+{
+    let as_http = StandardOAuthAs::new(200, r#"{"error":"server_error"}"#);
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _url_rx) = url_capture();
+    let config = http_cfg(
+        "refresh-boundary",
+        Some(oauth_block(Some("configured-client"))),
+    );
+    let key = oauth::server_key(&config.name, &config.spec);
+    seed_standard_oauth_token(&storage, &key, Some(1_300.0)).await;
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: as_http.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage.clone() as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry
+        .connect(config)
+        .await
+        .expect("refresh failure falls back to the still-current provider token");
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer access-current")
+    );
+
+    let token_requests: Vec<_> = as_http
+        .requests()
+        .into_iter()
+        .filter(|request| request.url == "https://as.example.com/token")
+        .collect();
+    assert_eq!(token_requests.len(), 3, "three total transient attempts");
+    for request in token_requests {
+        let body = request.body.as_deref().unwrap();
+        assert_eq!(
+            form_value(body, "grant_type").as_deref(),
+            Some("refresh_token")
+        );
+        assert_eq!(
+            form_value(body, "resource").as_deref(),
+            Some("https://mcp.example.com/v1"),
+            "refresh uses the configured MCP URL, not the PRM resource"
+        );
+    }
+    let current = oauth::load_tokens(&(storage as Arc<dyn SecureStorage>), &key)
+        .await
+        .unwrap()
+        .expect("current credentials remain stored");
+    assert_eq!(current.access_token, "access-current");
+}
+
+#[tokio::test(start_paused = true)]
+async fn standard_oauth_does_not_retry_invalid_grant_and_does_not_refresh_at_301_seconds() {
+    let as_http = StandardOAuthAs::new(200, r#"{"error":"invalid_grant"}"#);
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _url_rx) = url_capture();
+    let config = http_cfg(
+        "refresh-invalid-grant",
+        Some(oauth_block(Some("configured-client"))),
+    );
+    let key = oauth::server_key(&config.name, &config.spec);
+    seed_standard_oauth_token(&storage, &key, Some(1_300.0)).await;
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: as_http.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage.clone() as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+    registry
+        .connect(config)
+        .await
+        .expect("invalid grant retains current token");
+    assert_eq!(
+        as_http
+            .requests()
+            .iter()
+            .filter(|request| request.url.ends_with("/token"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer access-current")
+    );
+
+    let as_http = StandardOAuthAs::new(503, r#"{"error":"server_error"}"#);
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _url_rx) = url_capture();
+    let config = http_cfg("refresh-301", Some(oauth_block(Some("configured-client"))));
+    let key = oauth::server_key(&config.name, &config.spec);
+    seed_standard_oauth_token(&storage, &key, Some(1_301.0)).await;
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: as_http.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+    registry
+        .connect(config)
+        .await
+        .expect("301 seconds remains reusable");
+    assert!(
+        as_http.requests().is_empty(),
+        "no discovery or refresh over the boundary"
+    );
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer access-current")
+    );
+
+    let as_http = StandardOAuthAs::new(503, r#"{"error":"server_error"}"#);
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _url_rx) = url_capture();
+    let config = http_cfg(
+        "refresh-no-expiry",
+        Some(oauth_block(Some("configured-client"))),
+    );
+    let key = oauth::server_key(&config.name, &config.spec);
+    seed_standard_oauth_token(&storage, &key, None).await;
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: as_http.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+    registry
+        .connect(config)
+        .await
+        .expect("missing expiry is not treated as zero seconds");
+    assert!(as_http.requests().is_empty());
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer access-current")
+    );
+}
+
+#[tokio::test]
+async fn terminal_refresh_rejections_clear_the_source_scope_and_are_not_replayed() {
+    for (name, error, expected_client_id) in [
+        ("invalidate-grant", "invalid_grant", Some("client-current")),
+        ("invalidate-client", "invalid_client", None),
+        (
+            "invalidate-unauthorized-client",
+            "unauthorized_client",
+            None,
+        ),
+    ] {
+        let as_http = StandardOAuthAs::new(200, &format!(r#"{{"error":"{error}"}}"#));
+        let storage = MemStorage::new();
+        let config = http_cfg(name, Some(oauth_block(Some("configured-client"))));
+        let key = oauth::server_key(&config.name, &config.spec);
+        seed_standard_oauth_token(&storage, &key, Some(1_300.0)).await;
+
+        let first_transport = RecordingTransport::new(0);
+        let (on_url, _url_rx) = url_capture();
+        let first_registry = McpRegistry::new(first_transport.clone() as Arc<dyn McpTransport>)
+            .with_oauth(OAuthDeps {
+                http: as_http.clone() as Arc<dyn HttpTransport>,
+                clock: TestClock::new(1_000) as Arc<dyn Clock>,
+                storage: storage.clone() as Arc<dyn SecureStorage>,
+                on_authorization_url: on_url,
+                xaa_config: None,
+            });
+        first_registry
+            .connect(config.clone())
+            .await
+            .expect("terminal refresh rejection keeps this connect's current token");
+        assert_eq!(
+            spec_auth_header(&first_transport.last_spec()).as_deref(),
+            Some("Bearer access-current")
+        );
+
+        let stored = oauth::load_tokens(&(storage.clone() as Arc<dyn SecureStorage>), &key)
+            .await
+            .unwrap()
+            .expect("invalidated credential record remains scoped");
+        assert_eq!(stored.access_token, "");
+        assert_eq!(stored.refresh_token, None);
+        assert_eq!(stored.expires_at_millis, oauth::OAuthExpiry::Number(0.0));
+        assert_eq!(stored.client_id.as_deref(), expected_client_id);
+
+        let second_transport = RecordingTransport::new(0);
+        let (on_url, mut url_rx) = url_capture();
+        let second_registry = McpRegistry::new(second_transport.clone() as Arc<dyn McpTransport>)
+            .with_oauth(OAuthDeps {
+                http: as_http.clone() as Arc<dyn HttpTransport>,
+                clock: TestClock::new(1_000) as Arc<dyn Clock>,
+                storage: storage.clone() as Arc<dyn SecureStorage>,
+                on_authorization_url: on_url,
+                xaa_config: None,
+            });
+        let browser = tokio::spawn(async move {
+            let url = url_rx
+                .recv()
+                .await
+                .expect("interactive URL after invalidation");
+            drive_browser_with_issuer(&url, Some("https://as.example.com")).await;
+        });
+        second_registry
+            .connect(config)
+            .await
+            .expect("next connect starts a new grant instead of replaying old refresh");
+        browser.await.unwrap();
+        assert_eq!(
+            as_http
+                .requests()
+                .iter()
+                .filter(|request| {
+                    request.url == "https://as.example.com/token"
+                        && request
+                            .body
+                            .as_deref()
+                            .is_some_and(|body| body.contains("grant_type=refresh_token"))
+                })
+                .count(),
+            1,
+            "cleared refresh credentials are not sent again"
+        );
+        assert_eq!(
+            as_http
+                .requests()
+                .iter()
+                .filter(|request| {
+                    request.url == "https://as.example.com/token"
+                        && request
+                            .body
+                            .as_deref()
+                            .is_some_and(|body| body.contains("grant_type=authorization_code"))
+                })
+                .count(),
+            1,
+            "the follow-up connect uses an interactive authorization-code grant"
+        );
+    }
+}
+
+#[tokio::test]
+async fn standard_refresh_adopts_a_fresh_concurrent_credential_winner() {
+    let storage = MemStorage::new();
+    let transport = RecordingTransport::new(0);
+    let clock = TestClock::new(1_000);
+    let (on_url, _url_rx) = url_capture();
+    let config = http_cfg(
+        "refresh-concurrent-winner",
+        Some(oauth_block(Some("configured-client"))),
+    );
+    let key = oauth::server_key(&config.name, &config.spec);
+    seed_standard_oauth_token(&storage, &key, Some(1_300.0)).await;
+    let as_http = StandardOAuthAs::new(200, r#"{"error":"invalid_grant"}"#)
+        .with_concurrent_winner(&storage, &key);
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: as_http.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage.clone() as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry
+        .connect(config)
+        .await
+        .expect("the concurrent winner remains usable after stale refresh rejection");
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer access-winner")
+    );
+    let current = oauth::load_tokens(&(storage as Arc<dyn SecureStorage>), &key)
+        .await
+        .unwrap()
+        .expect("concurrent winner remains persisted");
+    assert_eq!(current.access_token, "access-winner");
+    assert_eq!(current.refresh_token.as_deref(), Some("refresh-winner"));
+    assert_eq!(
+        as_http
+            .requests()
+            .iter()
+            .filter(|request| request.url == "https://as.example.com/token")
+            .count(),
+        1
+    );
+
+    let storage = MemStorage::new();
+    let transport = RecordingTransport::new(0);
+    let (on_url, _url_rx) = url_capture();
+    let config = http_cfg(
+        "refresh-rotated-client-id",
+        Some(oauth_block(Some("configured-client"))),
+    );
+    let key = oauth::server_key(&config.name, &config.spec);
+    seed_standard_oauth_token(&storage, &key, Some(1_300.0)).await;
+    let changed_client_id = StandardOAuthAs::new(200, r#"{"error":"invalid_client"}"#)
+        .with_refresh_race_record(
+            &storage,
+            &key,
+            oauth::StoredTokens {
+                access_token: "access-rotated".into(),
+                refresh_token: Some("refresh-rotated".into()),
+                expires_at_millis: oauth::OAuthExpiry::Number(1_300_000.0),
+                client_id: Some("client-rotated".into()),
+                client_secret: None,
+                step_up_scope: None,
+            },
+        );
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: changed_client_id as Arc<dyn HttpTransport>,
+            clock: TestClock::new(1_000) as Arc<dyn Clock>,
+            storage: storage.clone() as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry
+        .connect(config)
+        .await
+        .expect("stale client rejection falls back for this connect");
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer access-current")
+    );
+    let current = oauth::load_tokens(&(storage as Arc<dyn SecureStorage>), &key)
+        .await
+        .unwrap()
+        .expect("new client record is preserved");
+    assert_eq!(current.access_token, "access-rotated");
+    assert_eq!(current.refresh_token.as_deref(), Some("refresh-rotated"));
+    assert_eq!(current.client_id.as_deref(), Some("client-rotated"));
+}
+
+#[tokio::test(start_paused = true)]
+async fn standard_refresh_composes_inner_fetch_retry_with_three_outer_attempts() {
+    let as_http = RetryableStandardOAuthAs::new(usize::MAX);
+    let transport = RecordingTransport::new(0);
+    let storage = MemStorage::new();
+    let clock = TestClock::new(1_000);
+    let (on_url, _url_rx) = url_capture();
+    let config = http_cfg(
+        "refresh-nested-retries",
+        Some(oauth_block(Some("configured-client"))),
+    );
+    let key = oauth::server_key(&config.name, &config.spec);
+    seed_standard_oauth_token(&storage, &key, Some(1_300.0)).await;
+    let registry =
+        McpRegistry::new(transport.clone() as Arc<dyn McpTransport>).with_oauth(OAuthDeps {
+            http: as_http.clone() as Arc<dyn HttpTransport>,
+            clock: clock as Arc<dyn Clock>,
+            storage: storage as Arc<dyn SecureStorage>,
+            on_authorization_url: on_url,
+            xaa_config: None,
+        });
+
+    registry
+        .connect(config)
+        .await
+        .expect("failed refresh falls back to the current token");
+    assert_eq!(
+        as_http.token_attempts(),
+        6,
+        "three outer attempts each make one 500 ms network retry for ECONNRESET"
+    );
+    assert_eq!(
+        spec_auth_header(&transport.last_spec()).as_deref(),
+        Some("Bearer access-current")
+    );
+}
+
+#[tokio::test]
 async fn static_token_server_spec_is_unchanged() {
     // oauth: None → the OAuth seam, even when wired, must not touch the spec.
     let mock_as = MockAs::new("{}", "{}");
@@ -604,7 +1326,7 @@ async fn static_token_server_spec_is_unchanged() {
 
 #[tokio::test]
 async fn expired_token_triggers_refresh_and_attaches_new_bearer() {
-    let refresh = r#"{"access_token":"access-2","refresh_token":"refresh-2","expires_in":3600}"#;
+    let refresh = r#"{"access_token":"access-2","refresh_token":"refresh-2","token_type":"Bearer","expires_in":3600}"#;
     let mock_as = MockAs::new("{}", refresh);
     let transport = RecordingTransport::new(0);
     let storage = MemStorage::new();
@@ -620,7 +1342,7 @@ async fn expired_token_triggers_refresh_and_attaches_new_bearer() {
     let stored = oauth::StoredTokens {
         access_token: "stale".into(),
         refresh_token: Some("refresh-1".into()),
-        expires_at_unix: 5_000,
+        expires_at_millis: oauth::OAuthExpiry::Number((5_000.0) * 1000.0),
         client_id: Some("dcr-issued-7".into()),
         client_secret: None,
         step_up_scope: None,
@@ -682,7 +1404,7 @@ async fn expired_token_triggers_refresh_and_attaches_new_bearer() {
 
 #[tokio::test]
 async fn connect_401_triggers_refresh_and_retry() {
-    let refresh = r#"{"access_token":"access-3","refresh_token":"refresh-3","expires_in":3600}"#;
+    let refresh = r#"{"access_token":"access-3","refresh_token":"refresh-3","token_type":"Bearer","expires_in":3600}"#;
     let mock_as = MockAs::new("{}", refresh);
     // First connect attempt 401s; the second (post-refresh) succeeds.
     let transport = RecordingTransport::new(1);
@@ -698,7 +1420,7 @@ async fn connect_401_triggers_refresh_and_retry() {
     let stored = oauth::StoredTokens {
         access_token: "access-old".into(),
         refresh_token: Some("refresh-1".into()),
-        expires_at_unix: 99_999,
+        expires_at_millis: oauth::OAuthExpiry::Number((99_999.0) * 1000.0),
         client_id: Some("dcr-issued-7".into()),
         client_secret: None,
         step_up_scope: None,
@@ -817,7 +1539,7 @@ impl HttpTransport for ChallengeAwareAs {
 
 #[tokio::test]
 async fn connect_401_challenge_resource_metadata_url_drives_prm_fetch() {
-    let refresh = r#"{"access_token":"access-challenge","refresh_token":"refresh-challenge","expires_in":3600}"#;
+    let refresh = r#"{"access_token":"access-challenge","refresh_token":"refresh-challenge","token_type":"Bearer","expires_in":3600}"#;
     let mock_as = ChallengeAwareAs::new(refresh);
     let challenge =
         r#"Bearer resource_metadata="https://mcp.example.com/custom-prm-location""#.to_string();
@@ -836,7 +1558,7 @@ async fn connect_401_challenge_resource_metadata_url_drives_prm_fetch() {
     let stored = oauth::StoredTokens {
         access_token: "access-old".into(),
         refresh_token: Some("refresh-1".into()),
-        expires_at_unix: 99_999,
+        expires_at_millis: oauth::OAuthExpiry::Number((99_999.0) * 1000.0),
         client_id: Some("dcr-issued-7".into()),
         client_secret: None,
         step_up_scope: None,
@@ -903,7 +1625,7 @@ async fn seed_unexpired_oauth_token(storage: &Arc<MemStorage>, key: &str) {
     let stored = oauth::StoredTokens {
         access_token: "oauth-bearer-should-not-win".into(),
         refresh_token: Some("refresh-x".into()),
-        expires_at_unix: 99_999,
+        expires_at_millis: oauth::OAuthExpiry::Number((99_999.0) * 1000.0),
         client_id: Some("client-x".into()),
         client_secret: None,
         step_up_scope: None,
@@ -921,6 +1643,48 @@ async fn seed_unexpired_oauth_token(storage: &Arc<MemStorage>, key: &str) {
         .store(oauth::MCP_OAUTH_SERVICE, key, data)
         .await
         .unwrap();
+}
+
+async fn seed_standard_oauth_token(
+    storage: &Arc<MemStorage>,
+    key: &str,
+    expires_at_seconds: Option<f64>,
+) {
+    let stored = oauth::StoredTokens {
+        access_token: "access-current".into(),
+        refresh_token: Some("refresh-current".into()),
+        expires_at_millis: expires_at_seconds
+            .map(|seconds| oauth::OAuthExpiry::Number(seconds * 1000.0))
+            .unwrap_or(oauth::OAuthExpiry::Undefined),
+        client_id: Some("client-current".into()),
+        client_secret: None,
+        step_up_scope: None,
+    };
+    store_oauth_test_tokens(storage, key, &stored).await;
+}
+
+async fn store_oauth_test_tokens(
+    storage: &Arc<MemStorage>,
+    key: &str,
+    stored: &oauth::StoredTokens,
+) {
+    let data = SecureStorageData::new(
+        serde_json::to_vec(stored).unwrap(),
+        SecureStorageMetadata {
+            created_at: SystemTime::UNIX_EPOCH,
+            last_accessed: None,
+            kind: SecretKindDto("mcp_oauth_tokens".into()),
+        },
+    );
+    storage
+        .store(oauth::MCP_OAUTH_SERVICE, key, data)
+        .await
+        .unwrap();
+}
+
+fn form_value(body: &str, key: &str) -> Option<String> {
+    url::form_urlencoded::parse(body.as_bytes())
+        .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
 }
 
 /// Gap 1: a static `headers.Authorization` on a server that ALSO has an
@@ -1240,7 +2004,7 @@ async fn disconnect_revokes_tokens_and_clears_local() {
     let stored = oauth::StoredTokens {
         access_token: "access-live".into(),
         refresh_token: Some("refresh-live".into()),
-        expires_at_unix: 99_999,
+        expires_at_millis: oauth::OAuthExpiry::Number((99_999.0) * 1000.0),
         client_id: Some("dcr-issued-7".into()),
         client_secret: None,
         step_up_scope: None,
@@ -1347,7 +2111,7 @@ async fn disconnect_without_revocation_endpoint_still_clears() {
     let stored = oauth::StoredTokens {
         access_token: "access-live".into(),
         refresh_token: Some("refresh-live".into()),
-        expires_at_unix: 99_999,
+        expires_at_millis: oauth::OAuthExpiry::Number((99_999.0) * 1000.0),
         client_id: Some("c".into()),
         client_secret: None,
         step_up_scope: None,
@@ -1409,7 +2173,7 @@ async fn disconnect_without_revocation_endpoint_still_clears() {
 /// attaches the freshly minted Bearer. The cache is cleared on the new grant.
 #[tokio::test]
 async fn connect_403_insufficient_scope_triggers_step_up_reauth() {
-    let exchange = r#"{"access_token":"elevated-access","refresh_token":"r","expires_in":3600}"#;
+    let exchange = r#"{"access_token":"elevated-access","refresh_token":"r","token_type":"Bearer","expires_in":3600}"#;
     let mock_as = MockAs::new(exchange, "{}");
     // First connect 403s requiring read:elevated; the post-reauth connect succeeds.
     let transport = RecordingTransport::with_403_first("read:elevated");
@@ -1425,7 +2189,7 @@ async fn connect_403_insufficient_scope_triggers_step_up_reauth() {
     let stored = oauth::StoredTokens {
         access_token: "narrow-access".into(),
         refresh_token: Some("narrow-refresh".into()),
-        expires_at_unix: 99_999,
+        expires_at_millis: oauth::OAuthExpiry::Number((99_999.0) * 1000.0),
         client_id: Some("preset-client".into()),
         client_secret: None,
         step_up_scope: None,
@@ -1794,7 +2558,7 @@ async fn xaa_no_refresh_token_far_from_expiry_reuses_cache_without_exchange() {
     let stored = oauth::StoredTokens {
         access_token: "cached-far".into(),
         refresh_token: None,
-        expires_at_unix: 1_000 + 3_600, // 3600s away — well outside the 300s window
+        expires_at_millis: oauth::OAuthExpiry::Number(((1_000 + 3_600) as f64) * 1000.0), // 3600s away — well outside the 300s window
         client_id: Some("as-client".into()),
         client_secret: Some("as-secret".into()),
         step_up_scope: None,
@@ -1868,7 +2632,7 @@ async fn xaa_no_refresh_token_near_expiry_triggers_silent_exchange() {
     let stored = oauth::StoredTokens {
         access_token: "cached-near".into(),
         refresh_token: None,
-        expires_at_unix: 1_000 + 100, // 100s away — inside the 300s window
+        expires_at_millis: oauth::OAuthExpiry::Number(((1_000 + 100) as f64) * 1000.0), // 100s away — inside the 300s window
         client_id: Some("as-client".into()),
         client_secret: Some("as-secret".into()),
         step_up_scope: None,
@@ -2023,7 +2787,7 @@ async fn xaa_stored_refresh_token_uses_ordinary_refresh_not_full_exchange() {
     let stored = oauth::StoredTokens {
         access_token: "xaa-stale".into(),
         refresh_token: Some("xaa-refresh-1".into()),
-        expires_at_unix: 500, // already expired (clock = 1000)
+        expires_at_millis: oauth::OAuthExpiry::Number((500.0) * 1000.0), // already expired (clock = 1000)
         client_id: Some("as-client".into()),
         client_secret: Some("as-secret".into()),
         step_up_scope: None,
@@ -2122,7 +2886,7 @@ async fn xaa_401_reauth_never_falls_to_interactive_consent() {
     let stored = oauth::StoredTokens {
         access_token: "xaa-access-old".into(),
         refresh_token: None,
-        expires_at_unix: 1_000 + 3_600,
+        expires_at_millis: oauth::OAuthExpiry::Number(((1_000 + 3_600) as f64) * 1000.0),
         client_id: Some("as-client".into()),
         client_secret: Some("as-secret".into()),
         step_up_scope: None,
@@ -2213,7 +2977,7 @@ async fn xaa_403_step_up_never_falls_to_interactive_consent() {
     let stored = oauth::StoredTokens {
         access_token: "xaa-access-old".into(),
         refresh_token: None,
-        expires_at_unix: 1_000 + 3_600,
+        expires_at_millis: oauth::OAuthExpiry::Number(((1_000 + 3_600) as f64) * 1000.0),
         client_id: Some("as-client".into()),
         client_secret: Some("as-secret".into()),
         step_up_scope: None,
@@ -2301,7 +3065,7 @@ async fn xaa_stored_refresh_token_inside_300s_window_refreshes_proactively() {
         refresh_token: Some("xaa-refresh-1".into()),
         // Still VALID (clock = 1000) but only 60s of life left — inside the
         // 300s window, so the oracle refreshes rather than serving it.
-        expires_at_unix: 1_000 + 60,
+        expires_at_millis: oauth::OAuthExpiry::Number(((1_000 + 60) as f64) * 1000.0),
         client_id: Some("as-client".into()),
         client_secret: Some("as-secret".into()),
         step_up_scope: None,

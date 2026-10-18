@@ -1,7 +1,9 @@
 use super::*;
 use super::{fusion::*, lifecycle::*};
+use crate::headless::io::Output;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[test]
 fn unknown_command_attachment_omits_absent_suggestion_and_preserves_source_units() {
@@ -310,6 +312,158 @@ fn resume_dedup_skip_emits_its_own_terminal() {
     assert_eq!(discarded["command_uuid"], "u-resident");
     assert_eq!(discarded["state"], "discarded");
     assert!(rx.try_recv().is_err(), "exactly one terminal per command");
+}
+
+#[tokio::test]
+async fn shutdown_signal_reason_survives_concurrent_turn_admission() {
+    use orchestrator::prompt::mid_turn_input::CancelReason;
+
+    let root = tempfile::tempdir().unwrap();
+    let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(
+        tokio::io::sink(),
+    )));
+    let runtime = fixture_runtime(stream, root.path()).await;
+
+    runtime.interrupt_for_signal(
+        crate::headless::HeadlessSignal::Shutdown.cancel_reason(),
+        true,
+    );
+    let next_turn = runtime.turn_cancel();
+
+    assert!(next_turn.is_cancelled());
+    assert_eq!(runtime.cancel_reason.get(), CancelReason::ServiceShutdown);
+}
+
+#[tokio::test]
+async fn cold_shutdown_redelivery_runs_but_an_answered_persisted_uuid_skips() {
+    let root = tempfile::tempdir().unwrap();
+    let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(
+        tokio::io::sink(),
+    )));
+    let runtime = fixture_runtime(stream, root.path()).await;
+    let message_id = lingxi_core::types::MessageId::new();
+    let uuid = message_id.to_string();
+    {
+        let session = runtime.orchestrator.session();
+        let mut session = session.lock().await;
+        session
+            .history
+            .push(lingxi_core::types::ConversationMessage::user(
+                message_id,
+                "original request".into(),
+            ));
+        let mut shutdown = lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "[Request interrupted by user]".into(),
+        );
+        if let lingxi_core::types::ConversationMessage::User {
+            interrupted_by_shutdown,
+            ..
+        } = &mut shutdown
+        {
+            *interrupted_by_shutdown = Some(true);
+        }
+        session.history.push(shutdown);
+    }
+
+    assert!(
+        !should_skip_persisted_user_turn(&runtime.orchestrator, &uuid).await,
+        "a shutdown-marked tail is eligible for Native cold redelivery"
+    );
+    {
+        let session = runtime.orchestrator.session();
+        session
+            .lock()
+            .await
+            .history
+            .push(lingxi_core::types::ConversationMessage::Assistant {
+                per_turn_effort: None,
+                id: lingxi_core::types::MessageId::new(),
+                content: vec![lingxi_core::types::ContentBlock::Text {
+                    text: "completed answer".into(),
+                    citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+                resumable: None,
+            });
+    }
+    assert!(
+        should_skip_persisted_user_turn(&runtime.orchestrator, &uuid).await,
+        "a later assistant answer makes the persisted UUID a duplicate"
+    );
+}
+
+#[tokio::test]
+async fn active_after_tools_duplicate_stays_deduped_during_the_current_query() {
+    use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
+    use std::collections::VecDeque;
+
+    let root = tempfile::tempdir().unwrap();
+    let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(
+        tokio::io::sink(),
+    )));
+    let runtime = fixture_runtime(stream.clone(), root.path()).await;
+    let message_id = lingxi_core::types::MessageId::new();
+    let uuid = message_id.to_string();
+    {
+        let session = runtime.orchestrator.session();
+        let mut session = session.lock().await;
+        session
+            .history
+            .push(lingxi_core::types::ConversationMessage::user(
+                message_id,
+                "request already in the active turn".into(),
+            ));
+        let mut shutdown = lingxi_core::types::ConversationMessage::user(
+            lingxi_core::types::MessageId::new(),
+            "[Request interrupted by user]".into(),
+        );
+        if let lingxi_core::types::ConversationMessage::User {
+            interrupted_by_shutdown,
+            ..
+        } = &mut shutdown
+        {
+            *interrupted_by_shutdown = Some(true);
+        }
+        session.history.push(shutdown);
+    }
+    let frame_projection = Utf16JsonProjection::from_serde_value(&serde_json::json!({
+        "type": "user",
+        "uuid": uuid.clone(),
+        "message": {"role": "user", "content": "request already in the active turn"}
+    }))
+    .unwrap();
+    let pending = Arc::new(std::sync::Mutex::new(VecDeque::from([
+        crate::headless::stream_json_input::StreamInput::User(
+            crate::headless::stream_json_input::UserTurn {
+                content: serde_json::json!("request already in the active turn"),
+                content_projection: Utf16JsonProjection::from("request already in the active turn"),
+                frame_projection,
+                uuid: Some(uuid),
+                queue_delivery: None,
+            },
+        ),
+    ])));
+    let (_sender, receiver) = tokio::sync::mpsc::channel(1);
+    let lifecycle = Arc::new(crate::headless::queued_commands::QueueLifecycle::new(
+        stream.outbound_tx(),
+        "active-session".into(),
+    ));
+    let queue = crate::headless::queued_commands::SdkInputQueue::new(
+        receiver,
+        pending.clone(),
+        lifecycle,
+        stream,
+        runtime.inner.orchestrator.clone(),
+        false,
+        "active-session".into(),
+    );
+
+    assert!(
+        queue.take_mid_turn_batch().await.unwrap().is_none(),
+        "an active after-tools duplicate is still retired by the queue's current-query dedup"
+    );
+    assert!(pending.lock().unwrap().is_empty());
 }
 
 /// `cK(mt,ce.fastMode)` (@227895153): the state rides the SAME inputs as
@@ -1209,6 +1363,7 @@ pub(super) async fn fixture_runtime(
         stdout: crate::headless::io::Output::new(tokio::io::sink()),
         shutdown: tokio_util::sync::CancellationToken::new(),
         active_turn: std::sync::Mutex::new(tokio_util::sync::CancellationToken::new()),
+        cancel_reason: orchestrator::prompt::mid_turn_input::CancelReasonFlag::new(),
         failures: std::sync::Mutex::new(Vec::new()),
         execution_errors: Arc::new(std::sync::Mutex::new(Vec::new())),
         max_turns: None,

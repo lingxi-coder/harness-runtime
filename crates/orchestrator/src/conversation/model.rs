@@ -1261,6 +1261,8 @@ impl ConversationOrchestrator {
         let messages = {
             vec![ConversationMessage::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::TextJsUtf16 {
                     text: prompt.to_owned(),
@@ -1457,6 +1459,8 @@ impl ConversationOrchestrator {
             api_attempts_left: None,
             prompt_messages: vec![ConversationMessage::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::TextJsUtf16 {
                     text: prompt,
@@ -3260,6 +3264,17 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         };
         let session = self.session.lock().await;
         session.history.iter().any(|message| message.id() == id)
+    }
+
+    /// Whether a persisted input UUID still needs its turn to run. Native
+    /// resume/redelivery treats an ordinary persisted UUID as a duplicate, but
+    /// retries it when the transcript has no response or ends in the flagged
+    /// shutdown interruption tail.
+    pub async fn session_message_turn_is_unanswered(&self, raw_uuid: &str) -> bool {
+        let Some(id) = MessageId::parse_prefixed(raw_uuid) else {
+            return false;
+        };
+        self.session.lock().await.message_turn_is_unanswered(id)
     }
 
     /// The `bash_output_audience_note` attachment (2.1.238, gate `kpm`

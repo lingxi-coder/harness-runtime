@@ -1,0 +1,6 @@
+sandbox-exec: host must be * or localhost in network address
+
+Backtrace: 
+/private/tmp/r380-refusal-tools-q9jor8ck/native-child-network.sbpl:6:26:
+	(remote ip "127.0.0.1:58084")
+

@@ -1,0 +1,384 @@
+$ source '/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/frozen-build-env.sh' && cargo test --locked --offline -p harness-runtime --lib --features desktop
+   Compiling syn v2.0.117
+   Compiling scopeguard v1.2.0
+   Compiling lock_api v0.4.14
+   Compiling parking_lot v0.12.5
+   Compiling typenum v1.20.0
+   Compiling generic-array v0.14.7
+   Compiling crypto-common v0.1.7
+   Compiling unicode-bidi v0.3.18
+   Compiling idna_adapter v1.1.0
+   Compiling idna v1.1.0
+   Compiling block-buffer v0.10.4
+   Compiling zerocopy v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling futures-macro v0.3.32
+   Compiling futures-util v0.3.32
+   Compiling serde v1.0.228
+   Compiling tokio-macros v2.7.0
+   Compiling tokio v1.52.3
+   Compiling tracing-attributes v0.1.31
+   Compiling tracing v0.1.44
+   Compiling thiserror-impl v2.0.18
+   Compiling thiserror v2.0.18
+   Compiling zerocopy-derive v0.8.48
+   Compiling tokio-util v0.7.18
+   Compiling digest v0.10.7
+   Compiling url v2.5.8
+   Compiling async-trait v0.1.89
+   Compiling futures-executor v0.3.32
+   Compiling sha2 v0.10.9
+   Compiling thiserror-impl v1.0.69
+   Compiling thiserror v1.0.69
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling uuid v1.10.0
+   Compiling toml_edit v0.22.27
+   Compiling proc-macro2-diagnostics v0.10.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling pear_codegen v0.2.9
+   Compiling json-projection v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/json-projection)
+   Compiling toml v0.8.23
+   Compiling futures v0.3.32
+   Compiling serde_derive_internals v0.29.1
+   Compiling pear v0.2.9
+   Compiling schemars_derive v0.8.22
+   Compiling dashmap v6.2.1
+   Compiling tokio-rustls v0.26.4
+   Compiling mobile-linux-api v0.1.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41)
+   Compiling schemars v0.8.22
+   Compiling rooted-fs v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/rooted-fs)
+   Compiling jsonrpc v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/jsonrpc)
+   Compiling figment v0.10.19
+   Compiling mcp-wire v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp-wire)
+   Compiling device-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/device-api)
+   Compiling secrecy v0.10.3
+   Compiling brotli-decompressor v5.0.3
+   Compiling core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+   Compiling tower v0.5.3
+   Compiling h2 v0.4.19
+   Compiling hyper v1.9.0
+   Compiling brotli v8.0.4
+   Compiling compression-codecs v0.4.39
+   Compiling hyper-util v0.1.20
+   Compiling async-compression v0.4.44
+   Compiling chrono v0.4.44
+   Compiling tower-http v0.6.11
+   Compiling serde_urlencoded v0.7.1
+   Compiling displaydoc v0.2.6
+   Compiling rand_chacha v0.9.0
+   Compiling opentelemetry v0.31.0
+   Compiling rand v0.9.4
+   Compiling pin-project-internal v1.1.13
+   Compiling pin-project v1.1.13
+   Compiling prost-derive v0.14.4
+   Compiling opentelemetry_sdk v0.31.0
+   Compiling hyper-timeout v0.5.2
+   Compiling tokio-stream v0.1.18
+   Compiling tonic v0.14.2
+   Compiling prost v0.14.4
+   Compiling hyper-rustls v0.27.5
+   Compiling protobuf-support v3.7.2
+   Compiling ref-cast-impl v1.0.25
+   Compiling ref-cast v1.0.25
+   Compiling protobuf v3.7.2
+   Compiling reqwest v0.12.28
+   Compiling tonic-prost v0.14.5
+   Compiling rand_chacha v0.3.1
+   Compiling opentelemetry-proto v0.31.0
+   Compiling rand v0.8.6
+   Compiling prometheus v0.14.0
+   Compiling opentelemetry-http v0.31.0
+   Compiling sha1 v0.10.6
+   Compiling hmac v0.12.1
+   Compiling opentelemetry-prometheus v0.31.0
+   Compiling opentelemetry-otlp v0.31.1
+   Compiling ahash v0.8.12
+   Compiling opentelemetry-stdout v0.31.0
+   Compiling lingxi-hyper v1.9.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling telemetry-macros v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry-macros)
+   Compiling telemetry v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry)
+   Compiling lingxi-hyper-util v0.1.21 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling fluent-uri v0.4.1
+   Compiling referencing v0.46.3
+   Compiling lingxi-hyper-rustls v0.27.5 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling tungstenite v0.24.0
+   Compiling email_address v0.2.9
+   Compiling jsonschema v0.46.3
+   Compiling tokio-tungstenite v0.24.0
+   Compiling lingxi-reqwest v0.12.29 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling chrono-tz v0.10.4
+   Compiling synstructure v0.13.2
+   Compiling asn1-rs-derive v0.5.1
+   Compiling asn1-rs-impl v0.2.0
+   Compiling asn1-rs v0.6.2
+   Compiling lingxi-llm-client v0.3.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling globset v0.4.15
+   Compiling ignore v0.4.23
+   Compiling secret v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/secret)
+   Compiling tree-sitter-bash v0.25.1
+   Compiling oid-registry v0.7.1
+   Compiling der-parser v9.0.0
+   Compiling x509-parser v0.16.0
+   Compiling fluent-uri v0.3.2
+   Compiling boon v0.6.1
+   Compiling rcgen v0.13.2
+   Compiling permission v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/permission)
+   Compiling serde_repr v0.1.20
+   Compiling lsp-types v0.95.1
+   Compiling sandbox-runtime v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sandbox-runtime)
+   Compiling sandbox v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sandbox)
+   Compiling lsp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/lsp)
+   Compiling visualization v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/visualization)
+   Compiling session v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/session)
+   Compiling llm-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime)
+   Compiling migrations v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/migrations)
+   Compiling mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp)
+   Compiling block-padding v0.3.3
+   Compiling syn v3.0.3
+   Compiling tool-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tool-api)
+   Compiling inout v0.1.4
+   Compiling cipher v0.4.4
+   Compiling objc2-encode v4.1.0
+   Compiling salsa20 v0.10.2
+   Compiling pbkdf2 v0.12.2
+   Compiling objc2 v0.6.4
+   Compiling scrypt v0.11.0
+   Compiling aes v0.8.4
+   Compiling cbc v0.1.2
+   Compiling pkcs5 v0.7.1
+   Compiling synstructure v0.14.0
+   Compiling nix v0.27.1
+   Compiling pkcs8 v0.10.2
+   Compiling http-client v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/http-client)
+   Compiling zerofrom-derive v0.1.8
+   Compiling block2 v0.6.2
+   Compiling mobile-linux-core v0.1.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41)
+   Compiling dispatch2 v0.3.1
+   Compiling zerofrom v0.1.8
+   Compiling platform-common v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/common)
+   Compiling hooks v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/hooks)
+   Compiling cost v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/cost)
+   Compiling yoke-derive v0.8.4
+   Compiling yoke v0.8.3
+   Compiling objc2-core-foundation v0.3.2
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling sidequery v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sidequery)
+   Compiling zerovec-derive v0.11.6
+   Compiling zerovec v0.11.8
+   Compiling hybrid-array v0.4.15
+   Compiling memory v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/memory)
+   Compiling tinystr v0.8.4
+   Compiling objc2-foundation v0.3.2
+   Compiling agent v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/agent)
+   Compiling workflow v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/workflow)
+   Compiling task-store v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/task-store)
+   Compiling icu_locale_core v2.3.0
+   Compiling tasks v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tasks)
+   Compiling potential_utf v0.1.6
+   Compiling zerotrie v0.2.5
+   Compiling phf_shared v0.11.3
+   Compiling icu_provider v2.3.1
+   Compiling crypto-common v0.2.2
+   Compiling rand_core v0.6.4
+   Compiling icu_collections v2.3.0
+   Compiling phf_generator v0.11.3
+   Compiling block-padding v0.4.2
+   Compiling inout v0.2.2
+   Compiling icu_locale_fallback v2.3.0
+   Compiling vcpkg v0.2.15
+   Compiling new_debug_unreachable v1.0.6
+   Compiling icu_normalizer v2.3.0
+   Compiling libz-sys v1.1.29
+   Compiling cipher v0.5.2
+   Compiling phf_codegen v0.11.3
+   Compiling string_cache_codegen v0.5.4
+   Compiling icu_properties v2.3.0
+   Compiling objc2-metal v0.3.2
+   Compiling block-buffer v0.12.1
+   Compiling command-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/command-api)
+   Compiling mbedtls-sys v3.6.2 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/mbedtls-sys)
+   Compiling mac v0.1.1
+   Compiling const-oid v0.10.2
+   Compiling rayon-core v1.13.0
+   Compiling cron v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/cron)
+   Compiling getrandom v0.4.3
+   Compiling rand_core v0.10.1
+   Compiling digest v0.11.3
+   Compiling futf v0.1.5
+   Compiling objc2-core-graphics v0.3.2
+   Compiling icu_collator v2.3.1 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/icu_collator)
+   Compiling markup5ever v0.12.1
+   Compiling icu_locale v2.3.1
+   Compiling skill v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/skill)
+   Compiling cpufeatures v0.3.1
+   Compiling precomputed-hash v0.1.1
+   Compiling objc-sys v0.3.5
+   Compiling string_cache v0.8.9
+   Compiling objc2-core-video v0.3.2
+   Compiling tendril v0.4.3
+   Compiling chacha20 v0.10.2
+   Compiling tool-cron v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/cron)
+   Compiling phf v0.11.3
+   Compiling libssh2-sys v0.3.1 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/libssh2-sys)
+   Compiling cpubits v0.1.1
+   Compiling unicode-properties v0.1.4
+   Compiling stringprep v0.1.5
+   Compiling aes v0.9.3
+   Compiling compaction v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/compaction)
+   Compiling rand v0.10.3
+   Compiling rayon v1.12.0
+   Compiling sha2 v0.11.0
+   Compiling md-5 v0.11.0
+   Compiling ecb v0.2.1
+   Compiling cbc v0.2.1
+   Compiling objc2-core-image v0.3.2
+   Compiling objc2-quartz-core v0.3.2
+   Compiling half v2.7.1
+   Compiling html5ever v0.27.0
+   Compiling nom v8.0.0
+   Compiling rangemap v1.7.1
+   Compiling ciborium-io v0.2.2
+   Compiling weezl v0.2.1
+   Compiling ciborium-ll v0.2.2
+   Compiling grep-searcher v0.1.14
+   Compiling lopdf v0.45.0
+   Compiling objc2 v0.5.2
+   Compiling grep-regex v0.1.13
+   Compiling objc2-cloud-kit v0.3.2
+   Compiling objc2-core-data v0.3.2
+   Compiling outputstyles v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/outputstyles)
+   Compiling objc2-core-text v0.3.2
+   Compiling objc2-core-audio-types v0.3.2
+   Compiling foreign-types-macros v0.2.4
+   Compiling libgit2-sys v0.18.5+1.9.4 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/git2-rs/libgit2-sys)
+   Compiling pulldown-cmark v0.13.4
+   Compiling foreign-types-shared v0.3.1
+   Compiling foreign-types v0.5.0
+   Compiling tool-file v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/file)
+   Compiling objc2-app-kit v0.3.2
+   Compiling objc2-foundation v0.2.2
+   Compiling ciborium v0.2.2
+   Compiling tool-skill v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/skill)
+   Compiling xml5ever v0.18.1
+   Compiling tool-workflow v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/workflow)
+   Compiling tool-task v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/task)
+   Compiling objc2-avf-audio v0.3.2
+   Compiling objc2-core-audio v0.3.2
+   Compiling objc2-media-toolbox v0.3.2
+   Compiling objc2-image-io v0.3.2
+   Compiling core-graphics-types v0.2.0
+   Compiling fancy-regex v0.16.2
+   Compiling zip v2.4.2
+   Compiling unicase v2.9.0
+   Compiling byteorder-lite v0.1.0
+   Compiling bumpalo v3.20.3
+   Compiling zopfli v0.8.3
+   Compiling image v0.25.6
+   Compiling syntect v5.3.0-harness.1 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/syntect)
+   Compiling orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+   Compiling core-graphics v0.24.0
+   Compiling objc2-av-foundation v0.3.2
+   Compiling objc2-core-media v0.3.2
+   Compiling markup5ever_rcdom v0.3.0
+   Compiling objc2-app-kit v0.2.2
+   Compiling tungstenite v0.21.0
+   Compiling quick-xml v0.42.0
+   Compiling base64 v0.23.1
+   Compiling plist v1.10.1
+   Compiling tokio-tungstenite v0.21.0
+   Compiling enigo v0.3.0
+   Compiling htmd v0.1.6
+   Compiling git2 v0.21.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/git2-rs/git2)
+   Compiling xcap v0.5.2
+   Compiling arboard v3.6.1
+   Compiling coordinator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/coordinator)
+   Compiling local-app v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/local-app)
+   Compiling console v0.16.3
+   Compiling semver v1.0.28
+   Compiling plugin v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/plugin)
+   Compiling platform-posix v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/posix)
+   Compiling insta v1.47.2
+   Compiling tool-ui v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/ui)
+   Compiling test-harness v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/test-harness)
+   Compiling platform-macos-computer-control v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/macos-computer-control)
+   Compiling tool-web v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/web)
+   Compiling fusion v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/fusion)
+   Compiling tool-shell v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/shell)
+   Compiling provider-config v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/provider-config)
+   Compiling tool-computer-use v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/computer-use)
+   Compiling tool-plan v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/plan)
+   Compiling tool-mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/mcp)
+   Compiling client v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/client)
+   Compiling bridge v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/bridge)
+   Compiling tool-lsp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/lsp)
+   Compiling tool-worktree v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/worktree)
+   Compiling tool-meta v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/meta)
+   Compiling tool-agent v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/agent)
+   Compiling tool-mobile v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/mobile)
+   Compiling audio-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/audio-runtime)
+   Compiling msgqueue v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/msgqueue)
+   Compiling harness-runtime v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/runtime)
+error[E0433]: failed to resolve: use of undeclared type `Output`
+    --> crates/runtime/src/headless/run/tests.rs:321:61
+     |
+ 321 |     let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(
+     |                                                             ^^^^^^ use of undeclared type `Output`
+     |
+note: struct `crate::desktop::fusion_attempts::tests::Output` exists but is inaccessible
+    --> crates/runtime/src/desktop/fusion_attempts/tests.rs:1012:1
+     |
+1012 | struct Output(lingxi_core::types::SessionId, lingxi_core::types::MessageId);
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not accessible
+help: consider importing one of these structs
+     |
+   1 + use crate::headless::io::Output;
+     |
+   1 + use std::process::Output;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `Output`
+    --> crates/runtime/src/headless/run/tests.rs:339:61
+     |
+ 339 |     let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(
+     |                                                             ^^^^^^ use of undeclared type `Output`
+     |
+note: struct `crate::desktop::fusion_attempts::tests::Output` exists but is inaccessible
+    --> crates/runtime/src/desktop/fusion_attempts/tests.rs:1012:1
+     |
+1012 | struct Output(lingxi_core::types::SessionId, lingxi_core::types::MessageId);
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not accessible
+help: consider importing one of these structs
+     |
+   1 + use crate::headless::io::Output;
+     |
+   1 + use std::process::Output;
+     |
+
+error[E0433]: failed to resolve: use of undeclared type `Output`
+    --> crates/runtime/src/headless/run/tests.rs:401:61
+     |
+ 401 |     let stream = Arc::new(StreamJsonStream::new_placeholder(Output::new(
+     |                                                             ^^^^^^ use of undeclared type `Output`
+     |
+note: struct `crate::desktop::fusion_attempts::tests::Output` exists but is inaccessible
+    --> crates/runtime/src/desktop/fusion_attempts/tests.rs:1012:1
+     |
+1012 | struct Output(lingxi_core::types::SessionId, lingxi_core::types::MessageId);
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not accessible
+help: consider importing one of these structs
+     |
+   1 + use crate::headless::io::Output;
+     |
+   1 + use std::process::Output;
+     |
+
+error[E0063]: missing field `cancel_reason` in initializer of `HeadlessRuntime`
+    --> crates/runtime/src/headless/run/tests.rs:1356:5
+     |
+1356 |     Runtime {
+     |     ^^^^^^^ missing `cancel_reason`
+
+Some errors have detailed explanations: E0063, E0433.
+For more information about an error, try `rustc --explain E0063`.
+error: could not compile `harness-runtime` (lib test) due to 4 previous errors

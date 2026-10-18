@@ -1,0 +1,6 @@
+0e68e5a6f54332b205d579a6ce2e8c66975c34e10468ebebbbe79d8a40664451  Cargo.lock
+f036cdcd18319f98d9e9a8eb4ce62e355cd81b2fd31ed51bd73098a5094fc472  crates/core/src/types/utf16_json.rs
+9738dc7739010f8f07d224f8623ceebb3b004c25ac3fcd34da4e08ee2955d47c  crates/mcp-wire/Cargo.toml
+3ca6da708b3e2658d91efb7f03e13f528a04bfd335625615f5acb05e631d173a  crates/mcp-wire/src/ids.rs
+a26f10f0a885a5c32ac16a04d8a9054c2926f07c6abec5de25944444b71cc21c  crates/mcp-wire/src/lib.rs
+f742c09d41b9dbab9e6a7eddc177edd1e894ff5d2e64ce9572c29c96c37d5ec0  crates/mcp-wire/src/transport.rs

@@ -84,6 +84,11 @@ fn source_string(value: &str) -> Utf16JsonProjection {
         .expect("Rust strings are valid UTF-16")
 }
 
+fn source_string_units(units: &[u16]) -> Utf16JsonProjection {
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(units), units.to_vec())
+        .expect("display text is derived from exact UTF-16 units")
+}
+
 fn empty_source_string() -> Utf16JsonProjection {
     source_string("")
 }
@@ -1527,7 +1532,7 @@ impl McpTransport for PosixMcpTransport {
                     Ok(n) => {
                         return Some((
                             McpNotificationDto {
-                                method: n.method,
+                                method: source_string_units(n.method.code_units()),
                                 params: n
                                     .params
                                     .as_ref()
@@ -1769,7 +1774,12 @@ pub async fn spawn_stdio_with_handles(cfg: StdioConfig) -> Result<StdioHandles, 
     }
 
     // Wire the JSON-RPC connection over NDJSON stdio.
-    let connection = Connection::new_line_delimited(stdout, stdin);
+    let connection = Connection::builder(jsonrpc::codec::LineCodec::with_decoder(
+        mcp::decode_native_mcp_frame,
+        jsonrpc::codec::DecodeErrorHandling::Skip,
+    ))
+    .unknown_method_message("Method not found")
+    .build_async_io(stdout, stdin);
 
     // Reap the child on exit. The waiter task owns the `Child`, so
     // `kill_on_drop(true)` makes the child die if this task is dropped

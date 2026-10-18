@@ -1,0 +1,121 @@
+21-test native_same_model_refusal_retry_precedes_configured_refusal_fallback ... FAILED
+22-
+23:thread 'current-alignment-refusal' (59097250) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:917:9:
+24-refusal API-error row precedes success tool result toolu_e98a60cbe0ba4c949461c519724573f0
+25-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+26-
+27:thread 'refusal_safety_retry_respects_disable_environment_flag' (59097249) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:69:19:
+28-refusal test thread panicked: Any { .. }
+29-test refusal_safety_retry_respects_disable_environment_flag ... FAILED
+30-
+31:failures:
+32-
+33:failures:
+34-    refusal_safety_retry_respects_disable_environment_flag
+35-
+36:test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 9 filtered out; finished in 1.18s
+37-
+38-test refusal_safety_retry_respects_disable_environment_flag ... FAILED
+39-test auxiliary_native_tool_refusal_runs_queued_work_and_follows_up ... FAILED
+40-
+41:failures:
+42-
+43:---- refusal_safety_retry_marker_does_not_suppress_a_later_user_turn stdout ----
+44-
+45:thread 'current-alignment-refusal' (59097228) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:293:44:
+46-message_delta fixture is JSON: Error("unexpected end of hex escape", line: 1, column: 177)
+47-
+48:thread 'refusal_safety_retry_marker_does_not_suppress_a_later_user_turn' (59097222) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:69:19:
+49-refusal test thread panicked: Any { .. }
+50-
+51:---- refusal_safety_retry_matches_native_query_source_classifier stdout ----
+52-
+53:thread 'current-alignment-refusal' (59097233) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:293:44:
+54-message_delta fixture is JSON: Error("unexpected end of hex escape", line: 1, column: 158)
+55-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+56-
+57:thread 'refusal_safety_retry_matches_native_query_source_classifier' (59097224) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:69:19:
+58-refusal test thread panicked: Any { .. }
+59-
+60:---- refusal_safety_retry_is_skipped_for_auxiliary_queries stdout ----
+61-
+62:thread 'current-alignment-refusal' (59097227) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:293:44:
+63-message_delta fixture is JSON: Error("unexpected end of hex escape", line: 1, column: 158)
+64-
+65:thread 'refusal_safety_retry_is_skipped_for_auxiliary_queries' (59097221) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:69:19:
+66-refusal test thread panicked: Any { .. }
+67-
+68:---- spent_native_refusal_retry_runs_later_tool_uses_and_follows_up stdout ----
+69-
+70:thread 'current-alignment-refusal' (59097232) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:293:44:
+71-message_delta fixture is JSON: Error("unexpected end of hex escape", line: 1, column: 158)
+72-
+73:thread 'spent_native_refusal_retry_runs_later_tool_uses_and_follows_up' (59097231) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:69:19:
+74-refusal test thread panicked: Any { .. }
+75-
+76:---- native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl stdout ----
+77-
+78:thread 'current-alignment-refusal' (59097223) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:1112:9:
+79-assertion `left == right` failed
+80-  left: 1
+81- right: 2
+82-
+83:thread 'native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl' (59097218) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:69:19:
+84-refusal test thread panicked: Any { .. }
+85-
+86:---- tool_bearing_native_refusal_keeps_completed_and_never_dispatches_queued_calls stdout ----
+87-[turn-diagnostic] tool call started id=toolu_38892e3b77524866a382a5b7a7d7fe47 name=CompletedRefusalProbe cancel_present=true cancelled=false
+88-[turn-diagnostic] tool call returned id=toolu_38892e3b77524866a382a5b7a7d7fe47 name=CompletedRefusalProbe elapsed_ms=0 outcome=ok
+89-[turn-diagnostic] tool call started id=toolu_1eac36e0a9bc45d2a80cb12537740719 name=RunningRefusalProbe cancel_present=true cancelled=false
+90-[turn-diagnostic] tool call returned id=toolu_1eac36e0a9bc45d2a80cb12537740719 name=RunningRefusalProbe elapsed_ms=81 outcome=error
+91-
+92:thread 'current-alignment-refusal' (59097235) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:1546:9:
+93-assertion `left == right` failed: same-model retry is one-shot
+94-  left: 1
+95- right: 2
+96-
+97:thread 'tool_bearing_native_refusal_keeps_completed_and_never_dispatches_queued_calls' (59097234) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:69:19:
+98-refusal test thread panicked: Any { .. }
+99-
+100:---- native_same_model_refusal_retry_precedes_configured_refusal_fallback stdout ----
+101-
+102:thread 'current-alignment-refusal' (59097230) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:1817:14:
+103-refusal sequence reaches configured fallback completion: MaxTurnsReached { max_turns: 1 }
+104-
+105:thread 'native_same_model_refusal_retry_precedes_configured_refusal_fallback' (59097219) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:69:19:
+106-refusal test thread panicked: Any { .. }
+107-
+108:---- refusal_safety_retry_respects_disable_environment_flag stdout ----
+109-
+110:thread 'refusal_safety_retry_respects_disable_environment_flag' (59097229) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:1507:5:
+111-disabled refusal retry child failed: exit status: 101
+112-
+113:---- auxiliary_native_tool_refusal_runs_queued_work_and_follows_up stdout ----
+114-[turn-diagnostic] tool call started id=toolu_62116089b6e7491383ae88ee9d71da90 name=CompletedRefusalProbe cancel_present=true cancelled=false
+115-[turn-diagnostic] tool call returned id=toolu_62116089b6e7491383ae88ee9d71da90 name=CompletedRefusalProbe elapsed_ms=0 outcome=ok
+116-[turn-diagnostic] tool call started id=toolu_c1b2ebc9b86d43368f44a89bfd869959 name=DelayedRefusalProbe cancel_present=true cancelled=false
+117-[turn-diagnostic] tool call returned id=toolu_c1b2ebc9b86d43368f44a89bfd869959 name=DelayedRefusalProbe elapsed_ms=103 outcome=ok
+118-[turn-diagnostic] tool call started id=toolu_0a2e5caf87e5437093d8899aeb8a60c8 name=QueuedRefusalProbe cancel_present=true cancelled=false
+119-[turn-diagnostic] tool call returned id=toolu_0a2e5caf87e5437093d8899aeb8a60c8 name=QueuedRefusalProbe elapsed_ms=0 outcome=ok
+120-
+121:thread 'current-alignment-refusal' (59097226) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:917:9:
+122-refusal API-error row precedes success tool result toolu_62116089b6e7491383ae88ee9d71da90
+123-
+124:thread 'auxiliary_native_tool_refusal_runs_queued_work_and_follows_up' (59097217) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:69:19:
+125-refusal test thread panicked: Any { .. }
+126-
+127-
+128:failures:
+129-    auxiliary_native_tool_refusal_runs_queued_work_and_follows_up
+130-    native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl
+131-    native_same_model_refusal_retry_precedes_configured_refusal_fallback
+132-    refusal_safety_retry_is_skipped_for_auxiliary_queries
+133-    refusal_safety_retry_marker_does_not_suppress_a_later_user_turn
+134-    refusal_safety_retry_matches_native_query_source_classifier
+135-    refusal_safety_retry_respects_disable_environment_flag
+136-    spent_native_refusal_retry_runs_later_tool_uses_and_follows_up
+137-    tool_bearing_native_refusal_keeps_completed_and_never_dispatches_queued_calls
+138-
+139:test result: FAILED. 1 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.20s
+140-
+141-error: test failed, to rerun pass `-p orchestrator --test current_alignment_refusal`

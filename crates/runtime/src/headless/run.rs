@@ -1605,11 +1605,7 @@ async fn run_stream_json_input_loop_inner(
             .and_then(lingxi_core::types::MessageId::parse_prefixed);
 
         if let Some(uuid) = turn.uuid.as_deref() {
-            if runtime
-                .orchestrator
-                .session_contains_message_uuid(uuid)
-                .await
-            {
+            if should_skip_persisted_user_turn(&runtime.orchestrator, uuid).await {
                 if argv.replay_user_messages {
                     let _ = emit_replay_ack_projected_queued(
                         &outbound_tx,
@@ -1971,6 +1967,17 @@ fn turn_outcome_terminal_reason(outcome: &orchestrator::TurnOutcome) -> &'static
         orchestrator::TurnOutcome::MaxTurns => "max_turns",
         orchestrator::TurnOutcome::EndTurn => "completed",
     }
+}
+
+/// A persisted UUID is a duplicate only after its turn has been answered.
+/// Cold `--resume` can redeliver a still-unanswered row, including a Native
+/// shutdown-marker tail; that query reuses the existing row in the orchestrator.
+pub(super) async fn should_skip_persisted_user_turn(
+    orchestrator: &orchestrator::ConversationOrchestrator,
+    uuid: &str,
+) -> bool {
+    orchestrator.session_contains_message_uuid(uuid).await
+        && !orchestrator.session_message_turn_is_unanswered(uuid).await
 }
 
 /// msg_lifecycle_v1 terminal for a command the resume dedup skipped — the
@@ -2922,6 +2929,8 @@ mod result_publication_tests {
                             origin: None,
                             turn_origin: None,
                             api_message_override: None,
+                            interrupted_by_shutdown: None,
+                            refused_message_id: None,
                         });
                 }
                 session

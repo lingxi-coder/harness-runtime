@@ -66,6 +66,8 @@ mod tests {
     fn text_block_maps_to_llm_text_with_no_cache_control() {
         let msg = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: "hello".to_string(),
@@ -141,6 +143,8 @@ mod tests {
         // P0: the paired `tool_result` must echo the SAME verbatim canonical id.
         let msg = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolResult {
                 tool_use_id: ToolUseId::from("toolu_01ABCDEF"),
@@ -170,6 +174,8 @@ mod tests {
         let tool_call_id_str = tool_use_id.to_string();
         let msg = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolResult {
                 tool_use_id,
@@ -198,6 +204,8 @@ mod tests {
     fn tool_result_error_flag_preserved() {
         let msg = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
@@ -251,6 +259,8 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
         let msg = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Image {
                 source: ImageSource::Base64 {
@@ -278,6 +288,8 @@ mod tests {
     fn image_url_source_maps_to_image_url() {
         let msg = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Image {
                 source: ImageSource::Url {
@@ -303,6 +315,8 @@ mod tests {
     fn media_analysis_block_is_lowered_to_model_visible_text() {
         let msg = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::MediaAnalysis {
                 analysis: MediaAnalysis {
@@ -465,6 +479,8 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(raw);
         let msg = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Document {
                 source: DocumentSource::Base64 {
@@ -507,6 +523,8 @@ mod tests {
     fn user_and_assistant_roles_mapped_correctly() {
         let user = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Text {
                 text: "hi".to_string(),
@@ -642,6 +660,8 @@ mod tests {
     fn image_bad_base64_returns_invalid_request() {
         let msg = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ProtoBlock::Image {
                 source: ImageSource::Base64 {
@@ -666,6 +686,8 @@ mod tests {
     fn user(id: MessageId, text: &str) -> ConversationMessage {
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id,
             content: vec![ProtoBlock::Text {
                 text: text.to_string(),
@@ -1164,6 +1186,8 @@ mod tests {
     fn user_blocks(id: MessageId, content: Vec<ProtoBlock>) -> ConversationMessage {
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id,
             content,
             is_meta: false,
@@ -1461,6 +1485,8 @@ mod tests {
     fn usr_blocks(blocks: Vec<ProtoBlock>) -> ConversationMessage {
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: blocks,
             is_meta: false,
@@ -1836,6 +1862,8 @@ mod tests {
                     origin: None,
                     turn_origin: None,
                     api_message_override: None,
+                    interrupted_by_shutdown: None,
+                    refused_message_id: None,
                 },
                 user(retained_id, "ordinary user content"),
             ]),
@@ -1899,6 +1927,8 @@ fn queued_api_system_rows_merge_exact_text_and_admission_sources() {
 fn ordinary_user_text_seam_preserves_utf16_for_all_text_block_pairs() {
     let make_user = |id, content| ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id,
         content: vec![content],
         is_meta: false,

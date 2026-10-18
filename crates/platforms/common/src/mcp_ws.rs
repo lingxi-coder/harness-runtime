@@ -119,7 +119,7 @@ pub async fn connect_ws_optional(
     // accepts `Message` items so we cannot surface a per-frame parse error.
     let inbound = ws_stream.filter_map(|item| async move {
         match item {
-            Ok(Message::Text(s)) => match serde_json::from_str::<JsonRpcMessage>(&s) {
+            Ok(Message::Text(s)) => match mcp::decode_native_mcp_frame(s.as_bytes()) {
                 Ok(msg) => Some(msg),
                 Err(e) => {
                     tracing::warn!(error = %e, "mcp ws: malformed JSON in text frame");
@@ -159,6 +159,7 @@ pub async fn connect_ws_optional(
     Ok(Connection::from_message_streams(
         Box::pin(inbound),
         Box::pin(outbound),
+        Some("Method not found".into()),
     ))
 }
 

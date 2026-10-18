@@ -1029,6 +1029,8 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
                 usage_limit_note,
                 origin,
                 turn_origin,
+                interrupted_by_shutdown,
+                refused_message_id,
                 api_message_override,
                 ..
             } = msg
@@ -1060,6 +1062,8 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
                             usage_limit_note: *usage_limit_note,
                             origin: origin.clone(),
                             turn_origin: turn_origin.clone(),
+                            interrupted_by_shutdown: *interrupted_by_shutdown,
+                            refused_message_id: refused_message_id.clone(),
                         });
                         result.block_sources.push(stripped_sources);
                     } else if result.messages.is_empty() {
@@ -1195,6 +1199,7 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
             usage_limit_note,
             origin,
             turn_origin,
+            refused_message_id,
             api_message_override: _,
             ..
         }) = next
@@ -1222,6 +1227,8 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
             if !patched.is_empty() {
                 result.messages.push(ConversationMessage::User {
                     api_message_override: None,
+                    interrupted_by_shutdown: None,
+                    refused_message_id: refused_message_id.clone(),
                     id: *uid,
                     content: patched.iter().map(|(block, _)| block.clone()).collect(),
                     is_meta: *is_meta,
@@ -1240,6 +1247,8 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
                 // isMeta: true).
                 result.messages.push(ConversationMessage::User {
                     api_message_override: None,
+                    interrupted_by_shutdown: None,
+                    refused_message_id: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![B::Text {
                         text: NO_CONTENT.to_string(),
@@ -1262,6 +1271,8 @@ pub(crate) fn ensure_tool_result_pairing_with_sources(
             if !synth.is_empty() {
                 result.messages.push(ConversationMessage::User {
                     api_message_override: None,
+                    interrupted_by_shutdown: None,
+                    refused_message_id: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: synth.iter().map(|(block, _)| block.clone()).collect(),
                     is_meta: true,

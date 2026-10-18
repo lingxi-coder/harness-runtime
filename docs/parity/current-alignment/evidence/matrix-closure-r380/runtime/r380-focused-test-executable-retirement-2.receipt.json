@@ -1,0 +1,208 @@
+{
+  "schema": "lingxi.claude-alignment-focused-test-executable-retirement-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:17:08.029331Z",
+  "policy": "Only PASS targets' exact Running executables with retained .d/fingerprint and no lsof handles were unlinked; source and third-party build artifacts were preserved.",
+  "availableKiBBefore": 2121192,
+  "availableKiBAfter": 2740860,
+  "results": [
+    {
+      "receipt": "r380-jsonrpc-lib-full-final.receipt.json",
+      "binary": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/jsonrpc-1741835ab7d0f02b",
+      "binarySha256": "7b7a2480da68f3969eb42d533626b670a4fea3f4cfde802b9d72c5193b58e57e",
+      "inode": 992301730,
+      "sizeBytes": 11291888,
+      "dependencyFileRetained": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/jsonrpc-1741835ab7d0f02b.d",
+      "dependencyFileSha256": "08666b31a080fcdf0436fdefe0f54fac113a6c630244cb221ba090c2334c8011",
+      "fingerprintFilesRetained": {
+        "jsonrpc-1741835ab7d0f02b/test-lib-jsonrpc": "d0489e6f1733c76fa7b747ad9e9223556c27ce07575001322a1b9ca568442f78",
+        "jsonrpc-1741835ab7d0f02b/output-test-lib-jsonrpc": "d7cf9ab8edc24c4b8a0de44ed7b6663837efafb5d559d63f06a232830c8bc1e6",
+        "jsonrpc-1741835ab7d0f02b/test-lib-jsonrpc.json": "7d00c910e8084a13bd8f0babfb75a6324b5bf193afda6253ae89d987026f019b",
+        "jsonrpc-1741835ab7d0f02b/dep-test-lib-jsonrpc": "2b5f165e4a4ef42e4f00b69f7a238a1b9686a3fea9150dd6e6fabec4108e6a90",
+        "jsonrpc-1741835ab7d0f02b/invoked.timestamp": "5a109e6643e8d3e88642e3f35e85d2a83e639d07523aa6e99166c48178e965c3"
+      },
+      "lsofBeforeDeletion": [],
+      "retired": true,
+      "reason": "PASS executable; .d and fingerprint retained"
+    },
+    {
+      "receipt": "r380-mcp-native-message-schema-after-fix.receipt.json",
+      "binary": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mcp-c61b611803851764",
+      "binarySha256": "2ea198b248848a99dcfde9d0b632dfd883aaf4de50a0d91884911bb1cbe058e0",
+      "inode": 992302889,
+      "sizeBytes": 38198560,
+      "dependencyFileRetained": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mcp-c61b611803851764.d",
+      "dependencyFileSha256": "9a738ed4da36dadc59dbd0a3fc95e12102434530a8899928e6a033c3a510d98c",
+      "fingerprintFilesRetained": {
+        "mcp-c61b611803851764/test-lib-mcp": "e3bce8965d69b6f2bdcce06b1a4d34c5445886a5dbdcd7f47dd2d831dbad603e",
+        "mcp-c61b611803851764/test-lib-mcp.json": "974349fcc98d3e05a3af6eb368566c2a3322dc1a301a39116bf45595b56a6d3c",
+        "mcp-c61b611803851764/dep-test-lib-mcp": "04f44a8f6a69fc946a7606f964c4d55f9188c808881e831ce3829e2fcfb9cde6",
+        "mcp-c61b611803851764/invoked.timestamp": "5a109e6643e8d3e88642e3f35e85d2a83e639d07523aa6e99166c48178e965c3"
+      },
+      "lsofBeforeDeletion": [],
+      "retired": true,
+      "reason": "PASS executable; .d and fingerprint retained"
+    },
+    {
+      "receipt": "r380-mcp-wire-notification-utf16-filtered.receipt.json",
+      "binary": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mcp_wire-dd7918d86db852be",
+      "binarySha256": "51d7b261c8e30f84cc12d525dc0739ae119f2b304fc655ef7ba41b6e8ef5d13b",
+      "inode": 992302565,
+      "sizeBytes": 2739808,
+      "dependencyFileRetained": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mcp_wire-dd7918d86db852be.d",
+      "dependencyFileSha256": "e6952b89fe37bb3cfacbef2dadf6e6e665206cacf3184eb776c018da8aaf76c2",
+      "fingerprintFilesRetained": {
+        "mcp-wire-dd7918d86db852be/dep-test-lib-mcp_wire": "89790d980bc8f3516d8f879c1e1c70785f5f134a8b360e58375cf81e90b67496",
+        "mcp-wire-dd7918d86db852be/test-lib-mcp_wire.json": "f53cd148effd956495215a52abeeb69339a179fb253fd7a2cf44a95491b85ee1",
+        "mcp-wire-dd7918d86db852be/invoked.timestamp": "5a109e6643e8d3e88642e3f35e85d2a83e639d07523aa6e99166c48178e965c3",
+        "mcp-wire-dd7918d86db852be/test-lib-mcp_wire": "7d57cd0ec213746788575193e84af2da7087d7d194849f746f76fcc848c77921"
+      },
+      "lsofBeforeDeletion": [],
+      "retired": true,
+      "reason": "PASS executable; .d and fingerprint retained"
+    },
+    {
+      "receipt": "r380-mcp-roots-replay.receipt.json",
+      "binary": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/input_required_native_295_roots_test-ea093fc74765079b",
+      "binarySha256": "76f47778df799bb4fcc7ef864c8d2a34d4b5e719900fc53ce4fe06ef97360f9b",
+      "inode": 992303109,
+      "sizeBytes": 4945328,
+      "dependencyFileRetained": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/input_required_native_295_roots_test-ea093fc74765079b.d",
+      "dependencyFileSha256": "1c87f783171de2a3e48e70d4671cc46123b353452c3071d1f3d56c6e7212ecbe",
+      "fingerprintFilesRetained": {
+        "mcp-ea093fc74765079b/dep-test-integration-test-input_required_native_295_roots_test": "ff83c32bf6520b7c677e6c90337853e5976746d2af3c98fad206024cf50200e6",
+        "mcp-ea093fc74765079b/test-integration-test-input_required_native_295_roots_test": "a4a910fc043ddfef7c045c37d8bcbbfd0b7ee96a0ddfc52cca0b0e4575db737a",
+        "mcp-ea093fc74765079b/invoked.timestamp": "5a109e6643e8d3e88642e3f35e85d2a83e639d07523aa6e99166c48178e965c3",
+        "mcp-ea093fc74765079b/test-integration-test-input_required_native_295_roots_test.json": "f1de4952c5ec2431477e1b6964e2a2bcb69ba6ad063c43f54f0b4ed609d989d2"
+      },
+      "lsofBeforeDeletion": [],
+      "retired": true,
+      "reason": "PASS executable; .d and fingerprint retained"
+    },
+    {
+      "receipt": "r380-orchestrator-mcp-iserror-presence.receipt.json",
+      "binary": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_mcp_tool_result_presence-88fa11682d8b2224",
+      "binarySha256": "0654784df961ad5ce0faa7f862bf9813064bc96beebf55fcbfbd79df41cd64b6",
+      "inode": 992304236,
+      "sizeBytes": 129504928,
+      "dependencyFileRetained": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_mcp_tool_result_presence-88fa11682d8b2224.d",
+      "dependencyFileSha256": "be0c527cee04449339395f47ff99fd6d7af612e7851b56397981472ef5fadaba",
+      "fingerprintFilesRetained": {
+        "orchestrator-88fa11682d8b2224/dep-test-integration-test-current_alignment_mcp_tool_result_presence": "6a9096c6e7ae927bef2609d6cf765a484932dc1d27d2d33219f79c8981e47645",
+        "orchestrator-88fa11682d8b2224/test-integration-test-current_alignment_mcp_tool_result_presence.json": "c7d473a88617fa57ed4c4207a003d16253fce3e65e5a4d36c5a8954476cb9a6a",
+        "orchestrator-88fa11682d8b2224/test-integration-test-current_alignment_mcp_tool_result_presence": "4560467965382ba1e1a735fa43d4f8a8f721c243af5ff80090409b0727a1f1c9",
+        "orchestrator-88fa11682d8b2224/invoked.timestamp": "5a109e6643e8d3e88642e3f35e85d2a83e639d07523aa6e99166c48178e965c3"
+      },
+      "lsofBeforeDeletion": [],
+      "retired": true,
+      "reason": "PASS executable; .d and fingerprint retained"
+    },
+    {
+      "receipt": "r380-orchestrator-mcp-error-roundtrip.receipt.json",
+      "binary": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_native_mcp_roundtrip-a86c8a97b851a693",
+      "binarySha256": "f496fdaf7aef0136f9079450721abe6e0b75d116c175a4691844018738d428bd",
+      "inode": 992304376,
+      "sizeBytes": 129877184,
+      "dependencyFileRetained": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_native_mcp_roundtrip-a86c8a97b851a693.d",
+      "dependencyFileSha256": "42b3a341a36a2c0a4a2a4bce81f17514ba7cdec896d32f936275f692c147818a",
+      "fingerprintFilesRetained": {
+        "orchestrator-a86c8a97b851a693/test-integration-test-current_alignment_native_mcp_roundtrip": "bdd25b8eeaa8059855f55e41b060918c8678103b289efd470f5e14aac01f1fa0",
+        "orchestrator-a86c8a97b851a693/dep-test-integration-test-current_alignment_native_mcp_roundtrip": "f2cb04bd3478d840c2b6e815bf728ee6bb9acea107d246d038e00583cc9733f3",
+        "orchestrator-a86c8a97b851a693/invoked.timestamp": "5a109e6643e8d3e88642e3f35e85d2a83e639d07523aa6e99166c48178e965c3",
+        "orchestrator-a86c8a97b851a693/test-integration-test-current_alignment_native_mcp_roundtrip.json": "a6a5c644fc91690d3ecc12fb534ba70d68d5fd5647b63a2b3fe7ae47a1783e42"
+      },
+      "lsofBeforeDeletion": [],
+      "retired": true,
+      "reason": "PASS executable; .d and fingerprint retained"
+    },
+    {
+      "receipt": "r380-tool-mcp-mime-295.receipt.json",
+      "binary": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_native_mcp_mime_295-7e2c124e0ac6dba1",
+      "binarySha256": "c721c15b91222320d81ca58517b874ec2472bfa7e4700cfcaca6e27dbb3b4ee7",
+      "inode": 992305522,
+      "sizeBytes": 25616224,
+      "dependencyFileRetained": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_native_mcp_mime_295-7e2c124e0ac6dba1.d",
+      "dependencyFileSha256": "786a4435eb796c5cb7ce5f389bf877a3f9a30b5cc0f98520ef9c28a2ad346746",
+      "fingerprintFilesRetained": {
+        "tool-mcp-7e2c124e0ac6dba1/test-integration-test-current_alignment_native_mcp_mime_295": "405a6051ee485838869c6394625a9a4cfcda02e4d555837b4379cd319c6ff776",
+        "tool-mcp-7e2c124e0ac6dba1/test-integration-test-current_alignment_native_mcp_mime_295.json": "bbf85a09175869b465eeb9b6d85081b64c9311146407220874a2c8e14055468a",
+        "tool-mcp-7e2c124e0ac6dba1/dep-test-integration-test-current_alignment_native_mcp_mime_295": "c796ab5509894b0cf7490b834fc56078903fd32144073e07e536b7bb85114d0d",
+        "tool-mcp-7e2c124e0ac6dba1/invoked.timestamp": "5a109e6643e8d3e88642e3f35e85d2a83e639d07523aa6e99166c48178e965c3"
+      },
+      "lsofBeforeDeletion": [],
+      "retired": true,
+      "reason": "PASS executable; .d and fingerprint retained"
+    },
+    {
+      "receipt": "r380-mcp-tool-call-optional-null.receipt.json",
+      "binary": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mcp-c61b611803851764",
+      "retired": false,
+      "reason": "already absent"
+    },
+    {
+      "receipt": "r380-orchestrator-effort-cold-resume-exact-after-fixture.receipt.json",
+      "binary": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/effort_cold_resume_295_test-4390b19af851ab93",
+      "binarySha256": "8326add3a0bdd9513630755473c9908bcabbf383fd49d3aad78f5e9e877f8ede",
+      "inode": 992305730,
+      "sizeBytes": 118661104,
+      "dependencyFileRetained": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/effort_cold_resume_295_test-4390b19af851ab93.d",
+      "dependencyFileSha256": "54b9ab2829c647145347bc348dabe2aa8c7c5282f004bbf52d15242e7f7b18a6",
+      "fingerprintFilesRetained": {
+        "orchestrator-4390b19af851ab93/dep-test-integration-test-effort_cold_resume_295_test": "6a8dab38289a5dd8523045143b443c33e3a0b6f4276fdbbc7f3d730bf42b7fea",
+        "orchestrator-4390b19af851ab93/test-integration-test-effort_cold_resume_295_test.json": "572b207bbac73d68a87a78ddddad146cd24f525cf93d3703ecc1191da4dfe703",
+        "orchestrator-4390b19af851ab93/invoked.timestamp": "5a109e6643e8d3e88642e3f35e85d2a83e639d07523aa6e99166c48178e965c3",
+        "orchestrator-4390b19af851ab93/test-integration-test-effort_cold_resume_295_test": "88daf3012a69d6876012bfd738429ac854d2024a1b1380d47e0510a9bd323c70"
+      },
+      "lsofBeforeDeletion": [],
+      "retired": true,
+      "reason": "PASS executable; .d and fingerprint retained"
+    },
+    {
+      "receipt": "r380-orchestrator-refusal-physical-route-alias-exact.receipt.json",
+      "binary": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_refusal-fb371c01a8664e22",
+      "retired": false,
+      "reason": "already absent"
+    },
+    {
+      "receipt": "r380-orchestrator-current-alignment-refusal-full14.receipt.json",
+      "binary": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_refusal-fb371c01a8664e22",
+      "retired": false,
+      "reason": "already absent"
+    },
+    {
+      "receipt": "r380-orchestrator-mod-tool-wire-295.receipt.json",
+      "binary": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_mod_tool_wire_295-58ef11b4cf85b8f6",
+      "binarySha256": "140a30a6a8307d4fbf5f19b8a29e110b7c92ade82966513683b83c5d0245c3c6",
+      "inode": 992306434,
+      "sizeBytes": 125168000,
+      "dependencyFileRetained": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_mod_tool_wire_295-58ef11b4cf85b8f6.d",
+      "dependencyFileSha256": "16bc07e7e22bfdc7a6fc34c8e8a498a832ce1d66ffa96a0ad12bfcd8e4901324",
+      "fingerprintFilesRetained": {
+        "orchestrator-58ef11b4cf85b8f6/test-integration-test-current_alignment_mod_tool_wire_295.json": "1e3eefb8e18c09433baaff80c4e061c04ac9a4fe2e2dd25056916a80b7571e89",
+        "orchestrator-58ef11b4cf85b8f6/test-integration-test-current_alignment_mod_tool_wire_295": "d55bff1147cec07a03d3d6fdcecae1b02efd254b63a8a5608554dd949a796028",
+        "orchestrator-58ef11b4cf85b8f6/dep-test-integration-test-current_alignment_mod_tool_wire_295": "089043c32e9ee7254428cb0bf9aa16c9ee9b4187e7f298b7eb1d0eb994ca9b96",
+        "orchestrator-58ef11b4cf85b8f6/invoked.timestamp": "5a109e6643e8d3e88642e3f35e85d2a83e639d07523aa6e99166c48178e965c3"
+      },
+      "lsofBeforeDeletion": [],
+      "retired": true,
+      "reason": "PASS executable; .d and fingerprint retained"
+    },
+    {
+      "receipt": "r380-orchestrator-tool-result-persist.receipt.json",
+      "binary": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_tool_result_persist-303f69c97f87d601",
+      "binarySha256": "8f41f0a0e499ed4bc65f0b24bb8452e4540e7e8e68f7231ee8867eb07b2b1697",
+      "inode": 992306559,
+      "sizeBytes": 48522912,
+      "dependencyFileRetained": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_tool_result_persist-303f69c97f87d601.d",
+      "dependencyFileSha256": "db9f678f55b2f1cfdb892da1a5fa7b67f8ae9309dabdf7fd5cdea2f8df156e76",
+      "fingerprintFilesRetained": {
+        "orchestrator-303f69c97f87d601/test-integration-test-current_alignment_tool_result_persist": "d685c6623ab5a2322b76a106f6b4c494d3a0c581b8da1e75080b8cc1d2870b25",
+        "orchestrator-303f69c97f87d601/dep-test-integration-test-current_alignment_tool_result_persist": "ece39a3c08bd51889ffba689647f6ce44f3591621dfd4865936d37b348db125c",
+        "orchestrator-303f69c97f87d601/invoked.timestamp": "5a109e6643e8d3e88642e3f35e85d2a83e639d07523aa6e99166c48178e965c3",
+        "orchestrator-303f69c97f87d601/test-integration-test-current_alignment_tool_result_persist.json": "e3a70603b1e33702066ed76b1e3656663d3e33a18a35c36f80b654a4cc3903c0"
+      },
+      "lsofBeforeDeletion": [],
+      "retired": true,
+      "reason": "PASS executable; .d and fingerprint retained"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+   Compiling llm-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime)
+    Finished `test` profile [unoptimized] target(s) in 1.51s
+     Running tests/current_alignment_http_layout_293_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_http_layout_293_test-fb2d119adf2e0af9)
+
+running 2 tests
+test native_295_http_layout_matches_its_own_raw_header_body_and_response ... FAILED
+test native_293_http_layout_is_selected_only_for_opted_in_first_party_anthropic ... FAILED
+
+failures:
+
+---- native_295_http_layout_matches_its_own_raw_header_body_and_response stdout ----
+
+thread 'native_295_http_layout_matches_its_own_raw_header_body_and_response' (58814253) panicked at crates/llm-runtime/tests/current_alignment_http_layout_293_test.rs:152:27:
+bind preferred Native fixture port 58855: Operation not permitted (os error 1)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- native_293_http_layout_is_selected_only_for_opted_in_first_party_anthropic stdout ----
+
+thread 'native_293_http_layout_is_selected_only_for_opted_in_first_party_anthropic' (58814252) panicked at crates/llm-runtime/tests/current_alignment_http_layout_293_test.rs:152:27:
+bind preferred Native fixture port 54086: Operation not permitted (os error 1)
+
+
+failures:
+    native_293_http_layout_is_selected_only_for_opted_in_first_party_anthropic
+    native_295_http_layout_matches_its_own_raw_header_body_and_response
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p llm-runtime --test current_alignment_http_layout_293_test`

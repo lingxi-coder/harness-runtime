@@ -1073,7 +1073,9 @@ impl McpTransport for RemoteMcpTransport {
                             };
                             return Some((
                                 McpNotificationDto {
-                                    method: notification.method,
+                                    method: source_string_units(
+                                        notification.method.code_units().to_vec(),
+                                    ),
                                     params,
                                 },
                                 receiver,
@@ -1491,10 +1493,10 @@ pub fn modern_probe_error(
             .and_then(|body| body.subprojection("/error").ok())
             .and_then(|source| {
                 let code = source.number_at("/code")?;
+                const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
                 if !code.is_finite()
                     || code.fract() != 0.0
-                    || code < i32::MIN as f64
-                    || code > i32::MAX as f64
+                    || !(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&code)
                 {
                     return None;
                 }
@@ -1506,7 +1508,7 @@ pub fn modern_probe_error(
                     .ok()
                     .and_then(|value| payload_from_projection(&value));
                 Some(jsonrpc::ResponseError {
-                    code: code as i32,
+                    code: code as i64,
                     message,
                     data,
                 })
@@ -2027,7 +2029,7 @@ fn body_is_jsonrpc(body: &str) -> bool {
         .lines()
         .find(|line| line.starts_with("data:"))
         .map_or(body, |line| &line[5..]);
-    serde_json::from_str::<jsonrpc::messages::Message>(payload.trim()).is_ok()
+    mcp::decode_native_mcp_frame(payload.trim().as_bytes()).is_ok()
 }
 
 /// The HTTP detail behind a failed handshake.

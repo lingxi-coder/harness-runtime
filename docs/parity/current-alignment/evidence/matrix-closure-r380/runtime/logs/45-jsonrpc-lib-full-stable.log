@@ -1,0 +1,94 @@
+   Compiling jsonrpc v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/jsonrpc)
+warning: unused variable: `conn_a`
+   --> crates/jsonrpc/src/connection.rs:577:13
+    |
+577 |         let conn_a = Connection::builder(LineCodec::default())
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_conn_a`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `jsonrpc` (lib test) generated 1 warning (run `cargo fix --lib -p jsonrpc --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized] target(s) in 2.36s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/jsonrpc-1741835ab7d0f02b)
+
+running 77 tests
+test codec::line_codec_tests::decode_returns_none_on_no_lf ... ok
+test codec::line_codec_tests::decode_rejects_oversize_line_after_buffer_grows ... ok
+test codec::line_codec_tests::encode_appends_lf_only ... ok
+test codec::line_codec_tests::configured_decoder_can_skip_bad_line_and_continue ... ok
+test codec::lsp_codec_tests::decode_accepts_content_headers_case_insensitively ... ok
+test codec::line_codec_tests::decode_skips_empty_lines ... ok
+test codec::line_codec_tests::decode_one_line ... ok
+test codec::line_codec_tests::decode_tolerates_trailing_cr_before_lf ... ok
+test codec::line_codec_tests::roundtrip_two_messages ... ok
+test codec::lsp_codec_tests::decode_rejects_body_over_default_cap ... ok
+test codec::lsp_codec_tests::decode_rejects_frame_over_max_size ... ok
+test codec::lsp_codec_tests::decode_rejects_invalid_header_name_token ... ok
+test codec::lsp_codec_tests::decode_rejects_non_numeric_content_length ... ok
+test codec::lsp_codec_tests::decode_rejects_unknown_headers ... ok
+test codec::lsp_codec_tests::decode_requires_crlfcrlf_separator ... ok
+test codec::lsp_codec_tests::decode_returns_none_on_incomplete_body ... ok
+test codec::lsp_codec_tests::decode_returns_none_on_incomplete_header ... ok
+test codec::lsp_codec_tests::decode_two_frames_back_to_back ... ok
+test codec::lsp_codec_tests::decode_rejects_header_over_default_cap ... ok
+test codec::lsp_codec_tests::encode_request_uses_content_length_header ... ok
+test codec::lsp_codec_tests::roundtrip_notification ... ok
+test codec::lsp_codec_tests::line_codec_retains_raw_json_in_request_and_response_members ... ok
+test codec::lsp_codec_tests::roundtrip_request ... ok
+test broker::tests::broker_fanouts_inbound_notifications_to_broadcast_receiver ... ok
+test broker::tests::broker_routes_inbound_response_back_to_pending_call ... ok
+test broker::tests::broker_handle_join_returns_ok_when_both_sides_close_cleanly ... ok
+test broker::tests::broker_dispatches_inbound_request_to_dispatcher_and_writes_response ... ok
+test broker::tests::broker_writes_outbound_request_through_writer_sink ... ok
+test connection::tests::mode_alias_equals_connection_mode ... ok
+test connection::tests::connection_call_response_against_peer_handler ... ok
+test connection::tests::builder_can_select_a_fixed_unknown_method_message ... ok
+test connection::tests::connection_notify_arrives_at_peer_broadcast ... ok
+test connection::tests::from_message_streams_roundtrips_a_call ... ok
+test inbound::tests::dispatch_returns_method_not_found_for_unregistered_method ... ok
+test messages::tests::error_code_constants_match_spec ... ok
+test inbound::tests::dispatch_calls_registered_handler ... ok
+test connection::tests::from_stream_sink_roundtrips_a_call ... ok
+test inbound::tests::fixed_method_not_found_message_does_not_interpolate_method ... ok
+test inbound::tests::register_overwrites_existing_handler ... ok
+test connection::tests::new_line_delimited_roundtrips_a_call ... ok
+test inbound::tests::unknown_method_error_preserves_exact_utf16_units_by_default ... ok
+test connection::tests::new_streams_roundtrips_a_call_in_lines_mode ... ok
+test messages::tests::exact_string_id_keeps_unpaired_utf16_units_through_message_roundtrip ... ok
+test messages::tests::id_negative_number_roundtrip ... ok
+test messages::tests::id_number_roundtrip ... ok
+test connection::tests::new_lsp_roundtrips_a_call ... ok
+test messages::tests::jsonrpc_version_constant_is_literally_2_0 ... ok
+test messages::tests::id_string_roundtrip ... ok
+test messages::tests::message_envelope_disambiguates_request_response_notification ... ok
+test messages::tests::message_parses_request_with_string_id ... ok
+test messages::tests::optional_raw_json_members_preserve_explicit_null ... ok
+test messages::tests::notification_has_no_id_field_when_serialized ... ok
+test messages::tests::request_wire_shape_has_jsonrpc_id_method_params ... ok
+test messages::tests::request_without_params_omits_field ... ok
+test messages::tests::request_and_notification_methods_keep_unpaired_utf16_units ... ok
+test messages::tests::response_constructors_set_jsonrpc_field ... ok
+test messages::tests::response_error_message_retains_unpaired_utf16_and_serializes_as_json_string ... ok
+test messages::tests::response_error_preserves_native_safe_integer_code_range ... ok
+test messages::tests::response_error_serializes_error_not_result ... ok
+test messages::tests::response_null_id_when_id_unknown ... ok
+test messages::tests::response_raw_result_is_validated_and_serialized_as_raw_json ... ok
+test messages::tests::response_success_serializes_result_not_error ... ok
+test messages::tests::response_with_null_result_preserves_field_presence_on_decode ... ok
+test router::tests::call_propagates_remote_error ... ok
+test router::tests::call_request_response_roundtrip ... ok
+test router::tests::completed_call_releases_drop_guard_pending_arc ... ok
+test router::tests::custom_initial_request_id_is_used_for_first_call ... ok
+test router::tests::default_timeout_constant_is_60s ... ok
+test router::tests::call_times_out_when_no_response ... ok
+test router::tests::disposable_probe_classifies_wrong_response_id ... ok
+test router::tests::notify_does_not_create_pending_entry ... ok
+test router::tests::dropping_call_future_removes_pending_entry ... ok
+test router::tests::writer_closed_yields_clear_error ... ok
+test router::tests::stdio_probe_waits_past_an_unrelated_reply ... ok
+test router::tests::probes_keep_numeric_ids_and_ignore_prior_probe_responses ... ok
+test router::tests::one_hundred_concurrent_calls_resolve_to_correct_responses ... ok
+test router::tests::cancelled_and_timed_out_probes_remove_id_watchers ... ok
+
+test result: ok. 77 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

@@ -1,0 +1,29 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-orchestrator-refusal-compile-diagnostic-r380.v1",
+  "recordedAtUtc": "2026-10-18T16:56:56Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_refusal",
+  "sandboxPermissions": "require_escalated; Root authorized local loopback for this target",
+  "sourceHashFiles": [
+    "r380-refusal-final-target-sourcehashes-pre.txt",
+    "r380-refusal-final-target-sourcehashes-post.txt"
+  ],
+  "sourceStableDuringRun": true,
+  "exitCode": 101,
+  "testsSelected": 0,
+  "testsPassed": 0,
+  "testsFailed": 0,
+  "phase": "orchestrator library compile",
+  "diagnostic": "crates/orchestrator/src/streaming_executor.rs:481 refers to crate::turn_loop::RefusalToolCallBoundary, but the type is not re-exported from turn_loop; rustc suggests importing crate::turn_loop::tool_dispatch::RefusalToolCallBoundary or using that path.",
+  "log": "logs/23-orchestrator-current-alignment-refusal-final.log",
+  "logSha256": "69d5fc43fd03ddf6bbe6f8bdf5483cf11528ca4883b23002ab26bc9d57cd703b",
+  "preExistingFailureReceipt": "r380-orchestrator-refusal-test-failures.receipt.json",
+  "scope": "Compile diagnostic for the owner-frozen refusal target; no behavior assertions ran."
+}

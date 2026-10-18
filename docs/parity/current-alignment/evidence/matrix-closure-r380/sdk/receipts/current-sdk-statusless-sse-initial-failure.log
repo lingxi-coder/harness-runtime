@@ -1,0 +1,102 @@
+     Locking 229 packages to latest compatible versions
+   Compiling find-msvc-tools v0.1.14
+   Compiling yoke-derive v0.8.4
+   Compiling cc v1.5.1
+   Compiling yoke v0.8.3
+   Compiling zerovec v0.11.8
+   Compiling smallvec v1.16.2
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling tinystr v0.8.4
+   Compiling potential_utf v0.1.6
+   Compiling tokio v1.53.1
+   Compiling icu_locale_core v2.3.0
+   Compiling zerotrie v0.2.5
+   Compiling ring v0.17.14
+   Compiling icu_collections v2.3.0
+   Compiling icu_provider v2.3.1
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling idna_adapter v1.2.2
+   Compiling zerocopy v0.8.59
+   Compiling rustls v0.23.45
+   Compiling brotli v8.0.4
+   Compiling zstd-safe v7.2.4
+   Compiling zstd v0.13.3
+   Compiling idna v1.1.0
+   Compiling rustls-webpki v0.103.15
+   Compiling compression-core v0.4.33
+   Compiling lingxi-hyper v1.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper)
+   Compiling compression-codecs v0.4.39
+   Compiling parking_lot_core v0.9.12
+   Compiling lingxi-hyper-util v0.1.21 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-util)
+warning: unused variable: `timer`
+    --> /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-util/src/client/legacy/client.rs:1509:32
+     |
+1509 |     pub fn timer<M>(&mut self, timer: M) -> &mut Self
+     |                                ^^^^^ help: if this is intentional, prefix it with an underscore: `_timer`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling tower v0.5.3
+warning: `lingxi-hyper-util` (lib) generated 1 warning (run `cargo fix --lib -p lingxi-hyper-util` to apply 1 suggestion)
+   Compiling ahash v0.8.12
+   Compiling tokio-rustls v0.26.5
+   Compiling parking_lot v0.12.5
+   Compiling async-compression v0.4.44
+   Compiling url v2.5.8
+   Compiling tokio-util v0.7.19
+   Compiling thiserror v2.0.21
+   Compiling referencing v0.46.10
+   Compiling tower-http v0.6.11
+   Compiling lingxi-hyper-rustls v0.27.5 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-rustls)
+warning: unused macro definition: `debug`
+  --> /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-rustls/src/lib.rs:53:18
+   |
+53 |     macro_rules! debug    ( ($($tt:tt)*) => {{}} );
+   |                  ^^^^^
+   |
+   = note: `#[warn(unused_macros)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `debug`
+  --> /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-rustls/src/lib.rs:55:20
+   |
+55 |     pub(crate) use debug;
+   |                    ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling jsonschema-regex v0.46.10
+warning: `lingxi-hyper-rustls` (lib) generated 2 warnings (run `cargo fix --lib -p lingxi-hyper-rustls` to apply 1 suggestion)
+   Compiling thiserror-impl v2.0.21
+   Compiling lingxi-llm-client v0.3.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client)
+   Compiling jsonschema v0.46.10
+   Compiling lingxi-reqwest v0.12.29 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-reqwest)
+   Compiling r379-sdk-current-vector-probe v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/matrix-closure-r379/sdk/current-sdk-probe)
+warning: unused import: `StreamDecoder`
+ --> tests/current_sdk_statusless_sse.rs:2:60
+  |
+2 | use lingxi_llm_client::codecs::{CodecContext, RequestMode, StreamDecoder, WireCodec};
+  |                                                            ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `r379-sdk-current-vector-probe` (test "current_sdk_statusless_sse") generated 1 warning
+    Finished `test` profile [unoptimized] target(s) in 44.51s
+     Running tests/current_sdk_statusless_sse.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_sdk_statusless_sse-430ab3cc3e52d099)
+
+running 1 test
+R379_CURRENT_SDK_VECTOR={"fixture_id":"timeout-error-lone-surrogate","execution_label":"current llm-client public StreamDecoder API; raw 2.1.293 SSE input","raw_event_sequence":["error"],"sdk_event_sequence":["error"],"pre_error_text":"","provider_error_text":"{\"type\":\"error\",\"error\":{\"type\":\"timeout_error\",\"message\":\"native timeout \\ud800 tail\"}}","provider_error_text_utf16_hex":"007b002200740079007000650022003a0022006500720072006f00720022002c0022006500720072006f00720022003a007b002200740079007000650022003a002200740069006d0065006f00750074005f006500720072006f00720022002c0022006d0065007300730061006700650022003a0022006e00610074006900760065002000740069006d0065006f007500740020005c007500640038003000300020007400610069006c0022007d007d","error_source":"provider_timeout","status_is_none":true}
+
+thread 'current_sdk_public_stream_api_decodes_the_exact_three_raw_sse_vectors' (58155250) panicked at tests/current_sdk_statusless_sse.rs:160:30:
+unexpected current SDK event for timeout-error-after-text-delta: ProviderEvent { protocol: AnthropicMessages, payload: JsonPayload("{\"type\":\"message_start\",\"message\":{\"id\":\"msg_fixture_partial\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-5\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}") }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test current_sdk_public_stream_api_decodes_the_exact_three_raw_sse_vectors ... FAILED
+
+failures:
+
+failures:
+    current_sdk_public_stream_api_decodes_the_exact_three_raw_sse_vectors
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test current_sdk_statusless_sse`

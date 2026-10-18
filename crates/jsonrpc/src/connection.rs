@@ -26,7 +26,7 @@ use tokio_util::codec::{Decoder, Encoder};
 use crate::broker::{spawn as spawn_broker, BrokerError, BrokerHandle};
 use crate::codec::CodecError;
 use crate::inbound::{BoxedHandler, Dispatcher};
-use crate::messages::{Id, Message, Notification, Request, Response};
+use crate::messages::{Id, JsonRpcString, Message, Notification, Request, Response};
 use crate::router::{Router, RouterError, StartedCall, DEFAULT_STARTING_REQUEST_ID};
 
 /// Connection-level error variants — surfaces the broker, router, codec, and
@@ -63,12 +63,20 @@ pub struct ConnectionBuilder<C> {
     codec: C,
     default_timeout: Duration,
     initial_request_id: i64,
+    unknown_method_message: Option<JsonRpcString>,
 }
 
 impl<C> ConnectionBuilder<C> {
     /// Override the default per-call timeout (default: 60s).
     pub fn default_timeout(mut self, d: Duration) -> Self {
         self.default_timeout = d;
+        self
+    }
+
+    /// Use a fixed error message for inbound requests with no registered
+    /// handler. The generic default includes the exact method string.
+    pub fn unknown_method_message(mut self, message: impl Into<JsonRpcString>) -> Self {
+        self.unknown_method_message = Some(message.into());
         self
     }
 
@@ -85,10 +93,14 @@ impl<C> ConnectionBuilder<C> {
             + 'static,
     {
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
+        let dispatcher = self
+            .unknown_method_message
+            .map_or_else(Dispatcher::new, |message| {
+                Dispatcher::with_method_not_found_message(message)
+            });
         let router = Router::new(outbound_tx)
             .with_initial_request_id(self.initial_request_id)
             .with_default_timeout(self.default_timeout);
-        let dispatcher = Dispatcher::new();
         let (broker, notif_rx) = spawn_broker(
             inbound,
             outbound,
@@ -103,6 +115,21 @@ impl<C> ConnectionBuilder<C> {
             broker: Arc::new(broker),
             notifications: notif_rx,
         }
+    }
+
+    /// Build a connection from an async reader/writer pair using this
+    /// builder's explicitly selected codec.
+    pub fn build_async_io<R, W>(self, reader: R, writer: W) -> Connection
+    where
+        R: tokio::io::AsyncRead + Send + Unpin + 'static,
+        W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+        C: Encoder<Message, Error = CodecError>
+            + Decoder<Item = Message, Error = CodecError>
+            + Send
+            + 'static,
+    {
+        let (stream, sink) = async_io_to_stream_sink(reader, writer);
+        self.build(stream, sink)
     }
 }
 
@@ -127,6 +154,7 @@ impl Connection {
             } else {
                 DEFAULT_STARTING_REQUEST_ID
             },
+            unknown_method_message: None,
         }
     }
 
@@ -144,8 +172,7 @@ impl Connection {
         W: tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
         use crate::codec::LineCodec;
-        let (stream, sink) = async_io_to_stream_sink(reader, writer);
-        Connection::builder(LineCodec::default()).build(stream, sink)
+        Connection::builder(LineCodec::default()).build_async_io(reader, writer)
     }
 
     /// Build a Connection that reads/writes LSP-style `Content-Length` frames.
@@ -176,16 +203,23 @@ impl Connection {
     }
 
     /// Build a Connection from already-decoded `Message` streams (used by
-    /// WebSocket transports where the wire frames are JSON text and decoding
-    /// happens before the message reaches the JSON-RPC layer).
-    pub fn from_message_streams<S, K>(inbound: S, outbound: K) -> Connection
+    /// transports where decoding happens before the message reaches the
+    /// JSON-RPC layer). `unknown_method_message` selects a protocol-specific
+    /// fixed error message, or leaves the generic method-bearing default.
+    pub fn from_message_streams<S, K>(
+        inbound: S,
+        outbound: K,
+        unknown_method_message: Option<JsonRpcString>,
+    ) -> Connection
     where
         S: futures::Stream<Item = Message> + Send + Unpin + 'static,
         K: futures::Sink<Message, Error = ConnectionError> + Send + Unpin + 'static,
     {
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let router = Router::new(outbound_tx);
-        let dispatcher = Dispatcher::new();
+        let dispatcher = unknown_method_message.map_or_else(Dispatcher::new, |message| {
+            Dispatcher::with_method_not_found_message(message)
+        });
         let (broker, notif_rx) = crate::broker::spawn_typed(
             inbound,
             outbound,
@@ -383,7 +417,8 @@ impl Connection {
     /// `None` means the capability has no registered handler. The registry lock
     /// is released before invoking callbacks, which may themselves use this connection.
     pub async fn invoke_registered_handler(&self, request: Request) -> Option<Response> {
-        let handler = self.local_registered_handler(&request.method).await?;
+        let method = String::from_utf16(request.method.code_units()).ok()?;
+        let handler = self.local_registered_handler(&method).await?;
         Some(handler.handle(request).await)
     }
 
@@ -537,6 +572,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn builder_can_select_a_fixed_unknown_method_message() {
+        let (a_in, a_out, b_in, b_out) = duplex_pipe();
+        let _conn_a = Connection::builder(LineCodec::default())
+            .unknown_method_message("Method not found")
+            .build(a_in, a_out);
+        let conn_b = Connection::builder(LineCodec::default()).build(b_in, b_out);
+
+        let error = conn_b
+            .call::<_, serde_json::Value>("unknown", json!({}))
+            .await
+            .unwrap_err();
+        let ConnectionError::Router(RouterError::Remote(remote)) = error else {
+            panic!("expected a remote method-not-found error, got {error:?}")
+        };
+        assert_eq!(remote.code, crate::messages::METHOD_NOT_FOUND);
+        assert_eq!(remote.message, "Method not found");
+    }
+
+    #[tokio::test]
     async fn connection_notify_arrives_at_peer_broadcast() {
         let (a_in, a_out, b_in, b_out) = duplex_pipe();
 
@@ -616,8 +670,8 @@ mod tests {
                 .map_err(|_| ConnectionError::Broker(BrokerError::Join("sink closed".into())))?;
             Ok::<_, ConnectionError>(tx)
         });
-        let conn_a = Connection::from_message_streams(Box::pin(a_in), Box::pin(a_out));
-        let conn_b = Connection::from_message_streams(Box::pin(b_in), Box::pin(b_out));
+        let conn_a = Connection::from_message_streams(Box::pin(a_in), Box::pin(a_out), None);
+        let conn_b = Connection::from_message_streams(Box::pin(b_in), Box::pin(b_out), None);
         conn_b.register_handler("ping", Arc::new(Echo)).await;
         let _: serde_json::Value = conn_a.call("ping", json!({})).await.expect("roundtrip");
     }

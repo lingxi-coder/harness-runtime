@@ -52,7 +52,7 @@
 //!   events.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use lingxi_core::host::{Clock, HttpTransport, McpTransportSpec};
+use lingxi_core::host::{Clock, HttpError, HttpTransport, McpTransportSpec};
 use lingxi_core::types::{HttpMethod, HttpRequest, Secret};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -320,13 +320,147 @@ pub enum OAuthState {
         /// Optional long-lived refresh token.
         refresh_token: Option<lingxi_core::types::Secret<String>>,
         /// Expiry of the current access token.
-        expires_at: SystemTime,
+        expires_at: OAuthExpiry,
     },
     /// Refreshing the access token using the refresh token.
     Refreshing {
         /// Refresh token being exchanged.
         refresh_token: lingxi_core::types::Secret<String>,
     },
+}
+
+/// Expiry carrier with the same three storage states as the Native provider:
+/// an omitted/undefined value, explicit JSON null, or a JavaScript Number in
+/// epoch milliseconds. `Number` intentionally retains infinities while live;
+/// JSON serialization turns them into `null`, matching `JSON.stringify`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum OAuthExpiry {
+    /// `expires_in` was omitted and the Native `expiresAt` property is absent.
+    #[default]
+    Undefined,
+    /// The persisted Native value was JSON null (including a serialized infinity).
+    Null,
+    /// Native epoch-millisecond Number; may be non-finite only before persistence.
+    Number(f64),
+}
+
+impl OAuthExpiry {
+    fn is_undefined(&self) -> bool {
+        matches!(self, Self::Undefined)
+    }
+
+    pub fn from_expires_in(base: SystemTime, seconds: f64) -> Self {
+        Self::Number(date_now_millis(base) + seconds * 1000.0)
+    }
+
+    /// Represent an existing host clock instant as Native's epoch-millisecond
+    /// expiry number (used for XAA's existing no-expiry lifecycle policy).
+    pub fn from_system_time(time: SystemTime) -> Self {
+        Self::Number(date_now_millis(time))
+    }
+
+    /// Native computes `(expiresAt - Date.now()) / 1000`; null participates as
+    /// zero, while an absent property leaves the remaining time undefined.
+    pub fn remaining_seconds(self, now: SystemTime) -> Option<f64> {
+        match self {
+            Self::Undefined => None,
+            Self::Null => Some(-date_now_millis(now) / 1000.0),
+            Self::Number(expires_at_millis) => {
+                Some((expires_at_millis - date_now_millis(now)) / 1000.0)
+            }
+        }
+    }
+
+    /// A credential-store reread is a winner only with a usable access token
+    /// and no expiry or more than 300 seconds remaining.
+    pub fn is_fresh_refresh_winner(self, now: SystemTime) -> bool {
+        match self {
+            Self::Undefined | Self::Null => true,
+            Self::Number(_) => self
+                .remaining_seconds(now)
+                .is_some_and(|remaining| remaining > 300.0),
+        }
+    }
+}
+
+impl Serialize for OAuthExpiry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Undefined | Self::Null => serializer.serialize_none(),
+            Self::Number(value) => serializer.serialize_f64(*value),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OAuthExpiry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ExpiryVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ExpiryVisitor {
+            type Value = OAuthExpiry;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("null or an epoch-millisecond number")
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(OAuthExpiry::Null)
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(OAuthExpiry::Null)
+            }
+
+            fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                deserializer.deserialize_any(self)
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(OAuthExpiry::Number(value as f64))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(OAuthExpiry::Number(value as f64))
+            }
+
+            fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(OAuthExpiry::Number(value))
+            }
+        }
+
+        deserializer.deserialize_option(ExpiryVisitor)
+    }
+}
+
+fn date_now_millis(time: SystemTime) -> f64 {
+    match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(duration) => duration.as_millis() as f64,
+        Err(before_epoch) => -(before_epoch.duration().as_millis() as f64),
+    }
 }
 
 /// OAuth-flow failures.
@@ -347,6 +481,28 @@ pub enum OAuthError {
     /// Stored `refresh_token` was rejected (`invalid_grant`); re-auth required.
     #[error("oauth refresh rejected: {0}")]
     RefreshRejected(String),
+}
+
+/// Which Native credential fields are cleared after a terminal refresh error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CredentialInvalidation {
+    /// Clear access and refresh tokens, retaining client information.
+    Tokens,
+    /// Clear access/refresh tokens and client information.
+    All,
+}
+
+pub(crate) fn refresh_credential_invalidation(
+    error: &OAuthError,
+) -> Option<CredentialInvalidation> {
+    match error {
+        OAuthError::RefreshRejected(_) => Some(CredentialInvalidation::Tokens),
+        OAuthError::Token(message) => match oauth_error_code(message).as_deref() {
+            Some("invalid_client" | "unauthorized_client") => Some(CredentialInvalidation::All),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 impl From<OAuthError> for lingxi_core::host::McpError {
@@ -515,6 +671,16 @@ fn validate_resource_indicator(server_url: &str, resource: &str) -> Result<(), O
     }
 }
 
+fn validated_resource_url(server_url: &str, resource: &str) -> Result<String, OAuthError> {
+    validate_resource_indicator(server_url, resource)?;
+    let configured = url::Url::parse(resource).map_err(|e| {
+        OAuthError::Discovery(format!(
+            "protected-resource metadata `resource` is not a valid URL: '{resource}' ({e})"
+        ))
+    })?;
+    Ok(configured.to_string())
+}
+
 /// Oracle `js({requestedResource, configuredResource})`: same origin, and the
 /// configured (PRM) path is a prefix of the requested (server URL) path once
 /// both are trailing-slash-normalized.
@@ -573,6 +739,31 @@ pub struct AuthServerMetadata {
     /// revocation auth-method selection (auth.ts:509-511).
     #[serde(default)]
     pub token_endpoint_auth_methods_supported: Option<Vec<String>>,
+}
+
+/// Private projection of RFC 8414 fields used by the standard MCP SDK's
+/// authorization-response issuer check. Keep these fields out of the public
+/// metadata DTO to avoid changing its struct-literal API.
+#[derive(Debug, Deserialize)]
+struct AuthServerMetadataDocument {
+    #[serde(flatten)]
+    metadata: AuthServerMetadata,
+    #[serde(default)]
+    issuer: Option<String>,
+    #[serde(default)]
+    authorization_response_iss_parameter_supported: Option<bool>,
+}
+
+#[derive(Debug)]
+struct DiscoveredAuthServer {
+    metadata: AuthServerMetadata,
+    /// Canonical `new URL(PRM.resource).href`, after the existing origin/path
+    /// guard. The standard SDK carries this exact value through authorize and
+    /// authorization-code requests.
+    resource: Option<String>,
+    /// RFC 8414's issuer field, not `authorization_servers[0]` from PRM.
+    issuer: Option<String>,
+    issuer_parameter_supported: bool,
 }
 
 /// Build a `.well-known` URL by inserting the well-known path between the
@@ -652,35 +843,92 @@ pub async fn discover_auth_server_metadata(
     configured_url: Option<&str>,
     resource_metadata_url: Option<&str>,
 ) -> Result<AuthServerMetadata, OAuthError> {
+    Ok(
+        discover_auth_server(http, server_url, configured_url, resource_metadata_url)
+            .await?
+            .metadata,
+    )
+}
+
+async fn discover_auth_server(
+    http: &Arc<dyn HttpTransport>,
+    server_url: &str,
+    configured_url: Option<&str>,
+    resource_metadata_url: Option<&str>,
+) -> Result<DiscoveredAuthServer, OAuthError> {
     if let Some(cfg) = configured_url {
         if !cfg.starts_with("https://") {
             return Err(OAuthError::Discovery(format!(
                 "authServerMetadataUrl must use https:// (got: {cfg})"
             )));
         }
-        return get_json::<AuthServerMetadata>(http, cfg).await;
+        let metadata = get_json::<AuthServerMetadataDocument>(http, cfg).await?;
+        let protected_resource =
+            discover_protected_resource(http, server_url, resource_metadata_url).await?;
+        return Ok(discovered_metadata(
+            metadata,
+            protected_resource.map(|(_, resource)| resource),
+        ));
     }
 
     // RFC 9728: protected-resource probe → issuer → RFC 8414. A challenge-named
     // URL (§24c) is fetched AT THAT EXACT ADDRESS; otherwise fall back to the
     // well-known guess on the server itself.
-    let pr_url = match resource_metadata_url {
-        Some(named) => named.to_string(),
-        None => well_known_url(server_url, "oauth-protected-resource"),
-    };
-    if let Ok(pr) = get_json::<ProtectedResourceMetadata>(http, &pr_url).await {
-        validate_resource_indicator(server_url, &pr.resource)?;
+    let protected_resource =
+        discover_protected_resource(http, server_url, resource_metadata_url).await?;
+    let resource = protected_resource
+        .as_ref()
+        .map(|(_, resource)| resource.clone());
+    if let Some((pr, resource)) = protected_resource {
         if let Some(issuer) = pr.authorization_servers.first() {
             let as_url = well_known_url(issuer, "oauth-authorization-server");
-            if let Ok(meta) = get_json::<AuthServerMetadata>(http, &as_url).await {
-                return Ok(meta);
+            if let Ok(meta) = get_json::<AuthServerMetadataDocument>(http, &as_url).await {
+                return Ok(discovered_metadata(meta, Some(resource)));
             }
         }
     }
 
     // Fallback: RFC 8414 directly against the server URL (path-aware).
     let as_url = well_known_url(server_url, "oauth-authorization-server");
-    get_json::<AuthServerMetadata>(http, &as_url).await
+    Ok(discovered_metadata(
+        get_json::<AuthServerMetadataDocument>(http, &as_url).await?,
+        resource,
+    ))
+}
+
+async fn discover_protected_resource(
+    http: &Arc<dyn HttpTransport>,
+    server_url: &str,
+    resource_metadata_url: Option<&str>,
+) -> Result<Option<(ProtectedResourceMetadata, String)>, OAuthError> {
+    let pr_url = match resource_metadata_url {
+        Some(named) => named.to_string(),
+        None => well_known_url(server_url, "oauth-protected-resource"),
+    };
+    match get_json::<ProtectedResourceMetadata>(http, &pr_url).await {
+        Ok(pr) => {
+            let resource = validated_resource_url(server_url, &pr.resource)?;
+            Ok(Some((pr, resource)))
+        }
+        // A missing or undecodable PRM is an optional discovery probe. The
+        // configured RFC 8414 URL still determines AS metadata, while a valid
+        // PRM contributes its RFC 8707 resource indicator to the OAuth wire.
+        Err(_) => Ok(None),
+    }
+}
+
+fn discovered_metadata(
+    document: AuthServerMetadataDocument,
+    resource: Option<String>,
+) -> DiscoveredAuthServer {
+    DiscoveredAuthServer {
+        metadata: document.metadata,
+        resource,
+        issuer: document.issuer,
+        issuer_parameter_supported: document
+            .authorization_response_iss_parameter_supported
+            .unwrap_or(false),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -773,14 +1021,15 @@ pub struct Tokens {
     pub access_token: Secret<String>,
     /// Refresh token, if the server issued one.
     pub refresh_token: Option<Secret<String>>,
-    /// Wall-clock expiry instant (`clock.now() + expires_in`).
-    pub expires_at: SystemTime,
+    /// Native-style expiry in epoch milliseconds. `Undefined` means the
+    /// response omitted `expires_in`; `Null` remains distinct after storage.
+    pub expires_at: OAuthExpiry,
     /// Effective OAuth `client_id` these tokens were minted with — the
     /// DCR-issued id (when the client was dynamically registered) or the
     /// configured id. Persisted so silent refresh re-sends the SAME `client_id`
     /// most public-client auth servers require (auth.ts `saveClientInformation`
-    /// /`clientInformation`, 1482-1538). `None` only when unknown (legacy
-    /// stored tokens, or a refresh whose origin client_id wasn't threaded).
+    /// /`clientInformation`, 1482-1538). `None` only when the record has no id
+    /// or a refresh whose origin client_id wasn't threaded.
     pub client_id: Option<String>,
 }
 
@@ -788,10 +1037,118 @@ pub struct Tokens {
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
-    #[serde(default)]
+    #[serde(rename = "token_type")]
+    _token_type: String,
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     refresh_token: Option<String>,
-    #[serde(default)]
-    expires_in: u64,
+    #[serde(default, deserialize_with = "deserialize_coerced_optional_number")]
+    expires_in: Option<f64>,
+}
+
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::String(value) => Ok(Some(value)),
+        _ => Err(D::Error::custom("expected a string")),
+    }
+}
+
+fn deserialize_coerced_optional_number<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let value = serde_json::Value::deserialize(deserializer)?;
+    let number = js_number(&value).ok_or_else(|| D::Error::custom("expected a finite number"))?;
+    if !number.is_finite() {
+        return Err(D::Error::custom("expected a finite number"));
+    }
+    Ok(Some(number))
+}
+
+/// The Native schema uses `z.coerce.number()` before its finite-number check.
+/// Cover JSON values that have a useful JavaScript Number conversion without
+/// accepting objects or non-finite values.
+fn js_number(value: &serde_json::Value) -> Option<f64> {
+    match value {
+        serde_json::Value::Null => Some(0.0),
+        serde_json::Value::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
+        serde_json::Value::Number(value) => value.as_f64(),
+        serde_json::Value::String(value) => js_number_from_string(value),
+        serde_json::Value::Array(values) => {
+            let joined = values.iter().map(js_string).collect::<Vec<_>>().join(",");
+            js_number_from_string(&joined)
+        }
+        serde_json::Value::Object(_) => None,
+    }
+}
+
+fn js_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Bool(value) => value.to_string(),
+        serde_json::Value::Number(value) => value.to_string(),
+        serde_json::Value::String(value) => value.clone(),
+        serde_json::Value::Array(values) => {
+            values.iter().map(js_string).collect::<Vec<_>>().join(",")
+        }
+        serde_json::Value::Object(_) => "[object Object]".into(),
+    }
+}
+
+fn js_number_from_string(value: &str) -> Option<f64> {
+    let value = value.trim_matches(is_ecmascript_whitespace);
+    if value.is_empty() {
+        return Some(0.0);
+    }
+    if let Some(digits) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        return js_radix_number(digits, 16);
+    }
+    if let Some(digits) = value
+        .strip_prefix("0b")
+        .or_else(|| value.strip_prefix("0B"))
+    {
+        return js_radix_number(digits, 2);
+    }
+    if let Some(digits) = value
+        .strip_prefix("0o")
+        .or_else(|| value.strip_prefix("0O"))
+    {
+        return js_radix_number(digits, 8);
+    }
+    value.parse::<f64>().ok()
+}
+
+fn js_radix_number(digits: &str, radix: u32) -> Option<f64> {
+    if digits.is_empty() {
+        return None;
+    }
+    let mut value = 0.0;
+    for byte in digits.bytes() {
+        let digit = match byte {
+            b'0'..=b'9' => u32::from(byte - b'0'),
+            b'a'..=b'f' => u32::from(byte - b'a') + 10,
+            b'A'..=b'F' => u32::from(byte - b'A') + 10,
+            _ => return None,
+        };
+        if digit >= radix {
+            return None;
+        }
+        value = value * f64::from(radix) + f64::from(digit);
+    }
+    value.is_finite().then_some(value)
+}
+
+fn is_ecmascript_whitespace(character: char) -> bool {
+    (character.is_whitespace() && character != '\u{0085}') || character == '\u{FEFF}'
 }
 
 /// Build the authorization URL, returning `(url, verifier, state)`.
@@ -807,6 +1164,16 @@ pub fn build_authorize_url(
     redirect_uri: &str,
     scope: &str,
 ) -> (String, String, String) {
+    build_authorize_url_with_resource(meta, client_id, redirect_uri, scope, None)
+}
+
+fn build_authorize_url_with_resource(
+    meta: &AuthServerMetadata,
+    client_id: &str,
+    redirect_uri: &str,
+    scope: &str,
+    resource: Option<&str>,
+) -> (String, String, String) {
     let (verifier, challenge) = generate_pkce();
     let state = generate_state_token();
     let mut url = format!(
@@ -819,6 +1186,12 @@ pub fn build_authorize_url(
     );
     if !scope.is_empty() {
         url.push_str(&format!("&scope={}", urlencoding::encode(scope)));
+    }
+    if let Some(resource) = resource {
+        let separator = if url.contains('?') { '&' } else { '?' };
+        url.push(separator);
+        url.push_str("resource=");
+        url.push_str(&urlencoding::encode(resource));
     }
     (url, verifier, state)
 }
@@ -867,10 +1240,14 @@ async fn post_token_grant_with_headers(
         body_bytes: None,
         timeout: Some(OAUTH_HTTP_TIMEOUT),
     };
-    let resp = http
-        .request(req)
+    let resp = request_standard_oauth_fetch(http, req)
         .await
-        .map_err(|e| OAuthError::Token(format!("transport: {e}")))?;
+        .map_err(|error| match error {
+            HttpError::Status { status, body } => {
+                OAuthError::Token(format!("status {status}: {body}"))
+            }
+            error => OAuthError::Token(format!("transport: {error}")),
+        })?;
     if resp.status != 200 {
         // Caller maps the (status, body) to a specific error.
         return Err(OAuthError::Token(format!(
@@ -878,9 +1255,23 @@ async fn post_token_grant_with_headers(
             resp.status, resp.body
         )));
     }
-    let parsed: TokenResponse =
-        serde_json::from_str(&resp.body).map_err(|e| OAuthError::Token(format!("decode: {e}")))?;
-    let expires_at = clock.now() + Duration::from_secs(parsed.expires_in);
+    let response_json = serde_json::from_str::<serde_json::Value>(&resp.body)
+        .map_err(|e| OAuthError::Token(format!("decode: {e}")))?;
+    if response_json.get("error").is_some() {
+        // The SDK converts OAuth error objects to its OAuth error type even
+        // when the endpoint incorrectly returns HTTP 200; refresh policy then
+        // classifies the code the same way as a non-200 OAuth response.
+        return Err(OAuthError::Token(format!(
+            "status {}: {}",
+            resp.status, resp.body
+        )));
+    }
+    let parsed: TokenResponse = serde_json::from_value(response_json)
+        .map_err(|e| OAuthError::Token(format!("decode: {e}")))?;
+    let expires_at = parsed
+        .expires_in
+        .map(|seconds| OAuthExpiry::from_expires_in(clock.now(), seconds))
+        .unwrap_or_default();
     let tokens = Tokens {
         access_token: Secret::new(parsed.access_token),
         refresh_token: parsed.refresh_token.map(Secret::new),
@@ -889,6 +1280,56 @@ async fn post_token_grant_with_headers(
         client_id: None,
     };
     Ok((tokens, resp.status, resp.body))
+}
+
+async fn request_standard_oauth_fetch(
+    http: &Arc<dyn HttpTransport>,
+    request: HttpRequest,
+) -> Result<lingxi_core::types::HttpResponse, HttpError> {
+    match http.request(request.clone()).await {
+        Err(error) if retryable_standard_fetch(&error) => {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            http.request(request).await
+        }
+        result => result,
+    }
+}
+
+fn retryable_standard_fetch(error: &HttpError) -> bool {
+    match error {
+        // The Native fetch wrapper retries AbortError/Cancelled when its
+        // request signal has not been aborted; this token POST carries none.
+        HttpError::Timeout(_) | HttpError::Cancelled => true,
+        HttpError::Connection(detail) => {
+            const NETWORK_CODES: &[&str] = &[
+                "ECONNREFUSED",
+                "ConnectionRefused",
+                "ENOTFOUND",
+                "ENETUNREACH",
+                "ENETDOWN",
+                "EHOSTUNREACH",
+                "EHOSTDOWN",
+                "EAI_AGAIN",
+                "FailedToOpenSocket",
+                "ERR_PROXY_TUNNEL",
+                "ECONNRESET",
+                "EPIPE",
+                "ConnectionClosed",
+                "UND_ERR_SOCKET",
+                "ETIMEDOUT",
+                "ECONNABORTED",
+                "ERR_SOCKET_CLOSED",
+                "StreamSuspended",
+                "StreamTruncated",
+            ];
+            detail
+                .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .any(|part| NETWORK_CODES.contains(&part))
+        }
+        HttpError::Status { .. } | HttpError::InvalidRequest(_) | HttpError::InvalidResponse(_) => {
+            false
+        }
+    }
 }
 
 /// Exchange an authorization `code` for an access + refresh token pair.
@@ -908,13 +1349,39 @@ pub async fn exchange_code(
     verifier: &str,
     redirect_uri: &str,
 ) -> Result<Tokens, OAuthError> {
-    let form = [
+    exchange_code_with_resource(
+        http,
+        clock,
+        meta,
+        client_id,
+        code,
+        verifier,
+        redirect_uri,
+        None,
+    )
+    .await
+}
+
+async fn exchange_code_with_resource(
+    http: &Arc<dyn HttpTransport>,
+    clock: &Arc<dyn Clock>,
+    meta: &AuthServerMetadata,
+    client_id: &str,
+    code: &str,
+    verifier: &str,
+    redirect_uri: &str,
+    resource: Option<&str>,
+) -> Result<Tokens, OAuthError> {
+    let mut form = vec![
         ("grant_type", "authorization_code"),
         ("code", code),
         ("redirect_uri", redirect_uri),
         ("client_id", client_id),
         ("code_verifier", verifier),
     ];
+    if let Some(resource) = resource {
+        form.push(("resource", resource));
+    }
     let (mut tokens, _status, _body) =
         post_token_grant(http, clock, &meta.token_endpoint, &form).await?;
     tokens.client_id = Some(client_id.to_string());
@@ -1006,6 +1473,67 @@ pub async fn refresh_tokens(
     client_secret: Option<&str>,
     refresh_token: &str,
 ) -> Result<Tokens, OAuthError> {
+    refresh_tokens_once(
+        http,
+        clock,
+        meta,
+        client_id,
+        client_secret,
+        refresh_token,
+        None,
+        false,
+    )
+    .await
+}
+
+/// Standard third-party MCP refresh path. The Native provider sends the MCP
+/// server URL as the refresh grant's resource indicator, retries only the
+/// source-observed transient error classes (three total attempts with 1s/2s
+/// backoff), and lets its caller retain the current access token on failure.
+pub(crate) async fn refresh_standard_tokens(
+    http: &Arc<dyn HttpTransport>,
+    clock: &Arc<dyn Clock>,
+    meta: &AuthServerMetadata,
+    client_id: &str,
+    refresh_token: &str,
+    server_url: &str,
+) -> Result<Tokens, OAuthError> {
+    let resource = url::Url::parse(server_url)
+        .map_err(|e| OAuthError::Token(format!("invalid MCP server URL: {e}")))?
+        .to_string();
+    for attempt in 0_u32..3 {
+        match refresh_tokens_once(
+            http,
+            clock,
+            meta,
+            client_id,
+            None,
+            refresh_token,
+            Some(&resource),
+            true,
+        )
+        .await
+        {
+            Ok(tokens) => return Ok(tokens),
+            Err(error) if attempt < 2 && retryable_standard_refresh(&error) => {
+                tokio::time::sleep(Duration::from_millis(1_000_u64 << attempt)).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the three-attempt refresh loop always returns")
+}
+
+async fn refresh_tokens_once(
+    http: &Arc<dyn HttpTransport>,
+    clock: &Arc<dyn Clock>,
+    meta: &AuthServerMetadata,
+    client_id: &str,
+    client_secret: Option<&str>,
+    refresh_token: &str,
+    resource: Option<&str>,
+    standard_error_mapping: bool,
+) -> Result<Tokens, OAuthError> {
     let mut form = vec![
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
@@ -1041,6 +1569,9 @@ pub async fn refresh_tokens(
             form.push(("client_id", client_id));
         }
     }
+    if let Some(resource) = resource {
+        form.push(("resource", resource));
+    }
     match post_token_grant_with_headers(http, clock, &meta.token_endpoint, &form, &extra_headers)
         .await
     {
@@ -1054,10 +1585,66 @@ pub async fn refresh_tokens(
             tokens.client_id = Some(client_id.to_string());
             Ok(tokens)
         }
+        Err(OAuthError::Token(msg)) if standard_error_mapping => {
+            if oauth_error_code(&msg).as_deref() == Some("invalid_grant") {
+                Err(OAuthError::RefreshRejected(msg))
+            } else {
+                Err(OAuthError::Token(msg))
+            }
+        }
         Err(OAuthError::Token(msg)) if msg.starts_with("status 4") => {
             Err(OAuthError::RefreshRejected(msg))
         }
         Err(e) => Err(e),
+    }
+}
+
+fn oauth_error_code(message: &str) -> Option<String> {
+    let (_, body) = message.split_once(": ")?;
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("error")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn retryable_standard_refresh(error: &OAuthError) -> bool {
+    let OAuthError::Token(message) = error else {
+        return false;
+    };
+    if let Some(detail) = message.strip_prefix("transport: ") {
+        let lower = detail.to_ascii_lowercase();
+        return ["timeout", "timed out", "etimedout", "econnreset"]
+            .iter()
+            .any(|needle| lower.contains(needle));
+    }
+    if !message.starts_with("status ") {
+        // A decoded token/schema error (for example a missing access_token)
+        // is deterministic and the SDK does not retry it.
+        return false;
+    }
+    match oauth_error_code(message).as_deref() {
+        Some("server_error" | "temporarily_unavailable" | "too_many_requests") => true,
+        Some(
+            "invalid_request"
+            | "invalid_client"
+            | "invalid_grant"
+            | "unauthorized_client"
+            | "unsupported_grant_type"
+            | "invalid_scope"
+            | "access_denied"
+            | "unsupported_response_type"
+            | "unsupported_token_type"
+            | "invalid_token"
+            | "method_not_allowed"
+            | "invalid_client_metadata"
+            | "insufficient_scope"
+            | "invalid_target"
+            | "invalid_redirect_uri",
+        ) => false,
+        // SDK error bodies that fail JSON/schema parsing become ServerError;
+        // an unrecognized OAuth error code is also classified as transient.
+        _ => true,
     }
 }
 
@@ -1292,13 +1879,14 @@ async fn perform_oauth_flow_inner(
 
     let result: Result<Tokens, OAuthError> = async {
     // 1. Discovery.
-    let meta = discover_auth_server_metadata(
+    let discovered = discover_auth_server(
         http,
         server_url,
         oauth.auth_server_metadata_url.as_deref(),
         resource_metadata_url,
     )
     .await?;
+    let meta = &discovered.metadata;
 
     // 2. Bind the loopback listener FIRST so the redirect_uri is known before
     //    the authorize URL is built (claude-code's listen(0) pattern). A
@@ -1352,8 +1940,13 @@ async fn perform_oauth_flow_inner(
     //    scope-less even when the server advertises `offline_access`.
     let authorize_scope =
         authorize_url_scope(&scope, oauth.auth_server_metadata_url.is_some(), &meta);
-    let (auth_url, verifier, state) =
-        build_authorize_url(&meta, &client_id, &redirect_uri, &authorize_scope);
+    let (auth_url, verifier, state) = build_authorize_url_with_resource(
+        meta,
+        &client_id,
+        &redirect_uri,
+        &authorize_scope,
+        discovered.resource.as_deref(),
+    );
     on_auth_url(&auth_url);
 
     // 6. Wait for the redirect, validate state, capture the code. `redirect_uri`
@@ -1362,7 +1955,12 @@ async fn perform_oauth_flow_inner(
     let code = if let Some(input) = manual_input {
         let mut line = String::new();
         tokio::select! {
-            params = listener.accept(&state, &redirect_uri) => params?.code,
+            params = listener.accept_with_issuer(
+                &state,
+                &redirect_uri,
+                discovered.issuer.as_deref(),
+                discovered.issuer_parameter_supported,
+            ) => params?.code,
             read = input.read_line(&mut line) => {
                 let bytes = read.map_err(|e| OAuthError::Callback(format!("read manual callback: {e}")))?;
                 if bytes == 0 {
@@ -1370,7 +1968,12 @@ async fn perform_oauth_flow_inner(
                         "stdin closed before an authorization callback or code was provided".into(),
                     ));
                 }
-                parse_manual_callback_input(&line, &state)?
+                parse_manual_callback_input_with_issuer(
+                    &line,
+                    &state,
+                    discovered.issuer.as_deref(),
+                    discovered.issuer_parameter_supported,
+                )?
             }
         }
     } else {
@@ -1380,7 +1983,12 @@ async fn perform_oauth_flow_inner(
         // oracle's browser-authorization deadline.
         match tokio::time::timeout(
             OAUTH_CALLBACK_TIMEOUT,
-            listener.accept(&state, &redirect_uri),
+            listener.accept_with_issuer(
+                &state,
+                &redirect_uri,
+                discovered.issuer.as_deref(),
+                discovered.issuer_parameter_supported,
+            ),
         )
         .await
         {
@@ -1394,14 +2002,15 @@ async fn perform_oauth_flow_inner(
     };
 
     // 7. Exchange the code for tokens.
-    exchange_code(
+    exchange_code_with_resource(
         http,
         clock,
-        &meta,
+        meta,
         &client_id,
         &code,
         &verifier,
         &redirect_uri,
+        discovered.resource.as_deref(),
     )
     .await
     }
@@ -1426,6 +2035,15 @@ pub fn parse_manual_callback_input(
     input: &str,
     expected_state: &str,
 ) -> Result<String, OAuthError> {
+    parse_manual_callback_input_with_issuer(input, expected_state, None, false)
+}
+
+fn parse_manual_callback_input_with_issuer(
+    input: &str,
+    expected_state: &str,
+    expected_issuer: Option<&str>,
+    issuer_parameter_supported: bool,
+) -> Result<String, OAuthError> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(OAuthError::Callback(
@@ -1436,21 +2054,25 @@ pub fn parse_manual_callback_input(
     let query = if let Some((_, query)) = trimmed.split_once('?') {
         query.split('#').next().unwrap_or(query)
     } else {
+        validate_manual_callback_issuer(None, expected_issuer, issuer_parameter_supported)?;
         return Ok(trimmed.to_string());
     };
 
     let mut code = None;
     let mut state = None;
     let mut provider_error = None;
-    for pair in query.split('&') {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let decoded = urlencoding::decode(value)
-            .map_err(|e| OAuthError::Callback(format!("invalid callback encoding: {e}")))?
-            .into_owned();
-        match key {
-            "code" => code = Some(decoded),
-            "state" => state = Some(decoded),
-            "error" => provider_error = Some(decoded),
+    let mut issuer = None;
+    let mut issuer_seen = false;
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        match key.as_ref() {
+            "code" => code = Some(value.into_owned()),
+            "state" => state = Some(value.into_owned()),
+            "error" => provider_error = Some(value.into_owned()),
+            "iss" if !issuer_seen => {
+                let value = value.into_owned();
+                issuer = (!value.is_empty()).then_some(value);
+                issuer_seen = true;
+            }
             _ => {}
         }
     }
@@ -1462,8 +2084,34 @@ pub fn parse_manual_callback_input(
     if state.as_deref() != Some(expected_state) {
         return Err(OAuthError::Callback("state mismatch".into()));
     }
-    code.filter(|value| !value.is_empty())
-        .ok_or_else(|| OAuthError::Callback("callback is missing code".into()))
+    let code = code
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| OAuthError::Callback("callback is missing code".into()))?;
+    validate_manual_callback_issuer(
+        issuer.as_deref(),
+        expected_issuer,
+        issuer_parameter_supported,
+    )?;
+    Ok(code)
+}
+
+fn validate_manual_callback_issuer(
+    issuer: Option<&str>,
+    expected_issuer: Option<&str>,
+    issuer_parameter_supported: bool,
+) -> Result<(), OAuthError> {
+    let Some(expected_issuer) = expected_issuer else {
+        return Ok(());
+    };
+    match issuer {
+        Some(issuer) if issuer != expected_issuer => Err(OAuthError::Callback(
+            "authorization response issuer does not match metadata issuer".into(),
+        )),
+        None if issuer_parameter_supported => Err(OAuthError::Callback(
+            "authorization response is missing the required issuer".into(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1509,27 +2157,29 @@ pub fn server_key(name: &str, spec: &McpTransportSpec) -> String {
 
 /// On-disk JSON shape for a stored MCP OAuth token set. The secret strings are
 /// the byte payload of a [`lingxi_core::types::SecureStorageData`].
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredTokens {
     /// Bearer access token (plain string inside the encrypted blob).
     pub access_token: String,
     /// Optional refresh token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
-    /// Expiry as seconds since the Unix epoch.
-    pub expires_at_unix: u64,
+    /// Native epoch-millisecond expiry. Missing expiry remains `Undefined`;
+    /// explicit JSON null remains `Null` after loading.
+    #[serde(default, skip_serializing_if = "OAuthExpiry::is_undefined")]
+    pub expires_at_millis: OAuthExpiry,
     /// Effective OAuth `client_id` (DCR-issued or configured) these tokens were
     /// minted with — re-sent on silent refresh so public-client auth servers
     /// don't reject an empty `client_id` and force a fresh interactive flow
     /// (auth.ts `saveClientInformation`/`clientInformation`). `#[serde(default)]`
-    /// makes legacy blobs without the field deserialize to `None`.
+    /// leaves the field absent when the provider record has no id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
     /// Confidential-client secret these tokens were minted with. Only set for
     /// XAA (cross-app-access) tokens, whose AS uses a confidential client —
     /// strict ASes reject public-client revocation of confidential tokens
     /// (auth.ts:408-410, `revokeToken` `clientSecret`). `None` for ordinary
-    /// public-client OAuth. `#[serde(default)]` keeps legacy blobs valid.
+    /// public-client OAuth. `#[serde(default)]` leaves it absent for those records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
     /// Elevated scope cached when a 403 `insufficient_scope` step-up is pending
@@ -1546,29 +2196,31 @@ impl StoredTokens {
         Tokens {
             access_token: Secret::new(self.access_token),
             refresh_token: self.refresh_token.map(Secret::new),
-            expires_at: SystemTime::UNIX_EPOCH + Duration::from_secs(self.expires_at_unix),
+            expires_at: self.expires_at_millis,
             client_id: self.client_id,
         }
     }
 
     /// Wall-clock expiry of the stored access token (borrowing, no move).
     #[must_use]
-    pub fn expires_at(&self) -> SystemTime {
-        SystemTime::UNIX_EPOCH + Duration::from_secs(self.expires_at_unix)
+    pub fn remaining_seconds(&self, now: SystemTime) -> Option<f64> {
+        self.expires_at_millis.remaining_seconds(now)
+    }
+
+    /// Native's concurrent refresh winner predicate, before the caller adopts
+    /// the newly stored credentials.
+    #[must_use]
+    pub fn is_fresh_refresh_winner(&self, now: SystemTime) -> bool {
+        !self.access_token.is_empty() && self.expires_at_millis.is_fresh_refresh_winner(now)
     }
 
     /// Build from live [`Tokens`].
     #[must_use]
     pub fn from_tokens(t: &Tokens) -> Self {
-        let expires_at_unix = t
-            .expires_at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_secs();
         Self {
             access_token: t.access_token.expose_secret().clone(),
             refresh_token: t.refresh_token.as_ref().map(|s| s.expose_secret().clone()),
-            expires_at_unix,
+            expires_at_millis: t.expires_at,
             client_id: t.client_id.clone(),
             // Ordinary OAuth tokens are public-client and carry no step-up
             // scope; XAA wiring sets these directly on the stored blob.
@@ -1594,6 +2246,36 @@ pub async fn load_tokens(
     let parsed: StoredTokens = serde_json::from_slice(data.expose_secret_bytes())
         .map_err(|e| OAuthError::Token(format!("decode stored tokens: {e}")))?;
     Ok(Some(parsed))
+}
+
+pub(crate) async fn invalidate_standard_credentials(
+    storage: &Arc<dyn lingxi_core::host::SecureStorage>,
+    clock: &Arc<dyn Clock>,
+    key: &str,
+    observed: &StoredTokens,
+    scope: CredentialInvalidation,
+) -> Result<(), OAuthError> {
+    let Some(mut current) = load_tokens(storage, key).await? else {
+        return Ok(());
+    };
+    // Match Native's stale-write guard: never invalidate a token/client record
+    // that rotated while the rejected refresh was in flight.
+    if current.access_token != observed.access_token
+        || current.refresh_token != observed.refresh_token
+    {
+        return Ok(());
+    }
+    if scope == CredentialInvalidation::All && current.client_id != observed.client_id {
+        return Ok(());
+    }
+    current.access_token.clear();
+    current.refresh_token = None;
+    current.expires_at_millis = OAuthExpiry::Number(0.0);
+    if scope == CredentialInvalidation::All {
+        current.client_id = None;
+        current.client_secret = None;
+    }
+    store_tokens(storage, clock, key, &current).await
 }
 
 #[must_use]
@@ -1997,6 +2679,201 @@ mod tests {
     use super::*;
 
     #[test]
+    fn standard_token_schema_requires_token_type_and_preserves_absent_expiry() {
+        let missing_expiry: TokenResponse =
+            serde_json::from_str(r#"{"access_token":"at","token_type":"Bearer"}"#)
+                .expect("expires_in is optional");
+        assert_eq!(missing_expiry.expires_in, None);
+
+        assert!(serde_json::from_str::<TokenResponse>(r#"{"access_token":"at"}"#).is_err());
+        assert!(serde_json::from_str::<TokenResponse>(
+            r#"{"access_token":"at","token_type":"Bearer","refresh_token":null}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<TokenResponse>(
+            r#"{"access_token":"at","token_type":"Bearer","expires_in":"Infinity"}"#
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn token_grant_without_expires_in_returns_an_absent_expiry() {
+        let http = MockPrmHttp::new(&[(
+            "https://as.example.com/token",
+            200,
+            r#"{"access_token":"at","token_type":"Bearer"}"#,
+        )]);
+        let http_dyn: Arc<dyn HttpTransport> = http;
+        let clock: Arc<dyn Clock> = Arc::new(TestClock::new(1_000));
+        let (tokens, _, _) =
+            post_token_grant(&http_dyn, &clock, "https://as.example.com/token", &[])
+                .await
+                .expect("missing expires_in is valid");
+        assert_eq!(tokens.expires_at, OAuthExpiry::Undefined);
+    }
+
+    #[test]
+    fn expires_in_uses_source_number_coercion_and_finite_domain() {
+        let cases = [
+            (r#"null"#, Some(0.0)),
+            (r#"false"#, Some(0.0)),
+            (r#"true"#, Some(1.0)),
+            (r#""""#, Some(0.0)),
+            (r#""3600""#, Some(3600.0)),
+            (r#""0x10""#, Some(16.0)),
+            (r#""\uFEFF2""#, Some(2.0)),
+            (r#"[1]"#, Some(1.0)),
+            (r#"[]"#, Some(0.0)),
+            (r#"-0.25"#, Some(-0.25)),
+        ];
+        for (value, expected) in cases {
+            let body =
+                format!(r#"{{"access_token":"at","token_type":"Bearer","expires_in":{value}}}"#);
+            let parsed: TokenResponse = serde_json::from_str(&body).unwrap_or_else(|error| {
+                panic!("source-coercible expires_in {value} rejected: {error}")
+            });
+            assert_eq!(parsed.expires_in, expected, "input {value}");
+        }
+
+        for value in [r#""inf""#, r#"{}"#, r#"[1,2]"#] {
+            let body =
+                format!(r#"{{"access_token":"at","token_type":"Bearer","expires_in":{value}}}"#);
+            assert!(
+                serde_json::from_str::<TokenResponse>(&body).is_err(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn expiry_uses_date_now_millisecond_base_and_keeps_fractional_seconds() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_millis(1_000_123);
+        assert_eq!(
+            OAuthExpiry::from_expires_in(now, 0.5),
+            OAuthExpiry::Number(1_000_623.0)
+        );
+        assert_eq!(
+            OAuthExpiry::from_expires_in(now, 0.5).remaining_seconds(now),
+            Some(0.5)
+        );
+        assert_eq!(
+            OAuthExpiry::from_expires_in(now, 0.0),
+            OAuthExpiry::Number(1_000_123.0)
+        );
+        assert_eq!(
+            OAuthExpiry::from_expires_in(now, f64::MAX),
+            OAuthExpiry::Number(f64::INFINITY)
+        );
+        assert_eq!(
+            OAuthExpiry::from_expires_in(now, -f64::MAX),
+            OAuthExpiry::Number(f64::NEG_INFINITY)
+        );
+    }
+
+    #[test]
+    fn standard_refresh_retry_classes_match_the_provider_policy() {
+        let token = |message: &str| OAuthError::Token(message.into());
+        assert!(retryable_standard_refresh(&token(
+            r#"status 503: {"error":"server_error"}"#
+        )));
+        assert!(retryable_standard_refresh(&token(
+            r#"status 200: {"error":"server_error"}"#
+        )));
+        assert!(retryable_standard_refresh(&token(
+            r#"status 200: {"error":5}"#
+        )));
+        assert!(retryable_standard_refresh(&token(
+            r#"status 400: {"error":"provider_extension_error"}"#
+        )));
+        assert!(!retryable_standard_refresh(&token(
+            r#"status 400: {"error":"invalid_client"}"#
+        )));
+        for known_non_retryable in [
+            "invalid_request",
+            "invalid_client",
+            "invalid_grant",
+            "unauthorized_client",
+            "unsupported_grant_type",
+            "invalid_scope",
+            "access_denied",
+            "unsupported_response_type",
+            "unsupported_token_type",
+            "invalid_token",
+            "method_not_allowed",
+            "invalid_client_metadata",
+            "invalid_redirect_uri",
+            "insufficient_scope",
+            "invalid_target",
+        ] {
+            assert!(
+                !retryable_standard_refresh(&token(&format!(
+                    "status 400: {{\"error\":\"{known_non_retryable}\"}}"
+                ))),
+                "known SDK OAuth code {known_non_retryable} is not transient"
+            );
+        }
+        assert!(!retryable_standard_refresh(&OAuthError::RefreshRejected(
+            "invalid_grant".into()
+        )));
+        assert!(retryable_standard_refresh(&token(
+            "transport: request timed out after 30s"
+        )));
+        assert!(retryable_standard_refresh(&token(
+            "transport: connection failed: ECONNRESET"
+        )));
+        assert!(!retryable_standard_refresh(&token(
+            "transport: connection failed: DNS lookup failed"
+        )));
+        assert!(!retryable_standard_refresh(&token(
+            "decode: token response missing access_token"
+        )));
+    }
+
+    #[test]
+    fn standard_fetch_retry_matches_sdk_network_codes_only() {
+        for code in [
+            "ECONNREFUSED",
+            "ConnectionRefused",
+            "ENOTFOUND",
+            "ENETUNREACH",
+            "ENETDOWN",
+            "EHOSTUNREACH",
+            "EHOSTDOWN",
+            "EAI_AGAIN",
+            "FailedToOpenSocket",
+            "ERR_PROXY_TUNNEL",
+            "ECONNRESET",
+            "EPIPE",
+            "ConnectionClosed",
+            "UND_ERR_SOCKET",
+            "ETIMEDOUT",
+            "ECONNABORTED",
+            "ERR_SOCKET_CLOSED",
+            "StreamSuspended",
+            "StreamTruncated",
+        ] {
+            assert!(
+                retryable_standard_fetch(&HttpError::Connection(code.into())),
+                "{code} is source-classified as transient"
+            );
+        }
+        assert!(retryable_standard_fetch(&HttpError::Timeout(
+            Duration::from_secs(1)
+        )));
+        assert!(retryable_standard_fetch(&HttpError::Cancelled));
+        assert!(!retryable_standard_fetch(&HttpError::Connection(
+            "DNS lookup failed".into()
+        )));
+        assert!(!retryable_standard_fetch(&HttpError::InvalidResponse(
+            "bad response".into()
+        )));
+        assert!(!retryable_standard_fetch(&HttpError::Status {
+            status: 503,
+            body: String::new(),
+        }));
+    }
+
+    #[test]
     fn verifier_and_challenge_distinct_and_url_safe() {
         let (v1, c1) = generate_pkce();
         let (v2, _c2) = generate_pkce();
@@ -2135,6 +3012,38 @@ mod tests {
             parse_manual_callback_input("/callback?error=access_denied&state=expected", "expected"),
             Err(OAuthError::Callback(message)) if message.contains("access_denied")
         ));
+    }
+
+    #[test]
+    fn manual_callback_applies_metadata_issuer_rules() {
+        assert!(matches!(
+            parse_manual_callback_input_with_issuer(
+                "raw-code",
+                "expected",
+                Some("https://as.example.com"),
+                true,
+            ),
+            Err(OAuthError::Callback(message)) if message.contains("missing the required issuer")
+        ));
+        assert!(matches!(
+            parse_manual_callback_input_with_issuer(
+                "/callback?code=x&state=expected&iss=https%3A%2F%2Fother.example",
+                "expected",
+                Some("https://as.example.com"),
+                false,
+            ),
+            Err(OAuthError::Callback(message)) if message.contains("does not match")
+        ));
+        assert_eq!(
+            parse_manual_callback_input_with_issuer(
+                "/callback?code=x&state=expected&iss=",
+                "expected",
+                Some("https://as.example.com"),
+                false,
+            )
+            .unwrap(),
+            "x"
+        );
     }
 
     /// Metadata builder for the curated-scope tests (all optional fields off).
@@ -2323,7 +3232,7 @@ mod tests {
         let tokens = Tokens {
             access_token: Secret::new("at".into()),
             refresh_token: Some(Secret::new("rt".into())),
-            expires_at: SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
+            expires_at: OAuthExpiry::Number(1_000_000.0),
             client_id: Some("dcr-client-xyz".into()),
         };
         let stored = StoredTokens::from_tokens(&tokens);
@@ -2339,13 +3248,57 @@ mod tests {
         );
     }
 
-    /// Legacy blobs (no `client_id` field) deserialize to `None`, not an error.
     #[test]
-    fn stored_tokens_legacy_without_client_id_is_none() {
-        let legacy = r#"{"access_token":"at","refresh_token":"rt","expires_at_unix":1000}"#;
-        let parsed: StoredTokens = serde_json::from_str(legacy).unwrap();
+    fn absent_expiry_stays_absent_through_storage_projection() {
+        let tokens = Tokens {
+            access_token: Secret::new("at".into()),
+            refresh_token: Some(Secret::new("rt".into())),
+            expires_at: OAuthExpiry::Undefined,
+            client_id: Some("client".into()),
+        };
+        let stored = StoredTokens::from_tokens(&tokens);
+        assert_eq!(stored.expires_at_millis, OAuthExpiry::Undefined);
+        let json = serde_json::to_string(&stored).unwrap();
+        assert!(!json.contains("expires_at_millis"));
+        let parsed: StoredTokens = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.into_tokens().expires_at, OAuthExpiry::Undefined);
+    }
+
+    /// Undefined, JSON null, finite numbers, and live infinity stay distinct.
+    #[test]
+    fn stored_expiry_preserves_undefined_null_and_native_number_states() {
+        let missing = r#"{"access_token":"at","refresh_token":"rt"}"#;
+        let parsed: StoredTokens = serde_json::from_str(missing).unwrap();
         assert_eq!(parsed.client_id, None);
-        assert_eq!(parsed.into_tokens().client_id, None);
+        assert_eq!(parsed.expires_at_millis, OAuthExpiry::Undefined);
+
+        let null: StoredTokens = serde_json::from_str(
+            r#"{"access_token":"at","refresh_token":"rt","expires_at_millis":null}"#,
+        )
+        .unwrap();
+        assert_eq!(null.expires_at_millis, OAuthExpiry::Null);
+        assert!(
+            null.remaining_seconds(SystemTime::UNIX_EPOCH + Duration::from_secs(1))
+                .unwrap()
+                < 0.0
+        );
+
+        let huge: StoredTokens =
+            serde_json::from_str(r#"{"access_token":"at","expires_at_millis":1e308}"#).unwrap();
+        assert_eq!(huge.expires_at_millis, OAuthExpiry::Number(1e308));
+
+        let live_infinity = StoredTokens {
+            access_token: "at".into(),
+            refresh_token: None,
+            expires_at_millis: OAuthExpiry::Number(f64::INFINITY),
+            client_id: None,
+            client_secret: None,
+            step_up_scope: None,
+        };
+        let persisted = serde_json::to_string(&live_infinity).unwrap();
+        assert!(persisted.contains("\"expires_at_millis\":null"));
+        let reloaded: StoredTokens = serde_json::from_str(&persisted).unwrap();
+        assert_eq!(reloaded.expires_at_millis, OAuthExpiry::Null);
     }
 
     /// `refresh_tokens` carries the `client_id` it was given onto the result so
@@ -2359,7 +3312,7 @@ mod tests {
         let exchanged = Tokens {
             access_token: Secret::new("at".into()),
             refresh_token: Some(Secret::new("rt".into())),
-            expires_at: SystemTime::UNIX_EPOCH + Duration::from_secs(10),
+            expires_at: OAuthExpiry::Number(10_000.0),
             client_id: Some("the-client".into()),
         };
         assert_eq!(
@@ -2459,7 +3412,7 @@ mod tests {
             &StoredTokens {
                 access_token: "at-1".into(),
                 refresh_token: Some("refresh-token".into()),
-                expires_at_unix: 10,
+                expires_at_millis: OAuthExpiry::Number((10.0) * 1000.0),
                 client_id: None,
                 client_secret: None,
                 step_up_scope: None,
@@ -2487,7 +3440,7 @@ mod tests {
             &StoredTokens {
                 access_token: "at-2".into(),
                 refresh_token: Some("refresh-token".into()),
-                expires_at_unix: 11,
+                expires_at_millis: OAuthExpiry::Number((11.0) * 1000.0),
                 client_id: None,
                 client_secret: None,
                 step_up_scope: None,
@@ -2516,7 +3469,7 @@ mod tests {
             &StoredTokens {
                 access_token: "at".into(),
                 refresh_token: Some("refresh-token".into()),
-                expires_at_unix: 10,
+                expires_at_millis: OAuthExpiry::Number((10.0) * 1000.0),
                 client_id: None,
                 client_secret: None,
                 step_up_scope: None,
@@ -2539,7 +3492,7 @@ mod tests {
             &StoredTokens {
                 access_token: "at".into(),
                 refresh_token: Some("rotated-refresh-token".into()),
-                expires_at_unix: 10,
+                expires_at_millis: OAuthExpiry::Number((10.0) * 1000.0),
                 client_id: None,
                 client_secret: None,
                 step_up_scope: None,
@@ -2578,7 +3531,7 @@ mod tests {
             &StoredTokens {
                 access_token: "access-only".into(),
                 refresh_token: None,
-                expires_at_unix: 10,
+                expires_at_millis: OAuthExpiry::Number((10.0) * 1000.0),
                 client_id: None,
                 client_secret: None,
                 step_up_scope: None,
@@ -2966,7 +3919,8 @@ mod tests {
             Ok(lingxi_core::types::HttpResponse {
                 status: 200,
                 headers: vec![],
-                body: r#"{"access_token":"new-at","expires_in":3600}"#.to_string(),
+                body: r#"{"access_token":"new-at","token_type":"Bearer","expires_in":3600}"#
+                    .to_string(),
                 body_bytes: Vec::new(),
             })
         }
@@ -3323,7 +4277,7 @@ mod tests {
         let tokens = Tokens {
             access_token: Secret::new("access".into()),
             refresh_token: Some(Secret::new("refresh".into())),
-            expires_at: SystemTime::UNIX_EPOCH + Duration::from_secs(60),
+            expires_at: OAuthExpiry::Number(60_000.0),
             client_id: Some("client".into()),
         };
 

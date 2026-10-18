@@ -23,6 +23,7 @@ use lingxi_core::types::{
     ContentBlock, ConversationMessage, MessageId, ToolUseId,
 };
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 use telemetry::tengu::orchestrator as orch_events;
 use tool_api::context::{ToolUseContext, ToolUseOptions};
 use tool_api::tool_trait::tool_result_turn_end;
@@ -3771,6 +3772,50 @@ pub(crate) struct ToolUseDispatchFacts {
     pub(crate) query_history: Vec<ConversationMessage>,
     pub(crate) assistant_message: ConversationMessage,
     pub(crate) same_turn_tool_uses: Vec<ContentBlock>,
+    pub(crate) refusal_call_boundary: Option<std::sync::Arc<RefusalToolCallBoundary>>,
+}
+
+/// Linearizes the refusal boundary with the exact pre-tool-call entry. Either
+/// the call wins `Pending -> Started` and may be reported as Interrupted, or
+/// refusal wins `Pending -> Closed` and the physical tool call is suppressed.
+#[derive(Debug, Default)]
+pub(crate) struct RefusalToolCallBoundary(AtomicU8);
+
+impl RefusalToolCallBoundary {
+    const PENDING: u8 = 0;
+    const STARTED: u8 = 1;
+    const CLOSED: u8 = 2;
+
+    pub(crate) fn mark_started(&self) -> bool {
+        self.0
+            .compare_exchange(
+                Self::PENDING,
+                Self::STARTED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Close a call that has not crossed the physical side-effect boundary.
+    /// Returns whether the call had already crossed that boundary.
+    pub(crate) fn close_for_refusal(&self) -> bool {
+        match self.0.compare_exchange(
+            Self::PENDING,
+            Self::CLOSED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => false,
+            Err(Self::STARTED) => true,
+            Err(Self::CLOSED) => false,
+            Err(_) => unreachable!("refusal call boundary has a valid state"),
+        }
+    }
+
+    pub(crate) fn was_started(&self) -> bool {
+        self.0.load(Ordering::Acquire) == Self::STARTED
+    }
 }
 
 fn dispatch_facts_for_tool_index(
@@ -6768,6 +6813,25 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             match execution_record {
                 Err(error) => (None, Err(error)),
                 Ok(record) => {
+                    if tool_dispatch_facts
+                        .as_ref()
+                        .and_then(|facts| facts.refusal_call_boundary.as_ref())
+                        .is_some_and(|boundary| !boundary.mark_started())
+                    {
+                        // Native's refusal boundary won before the physical
+                        // call. Close any native execution record, stop local
+                        // event producers, and return no synthetic tool or
+                        // post-tool hook work for a call that never ran.
+                        let aborted = Err(tool_api::ToolError::Aborted);
+                        Box::pin(crate::native_computer::after_execution(
+                            orch, record, &aborted,
+                        ))
+                        .await
+                        .map_err(|error| OrchestratorError::Internal(error.to_string()))?;
+                        event_tasks_done.cancel();
+                        while event_tasks.join_next().await.is_some() {}
+                        return Ok(DeferredToolDispatch::default());
+                    }
                     // Keep the call future in this inner scope. When cancellation wins,
                     // leaving the scope drops the non-cooperative future (and its
                     // progress sender) before we await the progress consumer below.

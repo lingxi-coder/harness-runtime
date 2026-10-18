@@ -927,6 +927,15 @@ fn build_state_from_jsonl(
                     .at_pointer("/isMeta")
                     .and_then(JsonValueView::as_bool)
                     .unwrap_or(false);
+                let interrupted_by_shutdown = m
+                    .extra
+                    .at_pointer("/interruptedByShutdown")
+                    .and_then(JsonValueView::as_bool);
+                let refused_message_id = m
+                    .extra
+                    .subprojection("/refusedMessageId")
+                    .ok()
+                    .filter(|value| value.string_units("").is_some());
                 if m.extra
                     .at_pointer("/isVirtual")
                     .and_then(JsonValueView::as_bool)
@@ -990,6 +999,8 @@ fn build_state_from_jsonl(
                     usage_limit_note: m.usage_limit_note,
                     origin: m.origin_projection.clone(),
                     turn_origin: m.turn_origin_projection.clone(),
+                    interrupted_by_shutdown,
+                    refused_message_id,
                 });
                 last_uuid = Some(msg_uuid);
             }
@@ -2196,6 +2207,8 @@ pub async fn replay_deferred_tools_after_resume(
 
     let tool_results_msg = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: MessageId::new(),
         content: tool_results,
         is_meta: false,
@@ -3667,6 +3680,67 @@ mod exact_history_string_tests {
             panic!("second cold row is a user message")
         };
         assert!(absent.is_none());
+    }
+
+    #[test]
+    fn shutdown_interruption_metadata_and_utf16_content_survive_cold_hydration() {
+        let shutdown = parsed_jsonl_row(
+            r#"{"type":"user","uuid":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:00Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":{"role":"user","content":[{"type":"text","text":"A\ud800B"}]},"interruptedByShutdown":true}"#,
+        );
+        let explicit_false = parsed_jsonl_row(
+            r#"{"type":"user","uuid":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:01Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":{"role":"user","content":[]},"interruptedByShutdown":false}"#,
+        );
+        let absent = parsed_jsonl_row(
+            r#"{"type":"user","uuid":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:02Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":{"role":"user","content":[]}}"#,
+        );
+        let refused = parsed_jsonl_row(
+            r#"{"type":"user","uuid":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","parentUuid":null,"isSidechain":false,"timestamp":"2026-10-07T12:00:03Z","cwd":"/fixture","version":"test","sessionId":"22222222-2222-4222-8222-222222222222","message":{"role":"user","content":[{"type":"text","text":"retry"}]},"refusedMessageId":"A\ud800B"}"#,
+        );
+        let state = state_from_messages(
+            Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap(),
+            &[shutdown, explicit_false, absent, refused],
+        );
+        let ConversationMessage::User {
+            content,
+            interrupted_by_shutdown: Some(true),
+            ..
+        } = &state.history[0]
+        else {
+            panic!("shutdown marker must hydrate with its flag")
+        };
+        let ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } = &content[0]
+        else {
+            panic!("the transcript must retain the exact UTF-16 carrier")
+        };
+        assert_eq!(utf16_code_units, &[0x0041, 0xd800, 0x0042]);
+        assert!(matches!(
+            &state.history[1],
+            ConversationMessage::User {
+                interrupted_by_shutdown: Some(false),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &state.history[2],
+            ConversationMessage::User {
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
+                ..
+            }
+        ));
+        let ConversationMessage::User {
+            refused_message_id: Some(refused_message_id),
+            ..
+        } = &state.history[3]
+        else {
+            panic!("refusal nudge id must hydrate as source-preserving user metadata")
+        };
+        assert_eq!(
+            refused_message_id.string_units(""),
+            Some(vec![65, 0xd800, 66])
+        );
     }
 
     #[test]

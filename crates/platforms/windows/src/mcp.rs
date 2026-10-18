@@ -543,7 +543,12 @@ pub async fn spawn_stdio_with_handles(cfg: StdioConfig) -> Result<StdioHandles, 
     }
 
     // Wire the JSON-RPC connection over NDJSON stdio.
-    let connection = Connection::new_line_delimited(stdout, stdin);
+    let connection = Connection::builder(jsonrpc::codec::LineCodec::with_decoder(
+        mcp::decode_native_mcp_frame,
+        jsonrpc::codec::DecodeErrorHandling::Skip,
+    ))
+    .unknown_method_message("Method not found")
+    .build_async_io(stdout, stdin);
 
     // Reap the child on exit. The waiter task owns the `Child`, so
     // `kill_on_drop(true)` makes the child die if this task is dropped

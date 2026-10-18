@@ -399,6 +399,8 @@ mod tool_frame_ordering_tests {
 
         let message = lingxi_core::types::ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::ToolResult {
                 tool_use_id: id.clone(),
@@ -588,6 +590,8 @@ async fn queued_hook_attachments_flush_after_the_tool_result_in_order() {
 
     let msg = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: tuid.clone(),
@@ -656,6 +660,8 @@ async fn discarded_result_cleanup_removes_only_its_queued_attachments() {
 
     let accepted_result = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::ToolResult {
             tool_use_id: accepted.clone(),

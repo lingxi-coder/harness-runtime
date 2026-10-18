@@ -1,0 +1,60 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-effort-cold-resume-fixture-diagnostic-r380.v1",
+  "recordedAtUtc": "2026-10-18T17:45:49Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "command": "cargo test --locked --offline -p orchestrator --test effort_cold_resume_295_test cold_resume_295_fresh_process_preserves_effort_into_next_sdk_request -- --exact --nocapture",
+  "sourceHashFiles": [
+    "r380-effort-cold-resume-sourcehashes-pre.txt",
+    "r380-effort-cold-resume-sourcehashes-post-fixture.txt"
+  ],
+  "targetTestSourceSha256AtRun": "bacd939918a5ad271db1fe2ab323f3e245a737e888bbdb5d2b342e4c669225bc",
+  "exitCode": 101,
+  "testsSelected": 1,
+  "testsPassed": 0,
+  "testsFailed": 1,
+  "failure": {
+    "observedEffortMarkers": [
+      [
+        1,
+        "system",
+        "low"
+      ],
+      [
+        4,
+        "system",
+        "medium"
+      ]
+    ],
+    "expectedEffortMarkers": [
+      [
+        1,
+        "system",
+        "low"
+      ],
+      [
+        4,
+        "system",
+        "high"
+      ]
+    ],
+    "classification": "test composition did not initialize ProviderApiAdapter with the configured high effort; production desktop assembly seeds both the adapter and OrchestratorConfig from the same initial_effort value"
+  },
+  "productionSource": "unchanged; no confirmed production cold-resume defect",
+  "testOnlyRepair": {
+    "file": "crates/orchestrator/tests/effort_cold_resume_295_test.rs",
+    "sha256": "a98e4452098212794dbbe336b29547fb3a37874859b2da4284bbc74d5d840c43",
+    "change": "Initialize ProviderApiAdapter with NEXT_TURN_EFFORT, matching desktop assembly's initial-effort wiring.",
+    "rustfmtCheck": "pass",
+    "gitDiffCheck": "pass"
+  },
+  "log": "logs/43-orchestrator-effort-cold-resume-exact.log",
+  "logSha256": "2871898f182c8e5c2b09838ffb705d20e02dd8da02a70e0bddd6502677825cb4",
+  "scope": "Diagnostic only; retain failed run. Test fixture now mirrors ProviderApiAdapter::with_initial_effort used by desktop assembly and will be rerun after shared API source freeze."
+}

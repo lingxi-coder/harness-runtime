@@ -1,0 +1,39 @@
+   Compiling orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+error[E0308]: mismatched types
+    --> crates/orchestrator/tests/mid_turn_input_test.rs:650:57
+     |
+ 650 |             .push(ConversationMessage::user(message_id, "original request"));
+     |                   -------------------------             ^^^^^^^^^^^^^^^^^^ expected `String`, found `&str`
+     |                   |
+     |                   arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1353:12
+     |
+1353 |     pub fn user(id: MessageId, text: String) -> Self {
+     |            ^^^^
+help: try using a conversion method
+     |
+ 650 |             .push(ConversationMessage::user(message_id, "original request".to_string()));
+     |                                                                           ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/orchestrator/tests/mid_turn_input_test.rs:652:57
+     |
+ 652 |             ConversationMessage::user(MessageId::new(), "[Request interrupted by user]");
+     |             -------------------------                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `String`, found `&str`
+     |             |
+     |             arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1353:12
+     |
+1353 |     pub fn user(id: MessageId, text: String) -> Self {
+     |            ^^^^
+help: try using a conversion method
+     |
+ 652 |             ConversationMessage::user(MessageId::new(), "[Request interrupted by user]".to_string());
+     |                                                                                        ++++++++++++
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `orchestrator` (test "mid_turn_input_test") due to 2 previous errors

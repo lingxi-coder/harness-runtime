@@ -498,6 +498,8 @@ async fn restore_marker(
         orch,
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: recovery_message_id(session_id, kind, calls, origins)?,
             content,
             is_meta: true,

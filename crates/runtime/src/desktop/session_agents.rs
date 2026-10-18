@@ -1151,6 +1151,8 @@ mod tests {
             ConversationMessage::user(lingxi_core::types::MessageId::new(), "hello".to_string());
         let hidden = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::Text {
                 text: "summary".into(),

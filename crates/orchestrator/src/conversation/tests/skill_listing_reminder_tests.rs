@@ -412,6 +412,8 @@ async fn tool_result_continuations_do_not_advance_the_plan_cadence() {
         for _ in 0..10 {
             s.history.push(ConversationMessage::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id: MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::ToolResult {
                     tool_use_id: lingxi_core::types::ToolUseId::new(),

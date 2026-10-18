@@ -719,6 +719,8 @@ mod tests {
         };
         let message = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
@@ -1019,6 +1021,8 @@ mod tests {
     fn user_tool_result(tool_use_id: ToolUseId, content: &str) -> ConversationMessage {
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id,

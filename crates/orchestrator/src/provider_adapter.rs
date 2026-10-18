@@ -352,6 +352,8 @@ impl tool_api::McpTokenCounter for ProviderApiAdapter {
             origin: None,
             turn_origin: None,
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
         };
         self.service
             .count_tokens_exact(model, None, None, vec![message], Vec::new())

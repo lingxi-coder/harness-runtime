@@ -1,0 +1,55 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-core-session-r380.v1",
+  "recordedAtUtc": "2026-10-18T15:47:56Z",
+  "sourceHashFile": "r380-core-session-sourcehashes.json",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "scopedWorkingDiffSha256": "4b40fb5aec860dc139709d402cefadfedb8fddc9bf44f7e16b0be92a90de05a9",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "commands": [
+    {
+      "package": "core",
+      "filter": "shutdown_interruption_metadata_preserves_native_optional_boolean",
+      "command": "source frozen-build-env.sh && cargo test --locked --offline -p core --lib shutdown_interruption_metadata_preserves_native_optional_boolean",
+      "exitCode": 0,
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "log": "logs/04-core-shutdown-interruption.log"
+    },
+    {
+      "package": "core",
+      "filter": "refused_message_id_is_optional_and_preserves_exact_utf16_source",
+      "command": "source frozen-build-env.sh && cargo test --locked --offline -p core --lib refused_message_id_is_optional_and_preserves_exact_utf16_source",
+      "exitCode": 0,
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "log": "logs/05-core-refused-message-id.log"
+    },
+    {
+      "package": "session",
+      "filter": "interruption_flag",
+      "command": "source frozen-build-env.sh && cargo test --locked --offline -p session --lib interruption_flag",
+      "exitCode": 0,
+      "testsPassed": 2,
+      "testsFailed": 0,
+      "log": "logs/06-session-interruption-jsonl.log"
+    },
+    {
+      "package": "session",
+      "filter": "refusal_message_id",
+      "command": "source frozen-build-env.sh && cargo test --locked --offline -p session --lib refusal_message_id",
+      "exitCode": 0,
+      "testsPassed": 2,
+      "testsFailed": 0,
+      "log": "logs/07-session-refused-message-id-jsonl.log"
+    }
+  ],
+  "summary": {
+    "passed": 6,
+    "failed": 0,
+    "packages": [
+      "core",
+      "session"
+    ]
+  },
+  "scope": "Core and Session focused selectors only; orchestrator and runtime gates not run in this receipt."
+}

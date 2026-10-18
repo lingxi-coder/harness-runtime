@@ -372,7 +372,7 @@ where
                                     if ev.data.is_empty() {
                                         continue;
                                     }
-                                    match serde_json::from_str::<JsonRpcMessage>(&ev.data) {
+                                    match mcp::decode_native_mcp_frame(ev.data.as_bytes()) {
                                         Ok(msg) => {
                                             observe_protocol_response(
                                                 &frame_value,
@@ -421,17 +421,37 @@ where
                         }
                     } else {
                         // Single JSON object response.
-                        match response.json::<JsonRpcMessage>().await {
-                            Ok(msg) => {
-                                observe_protocol_response(
-                                    &frame_value,
-                                    &msg,
-                                    &mut writer_protocol_version.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-                                );
-                                let _ = inbound_tx.send(msg);
+                        match response.bytes().await {
+                            Ok(body) => {
+                                // Fetch's Response.json() strips one leading
+                                // UTF-8 BOM before JSON.parse. Preserve that
+                                // HTTP-only behavior; stdio/SSE/WS keep the
+                                // Native decoder's direct JSON.parse policy.
+                                let body = body
+                                    .strip_prefix(b"\xef\xbb\xbf")
+                                    .unwrap_or(body.as_ref());
+                                match mcp::decode_native_mcp_frame(body) {
+                                Ok(msg) => {
+                                    observe_protocol_response(
+                                        &frame_value,
+                                        &msg,
+                                        &mut writer_protocol_version.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+                                    );
+                                    let _ = inbound_tx.send(msg);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "mcp http: response not valid MCP JSON-RPC");
+                                    if let Some(error) = probe_compatibility_error(
+                                        &frame,
+                                        "malformed discovery response",
+                                    ) {
+                                        let _ = inbound_tx.send(error);
+                                    }
+                                }
                             }
+                            },
                             Err(e) => {
-                                tracing::warn!(error = %e, "mcp http: response not valid JSON-RPC");
+                                tracing::warn!(error = %e, "mcp http: failed to read JSON response body");
                                 if let Some(error) = probe_compatibility_error(
                                     &frame,
                                     "malformed discovery response",
@@ -463,7 +483,11 @@ where
         Ok::<_, ConnectionError>(tx)
     });
 
-    let connection = Connection::from_message_streams(Box::pin(inbound), Box::pin(outbound));
+    let connection = Connection::from_message_streams(
+        Box::pin(inbound),
+        Box::pin(outbound),
+        Some("Method not found".into()),
+    );
     connection.set_per_request_cancellation(request_cancellation);
     Ok(connection)
 }

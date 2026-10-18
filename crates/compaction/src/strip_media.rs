@@ -95,6 +95,8 @@ mod tests {
     fn user_image_block_becomes_placeholder_text() {
         let msg = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {
@@ -154,6 +156,8 @@ mod tests {
         let id = lingxi_core::types::ToolUseId::new();
         let input = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult { tool_use_id: id.clone(),
                 content: "read result".into(),

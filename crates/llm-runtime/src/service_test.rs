@@ -2235,20 +2235,19 @@ mod tests {
             request
         };
 
-        // An explicitly configured canonical URL takes Native KXt's local
-        // true branch. Its provider route remains first-party even when the
-        // configured profile itself has a different URL.
+        // A canonical process URL paired with the selected canonical route
+        // takes Native KXt's local true branch.
         std::env::set_var("ANTHROPIC_BASE_URL", "https://api.anthropic.com");
         let canonical_env = make_adapter_for_protocol_with_transport(
             ProtocolFamily::AnthropicMessages,
             ProviderId::AnthropicFirstParty,
-            "https://proxy.example.test",
-            "proxy-profile",
+            "https://api.anthropic.com",
+            "canonical-profile",
             model,
             transport.clone(),
         );
         let canonical_scope = crate::thinking_scope::ThinkingRecoveryScope::default();
-        let mut canonical_request = make_request("proxy-profile");
+        let mut canonical_request = make_request("canonical-profile");
         canonical_request.execution.thinking_recovery_scope = Some(canonical_scope.clone());
         canonical_env
             .execute_non_stream_request(
@@ -2335,6 +2334,101 @@ mod tests {
                 .native_thinking_binding_controls_state()
                 .beta_sent
         );
+    }
+
+    #[tokio::test]
+    async fn native_tbc_uses_each_selected_first_party_profile_endpoint() {
+        let _cache_env_lock = CACHE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _thinking_env_lock = THINKING_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let _restore = CacheEnvRestore::clear(&[
+            "ANTHROPIC_BASE_URL",
+            "_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
+            "CLAUDE_CODE_SIMULATE_PROXY_USAGE",
+            "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+            "CLAUDE_CODE_EXTRA_BODY",
+            "R379_TBC_ROUTE_API_KEY",
+        ]);
+        std::env::set_var("R379_TBC_ROUTE_API_KEY", "sk-test-only");
+
+        let model = "claude-sonnet-4-20250514";
+        let mut canonical = crate::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|profile| profile.profile_name == "anthropic")
+            .expect("built-in first-party profile");
+        canonical.profile_name = "r379-tbc-canonical".into();
+        canonical.auth = crate::AuthStrategy::ApiKey;
+        canonical.credential = crate::CredentialConfig::Env {
+            var: "R379_TBC_ROUTE_API_KEY".into(),
+        };
+        canonical.models = vec![crate::ModelProfile {
+            display_model: model.into(),
+            request_model: model.into(),
+            billing_model: "claude-sonnet-4".into(),
+            aliases: Vec::new(),
+            description: None,
+            metadata: Default::default(),
+            capabilities: crate::Capabilities {
+                streaming: true,
+                tools: true,
+                reasoning: true,
+                ..Default::default()
+            },
+        }];
+
+        let mut proxy = canonical.clone();
+        proxy.profile_name = "r379-tbc-proxy".into();
+        proxy.base_url = "http://127.0.0.1:31003".into();
+        let client = Arc::new(
+            ModelRuntime::from_config(ClientConfig {
+                providers: vec![canonical, proxy],
+            })
+            .expect("two first-party routes with the same model"),
+        );
+        let transport = FakeTransport::always(ProviderResponse::json(200, ok_response_json()));
+        let service = ApiService::new(
+            client,
+            transport.clone(),
+            SubscriberState::default(),
+            UserAgentEnv {
+                user_type: Some("external".into()),
+                entrypoint: Some("cli".into()),
+                ..Default::default()
+            },
+            "0.0.0",
+            None,
+            None,
+        );
+        let tbc = "thinking-binding-controls-2026-08-01";
+
+        for (profile, expected_tbc) in [("r379-tbc-proxy", false), ("r379-tbc-canonical", true)] {
+            let mut request = LlmRequest::new(model).with_user_text("Hi");
+            request.profile = Some(profile.into());
+            request.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+                mode: Some(lingxi_llm_client::protocol::ThinkingMode::Adaptive),
+                ..Default::default()
+            });
+            request.execution.thinking_recovery_scope =
+                Some(crate::thinking_scope::ThinkingRecoveryScope::default());
+            service
+                .execute_non_stream_request(
+                    request,
+                    crate::NonStreamingRequestClass::Main,
+                    crate::NonStreamingRetryOptions::default(),
+                )
+                .await
+                .expect("fixture request succeeds");
+            assert_eq!(
+                request_header_has_beta(&transport.seen_headers(transport.seen_count() - 1), tbc),
+                expected_tbc,
+                "TBC admission must follow selected profile {profile} without leaking the previous route"
+            );
+        }
+        assert_eq!(transport.seen_count(), 2);
     }
 
     #[tokio::test]
@@ -4383,6 +4477,8 @@ mod tests {
     fn text_user_msg(s: &str) -> ConversationMessage {
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: s.to_string(),
@@ -4709,6 +4805,8 @@ mod tests {
                 },
                 ConversationMessage::User {
                     api_message_override: None,
+                    interrupted_by_shutdown: None,
+                    refused_message_id: None,
                     id: lingxi_core::types::MessageId::new(),
                     content: vec![ContentBlock::ToolResult {
                         tool_use_id: lingxi_core::types::ToolUseId::from("toolu_ref"),
@@ -5282,6 +5380,8 @@ mod tests {
             },
             CM::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id: MessageId::new(),
                 content: vec![PB::ToolResult {
                     tool_use_id: tool_id,
@@ -7279,6 +7379,8 @@ mod tests {
         let adapter = make_adapter(transport);
         let msgs = vec![ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::Image {
                 source: ImageSource::Url {
@@ -8865,6 +8967,8 @@ mod tests {
         content.extend(range.map(img));
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: lingxi_core::types::MessageId::new(),
             content,
             is_meta: false,
@@ -8906,6 +9010,8 @@ mod tests {
     fn tool_result_string_content_contributes_no_media() {
         let msgs = vec![ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![
                 ContentBlock::ToolResult {
@@ -8935,6 +9041,8 @@ mod tests {
         // image-heavy MCP transcript silently exceeds the API limit and 400s.
         let msgs = vec![ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
@@ -8962,6 +9070,8 @@ mod tests {
     fn count_media_includes_nested_openai_image_url_media() {
         let msgs = vec![ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
@@ -8990,6 +9100,8 @@ mod tests {
         // (claude.ts:982-999), leaving the text + the most-recent nested image.
         let msgs = vec![ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: lingxi_core::types::ToolUseId::new(),
@@ -9074,6 +9186,8 @@ mod tests {
     fn strip_excess_media_no_images_is_noop() {
         let msgs = vec![ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![ContentBlock::Text {
                 text: "no media here".to_string(),
@@ -14674,6 +14788,8 @@ mod tool_result_reminder_suffix_tests {
                     origin: None,
                     turn_origin: None,
                     api_message_override: None,
+                    interrupted_by_shutdown: None,
+                    refused_message_id: None,
                 },
                 ConversationMessage::user_meta(
                     reminder_id,

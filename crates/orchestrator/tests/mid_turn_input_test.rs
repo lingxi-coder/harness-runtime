@@ -16,7 +16,7 @@
 
 use async_trait::async_trait;
 use lingxi_core::types::{
-    utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, ToolUseId,
+    utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, MessageId, ToolUseId,
 };
 use orchestrator::prompt::mid_turn_input::{CancelReason, CancelReasonFlag, MidTurnInputSource};
 use orchestrator::test_support::{
@@ -538,6 +538,149 @@ async fn user_interrupt_default_injects_interrupt_message() {
     assert!(
         history_has_interrupt(&orch).await,
         "a default (user) interrupt MUST inject the interrupt message (today's behavior)"
+    );
+    let session = orch.session();
+    let state = session.lock().await;
+    assert!(
+        state.history.iter().any(|message| matches!(
+            message,
+            ConversationMessage::User {
+                content,
+                interrupted_by_shutdown: None,
+            refused_message_id: None,
+                ..
+            } if content.iter().any(|block| matches!(
+                block,
+                ContentBlock::Text { text, .. } if text.contains("interrupted by user")
+            ))
+        )),
+        "user cancellation remains an unflagged Native interruption row"
+    );
+}
+
+/// A service shutdown still emits Native's interruption message, and carries
+/// the optional shutdown discriminator used by transcript recovery.
+#[tokio::test]
+async fn service_shutdown_abort_injects_shutdown_discriminator() {
+    let api = one_cancel_tool_turn();
+    let orch = build_orch_with_cancel_tool(api);
+    let reason = CancelReasonFlag::new();
+    reason.set(CancelReason::ServiceShutdown);
+    orch.set_cancel_reason(reason);
+
+    let cancel = CancellationToken::new();
+    let firer = fire_cancel_soon(cancel.clone());
+    let outcome = orch
+        .run_turn_streaming_with_cancel("call the cancel tool", cancel)
+        .await
+        .unwrap();
+    firer.await.unwrap();
+    assert_eq!(outcome, TurnOutcome::Cancelled);
+
+    let session = orch.session();
+    let state = session.lock().await;
+    assert!(
+        state.history.iter().any(|message| matches!(
+            message,
+            ConversationMessage::User {
+                content,
+                interrupted_by_shutdown: Some(true),
+                ..
+            } if content.iter().any(|block| matches!(
+                block,
+                ContentBlock::Text { text, .. } if text.contains("interrupted by user")
+            ))
+        )),
+        "service shutdown remains a marker and carries the Native true flag"
+    );
+}
+
+#[tokio::test]
+async fn batched_pre_model_shutdown_emits_the_same_shutdown_discriminator() {
+    let api = Arc::new(MockStreamingApiClient::with_turns(Vec::new()));
+    let orch = build_orch(api);
+    let reason = CancelReasonFlag::new();
+    reason.set(CancelReason::ServiceShutdown);
+    orch.set_cancel_reason(reason);
+
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let outcome = orch
+        .run_turn_with_cancel("service shutdown before model admission", cancel)
+        .await
+        .unwrap();
+    assert_eq!(outcome, TurnOutcome::Cancelled);
+
+    let session = orch.session();
+    let state = session.lock().await;
+    assert!(
+        state.history.iter().any(|message| matches!(
+            message,
+            ConversationMessage::User {
+                content,
+                interrupted_by_shutdown: Some(true),
+                ..
+            } if content.iter().any(|block| matches!(
+                block,
+                ContentBlock::Text { text, .. } if text.contains("interrupted by user")
+            ))
+        )),
+        "batched and streaming cancellation use the same shutdown marker"
+    );
+}
+
+#[tokio::test]
+async fn cold_shutdown_redelivery_reuses_the_original_user_row() {
+    let stream = scripted![
+        message_start("m1", "claude-opus-4-7"),
+        content_block_start_text(0),
+        text_delta(0, "resumed answer"),
+        content_block_stop(0),
+        message_delta_stop("end_turn"),
+        message_stop(),
+    ];
+    let api = Arc::new(MockStreamingApiClient::with_turns(vec![stream]));
+    let orch = build_orch(api.clone());
+    let message_id = MessageId::new();
+    {
+        let session = orch.session();
+        let mut session = session.lock().await;
+        session.history.push(ConversationMessage::user(
+            message_id,
+            "original request".to_owned(),
+        ));
+        let mut shutdown =
+            ConversationMessage::user(MessageId::new(), "[Request interrupted by user]".to_owned());
+        if let ConversationMessage::User {
+            interrupted_by_shutdown,
+            ..
+        } = &mut shutdown
+        {
+            *interrupted_by_shutdown = Some(true);
+        }
+        session.history.push(shutdown);
+    }
+
+    let outcome = orch
+        .run_turn_streaming_with_cancel_projected_content(
+            &source_text("original request".into()),
+            CancellationToken::new(),
+            Some(message_id),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome, TurnOutcome::EndTurn);
+    assert_eq!(api.captured_calls().await.len(), 1);
+    let session = orch.session();
+    let history = session.lock().await.history.clone();
+    assert_eq!(
+        history
+            .iter()
+            .filter(|message| message.id() == message_id)
+            .count(),
+        1,
+        "cold redelivery must not append another user row with the same UUID"
     );
 }
 

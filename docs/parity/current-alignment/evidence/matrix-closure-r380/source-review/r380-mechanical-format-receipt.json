@@ -1,0 +1,187 @@
+{
+  "at": "2026-10-18T17:08:15.397381+00:00",
+  "tool": "rustfmt 1.94.0 edition2021 skip_children=true",
+  "classification": "whitespace only, byte stream after removing whitespace identical; reuse previous behavioral tests with this explicit source transformation",
+  "files": [
+    {
+      "path": "crates/agent/src/handle/spawn_context.rs",
+      "before": "46e5cd935047b6a77c8d62608fa293f45bd796791bb0eb3374c74f5df7aa4b49",
+      "after": "e5a757780ebdac4629ddccb906333e1c24028899bcc9714daadf35eaf863919a",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/agent/src/handle/tests/tests.rs",
+      "before": "14eda1264cd9497ace3e94ae99a1f298e064e4ec23622c77781afd21d3276138",
+      "after": "714975345d1346ca3d5bed1db3b2c6fd0fc381aae071d02454f020ed8de58d41",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/agent/src/runner.rs",
+      "before": "a6cfd68c0ef77cfde85d421c1b42daa748e416cdd6b41368000f9902da691dfe",
+      "after": "1dcbc74f09751797de81eeefc50e1c2b58c11f92369d78c5043fab7e7fc0c7f2",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/agent/src/runner_test.rs",
+      "before": "d214561cd185d29c18b1721527df510886ed0e8b879fc1751f33101c1bd70693",
+      "after": "db9120a1f1529d2c6ac1858104074588efeb0c61682d3d8956b862d7df1e4ec4",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/client/src/adapter/lowering/tests.rs",
+      "before": "1e0b92c55ab8a55befda21524a85e927f18759df6e25369c0a101932da524cfe",
+      "after": "79a36a6addd0b6d69b50531fb2cde87f38887c95b75c5265501c43fb5a435c63",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/client/src/adapter/output_stream.rs",
+      "before": "d1328acd236057792d3609d511c6b93b6c0c96990294ab8c238314b76e2dbb5f",
+      "after": "3620841d950bed8503e796afaae0084fe212f3d7dfbb345aca6e80e8c57aeca7",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/compaction/src/autocompact.rs",
+      "before": "198f5203ae9bb0ad93e4f47e3ccadc43e2955be64bf8ecca578b70d73b3b9dea",
+      "after": "dcc2443bf3e578f5d05168defc21e50aea1cd10e5273fb22a26498a82041fdca",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/compaction/src/context_hint.rs",
+      "before": "ebf2f4dffc4b9b71de5413e42c34b3566833e28451366273d3c5f17028bcb1e4",
+      "after": "6a2a6665d3f3d2cbf0cda70b4e5f9767ade0b0445ca60d33045fedece3e0db4b",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/core/src/reducer.rs",
+      "before": "bb92d87e2561c3c6a80920f77741f1d3a598aca14291e8827b9128cf3c8176d4",
+      "after": "8b5fc16b0dc2b5779a2ee379ad1d79caaf772a5af1166f2b8da1361f5bf1abd6",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/core/src/session.rs",
+      "before": "8208ace190cfef9edbe7b7ec86990a91ce2520a6bc2f271d4eced4a16a30e924",
+      "after": "65489e8aa018581420a11dba84f140deaa6e0edf8fbd857e69063a049679758d",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/llm-runtime/src/computer/auxiliary_tests.rs",
+      "before": "538211176ed733797cd0fe8efe6d9d535736dc2916f90adf1bc0b4ce296ec8f8",
+      "after": "9dc27a3abc5ec515bce439e9e1f28c79a75705a1ea425aceb87049066965e1e7",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/llm-runtime/src/service_test.rs",
+      "before": "26b6d777da4feea2ed67126c1fbfe0ecea81cb4c80a8a20512e3be951aaaef07",
+      "after": "6911783e165977ec87701ff9b403a81a078426e4c092bffee06030e6a91faad2",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/orchestrator/src/conversation/compaction.rs",
+      "before": "5c70d6dd9e47c5c4582a77a731aede7066d9d0423d040ea7b7c3e930d6cabb68",
+      "after": "31cd8fe3acc4a3bb835fee42766476749409a079ebd6e6b7ba0104fce3c505b7",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/orchestrator/src/conversation/drivers/prepare_tool_result_reminder_tests.rs",
+      "before": "285c720f28fae519cd436d61ed837f8dd6ef49ba688cb58af3d25d3966d2b20b",
+      "after": "177cfbdd43355815931075639cdd95511f57e5bac901aaa7f57b6e804c0bcdfd",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/orchestrator/src/conversation/model.rs",
+      "before": "e8ca252714708195054fba81ec4c5251d4d82d728c9db42384ac3528496a2fed",
+      "after": "bdeab18882c16388b4018ad7d9f1eaae5cdcc42f79366c58653e60e5a743b657",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/orchestrator/src/conversation/tests/ephemeral_tool_result_persistence_tests.rs",
+      "before": "6fb6425512995a81e24cdcb1d54b1ecfe21fb604be297d478013df5094da1fab",
+      "after": "c6bb42c0f61abc25b01cfe09becad38001a82944a061dd140c315c7d798b9604",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/orchestrator/src/conversation/tests/hook_attachment_persistence_tests.rs",
+      "before": "c9c814d2631db628ae4e6ecf08f59add48fb8ccde71ac9fca454d49e73260d62",
+      "after": "11927328db652301fcf75b417ffd8da7568cba3431cdb3450e802c3d1a52d8ff",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/orchestrator/src/conversation/tests/persist_with_parent_tests.rs",
+      "before": "6039922180d422a19541ecea64604040d079eff5765b62f40967a4f1f96c8852",
+      "after": "068301d509d3a6703980006827a6d0ae2931ebf6f434b1066fe2ee2e31100f07",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/orchestrator/src/conversation/tests/post_compact_file_restore_tests.rs",
+      "before": "d8c128e7b64ae0e7d61e0ff30f0503fffe03eb6e21382fbc9253e0992e543d04",
+      "after": "e0a4305ab92c24bb3227534975d2a46d9e3878c997fa760ddaac69cf199f1a29",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/orchestrator/src/conversation/tests/session_append_tests.rs",
+      "before": "8209cc33c0172231f6a7967ca7121cb3b55de5634b41a77cc910b0bcdc54c6af",
+      "after": "dd144b40e31257bc433c5a98a12ebc8492397295f2cc8a5573508570daa50793",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/orchestrator/src/conversation/tests/skill_listing_reminder_tests.rs",
+      "before": "86b7d9209ed330bed68144dc561f4ff2d178b1cc455489001a736059e07afdfe",
+      "after": "51a6975da47e1db2b0d5b5301c5fab5f57faef6808edfb127d454df33b684244",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/orchestrator/src/conversation/tests/total_tokens_lifecycle_tests.rs",
+      "before": "6150a826ee7d7514b4a86ba4857d1971ed54eff59772cc9868ba57af503b1326",
+      "after": "d74f04160916aaf2feaaea5caef78647ac84015babc58fd4c0e55c5cccb25f4c",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/orchestrator/src/handle_impl.rs",
+      "before": "8d10aed20fcebe8f83a2483054e4b1892c1e0431b34448522d3dfe6c9f046753",
+      "after": "74f1cd0e327bb70912c873d7467cf911ec36a9e9343c0195fac826ea0e0120b8",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/orchestrator/src/native_computer/tests.rs",
+      "before": "4ff0e923b43fa46cbc91a7f8a27cadd2818b3f54a1b16de4d203b1b20e198b28",
+      "after": "fd347dd68a91e9b5c2795a4a890829d9521d6c54ca97676c8fce32d19c58d6cf",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/orchestrator/src/streaming_loop_server_fallback_tests.rs",
+      "before": "815853198a1cf99afa5d8eba9c5150825a61558980e62f5efbaef39574fa1da6",
+      "after": "5edd6d303f48ba5470c0e53608a54009518a543e458f11190663c53576766969",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/runtime/src/mobile/host/tests/tests.rs",
+      "before": "f6cc5ad960dc8ec8b00523dc6ed7c574f53f20915432c0b98ec13ead0bf7ca95",
+      "after": "b98d91cdf6c4fdabce8529d87a225d67776271b291e0f42586285192e72f2efa",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/sidequery/src/computer_scope_tests.rs",
+      "before": "858f41ae7176fb07d427cdd923d3c96a573a35cf7e204676aac6a0a6397fce19",
+      "after": "376ddeb21f5930c9f6020c63649c6ce8a74ff71b75017c727e429671b6ffb8dd",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/sidequery/src/forked_agent.rs",
+      "before": "35546710bfcccdf4f1eb08cf73bf1c2231f93e42e7d974b2cbb121923adf5cf3",
+      "after": "0474db558b1965a1b956a8acb96a61c6ffdb5d4776c02b76f89c435d6b7f8abd",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/tasks/src/handlers/in_process_teammate.rs",
+      "before": "84d02bd9d7990507d36da9196190011dea77da554336c8ea50c1efbeec971cd2",
+      "after": "fc911ff3bb94c84957b9f9ec68cbefba98e1ec4b360882d14a579964f4c506e7",
+      "whitespace_only": true
+    },
+    {
+      "path": "crates/tools/skill/src/skill.rs",
+      "before": "547709311cf765e8a638c6c9a857030b7e7427df816224c510b3ffdd45140bae",
+      "after": "2c07da7cafb3a6c745484ba52cdcaabfe3ce47aaa2b94cde3f3d935dca4a93a8",
+      "whitespace_only": true
+    }
+  ]
+}

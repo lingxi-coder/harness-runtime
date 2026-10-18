@@ -1,0 +1,15 @@
+event: content_block_start
+data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_r380_second","name":"Bash","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":2,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"/usr/bin/python3 -c \\\"import pathlib,time; pathlib.Path('.r380-refusal-second.marker').write_text('queued_ran_ns='+str(time.time_ns())+'\\\\n')\\\"\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":2}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"refusal","stop_sequence":null,"stop_details":{"type":"refusal","explanation":"R380 synthetic refusal fixture."}},"usage":{"output_tokens":4}}
+
+event: message_stop
+data: {"type":"message_stop"}
+

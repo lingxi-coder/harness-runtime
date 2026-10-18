@@ -1,0 +1,37 @@
+rustc 1.94.0 (4a4ef493e 2026-03-02)
+warning: unused variable: `timer`
+    --> /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-util/src/client/legacy/client.rs:1509:32
+     |
+1509 |     pub fn timer<M>(&mut self, timer: M) -> &mut Self
+     |                                ^^^^^ help: if this is intentional, prefix it with an underscore: `_timer`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `lingxi-hyper-util` (lib) generated 1 warning (run `cargo fix --lib -p lingxi-hyper-util` to apply 1 suggestion)
+warning: unused macro definition: `debug`
+  --> /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-rustls/src/lib.rs:53:18
+   |
+53 |     macro_rules! debug    ( ($($tt:tt)*) => {{}} );
+   |                  ^^^^^
+   |
+   = note: `#[warn(unused_macros)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `debug`
+  --> /Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/llm-client/vendor/lingxi-hyper-rustls/src/lib.rs:55:20
+   |
+55 |     pub(crate) use debug;
+   |                    ^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `lingxi-hyper-rustls` (lib) generated 2 warnings (run `cargo fix --lib -p lingxi-hyper-rustls` to apply 1 suggestion)
+   Compiling r380-foundry-public-transport-probe v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/matrix-closure-r379/sdk/foundry-public-transport-probe)
+    Finished `test` profile [unoptimized] target(s) in 1.10s
+     Running tests/foundry_public_transport.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/foundry_public_transport-8e9fd6247a2dc7a7)
+
+running 1 test
+R380_FOUNDRY_LOCAL_TRANSPORT={"probe":"r380 current public SDK Foundry route over production HttpTransport and localhost only","external_provider_network_used":false,"native_process_or_capture_used":false,"transport":"HttpTransport::with_client_configurator(no_proxy)","request_count":1,"selected_base_url":"http://127.0.0.1:55254/anthropic","auth_input":{"strategy":"api_key","source":"RequestOptions.credential","header":"x-api-key","fixture_credential":"r380-localhost-only-dummy-key","real_secret_used":false},"request":{"raw_http_hex":"504f5354202f616e7468726f7069632f76312f6d6573736167657320485454502f312e310d0a636f6e74656e742d747970653a206170706c69636174696f6e2f6a736f6e0d0a616e7468726f7069632d76657273696f6e3a20323032332d30362d30310d0a782d6170692d6b65793a20723338302d6c6f63616c686f73742d6f6e6c792d64756d6d792d6b65790d0a6163636570743a202a2f2a0d0a686f73743a203132372e302e302e313a35353235340d0a636f6e74656e742d6c656e6774683a203136380d0a0d0a7b226d6f64656c223a22637573746f6d2d6465706c6f796d656e74222c226d61785f746f6b656e73223a31362c226d65737361676573223a5b7b22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2252657475726e20746865206c6f63616c20466f756e647279206669787475726520726573706f6e73652e227d5d7d5d2c2273747265616d223a747275657d","request_line":"POST /anthropic/v1/messages HTTP/1.1","ordered_header_lines":["content-type: application/json","anthropic-version: 2023-06-01","x-api-key: r380-localhost-only-dummy-key","accept: */*","host: 127.0.0.1:55254","content-length: 168"],"body_bytes":168,"body_hex":"7b226d6f64656c223a22637573746f6d2d6465706c6f796d656e74222c226d61785f746f6b656e73223a31362c226d65737361676573223a5b7b22726f6c65223a2275736572222c22636f6e74656e74223a5b7b2274797065223a2274657874222c2274657874223a2252657475726e20746865206c6f63616c20466f756e647279206669787475726520726573706f6e73652e227d5d7d5d2c2273747265616d223a747275657d","body_utf8":"{\"model\":\"custom-deployment\",\"max_tokens\":16,\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Return the local Foundry fixture response.\"}]}],\"stream\":true}"},"response":{"raw_http_hex":"485454502f312e3120323030204f4b0d0a636f6e74656e742d747970653a20746578742f6576656e742d73747265616d0d0a636f6e74656e742d6c656e6774683a203736300d0a636f6e6e656374696f6e3a20636c6f73650d0a0d0a6576656e743a206d6573736167655f73746172740d0a646174613a207b2274797065223a226d6573736167655f7374617274222c226d657373616765223a7b226964223a226d73675f723338305f666f756e647279222c2274797065223a226d657373616765222c22726f6c65223a22617373697374616e74222c226d6f64656c223a22637573746f6d2d6465706c6f796d656e74222c22636f6e74656e74223a5b5d2c2273746f705f726561736f6e223a6e756c6c2c2273746f705f73657175656e6365223a6e756c6c2c227573616765223a7b22696e7075745f746f6b656e73223a372c226f75747075745f746f6b656e73223a307d7d7d0d0a0d0a6576656e743a20636f6e74656e745f626c6f636b5f73746172740d0a646174613a207b2274797065223a22636f6e74656e745f626c6f636b5f7374617274222c22696e646578223a302c22636f6e74656e745f626c6f636b223a7b2274797065223a2274657874222c2274657874223a22227d7d0d0a0d0a6576656e743a20636f6e74656e745f626c6f636b5f64656c74610d0a646174613a207b2274797065223a22636f6e74656e745f626c6f636b5f64656c7461222c22696e646578223a302c2264656c7461223a7b2274797065223a22746578745f64656c7461222c2274657874223a22666f756e6472792d6c6f6f706261636b2d6f6b227d7d0d0a0d0a6576656e743a20636f6e74656e745f626c6f636b5f73746f700d0a646174613a207b2274797065223a22636f6e74656e745f626c6f636b5f73746f70222c22696e646578223a307d0d0a0d0a6576656e743a206d6573736167655f64656c74610d0a646174613a207b2274797065223a226d6573736167655f64656c7461222c2264656c7461223a7b2273746f705f726561736f6e223a22656e645f7475726e227d2c227573616765223a7b226f75747075745f746f6b656e73223a347d7d0d0a0d0a6576656e743a206d6573736167655f73746f700d0a646174613a207b2274797065223a226d6573736167655f73746f70227d0d0a0d0a","raw_http_utf8":"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: 760\r\nconnection: close\r\n\r\nevent: message_start\r\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_r380_foundry\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"custom-deployment\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":7,\"output_tokens\":0}}}\r\n\r\nevent: content_block_start\r\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\r\n\r\nevent: content_block_delta\r\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"foundry-loopback-ok\"}}\r\n\r\nevent: content_block_stop\r\ndata: {\"type\":\"content_block_stop\",\"index\":0}\r\n\r\nevent: message_delta\r\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":4}}\r\n\r\nevent: message_stop\r\ndata: {\"type\":\"message_stop\"}\r\n\r\n","sse_event_sequence":["message_start","content_block_start","content_block_delta","content_block_stop","message_delta","message_stop"]},"public_sdk_consumption":{"event_sequence":["start","text_delta","block_end","provider:message_delta","end"],"raw_provider_event_sequence":["message_delta"],"assistant_text":"foundry-loopback-ok","model":"custom-deployment","stop_reason":"EndTurn","input_tokens":7,"output_tokens":4}}
+test foundry_public_sdk_sends_and_consumes_one_localhost_sse_exchange ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+

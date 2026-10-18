@@ -1,0 +1,12 @@
+[package]
+name = "r380-foundry-public-transport-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+lingxi-llm-client = { path = "../../../../../llm-client" }
+serde_json = "=1.0.151"
+tokio = { version = "=1.53.1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }

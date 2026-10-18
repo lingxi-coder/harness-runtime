@@ -1460,6 +1460,7 @@ mod tests {
                     resumable: None,
                 },
                 same_turn_tool_uses: Vec::new(),
+                refusal_call_boundary: None,
             },
             resolved_tool: Arc::new(ProbeTool {
                 interrupt_behavior: tool_api::tool_trait::InterruptBehavior::Block,

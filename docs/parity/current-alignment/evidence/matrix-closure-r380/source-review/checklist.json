@@ -1,0 +1,1396 @@
+{
+  "schema": "lingxi.claude-alignment-matrix-closure-r379.v1",
+  "purpose": "Finite closure map for the 42 immutable r376 contract IDs against current source/evidence; distinguishes original requirements from extra evidence limits.",
+  "target": {
+    "nativeVersion": "2.1.295",
+    "nativeSha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+    "currentPins": {
+      "harnessProduction": "6548b9d5e702f8e9d42772412cd65b72881e24b4",
+      "harnessDocs": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+      "productSource": "343fe8528697d95b3cc0e21d9651727fa1b0a4e0",
+      "productDeliveryDocs": "7f8e022d1aef248fbd64e3db379af7c4903f12de",
+      "llmClient": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+      "mobileLinux": "6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+    }
+  },
+  "baseline": "acceptance/final-ledger-r376/baseline.json",
+  "latestLedger": "harness-runtime/docs/parity/current-alignment/current-matrix.md",
+  "newerEvidence": [
+    "harness-runtime/docs/parity/current-alignment/source-closure-r377.md",
+    "harness-runtime/docs/parity/current-alignment/mobile-package-r378.md",
+    "acceptance/matrix-closure-r379/integration/gate-plan.md",
+    "acceptance/matrix-closure-r379/runtime/r380-mcp-oauth-final.receipt.json: 81 MCP OAuth library tests plus 31 OAuth-flow integration tests passed (112/112) on stable source fingerprints.",
+    "acceptance/matrix-closure-r379/runtime/r380-session-1-agent-target.receipt.json: current_alignment_mod_append passed 3/3 on stable agent/core/hooks source fingerprints.",
+    "acceptance/native-session-append-295-20261010T120632Z/native-receipt.json: frozen Native 2.1.295 public plugin test passed 4/4 assertions; only the system returned-event raw JSON is retained.",
+    "acceptance/matrix-closure-r379/verification/candidate-clearance-r380.md: bounded 42-row r380 candidate status and final-pin boundary.",
+    "acceptance/matrix-closure-r379/refusal/max-turn-source-bindings-r380.json: source-semantic binding for Native 2.1.295 refusal reissue turn-count behavior.",
+    "acceptance/matrix-closure-r379/refusal/final-source-review-r380.md: bounded source comparison of the current refusal implementation; prior 12/13 + exact 1/1 receipts predate the current route binding.",
+    "acceptance/matrix-closure-r379/runtime/r380-orchestrator-current-alignment-refusal-full14.receipt.json: current refusal target passed 14/14 on 2,330 stable source fingerprints.",
+    "acceptance/matrix-closure-r379/runtime/r380-orchestrator-refusal-physical-route-alias-exact.receipt.json: current physical request model/profile alias selector passed 1/1 and is included in the full 14/14 target.",
+    "acceptance/matrix-closure-r379/verification/native-mcp-message-schema-r380.md: frozen Native MCP schema, progressToken numeric domain, stdio outer-caller semantics, and exact unknown-method response binding.",
+    "acceptance/matrix-closure-r379/runtime/r380-mcp-native-message-schema-after-fix.receipt.json: MCP schema selectors passed 9/9.",
+    "acceptance/matrix-closure-r379/runtime/r380-mcp-roots-replay.receipt.json and r380-mcp-wire-notification-utf16-filtered.receipt.json: input-required and UTF-16 notification selectors passed 1/1 each.",
+    "acceptance/matrix-closure-r379/runtime/r380-orchestrator-mcp-iserror-presence.receipt.json, r380-orchestrator-mcp-error-roundtrip.receipt.json, r380-tool-mcp-mime-295.receipt.json, and r380-mcp-tool-call-optional-null.receipt.json: four scoped production selectors passed 1/1 each, in addition to roots replay.",
+    "acceptance/matrix-closure-r379/runtime/r380-jsonrpc-lib-full-final.receipt.json: generic JSON-RPC library suite passed 77/77 on stable fingerprints, including fixed method-not-found dispatcher behavior.",
+    "acceptance/matrix-closure-r379/sdk/delivery/receipt.json: bounded current SDK statusless-SSE vectors 1/1 plus Foundry localhost public-transport exchange 1/1 and extracted Native 2.1.295 source execution 3/3.",
+    "acceptance/matrix-closure-r379/verification/mcp-session-minimal-gate-plan-r380.md#SESSION-2: source-first bounded reuse decision with exact current Agent and source-identical Hooks selector references.",
+    "acceptance/matrix-closure-r379/runtime/r380-orchestrator-effort-cold-resume-exact-after-fixture.receipt.json: effort cold-resume selector 1/1 on stable fingerprints.",
+    "acceptance/matrix-closure-r379/runtime/r380-orchestrator-mod-tool-wire-295.receipt.json: first-request tool-catalog candidate selector 1/1 on stable fingerprints.",
+    "acceptance/matrix-closure-r379/runtime/r380-orchestrator-tool-result-persist.receipt.json: tool-result production persistence selector 2/2 on stable fingerprints."
+  ],
+  "evidenceClasses": [
+    "native_source_binding",
+    "extracted_source_execution",
+    "candidate_regression",
+    "public_native_capture",
+    "candidate_package_or_ui",
+    "current_pin_gate"
+  ],
+  "scopeRules": {
+    "remoteAndCrossSession": "Excluded by the user; this does not exclude local cold resume, local session persistence, or local Agent recovery.",
+    "approvedDifferences": [
+      {
+        "id": "heapdump-runtime",
+        "scope": [
+          "RUNTIME-1"
+        ],
+        "rule": "Rust/Bun /heapdump difference is accepted; do not add a fake implementation."
+      },
+      {
+        "id": "anthropic-service-gates",
+        "scope": "Only live Claude Test account/service-gated behavior.",
+        "rule": "Accepted as a service-gate difference; this does not waive fixture-based Anthropic HTTP/SSE checks or any expressly required Native bytes."
+      }
+    ],
+    "noImplicitWaivers": "No other difference is accepted by inference. Existing audit limitations, missing captures, generated-field normalizations, package signing state, and historical evidence do not become approved product differences.",
+    "sharedWorktreeState": "This checklist records the committed r379 Native/H/Product/SDK identities above as historical baseline anchors. The shared Harness checkout has concurrent uncommitted edits; r380 execution receipts bind exact pre/post source fingerprints for their bounded targets. Final integrated H/P pins are not yet bound and must be recorded after source freeze; H6548/P7f8-style aliases are not the final delivery target."
+  },
+  "count": 42,
+  "statusCounts": {
+    "open": 7,
+    "closed": 19,
+    "closed_source_semantics_bounded": 10,
+    "open_current_pin_rebind": 2,
+    "closed_source_semantics": 2,
+    "closed_bounded": 1,
+    "closed_with_approved_difference": 1
+  },
+  "interpretationWarnings": [
+    "The immutable baseline requirement is authoritative for each ID. Later prose that associates TOOL-1 with LTr alias/glob source evidence does not satisfy TOOL-1 isDeferred/catalog wire acceptance.",
+    "The r377 LTr closure is relevant to Native alias/permission semantics but does not satisfy MCP-1 JSON-RPC initialize/discovery/result/transport-frame acceptance.",
+    "TURN-3 is only the one public in-flight SIGINT scenario; pre-admission, shutdown, compact-ID, and multi-turn cases are not extra closure requirements. The prior run04 is historical; its current gate must bind the final integrated P/H pins.",
+    "PROMPT-1 does not require one aggregate byte fixture when per-path source and regression evidence closes each listed assembly path and no mismatch is identified.",
+    "Source-semantic closure for Mods/Hook rows must not be described as public Native byte parity.",
+    "The r379 iOS receipt closes the current-pin 23-test focused slice (6 + 17); it does not claim app UI tests or physical device acceptance.",
+    "The r376 baseline globally pins Native 2.1.295. A 2.1.293 raw artifact remains useful historical evidence but is not a 2.1.295 public capture.",
+    "The Native 2.1.295 public session.append plugin-test passed four assertions and the current candidate selector passed 3/3. The retained raw returned-event artifact is system-only; the user case is source/candidate-backed and must not be called a Native raw capture.",
+    "The recovered MCP 2.1.295 fixtures plus r380 schema, input-required, presence, transport, OAuth, and JSON-RPC receipts close the bounded MCP-1 candidate selectors. Native public auth bytes remain unobserved but do not require recapture; do not inherit the unrelated r377 LTr alias/glob closure.",
+    "The r271 integration-10/36/39 receipts execute on older Harness snapshots. Current r380 receipts are bounded source-fingerprint runs; final H/P pins must be rebound after integration."
+  ],
+  "contracts": [
+    {
+      "id": "M2-HTTP-1",
+      "originalRequirement": "Compare the first physical Native Claude Messages request in headless print-text mode: HTTP/1 request line and query, raw header spelling/order/CRLF/framing, request-body bytes and offered response.",
+      "originalRequirementStatus": "open",
+      "r376AuditStatus": "partial_raw_http_pass_with_constraints",
+      "currentMatrixDisposition": "partial_raw_http_pass_with_constraints",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json",
+        "harness-runtime/docs/parity/current-alignment/fixtures/http-layout-295/README.md",
+        "harness-runtime/docs/parity/current-alignment/fixtures/http-layout-295/native-baseline/2.1.295/native-comparison-293-vs-295.json",
+        "harness-runtime/crates/llm-runtime/tests/current_alignment_http_layout_293_test.rs",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "The Native first-request fixture is pinned, but candidate comparison still stops below Product CLI assembly. Existing dynamic Host and 64-byte device_id normalization are proof constraints, not approved behavior differences. A separate client-observed raw-response comparison is beyond the original offered-response clause.",
+      "outstandingObligation": "Bind the first Product headless print-text request and offered response at the physical transport boundary on the current pins; retain request line, raw ordered headers/framing, body, and the server-written response bytes.",
+      "extraBeyondOriginal": "Client-observed response bytes are an additional comparison, not part of the baseline clause and not a closure blocker.",
+      "allowedDifference": [],
+      "smallestValidClosure": "Run one pinned Product print-text invocation against the local recorder; compare request and server-written offered-response bytes to the Native artifact, consume the response through the public CLI, and retain that CLI result. Do not add a client-observed raw-response spy.",
+      "closureAssessment": {
+        "originalRequirement": "open",
+        "currentPinValidation": "open",
+        "obligationScope": "original_acceptance",
+        "extraEvidenceLimit": "Client-observed response bytes exceed the original offered-response requirement."
+      }
+    },
+    {
+      "id": "SDK-ERR-1",
+      "originalRequirement": "Anthropic HTTP 400 with nested error.message containing one isolated UTF-16 unit, nested message null, and empty response body. Preserve response bytes and Native CLI result text without reserializing captured output.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "verified_with_cross_version_raw_input_equivalence",
+      "currentMatrixDisposition": "verified_with_cross_version_raw_input_equivalence",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json",
+        "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/receipt.json",
+        "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/comparison-to-293.json",
+        "harness-runtime/crates/orchestrator/tests/provider_error_output_293_test.rs",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "The selected 2.1.295 HTTP 400 inputs share raw hashes with the replayed frozen fixture and the untouched Native result literals match; the row does not ask for a complete stdout JSON byte comparison.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "Full CLI envelope identity is outside the stated row; do not add it as a closure requirement.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "Full CLI envelope identity is outside the stated row; do not add it as a closure requirement."
+      }
+    },
+    {
+      "id": "HOST-ERR-1",
+      "originalRequirement": "Replay captured HTTP error bodies through production `ApiService → ProviderApiAdapter → ConversationOrchestrator`; compare Native result text at `OutputStream` and persisted assistant rows.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "verified_host_boundary",
+      "currentMatrixDisposition": "verified_host_boundary",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json",
+        "harness-runtime/crates/orchestrator/tests/provider_error_output_293_test.rs",
+        "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/comparison-to-293.json",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-07/phase.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Exact result UTF-16 units are checked at OutputStream and persisted assistant JSONL for the recorded error bodies.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "Product CLI stdout is a separate row.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "Product CLI stdout is a separate row."
+      }
+    },
+    {
+      "id": "HOST-ERR-STATUS-1",
+      "originalRequirement": "Status-specific HTTP presentation for 403, 404, 413, plus separately scoped 401/500 responses with explicit `x-should-retry:false`.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "verified_host_boundary_with_500_authority_constraint",
+      "currentMatrixDisposition": "verified_host_boundary_with_500_authority_constraint",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json",
+        "harness-runtime/crates/orchestrator/tests/provider_error_output_293_test.rs",
+        "harness-runtime/docs/parity/current-alignment/fixtures/provider-error-295/native-baseline/2.1.295/comparison-to-293.json",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-07/phase.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Recorded status cases cover 403/404/413 and separately constrained no-retry 401/500 presentation at Host boundaries.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "The loopback listener authority constraint for 500 is retained as a test constraint, not a product difference.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "The loopback listener authority constraint for 500 is retained as a test constraint, not a product difference."
+      }
+    },
+    {
+      "id": "HOST-REFUSAL-1",
+      "originalRequirement": "Final Native terminal refusal presentation from stop reason/category/explanation, model display label, and interactive mode; compare exact JSON CLI result and persisted source fields.",
+      "originalRequirementStatus": "open",
+      "r376AuditStatus": "partial_host_boundary_pass",
+      "currentMatrixDisposition": "partial_host_boundary_pass",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json",
+        "harness-runtime/docs/parity/current-alignment/fixtures/stop-details-295/README.md",
+        "harness-runtime/crates/orchestrator/tests/current_alignment_refusal.rs",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-08/phase.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Host output and persisted category/explanation are source-bound; the requested public CLI display-label and interactive-mode composition is absent.",
+      "outstandingObligation": "One public CLI refusal replay must check model display label, interactive mode, JSON result text, and durable source fields against the pinned Native fixture.",
+      "extraBeyondOriginal": null,
+      "allowedDifference": [],
+      "smallestValidClosure": "Add/run one deterministic public CLI refusal selector with the Native stop/category/explanation fixture and record JSON result plus persisted fields.",
+      "closureAssessment": {
+        "originalRequirement": "open",
+        "currentPinValidation": "open",
+        "obligationScope": "original_acceptance",
+        "extraEvidenceLimit": null
+      }
+    },
+    {
+      "id": "CLI-ERR-1",
+      "originalRequirement": "Replay the same bodies through the exact Native mode `--print --output-format json` and the pinned Product CLI entrypoint; compare raw stdout schema, error/status flags, final result text units, stderr and exit status.",
+      "originalRequirementStatus": "open",
+      "r376AuditStatus": "selected_current_product_cli_cases_pass",
+      "currentMatrixDisposition": "selected_current_product_cli_cases_pass",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json",
+        "acceptance/final-ledger-r376/runtime-audit.json",
+        "lingxi-app/apps/cli/host/tests/provider_error_cli.rs",
+        "/private/tmp/product-full-r342-r375-20261018T014521Z-68469/runner/phases/integration-tests-04/phase.json",
+        "acceptance/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-04/phase.json",
+        "acceptance/matrix-closure-r379/integration/gate-plan.md",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "The saved 17593-era selector covers the bounded error bodies, but the current Product worktree has a newer concurrent change in apps/cli/host/tests/provider_error_cli.rs and fixture directories that are outside the current iOS receipt.",
+      "outstandingObligation": "Run the owning provider_error_cli gate on the current Product/H/SDK pins after the current CLI test/fixture delta is finalized; retain stdout schema/flags/result units/stderr/exit assertions.",
+      "extraBeyondOriginal": null,
+      "allowedDifference": [],
+      "smallestValidClosure": "Run the smallest provider_error_cli test target against P source 343fe852, H 6548b9d5, SDK a363c5b3 and record its receipt after the concurrent delta is stable.",
+      "closureAssessment": {
+        "originalRequirement": "open",
+        "currentPinValidation": "open",
+        "obligationScope": "original_acceptance",
+        "extraEvidenceLimit": null
+      }
+    },
+    {
+      "id": "SDK-ERR-2",
+      "originalRequirement": "Statusless Anthropic SSE `event:error`, `data.type=error`, nested `timeout_error` with U+D800 message; compare no-start and partial-text-before-error cases plus a generic `api_error` control.",
+      "originalRequirementStatus": "closed_source_semantics_bounded",
+      "r376AuditStatus": "current_sdk_message_unit_pass_295_classifier_mapped_293_comparison_unresolved",
+      "currentMatrixDisposition": "source_and_candidate_bounded_pass_3_statusless_SSE_vectors",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json",
+        "acceptance/source-alignment-295-r30/native-classifier-context/manifest.json",
+        "acceptance/source-alignment-295-r30/native-classifier-context/src_194447854.js",
+        "harness-runtime/docs/parity/current-alignment/fixtures/statusless-stream-error/README.md",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md",
+        "acceptance/matrix-closure-r379/sdk/delivery/source-bindings.json: Native 2.1.295 statusless parser/APIError ranges are bound to the frozen binary; three extracted-source vectors pass on retained Native 2.1.293 raw SSE inputs.",
+        "acceptance/matrix-closure-r379/sdk/delivery/receipt.json: current public SDK decoder passed all 3 statusless SSE vectors (1/1 test), with timeout/no-start, partial-text-before-error, U+D800 units, and generic api_error control asserted."
+      ],
+      "evidenceInterpretation": "Frozen Native 2.1.295 parser/APIError source binding and extracted execution agree with the current public SDK decoder on the three retained statusless SSE vectors. The inputs are Native 2.1.293 raw fixtures; this is bounded source-plus-candidate evidence.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": null,
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed_source_semantics_bounded",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "No 2.1.295 public SSE response capture is claimed or required by the current source-first bounded closure; the retained raw vectors are explicitly 2.1.293."
+      }
+    },
+    {
+      "id": "SDK-1",
+      "originalRequirement": "Claude Messages/Foundry request method, URL, headers, ordered body fields, exact-string sidecars, final body string normalization, signing inputs, response and SSE frame bytes.",
+      "originalRequirementStatus": "closed_source_semantics_bounded",
+      "r376AuditStatus": "partial_current_first_party_wire_coverage",
+      "currentMatrixDisposition": "source_and_candidate_bounded_pass_foundry_public_local_transport",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json",
+        "acceptance/source-alignment-295-r30/sdk-request.md",
+        "acceptance/source-alignment-295-r30/native-classifier-context/manifest.json",
+        "acceptance/source-alignment-295-r31/mcp-sanitizer-source/manifest.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md",
+        "acceptance/matrix-closure-r379/sdk/delivery/source-bindings.json: Native 2.1.295 request/encoding source ranges and current llm-client source fingerprints are recorded.",
+        "acceptance/matrix-closure-r379/sdk/delivery/receipt.json and foundry-public-transport-probe/{raw-request.http,raw-response.http,public-output.json}: current public SDK Foundry route used production HttpTransport against one localhost SSE exchange and passed 1/1."
+      ],
+      "evidenceInterpretation": "Native request/control source mapping plus current public Foundry execution over production HttpTransport provide a bounded candidate wire path: raw request, ordered headers/body, fixed response/SSE frames, public SDK events, text, model, stop reason, and usage are retained. The probe uses a localhost dummy credential and one route.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": null,
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed_source_semantics_bounded",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "The localhost candidate exchange is not a Native 2.1.295 physical Foundry capture or byte-parity claim; Native cloud wire and external-service behavior remain unobserved."
+      }
+    },
+    {
+      "id": "SDK-2",
+      "originalRequirement": "Non-Anthropic providers retain their own URL, headers, body/signing, streaming, error and fallback contracts.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "current_sdk_provider_regression_pass",
+      "currentMatrixDisposition": "current_sdk_provider_regression_pass",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json",
+        "acceptance/final-ledger-r376/gates-audit.json",
+        "harness-runtime/Cargo.lock",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Current SDK provider/codec regressions cover the mapped non-Anthropic URL, headers, body/signing, streaming, error and fallback contracts; the original row asks that these provider contracts remain distinct, not that each provider have a live external capture.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "External physical HTTP captures for every non-Anthropic provider are not required by this row.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "External physical HTTP captures for every non-Anthropic provider are not required by this row."
+      }
+    },
+    {
+      "id": "SDK-3",
+      "originalRequirement": "Credential snapshot, account change, retry latch, body/stream fallback, cache and model selection agree at each physical attempt.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "source_regression_closed_current_pin",
+      "currentMatrixDisposition": "source_regression_closed_current_pin",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json",
+        "harness-runtime/crates/llm-runtime/src/execution_context.rs",
+        "harness-runtime/crates/llm-runtime/src/client.rs",
+        "harness-runtime/crates/llm-runtime/src/service.rs",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Current SDK and Harness regressions cover configuration/credential snapshots, account replacement, retry/fallback, cache and model selection semantics at their decision points.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "All-attempt full-wire equality is not part of the original row.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "All-attempt full-wire equality is not part of the original row."
+      }
+    },
+    {
+      "id": "TURN-1",
+      "originalRequirement": "`/` and unknown slash command fall back to ordinary turn with unchanged prompt; ParseFailure hint/refusal is checked per execution mode.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "bounded-pass",
+      "currentMatrixDisposition": "bounded-pass",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "The exact slash-command fallback/ParseFailure cases have pinned Native fixture replay through Headless and Product CLI regression evidence.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "The separate two-process Skill resume selector is not needed to expand this row.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "The separate two-process Skill resume selector is not needed to expand this row."
+      }
+    },
+    {
+      "id": "TURN-2",
+      "originalRequirement": "Retry, cancellation, truncation, refusal and terminal result preserve event order and tool/transcript identity.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "bounded-evidence",
+      "currentMatrixDisposition": "current_refusal_target_14_of_14_pass; physical_route_alias_exact_1_of_1_pass; earlier_12_of_13_plus_exact_1_of_1_historical",
+      "newestSourceRelevantProof": [
+        "acceptance/matrix-closure-r379/refusal/max-turn-source-bindings-r380.json: frozen Native 2.1.295 query source and per-slice hashes bind the same-model retry/fallback turn-credit behavior.",
+        "acceptance/matrix-closure-r379/runtime/r380-orchestrator-current-alignment-refusal-full14.receipt.json: the current refusal target passed 14/14 on 2,330 stable source fingerprints, including the physical-route alias selector.",
+        "acceptance/matrix-closure-r379/runtime/r380-orchestrator-refusal-physical-route-alias-exact.receipt.json: the same route-alias selector passed exact 1/1 on stable source fingerprints.",
+        "acceptance/matrix-closure-r379/runtime/r380-orchestrator-refusal-final-test-failure-fallback-notice.receipt.json and r380-orchestrator-refusal-final-exact-fallback.receipt.json: older source-fingerprint history is 12/13 + exact 1/1 after a test-only event-kind correction; it is retained as history and is superseded by current 14/14.",
+        "acceptance/matrix-closure-r379/refusal/final-source-review-r380.md: current source review confirms physical request model/profile flows into batched refusal classification and error labels; Native has no physical-response-ID retry gate.",
+        "harness-runtime/crates/orchestrator/tests/current_alignment_refusal.rs: existing max_turns=1, non-native provider, tool call-start CAS, assistant-row guard, Ko=false follow-up and route-alias cases are present; the new route-binding selector is not covered by the older 12/13 + exact 1/1 receipts."
+      ],
+      "evidenceInterpretation": "Frozen Native source and the current 14/14 target support one-shot same-model retry, refusal-fallback turn credit, ordinary NextTurn cap, Ko=true call-start CAS and assistant-row rebinding, Ko=false ordinary tool follow-up, and batched physical request model/profile binding. The route-alias selector also passed exact 1/1 and appears in the 14-case full target. Earlier 12/13 + exact 1/1 receipts are retained as historical evidence only. The Native refusal retry path has no physical-response-ID gate.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "A single aggregate public Native sequence containing every retry/cancellation/truncation/refusal branch is not required. The final request-route regression is limited to the already-scoped model-source boundary.",
+      "allowedDifference": [],
+      "smallestValidClosure": "No further TURN-2 selector or Native recapture is required for this candidate source fingerprint.",
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "closed",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "A single aggregate public Native sequence containing every retry/cancellation/truncation/refusal branch is not required. The final request-route regression is limited to the already-scoped model-source boundary."
+      }
+    },
+    {
+      "id": "STOPDETAILS-1",
+      "originalRequirement": "Anthropic refusal `stop_details.explanation` containing U+D800; compare raw response, public CLI result, and durable assistant row against fixed Native source units.",
+      "originalRequirementStatus": "open",
+      "r376AuditStatus": "partial_native_host_projection_pass",
+      "currentMatrixDisposition": "partial_native_host_projection_pass",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json",
+        "harness-runtime/docs/parity/current-alignment/fixtures/stop-details-295/README.md",
+        "harness-runtime/crates/orchestrator/tests/current_alignment_refusal.rs",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-08/phase.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Raw refusal SSE and Host/durable explanation units are checked; public CLI JSON-result projection is not.",
+      "outstandingObligation": "One public CLI 2.1.295 refusal result must preserve the exact U+D800 explanation units through JSON output and durable assistant row.",
+      "extraBeyondOriginal": null,
+      "allowedDifference": [],
+      "smallestValidClosure": "Add/run one focused Product CLI refusal selector against the pinned stop_details fixture and compare the public result and row fields by UTF-16 units.",
+      "closureAssessment": {
+        "originalRequirement": "open",
+        "currentPinValidation": "open",
+        "obligationScope": "original_acceptance",
+        "extraEvidenceLimit": null
+      }
+    },
+    {
+      "id": "TURN-3",
+      "originalRequirement": "Public CLI SIGINT while one provider request is in flight: terminal result envelope, interruption row, and persisted event order.",
+      "originalRequirementStatus": "open_current_pin_rebind",
+      "r376AuditStatus": "H-source-pass; Product-17593-captured-stream-case-pass",
+      "currentMatrixDisposition": "r376 run04 remains a narrow public capture; r377 source projection bound and selected H selectors passed; no live-provider or whole-stdout result",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json",
+        "harness-runtime/docs/parity/current-alignment/source-closure-r377.md#cancellation",
+        "acceptance/source-closure-r377/gates/selected-r9/selected-run.json",
+        "acceptance/final-ledger-r376/cli-sigint-candidate-run-04-17593eaa66-20261018T091547Z-1496/receipt.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "The original in-flight public SIGINT scenario passes run04 (15/15) on P17593/H44, and r377 source plus selected H selectors cover the new projection. Current H6548 changes the headless run/stream_json projection path, so the exact same narrow run04 case must be rebound to current pins; no other cancellation shapes are part of this row.",
+      "outstandingObligation": "Repeat only the existing accepted-POST / withheld-response / SIGINT run04 shape on the final integrated P/H pins (to be bound after source freeze), preserving the terminal envelope, interruption row, and event ordering.",
+      "extraBeyondOriginal": "Pre-admission cancellation, QueueNow/shutdown, compact-ID rebuild variants, and multi-turn cancellation are outside the original one-request-in-flight scenario.",
+      "allowedDifference": [],
+      "smallestValidClosure": "Run the existing single run04 shape against the final integrated P/H pins (to be bound after source freeze) and retain the terminal envelope, interruption row, and event order. Do not add other cancellation shapes.",
+      "closureAssessment": {
+        "originalRequirement": "closed_on_prior_pin",
+        "currentPinValidation": "open",
+        "obligationScope": "current_pin_validation",
+        "extraEvidenceLimit": "Pre-admission cancellation, QueueNow/shutdown, compact-ID rebuild variants, and multi-turn cancellation are outside the original one-request-in-flight scenario."
+      }
+    },
+    {
+      "id": "TOOL-1",
+      "originalRequirement": "Tool registration with `isDeferred` absent, `false`, `true`; first physical Messages request's `tools` array and schemas.",
+      "originalRequirementStatus": "closed_source_semantics_bounded",
+      "r376AuditStatus": "source-repair-and-live-consumer-regressions-passed",
+      "currentMatrixDisposition": "native_source_and_bounded_candidate_first_request_tool_catalog_pass",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json",
+        "harness-runtime/docs/parity/current-alignment/source-closure-r377.md#alias-glob",
+        "acceptance/source-closure-r377/gates/selected-r9/selected-run.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md",
+        "harness-runtime/docs/parity/current-alignment/fixtures/mod-tool-register/native-baseline/native-receipt.json and requests/{omitted,false,true}.tools.raw.json: retained Native 2.1.293 public catalog outputs for all three isDeferred states.",
+        "acceptance/source-alignment-295-r30/mods-api-source/src_194447854.js: frozen Native 2.1.295 source maps $.tool.register and isDeferred metadata into deferred/listed provider catalog behavior.",
+        "acceptance/matrix-closure-r379/runtime/r380-orchestrator-mod-tool-wire-295.receipt.json: candidate first Messages request catalog selector passed 1/1 on stable source fingerprints, asserting absent/false/true states, order, and schemas."
+      ],
+      "evidenceInterpretation": "Frozen Native 2.1.295 registration/deferred source, retained 2.1.293 public catalogs, and the current candidate raw first-request-body selector cover omitted/false/true listing, order, and schemas. This is source-backed bounded closure.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "LTr alias/glob matching under r377 is a separate source question and does not discharge this ID.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed_source_semantics_bounded",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "No Native 2.1.295 physical first-request tools-array capture or 2.1.295 byte-equality claim is made; the bounded closure uses 2.1.295 source plus current candidate evidence and the retained 2.1.293 public fixture."
+      }
+    },
+    {
+      "id": "TOOL-2",
+      "originalRequirement": "Tool check/call, permission allow/deny/rewrite, result/error, pre-cancel and post-cancel behavior, process side effects and transcript mutation.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "bounded-pass",
+      "currentMatrixDisposition": "bounded-pass",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Current permission/Bash fixture and permission-library regressions cover the bounded check/call, allow/deny/rewrite/result/error and cancellation gates, with invocation-count assertions for process dispatch and transcript mutation.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "A real shell process side effect is not required; the controlled ProcessRunner call/no-call boundary is the side-effect assertion for these fixtures.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "A real shell process side effect is not required; the controlled ProcessRunner call/no-call boundary is the side-effect assertion for these fixtures."
+      }
+    },
+    {
+      "id": "TOOL-3",
+      "originalRequirement": "Oversized registered-tool string result: source preview UTF-16 units, Claude Messages request serialization, session JSONL row and persisted UTF-8 file bytes.",
+      "originalRequirementStatus": "closed_source_semantics_bounded",
+      "r376AuditStatus": "bounded-helper-and-production-persistence-evidence",
+      "currentMatrixDisposition": "native_source_and_current_candidate_persistence_pass_2_of_2",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json: TOOL-3 bounded helper and production persistence evidence.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/tool-result-persistence/README.md: explicitly labels Native baseline 2.1.293 and separates preview, request projection, JSONL, and persisted-file assertions.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/tool-result-persistence/native-baseline/native-receipt.json: Native 2.1.293; 50,007 UTF-16 units including U+D800; 2,000-unit session preview retains U+D800, request preview projects U+FFFD; raw session row, request content and persisted UTF-8 file are retained.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/tool-result-persistence/native-baseline/unicode-boundary/native-receipt.json: Native 2.1.293; non-BMP pair straddles preview boundary; raw row/request/file outputs retained separately.",
+        "harness-runtime/crates/orchestrator/tests/current_alignment_tool_result_persist.rs @ SHA-256 7e7677d84e28b2368bbca49b8c2fae7421b9ebf68a0f5b16c260210a1a80f588 (current observed file); production helper crates/orchestrator/src/tool_result_text.rs @ SHA-256 722bd404c4a1e9d98510e1593587886406c423476473d453a74f29218ed4a5ff (current observed file).",
+        "acceptance/final-ledger-r376/receipts/r271-phases/integration-36.json: current_alignment_tool_result_persist included in 20/0 suite on H dc6ce121; not an H6548 execution.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md",
+        "harness-runtime/docs/parity/current-alignment/source-closure-r377.md#cold-resume-utf16: Native 2.1.295 source binds the tool-result preview/request projection and UTF-16 boundary semantics.",
+        "acceptance/matrix-closure-r379/runtime/r380-orchestrator-tool-result-persist.receipt.json: current production persistence selector passed 2/2 on stable source fingerprints."
+      ],
+      "evidenceInterpretation": "The frozen Native source contract, retained 2.1.293 raw outputs for the two controlled cases, and current production candidate selector cover preview units, request serialization, session row, and persisted UTF-8 bytes for both cases.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "A whole Agent/tool/CLI replay and cross-run equality of machine-local envelope/path bytes are outside the stated contract.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed_source_semantics_bounded",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "The retained public raw tool-result artifacts are 2.1.293, not 2.1.295. No Native 2.1.295 raw-output claim is made; current candidate persistence behavior is covered 2/2."
+      }
+    },
+    {
+      "id": "TOOL-4",
+      "originalRequirement": "Cold resume of object-valued `tool_result.content`: JSON-stringification, 50,000 UTF-16-unit cut, code-point boundary and omitted-character count.",
+      "originalRequirementStatus": "open",
+      "r376AuditStatus": "source-closed-on-reviewed-helper-path; evidence-version-bounded",
+      "currentMatrixDisposition": "native_295_source_and_current_helper_path_reviewed; final_candidate_cold_resume_selector_pending",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json: source/helper-path closure and historical selector evidence.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/tool-result-json-resume/native-baseline/cold-resume-object/native-receipt.json: Native 2.1.293, two public CLI processes; object-valued tool_result.content stringifies to 50,007 UTF-16 units; cold resume emits a 50,049-unit projection with scalar-safe cut and omitted count 6; original and post-resume session rows retained.",
+        "harness-runtime/docs/parity/current-alignment/source-closure-r377.md#cold-resume-utf16: pins Native 2.1.295 object-result projection source and traces the current H producer/JSONL/read/resume/request path; source review reports no concrete mismatch.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/tool-result-json-resume/native-baseline/cold-resume-object/native-receipt.json (version 2.1.293) remains a historical public fixture, not a 2.1.295 capture.",
+        "harness-runtime/crates/orchestrator/src/tool_result_text.rs @ SHA-256 722bd404c4a1e9d98510e1593587886406c423476473d453a74f29218ed4a5ff (current observed file); normalized_tool_result_projection has object/stringification, UTF-16 cut, scalar boundary, and omitted-count tests.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Native 2.1.295 source and the current helper implementation cover object stringification, UTF-16 cut, scalar-safe boundary, and omitted-count rules. The retained end-to-end public cold-resume fixture is 2.1.293; the current candidate cold-resume path has not yet been rebound.",
+      "outstandingObligation": "Run the existing single local two-process candidate cold-resume selector for object-valued tool_result.content on the final integrated H pin; assert stringification, 50,000 UTF-16-unit cut, scalar-safe boundary, and omitted-character count against the Native 2.1.295 source contract.",
+      "extraBeyondOriginal": "Full Host/SDK/CLI byte-for-byte identity and remote/cross-session discovery are beyond the listed projection semantics.",
+      "allowedDifference": [],
+      "smallestValidClosure": "Bind the existing object-valued tool_result.content cold-resume selector to the final integrated H pin and retain the four named assertions. Use the 2.1.295 source binding and retained 2.1.293 public fixture; do not add a new Native capture or remote/cross-session case.",
+      "closureAssessment": {
+        "originalRequirement": "open",
+        "currentPinValidation": "open",
+        "obligationScope": "original_acceptance",
+        "extraEvidenceLimit": "Remote/cross-session behavior and full transcript byte identity are outside the stated local cold-resume contract."
+      }
+    },
+    {
+      "id": "CMD-1",
+      "originalRequirement": "Skill names with supplementary Unicode and punctuation resolve to the local skill; unpaired UTF-16 command input retains the Native persistence/final-wire boundary.",
+      "originalRequirementStatus": "open",
+      "r376AuditStatus": "Product-17593-cold-resume-regression-pass; Native-cold-oracle-unavailable",
+      "currentMatrixDisposition": "native_295_source_bound; final_candidate_command_selectors_pending",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json: historical Product cold-resume regression and command fixture status.",
+        "lingxi-app/apps/cli/host/tests/fixtures/commands-native-293-rerun/native-rerun-receipt.json: Native 2.1.293 Unicode, punctuation, and unpaired-surrogate skill/command cases; not the pinned 2.1.295 target.",
+        "lingxi-app/apps/cli/host/tests/commands_native_cli.rs @ SHA-256 af62c3656a9d8b9b833c7b4766909c4a95d34ba9846bbdb885d53d9eda0ab1f0 (current observed Product file): existing focused command/skill selectors.",
+        "acceptance/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-05/phase.json and /private/tmp/product-full-r342-r376-20261018T084434Z-98045/gate-logs/skill-cold.log: cli_cold_resume_preserves_skill_source_and_normalizes_anthropic_wire passed 1/1 on historical Product 17593, using Native first-turn fixture only.",
+        "harness-runtime/docs/parity/current-alignment/source-closure-r377.md#frozen-deny-order and #cold-resume-utf16: adjacent Native/H source order and UTF-16 projection review; not a complete Native 2.1.295 skill-name + cold command oracle.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Native 2.1.295 frozen-order/source review binds supplementary Unicode, punctuation, and unpaired-unit command behavior; retained public command fixtures are 2.1.293. Current candidate source selectors are reviewed, but the named Product command selectors have not been rebound to the final P/H pins.",
+      "outstandingObligation": "After final Product/H source freeze, run only the existing supplementary/punctuation skill-resolution and unpaired command-input persistence/final-wire selectors on the current pins.",
+      "extraBeyondOriginal": "Remote/cross-session discovery and a broad CLI suite are outside the contract.",
+      "allowedDifference": [],
+      "smallestValidClosure": "Run the existing named command selectors against final P/H pins and compare skill selection, persisted UTF-16 units, and final request projection to the Native 2.1.295 source contract; do not add a Native capture unless a concrete source conflict is found.",
+      "closureAssessment": {
+        "originalRequirement": "open",
+        "currentPinValidation": "open",
+        "obligationScope": "original_acceptance",
+        "extraEvidenceLimit": "Remote/cross-session discovery and a broad CLI suite are outside the contract; no new Native capture is required absent a source conflict."
+      }
+    },
+    {
+      "id": "PROMPT-1",
+      "originalRequirement": "Main, hook, child, fork and resume prompt assembly; CLAUDE.md/AGENTS, skill discovery/read, order and attachments.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "composition-acceptance-bounded",
+      "currentMatrixDisposition": "r376 composition acceptance retained; r377 frozen-deny source order bound and selected H regressions passed",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json",
+        "harness-runtime/docs/parity/current-alignment/source-closure-r377.md#frozen-deny-order",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Separate source and regression evidence covers main, hook, child, fork and resume assembly, attachment order, CLAUDE.md/AGENTS and Skill discovery/read paths. The original asks for these assembly semantics; it does not require one composite full-byte fixture.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "A single end-to-end main+hook+child+fork+resume byte-equality capture is not a remaining obligation absent a named mismatch.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "A single end-to-end main+hook+child+fork+resume byte-equality capture is not a remaining obligation absent a named mismatch."
+      }
+    },
+    {
+      "id": "PROMPT-2",
+      "originalRequirement": "Context compaction, cache attribution, token limits, aliases and request counting use current model/protocol policy.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "source_closed_current_regressions",
+      "currentMatrixDisposition": "r377 Native suggestion normalization source-bound; selected H UTF-16 regressions and scoped Product mobile source/helper checks passed; full mobile app/device checks and public Native frame absent",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json",
+        "harness-runtime/crates/llm-runtime/src/execution_context.rs",
+        "harness-runtime/crates/orchestrator/src/conversation/compaction.rs",
+        "harness-runtime/crates/compaction/src/autocompact.rs",
+        "harness-runtime/docs/parity/current-alignment/source-closure-r377.md#utf16-suggestion",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Current source and regression evidence closes compaction/cache/token/model alias/request-budget policy; the stale matrix statement that Harness has no equivalent attempt budget is superseded by the ApiAttemptsLeft producer/consumer proof. r377 UTF-16 prompt-suggestion proof is adjacent, not the core basis for this row.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "No broad Native capture is required by the row once source and focused regressions cover each listed policy.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "No broad Native capture is required by the row once source and focused regressions cover each listed policy."
+      }
+    },
+    {
+      "id": "SESSION-1",
+      "originalRequirement": "`session.append` middleware rewrite and raw returned event for user and system messages; preserve source UTF-16 units through Native result and candidate transcript path.",
+      "originalRequirementStatus": "closed_source_semantics_bounded",
+      "r376AuditStatus": "source-reviewed; native-persistence-evidence-unavailable",
+      "currentMatrixDisposition": "source_bound_native_public_assertions_4_of_4_and_candidate_snapshot_3_of_3_bounded_user_raw_unretained",
+      "newestSourceRelevantProof": [
+        "acceptance/native-session-append-295-20261010T120632Z/native-receipt.json: frozen Native 2.1.295 public `claude plugin test` receipt, 4/4 assertions; source fingerprint covers user lone-unit append/rewrite and system rewrite, while the retained raw returned-event JSON is system-only.",
+        "acceptance/native-session-append-295-20261010T120632Z/system-result-event.raw.json: exact public Native system returned event with the rewritten U+D800 source units.",
+        "harness-runtime/crates/agent/tests/current_alignment_mod_append.rs: source-derived user case compares returned projection and transcript units; the system case consumes the exact retained Native raw event.",
+        "acceptance/matrix-closure-r379/runtime/r380-session-1-agent-target.receipt.json: current candidate target passed 3/3; stable source hashes are in r380-session-1-sourcehashes-pre.txt and r380-session-1-sourcehashes-post.txt.",
+        "acceptance/matrix-closure-r379/runtime/logs/22-agent-current-alignment-mod-append.log: exact focused test output and source-derived candidate transcript values.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "The frozen Native 2.1.295 public plugin test passed four assertions, including user append/rewrite assertions, system rewrite with an exact retained raw returned event, and mock.session success/denial behavior. The public user returned-event raw JSON was not retained. Current candidate `current_alignment_mod_append` passed 3/3; its user case is source-derived and checks exact returned projection/transcript UTF-16 units, while its system case uses the retained Native event. Under the source-first bounded closure, this is sufficient evidence without claiming a Native raw user event or Native JSONL row.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "The user returned-event raw JSON is not retained, and the plugin-test sandbox produces no Native JSONL row. These are evidence boundaries under the approved source-first bounded closure, not new acquisition obligations.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed_source_semantics_bounded",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "The user returned-event raw JSON is not retained, and the plugin-test sandbox produces no Native JSONL row. These are evidence boundaries under the approved source-first bounded closure, not new acquisition obligations."
+      }
+    },
+    {
+      "id": "SESSION-3",
+      "originalRequirement": "Cold `--resume` distinguishes exact persisted source units from Native's resumed public/API projection.",
+      "originalRequirementStatus": "open",
+      "r376AuditStatus": "Product-17593-cold-resume-regression-pass; Native-cold-oracle-unavailable",
+      "currentMatrixDisposition": "native_295_source_bound; current_local_cold_resume_product_selector_pending_final_pin",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json: historical Product cold-resume pass; Native cold-resume oracle classified unavailable.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/session-append/native-resume/native-baseline/cold-resume-projection/native-receipt.json: exact public two-process Native 2.1.293 raw JSONL source units and resumed request replacement projection; historical version only.",
+        "harness-runtime/docs/parity/current-alignment/source-closure-r377.md#cold-resume-utf16: binds Native 2.1.295 UTF-16 projection source and reviews producer/JSONL/read/resume/request chain.",
+        "lingxi-app/apps/cli/host/tests/fixtures/commands-native-293-rerun/native-rerun-receipt.json: first-turn public Native fixture; it is not a Native 2.1.295 cold-resume trace.",
+        "acceptance/final-ledger-r376/final-evidence-17593-v2/product/runner/phases/integration-tests-05/phase.json and /private/tmp/product-full-r342-r376-20261018T084434Z-98045/gate-logs/skill-cold.log: Product two-process cold resume passed 1/1 at P17593; current candidate path source changed since the H44 baseline.",
+        "harness-runtime/crates/orchestrator/src/conversation/transcript.rs and crates/session/src/agent_rows.rs: both current H production files changed H44→H6548; current-pin candidate receipt absent.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Native 2.1.295 source binds the one local unpaired-unit cold-resume source-row and resumed public/API projection; a 2.1.293 public two-process fixture is retained as historical evidence. The remaining gap is the current Product/H two-process selector after the final integrated pin is frozen.",
+      "outstandingObligation": "Run the existing one-case local two-process Product cold-resume selector for an unpaired UTF-16 unit on the final integrated P/H pins; retain the source-row and resumed public/API projection checks.",
+      "extraBeyondOriginal": "Remote/cross-session discovery, multi-session recovery, and full transcript identity beyond the exact source/public projection are excluded.",
+      "allowedDifference": [],
+      "smallestValidClosure": "After final pin freeze, rebind the existing local cold-resume selector and assert exact source-row units and resumed public/API projection against Native 2.1.295 source. Do not add a Native capture, remote/cross-session case, or broader transcript comparison.",
+      "closureAssessment": {
+        "originalRequirement": "open",
+        "currentPinValidation": "open",
+        "obligationScope": "original_acceptance",
+        "extraEvidenceLimit": "Remote/cross-session discovery, multi-session recovery, and full transcript identity beyond the exact source/public projection are excluded."
+      }
+    },
+    {
+      "id": "EFFORT-1",
+      "originalRequirement": "A per-turn effort override survives a cold resume and is projected into the resumed model request without replacing the historical turn's system metadata.",
+      "originalRequirementStatus": "closed_source_semantics_bounded",
+      "r376AuditStatus": "source_projection_closed_fixture_value_limited",
+      "currentMatrixDisposition": "native_295_cold_resume_fixture_and_current_candidate_pass_1_of_1",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json: historical test-value limitation.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/per-turn-effort/native-baseline/2.1.295/receipt.json: exact public Native 2.1.295 cold-resume capture; first turn low, resumed turn high; resumed request retains historical low marker and appends high after the current user.",
+        "harness-runtime/crates/orchestrator/tests/effort_cold_resume_295_test.rs: existing candidate selector; committed H6548 version uses current default medium rather than Native captured high.",
+        "acceptance/final-ledger-r376/receipts/r271-phases/integration-10.json: 14/0 on H dc6ce121, including effort_cold_resume_295_test; not current H and not the Native high-valued case.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md",
+        "acceptance/matrix-closure-r379/runtime/r380-orchestrator-effort-cold-resume-exact-after-fixture.receipt.json: current cold-resume candidate selector passed 1/1 on 2,330 stable source fingerprints.",
+        "harness-runtime/crates/orchestrator/tests/effort_cold_resume_295_test.rs: exact current selector verifies historical low metadata remains and resumed high is appended after the current user."
+      ],
+      "evidenceInterpretation": "The retained Native 2.1.295 low-to-high cold-resume fixture and the current candidate test agree: historical low metadata remains in the resumed request and high is appended after the current user.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": null,
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed_source_semantics_bounded",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "The current candidate test is a bounded selector, not a claim about all effort settings or a whole-session byte comparison."
+      }
+    },
+    {
+      "id": "PER-TURN-CONTROL-295",
+      "originalRequirement": "The default main request includes the `per-turn-control-2026-07-01` beta and a per-message effort row only when the experimental-beta setting permits it, across first-party/Foundry and Sonnet/Fable routes.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "current_sdk_route_control_matrix_pass",
+      "currentMatrixDisposition": "current_sdk_route_control_matrix_pass",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/sdk-audit.json",
+        "acceptance/final-ledger-r376/sdk-message-controls.log",
+        "harness-runtime/docs/parity/current-alignment/fixtures/per-turn-effort/README.md",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/integration-27/phase.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "The 18-case SDK route-control matrix covers the beta gate and per-message effort projection across first-party/Foundry and the specified route/model families.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "Public raw-wire coverage remains first-party/effort-fixture bounded; the original control-matrix requirement is satisfied by the source/regression matrix.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "Public raw-wire coverage remains first-party/effort-fixture bounded; the original control-matrix requirement is satisfied by the source/regression matrix."
+      }
+    },
+    {
+      "id": "SESSION-2",
+      "originalRequirement": "Direct return, denial, thrown error, subscription removal and plugin/process shutdown.",
+      "originalRequirementStatus": "closed_source_semantics_bounded",
+      "r376AuditStatus": "bounded-evidence; current-corewriter-receipt-not-included",
+      "currentMatrixDisposition": "native_source_and_source_identical_current_or_prior_lifecycle_selectors_closed_bounded",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md",
+        "acceptance/matrix-closure-r379/verification/mcp-session-minimal-gate-plan-r380.md#SESSION-2: documents the allowed source-first reuse and exact selector mapping.",
+        "acceptance/matrix-closure-r379/runtime/r380-session-1-agent-target.receipt.json: current Agent target passed 3/3, including real Bun ModHost/transcript rewrite/direct/cancel-deny/throw case on stable source hashes.",
+        "R8/R31 Hooks receipts for mods_wrap_in_load_order_and_unload_by_plugin and unload_does_not_interrupt_an_inflight_dispatch are source-identical to current crates/hooks/src/mods.rs SHA-256 cb943c9f7ff26ef3c0adca688d90fad4c6602578517f9807ce7bc3fd818bac8c."
+      ],
+      "evidenceInterpretation": "Current Agent evidence covers rewrite/direct/cancel-deny/throw; the source-identical Hooks selectors cover handler removal and in-flight unload. Frozen Native on() source has no per-handler disposer, while child process reaping remains the separately bounded RUNTIME-1 topology difference.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "No single composite public lifecycle sequence is required; the listed cases may be tested independently.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed_source_semantics_bounded",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "The current 2.1.295 Native session-append public cases do not claim direct/deny/throw/unload bytes. Closure is source plus bounded candidate behavior; process reaping is not counted as a Native SESSION-2 requirement."
+      }
+    },
+    {
+      "id": "SESSION-4",
+      "originalRequirement": "JSONL persistence, parallel tail recovery, attachments, crash write, compact boundaries and rollback.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "bounded-source-and-regression-pass",
+      "currentMatrixDisposition": "r377 frozen deny carrier/source order reviewed; selected H regressions passed",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json",
+        "harness-runtime/docs/parity/current-alignment/source-closure-r377.md#frozen-deny-order",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Source and focused regressions cover JSONL routing, FEFF/NEL trim behavior, attachment/persistence flow, crash/compact boundaries and rollback in the reviewed paths. The original row does not require every malformed/torn-tail reader mode.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "Unselected malformed/torn-tail variants are extra unless a concrete current mismatch is identified.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "Unselected malformed/torn-tail variants are extra unless a concrete current mismatch is identified."
+      }
+    },
+    {
+      "id": "SESSION-5",
+      "originalRequirement": "Generated session name and prompt-suggestion public scalar APIs when the model's final text contains an unpaired UTF-16 unit.",
+      "originalRequirementStatus": "closed_source_semantics_bounded",
+      "r376AuditStatus": "native-oracle-unverified; no-confirmed-source-gap",
+      "currentMatrixDisposition": "native_295_source_and_candidate_scalar_helpers_bounded_pass",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json",
+        "harness-runtime/docs/parity/current-alignment/source-closure-r377.md#cold-resume-utf16",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md",
+        "harness-runtime/docs/parity/current-alignment/source-closure-r377.md#cold-resume-utf16: Native 2.1.295 generated-name/suggestion source semantics are bound.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md: selected current H generated-name and suggestion helper regressions are recorded."
+      ],
+      "evidenceInterpretation": "The Native 2.1.295 source chain and selected current candidate helper regressions cover generated-name and suggestion handling for lone UTF-16 units without an identified source/candidate mismatch.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "No broad session capture is needed.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed_source_semantics_bounded",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "Native public scalar return values are not retained; no Native raw-value claim or additional capture requirement is created by this bounded source-first closure."
+      }
+    },
+    {
+      "id": "AGENT-1",
+      "originalRequirement": "Agent/task spawn, offer, receipt, wait, stop, report admission, handback and nested/cold recovery.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "source-and-current-regression-pass-bounded-lifecycle",
+      "currentMatrixDisposition": "source-and-current-regression-pass-bounded-lifecycle",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Current alias-aware child/catalog/denied-agent resolver tests and pinned spawn/stop/realtime lifecycle regressions cover the named admission, wait, report and handback semantics at branch level.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "One complete public Native chain containing every lifecycle stage is not required by the baseline if each listed lifecycle transition has focused source/regression coverage.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "One complete public Native chain containing every lifecycle stage is not required by the baseline if each listed lifecycle transition has focused source/regression coverage."
+      }
+    },
+    {
+      "id": "MCP-1",
+      "originalRequirement": "JSON-RPC initialize/discovery, tools/resources/prompts, input-required, auth, result/error/null presence and transport frames.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "source-repair-and-current-H-regressions-passed; native-regex-semantics-unresolved",
+      "currentMatrixDisposition": "mcp_current_source_candidate_selectors_closed; oauth_112_of_112; final_build_integration_tracked_by_BUILD-1",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json: prior entry mis-associates MCP-1 with LTr alias/glob; that is one permission subpath only.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/mcp-pagination-295/native-baseline/2.1.295/receipt.json and raw initialize/server-discover/tools-list/tools-call/resources-list/prompts-list JSON-RPC frames: public Native 2.1.295 negotiation, discovery, lists, call, cursor and later-page behavior.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/mcp-mime-295/native-baseline/2.1.295/native-receipt.json and raw stdio/model artifacts: public Native 2.1.295 resource result/blob and saved-file behavior.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/mcp-listen-error-295/native-baseline/2.1.295/receipt.json: raw server/discovery/list/call frames plus subscriptions/listen JSON-RPC error (-32000/ECONNRESET).",
+        "harness-runtime/docs/parity/current-alignment/fixtures/mcp-list-resources-interrupt-295/native-baseline/2.1.295/{direct-tool-cache,notification-refresh-no-rpc}/receipt.json: list/cache/interrupt and notification-refresh cases.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/tool-result-presence-295/native-baseline/2.1.295/mcp-three-iserror-cases/manifest.json and mcp-true-persist-complex/manifest.json; plus tool-result-presence-295/native-baseline/2.1.295/mcp/error-text-hook: omitted/false/true isError, complex persisted/cold-resume result, and raw error text/hook artifacts.",
+        "harness-runtime/crates/mcp/tests/fixtures/native_mcp_roots_295/{accepted,invalid-primitive}/*.raw.jsonrpc and crates/mcp/tests/input_required_native_295_roots_test.rs @ SHA-256 0543f17427e623a3446dc8b54c39687e4794a574423dc5ace5efaa141e13a763: exact Native 2.1.295 input-required roots/list frames and candidate replay test source.",
+        "harness-runtime/crates/mcp/tests/oauth_flow_test.rs @ SHA-256 6f461870286bfe2112e6398dd3b1609f82dc49d7feb1694f333f70ecdeff0c38 and acceptance/matrix-closure-r379/runtime/r380-mcp-oauth-final.receipt.json: final OAuth test source snapshot was stable and 31 flow tests passed; Native public auth bytes remain unobserved.",
+        "acceptance/final-ledger-r376/receipts/r271-phases/integration-39.json: 78/0 H dc6ce121 suite includes contract_mcp, mcp_endpoint_test, mcp_http_test, mcp_stdio_e2e_test, mcp_elicitation_capability_test, and related list tests; current crates/mcp, mcp-wire, bridge and platform MCP files are unchanged from that receipt except agent tool_resolver alias source.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md",
+        "acceptance/matrix-closure-r379/verification/mcp-oauth-source-review.md: full-manifest Native 2.1.295 MCP provider→SDK source map and pre-r380 H baseline comparison.",
+        "acceptance/matrix-closure-r379/verification/mcp-oauth-r380-review.md and runtime/r380-mcp-oauth-final.receipt.json: finite OAUTH-1..5 source review plus 81 library + 31 OAuth-flow tests passed (112/112); exact source fingerprints are in r380-mcp-oauth-tests-final-sourcehashes-pre.txt and -post.txt. No Native public auth bytes are claimed.",
+        "acceptance/matrix-closure-r379/verification/native-mcp-message-schema-r380.md: frozen 2.1.295 message-schema source, safe-integer progressToken, stdio outer-caller continuation, and two fixed `Method not found` branches; current MCP constructors select that fixed message while generic JSON-RPC/LSP defaults stay method-bearing.",
+        "acceptance/matrix-closure-r379/runtime/r380-mcp-native-message-schema-after-fix.receipt.json: current Native-schema frame decoder selectors passed 9/9 on stable source fingerprints.",
+        "acceptance/matrix-closure-r379/runtime/r380-mcp-roots-replay.receipt.json: captured Native input-required roots/list response replay passed 1/1 on stable source fingerprints.",
+        "acceptance/matrix-closure-r379/runtime/r380-mcp-wire-notification-utf16-filtered.receipt.json: UTF-16 notification DTO filter selector passed 1/1 on stable source fingerprints.",
+        "acceptance/matrix-closure-r379/runtime/r380-orchestrator-mcp-iserror-presence.receipt.json, r380-orchestrator-mcp-error-roundtrip.receipt.json, r380-tool-mcp-mime-295.receipt.json, and r380-mcp-tool-call-optional-null.receipt.json: isError presence, error details, MIME/blob bytes, and absent-versus-null tool-call members each passed 1/1.",
+        "acceptance/matrix-closure-r379/runtime/r380-jsonrpc-lib-full-final.receipt.json: generic JSON-RPC suite passed 77/77 on stable fingerprints, including fixed unknown-method message behavior; Native auth source/OAUTH-1..5 evidence and 112/112 receipt remain recorded above."
+      ],
+      "evidenceInterpretation": "Exact Native 2.1.295 JSON-RPC/raw stdio artifacts and source mappings cover initialize/discovery, lists/calls, pagination, resource notifications, errors, tool-result presence, persistence, and input-required fixtures. The standard third-party OAuth provider/SDK source is bound, and OAUTH-1..5 passed 112/112 on stable fingerprints. The current MCP frame decoder source and 9/9 selectors cover strict envelopes, JSON-RPC result/error/null presence, normalization, and safe-integer progressToken. The input-required roots replay passed 1/1; current candidate selectors for notification UTF-16 identity, isError, error-detail roundtrip, MIME/blob bytes, and absent-versus-null tool-call members passed. Native's two unknown request branches use fixed `Method not found`; current MCP constructors select that message, while generic JSON-RPC/LSP keeps its method-bearing default (77/77 library suite). Native public auth bytes are unobserved but do not create a recapture obligation. The 293 LTr alias probe is unrelated to this full protocol contract.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "LTr alias/glob permission behavior is adjacent, not the whole JSON-RPC protocol row. Native public auth request/callback bytes are unobserved separately from the source-bound auth semantics. DCR branding/client identity and Anthropic-specific XAA/account-service gates are allowed product differences.",
+      "allowedDifference": [
+        "DCR client_name branding and MCP OAuth client identity choices are product-specific.",
+        "Anthropic first-party/XAA account and service gates are outside third-party MCP OAuth comparison."
+      ],
+      "smallestValidClosure": "No further MCP selector or Native capture is required for the current bounded source/candidate closure; the final integrated build and package remain tracked by BUILD-1.",
+      "protocolClauseCoverage": [
+        {
+          "clause": "initialize/discovery",
+          "proof": "mcp-pagination-295 raw initialize and server-discover frames; Native 2.1.295 receipt",
+          "state": "native_295_evidence_present"
+        },
+        {
+          "clause": "tools/resources/prompts lists and tools/call",
+          "proof": "mcp-pagination-295, mcp-mime-295, mcp-listen-error-295 raw JSON-RPC/stdio frames",
+          "state": "native_295_evidence_present"
+        },
+        {
+          "clause": "input-required",
+          "proof": "native_mcp_roots_295 raw frames; r380-mcp-roots-replay.receipt.json passed the exact input-required roots/list replay 1/1.",
+          "state": "native_fixture_and_candidate_replay_pass"
+        },
+        {
+          "clause": "auth",
+          "proof": "mcp-oauth-source-review.md and mcp-oauth-r380-review.md bind Native 2.1.295 provider/SDK source; r380-mcp-oauth-final.receipt.json reports 112/112 candidate OAuth unit/flow tests on stable source fingerprints. Native public auth bytes remain unobserved.",
+          "state": "native_295_auth_source_bound_candidate_112_pass_public_bytes_unobserved"
+        },
+        {
+          "clause": "result/error/null presence",
+          "proof": "Native result/error/null schema source + r380 schema 9/9; optional-null tool-call selector 1/1; isError presence and error-detail production roundtrips 1/1 each.",
+          "state": "native_source_bound_current_candidate_pass"
+        },
+        {
+          "clause": "transport frames",
+          "proof": "Native 2.1.295 stdio/JSON-RPC artifacts plus MCP UTF-16 notification 1/1, MIME/blob 1/1, fixed unknown-method source binding and JSON-RPC library 77/77.",
+          "state": "native_source_and_current_candidate_pass"
+        }
+      ],
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "closed",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "LTr alias/glob permission behavior is adjacent, not the whole JSON-RPC protocol row. Native public auth request/callback bytes are separately unobserved; DCR branding/client identity and Anthropic-specific XAA/account-service gates are allowed product differences."
+      }
+    },
+    {
+      "id": "HOOK-1",
+      "originalRequirement": "RegExp matcher and event source, registration/order, match/nonmatch and raw event payload.",
+      "originalRequirementStatus": "closed_source_semantics_bounded",
+      "r376AuditStatus": "candidate_closed_evidence_limited",
+      "currentMatrixDisposition": "candidate_closed_evidence_limited",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/mods-audit.json",
+        "acceptance/source-alignment-295-r30/mods-api-source/src_194447854.js: Native chunk offset 194447854, SHA-256 ae64b2c8c87be0e990738da478adbbe5cd6a8201cef7953d7684cf59bd780120; J9 includes DirectoryAdded, PreModelSwitch, and PostModelSwitch; tan at 197396236 implements the event-specific simple-list grammar and Q9 at 197398966 has the JavaScript RegExp fallback.",
+        "harness-runtime/crates/hooks/src/matcher.rs: committed candidate SHA-256 b1e8942326d96eb62f29db71bc02ab814655ae39973d032a9e152fba88cc1de2; comma_mode_for includes all three J9 members; is_simple_pattern_units and matches_pattern_source_with/js_regexp_test retain the list/RegExp branches and JavaScript units.",
+        "harness-runtime/crates/hooks/src/registry.rs: committed candidate SHA-256 39bc30f6b99983429aea6082483e5e470131f036eed37eb1cab79b8c61db1b5e; match_event_matcher_tests::native_295_comma_mode_event_set_matches_directory_added_and_model_switches covers positive and negative comma-list queries for all three events plus positive/negative non-simple RegExp cases on DirectoryAdded.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md",
+        "harness-runtime/docs/parity/current-alignment/fixtures/hook-regexp/native-receipt.json: Native 2.1.293 public CLI RegExp match/nonmatch cases; explicitly not a 2.1.295 matcher output.",
+        "harness-runtime/docs/parity/current-alignment/fixtures/hooks-on-failure-295/native-baseline/2.1.295/pretool-stop-onfailure: Native 2.1.295 raw PreToolUse and Stop hook payloads; root-level fixtures retain UserPromptSubmit, command-failure and HTTP-failure payloads.",
+        "acceptance/final-ledger-r376/hooks-comma-receipt.json: 852 passed, 0 failed, 1 ignored; focused matcher regression passed 1/1 at b386; current matcher.rs and registry.rs source hashes remain b1e8942326d96eb62f29db71bc02ab814655ae39973d032a9e152fba88cc1de2 and 39bc30f6b99983429aea6082483e5e470131f036eed37eb1cab79b8c61db1b5e."
+      ],
+      "evidenceInterpretation": "Native 2.1.295 source binds event query/list grammar and RegExp fallback; current candidate gates cover positive/negative RegExp and comma-mode cases with unchanged current matcher/registry fingerprints. Native 2.1.295 raw hook payloads exist for failure, PreToolUse and Stop events. The retained public RegExp match/nonmatch CLI capture itself remains 2.1.293, so no 2.1.295 public matcher byte-parity claim is made.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "A public Native 2.1.295 RegExp matcher invocation/output is not retained; under the bounded source-first semantic closure, that is an evidence-class limit, not a new byte-parity obligation. Do not claim 2.1.295 matcher output bytes.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "A public Native 2.1.295 RegExp matcher invocation/output is not retained; under the bounded source-first semantic closure, that is an evidence-class limit, not a new byte-parity obligation. Do not claim 2.1.295 matcher output bytes."
+      }
+    },
+    {
+      "id": "HOOK-2",
+      "originalRequirement": "Hook rewrite/refusal, commands/settings merge, env overlays, managed policy, built-in protected events and refresh.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "partial",
+      "currentMatrixDisposition": "partial",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/mods-audit.json",
+        "harness-runtime/crates/core/src/settings/mod.rs registers native_policy_hook_settings; native_policy_static_defaults.rs invokes normalize_native_hook_settings and validate_native_hooks_due.",
+        "/private/tmp/h-full-gate-final-r271-20261017/phases/unit-libraries/stdout.jsonl: seven native_policy_hook_settings tests pass at lines 4351-4357, settings merger tests at 4260-4287, and eight native_extra_known_marketplaces Due tests at 4298-4305. Core source is unchanged through Harness 4d6d0d6.",
+        "acceptance/source-alignment-295-r31/static-defaults-next-batch/hook-settings-oracle/receipt.json records the 49-case extracted-source Bun oracle and labels the Rust module acceptance-only.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Native source and current candidate/Core tests are source-closed for normalization, URL semantics, commands/settings merge, env overlays, managed policy, protected events and refresh. The lack of a same-version public settings capture is not required to close these source-defined semantics.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "Do not describe this as a public Native settings byte capture.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "Do not describe this as a public Native settings byte capture."
+      }
+    },
+    {
+      "id": "HOOK-RELEASE-1",
+      "originalRequirement": "Compare the Native public Stop `type:prompt` hook request across historical 2.1.293 and 2.1.294 without mutating either baseline.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "complete",
+      "currentMatrixDisposition": "complete",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/mods-audit.json",
+        "harness-runtime/docs/parity/current-alignment/fixtures/stop-prompt-hook/README.md documents the isolated runner and immutable request artifacts.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "The immutable receipts close the requested narrow historical 2.1.293 versus 2.1.294 Stop type:prompt comparison without modifying either baseline.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "SubagentStop/reasoning quality are not part of this contract.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "SubagentStop/reasoning quality are not part of this contract."
+      }
+    },
+    {
+      "id": "AGENT-RELEASE-1",
+      "originalRequirement": "Compare the Native public `Agent` → general-purpose child → `SubagentStop` prompt hook → parent continuation using preserved 2.1.293/2.1.294 evidence and the frozen 2.1.295 target.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "version-bounded-lifecycle-evidence",
+      "currentMatrixDisposition": "version-bounded-lifecycle-evidence",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Preserved 2.1.293/2.1.294 lifecycle receipts plus the frozen 2.1.295 target and current H lifecycle regression gates satisfy the explicitly version-bounded comparison.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "Exact 2.1.295 public chain bytes and child reasoning quality are not requested by this baseline row.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "Exact 2.1.295 public chain bytes and child reasoning quality are not requested by this baseline row."
+      }
+    },
+    {
+      "id": "FINAL-TARGET-1",
+      "originalRequirement": "Freeze one Native version for the final alignment pass and close impacted acceptance gates against that exact binary.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "verified_frozen_target",
+      "currentMatrixDisposition": "verified_frozen_target",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/baseline.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Native is frozen at 2.1.295 with the exact binary SHA; current H/P/SDK pins and impacted gates are recorded across r377/r378/r379 evidence.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "This row closes target identity and gate bookkeeping, not all 42 contract rows.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "This row closes target identity and gate bookkeeping, not all 42 contract rows."
+      }
+    },
+    {
+      "id": "MOD-1",
+      "originalRequirement": "Public Mods middleware event ordering, `next(e)` rewrite/direct answer/error/deny, module load and unload boundary.",
+      "originalRequirementStatus": "closed_source_semantics",
+      "r376AuditStatus": "partial",
+      "currentMatrixDisposition": "bounded_current_candidate_append_slice_pass_3_of_3",
+      "newestSourceRelevantProof": [
+        "acceptance/matrix-closure-r379/runtime/r380-session-1-agent-target.receipt.json: current_alignment_mod_append passed 3/3 against stable agent/core/hooks source hashes.",
+        "acceptance/native-session-append-295-20261010T120632Z/native-receipt.json: frozen Native 2.1.295 public plugin test passed 4/4 assertions, including the selected append and mock.session cases.",
+        "harness-runtime/crates/agent/tests/current_alignment_mod_append.rs: current candidate covers rewrite/direct/cancel/throw host dispatch, source-derived user return/transcript, and the retained Native system event.",
+        "acceptance/matrix-closure-r379/runtime/r380-session-1-sourcehashes-post.txt: post-run fingerprint for the scoped candidate sources.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "The focused current candidate append slice is re-bound and passed 3/3. This supports the selected rewrite/direct/failure and transcript behavior alongside the Native source/public assertions. It does not claim Native public bytes for every middleware branch or use process exit as unload proof.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "Complete target-version public byte captures for every direct/throw/order/deny/unload branch are not claimed; explicit per-handler unload bytes are beyond the source-supported bounded lifecycle contract.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed_source_semantics_bounded",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "Complete target-version public byte captures for every direct/throw/order/deny/unload branch are not claimed; explicit per-handler unload bytes are beyond the source-supported bounded lifecycle contract."
+      }
+    },
+    {
+      "id": "MOD-2",
+      "originalRequirement": "`$.tool.register`, `$.tool.list/call/check`, command and prompt APIs; provider-facing schema/catalog order.",
+      "originalRequirementStatus": "closed_source_semantics",
+      "r376AuditStatus": "partial",
+      "currentMatrixDisposition": "partial",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/mods-audit.json",
+        "acceptance/source-alignment-295-r30/mods-api-source/src_189676409.js: chunk offset 189676409, 243580 bytes, SHA-256 52ad1c53312d15fbf90ddb548c9692e6598ead6e35398c38be9ac9d0c6806555. CT (binary offset 189895956), Nw (189883144), and sT (189889728) expose exact $.tool, $.command, and $.prompt method argument/validation routes.",
+        "acceptance/source-alignment-295-r30/mods-api-source/src_194447854.js: SHA-256 ae64b2c8c87be0e990738da478adbbe5cd6a8201cef7953d7684cf59bd780120. Wj/AHo/PHo/MHo implement tool call/check/list/register; TCo/RCo/xCo command list/register/run; Pvo/Pme/o7o/sXt prompt submit/read/suggest/compose. tZt/ZJt at binary offset 196877559 maps isDeferred presence to anthropic/alwaysLoad metadata; V2n at 194899401 and provider builder vL carry the resolved deferred/listed state through tool.describe to provider defer_loading.",
+        "harness-runtime/crates/orchestrator/src/turn_loop/tool_dispatch.rs::mod_tool_register_spec preserves optional isDeferred; ModRegisteredTool::should_defer/always_load maps its three states. core::host::SourceToolWireDefinition carries defer_loading to the provider wire.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Pinned Native API route/catalog source review plus candidate API/deferred-wire regressions cover register/list/call/check, commands/prompts and provider schema order. The r377 alias closure is not used as a substitute for these APIs.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "The 2.1.293 public tool.register capture remains historical; no 2.1.295 public output claim is made.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "The 2.1.293 public tool.register capture remains historical; no 2.1.295 public output claim is made."
+      }
+    },
+    {
+      "id": "MOD-3",
+      "originalRequirement": "ModUI subscriptions, events, resolution/render tree, update/disposal, restart and visible terminal/desktop surfaces.",
+      "originalRequirementStatus": "closed_source_semantics_bounded",
+      "r376AuditStatus": "partial",
+      "currentMatrixDisposition": "partial_source_semantic_closure_with_selected_295_public_tree_proof",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/mods-audit.json",
+        "acceptance/final-ledger-r376/source-oracle-receipt.json records 15/15, worker SHA-256 2ee0d2b88a6c2aa565a929cf23d058dc8283b9d308c30b6b7e1f9ec132c12c1f, extracted-source log SHA-256 0761972925540b952f2ea1b56bf794e05629b9cd40c31fc04e5631a596384f03, results SHA-256 3898ab57a4de299de8bfeb7bbb2657657913545c04590314b5d6a96e565b3f02, and native_cli_launches=0.",
+        "acceptance/mod-ui-post-ack-r375-20261017/node-worker.log records the historical r375 21/21 worker tests; mac-final r375 includes signed-package host UI/API and actual CUA typing plus Submit.",
+        "acceptance/final-ledger-r376/receipts/mac-package-final-17593.json (SHA-256 6e4f1ce2eba4d069f9219603b6043b64ce0cb8f2e7b4e71645710e2b37fbb337) records current P17593/H44/SDK a363 signed macOS package with static audit, startup smoke, independent audit, packaged Host driver, and actual CUA all passed. Signed ZIP SHA-256 is 64c8a4d7a441f53c5dc9990d13f3ea4930f1ead72c2df52759565102f73481de; app.asar SHA-256 is 21462a3c01035cd13bb3785dcfcc11ad474ea6f22b6fde0357db352fa23ecb06.",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md",
+        "harness-runtime/docs/parity/current-alignment/fixtures/mod-ui-render-295/native-baseline/2.1.295/native-receipt.json: public plugin-test UI evidence for three Button child/render trees and ui.notify rejection (`no implementation for ui.notify`), exit 0.",
+        "acceptance/final-ledger-r376/source-oracle-receipt.json: 15/15 extracted Native exportTree cases; native_cli_launches=0.",
+        "acceptance/mod-ui-post-ack-r375-20261017/node-worker.log: historical 21/21 worker lifecycle tests; current P7f8 package/CUA form-input/append/Submit evidence remains scoped candidate UI proof, not Native lifecycle capture.",
+        "Current H6548 ModUI worker source and tests are committed at the current pin; Native 2.1.295 receipt does not cover subscriptions, updates, disposal or restart."
+      ],
+      "evidenceInterpretation": "The exact 2.1.295 public capture confirms selected render-tree serialization and ui.notify rejection. The extracted Native exportTree differential and candidate worker/package tests cover the bounded semantic surfaces. No Native public subscription/update/dispose/restart or visual-layout bytes are claimed.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "Native public lifecycle byte captures and Native-vs-candidate visual layout comparison remain unverified evidence classes; they are not asserted as completed. The row remains bounded to the existing source/extracted/candidate evidence.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "Native public lifecycle byte captures and Native-vs-candidate visual layout comparison remain unverified evidence classes; they are not asserted as completed. The row remains bounded to the existing source/extracted/candidate evidence."
+      }
+    },
+    {
+      "id": "CLIENT-1",
+      "originalRequirement": "CLI, TUI, desktop and mobile callers preserve prompt, session, command, cancellation and transcript identity under current client protocol 25.0.0 (formal contract blessing passed; generated bindings pending); Local Apps Native parity is excluded; Local App tool bug fixes and current API integration remain in scope.",
+      "originalRequirementStatus": "closed_bounded",
+      "r376AuditStatus": "verified_build_and_client_regression_scoped",
+      "currentMatrixDisposition": "verified_build_and_client_regression_scoped",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/gates-audit.json",
+        "acceptance/matrix-closure-r379/integration/gate-plan.md",
+        "acceptance/matrix-closure-r379/integration/ios/focused-23test.receipt.json",
+        "harness-runtime/docs/parity/current-alignment/evidence/mobile-package-r378/receipt.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Current r378 Android debug/JNI and 97 reducer tests, current iOS build plus the r379 current-pin 23/23 focused test receipt, and current Product Bridge/CLI/mobile source checks cover the requested client protocol paths. Local Apps Native parity is excluded in the original row; no device UI claim is made.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "Physical-device/UI acceptance is not in the baseline requirement.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "Physical-device/UI acceptance is not in the baseline requirement."
+      }
+    },
+    {
+      "id": "RUNTIME-1",
+      "originalRequirement": "Bun worker startup/restart, filesystem/process/sandbox, env inheritance, cancellation/deadline, stdout/stderr and cleanup.",
+      "originalRequirementStatus": "closed_with_approved_difference",
+      "r376AuditStatus": "partial",
+      "currentMatrixDisposition": "partial",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/mods-audit.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Pinned Native host API/stream source and current Bun focused/runtime/package startup-reload-restart gates cover the listed worker-facing semantics. The accepted Rust/Bun /heapdump difference remains the sole row-level approved difference.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "Native process/OS topology is not required to be isomorphic; do not claim a Native public worker lifecycle capture.",
+      "allowedDifference": [
+        "/heapdump is an approved Rust/Bun runtime difference; do not add a fake implementation."
+      ],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "Native process/OS topology is not required to be isomorphic; do not claim a Native public worker lifecycle capture."
+      }
+    },
+    {
+      "id": "BUILD-1",
+      "originalRequirement": "Three repositories resolve one candidate; dependency-complete checks, macOS production app and package, and required cross-platform checks.",
+      "originalRequirementStatus": "open_current_pin_rebind",
+      "r376AuditStatus": "verified_build_and_client_regression_scoped",
+      "currentMatrixDisposition": "r378_prior_build_package_evidence; final_integrated_three_repo_and_package_gate_pending",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/gates-audit.json",
+        "acceptance/matrix-closure-r379/integration/gate-plan.md",
+        "acceptance/matrix-closure-r379/integration/ios/focused-23test.receipt.json",
+        "harness-runtime/docs/parity/current-alignment/evidence/mobile-package-r378/receipt.json",
+        "harness-runtime/docs/parity/current-alignment/mobile-package-r378.md",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md",
+        "acceptance/matrix-closure-r379/runtime/r380-mcp-native-message-schema-after-fix.receipt.json: current focused schema gate 9/9 on stable fingerprints; bounded receipt only.",
+        "acceptance/matrix-closure-r379/runtime/r380-orchestrator-current-alignment-refusal-full14.receipt.json: current bounded refusal selector 14/14; not a full integrated package gate.",
+        "acceptance/matrix-closure-r379/runtime/r380-orchestrator-tool-result-persist.receipt.json and r380-orchestrator-effort-cold-resume-exact-after-fixture.receipt.json: current bounded Orchestrator selectors passed 2/2 and 1/1."
+      ],
+      "evidenceInterpretation": "The r378 package/client and cross-platform receipts remain valid historical evidence; r380 bounded selectors do not replace the final integrated dependency-complete checks, macOS production app/package, or required mobile gate after current source freeze. Final H/P pins remain unbound.",
+      "outstandingObligation": "After source freeze, bind the final integrated H/P/llm-client pins; run the existing dependency-complete and required cross-platform checks, build the macOS production app/package, and retain the final package/GUI and mobile gate receipts.",
+      "extraBeyondOriginal": "The r378 interrupted broader iOS UI/test attempt remains diagnostic; no UI-suite, physical-device, notarization or all-42 parity claim is made.",
+      "allowedDifference": [],
+      "smallestValidClosure": "Run the final integrated three-repository/package gate from acceptance/matrix-closure-r379/integration/gate-plan.md on the frozen H/P/llm-client pins and retain its required build, package, and cross-platform receipts.",
+      "closureAssessment": {
+        "originalRequirement": "closed_on_prior_pin",
+        "currentPinValidation": "open",
+        "obligationScope": "current_pin_validation",
+        "extraEvidenceLimit": "No broader UI suite, physical-device, notarization, or all-42 raw-parity claim is added beyond the baseline gate."
+      }
+    },
+    {
+      "id": "BASH-INPUT-295",
+      "originalRequirement": "Normalize Bash `tool_input.command_description` and `timeout_ms` aliases before `PreToolUse`, validation, and execution; preserve Native field priority and source units.",
+      "originalRequirementStatus": "closed",
+      "r376AuditStatus": "bounded-pass",
+      "currentMatrixDisposition": "bounded-pass",
+      "newestSourceRelevantProof": [
+        "acceptance/final-ledger-r376/runtime-audit.json",
+        "harness-runtime/docs/parity/current-alignment/current-matrix.md"
+      ],
+      "evidenceInterpretation": "Pinned 2.1.295 Bash alias/priority fixtures pass through production validation and permission gates; the row asks normalization/source-unit behavior, not an operating-system shell side effect.",
+      "outstandingObligation": null,
+      "extraBeyondOriginal": "The ProcessRunner is mocked; shell execution is not needed for this normalization contract.",
+      "allowedDifference": [],
+      "smallestValidClosure": null,
+      "closureAssessment": {
+        "originalRequirement": "closed",
+        "currentPinValidation": "recorded",
+        "obligationScope": "none",
+        "extraEvidenceLimit": "The ProcessRunner is mocked; shell execution is not needed for this normalization contract."
+      }
+    }
+  ],
+  "priorityWork": [
+    {
+      "priority": 1,
+      "ids": [
+        "BUILD-1"
+      ],
+      "reason": "Final three-repository pin, dependency-complete checks, macOS production package, and required mobile/cross-platform gate remain after r380 source edits."
+    },
+    {
+      "priority": 2,
+      "ids": [
+        "M2-HTTP-1"
+      ],
+      "reason": "Run the original Product headless print-text physical request/offered-response selector; do not add a client-observed response spy."
+    },
+    {
+      "priority": 3,
+      "ids": [
+        "CLI-ERR-1",
+        "HOST-REFUSAL-1",
+        "STOPDETAILS-1"
+      ],
+      "reason": "Run the owning current Product CLI selectors for the error envelope and refusal result/durable fields against the retained Native source/fixtures."
+    },
+    {
+      "priority": 4,
+      "ids": [
+        "TURN-3",
+        "SESSION-3"
+      ],
+      "reason": "Rebind only the existing in-flight SIGINT and local cold-resume Product cases after final P/H pin freeze."
+    },
+    {
+      "priority": 5,
+      "ids": [
+        "TOOL-4",
+        "CMD-1"
+      ],
+      "reason": "Run only the named current cold tool-result and command selectors on the final pins; no new Native capture without a concrete source conflict."
+    }
+  ],
+  "generatedAt": "2026-10-18",
+  "proofPathBase": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration",
+  "auditMode": "read_only_closure_mapping",
+  "buildsRun": false,
+  "nativeLaunchesRun": false,
+  "openContractIds": [
+    "M2-HTTP-1",
+    "HOST-REFUSAL-1",
+    "CLI-ERR-1",
+    "STOPDETAILS-1",
+    "TURN-3",
+    "TOOL-4",
+    "CMD-1",
+    "SESSION-3",
+    "BUILD-1"
+  ],
+  "openOriginalRequirementIds": [
+    "M2-HTTP-1",
+    "HOST-REFUSAL-1",
+    "CLI-ERR-1",
+    "STOPDETAILS-1",
+    "TOOL-4",
+    "CMD-1",
+    "SESSION-3"
+  ],
+  "openCurrentPinValidationIds": [
+    "M2-HTTP-1",
+    "HOST-REFUSAL-1",
+    "CLI-ERR-1",
+    "STOPDETAILS-1",
+    "TURN-3",
+    "TOOL-4",
+    "CMD-1",
+    "SESSION-3",
+    "BUILD-1"
+  ],
+  "currentPinValidationCounts": {
+    "open": 9,
+    "recorded": 31,
+    "closed": 2
+  },
+  "preReconciliationR380Snapshot": {
+    "note": "Prior derived arrays/counts are retained for audit only; current top-level arrays/counts below are recomputed from current row evidence.",
+    "statusCounts": {
+      "open": 14,
+      "closed": 19,
+      "open_current_pin_rebind": 1,
+      "closed_source_semantics_bounded": 3,
+      "closed_source_semantics": 2,
+      "closed_bounded": 2,
+      "closed_with_approved_difference": 1
+    },
+    "openContractIds": [
+      "M2-HTTP-1",
+      "HOST-REFUSAL-1",
+      "CLI-ERR-1",
+      "SDK-ERR-2",
+      "SDK-1",
+      "STOPDETAILS-1",
+      "TURN-3",
+      "TOOL-1",
+      "TOOL-3",
+      "TOOL-4",
+      "CMD-1",
+      "SESSION-3",
+      "EFFORT-1",
+      "SESSION-2",
+      "SESSION-5",
+      "MCP-1",
+      "TURN-2"
+    ],
+    "openOriginalRequirementIds": [
+      "M2-HTTP-1",
+      "HOST-REFUSAL-1",
+      "CLI-ERR-1",
+      "SDK-ERR-2",
+      "SDK-1",
+      "STOPDETAILS-1",
+      "TURN-3",
+      "TOOL-1",
+      "TOOL-3",
+      "TOOL-4",
+      "CMD-1",
+      "SESSION-3",
+      "EFFORT-1",
+      "SESSION-2",
+      "SESSION-5"
+    ],
+    "openCurrentPinValidationIds": [
+      "TURN-3"
+    ],
+    "currentPinValidationCounts": {
+      "open": 15,
+      "recorded": 27
+    },
+    "priorityWork": [
+      {
+        "priority": 1,
+        "ids": [
+          "TOOL-1"
+        ],
+        "reason": "The later matrix assigned LTr alias/glob source evidence to a different immutable baseline contract; the original deferred-catalog physical request remains open."
+      },
+      {
+        "priority": 2,
+        "ids": [
+          "CLI-ERR-1"
+        ],
+        "reason": "A current Product CLI test/fixture delta exists outside the iOS integration receipt and needs its owning gate."
+      },
+      {
+        "priority": 3,
+        "ids": [
+          "TURN-3"
+        ],
+        "reason": "The original run04 shape passes at P17593/H44; current projection code changed afterward, so rebind this one case to the final integrated P/H pins after source freeze."
+      },
+      {
+        "priority": 4,
+        "ids": [
+          "HOST-REFUSAL-1",
+          "STOPDETAILS-1"
+        ],
+        "reason": "Both audits name one missing public CLI refusal projection; these are compact fixed-fixture tests."
+      },
+      {
+        "priority": 5,
+        "ids": [
+          "SESSION-3",
+          "EFFORT-1",
+          "TOOL-4",
+          "CMD-1"
+        ],
+        "reason": "The remaining items are distinct local persistence/cold-resume requirements; close only the named source-backed selector or two-process scenario."
+      },
+      {
+        "priority": 6,
+        "ids": [
+          "SDK-ERR-2",
+          "SDK-1",
+          "TOOL-3",
+          "MCP-1",
+          "SESSION-2",
+          "SESSION-5",
+          "M2-HTTP-1"
+        ],
+        "reason": "The baseline explicitly requests these missing parser, raw wire, public-result, lifecycle or transport-frame evidence slices."
+      }
+    ]
+  },
+  "statusReconciliation": {
+    "asOf": "2026-10-18",
+    "policy": "Current source-first bounded dispositions; no extra Native capture requirement is derived solely from an absent public artifact when frozen source and bounded candidate evidence close the stated behavior.",
+    "history": "Per-row r376AuditStatus and preReconciliationR380Snapshot preserve prior audit state. The 42 baseline IDs, ordering, and original requirement strings are unchanged.",
+    "openContractIds": "Rows with a non-null current outstandingObligation, in immutable baseline order.",
+    "openOriginalRequirementIds": "Rows whose current closureAssessment.originalRequirement is open.",
+    "openCurrentPinValidationIds": "Rows whose current closureAssessment.currentPinValidation is open.",
+    "currentPinValidationCounts": "Counts the actual row-level currentPinValidation values, including closed separately from recorded."
+  }
+}

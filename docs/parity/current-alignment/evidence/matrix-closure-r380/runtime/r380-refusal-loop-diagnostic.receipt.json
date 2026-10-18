@@ -1,0 +1,52 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-refusal-loop-diagnostic-r380.v1",
+  "recordedAtUtc": "2026-10-18T17:12:11Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_refusal native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl -- --exact --nocapture",
+  "sandboxPermissions": "require_escalated; Root authorized this exact selector for localhost transport fixtures",
+  "sourceHashFiles": [
+    "r380-refusal-loop-diagnostic-sourcehashes-pre.txt",
+    "r380-refusal-loop-diagnostic-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 29,
+  "sourceStableDuringRun": true,
+  "exitCode": 101,
+  "testsSelected": 1,
+  "testsPassed": 0,
+  "testsFailed": 1,
+  "failure": "Native 2.1.295 sends a second request after the safety-classifier refusal: refusal-cyber; observed one request, expected two.",
+  "diagnostic": {
+    "finalize": {
+      "query_source": "repl_main_thread",
+      "selected_model": "claude-sonnet-4-5",
+      "served_model": null,
+      "fallback_events": 0,
+      "handled_fallback_events": 0,
+      "tools": 0,
+      "native_catalog": true,
+      "retry_enabled": true,
+      "retry_spent": false,
+      "settled": true
+    },
+    "disposition": {
+      "response_id": "msg_fixed_stop_details_cyber_293",
+      "served_model": null,
+      "fallback_events": 0,
+      "tools": 0,
+      "settled": true,
+      "dispatch_guard_current": true,
+      "retry_spent": false,
+      "query_source": "repl_main_thread"
+    }
+  },
+  "log": "logs/27-orchestrator-refusal-loop-diagnostic.log",
+  "logSha256": "3bda5cb00d4327edca67fc9bc26860530954ac48c564ac6a164715e356ebe754",
+  "scope": "Single selector only, run for runtime gate/disposition diagnosis after diagnostic instrumentation was added; this is not a refusal behavior pass."
+}

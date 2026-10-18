@@ -563,6 +563,8 @@ fn session_agent_transcript_revision_advances_for_hidden_compact_record() {
     };
     let compact = lingxi_core::types::ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "replacement summary".to_string(),
@@ -781,6 +783,8 @@ fn session_agent_id_from_nested_transcript_path_requires_agent_jsonl_shape() {
 fn session_agent_index_excludes_hidden_transcript_records() {
     let hidden_meta = lingxi_core::types::ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::Text {
             text: "<runtime-reminder>internal</runtime-reminder>".to_string(),
@@ -796,6 +800,8 @@ fn session_agent_index_excludes_hidden_transcript_records() {
     };
     let hidden_summary = lingxi_core::types::ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         is_meta: false,
@@ -808,6 +814,8 @@ fn session_agent_index_excludes_hidden_transcript_records() {
     };
     let hidden_transcript_only = lingxi_core::types::ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: Vec::new(),
         is_meta: false,
@@ -994,6 +1002,8 @@ async fn session_agent_observer_parking_preserves_binding_and_message_index() {
             agent_id,
             message: lingxi_core::types::ConversationMessage::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::Text {
                     text: "follow-up".to_string(),

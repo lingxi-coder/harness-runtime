@@ -1,14 +1,14 @@
 //! Focused Native 2.1.295 session.append contract gate.
 //!
-//! Uses the same checked-in Mod module as the Native plugin-test fixture. The
-//! first pass observes actual ModHost dispatch results and core `next` inputs;
-//! the second pass exercises AgentTranscriptWriter's retained-row consumer so
-//! a valid worker intermediate answer is not confused with persisted behavior.
+//! The system case uses the checked-in Native plugin-test module. The user
+//! lone-surrogate case uses a source-derived candidate module with a stable
+//! typed-message UUID. Tests observe actual ModHost dispatch and the retained
+//! transcript consumer as separate boundaries.
 
 use agent::transcript::{AgentTranscriptWriter, TranscriptEntry};
 use hooks::mods::ModHost;
 use lingxi_core::types::{
-    utf16_json::Utf16JsonProjection, AgentId, ConversationMessage, MessageId,
+    utf16_json::Utf16JsonProjection, AgentId, ContentBlock, ConversationMessage, MessageId,
 };
 use serde_json::{json, Value};
 use std::path::Path;
@@ -21,9 +21,31 @@ const CASES: [(&str, &str); 4] = [
     ("cancel", "00000000-0000-4000-8000-000000000003"),
     ("throw", "00000000-0000-4000-8000-000000000004"),
 ];
+const USER_UTF16_UUID: &str = "00000000-0000-4000-8000-000000000016";
 
 fn case_id(uuid: &str) -> MessageId {
     MessageId::from_uuid(Uuid::parse_str(uuid).expect("fixed case UUID"))
+}
+
+fn user_with_utf16_text(id: MessageId, utf16_code_units: Vec<u16>) -> ConversationMessage {
+    ConversationMessage::User {
+        id,
+        content: vec![ContentBlock::TextJsUtf16 {
+            text: String::from_utf16_lossy(&utf16_code_units),
+            utf16_code_units,
+            citations: None,
+        }],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
+        api_message_override: None,
+    }
 }
 
 fn row_text(message: &ConversationMessage) -> String {
@@ -352,5 +374,160 @@ async fn native_system_lone_session_append_reaches_bun_worker_and_host_writer() 
     assert_eq!(
         persisted_entry.message, system_message,
         "the durable entry round-trips the accepted System row and source units"
+    );
+}
+
+#[tokio::test]
+async fn source_derived_user_lone_session_append_rewrite_preserves_return_and_transcript_units() {
+    // Source: Native 2.1.295 append.test.ts
+    // (SHA-256 3b9a34e4714a7b297f3cb0e6407397fd05bb67d81b7372670df019e5cf8fe1a6)
+    // uses a user text of `"\ud800"`,
+    // passes it to $.session.append, and asserts that the returned text is
+    // `"prefix:" + input`. Native's hooks/register.js
+    // (SHA-256 3304837a13c3232693e30ca2e9d5f71c3d86995d815df32d740c23a8d5c2ad84)
+    // performs that rewrite. Native's public user event was not retained, so
+    // this is a source-derived candidate input rather than a fabricated
+    // captured-Native event. The candidate module maps Native's
+    // `uuid === "rewrite"` selector to a stable UUID for the typed writer path.
+    let input = Utf16JsonProjection::parse(
+        r#"{"message":{"type":"user","content":[{"type":"text","text":"\ud800"}]},"door":"user","origin":{"kind":"core"},"uuid":"00000000-0000-4000-8000-000000000016"}"#,
+    )
+    .expect("source-derived user session.append input keeps the escaped lone unit");
+    let input_units = input
+        .string_units("/message/content/0/text")
+        .expect("source user text units");
+    assert_eq!(input_units, [0xd800_u16]);
+    assert_eq!(input.string_at("/message/type"), Some("user"));
+    assert_eq!(input.string_at("/uuid"), Some(USER_UTF16_UUID));
+
+    let mut expected_result_units = "prefix:".encode_utf16().collect::<Vec<_>>();
+    expected_result_units.extend_from_slice(&input_units);
+    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let module = fixture_root.join("current_alignment_mod_append_user_utf16_295.js");
+    let host = ModHost::start(None).await.expect("start actual Mod worker");
+    host.load(
+        "current-alignment-user-utf16-session-append",
+        &fixture_root,
+        &module,
+        Utf16JsonProjection::parse("{}").expect("empty Mod options JSON"),
+    )
+    .await
+    .expect("load source-derived user rewrite into Bun");
+
+    let next_inputs = Arc::new(Mutex::new(Vec::<Utf16JsonProjection>::new()));
+    let captured = next_inputs.clone();
+    let returned = host
+        .dispatch("session.append", input, move |event| {
+            let captured = captured.clone();
+            async move {
+                let event = event.expect("user append next carries an event");
+                captured
+                    .lock()
+                    .expect("forwarded user event lock")
+                    .push(event.clone());
+                Ok(Some(
+                    Utf16JsonProjection::object(vec![
+                        (
+                            "message".into(),
+                            event.subprojection("/message").expect("message projection"),
+                        ),
+                        (
+                            "uuid".into(),
+                            event.subprojection("/uuid").expect("uuid projection"),
+                        ),
+                    ])
+                    .expect("user append continuation result"),
+                ))
+            }
+        })
+        .await
+        .expect("dispatch user append through Bun");
+    assert_eq!(
+        returned.string_units("/message/content/0/text"),
+        Some(expected_result_units.clone()),
+        "the public ModHost result returns prefix plus the exact lone UTF-16 unit"
+    );
+    assert_eq!(returned.string_at("/message/type"), Some("user"));
+    assert_eq!(returned.string_at("/uuid"), Some(USER_UTF16_UUID));
+    let forwarded = next_inputs
+        .lock()
+        .expect("forwarded user event lock")
+        .first()
+        .cloned()
+        .expect("middleware rewrite reaches the real continuation");
+    assert_eq!(
+        forwarded.string_units("/message/content/0/text"),
+        Some(expected_result_units.clone())
+    );
+
+    let registry = {
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host.clone());
+        registry
+    };
+    let executor = Arc::new(hooks::HookExecutorImpl::new(
+        Arc::new(tokio::sync::RwLock::new(registry)),
+        Arc::new(test_harness::mocks::MockHttpTransport::new()),
+        Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+    ));
+    let temp = tempfile::tempdir().expect("isolated user transcript directory");
+    let transcript_path = temp.path().join("user.jsonl");
+    let writer = AgentTranscriptWriter::new(
+        transcript_path.clone(),
+        AgentId::new(),
+        Arc::new(platform_posix::PosixFileSystem::new(
+            temp.path().to_path_buf(),
+        )),
+    )
+    .with_mod_append(
+        Some(executor),
+        temp.path().to_path_buf(),
+        Some("test-model".into()),
+    );
+    let mut user_message = user_with_utf16_text(case_id(USER_UTF16_UUID), input_units);
+    writer
+        .record_retained(&mut user_message, &[])
+        .await
+        .expect("persist rewritten user row through AgentTranscriptWriter");
+    let ConversationMessage::User { content, .. } = &user_message else {
+        panic!("retained message remains a user row")
+    };
+    let ContentBlock::TextJsUtf16 {
+        text,
+        utf16_code_units,
+        ..
+    } = &content[0]
+    else {
+        panic!("rewritten user text retains its UTF-16 source carrier")
+    };
+    assert_eq!(text, "prefix:\u{fffd}");
+    assert_eq!(utf16_code_units, &expected_result_units);
+
+    let persisted = std::fs::read(&transcript_path).expect("read rewritten user JSONL");
+    assert!(persisted
+        .windows(b"prefix:\\ud800".len())
+        .any(|window| window == b"prefix:\\ud800"));
+    assert!(!persisted
+        .windows(3)
+        .any(|window| window == [0xef, 0xbf, 0xbd]));
+    let persisted_line = std::str::from_utf8(&persisted)
+        .expect("JSONL framing stays UTF-8 with the source unit escaped")
+        .lines()
+        .next()
+        .expect("one persisted user row");
+    let persisted_projection = Utf16JsonProjection::parse(persisted_line)
+        .expect("persisted user row parses as exact UTF-16 JSON projection");
+    assert_eq!(
+        persisted_projection.string_at("/message/role"),
+        Some("user")
+    );
+    assert_eq!(
+        persisted_projection.string_at("/message/id"),
+        Some(USER_UTF16_UUID)
+    );
+    assert_eq!(
+        persisted_projection.string_units("/message/content/0/text"),
+        Some(expected_result_units),
+        "transcript source projection retains prefix plus the original lone unit"
     );
 }

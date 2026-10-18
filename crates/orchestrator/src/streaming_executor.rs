@@ -89,6 +89,10 @@ pub(crate) fn synthetic_tool_use_result_for_tool(
     synthetic_tool_use_result(reason)
 }
 
+const REFUSAL_TOOL_NOT_RUN: &str =
+    "Not run: the response that made this tool call was stopped by a safety classifier.";
+const REFUSAL_TOOL_INTERRUPTED: &str = "Interrupted: the response that made this tool call was stopped by a safety classifier while the call was running; it may have partially or fully completed.";
+
 /// Build the synthetic `tool_result` for a cancelled tool (TS
 /// `createSyntheticErrorMessage`). `provider_tool_use_id` is left `None` —
 /// the caller copies the tracked tool's `provider_id` in before persisting.
@@ -472,6 +476,10 @@ impl<'a> StreamingToolExecutor<'a> {
                 })?;
             }
             Some(resolved_tool) => {
+                let mut dispatch_facts = dispatch_facts;
+                let refusal_call_boundary =
+                    Arc::new(crate::turn_loop::tool_dispatch::RefusalToolCallBoundary::default());
+                dispatch_facts.refusal_call_boundary = Some(Arc::clone(&refusal_call_boundary));
                 let safe =
                     crate::schema_validation::validate_tool_schema(resolved_tool.as_ref(), &input)
                         .is_ok()
@@ -568,6 +576,7 @@ impl<'a> StreamingToolExecutor<'a> {
                 resumable: None,
             },
             same_turn_tool_uses: Vec::new(),
+            refusal_call_boundary: None,
         };
         self.add_tool_with_context_owned(id, name, input, provider_id, assistant_id, facts)
             .await
@@ -749,6 +758,128 @@ impl<'a> StreamingToolExecutor<'a> {
         completed += self.ingest_owned_dispatches_to_terminal(rest).await;
         self.sync_statuses().await;
         completed
+    }
+
+    /// Settle tool uses only on Native's Ko=true same-model retry branch, where
+    /// queued calls do not run. Results already completed at the refusal
+    /// boundary remain real results; executing and queued calls receive the
+    /// distinct interruption and not-run rows. Ko=false follows normal tool
+    /// execution and generic needsFollowUp outside this method; the bounded
+    /// refusal-boundary probe observed the queued results in the next request.
+    pub(crate) async fn settle_refused_tool_uses(
+        &mut self,
+    ) -> Result<Vec<DrainedResult>, crate::error::OrchestratorError> {
+        // Close every call that has not crossed the physical side-effect
+        // boundary before the first scheduler await. This prevents a queued
+        // dispatch or permission waiter from winning the call-start race while
+        // the ready-only drain is being acknowledged.
+        for tool in self
+            .tools
+            .iter()
+            .filter(|tool| matches!(tool.status, ToolStatus::Queued | ToolStatus::Executing))
+        {
+            if let Some(boundary) = tool
+                .dispatch_facts
+                .as_ref()
+                .and_then(|facts| facts.refusal_call_boundary.as_ref())
+            {
+                boundary.close_for_refusal();
+            }
+        }
+        self.drain_ready_without_queue().await;
+        let mut results = self.take_newly_completed();
+        results.extend(self.take_all_completed());
+
+        let pending = self
+            .tools
+            .iter()
+            .filter(|tool| matches!(tool.status, ToolStatus::Queued | ToolStatus::Executing))
+            .map(|tool| {
+                (
+                    tool.id.clone(),
+                    tool.name.clone(),
+                    tool.provider_id.clone(),
+                    tool.assistant_id,
+                    tool.status == ToolStatus::Executing
+                        && tool
+                            .dispatch_facts
+                            .as_ref()
+                            .and_then(|facts| facts.refusal_call_boundary.as_ref())
+                            .is_some_and(|boundary| boundary.was_started()),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let publication_guard: Arc<dyn hooks::attachment::HookPublicationGuard> =
+            if pending.is_empty() {
+                Arc::new(self.publication_fence.clone())
+            } else {
+                self.reset_after_server_fallback_owned(None).await?;
+                let guard: Arc<dyn hooks::attachment::HookPublicationGuard> =
+                    Arc::new(self.publication_fence.clone());
+                for (id, ..) in &pending {
+                    self.orch.clear_discarded_tool_result_metadata(id).await;
+                }
+                for result in &mut results {
+                    result.publication_guard = Some(Arc::clone(&guard));
+                }
+                guard
+            };
+
+        for (id, name, provider_id, assistant_id, was_actually_started) in pending {
+            let result_text = if was_actually_started {
+                REFUSAL_TOOL_INTERRUPTED
+            } else {
+                REFUSAL_TOOL_NOT_RUN
+            };
+            let block = ContentBlock::ToolResult {
+                tool_use_id: id.clone(),
+                content: Utf16JsonProjection::from(result_text),
+                is_error: Some(true),
+                provider_tool_use_id: provider_id,
+                content_blocks: None,
+            };
+            let error_result = match &block {
+                ContentBlock::ToolResult { content, .. } => {
+                    Utf16JsonProjection::object(vec![("error".into(), content.clone())])
+                        .expect("refusal tool result metadata is an object")
+                }
+                _ => unreachable!("refusal settlement creates a ToolResult"),
+            };
+            let mut publication = crate::turn_loop::ToolResultPublication::frame_only(
+                &id,
+                &name,
+                match &block {
+                    ContentBlock::ToolResult { content, .. } => content,
+                    _ => unreachable!("refusal settlement creates a ToolResult"),
+                },
+                error_result,
+            );
+            publication.tool_use_result = Some(Utf16JsonProjection::from(result_text));
+            publication.denial_kind = Some(if was_actually_started {
+                "interrupted".into()
+            } else {
+                "cancelled".into()
+            });
+            self.tool_use_lifecycle.observe_tool_result(&id);
+            results.push(DrainedResult {
+                assistant_id,
+                publication_guard: Some(Arc::clone(&publication_guard)),
+                tool: name,
+                block,
+                prevent_continuation: false,
+                injected: Vec::new(),
+                modifiers: Vec::new(),
+                // Native Qa constructs these result rows directly through
+                // makeUserMessage. Since no tool call ran here, it does not
+                // synthesize PostToolUse/Failure or PostToolBatch work.
+                post_tool_batch_calls: Vec::new(),
+                publications: vec![publication],
+                tool_use_result: Some(Utf16JsonProjection::from(result_text)),
+            });
+        }
+
+        Ok(results)
     }
 
     async fn ingest_owned_dispatches(&mut self, ready: Vec<CompletedDispatch>) -> usize {

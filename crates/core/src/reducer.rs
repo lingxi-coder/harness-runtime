@@ -73,6 +73,8 @@ pub fn reduce(state: ConversationState, event: Event) -> (ConversationState, Vec
                 origin: None,
                 turn_origin: None,
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
             });
             let request = assemble_model_request(&session);
             (

@@ -1559,6 +1559,8 @@ mod tests {
         request.system_prompt = Some(r#"Answer with exactly one label: "\ud800"."#.into());
         request.messages = vec![ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
                 text: prompt_display.clone(),
@@ -1606,6 +1608,8 @@ mod tests {
         let mut request = req(None);
         request.messages = vec![ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
                 text: display,

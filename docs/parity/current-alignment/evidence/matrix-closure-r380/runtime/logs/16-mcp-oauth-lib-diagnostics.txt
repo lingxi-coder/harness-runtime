@@ -1,0 +1,24 @@
+123-test registry::tests::oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_scope ... ok
+124-test oauth::callback::tests::accept_is_interruptible_by_a_timeout ... ok
+125-
+126:failures:
+127-
+128:---- oauth::callback::tests::percent_encoded_issuer_parameter_name_is_still_validated stdout ----
+129-
+130-thread 'oauth::callback::tests::percent_encoded_issuer_parameter_name_is_still_validated' (59041874) panicked at crates/mcp/src/oauth/callback.rs:540:9:
+131-assertion failed: response.contains("Authentication complete")
+132-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+133-
+134:---- registry::tests::connect_oauth_discovery_failure_emits_server_needs_auth_with_discovery_schema_cause stdout ----
+135-
+136-thread 'registry::tests::connect_oauth_discovery_failure_emits_server_needs_auth_with_discovery_schema_cause' (59041935) panicked at crates/mcp/src/registry/tests/tests.rs:9477:45:
+137-connect must fail: McpConnectionId(50303bea-1a3a-42d9-b2e6-fd703553f4e8)
+138-
+139-
+140:failures:
+141-    oauth::callback::tests::percent_encoded_issuer_parameter_name_is_still_validated
+142-    registry::tests::connect_oauth_discovery_failure_emits_server_needs_auth_with_discovery_schema_cause
+143-
+144:test result: FAILED. 79 passed; 2 failed; 0 ignored; 0 measured; 621 filtered out; finished in 0.06s
+145-
+146:error: test failed, to rerun pass `-p mcp --lib`

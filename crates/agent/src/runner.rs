@@ -840,6 +840,8 @@ async fn append_unmatched_stream_tool_results(
             };
             let message = ConversationMessage::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id: MessageId::new(),
                 content: vec![result],
                 is_meta: false,
@@ -916,6 +918,8 @@ async fn publish_live_tool_completion(
     early_tool_result_ids.insert(tool_use_id.clone());
     let row = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: MessageId::new(),
         content: vec![block],
         is_meta: false,
@@ -2818,6 +2822,8 @@ async fn build_preload_messages(
                     blocks.extend(load.content);
                     out.push(ConversationMessage::User {
                         api_message_override: None,
+                        interrupted_by_shutdown: None,
+                        refused_message_id: None,
                         id: MessageId::new(),
                         content: blocks,
                         is_meta: true,
@@ -5486,6 +5492,8 @@ async fn run_subagent_loop(
                         native_next_turn_has_tool_results = true;
                         let tool_results_msg = ConversationMessage::User {
                             api_message_override: None,
+                            interrupted_by_shutdown: None,
+                            refused_message_id: None,
                             id: MessageId::new(),
                             content: tool_results,
                             is_meta: false,

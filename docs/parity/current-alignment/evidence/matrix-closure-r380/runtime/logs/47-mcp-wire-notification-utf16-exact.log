@@ -1,0 +1,25 @@
+$ source '/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/frozen-build-env.sh' && cargo test --locked --offline -p mcp-wire --lib mcp_capabilities_and_notifications_preserve_exact_source_json -- --exact
+   Compiling syn v2.0.117
+   Compiling libc v0.2.186
+   Compiling indexmap v2.14.2
+   Compiling serde_json v1.0.150
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling thiserror v2.0.18
+   Compiling serde v1.0.228
+   Compiling tokio-macros v2.7.0
+   Compiling getrandom v0.2.17
+   Compiling futures-sink v0.3.32
+   Compiling futures-util v0.3.32
+   Compiling json-projection v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/json-projection)
+   Compiling uuid v1.10.0
+   Compiling tokio v1.52.3
+   Compiling async-trait v0.1.89
+   Compiling mcp-wire v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp-wire)
+    Finished `test` profile [unoptimized] target(s) in 6.76s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mcp_wire-dd7918d86db852be)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+

@@ -1,0 +1,488 @@
+{
+  "status": "timed_out",
+  "native_binary": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+  "native_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+  "public_entrypoint": "pinned Native 2.1.295 CLI --print --output-format json",
+  "argv": [
+    "/usr/bin/sandbox-exec",
+    "-f",
+    "/private/tmp/r380-refusal-tools-jh21ovkk/native-child-network.sbpl",
+    "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "--bare",
+    "--print",
+    "--output-format",
+    "json",
+    "--tools",
+    "Bash",
+    "--allowedTools",
+    "Bash",
+    "--model",
+    "claude-sonnet-4-5",
+    "--session-id",
+    "00000000-0000-4000-8000-000000002952",
+    "Exercise the fixed synthetic refusal boundary response."
+  ],
+  "environment": {
+    "PATH": "/usr/bin:/bin",
+    "HOME": "/private/tmp/r380-refusal-tools-jh21ovkk/home",
+    "TMPDIR": "/private/tmp/r380-refusal-tools-jh21ovkk/tmp",
+    "LANG": "C.UTF-8",
+    "TZ": "UTC",
+    "TERM": "dumb",
+    "CLAUDE_CONFIG_DIR": "/private/tmp/r380-refusal-tools-jh21ovkk/config",
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:58649",
+    "CLAUDE_CODE_DISABLE_REFUSAL_RETRY": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "DISABLE_TELEMETRY": "1",
+    "DO_NOT_TRACK": "1"
+  },
+  "dummy_api_key": {
+    "variable": "ANTHROPIC_API_KEY",
+    "value": "r380-refusal-disabled-localhost-dummy-key",
+    "real_secret_used": false
+  },
+  "refusal_retry_disabled": "1",
+  "fallback_configuration": "none; isolated HOME/config and project-only settings source",
+  "network_boundary": {
+    "listener": "127.0.0.1:58649",
+    "sandbox": "deny outbound except localhost:<this exact loopback port>; listener binds 127.0.0.1; deny inbound",
+    "workspace_file_read_denied": "/Users/luolingfeng/lingxi",
+    "workspace_file_write_denied": "/Users/luolingfeng/lingxi",
+    "proxy_environment_inherited": false
+  },
+  "fixed_sse": {
+    "path": "capture/provider-response.sse.raw",
+    "sha256": "e229014104b365a2ce0c89402bc7f6ed7cd9ad9f0c7009ec7f909c9bf2c63f75",
+    "event_order": [
+      "message_start",
+      "text_block",
+      "Bash tool_use #1",
+      "Bash tool_use #2",
+      "message_delta(refusal)",
+      "message_stop"
+    ],
+    "tool_use_count": 2,
+    "tool_names": [
+      "Bash",
+      "Bash"
+    ],
+    "tool_ids": [
+      "toolu_r380_first",
+      "toolu_r380_second"
+    ],
+    "first_command": "/usr/bin/python3 -c \"import pathlib,time; pathlib.Path('.r380-refusal-first.marker').write_text('started_ns='+str(time.time_ns())+'\\n')\"; /bin/sleep 2; /usr/bin/python3 -c \"import pathlib,time; pathlib.Path('.r380-refusal-first.marker').open('a').write('completed_ns='+str(time.time_ns())+'\\n')\"",
+    "second_command": "/usr/bin/python3 -c \"import pathlib,time; pathlib.Path('.r380-refusal-second.marker').write_text('queued_ran_ns='+str(time.time_ns())+'\\n')\"",
+    "stop_reason": "refusal",
+    "stop_details": {
+      "type": "refusal",
+      "explanation": "R380 synthetic refusal fixture."
+    }
+  },
+  "request_count": {
+    "total": 6,
+    "post": 6,
+    "expected_post": 1
+  },
+  "requests": [
+    {
+      "request_number": 1,
+      "peer": "127.0.0.1",
+      "request_line": "POST /v1/messages?beta=true HTTP/1.1",
+      "ordered_header_lines": [
+        "Accept: application/json",
+        "Content-Type: application/json",
+        "User-Agent: claude-cli/2.1.295 (external, sdk-cli)",
+        "X-Claude-Code-Session-Id: 00000000-0000-4000-8000-000000002952",
+        "X-Stainless-Arch: arm64",
+        "X-Stainless-Lang: js",
+        "X-Stainless-OS: MacOS",
+        "X-Stainless-Package-Version: 0.128.0",
+        "X-Stainless-Retry-Count: 0",
+        "X-Stainless-Runtime: node",
+        "X-Stainless-Runtime-Version: v26.3.0",
+        "X-Stainless-Timeout: 600",
+        "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05",
+        "anthropic-dangerous-direct-browser-access: true",
+        "anthropic-version: 2023-06-01",
+        "x-api-key: r380-refusal-disabled-localhost-dummy-key",
+        "x-app: cli",
+        "Connection: keep-alive",
+        "Host: 127.0.0.1:58649",
+        "Accept-Encoding: gzip, deflate, br, zstd",
+        "Content-Length: 2504"
+      ],
+      "credential_is_dummy": true,
+      "accepted_as_fixture_request": true,
+      "response_status": 200,
+      "request_artifact": {
+        "path": "run-002/capture/native-request-01.raw",
+        "bytes": 3366,
+        "sha256": "47ed5cf576e2ac1125be0938fe0b4f5be930bb8847cfdbce1c35af938462e2d6"
+      },
+      "response_artifact": {
+        "path": "run-002/capture/native-response-01.http.raw",
+        "bytes": 2185,
+        "sha256": "e08a3be752eec7e8894e35693d81103f32a70bc8ba90a61a2c7ee1a203b5b382"
+      },
+      "body_bytes": 2504,
+      "body_sha256": "292a16432ae3e494492647e167df04baec9e5c59beb2bc4d66a3d7b5e1717f84",
+      "response_segments": [
+        {
+          "segment": 1,
+          "phase": "HTTP headers plus text and first Bash tool_use through its content_block_stop",
+          "artifact": {
+            "path": "run-002/capture/native-response-01-segment-01.http.raw",
+            "bytes": 1386,
+            "sha256": "e85bfa43b906626f567a7e31b730d92bf7593eb0df97418477c5e8cc2975f0cf"
+          },
+          "send_start_wall_time_ns": 1792340175988199000,
+          "send_end_wall_time_ns": 1792340175988222000
+        },
+        {
+          "segment": 2,
+          "phase": "second Bash tool_use, refusal message_delta, and message_stop",
+          "artifact": {
+            "path": "run-002/capture/native-response-01-segment-02.http.raw",
+            "bytes": 799,
+            "sha256": "e15e7f599bde0d391646299ed12e74571571252a416d09148b457d5b6f15bf80"
+          },
+          "send_start_wall_time_ns": 1792340176197895000,
+          "send_end_wall_time_ns": 1792340176197924000
+        }
+      ],
+      "request_summary": {
+        "model": "claude-sonnet-4-5",
+        "stream": true,
+        "tool_names": [
+          "Bash"
+        ]
+      },
+      "inter_segment_pause": {
+        "requested_ms": 200,
+        "actual_wall_ms": 209.526
+      }
+    },
+    {
+      "request_number": 2,
+      "peer": "127.0.0.1",
+      "request_line": "POST /v1/messages?beta=true HTTP/1.1",
+      "ordered_header_lines": [
+        "Accept: application/json",
+        "Content-Type: application/json",
+        "User-Agent: claude-cli/2.1.295 (external, sdk-cli)",
+        "X-Claude-Code-Session-Id: 00000000-0000-4000-8000-000000002952",
+        "X-Stainless-Arch: arm64",
+        "X-Stainless-Lang: js",
+        "X-Stainless-OS: MacOS",
+        "X-Stainless-Package-Version: 0.128.0",
+        "X-Stainless-Retry-Count: 0",
+        "X-Stainless-Runtime: node",
+        "X-Stainless-Runtime-Version: v26.3.0",
+        "X-Stainless-Timeout: 600",
+        "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05",
+        "anthropic-dangerous-direct-browser-access: true",
+        "anthropic-version: 2023-06-01",
+        "x-api-key: r380-refusal-disabled-localhost-dummy-key",
+        "x-app: cli",
+        "Connection: keep-alive",
+        "Host: 127.0.0.1:58649",
+        "Accept-Encoding: gzip, deflate, br, zstd",
+        "Content-Length: 3446"
+      ],
+      "credential_is_dummy": true,
+      "accepted_as_fixture_request": false,
+      "response_status": 409,
+      "request_artifact": {
+        "path": "run-002/capture/native-request-02.raw",
+        "bytes": 4308,
+        "sha256": "750e7e4195c2adc694edb9a8d5bccb665c5dd4a550058736dbde2a82d7e2d280"
+      },
+      "response_artifact": {
+        "path": "run-002/capture/native-response-02.http.raw",
+        "bytes": 63,
+        "sha256": "596c8fb477fafdcce6730c75919e7a632ef79a3a3a66963a18411c088ce97fa2"
+      },
+      "body_bytes": 3446,
+      "body_sha256": "9d8b73984818e0bfa71cdb6d6b1b735a959ce9148599947176a3fd130bb20355",
+      "response_segments": [],
+      "request_summary": {
+        "model": "claude-sonnet-4-5",
+        "stream": true,
+        "tool_names": [
+          "Bash"
+        ]
+      }
+    },
+    {
+      "request_number": 3,
+      "peer": "127.0.0.1",
+      "request_line": "POST /v1/messages?beta=true HTTP/1.1",
+      "ordered_header_lines": [
+        "Accept: application/json",
+        "Content-Type: application/json",
+        "User-Agent: claude-cli/2.1.295 (external, sdk-cli)",
+        "X-Claude-Code-Session-Id: 00000000-0000-4000-8000-000000002952",
+        "X-Stainless-Arch: arm64",
+        "X-Stainless-Lang: js",
+        "X-Stainless-OS: MacOS",
+        "X-Stainless-Package-Version: 0.128.0",
+        "X-Stainless-Retry-Count: 0",
+        "X-Stainless-Runtime: node",
+        "X-Stainless-Runtime-Version: v26.3.0",
+        "X-Stainless-Timeout: 600",
+        "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05",
+        "anthropic-dangerous-direct-browser-access: true",
+        "anthropic-version: 2023-06-01",
+        "x-api-key: r380-refusal-disabled-localhost-dummy-key",
+        "x-app: cli",
+        "Connection: keep-alive",
+        "Host: 127.0.0.1:58649",
+        "Accept-Encoding: gzip, deflate, br, zstd",
+        "Content-Length: 3446"
+      ],
+      "credential_is_dummy": true,
+      "accepted_as_fixture_request": false,
+      "response_status": 409,
+      "request_artifact": {
+        "path": "run-002/capture/native-request-03.raw",
+        "bytes": 4308,
+        "sha256": "750e7e4195c2adc694edb9a8d5bccb665c5dd4a550058736dbde2a82d7e2d280"
+      },
+      "response_artifact": {
+        "path": "run-002/capture/native-response-03.http.raw",
+        "bytes": 63,
+        "sha256": "596c8fb477fafdcce6730c75919e7a632ef79a3a3a66963a18411c088ce97fa2"
+      },
+      "body_bytes": 3446,
+      "body_sha256": "9d8b73984818e0bfa71cdb6d6b1b735a959ce9148599947176a3fd130bb20355",
+      "response_segments": [],
+      "request_summary": {
+        "model": "claude-sonnet-4-5",
+        "stream": true,
+        "tool_names": [
+          "Bash"
+        ]
+      }
+    },
+    {
+      "request_number": 4,
+      "peer": "127.0.0.1",
+      "request_line": "POST /v1/messages?beta=true HTTP/1.1",
+      "ordered_header_lines": [
+        "Accept: application/json",
+        "Content-Type: application/json",
+        "User-Agent: claude-cli/2.1.295 (external, sdk-cli)",
+        "X-Claude-Code-Session-Id: 00000000-0000-4000-8000-000000002952",
+        "X-Stainless-Arch: arm64",
+        "X-Stainless-Lang: js",
+        "X-Stainless-OS: MacOS",
+        "X-Stainless-Package-Version: 0.128.0",
+        "X-Stainless-Retry-Count: 0",
+        "X-Stainless-Runtime: node",
+        "X-Stainless-Runtime-Version: v26.3.0",
+        "X-Stainless-Timeout: 600",
+        "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05",
+        "anthropic-dangerous-direct-browser-access: true",
+        "anthropic-version: 2023-06-01",
+        "x-api-key: r380-refusal-disabled-localhost-dummy-key",
+        "x-app: cli",
+        "Connection: keep-alive",
+        "Host: 127.0.0.1:58649",
+        "Accept-Encoding: gzip, deflate, br, zstd",
+        "Content-Length: 3446"
+      ],
+      "credential_is_dummy": true,
+      "accepted_as_fixture_request": false,
+      "response_status": 409,
+      "request_artifact": {
+        "path": "run-002/capture/native-request-04.raw",
+        "bytes": 4308,
+        "sha256": "750e7e4195c2adc694edb9a8d5bccb665c5dd4a550058736dbde2a82d7e2d280"
+      },
+      "response_artifact": {
+        "path": "run-002/capture/native-response-04.http.raw",
+        "bytes": 63,
+        "sha256": "596c8fb477fafdcce6730c75919e7a632ef79a3a3a66963a18411c088ce97fa2"
+      },
+      "body_bytes": 3446,
+      "body_sha256": "9d8b73984818e0bfa71cdb6d6b1b735a959ce9148599947176a3fd130bb20355",
+      "response_segments": [],
+      "request_summary": {
+        "model": "claude-sonnet-4-5",
+        "stream": true,
+        "tool_names": [
+          "Bash"
+        ]
+      }
+    },
+    {
+      "request_number": 5,
+      "peer": "127.0.0.1",
+      "request_line": "POST /v1/messages?beta=true HTTP/1.1",
+      "ordered_header_lines": [
+        "Accept: application/json",
+        "Content-Type: application/json",
+        "User-Agent: claude-cli/2.1.295 (external, sdk-cli)",
+        "X-Claude-Code-Session-Id: 00000000-0000-4000-8000-000000002952",
+        "X-Stainless-Arch: arm64",
+        "X-Stainless-Lang: js",
+        "X-Stainless-OS: MacOS",
+        "X-Stainless-Package-Version: 0.128.0",
+        "X-Stainless-Retry-Count: 0",
+        "X-Stainless-Runtime: node",
+        "X-Stainless-Runtime-Version: v26.3.0",
+        "X-Stainless-Timeout: 600",
+        "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05",
+        "anthropic-dangerous-direct-browser-access: true",
+        "anthropic-version: 2023-06-01",
+        "x-api-key: r380-refusal-disabled-localhost-dummy-key",
+        "x-app: cli",
+        "Connection: keep-alive",
+        "Host: 127.0.0.1:58649",
+        "Accept-Encoding: gzip, deflate, br, zstd",
+        "Content-Length: 3446"
+      ],
+      "credential_is_dummy": true,
+      "accepted_as_fixture_request": false,
+      "response_status": 409,
+      "request_artifact": {
+        "path": "run-002/capture/native-request-05.raw",
+        "bytes": 4308,
+        "sha256": "750e7e4195c2adc694edb9a8d5bccb665c5dd4a550058736dbde2a82d7e2d280"
+      },
+      "response_artifact": {
+        "path": "run-002/capture/native-response-05.http.raw",
+        "bytes": 63,
+        "sha256": "596c8fb477fafdcce6730c75919e7a632ef79a3a3a66963a18411c088ce97fa2"
+      },
+      "body_bytes": 3446,
+      "body_sha256": "9d8b73984818e0bfa71cdb6d6b1b735a959ce9148599947176a3fd130bb20355",
+      "response_segments": [],
+      "request_summary": {
+        "model": "claude-sonnet-4-5",
+        "stream": true,
+        "tool_names": [
+          "Bash"
+        ]
+      }
+    },
+    {
+      "request_number": 6,
+      "peer": "127.0.0.1",
+      "request_line": "POST /v1/messages?beta=true HTTP/1.1",
+      "ordered_header_lines": [
+        "Accept: application/json",
+        "Content-Type: application/json",
+        "User-Agent: claude-cli/2.1.295 (external, sdk-cli)",
+        "X-Claude-Code-Session-Id: 00000000-0000-4000-8000-000000002952",
+        "X-Stainless-Arch: arm64",
+        "X-Stainless-Lang: js",
+        "X-Stainless-OS: MacOS",
+        "X-Stainless-Package-Version: 0.128.0",
+        "X-Stainless-Retry-Count: 0",
+        "X-Stainless-Runtime: node",
+        "X-Stainless-Runtime-Version: v26.3.0",
+        "X-Stainless-Timeout: 600",
+        "anthropic-beta: claude-code-20250219,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05",
+        "anthropic-dangerous-direct-browser-access: true",
+        "anthropic-version: 2023-06-01",
+        "x-api-key: r380-refusal-disabled-localhost-dummy-key",
+        "x-app: cli",
+        "Connection: keep-alive",
+        "Host: 127.0.0.1:58649",
+        "Accept-Encoding: gzip, deflate, br, zstd",
+        "Content-Length: 3446"
+      ],
+      "credential_is_dummy": true,
+      "accepted_as_fixture_request": false,
+      "response_status": 409,
+      "request_artifact": {
+        "path": "run-002/capture/native-request-06.raw",
+        "bytes": 4308,
+        "sha256": "750e7e4195c2adc694edb9a8d5bccb665c5dd4a550058736dbde2a82d7e2d280"
+      },
+      "response_artifact": {
+        "path": "run-002/capture/native-response-06.http.raw",
+        "bytes": 63,
+        "sha256": "596c8fb477fafdcce6730c75919e7a632ef79a3a3a66963a18411c088ce97fa2"
+      },
+      "body_bytes": 3446,
+      "body_sha256": "9d8b73984818e0bfa71cdb6d6b1b735a959ce9148599947176a3fd130bb20355",
+      "response_segments": [],
+      "request_summary": {
+        "model": "claude-sonnet-4-5",
+        "stream": true,
+        "tool_names": [
+          "Bash"
+        ]
+      }
+    }
+  ],
+  "server_errors": [],
+  "server_thread_still_alive": false,
+  "subprocess_exit_code": 143,
+  "native_request_seen": true,
+  "timed_out": true,
+  "process_timeout_seconds": 18,
+  "owned_process_group_cleanup": {
+    "pid": 18871,
+    "process_group": 18871,
+    "term_sent": true,
+    "kill_sent": false
+  },
+  "elapsed_seconds": 18.067,
+  "launch_error": null,
+  "raw_artifacts": {
+    "stdout": {
+      "path": "run-002/capture/native.stdout.raw",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "stderr": {
+      "path": "run-002/capture/native.stderr.raw",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "session_jsonl": {
+      "path": "run-002/capture/native.session.jsonl.raw",
+      "bytes": 14972,
+      "sha256": "abede92812e11a5d875186949e7bb593bc2ce50184063c8761115ce006a0364a",
+      "found": true
+    },
+    "first_tool_marker": {
+      "path": "run-002/capture/marker-first.raw",
+      "bytes": 64,
+      "sha256": "a2b20509538007afad198f2dbeb798717b13f728927750148678724451a478a9",
+      "contents": "started_ns=1792340176119632000\ncompleted_ns=1792340178164569000\n"
+    },
+    "second_tool_marker": {
+      "path": "run-002/capture/marker-second.raw",
+      "bytes": 34,
+      "sha256": "ea7ec3642bedd5f23f8f76824085b3a6f7b02358ded1aedde7375ec008f529dd",
+      "contents": "queued_ran_ns=1792340178212001000\n"
+    },
+    "marker_timestamps_ns": {
+      "first_started": 1792340176119632000,
+      "first_completed": 1792340178164569000,
+      "second_queued_ran": 1792340178212001000,
+      "refusal_final_segment_send_started": 1792340176197895000,
+      "first_started_before_refusal_final_segment": true,
+      "first_completed_before_refusal_final_segment": false,
+      "second_ran_before_refusal_final_segment": false
+    },
+    "provider_sse": {
+      "path": "capture/provider-response.sse.raw",
+      "bytes": 2092,
+      "sha256": "e229014104b365a2ce0c89402bc7f6ed7cd9ad9f0c7009ec7f909c9bf2c63f75"
+    },
+    "provider_http": {
+      "path": "capture/provider-response.http.raw",
+      "bytes": 2185,
+      "sha256": "e08a3be752eec7e8894e35693d81103f32a70bc8ba90a61a2c7ee1a203b5b382"
+    }
+  },
+  "scratch_cleanup": "only this invocation's /private/tmp/r380-refusal-tools-* directory; capture files remain under acceptance",
+  "scope": "one synthetic refusal SSE with two Bash tool blocks; not a general Native parity claim",
+  "runner_sha256": "4fc57e120a14adc780a96608b742b1c52f2d8bf7536cfb34268c90b634829029",
+  "scratch_removed": true
+}

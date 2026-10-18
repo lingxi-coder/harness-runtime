@@ -1,0 +1,124 @@
+{
+  "schema": "r380-sdk-evidence-source-bindings-v1",
+  "scope": "Acceptance-only SDK evidence; no production source is modified by this package.",
+  "candidate_sdk": {
+    "repository": "llm-client",
+    "head": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+    "source_sha256": {
+      "src/codecs/anthropic/stream.rs": "21ede35455b34fd55e470ad357a6b1b930bd93fbe6b068087859c9171cd433eb",
+      "src/codecs/anthropic/decode.rs": "13ed911a25e5c2b1a799ed92fcc78592aa73365167484a9299acd77e9c4f5a17",
+      "src/client/executor.rs": "b19c1810dd28375fd9c767b8b42877ada462f395f78a87a1f701a83ea6756bc3",
+      "src/transport/http.rs": "a0a71476ab558e9a6c6c6ae4265a3255215ab922cded23622fecb28ef9282643",
+      "src/hosting/mod.rs": "e306e816bd9be12ebcbdef0ed8e7a5b06d10025e7e9a7dba9c54bef6c694dd3c",
+      "src/codecs/anthropic/encode.rs": "272d426bd8e7d115d2b89ced2de8d986ffcce6127e72d9cbe3fdaf8ef5b6e979",
+      "src/auth/credential.rs": "cf1ec9d242176f7a7695b95d295840c40f51bf2985ae7d51d0ddaa2d2beb03b8",
+      "src/auth/mod.rs": "a4ccefa7010df1f527108268962462a01b494c112994e826e7febed892a140b4"
+    }
+  },
+  "native_source": {
+    "version": "2.1.295",
+    "artifact_sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70",
+    "full_artifact_included": false,
+    "ranges": [
+      {
+        "name": "statusless SSE parser source chunk",
+        "byte_offset": 190263488,
+        "bytes": 309067,
+        "sha256": "ab4dbd9d43b80f965be5dbd2f6a2ba069509b41ead7cfc87b2da1853c30a4abd",
+        "included": false
+      },
+      {
+        "name": "APIError source chunk",
+        "byte_offset": 186056234,
+        "bytes": 10345,
+        "sha256": "a462b175f36ed4ae079da572a7a6da5993bc4c8fd2b53f4dfbbb82e14d3a0b52",
+        "included": false
+      },
+      {
+        "name": "retained exact APIError source excerpt",
+        "path": "extracted-295-probe/api-error-source-extracted.js",
+        "bytes": 936,
+        "sha256": "bd2f088ac31f6f51814af53df83f7d6ff5eafd3c4569af7a10f422f7f8661f89"
+      }
+    ],
+    "extractor": "extract_native_ranges.py"
+  },
+  "statusless_sse_oracle": {
+    "native_oracle_version": "2.1.293",
+    "original_source": "harness-runtime/docs/parity/current-alignment/fixtures/statusless-stream-error",
+    "cases_manifest": {
+      "path": "fixtures/statusless-stream-error/cases.json",
+      "bytes": 3325,
+      "sha256": "2404353aa5c79ad191335fde78d881b0374c424ed9f6bc11cbeb444dc0c0b50f"
+    },
+    "raw_vectors": [
+      {
+        "id": "timeout-error-lone-surrogate",
+        "path": "fixtures/statusless-stream-error/native-baseline/timeout-error-lone-surrogate/http-response.sse.raw",
+        "bytes": 109,
+        "sha256": "98c28fc61f8c8a2c4c047c7020d6d285660539678c37232b64f8bab18fef3a84"
+      },
+      {
+        "id": "timeout-error-after-text-delta",
+        "path": "fixtures/statusless-stream-error/native-baseline/timeout-error-after-text-delta/http-response.sse.raw",
+        "bytes": 617,
+        "sha256": "ee203497c4c8955e87c2cdc8166f49320d642939b74cdc0ff9a227723f303ab0"
+      },
+      {
+        "id": "api-error-lone-surrogate-control",
+        "path": "fixtures/statusless-stream-error/native-baseline/api-error-lone-surrogate-control/http-response.sse.raw",
+        "bytes": 101,
+        "sha256": "7821338a1afa15cbbd93ed8eaed8f2ae262605b4827e07d046ca20c034394767"
+      }
+    ]
+  },
+  "probes": {
+    "current_public_sdk": {
+      "api": "AnthropicMessagesCodec::stream_decoder + StreamDecoder::push_bytes",
+      "manifest": "current-sdk-probe/Cargo.toml",
+      "test": "current-sdk-probe/tests/current_sdk_statusless_sse.rs",
+      "original_test_sha256": "33800018e8ece0a5c648613849e24bd3294988845ab2bd361937e10b105f001f",
+      "packaged_test_sha256": "bd72bc9d2163ebfb1501192141ec7ba0a4e4fc09d9d0f98b00fa7ba7a92b5cea",
+      "packaging_adaptation": "fixture root changed to local packaged fixtures; assertions unchanged"
+    },
+    "foundry_public_transport": {
+      "api": "LlmClientBuilder::with_transport + public chat().stream + production HttpTransport(no_proxy)",
+      "manifest": "foundry-public-transport-probe/Cargo.toml",
+      "test": "foundry-public-transport-probe/tests/foundry_public_transport.rs",
+      "original_test_sha256": "57e7d188cb496756e347998d925cadcfa1edcf8d0947f618336de6b9ec98b642",
+      "packaged_test_sha256": "57e7d188cb496756e347998d925cadcfa1edcf8d0947f618336de6b9ec98b642",
+      "packaging_adaptation": "relative path to sibling llm-client checkout only; assertions unchanged",
+      "transport_source_sha256": {
+        "src/client/executor.rs": "b19c1810dd28375fd9c767b8b42877ada462f395f78a87a1f701a83ea6756bc3",
+        "src/transport/http.rs": "a0a71476ab558e9a6c6c6ae4265a3255215ab922cded23622fecb28ef9282643",
+        "src/hosting/mod.rs": "e306e816bd9be12ebcbdef0ed8e7a5b06d10025e7e9a7dba9c54bef6c694dd3c",
+        "src/codecs/anthropic/encode.rs": "272d426bd8e7d115d2b89ced2de8d986ffcce6127e72d9cbe3fdaf8ef5b6e979",
+        "src/codecs/anthropic/stream.rs": "21ede35455b34fd55e470ad357a6b1b930bd93fbe6b068087859c9171cd433eb",
+        "src/auth/credential.rs": "cf1ec9d242176f7a7695b95d295840c40f51bf2985ae7d51d0ddaa2d2beb03b8",
+        "src/auth/mod.rs": "a4ccefa7010df1f527108268962462a01b494c112994e826e7febed892a140b4"
+      }
+    },
+    "extracted_native_source": {
+      "probe": "extracted-295-probe/extracted-295-sse-probe.mjs",
+      "packaged_probe_sha256": "004df8d3c31e3dce483f51054028501cb26c76f91fe8f14b753016398dd11d72",
+      "prior_output": "extracted-295-probe/prior-output.json",
+      "prior_output_sha256": "75f841b7dac8f97e5c3fe80b72701bca2e7fd3ecbc36c21bbe6efa57d3c4f03e",
+      "package_local_run_command": "node acceptance/matrix-closure-r379/sdk/delivery/extracted-295-probe/extracted-295-sse-probe.mjs",
+      "package_local_output": "extracted-295-probe/probe-output.json",
+      "package_local_output_sha256": "75f841b7dac8f97e5c3fe80b72701bca2e7fd3ecbc36c21bbe6efa57d3c4f03e",
+      "package_local_receipt": "receipts/extracted-295-sse-probe-node.log",
+      "package_local_receipt_sha256": "75f841b7dac8f97e5c3fe80b72701bca2e7fd3ecbc36c21bbe6efa57d3c4f03e"
+    }
+  },
+  "runtime_profile": {
+    "rust": "1.94.0",
+    "cargo_offline": true,
+    "build_jobs": 2,
+    "debug_info": 0
+  },
+  "reproduction_helper": {
+    "path": "prepare_cargo_probes.py",
+    "sha256": "7220d53cfcaa48d965222986292b3745b2fd536c91ad4de349d9780e648436ce",
+    "behavior": "verifies content manifest and exact llm-client revision; copies the two probe crates and fixtures into scratch; rewrites only scratch Cargo.toml dependency paths; preserves Cargo.lock bytes; does not invoke Cargo"
+  }
+}

@@ -224,6 +224,8 @@ mod tests {
     fn oracle_261_estimates_nested_wire_results_instead_of_display_text() {
         let message = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
@@ -265,6 +267,8 @@ mod tests {
     fn user_result(tool_use_id: ToolUseId) -> ConversationMessage {
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id,

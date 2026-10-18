@@ -1,0 +1,41 @@
+{
+  "schema": "lingxi.claude-alignment-orchestrator-current-alignment-refusal-full14-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:15:00.380335Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "package": "orchestrator",
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_refusal -- --nocapture",
+  "sandboxPermissions": "require_escalated (Root-authorized bounded loopback target)",
+  "sourceHashFiles": [
+    "r380-orchestrator-refusal-full14-sourcehashes-pre.txt",
+    "r380-orchestrator-refusal-full14-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 2330,
+  "sourceStableDuringRun": true,
+  "exitCode": 0,
+  "testsSelected": 14,
+  "testsPassed": 14,
+  "testsFailed": 0,
+  "allTestResultLines": [
+    {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "passed": 14,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "nestedChildTestResultLines": 1,
+  "log": "logs/58-orchestrator-current-alignment-refusal-full14.log",
+  "logSha256": "8f49a36e62e7d01419d1c0f4ee8a3f7521dab13d1e249195630707b4f2fd5ec2",
+  "targetExecutable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_refusal-fb371c01a8664e22"
+}

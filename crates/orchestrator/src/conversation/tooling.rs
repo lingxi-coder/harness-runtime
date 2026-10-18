@@ -483,6 +483,8 @@ impl ConversationOrchestrator {
         //    per-result twin (queryHelpers.ts:328-332).
         let tool_results_msg = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: tool_results,
             is_meta: false,

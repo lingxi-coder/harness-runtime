@@ -247,6 +247,33 @@ fn native_tbc_first_party_tf(configured_base_url: Option<&std::ffi::OsStr>) -> b
         .is_some_and(|url| url.host_str() == Some(FIRST_PARTY_API_HOST) && url.port().is_none())
 }
 
+/// Prefer the resolved profile URL because it is the endpoint this request will
+/// actually use. The canonical API host is the Native default, so leave it
+/// unconfigured when the process env is absent; that preserves the separate
+/// unknown `KXt()` branch. The process value is only a fallback when no route
+/// profile was available to the service.
+fn native_tbc_effective_base_url(
+    selected_profile_base_url: Option<&str>,
+    process_base_url: Option<&std::ffi::OsStr>,
+) -> Option<String> {
+    if let Some(base_url) = selected_profile_base_url {
+        if native_tbc_first_party_tf(Some(std::ffi::OsStr::new(base_url))) {
+            // An explicit canonical env value is equivalent to the selected
+            // canonical route and takes Native KXt's defined-URL branch. An
+            // env value for another host cannot override the URL this request
+            // actually selected.
+            if process_base_url.is_some_and(|value| !value.is_empty())
+                && process_base_url.is_some_and(|value| native_tbc_first_party_tf(Some(value)))
+            {
+                return process_base_url.map(|value| value.to_string_lossy().into_owned());
+            }
+            return None;
+        }
+        return Some(base_url.to_owned());
+    }
+    process_base_url.map(|value| value.to_string_lossy().into_owned())
+}
+
 /// Native `M.str()` trims the process environment string and returns undefined
 /// for an empty result. KXt's early path checks this parsed value, not whether
 /// the raw environment variable exists.
@@ -485,20 +512,14 @@ mod native_first_party_base_url_assumption_tests {
     }
 }
 
-fn env_truthy(name: &str) -> bool {
-    std::env::var(name).ok().is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
+fn native_js_env_truthy(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| !value.is_empty())
 }
 
-fn native_prompt_cache_bare_mode() -> bool {
-    if env_truthy("CLAUDE_CODE_SIMPLE") {
-        return true;
-    }
-    for argument in std::env::args_os() {
+fn native_bare_flag_before_separator(
+    arguments: impl IntoIterator<Item = std::ffi::OsString>,
+) -> bool {
+    for argument in arguments {
         if argument == std::ffi::OsStr::new("--") {
             break;
         }
@@ -507,6 +528,123 @@ fn native_prompt_cache_bare_mode() -> bool {
         }
     }
     false
+}
+
+fn native_prompt_cache_bare_mode_for_inputs(
+    simple_mode: Option<&std::ffi::OsStr>,
+    arguments: impl IntoIterator<Item = std::ffi::OsString>,
+) -> bool {
+    native_js_env_truthy(simple_mode) || native_bare_flag_before_separator(arguments)
+}
+
+fn native_prompt_cache_bare_mode() -> bool {
+    native_prompt_cache_bare_mode_for_inputs(
+        std::env::var_os(branding::SIMPLE_ENV).as_deref(),
+        std::env::args_os(),
+    )
+}
+
+fn native_mctc_disabled_for_inputs(
+    simple_mode: Option<&std::ffi::OsStr>,
+    disable_attachments: Option<&std::ffi::OsStr>,
+    arguments: impl IntoIterator<Item = std::ffi::OsString>,
+) -> bool {
+    native_js_env_truthy(disable_attachments)
+        || native_prompt_cache_bare_mode_for_inputs(simple_mode, arguments)
+}
+
+fn native_mctc_disabled_by_process_mode() -> bool {
+    native_mctc_disabled_for_inputs(
+        std::env::var_os(branding::SIMPLE_ENV).as_deref(),
+        std::env::var_os(branding::DISABLE_ATTACHMENTS_ENV).as_deref(),
+        std::env::args_os(),
+    )
+}
+
+#[cfg(test)]
+mod native_simple_and_route_beta_gate_tests {
+    use super::*;
+    use std::ffi::{OsStr, OsString};
+
+    fn args(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn native_simple_mode_and_bare_flag_match_source_truthiness_and_separator() {
+        assert!(native_mctc_disabled_for_inputs(
+            Some(OsStr::new("false")),
+            None,
+            args(&["lingxi"]),
+        ));
+        assert!(native_mctc_disabled_for_inputs(
+            Some(OsStr::new("0")),
+            None,
+            args(&["lingxi"]),
+        ));
+        assert!(native_mctc_disabled_for_inputs(
+            None,
+            Some(OsStr::new("false")),
+            args(&["lingxi"]),
+        ));
+        assert!(native_prompt_cache_bare_mode_for_inputs(
+            None,
+            args(&["lingxi", "--bare", "--", "--not-an-option"]),
+        ));
+        assert!(!native_prompt_cache_bare_mode_for_inputs(
+            Some(OsStr::new("")),
+            args(&["lingxi", "--", "--bare"]),
+        ));
+    }
+
+    #[test]
+    fn native_tbc_uses_the_selected_profile_endpoint_without_cross_request_state() {
+        let profile_a = native_tbc_effective_base_url(
+            Some("http://127.0.0.1:31001"),
+            Some(OsStr::new("https://env-proxy.example.test")),
+        )
+        .expect("selected request route has a URL");
+        let profile_b = native_tbc_effective_base_url(Some("http://127.0.0.1:31002"), None)
+            .expect("selected request route has a URL");
+        assert_eq!(profile_a, "http://127.0.0.1:31001");
+        assert_eq!(profile_b, "http://127.0.0.1:31002");
+        assert!(!native_tbc_first_party_tf(Some(OsStr::new(&profile_a))));
+        assert!(!native_tbc_first_party_tf(Some(OsStr::new(&profile_b))));
+
+        // The canonical resolved default keeps the no-env `KXt()` result
+        // unknown instead of treating every SDK profile as explicit env input.
+        let default_route = native_tbc_effective_base_url(Some("https://api.anthropic.com"), None);
+        assert_eq!(default_route, None);
+        assert_eq!(
+            native_tbc_first_party_kxt(false, native_tbc_first_party_tf(None)),
+            None
+        );
+        let explicit_canonical = native_tbc_effective_base_url(
+            Some("https://api.anthropic.com"),
+            Some(OsStr::new("https://api.anthropic.com")),
+        )
+        .expect("explicit canonical env is a defined Native URL");
+        assert!(native_tbc_first_party_tf(Some(OsStr::new(
+            &explicit_canonical
+        ))));
+        assert!(native_tbc_first_party_base_url_is_defined(Some(
+            OsStr::new(&explicit_canonical)
+        )));
+
+        // If no route profile exists, preserve Native's empty and whitespace
+        // environment distinctions: empty is the default; whitespace is set
+        // but fails URL validation and is not a parsed URL for KXt.
+        let empty = native_tbc_effective_base_url(None, Some(OsStr::new(""))).unwrap();
+        assert!(native_tbc_first_party_tf(Some(OsStr::new(&empty))));
+        assert!(!native_tbc_first_party_base_url_is_defined(Some(
+            OsStr::new(&empty)
+        )));
+        let whitespace = native_tbc_effective_base_url(None, Some(OsStr::new("   "))).unwrap();
+        assert!(!native_tbc_first_party_tf(Some(OsStr::new(&whitespace))));
+        assert!(!native_tbc_first_party_base_url_is_defined(Some(
+            OsStr::new(&whitespace)
+        )));
+    }
 }
 
 fn native_anthropic_unix_socket_enabled() -> bool {
@@ -4248,10 +4386,12 @@ impl ApiService {
         };
         let automatic_effort = supported && !explicit_effort && selected_is_string;
         let beta_model_identity = self.model_unsupported_identity(prepared);
-        let native_mctc_admitted = native_request_facts.is_some_and(|facts| {
-            facts.mid_conversation_tool_changes
-                && facts.mid_conversation_tool_changes_feature_gate
-        }) && self
+        let native_mctc_admitted = !native_mctc_disabled_by_process_mode()
+            && native_request_facts.is_some_and(|facts| {
+                facts.mid_conversation_tool_changes
+                    && facts.mid_conversation_tool_changes_feature_gate
+            })
+            && self
             .native_mid_conversation_tool_change_supported(
                 &prepared.route.resolved_route.request_model,
                 Some(&prepared.route.resolved_route.profile_name),
@@ -4906,8 +5046,20 @@ impl ApiService {
         let (first_party_kxt_eligible, first_party_endpoint_eligible) = if provider
             == Some(ProviderRoute::FirstParty)
         {
-            let configured_base_url = std::env::var_os("ANTHROPIC_BASE_URL");
-            let tf = native_tbc_first_party_tf(configured_base_url.as_deref());
+            let route_base_url = self
+                .client
+                .prompt_cache_profile(
+                    &prepared.route.resolved_route.request_model,
+                    Some(&prepared.route.resolved_route.profile_name),
+                )
+                .map(|profile| profile.base_url);
+            let process_base_url = std::env::var_os("ANTHROPIC_BASE_URL");
+            let configured_base_url = native_tbc_effective_base_url(
+                route_base_url.as_deref(),
+                process_base_url.as_deref(),
+            );
+            let configured_base_url = configured_base_url.as_deref().map(std::ffi::OsStr::new);
+            let tf = native_tbc_first_party_tf(configured_base_url);
             let process_assume = std::env::var_os("_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL");
             let captured_managed_assume = self
                 .native_system_prefix_snapshot()
@@ -4916,7 +5068,7 @@ impl ApiService {
                 native_tbc_first_party_assume(process_assume.as_deref(), captured_managed_assume);
             (
                 native_tbc_first_party_kxt(
-                    native_tbc_first_party_base_url_is_defined(configured_base_url.as_deref()),
+                    native_tbc_first_party_base_url_is_defined(configured_base_url),
                     tf,
                 ),
                 native_tbc_first_party_sl(tf, assume),

@@ -1,0 +1,27 @@
+{
+  "schema": "lingxi.claude-alignment-orchestrator-tool-result-persist-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:16:09.184626Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "package": "orchestrator",
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_tool_result_persist",
+  "sourceHashFiles": [
+    "r380-orchestrator-tool-result-persist-sourcehashes-pre.txt",
+    "r380-orchestrator-tool-result-persist-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 2330,
+  "sourceStableDuringRun": true,
+  "exitCode": 0,
+  "testsSelected": 2,
+  "testsPassed": 2,
+  "testsFailed": 0,
+  "log": "logs/60-orchestrator-tool-result-persist.log",
+  "logSha256": "c4dbcc077799efc112408c18fcc1057eee23d94432ac2e2e50b44555ca0fbc1a",
+  "sourceFilesChangedDuringRun": []
+}

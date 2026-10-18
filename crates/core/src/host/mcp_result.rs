@@ -1196,6 +1196,14 @@ fn source_id_matches(value: JsonValueView<'_>, id: &jsonrpc::Id) -> bool {
     }
 }
 
+fn jsonrpc_method_is(method: &jsonrpc::JsonRpcString, expected: &str) -> bool {
+    method
+        .code_units()
+        .iter()
+        .copied()
+        .eq(expected.encode_utf16())
+}
+
 fn protocol_meta_projection(params: &Utf16JsonProjection) -> Option<Utf16JsonProjection> {
     let meta = params.subprojection("/_meta").ok()?;
     let entries = meta.object_entries()?;
@@ -2091,7 +2099,7 @@ impl McpInputRequiredIo for JsonrpcMcpResultIo {
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => { progress_enabled = false; continue; },
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     };
-                    if notice.method != "notifications/progress" { continue; }
+                    if !jsonrpc_method_is(&notice.method, "notifications/progress") { continue; }
                     let Some(params) = notice.params else { continue; };
                     let Ok(params) = Utf16JsonProjection::parse(params.as_json()) else { continue; };
                     let Some(token) = params.at_pointer("").and_then(|root| root.get_property("progressToken")) else { continue; };
@@ -2149,10 +2157,12 @@ impl McpInputRequiredIo for JsonrpcMcpResultIo {
                 ))
             })?;
         let request = validate_embedded_request(&key_units, &request_value)?;
-        let capability = match request.method.as_str() {
-            "roots/list" => "roots",
-            "elicitation/create" => "elicitation",
-            _ => "sampling",
+        let capability = if jsonrpc_method_is(&request.method, "roots/list") {
+            "roots"
+        } else if jsonrpc_method_is(&request.method, "elicitation/create") {
+            "elicitation"
+        } else {
+            "sampling"
         };
         if !self
             .client_capabilities
@@ -2167,7 +2177,7 @@ impl McpInputRequiredIo for JsonrpcMcpResultIo {
                 ),
             ));
         }
-        if request.method == "elicitation/create" {
+        if jsonrpc_method_is(&request.method, "elicitation/create") {
             let mode = request
                 .params
                 .as_ref()
@@ -2191,7 +2201,7 @@ impl McpInputRequiredIo for JsonrpcMcpResultIo {
                 )));
             }
         }
-        let method = request.method.clone();
+        let method = request.method.display();
         let response = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return Err(cancelled()),

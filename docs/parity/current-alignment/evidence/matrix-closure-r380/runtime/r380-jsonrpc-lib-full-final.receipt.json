@@ -1,0 +1,42 @@
+{
+  "schema": "lingxi.claude-alignment-jsonrpc-lib-final-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:03:43Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "package": "jsonrpc",
+  "command": "cargo test --locked --offline -p jsonrpc --lib",
+  "sourceHashFiles": [
+    "r380-jsonrpc-lib-final-sourcehashes-pre.txt",
+    "r380-jsonrpc-lib-final-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 10,
+  "sourceStableDuringRun": true,
+  "sourceHashes": {
+    "crates/jsonrpc/src/connection.rs": "d7a4124ffc2c4ea6fa3428c56b2f6534ebc7dfa41fdda127cf56271ef5f72f12",
+    "Cargo.lock": "0e68e5a6f54332b205d579a6ce2e8c66975c34e10468ebebbbe79d8a40664451"
+  },
+  "exitCode": 0,
+  "testsSelected": 77,
+  "testsPassed": 77,
+  "testsFailed": 0,
+  "log": "logs/45-jsonrpc-lib-full-stable.log",
+  "logSha256": "b216623e5d1bc1f921ace65113d8066767b07a1f43f20b2892b110c4be841290",
+  "warnings": [
+    "One pre-existing unused `conn_a` variable warning in connection.rs; test suite passed."
+  ],
+  "priorUnstableRun": {
+    "log": "logs/44-jsonrpc-lib-full.log",
+    "logSha256": "a6445d78a1013ef3ad19a9acb58344fd80b04f92ab2dab12d7365362686c0d7a",
+    "testsPassed": 77,
+    "sourceStability": false,
+    "changedFile": "crates/jsonrpc/src/connection.rs",
+    "note": "Initial run passed but overlapped the final type-inference closure and documentation adjustment; the stable run above binds that final source."
+  },
+  "scope": "Full JSON-RPC library unit suite, including safe-integer ResponseError codes, JsonRpcString method preservation, and unknown-method policy behavior."
+}

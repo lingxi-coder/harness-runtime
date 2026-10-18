@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized] target(s) in 0.21s
+     Running tests/current_alignment_http_layout_293_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_http_layout_293_test-fb2d119adf2e0af9)
+
+running 2 tests
+test native_293_http_layout_is_selected_only_for_opted_in_first_party_anthropic ... ok
+test native_295_http_layout_matches_its_own_raw_header_body_and_response ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.42s
+

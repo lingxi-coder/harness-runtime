@@ -6,7 +6,6 @@ use super::{GrantProvenance, McpRegistry, OAuthDeps};
 use crate::connection::{McpConnectionState, McpServerConfig};
 use crate::oauth;
 use lingxi_core::host::{McpError, McpTransportSpec};
-use std::time::{Duration, SystemTime};
 
 /// Borrow the `oauth` config block of an SSE/HTTP spec, if present. Other
 /// transports (stdio, websocket, …) never carry OAuth → `None`.
@@ -26,6 +25,41 @@ pub(super) fn spec_url(spec: &McpTransportSpec) -> &str {
         McpTransportSpec::Sse { url, .. } | McpTransportSpec::Http { url, .. } => url,
         _ => "",
     }
+}
+
+async fn concurrent_refresh_winner_or_invalidate(
+    deps: &OAuthDeps,
+    key: &str,
+    original: &oauth::StoredTokens,
+    error: &oauth::OAuthError,
+    request_client_id: &str,
+) -> Option<oauth::StoredTokens> {
+    let scope = oauth::refresh_credential_invalidation(error)?;
+    let latest = oauth::load_tokens(&deps.storage, key).await.ok().flatten();
+    if let Some(winner) = latest
+        .as_ref()
+        .filter(|stored| stored.is_fresh_refresh_winner(deps.clock.now()))
+    {
+        return Some(winner.clone());
+    }
+    let should_invalidate = match scope {
+        oauth::CredentialInvalidation::Tokens => true,
+        oauth::CredentialInvalidation::All => latest
+            .as_ref()
+            .and_then(|stored| stored.client_id.as_deref())
+            .is_none_or(|client_id| client_id == request_client_id),
+    };
+    if should_invalidate {
+        let _ = oauth::invalidate_standard_credentials(
+            &deps.storage,
+            &deps.clock,
+            key,
+            original,
+            scope,
+        )
+        .await;
+    }
+    None
 }
 
 /// Clone `spec` with `Authorization: Bearer <token>` set in its headers map.
@@ -214,78 +248,44 @@ impl McpRegistry {
             ));
         }
 
-        // 1. Stored token, unexpired → use it.
-        // 2. Stored token, expired with a refresh token → refresh, persist.
-        // 3. No usable token → run the interactive flow, persist.
+        // Standard OAuth's SDK provider refreshes at <=300s (while a refresh
+        // token exists and step-up is not pending), then falls back to its
+        // current access token if refresh fails. XAA took its separate branch
+        // above and retains its own resolver policy.
         let token = match oauth::load_tokens(&deps.storage, &key).await? {
-            // Unexpired stored token → use it directly.
-            Some(stored) if deps.clock.now() < stored.expires_at() => stored.into_tokens(),
-            // Expired stored token.
             Some(stored) => {
-                match stored.refresh_token.clone() {
-                    Some(refresh) => {
-                        // Proactive (pre-connect) refresh: no live challenge
-                        // exists yet, so discovery uses the well-known guess.
-                        let meta = match oauth::discover_auth_server_metadata(
-                            &deps.http,
-                            spec_url(&config.spec),
-                            oauth_cfg.auth_server_metadata_url.as_deref(),
+                let now = deps.clock.now();
+                let remaining = stored.remaining_seconds(now);
+                let expired = remaining.is_some_and(|seconds| seconds <= 0.0);
+                let step_up_pending = stored.step_up_scope.is_some();
+                let should_refresh = stored.refresh_token.is_some()
+                    && !step_up_pending
+                    && remaining.is_some_and(|seconds| seconds <= 300.0);
+
+                if !should_refresh {
+                    if !expired || step_up_pending {
+                        stored.into_tokens()
+                    } else {
+                        self.run_interactive_oauth(
+                            config,
+                            oauth_cfg,
+                            &key,
+                            deps,
+                            stored.step_up_scope.as_deref(),
                             None,
                         )
-                        .await
-                        {
-                            Ok(meta) => meta,
-                            Err(error) => {
-                                oauth::emit_oauth_refresh_failure(
-                                    &telemetry_ctx,
-                                    oauth_refresh_failure_reason(&error),
-                                );
-                                return Err(error.into());
-                            }
-                        };
-                        // Prefer the client_id the stored tokens were minted
-                        // with (DCR-issued OR configured) so silent refresh
-                        // re-sends it; fall back to the configured id, then ""
-                        // (auth.ts clientInformation(), 1482-1506).
-                        let client_id = stored
-                            .client_id
-                            .clone()
-                            .or_else(|| oauth_cfg.client_id.clone())
-                            .unwrap_or_default();
-                        let refreshed = match oauth::refresh_tokens(
-                            &deps.http,
-                            &deps.clock,
-                            &meta,
-                            &client_id,
-                            None, // public client — no confidential secret to send
-                            &refresh,
-                        )
-                        .await
-                        {
-                            Ok(refreshed) => refreshed,
-                            Err(error) => {
-                                oauth::emit_oauth_refresh_failure(
-                                    &telemetry_ctx,
-                                    oauth_refresh_failure_reason(&error),
-                                );
-                                return Err(error.into());
-                            }
-                        };
-                        oauth::save_tokens_with_telemetry(
-                            &deps.storage,
-                            &deps.clock,
-                            &key,
-                            &refreshed,
-                            Some(&telemetry_ctx),
-                        )
-                        .await?;
-                        oauth::emit_oauth_refresh_success(&telemetry_ctx);
-                        refreshed
+                        .await?
                     }
-                    None => {
-                        self.run_interactive_oauth(config, oauth_cfg, &key, deps, None, None)
-                            .await?
-                    }
+                } else {
+                    self.refresh_standard_token_or_concurrent_winner(
+                        config,
+                        oauth_cfg,
+                        &key,
+                        deps,
+                        &telemetry_ctx,
+                        stored,
+                    )
+                    .await?
                 }
             }
             None => {
@@ -300,6 +300,105 @@ impl McpRegistry {
             GrantProvenance::from_tokens(&token),
         ))
     }
+
+    async fn refresh_standard_token_or_concurrent_winner(
+        &self,
+        config: &McpServerConfig,
+        oauth_cfg: &lingxi_core::host::McpOAuthConfigDto,
+        key: &str,
+        deps: &OAuthDeps,
+        telemetry_ctx: &oauth::McpOAuthTelemetryContext,
+        original: oauth::StoredTokens,
+    ) -> Result<oauth::Tokens, McpError> {
+        // The per-server lifecycle lock serializes same-process connects.
+        // Reload before refreshing so a credential rotation completed by
+        // another owner is adopted instead of replaying its old refresh token.
+        let stored = oauth::load_tokens(&deps.storage, key)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| original.clone());
+        let now = deps.clock.now();
+        if stored.is_fresh_refresh_winner(now) {
+            return Ok(stored.into_tokens());
+        }
+        let remaining = stored.remaining_seconds(now);
+        let expired = remaining.is_some_and(|seconds| seconds <= 0.0);
+        if stored.step_up_scope.is_some() {
+            return Ok(stored.into_tokens());
+        }
+        let Some(refresh) = stored.refresh_token.as_deref() else {
+            if !expired {
+                return Ok(stored.into_tokens());
+            }
+            return self
+                .run_interactive_oauth(
+                    config,
+                    oauth_cfg,
+                    key,
+                    deps,
+                    stored.step_up_scope.as_deref(),
+                    None,
+                )
+                .await;
+        };
+        let client_id = stored
+            .client_id
+            .clone()
+            .or_else(|| oauth_cfg.client_id.clone())
+            .unwrap_or_default();
+        let refresh_result = async {
+            let meta = oauth::discover_auth_server_metadata(
+                &deps.http,
+                spec_url(&config.spec),
+                oauth_cfg.auth_server_metadata_url.as_deref(),
+                None,
+            )
+            .await?;
+            oauth::refresh_standard_tokens(
+                &deps.http,
+                &deps.clock,
+                &meta,
+                &client_id,
+                refresh,
+                spec_url(&config.spec),
+            )
+            .await
+        }
+        .await;
+
+        match refresh_result {
+            Ok(refreshed) => {
+                oauth::save_tokens_with_telemetry(
+                    &deps.storage,
+                    &deps.clock,
+                    key,
+                    &refreshed,
+                    Some(telemetry_ctx),
+                )
+                .await?;
+                oauth::emit_oauth_refresh_success(telemetry_ctx);
+                Ok(refreshed)
+            }
+            Err(error) => {
+                oauth::emit_oauth_refresh_failure(
+                    telemetry_ctx,
+                    oauth_refresh_failure_reason(&error),
+                );
+                if let Some(winner) = concurrent_refresh_winner_or_invalidate(
+                    deps, key, &original, &error, &client_id,
+                )
+                .await
+                {
+                    return Ok(winner.into_tokens());
+                }
+                // Native's tokens() returns the access token captured before
+                // refresh even after invalidating persisted credentials.
+                Ok(original.into_tokens())
+            }
+        }
+    }
+
     /// Re-authenticate after a 401: refresh if a refresh token is stored, else
     /// run a fresh interactive flow, then return the spec with the new Bearer.
     /// `resource_metadata_url` (§24c) is the `resource_metadata` param parsed
@@ -365,13 +464,13 @@ impl McpRegistry {
                     .and_then(|t| t.client_id.clone())
                     .or_else(|| oauth_cfg.client_id.clone())
                     .unwrap_or_default();
-                match oauth::refresh_tokens(
+                match oauth::refresh_standard_tokens(
                     &deps.http,
                     &deps.clock,
                     &meta,
                     &client_id,
-                    None, // public client — no confidential secret to send
                     &refresh,
+                    spec_url(&config.spec),
                 )
                 .await
                 {
@@ -387,25 +486,46 @@ impl McpRegistry {
                         oauth::emit_oauth_refresh_success(&telemetry_ctx);
                         t
                     }
-                    // Refresh token rejected → fall back to a fresh flow.
-                    Err(oauth::OAuthError::RefreshRejected(_)) => {
-                        oauth::emit_oauth_refresh_failure(&telemetry_ctx, "invalid_grant");
-                        self.run_interactive_oauth(
-                            config,
-                            oauth_cfg,
-                            &key,
-                            deps,
-                            None,
-                            resource_metadata_url,
-                        )
-                        .await?
-                    }
-                    Err(e) => {
-                        oauth::emit_oauth_refresh_failure(
-                            &telemetry_ctx,
-                            oauth_refresh_failure_reason(&e),
-                        );
-                        return Err(e.into());
+                    Err(error) => {
+                        if let Some(original) = stored.as_ref() {
+                            if let Some(winner) = concurrent_refresh_winner_or_invalidate(
+                                deps, &key, original, &error, &client_id,
+                            )
+                            .await
+                            {
+                                let winner = winner.into_tokens();
+                                return Ok((
+                                    inject_bearer(
+                                        &config.spec,
+                                        winner.access_token.expose_secret(),
+                                    ),
+                                    GrantProvenance::from_tokens(&winner),
+                                ));
+                            }
+                        }
+                        match error {
+                            // invalid_grant invalidates persisted tokens before
+                            // falling back to a fresh interactive grant.
+                            oauth::OAuthError::RefreshRejected(_) => {
+                                oauth::emit_oauth_refresh_failure(&telemetry_ctx, "invalid_grant");
+                                self.run_interactive_oauth(
+                                    config,
+                                    oauth_cfg,
+                                    &key,
+                                    deps,
+                                    None,
+                                    resource_metadata_url,
+                                )
+                                .await?
+                            }
+                            error => {
+                                oauth::emit_oauth_refresh_failure(
+                                    &telemetry_ctx,
+                                    oauth_refresh_failure_reason(&error),
+                                );
+                                return Err(error.into());
+                            }
+                        }
                     }
                 }
             }
@@ -594,10 +714,8 @@ impl McpRegistry {
                     // death, buying an avoidable 401 + reauth round-trip (or
                     // a connect failure if it lapses mid-handshake).
                     let expiring_soon = s
-                        .expires_at()
-                        .duration_since(deps.clock.now())
-                        .map(|remaining| remaining <= Duration::from_secs(300))
-                        .unwrap_or(true);
+                        .remaining_seconds(deps.clock.now())
+                        .is_none_or(|remaining| remaining <= 300.0);
                     if !force_fresh && !expiring_soon {
                         return Ok(s.into_tokens());
                     }
@@ -621,21 +739,9 @@ impl McpRegistry {
                     .await
                     {
                         Ok(refreshed) => {
-                            let stored_new = oauth::StoredTokens {
-                                access_token: refreshed.access_token.expose_secret().clone(),
-                                refresh_token: refreshed
-                                    .refresh_token
-                                    .as_ref()
-                                    .map(|t| t.expose_secret().clone()),
-                                expires_at_unix: refreshed
-                                    .expires_at
-                                    .duration_since(SystemTime::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs(),
-                                client_id: Some(client_id),
-                                client_secret,
-                                step_up_scope: None,
-                            };
+                            let mut stored_new = oauth::StoredTokens::from_tokens(&refreshed);
+                            stored_new.client_id = Some(client_id);
+                            stored_new.client_secret = client_secret;
                             oauth::store_tokens(&deps.storage, &deps.clock, key, &stored_new)
                                 .await
                                 .map_err(McpError::from)?;
@@ -652,10 +758,8 @@ impl McpRegistry {
                     // token outright unless it is missing or expiring within
                     // 300s (`Err` from `duration_since` means already past).
                     let expiring_soon = s
-                        .expires_at()
-                        .duration_since(deps.clock.now())
-                        .map(|remaining| remaining <= Duration::from_secs(300))
-                        .unwrap_or(true);
+                        .remaining_seconds(deps.clock.now())
+                        .is_none_or(|remaining| remaining <= 300.0);
                     if !expiring_soon {
                         return Ok(s.into_tokens());
                     }
@@ -760,19 +864,16 @@ impl McpRegistry {
         // Persist: carry the AS confidential client_id/secret so refresh +
         // RFC-7009 revocation can authenticate the confidential client
         // (auth.ts:807-825 token-save). `expires_in` (when present) sets expiry.
-        let expires_at = match result.tokens.expires_in {
-            Some(secs) => deps.clock.now() + Duration::from_secs(secs),
+        let expires_at_millis = match result.tokens.expires_in {
+            Some(secs) => oauth::OAuthExpiry::from_expires_in(deps.clock.now(), secs as f64),
             // No expiry advertised → treat as already-stale so the next connect
             // re-runs the exchange (XAA tokens are cheap to re-mint, silent).
-            None => deps.clock.now(),
+            None => oauth::OAuthExpiry::from_system_time(deps.clock.now()),
         };
         let stored = oauth::StoredTokens {
             access_token: result.tokens.access_token.clone(),
             refresh_token: result.tokens.refresh_token.clone(),
-            expires_at_unix: expires_at
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
+            expires_at_millis,
             client_id: Some(inputs.client_id.clone()),
             client_secret: Some(inputs.client_secret.clone()),
             step_up_scope: None,

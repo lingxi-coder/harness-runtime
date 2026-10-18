@@ -428,10 +428,9 @@ pub(crate) async fn surface_rapid_refill_thrashing(orch: &ConversationOrchestrat
 /// Shared by the streaming ([`ConversationOrchestrator`] turn loop) and batched
 /// ([`surface_terminal_api_error`]) terminal arms so both paths surface
 /// byte-identical text (claude-code `claude.ts:2266/2279`, `U2e`). The refusal
-/// cyber/bio category variant, the `stop_details.explanation` clause, and the
-/// `\n\nRequest ID: …` suffix remain residuals on BOTH paths — LingXi does not
-/// thread `stop_details`/requestId into the terminal arm, so the non-cyber,
-/// no-explanation path (the common terminal) fires.
+/// The selected request model, source `stop_details`, request ID, and refused
+/// response ID are passed through by both paths so route labels and refusal
+/// details remain tied to the response being surfaced.
 #[must_use]
 pub(crate) fn terminal_api_error_text(
     model: &str,
@@ -459,9 +458,13 @@ pub(crate) fn terminal_api_error_text(
             if !interactive && (category.is_none() || category == Some("cyber")) {
                 if let Some(label) = crate::prompt::env_meta::marketing_name_for_model(model) {
                     let mut notice = if category == Some("cyber") {
-                        format!("API Error: {label}'s safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Apply to the Cyber Verification Program to reduce these interruptions. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`")
+                        format!(
+                            "API Error: {label}'s safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate cybersecurity work. Apply to the Cyber Verification Program to reduce these interruptions. Learn more: https://support.claude.com/en/articles/14604842-real-time-cyber-safeguards-on-claude\n\nDetails: `[cyber]`"
+                        )
                     } else {
-                        format!("API Error: {label} can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup")
+                        format!(
+                            "API Error: {label} can't help with this. Start a new session to continue.\n\nLearn more: https://www.anthropic.com/legal/aup"
+                        )
                     };
                     if let Some(id) = response_message_id.filter(|id| !id.is_empty()) {
                         notice.push_str(&format!("\n\nMessage ID: {id}"));
@@ -545,7 +548,9 @@ pub(crate) fn terminal_api_error_text(
                         let clause = refusal_explanation_clause(
                             stop_details.and_then(|sd| sd.explanation.as_ref()),
                         );
-                        let suffix = request_id.filter(|id| !id.is_empty()).map_or_else(String::new, |id| format!("\n\nRequest ID: {id}"));
+                        let suffix = request_id
+                            .filter(|id| !id.is_empty())
+                            .map_or_else(String::new, |id| format!("\n\nRequest ID: {id}"));
                         return Some(source_error_affixes(
                             "API Error: LingXi is unable to respond to this request, which appears to violate our Usage Policy (https://www.anthropic.com/legal/aup).",
                             &clause.string_units("").expect("source explanation clause"),
@@ -622,20 +627,18 @@ pub(super) fn refusal_explanation_clause(
 /// `None` when `stop_reason` is not one of the three error terminals.
 pub(crate) async fn surface_terminal_api_error(
     orch: &ConversationOrchestrator,
+    request_model: &str,
     stop_reason: &str,
     stop_details: Option<&llm_runtime::HistoryStopDetails>,
     response_message_id: Option<&str>,
 ) -> Option<MessageId> {
-    let (model, interactive) = {
-        let s = orch.session.lock().await;
-        (s.model.clone(), orch.prompt_is_interactive())
-    };
+    let interactive = orch.prompt_is_interactive();
     // The just-completed call's Anthropic `request-id` — for the refusal
     // message's `\nRequest ID: …` suffix (recorded by the adapter from the
     // response headers; same slot the JSONL `requestId` reads from).
     let request_id = orch.api.last_request_id();
     let text = terminal_api_error_text(
-        &model,
+        request_model,
         interactive,
         stop_reason,
         request_id.as_deref(),
@@ -674,6 +677,8 @@ pub(crate) async fn surface_terminal_api_error(
             error: Some("max_output_tokens"),
             api_error_status: None,
             inner_stop_reason: None,
+            inner_stop_details: None,
+            refused_message_id: None,
             truncated_after_output: false,
             terminal_reason: None,
         },
@@ -681,6 +686,8 @@ pub(crate) async fn surface_terminal_api_error(
             error: Some("invalid_request"),
             api_error_status: None,
             inner_stop_reason: Some("refusal"),
+            inner_stop_details: None,
+            refused_message_id: None,
             truncated_after_output: false,
             terminal_reason: None,
         },
@@ -896,8 +903,12 @@ pub(crate) fn orchestrator_error_text_source(
             max_retries,
             last_error: Some(detail),
         } => source_error_affixes(
-            &format!("Failed to provide valid structured output after {max_retries} attempts — last StructuredOutput error: "),
-            &detail.string_units("").expect("structured output error is a source string"),
+            &format!(
+                "Failed to provide valid structured output after {max_retries} attempts — last StructuredOutput error: "
+            ),
+            &detail
+                .string_units("")
+                .expect("structured output error is a source string"),
             "",
         ),
         OrchestratorError::ApiCall(error) | OrchestratorError::Streaming(error) => {
@@ -1019,8 +1030,20 @@ mod source_error_tests {
     #[test]
     fn native_293_noninteractive_refusal_matches_captured_result_text() {
         let captures = [
-            (Some("cyber"), "msg_fixed_stop_details_cyber_293", include_str!("../../../../docs/parity/current-alignment/fixtures/stop-details/native-baseline/refusal-cyber/native.stdout.raw")),
-            (None, "msg_fixed_stop_details_generic_293", include_str!("../../../../docs/parity/current-alignment/fixtures/stop-details/native-baseline/refusal-generic/native.stdout.raw")),
+            (
+                Some("cyber"),
+                "msg_fixed_stop_details_cyber_293",
+                include_str!(
+                    "../../../../docs/parity/current-alignment/fixtures/stop-details/native-baseline/refusal-cyber/native.stdout.raw"
+                ),
+            ),
+            (
+                None,
+                "msg_fixed_stop_details_generic_293",
+                include_str!(
+                    "../../../../docs/parity/current-alignment/fixtures/stop-details/native-baseline/refusal-generic/native.stdout.raw"
+                ),
+            ),
         ];
         for (category, message_id, capture) in captures {
             let native = Utf16JsonProjection::parse(capture.trim()).unwrap();

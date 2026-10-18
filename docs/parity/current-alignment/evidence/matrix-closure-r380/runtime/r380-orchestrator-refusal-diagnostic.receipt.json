@@ -1,0 +1,57 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-orchestrator-refusal-diagnostic-r380.v1",
+  "recordedAtUtc": "2026-10-18T16:29:19Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": ["--locked", "--offline"],
+  "features": [],
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_refusal",
+  "sandboxPermissions": "require_escalated",
+  "authorization": "Root authorized the bounded current_alignment_refusal target with localhost bind permission.",
+  "diagnosticOnly": true,
+  "notFinalGate": true,
+  "exitCode": 101,
+  "testsRun": false,
+  "compileErrors": [
+    {
+      "code": "E0308",
+      "file": "crates/orchestrator/src/streaming_executor.rs",
+      "lines": [794, 837],
+      "message": "Arc<ToolDispatchPublicationFence> does not match the expected Arc<dyn HookPublicationGuard> at the publication_guard assignments."
+    },
+    {
+      "code": "E0631",
+      "file": "crates/orchestrator/src/turn_loop/refusal_retry.rs",
+      "line": 57,
+      "message": "Option::is_some_and receives MediaRoute by value but route_uses_native_model_catalog takes &MediaRoute."
+    },
+    {
+      "code": "E0063",
+      "file": "crates/orchestrator/src/conversation/drivers/mod.rs",
+      "line": 4290,
+      "message": "PumpedTurn initializer is missing refusal_api_error_staged and refusal_retry_had_interrupted_tool."
+    }
+  ],
+  "compilerErrorCount": 4,
+  "warnings": [
+    {
+      "file": "crates/orchestrator/src/turn_loop.rs",
+      "line": 99,
+      "message": "unused import: NATIVE_REFUSAL_SAFETY_RETRY_USER_MESSAGE"
+    }
+  ],
+  "sourceHashFiles": [
+    "r380-refusal-target-sourcehashes-pre.txt",
+    "r380-refusal-target-sourcehashes-post.txt"
+  ],
+  "sourceHashDiff": [
+    {
+      "file": "crates/mcp/tests/oauth_flow_test.rs",
+      "detail": "Changed between pre/post hashes while Mods added/formatted integration tests; this MCP integration test file is not compiled by this Orchestrator target."
+    }
+  ],
+  "log": "logs/15-orchestrator-current-alignment-refusal.log",
+  "diagnosticExcerpt": "logs/15-orchestrator-current-alignment-refusal-diagnostics.txt",
+  "scope": "Single refusal integration-target diagnostic. Compilation failed before any test ran; do not count as a pass or final refusal gate."
+}

@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized] target(s) in 0.43s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/lingxi_core-ea4cc899672c3abd)
+
+running 1 test
+test types::messages::tests::refused_message_id_is_optional_and_preserves_exact_utf16_source ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1053 filtered out; finished in 0.00s
+

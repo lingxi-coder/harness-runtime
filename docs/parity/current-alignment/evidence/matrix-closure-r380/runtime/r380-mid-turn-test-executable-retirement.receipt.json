@@ -1,0 +1,37 @@
+{
+  "schema": "lingxi.claude-alignment-test-executable-retirement-r380.v1",
+  "recordedAtUtc": "2026-10-18T17:47:00Z",
+  "reason": "Reclaim space before the Root-authorized small JSON-RPC/MCP gates; the complete mid-turn target has a passing receipt.",
+  "passReceipt": "r380-mid-turn-input-fixed-gate.receipt.json",
+  "passLog": "logs/42-orchestrator-mid-turn-after-fix.log",
+  "passLogSha256": "3a3efb62599612ee998fab83de81a11cf9b2de00d88c83b344a9977db5cc85dd",
+  "runningPathFromPassLog": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mid_turn_input_test-8d989385fa514f96",
+  "testExecutable": {
+    "inode": 992297260,
+    "sizeBytes": 90311344,
+    "sha256": "012dbee1205775e6ee3ee807b42b9f86fa1c1c1e28e47270a32dc1ee4a114d2b",
+    "openHandles": false
+  },
+  "dependencyFileRetained": {
+    "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mid_turn_input_test-8d989385fa514f96.d",
+    "inode": 992296329,
+    "sizeBytes": 406,
+    "sha256": "5d8b008d3e3b51d645d6985749ffb730992e6b9ecb5f8d44a9bbbc6aa9a0c190",
+    "references": "crates/orchestrator/tests/mid_turn_input_test.rs"
+  },
+  "fingerprintRetained": {
+    "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/orchestrator-8d989385fa514f96/test-integration-test-mid_turn_input_test.json",
+    "sha256": "cbb036bbd25e898ebc613042558496afdfef0cf388c91de1de9e1bb2baa6f344",
+    "targetMarkerSha256": "ccfc9e2f1ff094a36892cf0d82baf33b4484933a6ade03d2ba05ccbcf03b72b0"
+  },
+  "deletion": {
+    "scope": "Only the exact passing test executable listed above; .d and fingerprint records retained.",
+    "authorizedBy": "Root preauthorization for retiring a passing independent test target after receipt and exact identity/open-handle checks.",
+    "deletedSuccessfully": true,
+    "verifiedExecutableAbsent": true,
+    "verifiedDependencyFileRetained": true,
+    "verifiedFingerprintRetained": true,
+    "freeKiBBefore": 546412,
+    "freeKiBAfter": 629828
+  }
+}

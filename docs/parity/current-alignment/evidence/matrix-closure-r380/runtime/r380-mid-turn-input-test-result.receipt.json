@@ -1,0 +1,52 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-mid-turn-input-test-result-r380.v1",
+  "recordedAtUtc": "2026-10-18T17:38:00Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "command": "cargo test --locked --offline -p orchestrator --test mid_turn_input_test",
+  "sourceHashFiles": [
+    "r380-mid-turn-retry-sourcehashes-pre.txt",
+    "r380-mid-turn-retry-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 110,
+  "sourceStableDuringRun": true,
+  "exitCode": 101,
+  "testsSelected": 12,
+  "testsPassed": 10,
+  "testsFailed": 2,
+  "passed": [
+    "the_batched_path_has_no_late_drain",
+    "no_source_is_noop_only_seed_prompt_reaches_model",
+    "mid_turn_source_injects_queued_text_into_first_model_call",
+    "mid_turn_input_is_preserved_when_max_turns_ends_streaming_loop",
+    "mid_turn_input_arriving_during_final_response_continues_the_turn",
+    "only_the_non_cancelable_batched_entry_drains_at_the_top_of_its_loop",
+    "a_tool_requested_end_does_not_take_the_late_drain",
+    "service_shutdown_abort_injects_shutdown_discriminator",
+    "now_command_abort_does_not_inject_interrupt_message",
+    "user_interrupt_default_injects_interrupt_message"
+  ],
+  "failures": [
+    {
+      "test": "batched_pre_model_shutdown_emits_the_same_shutdown_discriminator",
+      "category": "batched_shutdown_marker",
+      "location": "mid_turn_input_test.rs:616",
+      "detail": "Batched and streaming cancellation do not expose the same shutdown marker."
+    },
+    {
+      "test": "cold_shutdown_redelivery_reuses_the_original_user_row",
+      "category": "cold_resume_duplicate_user_row",
+      "location": "mid_turn_input_test.rs:677",
+      "detail": "Observed two rows with the UUID where cold redelivery expected one."
+    }
+  ],
+  "log": "logs/39-orchestrator-mid-turn-input-retry.log",
+  "logSha256": "1e314e70ccd8060f6db1b39717d275aee3218eb346ea811b201df264f0b09536",
+  "scope": "Orchestrator mid-turn input integration target; retain executable because two assertions failed."
+}

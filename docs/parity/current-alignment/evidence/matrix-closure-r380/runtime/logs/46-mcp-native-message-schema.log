@@ -1,0 +1,66 @@
+$ source '/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/frozen-build-env.sh' && cargo test --locked --offline -p mcp --lib native_message_schema
+   Compiling json-projection v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/json-projection)
+   Compiling rooted-fs v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/rooted-fs)
+   Compiling device-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/device-api)
+   Compiling jsonrpc v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/jsonrpc)
+   Compiling mcp-wire v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp-wire)
+   Compiling branding v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/branding)
+   Compiling core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+   Compiling telemetry v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry)
+   Compiling secret v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/secret)
+   Compiling llm-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime)
+   Compiling migrations v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/migrations)
+   Compiling mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp)
+error[E0308]: mismatched types
+    --> crates/mcp/src/client.rs:2486:26
+     |
+2486 |             if r.code == JSONRPC_INVALID_PARAMS
+     |                          ^^^^^^^^^^^^^^^^^^^^^^ expected `i64`, found `i32`
+
+error[E0277]: can't compare `i64` with `i32`
+    --> crates/mcp/src/client.rs:2486:23
+     |
+2486 |             if r.code == JSONRPC_INVALID_PARAMS
+     |                       ^^ no implementation for `i64 == i32`
+     |
+     = help: the trait `PartialEq<i32>` is not implemented for `i64`
+help: the following other types implement trait `PartialEq<Rhs>`
+    --> /Users/luolingfeng/.rustup/toolchains/1.94.0-aarch64-apple-darwin/lib/rustlib/src/rust/library/core/src/cmp.rs:1868:13
+     |
+1868 |               impl const PartialEq for $t {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^ `i64` implements `PartialEq`
+...
+1890 | /     partial_eq_impl! {
+1891 | |         bool char usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f16 f32 f64 f128
+1892 | |     }
+     | |_____- in this macro invocation
+     |
+    ::: /Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/cargo-home/registry/src/index.crates.io-1949cf8c6b5b557f/serde_json-1.0.150/src/value/partial_eq.rs:76:13
+     |
+  76 |               impl PartialEq<Value> for $ty {
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `i64` implements `PartialEq<serde_json::Value>`
+...
+  97 | / partialeq_numeric! {
+  98 | |     eq_i64[i8 i16 i32 i64 isize]
+  99 | |     eq_u64[u8 u16 u32 u64 usize]
+ 100 | |     eq_f32[f32]
+ 101 | |     eq_f64[f64]
+ 102 | |     eq_bool[bool]
+ 103 | | }
+     | |_- in this macro invocation
+     = note: this error originates in the macro `partial_eq_impl` which comes from the expansion of the macro `partialeq_numeric` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0599]: no method named `code_units` found for struct `lingxi_core::types::utf16_json::Utf16JsonProjection` in the current scope
+    --> crates/mcp/src/registry/tests/tests.rs:4413:10
+     |
+4411 |       assert!(notification
+     |  _____________-
+4412 | |         .method
+4413 | |         .code_units()
+     | |         -^^^^^^^^^^ method not found in `lingxi_core::types::utf16_json::Utf16JsonProjection`
+     | |_________|
+     |
+
+Some errors have detailed explanations: E0277, E0308, E0599.
+For more information about an error, try `rustc --explain E0277`.
+error: could not compile `mcp` (lib test) due to 3 previous errors

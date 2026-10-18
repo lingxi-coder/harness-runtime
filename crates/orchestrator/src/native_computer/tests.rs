@@ -1004,6 +1004,7 @@ impl Fixture {
                 query_history: vec![],
                 assistant_message,
                 same_turn_tool_uses: vec![],
+                refusal_call_boundary: None,
             },
             None,
             self.fence(),
@@ -1057,6 +1058,8 @@ impl Fixture {
             final_model_result(&self.orch, &content).await.unwrap();
             let message = ConversationMessage::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id: MessageId::new(),
                 content,
                 is_meta: false,
@@ -2993,6 +2996,8 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                 fixture.orch.session.lock().await.history.push(later);
                 let exact = ConversationMessage::User {
                     api_message_override: None,
+                    interrupted_by_shutdown: None,
+                    refused_message_id: None,
                     id: MessageId::new(),
                     is_meta: false,
                     is_compact_summary: false,
@@ -3012,6 +3017,8 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                 fixture.orch.session.lock().await.history.push(exact);
                 let derived = ConversationMessage::User {
                     api_message_override: None,
+                    interrupted_by_shutdown: None,
+                    refused_message_id: None,
                     id: MessageId::new(),
                     is_meta: true,
                     is_compact_summary: false,

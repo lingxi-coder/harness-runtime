@@ -1,0 +1,32 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-orchestrator-refusal-exact-retest-r380.v1",
+  "recordedAtUtc": "2026-10-18T17:28:52Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_refusal native_same_model_refusal_retry_precedes_configured_refusal_fallback -- --exact --nocapture",
+  "sandboxPermissions": "require_escalated; Root authorized the exact same-target repair loop",
+  "sourceHashFiles": [
+    "r380-refusal-fallback-exact-sourcehashes-pre.txt",
+    "r380-refusal-fallback-exact-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 31,
+  "sourceStableDuringRun": true,
+  "onlyDifferenceFromPriorFullTarget": "crates/orchestrator/tests/current_alignment_refusal.rs changed the expected event variant from SystemNotice to Text; production source hashes remain identical.",
+  "exitCode": 0,
+  "testsSelected": 1,
+  "testsPassed": 1,
+  "testsFailed": 0,
+  "passed": [
+    "native_same_model_refusal_retry_precedes_configured_refusal_fallback"
+  ],
+  "log": "logs/30-orchestrator-refusal-fallback-exact.log",
+  "logSha256": "b5421f492f747e2814c05afd0ad5cd8c98a4e36560a03eb32a16b3a4bf2fe6d9",
+  "priorFullTarget": "r380-orchestrator-refusal-final-test-failure-fallback-notice.receipt.json",
+  "aggregateInterpretation": "The prior 13-test run passed 12/13 against unchanged production sources; this exact retest passed the one corrected assertion after a test-only event-variant correction. Do not report this as one 13/13 execution.",
+  "scope": "Exact retest for the sole previously failing configured-fallback assertion."
+}

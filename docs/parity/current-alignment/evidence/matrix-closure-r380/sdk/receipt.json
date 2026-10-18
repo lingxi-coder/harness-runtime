@@ -1,0 +1,71 @@
+{
+  "schema": "r380-sdk-evidence-receipt-v1",
+  "candidate_sdk_head": "a363c5b3a237d53eea12c3abfb3b98648ef15d3e",
+  "runs": [
+    {
+      "id": "current-public-sdk-statusless-sse-r380",
+      "status": "passed",
+      "tests": "1 passed; 3 fixed vectors",
+      "scope": "current public SDK codec/decoder over exact Native 2.1.293 raw SSE inputs",
+      "raw_receipt": "receipts/current-sdk-statusless-sse-r380-pass.log",
+      "raw_receipt_sha256": "ba6e50d8db865f3812c8ae23aa3f7d12c30b816910171283a14cfedcea97a4e2",
+      "initial_attempt": {
+        "status": "failed_probe_assertion",
+        "meaning": "probe treated raw ProviderEvent(message_start) as an unexpected normalized event; no production defect established",
+        "raw_receipt": "receipts/current-sdk-statusless-sse-initial-failure.log",
+        "sha256": "7a0caf2cbb113b8ca731c70692b4195b938f7e77ee277024a76ae1adf6da0b5e"
+      },
+      "vectors": [
+        "timeout-error-lone-surrogate",
+        "timeout-error-after-text-delta",
+        "api-error-lone-surrogate-control"
+      ]
+    },
+    {
+      "id": "foundry-public-transport-r380",
+      "status": "passed",
+      "tests": "1 passed; exactly one localhost HTTP exchange",
+      "scope": "current public SDK Foundry route through production HttpTransport(no_proxy), explicit dummy key, fixed SSE response",
+      "receipt": "foundry-public-transport-probe/public-output.json",
+      "raw_request": "foundry-public-transport-probe/raw-request.http",
+      "raw_response": "foundry-public-transport-probe/raw-response.http",
+      "raw_receipt": "receipts/foundry-public-transport-r380-pass.log",
+      "raw_receipt_sha256": "5c6d827384e1156a82231a53522e2ae5b06ddec4245ea12e910040450c65b4f6",
+      "initial_attempt": {
+        "status": "failed_probe_assertion",
+        "meaning": "expected raw message_start ProviderEvent, while localhost profile normalizes it to Start; not a production defect",
+        "raw_receipt": "receipts/foundry-public-transport-r380-initial-failure.log",
+        "sha256": "39f11e39b5f10f6ed3cc2715f50bbf79eadf2bc0deeeafda77ab2029d0daaa06"
+      },
+      "limits": [
+        "localhost only",
+        "no external provider traffic",
+        "no Native parity claim",
+        "one route/request only"
+      ]
+    },
+    {
+      "id": "extracted-native-295-sse-parser-and-apierror",
+      "status": "passed_package_local_extracted_source_execution",
+      "vectors": 3,
+      "scope": "verified extracted Native 2.1.295 source fragments exercised on the fixed Native 2.1.293 SSE fixtures; not a public Native capture",
+      "probe": "extracted-295-probe/extracted-295-sse-probe.mjs",
+      "prior_output": "extracted-295-probe/probe-output.json",
+      "prior_output_sha256": "75f841b7dac8f97e5c3fe80b72701bca2e7fd3ecbc36c21bbe6efa57d3c4f03e",
+      "tests": "3 vectors passed during package-local Node verification",
+      "raw_receipt": "receipts/extracted-295-sse-probe-node.log",
+      "raw_receipt_sha256": "75f841b7dac8f97e5c3fe80b72701bca2e7fd3ecbc36c21bbe6efa57d3c4f03e",
+      "run_command": "node acceptance/matrix-closure-r379/sdk/delivery/extracted-295-probe/extracted-295-sse-probe.mjs"
+    }
+  ],
+  "limits": [
+    "No SDK production source changed for these probes.",
+    "No Cargo or Native process was run while assembling this delivery package.",
+    "Original failed assertion receipts remain failures and are not relabeled as passes."
+  ],
+  "reproduction_helper": {
+    "path": "prepare_cargo_probes.py",
+    "sha256": "7220d53cfcaa48d965222986292b3745b2fd536c91ad4de349d9780e648436ce",
+    "behavior": "verifies content manifest and exact llm-client revision; copies the two probe crates and fixtures into scratch; rewrites only scratch Cargo.toml dependency paths; preserves Cargo.lock bytes; does not invoke Cargo"
+  }
+}

@@ -254,6 +254,8 @@ async fn merged_session_append_rewrites_content_without_forging_tool_identity() 
 
     let result = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolResult {
             tool_use_id: tool_use_id.clone(),

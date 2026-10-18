@@ -1,0 +1,85 @@
+   Compiling futures-util v0.3.32
+   Compiling tokio v1.52.3
+   Compiling ring v0.17.14
+   Compiling tokio-util v0.7.18
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling rustls-webpki v0.103.15
+   Compiling rustls v0.23.45
+   Compiling zstd-safe v7.2.4
+   Compiling idna v1.1.0
+   Compiling tokio-rustls v0.26.4
+   Compiling h2 v0.4.19
+   Compiling futures-executor v0.3.32
+   Compiling hyper v1.9.0
+   Compiling tower v0.5.3
+   Compiling hyper-util v0.1.20
+   Compiling url v2.5.8
+   Compiling regex-automata v0.4.14
+   Compiling zstd v0.13.3
+   Compiling compression-codecs v0.4.39
+   Compiling async-compression v0.4.44
+   Compiling opentelemetry v0.31.0
+   Compiling uuid v1.10.0
+   Compiling serde_urlencoded v0.7.1
+   Compiling tower-http v0.6.11
+   Compiling thiserror-impl v1.0.69
+   Compiling pin-project-internal v1.1.13
+   Compiling thiserror v1.0.69
+   Compiling pin-project v1.1.13
+   Compiling prost-derive v0.14.4
+   Compiling opentelemetry_sdk v0.31.0
+   Compiling fancy-regex v0.18.0
+   Compiling json-projection v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/json-projection)
+   Compiling num-bigint v0.4.6
+   Compiling hyper-timeout v0.5.2
+   Compiling futures v0.3.32
+   Compiling tokio-stream v0.1.18
+   Compiling ref-cast-impl v1.0.25
+   Compiling tonic v0.14.2
+   Compiling ref-cast v1.0.25
+   Compiling num-rational v0.4.2
+   Compiling prost v0.14.4
+   Compiling protobuf-support v3.7.2
+   Compiling hyper-rustls v0.27.5
+   Compiling lingxi-hyper v1.9.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling borrow-or-share v0.2.4
+   Compiling schemars v0.8.22
+   Compiling fluent-uri v0.4.1
+   Compiling lingxi-hyper-util v0.1.21 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling rooted-fs v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/rooted-fs)
+   Compiling num v0.4.3
+   Compiling reqwest v0.12.28
+   Compiling protobuf v3.7.2
+   Compiling figment v0.10.19
+   Compiling tonic-prost v0.14.5
+   Compiling ahash v0.8.12
+   Compiling jsonrpc v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/jsonrpc)
+   Compiling mcp-wire v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp-wire)
+   Compiling device-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/device-api)
+   Compiling regex v1.12.3
+   Compiling core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+   Compiling referencing v0.46.3
+   Compiling opentelemetry-proto v0.31.0
+   Compiling prometheus v0.14.0
+   Compiling opentelemetry-http v0.31.0
+   Compiling fraction v0.15.4
+   Compiling lingxi-hyper-rustls v0.27.5 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling email_address v0.2.9
+   Compiling lingxi-llm-client v0.3.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling jsonschema v0.46.3
+   Compiling lingxi-reqwest v0.12.29 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling opentelemetry-otlp v0.31.1
+   Compiling opentelemetry-prometheus v0.31.0
+   Compiling opentelemetry-stdout v0.31.0
+   Compiling telemetry-macros v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry-macros)
+   Compiling secret v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/secret)
+   Compiling telemetry v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry)
+   Compiling llm-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime)
+    Finished `test` profile [unoptimized] target(s) in 1m 16s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/llm_runtime-360df690c250a789)
+
+running 1 test
+test service::native_simple_and_route_beta_gate_tests::native_simple_mode_and_bare_flag_match_source_truthiness_and_separator ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1418 filtered out; finished in 0.00s
+

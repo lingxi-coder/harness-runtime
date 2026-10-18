@@ -1898,6 +1898,8 @@ fn regular_ingress_has_token_and_later_tool_continuation_uses_false_token_path()
                     };
                     let tool_result = ConversationMessage::User {
                         api_message_override: None,
+                        interrupted_by_shutdown: None,
+            refused_message_id: None,
                         id: MessageId::new(),
                         content: vec![ContentBlock::ToolResult {
                             tool_use_id,
@@ -2067,6 +2069,8 @@ fn auto_compaction_consumes_pending_prompt_before_nar_finalize_without_resurrect
                 };
                 let tool_result = ConversationMessage::User {
                     api_message_override: None,
+                    interrupted_by_shutdown: None,
+            refused_message_id: None,
                     id: MessageId::new(),
                     content: vec![ContentBlock::ToolResult {
                         tool_use_id,

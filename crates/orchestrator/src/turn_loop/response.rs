@@ -27,6 +27,7 @@ fn citations_to_core(
 /// escalation: budget changes require selected-route accounting facts.
 pub(super) async fn handle_max_output_tokens(
     orch: &ConversationOrchestrator,
+    request_model: &str,
     assistant_id: MessageId,
     state: &mut RecoveryState,
     malformed_tool: bool,
@@ -71,7 +72,8 @@ pub(super) async fn handle_max_output_tokens(
 
     // Recovery exhausted — surface the byte-locked `API Error: …` cap message
     // (the streaming twin does this in its terminal arm), then end the turn.
-    let surfaced_id = surface_terminal_api_error(orch, "max_tokens", None, None).await;
+    let surfaced_id =
+        surface_terminal_api_error(orch, request_model, "max_tokens", None, None).await;
     Ok(TurnStepOutcome::Ended {
         final_message_id: surfaced_id.unwrap_or(assistant_id),
         stop_reason: "max_tokens".to_string(),

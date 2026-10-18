@@ -903,12 +903,19 @@ pub(super) fn listen_reopen_payload(
     }
 }
 
-pub(super) fn notification_kind(method: &str) -> Option<McpCatalogKind> {
-    match method {
-        "notifications/tools/list_changed" => Some(McpCatalogKind::Tools),
-        "notifications/prompts/list_changed" => Some(McpCatalogKind::Prompts),
-        "notifications/resources/list_changed" => Some(McpCatalogKind::Resources),
-        _ => None,
+fn method_is(method: &[u16], expected: &str) -> bool {
+    method.iter().copied().eq(expected.encode_utf16())
+}
+
+pub(super) fn notification_kind(method: &[u16]) -> Option<McpCatalogKind> {
+    if method_is(method, "notifications/tools/list_changed") {
+        Some(McpCatalogKind::Tools)
+    } else if method_is(method, "notifications/prompts/list_changed") {
+        Some(McpCatalogKind::Prompts)
+    } else if method_is(method, "notifications/resources/list_changed") {
+        Some(McpCatalogKind::Resources)
+    } else {
+        None
     }
 }
 
@@ -916,7 +923,7 @@ pub(super) fn forward_catalog_change(
     changes: &broadcast::Sender<McpCatalogChanged>,
     server_name: &str,
     connection_id: McpConnectionId,
-    method: &str,
+    method: &[u16],
     telemetry_cause: Option<&'static str>,
 ) {
     let Some(kind) = notification_kind(method) else {

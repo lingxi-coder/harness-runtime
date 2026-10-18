@@ -1415,8 +1415,12 @@ impl Default for McpToolResultDto {
 /// Arbitrary notification pushed by a server (logging, progress, etc).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpNotificationDto {
-    /// JSON-RPC method.
-    pub method: String,
+    /// JSON-RPC method with its exact source UTF-16 code units.
+    #[serde(
+        serialize_with = "serialize_required_mcp_string",
+        deserialize_with = "deserialize_required_mcp_string"
+    )]
+    pub method: json_projection::Utf16JsonProjection,
     /// Method-specific parameters.
     #[serde(with = "json_projection::raw_json_serde")]
     pub params: json_projection::Utf16JsonProjection,
@@ -1954,13 +1958,25 @@ mod tests {
         let mut params_units: Vec<u16> = "{\"x\":\"".encode_utf16().collect();
         params_units.push(0xd800);
         params_units.extend("\"}".encode_utf16());
+        let mut method_units: Vec<u16> = "\"notifications/message".encode_utf16().collect();
+        method_units.push(0xd800);
+        method_units.extend("\"".encode_utf16());
         let notification = super::McpNotificationDto {
-            method: "notifications/message".into(),
+            method: project_utf16(&method_units),
             params: project_utf16(&params_units),
         };
         let encoded = serde_json::to_string(&notification).expect("serialize notification");
         let decoded: super::McpNotificationDto =
             serde_json::from_str(&encoded).expect("deserialize notification");
+        assert_eq!(
+            decoded.method.string_units(""),
+            Some(
+                "notifications/message"
+                    .encode_utf16()
+                    .chain([0xd800])
+                    .collect()
+            )
+        );
         assert_eq!(decoded.params.string_units("/x"), Some(vec![0xd800]));
     }
 

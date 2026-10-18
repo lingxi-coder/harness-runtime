@@ -1,0 +1,66 @@
+   Compiling mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp)
+   Compiling tool-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tool-api)
+   Compiling sidequery v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sidequery)
+   Compiling tool-file v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/file)
+   Compiling memory v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/memory)
+   Compiling agent v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/agent)
+   Compiling tool-workflow v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/workflow)
+   Compiling tool-mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/mcp)
+   Compiling tasks v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tasks)
+   Compiling platform-posix v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/posix)
+   Compiling cron v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/cron)
+   Compiling tool-cron v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/cron)
+   Compiling tool-task v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/task)
+   Compiling compaction v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/compaction)
+   Compiling tool-skill v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/skill)
+   Compiling orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+warning: method `inject_user_message` is never used
+   --> crates/orchestrator/src/conversation/drivers/mod.rs:616:25
+    |
+397 | impl ConversationOrchestrator {
+    | ----------------------------- method in this implementation
+...
+616 |     pub(super) async fn inject_user_message(&self, text: &str) {
+    |                         ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `orchestrator` (lib) generated 1 warning
+error[E0616]: field `session` of struct `ConversationOrchestrator` is private
+    --> crates/orchestrator/tests/current_alignment_refusal.rs:1550:44
+     |
+1550 |         let history = harness.orchestrator.session.lock().await.history.clone();
+     |                                            ^^^^^^^ private field
+     |
+help: a method `session` also exists, call it with parentheses
+     |
+1550 |         let history = harness.orchestrator.session().lock().await.history.clone();
+     |                                                   ++
+
+error[E0282]: type annotations needed for `(_, _, {type error})`
+    --> crates/orchestrator/tests/current_alignment_refusal.rs:1572:33
+     |
+1572 |             results.iter().any(|(id, text, is_error)| {
+     |                                 ^^^^^^^^^^^^^^^^^^^^
+1573 |                 id == &completed_id && !is_error && text.contains("ok")
+     |                                                     ---- type must be known at this point
+     |
+help: consider giving this closure parameter an explicit type, where the placeholders `_` are specified
+     |
+1572 |             results.iter().any(|(id, text, is_error): (_, _, _)| {
+     |                                                     +++++++++++
+
+error[E0616]: field `session` of struct `ConversationOrchestrator` is private
+    --> crates/orchestrator/tests/current_alignment_refusal.rs:1704:44
+     |
+1704 |         let history = harness.orchestrator.session.lock().await.history.clone();
+     |                                            ^^^^^^^ private field
+     |
+help: a method `session` also exists, call it with parentheses
+     |
+1704 |         let history = harness.orchestrator.session().lock().await.history.clone();
+     |                                                   ++
+
+Some errors have detailed explanations: E0282, E0616.
+For more information about an error, try `rustc --explain E0282`.
+error: could not compile `orchestrator` (test "current_alignment_refusal") due to 3 previous errors

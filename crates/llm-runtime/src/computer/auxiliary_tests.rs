@@ -12,6 +12,8 @@ use serde_json::json;
 fn user(text: &str) -> ConversationMessage {
     ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: MessageId::new(),
         content: vec![ContentBlock::Text {
             text: text.into(),
@@ -316,6 +318,8 @@ async fn auxiliary_history_conversion_does_not_use_the_parent_continuation_bound
 fn history_user(content: Vec<ContentBlock>) -> ConversationMessage {
     ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: MessageId::new(),
         content,
         is_meta: false,

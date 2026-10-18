@@ -1,0 +1,19 @@
+   Compiling orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+error[E0433]: failed to resolve: could not find `RefusalToolCallBoundary` in `turn_loop`
+   --> crates/orchestrator/src/streaming_executor.rs:481:48
+    |
+481 |                     Arc::new(crate::turn_loop::RefusalToolCallBoundary::default());
+    |                                                ^^^^^^^^^^^^^^^^^^^^^^^ could not find `RefusalToolCallBoundary` in `turn_loop`
+    |
+help: consider importing this struct
+    |
+  6 + use crate::turn_loop::tool_dispatch::RefusalToolCallBoundary;
+    |
+help: if you import `RefusalToolCallBoundary`, refer to it directly
+    |
+481 -                     Arc::new(crate::turn_loop::RefusalToolCallBoundary::default());
+481 +                     Arc::new(RefusalToolCallBoundary::default());
+    |
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `orchestrator` (lib) due to 1 previous error

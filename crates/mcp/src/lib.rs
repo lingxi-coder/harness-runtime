@@ -85,6 +85,7 @@ pub mod inbound;
 pub mod initialize_params;
 pub mod json_config;
 pub mod mcp_output_storage;
+mod native_message_schema;
 pub mod negotiation;
 pub mod normalization;
 pub mod oauth;
@@ -139,6 +140,7 @@ pub use mcp_output_storage::{
     map_resource_contents, persist_binary_content, Base64Error, PersistBinaryResult,
     RawResourceContent as RawResourceContentRich,
 };
+pub use native_message_schema::decode_native_mcp_frame;
 pub use raw_conn::RawConnectionProvider;
 pub use registry::{
     McpCatalogChanged, McpCatalogKind, McpRegistry, McpToolOutputSchemaParserHandle,

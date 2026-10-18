@@ -1,0 +1,19 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-sourcehash-r380.v1",
+  "recordedAtUtc": "2026-10-18T15:47:56Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "scopedWorkingDiffSha256": "4b40fb5aec860dc139709d402cefadfedb8fddc9bf44f7e16b0be92a90de05a9",
+  "files": {
+    "crates/core/src/types/messages.rs": "c069e25efd8493056a42a82e1e93cc9614f2062615863ea9b07519ba56b51bb8",
+    "crates/session/src/jsonl/schema.rs": "e78d338076c33053d4710d9dfbeb4664fd4441e50e52a8970c543881d5a4880b",
+    "crates/session/src/jsonl/exact_json.rs": "55f05ec16b88a0d12166f1abab55e248e3f9d7cd7e93ff9f80e1c643e0977ceb",
+    "crates/json-projection/src/lib.rs": "5b8f1b574ce232290b8d206189eb7a53d3dda83fcdb16a62f459f79d8fa2f98b",
+    "Cargo.lock": "2f9456e8b1d289bfc8dab0005a5ba9a865b7ccf044a16221a9ec214a9fec5409"
+  },
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ]
+}

@@ -1,0 +1,109 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-orchestrator-refusal-test-failures-r380.v1",
+  "recordedAtUtc": "2026-10-18T16:41:12Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": ["--locked", "--offline"],
+  "features": [],
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_refusal",
+  "sandboxPermissions": "require_escalated",
+  "authorization": "Root preauthorized the same-target refusal fix/test loop with localhost access.",
+  "sourceStableDuringRun": true,
+  "sourceHashFiles": [
+    "r380-refusal-retry-sourcehashes-pre.txt",
+    "r380-refusal-retry-sourcehashes-post.txt"
+  ],
+  "exitCode": 101,
+  "testsSelected": 10,
+  "testsPassed": 1,
+  "testsFailed": 9,
+  "passed": [
+    "refusal_safety_classifier_retry_stays_on_native_model_routes"
+  ],
+  "failures": [
+    {
+      "test": "refusal_safety_retry_marker_does_not_suppress_a_later_user_turn",
+      "category": "test_fixture_transform",
+      "file": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "line": 293,
+      "message": "The helper parses a captured message_delta containing the lone-surrogate escape \\ud800 with serde_json::Value and fails with unexpected end of hex escape."
+    },
+    {
+      "test": "refusal_safety_retry_matches_native_query_source_classifier",
+      "category": "test_fixture_transform",
+      "file": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "line": 293,
+      "message": "The helper fails while parsing the captured message_delta explanation's lone-surrogate escape."
+    },
+    {
+      "test": "refusal_safety_retry_is_skipped_for_auxiliary_queries",
+      "category": "test_fixture_transform",
+      "file": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "line": 293,
+      "message": "The helper fails while parsing the captured message_delta explanation's lone-surrogate escape."
+    },
+    {
+      "test": "spent_native_refusal_retry_runs_later_tool_uses_and_follows_up",
+      "category": "test_fixture_transform",
+      "file": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "line": 293,
+      "message": "The helper fails while parsing the captured message_delta explanation's lone-surrogate escape."
+    },
+    {
+      "test": "native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl",
+      "category": "test_harness_limit",
+      "file": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "line": 1112,
+      "message": "Observed one completed turn but expected two; this test constructs OrchestratorConfig with max_turns: 1 while asserting Native's second request."
+    },
+    {
+      "test": "tool_bearing_native_refusal_keeps_completed_and_never_dispatches_queued_calls",
+      "category": "test_harness_limit",
+      "file": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "line": 1546,
+      "message": "Observed one request but expected the same-model retry as request two; it calls native_sequence_harness, which sets max_turns to 1."
+    },
+    {
+      "test": "native_same_model_refusal_retry_precedes_configured_refusal_fallback",
+      "category": "test_harness_limit",
+      "file": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "line": 1817,
+      "message": "The sequence reached MaxTurnsReached { max_turns: 1 }; the helper's default max_turns is 1 although the test supplies three responses."
+    },
+    {
+      "test": "refusal_safety_retry_respects_disable_environment_flag",
+      "category": "source_order_or_oracle_review",
+      "file": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "line": 917,
+      "message": "The test's child fails assert_refusal_error_precedes_tool_results for CompletedRefusalProbe, which completed before the final refusal. The available Native oracle only establishes order for tool results pending at final refusal; source classification is required before changing the expectation or production path."
+    },
+    {
+      "test": "auxiliary_native_tool_refusal_runs_queued_work_and_follows_up",
+      "category": "source_order_or_oracle_review",
+      "file": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "line": 917,
+      "message": "The persisted API-error row was not before every tool result. The Native Ko=false oracle establishes APIError-before-result only for calls still pending at final refusal; distinguish already-completed results from queued/pending results using the source loop semantics before changing the assertion or production code."
+    }
+  ],
+  "nativeToolBearingOracle": {
+    "path": "acceptance/refusal-disabled-tool-boundary-r380/run-002/capture/native.session.jsonl.raw",
+    "sha256": "abede92812e11a5d875186949e7bb593bc2ce50184063c8761115ce006a0364a",
+    "version": "2.1.295",
+    "refusalGate": "Ko=false",
+    "scopeLimit": "Final-refusal ordering for tool calls still pending at that point; does not establish ordering for calls completed before the final refusal.",
+    "rows": {
+      "14": "isApiErrorMessage=true, refusedMessageId=msg_r380_refusal_tools",
+      "15": "successful user tool-result toolu_r380_first",
+      "16": "successful user tool-result toolu_r380_second"
+    },
+    "secondRequest": "No APIError or refusal nudge"
+  },
+  "log": "logs/21-orchestrator-current-alignment-refusal-retry.log",
+  "diagnosticExcerpt": "logs/21-orchestrator-current-alignment-refusal-retry-diagnostics.txt",
+  "priorCompileFailures": [
+    "r380-orchestrator-refusal-diagnostic.receipt.json",
+    "r380-orchestrator-refusal-compile-retry.receipt.json"
+  ],
+  "scope": "Same-target refusal behavior test result only. Source hashes remained unchanged during this run; no assertions were modified or relaxed."
+}

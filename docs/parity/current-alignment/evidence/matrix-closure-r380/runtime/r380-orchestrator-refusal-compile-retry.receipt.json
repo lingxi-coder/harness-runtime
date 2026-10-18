@@ -1,0 +1,58 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-orchestrator-refusal-compile-retry-r380.v1",
+  "recordedAtUtc": "2026-10-18T16:38:23Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": ["--locked", "--offline"],
+  "features": [],
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_refusal",
+  "sandboxPermissions": "require_escalated",
+  "authorization": "Root approved the bounded refusal target with localhost access.",
+  "diagnosticOnly": true,
+  "notFinalGate": true,
+  "exitCode": 101,
+  "testsRun": false,
+  "compileErrors": [
+    {
+      "code": "E0616",
+      "file": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "line": 1550,
+      "message": "Test accessed private ConversationOrchestrator.session; compiler suggests the public session() accessor."
+    },
+    {
+      "code": "E0282",
+      "file": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "line": 1572,
+      "message": "The tuple element types in results.iter().any(|(id, text, is_error)| ...) could not be inferred."
+    },
+    {
+      "code": "E0616",
+      "file": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "line": 1704,
+      "message": "Test accessed private ConversationOrchestrator.session; compiler suggests the public session() accessor."
+    }
+  ],
+  "warnings": [
+    {
+      "file": "crates/orchestrator/src/conversation/drivers/mod.rs",
+      "line": 616,
+      "message": "method inject_user_message is never used"
+    }
+  ],
+  "sourceHashFiles": [
+    "r380-refusal-final-sourcehashes-pre.txt",
+    "r380-refusal-final-sourcehashes-post.txt",
+    "r380-refusal-final-sourcehash-diff.txt"
+  ],
+  "sourceHashChangedFiles": [
+    {
+      "file": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "detail": "The refusal owner patched the test-only accessor and result tuple typing after this compile failure; the post-capture hash is the fixed retry source, not the source consumed by this failed attempt."
+    }
+  ],
+  "log": "logs/20-orchestrator-current-alignment-refusal-final.log",
+  "diagnosticExcerpt": "logs/20-orchestrator-current-alignment-refusal-diagnostics.txt",
+  "priorAttempt": "r380-orchestrator-refusal-diagnostic.receipt.json",
+  "scope": "This compile retry failed before any test ran. Preserve it as diagnostic evidence; rerun only the same refusal target against the owner's frozen fix."
+}

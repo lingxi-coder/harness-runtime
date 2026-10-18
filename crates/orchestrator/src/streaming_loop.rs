@@ -212,6 +212,12 @@ pub struct PumpedTurn {
     pub server_fallback_events: Vec<llm_runtime::history::HistoryServerFallback>,
     /// Exact provider response message ID for Native refusal presentation.
     pub response_message_id: Option<String>,
+    /// Whether refusal settlement found a still-running tool, selecting
+    /// Native's nudge variant that explains the ambiguous Interrupted result.
+    pub(crate) refusal_retry_had_interrupted_tool: bool,
+    /// Whether Ko=false refusal handling already persisted its API-error row
+    /// before ordinary tool results and follow-up.
+    pub(crate) refusal_api_error_staged: bool,
     /// Prefix of `server_fallback_events` applied by the live conversation
     /// fallback controller. The completed-response adapter must not apply
     /// these observations a second time.
@@ -2226,6 +2232,7 @@ async fn pump_stream_inner(
                         // same assistantMessage; a recovered/full response row
                         // builds that list in the driver's full-row path.
                         same_turn_tool_uses: Vec::new(),
+                        refusal_call_boundary: None,
                     };
                     if let Err(error) = p
                         .executor

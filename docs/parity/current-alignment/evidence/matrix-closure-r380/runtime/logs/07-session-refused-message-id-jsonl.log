@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized] target(s) in 0.41s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/session-1cda81294cdaa986)
+
+running 2 tests
+test jsonl::schema::shutdown_interruption_tests::refusal_message_id_on_assistant_api_error_roundtrips_in_its_native_head ... ok
+test jsonl::schema::shutdown_interruption_tests::refusal_message_id_uses_native_user_slot_and_preserves_utf16_payload ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 379 filtered out; finished in 0.00s
+

@@ -119,6 +119,8 @@ mod tests {
             origin: None,
             turn_origin: None,
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
         };
         assert_eq!(text_byte_size(&m), 4); // "YWJj".len()
     }
@@ -174,6 +176,8 @@ mod tests {
             origin: None,
             turn_origin: None,
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
         };
         assert_eq!(text_byte_size(&message), expected);
     }

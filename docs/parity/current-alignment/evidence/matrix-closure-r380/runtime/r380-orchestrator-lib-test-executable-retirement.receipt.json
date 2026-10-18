@@ -1,0 +1,39 @@
+{
+  "schema": "lingxi.claude-alignment-exact-test-executable-retirement-r380.v1",
+  "recordedAtUtc": "2026-10-18T17:33:43Z",
+  "target": "orchestrator --lib focused selector group",
+  "passReceipt": "r380-orchestrator-lib-focused-group.receipt.json",
+  "exactRunningPath": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/orchestrator-33c71635f98fe3bd",
+  "fileIdentity": {
+    "device": 16777234,
+    "inode": 992295276,
+    "sizeBytes": 214224176,
+    "mtimeNs": 1792344750734921528,
+    "mode": "0o100755"
+  },
+  "binarySha256": "8949630befad36c94e53d3498c1335a156ccf0c0203c608a637b241dee15778d",
+  "lsof": {
+    "exitCode": 1,
+    "stdoutEmpty": true,
+    "stderrEmpty": true
+  },
+  "retainedDependencyFile": {
+    "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/orchestrator-33c71635f98fe3bd.d",
+    "sha256": "7d86d7d7fe3e414cbed915cea58b99c6f15da22ff49cc34d1fd0453769b409af"
+  },
+  "retainedFingerprintMarker": {
+    "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/orchestrator-33c71635f98fe3bd/test-lib-orchestrator",
+    "sha256": "3d22e99c02dbe594bdbd6293ae15650c4e87d8d0317cb6ededa9746d4f7a1a0e"
+  },
+  "retainedFingerprintJson": {
+    "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/orchestrator-33c71635f98fe3bd/test-lib-orchestrator.json",
+    "sha256": "fb811a5d4e990de1f35bdc26731a3070970099709e7adfbbd88277f2dce7bf84"
+  },
+  "action": "Unlinked only the shared lib test executable after all seven selectors (8 tests) passed; retained .d, fingerprints, libraries, and other target files.",
+  "verifiedAfterUnlink": {
+    "executableAbsent": true,
+    "dependencyFilePresent": true,
+    "fingerprintMarkerPresent": true,
+    "fingerprintJsonPresent": true
+  }
+}

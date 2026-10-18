@@ -598,6 +598,8 @@ mod regressions {
             },
             ConversationMessage::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::ToolResult {
                     tool_use_id: tu.clone(),
@@ -661,6 +663,8 @@ mod regressions {
         };
         let returned = |tu: &ToolUseId, content: &str| ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: tu.clone(),
@@ -765,6 +769,8 @@ mod regressions {
             };
         let persisted = |tu: &ToolUseId, content: &str| ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: tu.clone(),
@@ -826,6 +832,8 @@ mod regressions {
         use lingxi_core::types::{ContentBlock, MessageId, ToolUseId};
         let history = vec![ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: ToolUseId::new(),
@@ -857,6 +865,8 @@ mod regressions {
         let tool_id = ToolUseId::new();
         let meta = |content| ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content,
             is_meta: true,
@@ -1028,6 +1038,8 @@ mod regressions {
         // durable URL-shaped message media entry while text stays in blocks.
         let msg = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {

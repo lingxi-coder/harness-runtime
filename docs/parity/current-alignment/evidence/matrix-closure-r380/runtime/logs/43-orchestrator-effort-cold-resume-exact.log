@@ -1,0 +1,40 @@
+   Compiling orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+    Finished `test` profile [unoptimized] target(s) in 4.31s
+     Running tests/effort_cold_resume_295_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/effort_cold_resume_295_test-c9bcc1621106ee2f)
+
+running 1 test
+
+thread 'cold_resume_295_fresh_process_preserves_effort_into_next_sdk_request' (59867316) panicked at crates/orchestrator/tests/effort_cold_resume_295_test.rs:368:5:
+fresh-process cold-resume assertion failed
+stdout:
+
+running 1 test
+test cold_resume_295_fresh_process_preserves_effort_into_next_sdk_request ... FAILED
+
+failures:
+
+failures:
+    cold_resume_295_fresh_process_preserves_effort_into_next_sdk_request
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+
+
+stderr:
+
+thread 'cold_resume_295_fresh_process_preserves_effort_into_next_sdk_request' (59867387) panicked at crates/orchestrator/tests/effort_cold_resume_295_test.rs:280:5:
+assertion `left == right` failed: the SDK encoder carries the historical low marker before the old assistant and the current high marker after the resumed history, matching the Native 2.1.295 fixture
+  left: [(1, "system", "low"), (4, "system", "medium")]
+ right: [(1, "system", "low"), (4, "system", "high")]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cold_resume_295_fresh_process_preserves_effort_into_next_sdk_request ... FAILED
+
+failures:
+
+failures:
+    cold_resume_295_fresh_process_preserves_effort_into_next_sdk_request
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.45s
+
+error: test failed, to rerun pass `-p orchestrator --test effort_cold_resume_295_test`

@@ -1,0 +1,35 @@
+   Compiling orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+error[E0432]: unresolved import `permission::PermissionOutcome`
+  --> crates/orchestrator/tests/current_alignment_refusal.rs:31:67
+   |
+31 |     PermissionDecision, PermissionDecisionReason, PermissionGate, PermissionOutcome,
+   |                                                                   ^^^^^^^^^^^^^^^^^
+   |                                                                   |
+   |                                                                   no `PermissionOutcome` in the root
+   |                                                                   help: a similar name exists in the module: `PermissionGate`
+   |
+   = help: consider importing one of these enums instead:
+           lingxi_core::host::permission_gate::PermissionOutcome
+           permission::gate::PermissionOutcome
+
+error[E0425]: cannot find type `PermissionCheckContext` in crate `permission`
+   --> crates/orchestrator/tests/current_alignment_refusal.rs:946:28
+    |
+946 |         _ctx: &permission::PermissionCheckContext,
+    |                            ^^^^^^^^^^^^^^^^^^^^^^ not found in `permission`
+    |
+help: consider importing one of these structs
+    |
+  7 + use lingxi_core::host::permission_gate::PermissionCheckContext;
+    |
+  7 + use permission::gate::PermissionCheckContext;
+    |
+help: if you import `PermissionCheckContext`, refer to it directly
+    |
+946 -         _ctx: &permission::PermissionCheckContext,
+946 +         _ctx: &PermissionCheckContext,
+    |
+
+Some errors have detailed explanations: E0425, E0432.
+For more information about an error, try `rustc --explain E0425`.
+error: could not compile `orchestrator` (test "current_alignment_refusal") due to 2 previous errors

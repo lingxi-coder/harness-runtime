@@ -1,0 +1,23 @@
+{
+  "schema": "lingxi.claude-alignment-test-executable-retirement-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:26:14.364878Z",
+  "reason": "The exact desktop runtime --lib test executable passed all 1179 tests and may be rebuilt; its large binary is retired before workspace check.",
+  "targetExecutable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/harness_runtime-63b1eab9d1906e2a",
+  "binarySha256": "6c277bbd4318a0ac99270242885cbc8645208aea660370177e23231caf491a40",
+  "inode": 992312690,
+  "sizeBytes": 324247296,
+  "dependencyFileRetained": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/harness_runtime-63b1eab9d1906e2a.d",
+  "dependencyFileSha256": "8284d5c567b754a1810858607b758a1cc4880ab7d884dd69bf2651b187d48848",
+  "fingerprintFilesRetained": {
+    "dep-test-lib-harness_runtime": "79d921ed43f3c0c27365b1b23a121fb01f4cad5162d8d3d7b8e27f7bcbafefc4",
+    "invoked.timestamp": "5a109e6643e8d3e88642e3f35e85d2a83e639d07523aa6e99166c48178e965c3",
+    "test-lib-harness_runtime": "3a20049e88daef64ca01f7bdc89bb485d28754d9c19c2e45394886a46162c2a0",
+    "test-lib-harness_runtime.json": "68a6ddc0f36f8459ad31b629ba2b31610794d30ee40abdb3501407a93e7c7ebf"
+  },
+  "lsofBeforeDeletion": [],
+  "removed": true,
+  "verifiedAbsent": true,
+  "sourceReceipt": "r380-harness-runtime-desktop-lib-elevated.receipt.json",
+  "availableKiBBefore": 1326244,
+  "availableKiBAfter": 1643120
+}

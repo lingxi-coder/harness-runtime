@@ -662,6 +662,7 @@ async fn physical_request_history_and_raw_row_facts_reach_the_tool_context() {
             query_history: captured_request_history.clone(),
             assistant_message: raw_assistant_row.clone(),
             same_turn_tool_uses: vec![prior_tool.clone()],
+            refusal_call_boundary: None,
         }),
         None,
         None,

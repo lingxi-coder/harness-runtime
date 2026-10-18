@@ -1,0 +1,22 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-core-unanswered-r380.v1",
+  "recordedAtUtc": "2026-10-18T16:19:41Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": ["--locked", "--offline"],
+  "features": [],
+  "sourceHashFile": "r380-core-unanswered-sourcehashes.txt",
+  "command": "cargo test --locked --offline -p core --lib unanswered",
+  "exitCode": 0,
+  "testsPassed": 4,
+  "testsFailed": 0,
+  "tests": [
+    "shutdown_tail_is_unanswered_through_native_interruption_furniture",
+    "only_shutdown_tail_or_no_response_keeps_a_persisted_turn_unanswered",
+    "native_meta_classifier_matches_extracted_295_utf16_fixture",
+    "native_engine_meta_allowlist_requires_exact_text_and_meta_flag"
+  ],
+  "log": "logs/13-core-unanswered-source-behavior.log",
+  "scope": "Core unanswered-turn behavior and Native 2.1.295 extracted UTF-16 fixture only."
+}

@@ -1896,6 +1896,8 @@ pub(crate) async fn prepare_receipts(
         })?;
         let message = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ProviderContent {
                 protocol: protocol_name(call.context.provider),

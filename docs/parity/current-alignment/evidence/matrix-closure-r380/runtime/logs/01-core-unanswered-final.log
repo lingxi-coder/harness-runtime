@@ -1,0 +1,12 @@
+   Compiling core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+    Finished `test` profile [unoptimized] target(s) in 19.01s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/lingxi_core-ea4cc899672c3abd)
+
+running 4 tests
+test session::unanswered_turn_tests::shutdown_tail_is_unanswered_through_native_interruption_furniture ... ok
+test session::unanswered_turn_tests::only_shutdown_tail_or_no_response_keeps_a_persisted_turn_unanswered ... ok
+test session::unanswered_turn_tests::native_meta_classifier_matches_extracted_295_utf16_fixture ... ok
+test session::unanswered_turn_tests::native_engine_meta_allowlist_requires_exact_text_and_meta_flag ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 1049 filtered out; finished in 0.01s
+

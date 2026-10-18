@@ -1,0 +1,85 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-llm-runtime-focused-r380.v1",
+  "recordedAtUtc": "2026-10-18T16:17:45Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": ["--locked", "--offline"],
+  "features": [],
+  "sourceHashFiles": [
+    "r380-llm-runtime-sourcehashes.txt",
+    "r380-llm-runtime-sourcehashes-post.txt"
+  ],
+  "commands": [
+    {
+      "package": "llm-runtime",
+      "target": "lib",
+      "filter": "native_simple_mode_and_bare_flag_match_source_truthiness_and_separator",
+      "command": "cargo test --locked --offline -p llm-runtime --lib native_simple_mode_and_bare_flag_match_source_truthiness_and_separator",
+      "exitCode": 0,
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "log": "logs/08-llm-runtime-native-simple-bare.log"
+    },
+    {
+      "package": "llm-runtime",
+      "target": "lib",
+      "filter": "native_tbc_",
+      "command": "cargo test --locked --offline -p llm-runtime --lib native_tbc_",
+      "exitCode": 0,
+      "testsPassed": 5,
+      "testsFailed": 0,
+      "tests": [
+        "native_tbc_uses_the_selected_profile_endpoint_without_cross_request_state",
+        "native_tbc_planned_membership_and_rejection_reset_with_the_conversation",
+        "native_tbc_h3_fact_and_final_authentication_share_one_selected_key_snapshot",
+        "native_tbc_uses_each_selected_first_party_profile_endpoint",
+        "native_tbc_first_party_uses_separate_tf_kxt_and_sl_facts"
+      ],
+      "log": "logs/09-llm-runtime-native-tbc-profile.log"
+    },
+    {
+      "package": "llm-runtime",
+      "target": "lib",
+      "filter": "ordinary_user_text_seam_preserves_utf16_for_all_text_block_pairs",
+      "command": "cargo test --locked --offline -p llm-runtime --lib ordinary_user_text_seam_preserves_utf16_for_all_text_block_pairs",
+      "exitCode": 0,
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "log": "logs/10-llm-runtime-convert-utf16.log"
+    },
+    {
+      "package": "llm-runtime",
+      "target": "current_alignment_http_layout_293_test",
+      "command": "cargo test --locked --offline -p llm-runtime --test current_alignment_http_layout_293_test",
+      "exitCode": 101,
+      "testsPassed": 0,
+      "testsFailed": 2,
+      "classification": "sandbox_denied_localhost_bind",
+      "detail": "Both test cases were denied at TcpListener::bind with Operation not permitted before reaching request assertions.",
+      "log": "logs/11-llm-runtime-http-layout-293-295.log"
+    },
+    {
+      "package": "llm-runtime",
+      "target": "current_alignment_http_layout_293_test",
+      "command": "cargo test --locked --offline -p llm-runtime --test current_alignment_http_layout_293_test",
+      "sandboxPermissions": "require_escalated",
+      "authorization": "Root approved one retry for this local-loopback-only test target.",
+      "exitCode": 0,
+      "testsPassed": 2,
+      "testsFailed": 0,
+      "tests": [
+        "native_293_http_layout_is_selected_only_for_opted_in_first_party_anthropic",
+        "native_295_http_layout_matches_its_own_raw_header_body_and_response"
+      ],
+      "log": "logs/12-llm-runtime-http-layout-293-295-loopback-retry.log"
+    }
+  ],
+  "summary": {
+    "successfulRunTestsPassed": 9,
+    "successfulRunTestsFailed": 0,
+    "sandboxDeniedAttemptCases": 2,
+    "sourceAssertionsFailed": 0
+  },
+  "scope": "Focused llm-runtime service/convert/TBC and HTTP layout gates only; no MCP, Orchestrator, full runtime, or tokenizer suite was run."
+}

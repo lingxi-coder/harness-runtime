@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 
 /// The frozen native distribution documented in headless-native-baseline.json.
 /// This identifies the protocol target, not a claim of completed parity.
-pub const CLAUDE_CODE_REFERENCE_VERSION: &str = "2.1.293";
+pub const CLAUDE_CODE_REFERENCE_VERSION: &str = "2.1.295";
 
 /// Notifications supplied by the embedding host. No process signal handlers
 /// are installed by the service.
@@ -74,6 +74,24 @@ impl HeadlessSignals {
 impl Default for HeadlessSignals {
     fn default() -> Self {
         Self::channel().1
+    }
+}
+
+impl HeadlessSignal {
+    fn cancel_reason(self) -> orchestrator::prompt::mid_turn_input::CancelReason {
+        use orchestrator::prompt::mid_turn_input::CancelReason;
+
+        match self {
+            // Native's SIGINT handler aborts with `user-cancel`; keep it on the
+            // ordinary user-interruption path, including print-mode startup.
+            Self::Interrupt => CancelReason::UserInterrupt,
+            // These are host lifecycle events. Native's shutdown abort uses
+            // reason `shutdown` and persists its interruption marker with the
+            // `interruptedByShutdown` flag.
+            Self::Shutdown | Self::OutputClosed | Self::Terminate { .. } => {
+                CancelReason::ServiceShutdown
+            }
+        }
     }
 }
 
@@ -174,6 +192,7 @@ pub(crate) struct HeadlessRuntime {
     pub(crate) stdout: io::Output,
     pub(crate) shutdown: CancellationToken,
     active_turn: Mutex<CancellationToken>,
+    cancel_reason: orchestrator::prompt::mid_turn_input::CancelReasonFlag,
     failures: Mutex<Vec<String>>,
     execution_errors: Arc<Mutex<Vec<String>>>,
     max_turns: Option<u32>,
@@ -196,12 +215,41 @@ impl HeadlessRuntime {
     }
 
     pub(crate) fn turn_cancel(&self) -> CancellationToken {
-        let token = self.shutdown.child_token();
-        *self
+        let mut active_turn = self
             .active_turn
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = token.clone();
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Once the service token is cancelled, keep the lifecycle reason that
+        // was recorded by the signal owner. Otherwise each newly admitted turn
+        // starts with the ordinary Ctrl+C / ESC default.
+        if !self.shutdown.is_cancelled() {
+            self.cancel_reason.reset();
+        }
+        let token = self.shutdown.child_token();
+        *active_turn = token.clone();
         token
+    }
+    fn set_cancel_reason(&self, reason: orchestrator::prompt::mid_turn_input::CancelReason) {
+        self.cancel_reason.set(reason);
+    }
+    fn interrupt_for_signal(
+        &self,
+        reason: orchestrator::prompt::mid_turn_input::CancelReason,
+        shutdown: bool,
+    ) {
+        // Serialize a signal's cause and cancellation with turn creation. If
+        // a turn starts first, this signal claims and cancels that new token;
+        // if the signal wins, a shutdown token keeps the reason from being
+        // reset by a concurrent admission.
+        let active_turn = self
+            .active_turn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.cancel_reason.set(reason);
+        if shutdown {
+            self.shutdown.cancel();
+        }
+        active_turn.cancel();
     }
     pub(crate) async fn headless_command_catalog(&self) -> command_api::HeadlessCommandCatalog {
         host::configure_native_command_catalog(
@@ -387,12 +435,12 @@ async fn run_owned(
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             if let Some(runtime) = runtime {
-                runtime.interrupt();
+                let startup_cancelled = signal_startup.is_cancelled();
+                runtime.interrupt_for_signal(signal.cancel_reason(), startup_cancelled);
                 if let Some(plane) = &plane {
                     plane.cancel_active_turn().await;
                 }
-                if signal_startup.is_cancelled() {
-                    runtime.shutdown.cancel();
+                if startup_cancelled {
                     // The print owner continues polling execution and owns
                     // task settlement. Keep this watcher free to bound I/O.
                     if !print_interrupt {
@@ -686,6 +734,7 @@ async fn run_owned(
             return finish_delivery(exit, &io.stdout, &io.stderr, &last_signal, input_format).await;
         }
     };
+    let cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
     let runtime = Arc::new(HeadlessRuntime {
         inner,
         services,
@@ -697,6 +746,7 @@ async fn run_owned(
         stdout: io.stdout.clone(),
         shutdown: CancellationToken::new(),
         active_turn: Mutex::new(CancellationToken::new()),
+        cancel_reason: cancel_reason.clone(),
         failures: Mutex::new(Vec::new()),
         execution_errors: Arc::new(Mutex::new(Vec::new())),
         max_turns,
@@ -704,6 +754,7 @@ async fn run_owned(
         execution_interrupted: std::sync::atomic::AtomicBool::new(false),
         shutdown_complete: std::sync::atomic::AtomicBool::new(false),
     });
+    runtime.orchestrator.set_cancel_reason(cancel_reason);
     exit.session_id = Some(
         runtime
             .orchestrator
@@ -762,6 +813,12 @@ async fn run_owned(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = plane.clone();
     if startup_cancel.is_cancelled() {
+        if let Some(signal) = *last_signal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        {
+            runtime.set_cancel_reason(signal.cancel_reason());
+        }
         runtime.shutdown.cancel();
         runtime.interrupt();
     }
@@ -1016,6 +1073,26 @@ async fn write_live_policy_refusal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_signal_reason_preserves_native_user_cancel_and_shutdown_kinds() {
+        use orchestrator::prompt::mid_turn_input::{CancelReason, CancelReasonFlag};
+
+        let reason = CancelReasonFlag::new();
+        reason.set(HeadlessSignal::Interrupt.cancel_reason());
+        assert_eq!(reason.get(), CancelReason::UserInterrupt);
+        reason.reset();
+        for signal in [
+            HeadlessSignal::Shutdown,
+            HeadlessSignal::OutputClosed,
+            HeadlessSignal::Terminate { signal: 15 },
+        ] {
+            reason.reset();
+            reason.set(signal.cancel_reason());
+            assert_eq!(reason.get(), CancelReason::ServiceShutdown);
+        }
+    }
+
     struct Host;
     #[async_trait::async_trait]
     impl HeadlessHostServices for Host {

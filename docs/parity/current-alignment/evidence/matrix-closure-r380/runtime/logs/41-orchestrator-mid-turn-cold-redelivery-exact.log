@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized] target(s) in 0.27s
+     Running tests/mid_turn_input_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mid_turn_input_test-8d989385fa514f96)
+
+running 1 test
+test cold_shutdown_redelivery_reuses_the_original_user_row ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.02s
+

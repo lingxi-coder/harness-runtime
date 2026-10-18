@@ -301,7 +301,7 @@ where
                     if event.data.is_empty() {
                         continue;
                     }
-                    match serde_json::from_str::<JsonRpcMessage>(&event.data) {
+                    match mcp::decode_native_mcp_frame(event.data.as_bytes()) {
                         Ok(msg) => {
                             if reader_inbound_tx.send(msg).is_err() {
                                 // Connection dropped; stop reading.
@@ -417,6 +417,7 @@ where
     Ok(Connection::from_message_streams(
         Box::pin(inbound),
         Box::pin(outbound),
+        Some("Method not found".into()),
     ))
 }
 

@@ -1,0 +1,64 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-mcp-oauth-diagnostic-r380.v1",
+  "recordedAtUtc": "2026-10-18T16:32:05Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": ["--locked", "--offline"],
+  "features": [],
+  "diagnosticOnly": true,
+  "notFinalGate": true,
+  "sourceStableDuringBatch": false,
+  "sourceHashFiles": [
+    "r380-mcp-oauth-tests-sourcehashes-pre.txt",
+    "r380-mcp-oauth-tests-sourcehashes-post.txt",
+    "r380-mcp-oauth-tests-sourcehash-diff.txt"
+  ],
+  "sourceHashChangedFiles": [
+    "crates/mcp/src/oauth.rs",
+    "crates/mcp/src/registry/authentication.rs"
+  ],
+  "commands": [
+    {
+      "command": "cargo test --locked --offline -p mcp --lib oauth",
+      "sandboxPermissions": "require_escalated",
+      "exitCode": 101,
+      "testsSelected": 81,
+      "testsPassed": 79,
+      "testsFailed": 2,
+      "failures": [
+        {
+          "test": "oauth::callback::tests::percent_encoded_issuer_parameter_name_is_still_validated",
+          "file": "crates/mcp/src/oauth/callback.rs",
+          "line": 540,
+          "message": "Expected callback response to contain Authentication complete."
+        },
+        {
+          "test": "registry::tests::connect_oauth_discovery_failure_emits_server_needs_auth_with_discovery_schema_cause",
+          "file": "crates/mcp/src/registry/tests/tests.rs",
+          "line": 9477,
+          "message": "Expected connect failure but connect returned an McpConnectionId."
+        }
+      ],
+      "log": "logs/16-mcp-oauth-lib.log",
+      "diagnosticExcerpt": "logs/16-mcp-oauth-lib-diagnostics.txt"
+    },
+    {
+      "command": "cargo test --locked --offline -p mcp --test oauth_flow_test",
+      "sandboxPermissions": "require_escalated",
+      "exitCode": 0,
+      "testsSelected": 31,
+      "testsPassed": 31,
+      "testsFailed": 0,
+      "log": "logs/17-mcp-oauth-flow.log"
+    }
+  ],
+  "summary": {
+    "selectedTests": 112,
+    "passedAcrossRuns": 110,
+    "failed": 2,
+    "libFilterCompileErrors": 0,
+    "finalPassClaim": false
+  },
+  "scope": "Current OAuth diagnostics only. OAuth implementation sources changed during the batch, so neither command is final gate evidence; rerun both after the owner freezes source and Root releases the queue."
+}

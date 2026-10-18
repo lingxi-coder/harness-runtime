@@ -1,0 +1,127 @@
+   Compiling orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+    Finished `test` profile [unoptimized] target(s) in 51.76s
+     Running tests/current_alignment_refusal.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_refusal-f8c195d57234acd9)
+
+running 13 tests
+
+running 1 test
+test native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl ... FAILED
+test refusal_safety_classifier_retry_stays_on_native_model_routes ... ok
+test refusal_safety_retry_matches_native_query_source_classifier ... FAILED
+[turn-diagnostic] tool call started id=toolu_9ad5bd28cc5c43ac976e9ec53ee80c90 name=CompletedRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_9ad5bd28cc5c43ac976e9ec53ee80c90 name=CompletedRefusalProbe elapsed_ms=0 outcome=ok
+[turn-diagnostic] tool call started id=toolu_fdcff1e4884241228efcb5c30b901579 name=DelayedRefusalProbe cancel_present=true cancelled=false
+test refusal_reissue_credit_does_not_cover_a_normal_next_turn_at_max_turns_one ... FAILED
+test spent_native_refusal_retry_runs_later_tool_uses_and_follows_up ... FAILED
+[turn-diagnostic] tool call returned id=toolu_fdcff1e4884241228efcb5c30b901579 name=DelayedRefusalProbe elapsed_ms=103 outcome=ok
+[turn-diagnostic] tool call started id=toolu_2c792d52e42f4d5e96879e97989c5a84 name=QueuedRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_2c792d52e42f4d5e96879e97989c5a84 name=QueuedRefusalProbe elapsed_ms=0 outcome=ok
+test tool_bearing_native_refusal_keeps_completed_and_never_dispatches_queued_calls ... FAILED
+test refusal_safety_retry_marker_does_not_suppress_a_later_user_turn ... FAILED
+test batched_native_refusal_closes_tool_uses_before_dispatch_and_retries_once ... ok
+test native_same_model_refusal_retry_precedes_configured_refusal_fallback ... FAILED
+test refusal_safety_retry_respects_disable_environment_flag ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.36s
+
+test refusal_safety_retry_respects_disable_environment_flag ... ok
+test auxiliary_native_tool_refusal_runs_queued_work_and_follows_up ... ok
+test refusal_safety_retry_is_skipped_for_auxiliary_queries ... ok
+test native_refusal_closes_a_permission_waiting_tool_before_physical_call ... FAILED
+
+failures:
+
+---- native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl stdout ----
+
+thread 'current-alignment-refusal' (59422938) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:1398:9:
+assertion `left == right` failed: Native 2.1.295 sends a second request after the safety-classifier refusal: refusal-cyber
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl' (59422926) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:70:19:
+refusal test thread panicked: Any { .. }
+
+---- refusal_safety_retry_matches_native_query_source_classifier stdout ----
+
+thread 'current-alignment-refusal' (59422943) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:1665:13:
+assertion `left == right` failed: Native querySource classification for "repl_main_thread"
+  left: 1
+ right: 2
+
+thread 'refusal_safety_retry_matches_native_query_source_classifier' (59422940) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:70:19:
+refusal test thread panicked: Any { .. }
+
+---- refusal_reissue_credit_does_not_cover_a_normal_next_turn_at_max_turns_one stdout ----
+
+thread 'current-alignment-refusal' (59422934) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:2312:9:
+assertion failed: matches!(result,
+    Err(orchestrator::OrchestratorError::MaxTurnsReached { max_turns: 1 }))
+
+thread 'refusal_reissue_credit_does_not_cover_a_normal_next_turn_at_max_turns_one' (59422928) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:70:19:
+refusal test thread panicked: Any { .. }
+
+---- spent_native_refusal_retry_runs_later_tool_uses_and_follows_up stdout ----
+
+thread 'current-alignment-refusal' (59422945) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:2194:9:
+assertion failed: matches!(outcome, ConversationOutcome::EndTurn { turn_count: 2, .. })
+
+thread 'spent_native_refusal_retry_runs_later_tool_uses_and_follows_up' (59422944) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:70:19:
+refusal test thread panicked: Any { .. }
+
+---- tool_bearing_native_refusal_keeps_completed_and_never_dispatches_queued_calls stdout ----
+[turn-diagnostic] tool call started id=toolu_089ded43533f4760a7a52b49dc830659 name=CompletedRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_089ded43533f4760a7a52b49dc830659 name=CompletedRefusalProbe elapsed_ms=0 outcome=ok
+[turn-diagnostic] tool call started id=toolu_8be096fed1834a2dafd461e38a2cb73d name=RunningRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_8be096fed1834a2dafd461e38a2cb73d name=RunningRefusalProbe elapsed_ms=73 outcome=error
+
+thread 'current-alignment-refusal' (59423099) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:1829:9:
+assertion `left == right` failed: same-model retry is one-shot
+  left: 1
+ right: 2
+
+thread 'tool_bearing_native_refusal_keeps_completed_and_never_dispatches_queued_calls' (59423098) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:70:19:
+refusal test thread panicked: Any { .. }
+
+---- refusal_safety_retry_marker_does_not_suppress_a_later_user_turn stdout ----
+
+thread 'current-alignment-refusal' (59422942) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:1612:9:
+assertion `left == right` failed: each user turn gets one safety retry
+  left: 2
+ right: 4
+
+thread 'refusal_safety_retry_marker_does_not_suppress_a_later_user_turn' (59422939) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:70:19:
+refusal test thread panicked: Any { .. }
+
+---- native_same_model_refusal_retry_precedes_configured_refusal_fallback stdout ----
+
+thread 'current-alignment-refusal' (59422936) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:2260:9:
+assertion `left == right` failed
+  left: 2
+ right: 3
+
+thread 'native_same_model_refusal_retry_precedes_configured_refusal_fallback' (59422927) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:70:19:
+refusal test thread panicked: Any { .. }
+
+---- native_refusal_closes_a_permission_waiting_tool_before_physical_call stdout ----
+
+thread 'current-alignment-refusal' (59422933) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:1994:10:
+Native refusal retry is sent while the original permission waits: Elapsed(())
+
+thread 'native_refusal_closes_a_permission_waiting_tool_before_physical_call' (59422925) panicked at crates/orchestrator/tests/current_alignment_refusal.rs:70:19:
+refusal test thread panicked: Any { .. }
+
+
+failures:
+    native_refusal_closes_a_permission_waiting_tool_before_physical_call
+    native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl
+    native_same_model_refusal_retry_precedes_configured_refusal_fallback
+    refusal_reissue_credit_does_not_cover_a_normal_next_turn_at_max_turns_one
+    refusal_safety_retry_marker_does_not_suppress_a_later_user_turn
+    refusal_safety_retry_matches_native_query_source_classifier
+    spent_native_refusal_retry_runs_later_tool_uses_and_follows_up
+    tool_bearing_native_refusal_keeps_completed_and_never_dispatches_queued_calls
+
+test result: FAILED. 5 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.88s
+
+error: test failed, to rerun pass `-p orchestrator --test current_alignment_refusal`

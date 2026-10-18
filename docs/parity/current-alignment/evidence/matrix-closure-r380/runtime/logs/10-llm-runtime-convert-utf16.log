@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized] target(s) in 0.22s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/llm_runtime-360df690c250a789)
+
+running 1 test
+test convert::convert_test::ordinary_user_text_seam_preserves_utf16_for_all_text_block_pairs ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1418 filtered out; finished in 0.00s
+

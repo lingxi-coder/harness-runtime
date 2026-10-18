@@ -1,0 +1,9 @@
+$ source '/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/frozen-build-env.sh' && cargo test --locked --offline -p mcp --lib client::constructor_tests::call_tool_absent_members_yield_none_and_explicit_null_stays_present -- --exact
+    Finished `test` profile [unoptimized] target(s) in 0.25s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mcp-c61b611803851764)
+
+running 1 test
+test client::constructor_tests::call_tool_absent_members_yield_none_and_explicit_null_stays_present ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 710 filtered out; finished in 0.01s
+

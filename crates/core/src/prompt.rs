@@ -92,6 +92,8 @@ mod tests {
             origin: Some(origin.clone()),
             turn_origin: Some(turn_origin.clone()),
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
         };
         let assistant = ConversationMessage::Assistant {
             id: MessageId::nil(),

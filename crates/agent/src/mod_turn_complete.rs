@@ -454,6 +454,8 @@ mod tests {
         let history = vec![ConversationMessage::User {
             id: MessageId::new(),
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             content: vec![HostContentBlock::TextJsUtf16 {
                 text: "�".into(),
                 utf16_code_units: vec![0xd800],

@@ -1,0 +1,12 @@
+    Finished `test` profile [unoptimized] target(s) in 0.23s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/llm_runtime-360df690c250a789)
+
+running 5 tests
+test service::native_simple_and_route_beta_gate_tests::native_tbc_uses_the_selected_profile_endpoint_without_cross_request_state ... ok
+test thinking_scope::beta_tests::native_tbc_planned_membership_and_rejection_reset_with_the_conversation ... ok
+test service::service_test::tests::native_tbc_h3_fact_and_final_authentication_share_one_selected_key_snapshot ... ok
+test service::service_test::tests::native_tbc_uses_each_selected_first_party_profile_endpoint ... ok
+test service::service_test::tests::native_tbc_first_party_uses_separate_tf_kxt_and_sl_facts ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 1414 filtered out; finished in 0.38s
+

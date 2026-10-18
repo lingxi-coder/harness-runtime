@@ -341,6 +341,8 @@ fn restored_observer_index_counts_only_client_visible_messages() {
     let hidden_meta = ConversationMessage::user_meta(MessageId::new(), "meta".to_string());
     let compact_summary = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: MessageId::new(),
         content: Vec::new(),
         is_meta: false,
@@ -353,6 +355,8 @@ fn restored_observer_index_counts_only_client_visible_messages() {
     };
     let transcript_only = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: MessageId::new(),
         content: Vec::new(),
         is_meta: false,

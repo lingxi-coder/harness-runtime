@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized] target(s) in 0.27s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/orchestrator-33c71635f98fe3bd)
+
+running 1 test
+test tool_result_text::tests::cold_resume_object_matches_native_293_raw_content_bytes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2114 filtered out; finished in 0.02s
+

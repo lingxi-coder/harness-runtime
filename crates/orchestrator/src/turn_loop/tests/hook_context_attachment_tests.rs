@@ -1623,6 +1623,8 @@ async fn dispatched_tool_result_reaches_the_transcript_as_tool_use_result() {
         .expect("dispatch");
     let msg = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: MessageId::new(),
         content: results,
         is_meta: false,
@@ -1981,6 +1983,7 @@ async fn streaming_w1_defer_commits_between_session_append_and_assistant_commit(
         query_history: vec![prompt.clone()],
         assistant_message: assistant.clone(),
         same_turn_tool_uses: Vec::new(),
+        refusal_call_boundary: None,
     };
     let prepared_tool = orch
         .tools

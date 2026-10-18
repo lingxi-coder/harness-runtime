@@ -1,0 +1,24 @@
+$ source '/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/frozen-build-env.sh' && cargo test --locked --offline -p mcp --lib native_message_schema
+   Compiling jsonrpc v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/jsonrpc)
+   Compiling core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+   Compiling telemetry v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry)
+   Compiling secret v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/secret)
+   Compiling llm-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime)
+   Compiling migrations v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/migrations)
+   Compiling mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp)
+    Finished `test` profile [unoptimized] target(s) in 28.17s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/mcp-c61b611803851764)
+
+running 9 tests
+test native_message_schema::tests::duplicate_keys_use_last_json_parse_value_and_strings_keep_utf16 ... ok
+test native_message_schema::tests::rejects_invalid_result_error_and_missing_response_members ... ok
+test native_message_schema::tests::decodes_all_four_native_message_variants ... ok
+test native_message_schema::tests::strict_envelopes_and_non_null_meta_requirements_are_enforced ... ok
+test native_message_schema::tests::matches_safe_integer_and_json_number_semantics ... ok
+test native_message_schema::tests::frame_decoder_preserves_utf16_payloads_and_wide_safe_integer_error_codes ... ok
+test native_message_schema::tests::frame_decoder_normalizes_loose_params_in_native_schema_order ... ok
+test native_message_schema::tests::frame_decoder_preserves_unpaired_method_code_units ... ok
+test native_message_schema::tests::frame_decoder_normalizes_result_server_info_and_catches_invalid_value ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 702 filtered out; finished in 0.00s
+

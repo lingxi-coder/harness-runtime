@@ -1,0 +1,71 @@
+[
+  {
+    "fixture_id": "timeout-error-lone-surrogate",
+    "execution_label": "extracted-295 execution; not public Native",
+    "emitted_event_sequence": [
+      "error"
+    ],
+    "expected_event_sequence": [
+      "error"
+    ],
+    "pre_error_text": "",
+    "expected_pre_error_text": "",
+    "api_error_status_is_undefined": true,
+    "api_error_type": "timeout_error",
+    "api_error_message": "{\"type\":\"error\",\"error\":{\"type\":\"timeout_error\",\"message\":\"native timeout \\ud800 tail\"}}",
+    "api_error_message_utf16_hex": "007b002200740079007000650022003a0022006500720072006f00720022002c0022006500720072006f00720022003a007b002200740079007000650022003a002200740069006d0065006f00750074005f006500720072006f00720022002c0022006d0065007300730061006700650022003a0022006e00610074006900760065002000740069006d0065006f007500740020005c007500640038003000300020007400610069006c0022007d007d",
+    "raw_error_data_source": "{\"type\":\"error\",\"error\":{\"type\":\"timeout_error\",\"message\":\"native timeout \\ud800 tail\"}}",
+    "api_error_message_equals_raw_sse_data": true,
+    "nested_error_message": "native timeout \ud800 tail",
+    "nested_error_message_utf16_hex": "006e00610074006900760065002000740069006d0065006f007500740020d8000020007400610069006c",
+    "expected_nested_error_message_utf16_hex": "006e00610074006900760065002000740069006d0065006f007500740020d8000020007400610069006c"
+  },
+  {
+    "fixture_id": "timeout-error-after-text-delta",
+    "execution_label": "extracted-295 execution; not public Native",
+    "emitted_event_sequence": [
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "error"
+    ],
+    "expected_event_sequence": [
+      "message_start",
+      "content_block_start",
+      "content_block_delta",
+      "error"
+    ],
+    "pre_error_text": "partial-before-error: ",
+    "expected_pre_error_text": "partial-before-error: ",
+    "api_error_status_is_undefined": true,
+    "api_error_type": "timeout_error",
+    "api_error_message": "{\"type\":\"error\",\"error\":{\"type\":\"timeout_error\",\"message\":\"native timeout \\ud800 tail\"}}",
+    "api_error_message_utf16_hex": "007b002200740079007000650022003a0022006500720072006f00720022002c0022006500720072006f00720022003a007b002200740079007000650022003a002200740069006d0065006f00750074005f006500720072006f00720022002c0022006d0065007300730061006700650022003a0022006e00610074006900760065002000740069006d0065006f007500740020005c007500640038003000300020007400610069006c0022007d007d",
+    "raw_error_data_source": "{\"type\":\"error\",\"error\":{\"type\":\"timeout_error\",\"message\":\"native timeout \\ud800 tail\"}}",
+    "api_error_message_equals_raw_sse_data": true,
+    "nested_error_message": "native timeout \ud800 tail",
+    "nested_error_message_utf16_hex": "006e00610074006900760065002000740069006d0065006f007500740020d8000020007400610069006c",
+    "expected_nested_error_message_utf16_hex": "006e00610074006900760065002000740069006d0065006f007500740020d8000020007400610069006c"
+  },
+  {
+    "fixture_id": "api-error-lone-surrogate-control",
+    "execution_label": "extracted-295 execution; not public Native",
+    "emitted_event_sequence": [
+      "error"
+    ],
+    "expected_event_sequence": [
+      "error"
+    ],
+    "pre_error_text": "",
+    "expected_pre_error_text": "",
+    "api_error_status_is_undefined": true,
+    "api_error_type": "api_error",
+    "api_error_message": "{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"native api \\ud800 tail\"}}",
+    "api_error_message_utf16_hex": "007b002200740079007000650022003a0022006500720072006f00720022002c0022006500720072006f00720022003a007b002200740079007000650022003a0022006100700069005f006500720072006f00720022002c0022006d0065007300730061006700650022003a0022006e0061007400690076006500200061007000690020005c007500640038003000300020007400610069006c0022007d007d",
+    "raw_error_data_source": "{\"type\":\"error\",\"error\":{\"type\":\"api_error\",\"message\":\"native api \\ud800 tail\"}}",
+    "api_error_message_equals_raw_sse_data": true,
+    "nested_error_message": "native api \ud800 tail",
+    "nested_error_message_utf16_hex": "006e0061007400690076006500200061007000690020d8000020007400610069006c",
+    "expected_nested_error_message_utf16_hex": "006e0061007400690076006500200061007000690020d8000020007400610069006c"
+  }
+]

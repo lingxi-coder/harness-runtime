@@ -1,0 +1,82 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-orchestrator-refusal-test-result-r380.v1",
+  "recordedAtUtc": "2026-10-18T16:59:34Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_refusal",
+  "sandboxPermissions": "require_escalated; Root authorized local loopback for this target",
+  "sourceHashFiles": [
+    "r380-refusal-final-target-retry2-sourcehashes-pre.txt",
+    "r380-refusal-final-target-retry2-sourcehashes-post.txt"
+  ],
+  "sourceStableDuringRun": true,
+  "exitCode": 101,
+  "testsSelected": 12,
+  "testsPassed": 5,
+  "testsFailed": 7,
+  "passed": [
+    "refusal_safety_classifier_retry_stays_on_native_model_routes",
+    "batched_native_refusal_closes_tool_uses_before_dispatch_and_retries_once",
+    "auxiliary_native_tool_refusal_runs_queued_work_and_follows_up",
+    "refusal_safety_retry_respects_disable_environment_flag",
+    "refusal_safety_retry_is_skipped_for_auxiliary_queries"
+  ],
+  "failures": [
+    {
+      "test": "native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl",
+      "category": "turn_budget_or_retry_semantics_review",
+      "location": "current_alignment_refusal.rs:1314",
+      "detail": "Observed 1 where test expected 2."
+    },
+    {
+      "test": "refusal_safety_retry_matches_native_query_source_classifier",
+      "category": "turn_budget_or_retry_semantics_review",
+      "location": "current_alignment_refusal.rs:1587",
+      "detail": "For querySource repl_main_thread, observed 1 where test expected 2."
+    },
+    {
+      "test": "spent_native_refusal_retry_runs_later_tool_uses_and_follows_up",
+      "category": "turn_budget_or_retry_semantics_review",
+      "location": "current_alignment_refusal.rs:2101",
+      "detail": "Observed 1 where test expected 3."
+    },
+    {
+      "test": "tool_bearing_native_refusal_keeps_completed_and_never_dispatches_queued_calls",
+      "category": "turn_budget_or_retry_semantics_review",
+      "location": "current_alignment_refusal.rs:1744",
+      "detail": "Observed 1 where one-shot same-model retry test expected 2."
+    },
+    {
+      "test": "refusal_safety_retry_marker_does_not_suppress_a_later_user_turn",
+      "category": "turn_budget_or_retry_semantics_review",
+      "location": "current_alignment_refusal.rs:1534",
+      "detail": "Observed 2 where two-user-turn retry count expected 4."
+    },
+    {
+      "test": "native_same_model_refusal_retry_precedes_configured_refusal_fallback",
+      "category": "turn_budget_or_retry_semantics_review",
+      "location": "current_alignment_refusal.rs:2153",
+      "detail": "Observed 2 where test expected 3."
+    },
+    {
+      "test": "native_refusal_closes_a_permission_waiting_tool_before_physical_call",
+      "category": "permission_wait_retry_timeout",
+      "location": "current_alignment_refusal.rs:1911",
+      "detail": "Timed out waiting for the Native refusal retry while the original tool permission was pending."
+    }
+  ],
+  "warning": "field output is never read in BatchedNativeHarness at current_alignment_refusal.rs:924",
+  "log": "logs/25-orchestrator-current-alignment-refusal-retry2.log",
+  "logSha256": "2d83736a77daab8f0b9c13a54a94ba8354200ff289a2d9840f992d0620776e28",
+  "previousCompileDiagnostics": [
+    "r380-orchestrator-refusal-final-compile-error.receipt.json",
+    "r380-orchestrator-refusal-final-retry-compile-error.receipt.json"
+  ],
+  "scope": "Final owner-frozen refusal source test run; UTF-16 fixture transform and permission type imports compile, 5 pass and 7 remain for source-versus-oracle classification."
+}

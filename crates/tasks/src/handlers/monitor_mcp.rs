@@ -65,11 +65,15 @@ const RESOURCE_LIST_CHANGED_METHOD: &str = "notifications/resources/list_changed
 /// accepted as a compatibility measure for older platform adapters that
 /// exposed the suffix directly; other notifications must not trigger a
 /// potentially expensive catalog read.
-fn is_resource_list_changed(method: &str) -> bool {
-    matches!(
-        method,
-        RESOURCE_LIST_CHANGED_METHOD | "resources/list_changed"
-    )
+fn is_resource_list_changed(method: &[u16]) -> bool {
+    method
+        .iter()
+        .copied()
+        .eq(RESOURCE_LIST_CHANGED_METHOD.encode_utf16())
+        || method
+            .iter()
+            .copied()
+            .eq("resources/list_changed".encode_utf16())
 }
 
 /// Per-task control block held by the handler so [`Task::kill`] (and the
@@ -380,7 +384,13 @@ impl Task for MonitorMcpHandler {
                     let stream_ended = tokio::select! {
                         _ = stop_loop.changed() => break,
                         notification = stream.next() => match notification {
-                            Some(notification) if is_resource_list_changed(&notification.method) => {
+                            Some(notification)
+                                if notification
+                                    .method
+                                    .at_pointer("")
+                                    .and_then(|method| method.code_units())
+                                    .is_some_and(is_resource_list_changed) =>
+                            {
                                 let snapshot = tokio::select! {
                                     _ = stop_loop.changed() => break 'monitor,
                                     snapshot = poll_once(
@@ -868,14 +878,15 @@ mod tests {
 
     #[test]
     fn only_resource_catalog_notifications_trigger_reconciliation() {
-        assert!(is_resource_list_changed(
+        let units = |method: &str| method.encode_utf16().collect::<Vec<_>>();
+        assert!(is_resource_list_changed(&units(
             "notifications/resources/list_changed"
-        ));
-        assert!(is_resource_list_changed("resources/list_changed"));
-        assert!(!is_resource_list_changed(
+        )));
+        assert!(is_resource_list_changed(&units("resources/list_changed")));
+        assert!(!is_resource_list_changed(&units(
             "notifications/tools/list_changed"
-        ));
-        assert!(!is_resource_list_changed("notifications/progress"));
+        )));
+        assert!(!is_resource_list_changed(&units("notifications/progress")));
     }
 
     #[tokio::test]

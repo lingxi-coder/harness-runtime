@@ -410,6 +410,67 @@ impl SessionState {
             .saturating_add(self.real_user_turns_in_history())
     }
 
+    /// Whether the input row with `message_id` is still eligible for Native's
+    /// cold redelivery path. Claude Code's `isTurnUnanswered` accepts a
+    /// persisted row with no later user/assistant messages, or a tail ending
+    /// in an `interruptedByShutdown: true` user row whose intervening rows are
+    /// only assistant output and the recognized transcript furniture.
+    #[must_use]
+    pub fn message_turn_is_unanswered(&self, message_id: MessageId) -> bool {
+        let Some(anchor) = self
+            .history
+            .iter()
+            .position(|message| message.id() == message_id)
+        else {
+            return false;
+        };
+
+        let following = self.history[anchor + 1..]
+            .iter()
+            .filter(|message| {
+                matches!(
+                    message,
+                    ConversationMessage::User { .. } | ConversationMessage::Assistant { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        let Some(last) = following.last() else {
+            return true;
+        };
+        if !matches!(
+            last,
+            ConversationMessage::User {
+                interrupted_by_shutdown: Some(true),
+                ..
+            }
+        ) {
+            return false;
+        }
+
+        following[..following.len() - 1]
+            .iter()
+            .rev()
+            .all(|message| match message {
+                ConversationMessage::Assistant { .. } => true,
+                ConversationMessage::User {
+                    is_compact_summary: true,
+                    ..
+                } => true,
+                ConversationMessage::User {
+                    content, is_meta, ..
+                } => {
+                    native_interruption_notice(content)
+                        || content.iter().any(|block| {
+                            matches!(block, crate::types::ContentBlock::ToolResult { .. })
+                        })
+                        || (*is_meta && native_engine_meta_notice(content))
+                }
+                ConversationMessage::System { .. } => {
+                    unreachable!("system rows are excluded from Native's unanswered-turn scan")
+                }
+            })
+    }
+
     fn real_user_turns_in_history(&self) -> u64 {
         self.history
             .iter()
@@ -431,6 +492,114 @@ impl SessionState {
             })
             .count() as u64
     }
+}
+
+const NATIVE_INTERRUPTION_PREFIXES: &[&str] = &[
+    "[Request interrupted by user]",
+    "[Request interrupted by user for tool use]",
+    "[Tool call did not complete: the turn was ended to deliver the message that follows. Nothing refused it; re-run it if still needed.]",
+    "[Tool call interrupted: the session ended before this call's result was recorded, so its outcome is unknown. Check whether it took effect before relying on it or running it again.]",
+    "[Tool call result not in this copy: this session was copied from another session before that session recorded this call's result. The call may have finished there, may still be running there, or may never have run. Check whether it took effect before relying on it or running it again.]",
+    "The user doesn't want to take this action right now. STOP what you are doing and wait for the user to tell you how to proceed.",
+    "[Tool call skipped: the turn was stopped before this call ran, by the check whose denial is on another call in this batch. Nothing refused this call and it had no effects; re-run it if still needed.]",
+    "[Tool call skipped: the turn ended to deliver the message that follows before this call ran. Nothing refused it; re-run it if still needed.]",
+];
+
+const NATIVE_ENGINE_META_PREFIXES: &[&str] = &[
+    "[structured-output-enforce]",
+    "[projects-reply-gate]",
+    "You ended the turn without calling SendUserMessage.",
+    "Goal check-in: «",
+];
+
+const NATIVE_ENGINE_META_EXACT: &[&str] = &[
+    "The previous response failed to produce a valid tool call. Please retry the tool call now.",
+    "Your tool call was malformed and could not be parsed. Please retry.",
+    "[Your previous response had no visible output. Please continue and produce a user-visible response.]",
+    "The PermissionDenied hook indicated you may retry this tool call.",
+    "Your response above was stopped by a safety classifier — this is not a tool or API error. The rest of it was withheld, and tool calls in it that had not finished did not run. Do not produce that content again, even reworded.",
+    "Your response above was stopped by a safety classifier — this is not a tool or API error. The rest of it was withheld, and tool calls in it that had not finished did not run. Do not produce that content again, even reworded. Exception: a tool call whose result reads \"Interrupted\" was already running when the response was stopped; it may have partially or fully completed.",
+    "Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
+    "Output token limit hit while you were still reasoning, before this response produced any text or tool call. That reasoning was not kept and is not part of this conversation, so there is nothing to resume. Continue from the conversation above: reason much more briefly and produce your answer or next tool call well within the output limit.",
+    "Your response was cut off because it exceeded the output token limit. Continue from where you left off. What you write next is shown as a separate block below the text so far, so begin at the start of the line, table row, list item or sentence that was cut, writing it again in full, and if you were inside a code block or a table, open it again first (the same code fence and language, the table's header row). Repeat nothing before that point and do not comment on the interruption. Keep going until the response is complete.",
+    "Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.",
+    "Your response above was cut off mid-stream and only your next message is delivered. Write the complete response again from the start — no apology, no mention of the cut-off.",
+];
+
+const NATIVE_ENGINE_META_HOOK_EVENTS: &[&str] =
+    &["Stop", "TeammateIdle", "TaskCreated", "TaskCompleted"];
+const NATIVE_ENGINE_META_HOOK_FEEDBACK_SUFFIX: &str = " hook feedback:\n";
+
+fn units_start_with(units: &[u16], prefix: &str) -> bool {
+    let prefix = prefix.encode_utf16().collect::<Vec<_>>();
+    units.starts_with(&prefix)
+}
+
+fn user_block_text_units(block: &crate::types::ContentBlock) -> Option<Vec<u16>> {
+    use crate::types::ContentBlock;
+
+    match block {
+        ContentBlock::Text { text, .. } => Some(text.encode_utf16().collect()),
+        ContentBlock::TextJsUtf16 {
+            utf16_code_units, ..
+        } => Some(utf16_code_units.clone()),
+        _ => None,
+    }
+}
+
+/// Native `HS`: a user row whose text blocks all begin with one of the
+/// transcript's recognized interruption/tool-delivery prefixes.
+fn native_interruption_notice(content: &[crate::types::ContentBlock]) -> bool {
+    use crate::types::ContentBlock;
+
+    !content.is_empty()
+        && content.iter().all(|block| {
+            let units = match block {
+                ContentBlock::Text { text, .. } => text.encode_utf16().collect::<Vec<_>>(),
+                ContentBlock::TextJsUtf16 {
+                    utf16_code_units, ..
+                } => utf16_code_units.clone(),
+                ContentBlock::ToolResult {
+                    content,
+                    is_error: Some(true),
+                    ..
+                } => content.string_units("").unwrap_or_default(),
+                _ => return false,
+            };
+            NATIVE_INTERRUPTION_PREFIXES
+                .iter()
+                .any(|prefix| units_start_with(&units, prefix))
+        })
+}
+
+/// Native `I4e`: only recognized internal meta rows are ignored while it
+/// scans backward from a shutdown interruption. Arbitrary `isMeta` messages
+/// remain substantive user rows and close the unanswered window.
+fn native_engine_meta_notice(content: &[crate::types::ContentBlock]) -> bool {
+    let Some(first) = content.first().and_then(user_block_text_units) else {
+        return false;
+    };
+
+    if NATIVE_ENGINE_META_PREFIXES
+        .iter()
+        .any(|prefix| units_start_with(&first, prefix))
+    {
+        return true;
+    }
+
+    if NATIVE_ENGINE_META_EXACT
+        .iter()
+        .any(|text| first.as_slice() == text.encode_utf16().collect::<Vec<_>>())
+    {
+        return true;
+    }
+
+    NATIVE_ENGINE_META_HOOK_EVENTS.iter().any(|event| {
+        units_start_with(
+            &first,
+            &format!("{event}{NATIVE_ENGINE_META_HOOK_FEEDBACK_SUFFIX}"),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -518,6 +687,8 @@ mod mod_session_turn_tests {
                 origin: None,
                 turn_origin: None,
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
             },
             second.clone(),
         ]);
@@ -543,6 +714,257 @@ mod mod_session_turn_tests {
         let restored: SessionState =
             serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
         assert_eq!(restored.real_user_turns(), 3);
+    }
+}
+
+#[cfg(test)]
+mod unanswered_turn_tests {
+    use super::SessionState;
+    use super::{
+        NATIVE_ENGINE_META_EXACT, NATIVE_ENGINE_META_HOOK_EVENTS,
+        NATIVE_ENGINE_META_HOOK_FEEDBACK_SUFFIX, NATIVE_ENGINE_META_PREFIXES,
+    };
+    use crate::types::{ContentBlock, ConversationMessage, MessageId, SessionId, ToolUseId};
+
+    fn state_with(history: Vec<ConversationMessage>) -> SessionState {
+        let mut session = SessionState::empty(SessionId::new(), "model".into());
+        session.history = history;
+        session
+    }
+
+    fn shutdown_marker() -> ConversationMessage {
+        let mut row =
+            ConversationMessage::user(MessageId::new(), "[Request interrupted by user]".into());
+        if let ConversationMessage::User {
+            interrupted_by_shutdown,
+            ..
+        } = &mut row
+        {
+            *interrupted_by_shutdown = Some(true);
+        }
+        row
+    }
+
+    #[test]
+    fn shutdown_tail_is_unanswered_through_native_interruption_furniture() {
+        let anchor = ConversationMessage::user(MessageId::new(), "request".into());
+        let anchor_id = anchor.id();
+        let tool_result = ConversationMessage::User {
+            api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: ToolUseId::new(),
+                content: "partial tool result".into(),
+                is_error: Some(false),
+                provider_tool_use_id: None,
+                content_blocks: None,
+            }],
+            is_meta: false,
+            is_compact_summary: false,
+            is_visible_in_transcript_only: false,
+            turn_companion: None,
+            usage_limit_note: None,
+            origin: None,
+            turn_origin: None,
+        };
+        let session = state_with(vec![
+            anchor,
+            ConversationMessage::Assistant {
+                per_turn_effort: None,
+                id: MessageId::new(),
+                content: vec![ContentBlock::Text {
+                    text: "partial answer".into(),
+                    citations: None,
+                }],
+                stop_reason: None,
+                resumable: None,
+            },
+            tool_result,
+            ConversationMessage::compact_summary(MessageId::new(), "summary".into()),
+            ConversationMessage::user_meta(MessageId::new(), "Goal check-in: «progress".into()),
+            ConversationMessage::user(MessageId::new(), "[Request interrupted by user]".into()),
+            shutdown_marker(),
+        ]);
+
+        assert!(session.message_turn_is_unanswered(anchor_id));
+    }
+
+    #[test]
+    fn only_shutdown_tail_or_no_response_keeps_a_persisted_turn_unanswered() {
+        let anchor = ConversationMessage::user(MessageId::new(), "request".into());
+        let anchor_id = anchor.id();
+        assert!(state_with(vec![anchor.clone()]).message_turn_is_unanswered(anchor_id));
+
+        let unflagged =
+            ConversationMessage::user(MessageId::new(), "[Request interrupted by user]".into());
+        assert!(!state_with(vec![anchor.clone(), unflagged]).message_turn_is_unanswered(anchor_id));
+
+        let mut explicit_false =
+            ConversationMessage::user(MessageId::new(), "[Request interrupted by user]".into());
+        if let ConversationMessage::User {
+            interrupted_by_shutdown,
+            ..
+        } = &mut explicit_false
+        {
+            *interrupted_by_shutdown = Some(false);
+        }
+        assert!(
+            !state_with(vec![anchor.clone(), explicit_false]).message_turn_is_unanswered(anchor_id)
+        );
+
+        let intervening_user =
+            ConversationMessage::user(MessageId::new(), "new human input".into());
+        assert!(
+            !state_with(vec![anchor.clone(), intervening_user, shutdown_marker()])
+                .message_turn_is_unanswered(anchor_id)
+        );
+
+        assert!(!state_with(vec![ConversationMessage::user(
+            MessageId::new(),
+            "other".into(),
+        )])
+        .message_turn_is_unanswered(anchor_id));
+
+        let ordinary_notice =
+            ConversationMessage::user(MessageId::new(), "Goal check-in: «progress".into());
+        assert!(
+            !state_with(vec![anchor, ordinary_notice, shutdown_marker()])
+                .message_turn_is_unanswered(anchor_id),
+            "Native I4e only skips recognized internal notices when isMeta is true"
+        );
+    }
+
+    #[test]
+    fn native_engine_meta_allowlist_requires_exact_text_and_meta_flag() {
+        let anchor = ConversationMessage::user(MessageId::new(), "request".into());
+        let anchor_id = anchor.id();
+        let recognized = [
+            "[structured-output-enforce] additional detail",
+            "[projects-reply-gate] additional detail",
+            "You ended the turn without calling SendUserMessage. additional detail",
+            "Goal check-in: «progress",
+            "The previous response failed to produce a valid tool call. Please retry the tool call now.",
+            "Your tool call was malformed and could not be parsed. Please retry.",
+            "[Your previous response had no visible output. Please continue and produce a user-visible response.]",
+            "The PermissionDenied hook indicated you may retry this tool call.",
+            "Your response above was stopped by a safety classifier — this is not a tool or API error. The rest of it was withheld, and tool calls in it that had not finished did not run. Do not produce that content again, even reworded.",
+            "Your response above was stopped by a safety classifier — this is not a tool or API error. The rest of it was withheld, and tool calls in it that had not finished did not run. Do not produce that content again, even reworded. Exception: a tool call whose result reads \"Interrupted\" was already running when the response was stopped; it may have partially or fully completed.",
+            "Output token limit hit. Resume directly — no apology, no recap of what you were doing. Pick up mid-thought if that is where the cut happened. Break remaining work into smaller pieces.",
+            "Output token limit hit while you were still reasoning, before this response produced any text or tool call. That reasoning was not kept and is not part of this conversation, so there is nothing to resume. Continue from the conversation above: reason much more briefly and produce your answer or next tool call well within the output limit.",
+            "Your response was cut off because it exceeded the output token limit. Continue from where you left off. What you write next is shown as a separate block below the text so far, so begin at the start of the line, table row, list item or sentence that was cut, writing it again in full, and if you were inside a code block or a table, open it again first (the same code fence and language, the table's header row). Repeat nothing before that point and do not comment on the interruption. Keep going until the response is complete.",
+            "Your response above was cut off mid-stream. Resume directly from where it stops — no apology, no recap. If none of it survived, answer the request from the start.",
+            "Your response above was cut off mid-stream and only your next message is delivered. Write the complete response again from the start — no apology, no mention of the cut-off.",
+            "Stop hook feedback:\nstop detail",
+            "TeammateIdle hook feedback:\nidle detail",
+            "TaskCreated hook feedback:\ncreated detail",
+            "TaskCompleted hook feedback:\ncompleted detail",
+        ];
+
+        for text in recognized {
+            let meta = ConversationMessage::user_meta(MessageId::new(), text.into());
+            assert!(
+                state_with(vec![anchor.clone(), meta, shutdown_marker()])
+                    .message_turn_is_unanswered(anchor_id),
+                "Native internal notice was not recognized: {text}"
+            );
+
+            let ordinary = ConversationMessage::user(MessageId::new(), text.into());
+            assert!(
+                !state_with(vec![anchor.clone(), ordinary, shutdown_marker()])
+                    .message_turn_is_unanswered(anchor_id),
+                "ordinary user text must not be treated as Native internal meta: {text}"
+            );
+        }
+
+        for near_miss in [
+            "Your previous response had no visible output. Please continue and produce a user-visible response.",
+            "Your response was cut off because it exceeded the output token limit. Continue from where you left off. What you write next is shown as a separate block below the text so far, so begin at the start of the line, list item or sentence that was cut.",
+        ] {
+            let meta = ConversationMessage::user_meta(MessageId::new(), near_miss.into());
+            assert!(
+                !state_with(vec![anchor.clone(), meta, shutdown_marker()])
+                    .message_turn_is_unanswered(anchor_id),
+                "near-miss text must not be treated as an exact Native internal notice: {near_miss}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_meta_classifier_matches_extracted_295_utf16_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/native-meta-allowlist-295.json")).unwrap();
+        assert_eq!(
+            fixture["native"]["binarySha256"],
+            "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+        );
+        assert_eq!(
+            fixture["source"]["i4e"]["sha256"],
+            "45aa5349661a7e8ea971e78ab67a1512977a96c1af2615d24e0626e930703a21"
+        );
+
+        let fixture_strings = |name: &str| {
+            fixture["classification"][name]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["text"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let assert_utf16_carriers = |name: &str| {
+            for item in fixture["classification"][name].as_array().unwrap() {
+                let text = item["text"].as_str().unwrap();
+                let expected = item["utf16CodeUnits"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|unit| unit.as_u64().unwrap() as u16)
+                    .collect::<Vec<_>>();
+                assert_eq!(text.encode_utf16().collect::<Vec<_>>(), expected);
+            }
+        };
+
+        assert_eq!(
+            fixture_strings("prefixes"),
+            NATIVE_ENGINE_META_PREFIXES
+                .iter()
+                .map(|text| (*text).to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fixture_strings("exact"),
+            NATIVE_ENGINE_META_EXACT
+                .iter()
+                .map(|text| (*text).to_owned())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fixture["classification"]["hookEvents"],
+            serde_json::json!(NATIVE_ENGINE_META_HOOK_EVENTS)
+        );
+        assert_eq!(
+            fixture["classification"]["hookFeedbackSuffix"]["text"],
+            NATIVE_ENGINE_META_HOOK_FEEDBACK_SUFFIX
+        );
+        assert_utf16_carriers("prefixes");
+        assert_utf16_carriers("exact");
+
+        let suffix = fixture["classification"]["hookFeedbackSuffix"]["utf16CodeUnits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|unit| unit.as_u64().unwrap() as u16)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            NATIVE_ENGINE_META_HOOK_FEEDBACK_SUFFIX
+                .encode_utf16()
+                .collect::<Vec<_>>(),
+            suffix
+        );
+        assert!(fixture["classification"]["requiresIsMeta"]
+            .as_bool()
+            .unwrap());
     }
 }
 

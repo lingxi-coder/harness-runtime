@@ -750,6 +750,8 @@ impl lingxi_core::host::ToolInvoker for CaptureLiveInvocationContexts {
             new_messages: vec![
                 ConversationMessage::User {
                     api_message_override: None,
+                    interrupted_by_shutdown: None,
+                    refused_message_id: None,
                     id: MessageId::new(),
                     content: vec![
                         ContentBlock::Text {
@@ -1409,6 +1411,8 @@ async fn accepted_fallback_prunes_discarded_k_without_clearing_je() {
     let result_b_id = MessageId::new();
     let je_a = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: result_a_id,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: ToolUseId::from("toolu-result-a".to_string()),
@@ -1432,6 +1436,8 @@ async fn accepted_fallback_prunes_discarded_k_without_clearing_je() {
     let note_a = ConversationMessage::user(note_a_id, "attachment/user note A".into());
     let je_b = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: result_b_id,
         content: vec![ContentBlock::ToolResult {
             tool_use_id: ToolUseId::from("toolu-result-b".to_string()),
@@ -11064,6 +11070,8 @@ fn assistant_tool_use(id: ToolUseId, name: &str) -> ConversationMessage {
 fn user_tool_result(tool_use_id: ToolUseId, content: &str) -> ConversationMessage {
     ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolResult {
             tool_use_id,

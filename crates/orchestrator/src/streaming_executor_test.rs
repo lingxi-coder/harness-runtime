@@ -5108,6 +5108,7 @@ mod tests {
                     query_history: query_history.clone(),
                     assistant_message: full_row.clone(),
                     same_turn_tool_uses: Vec::new(),
+                    refusal_call_boundary: None,
                 },
             ),
         )
@@ -5138,6 +5139,7 @@ mod tests {
 
                         provider_id: None,
                     }],
+                    refusal_call_boundary: None,
                 },
             ),
         )
@@ -5294,6 +5296,7 @@ mod tests {
                     query_history: query_history.clone(),
                     assistant_message: first_row,
                     same_turn_tool_uses: Vec::new(),
+                    refusal_call_boundary: None,
                 },
             )
             .await
@@ -5343,6 +5346,7 @@ mod tests {
                     query_history: query_history.clone(),
                     assistant_message: second_row,
                     same_turn_tool_uses: Vec::new(),
+                    refusal_call_boundary: None,
                 },
             )
             .await
@@ -5512,6 +5516,7 @@ mod tests {
                             per_turn_effort: None,
                         },
                         same_turn_tool_uses: Vec::new(),
+                        refusal_call_boundary: None,
                     },
                 )
                 .await

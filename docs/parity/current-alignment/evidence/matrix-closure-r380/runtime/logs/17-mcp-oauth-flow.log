@@ -1,0 +1,39 @@
+   Compiling mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp)
+    Finished `test` profile [unoptimized] target(s) in 5.30s
+     Running tests/oauth_flow_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/oauth_flow_test-a680e58387c4c2a0)
+
+running 31 tests
+test disconnect_without_revocation_endpoint_still_clears ... ok
+test connect_401_triggers_refresh_and_retry ... ok
+test disconnect_revokes_tokens_and_clears_local ... ok
+test expired_token_triggers_refresh_and_attaches_new_bearer ... ok
+test standard_oauth_carries_validated_resource_and_checks_metadata_issuer ... ok
+test configured_auth_metadata_still_carries_the_validated_prm_resource ... ok
+test connect_403_insufficient_scope_triggers_step_up_reauth ... ok
+test full_flow_attaches_bearer_and_persists_tokens ... ok
+test standard_oauth_does_not_retry_invalid_grant_and_does_not_refresh_at_301_seconds ... ok
+test static_authorization_header_survives_oauth_bearer ... ok
+test standard_refresh_adopts_a_fresh_concurrent_credential_winner ... ok
+test static_authorization_header_rejection_is_classified ... ok
+test step_up_scope_extraction ... ok
+test standard_oauth_issuer_mismatch_stops_before_code_grant ... ok
+test standard_oauth_refreshes_at_300_seconds_retries_transient_errors_and_keeps_current_token ... ok
+test static_token_server_spec_is_unchanged ... ok
+test step_up_scope_extraction_from_structured_http_response ... ok
+test standard_refresh_composes_inner_fetch_retry_with_three_outer_attempts ... ok
+test xaa_401_reauth_never_falls_to_interactive_consent ... ok
+test xaa_stored_refresh_token_inside_300s_window_refreshes_proactively ... ok
+test xaa_enabled_drives_exchange_and_attaches_bearer ... ok
+test headers_helper_minted_authorization_survives_oauth_bearer ... ok
+test xaa_no_refresh_token_far_from_expiry_reuses_cache_without_exchange ... ok
+test xaa_flagged_server_without_enable_flag_hard_fails ... ok
+test xaa_no_refresh_token_near_expiry_triggers_silent_exchange ... ok
+test headers_helper_minting_other_header_does_not_suppress_oauth ... ok
+test terminal_refresh_rejections_clear_the_source_scope_and_are_not_replayed ... ok
+test xaa_403_step_up_never_falls_to_interactive_consent ... ok
+test xaa_stored_refresh_token_uses_ordinary_refresh_not_full_exchange ... ok
+test connect_401_challenge_resource_metadata_url_drives_prm_fetch ... ok
+test headers_helper_minted_authorization_rejection_is_classified ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+

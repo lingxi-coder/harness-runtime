@@ -86,7 +86,8 @@ async fn full_mcp_surface_roundtrips_over_stdio() {
         .expect("notification stream timed out")
         .expect("notification stream closed before yielding an item");
     assert_eq!(
-        pushed.method, "notifications/message",
+        pushed.method.string_at(""),
+        Some("notifications/message"),
         "fixture pushes a notifications/message line after initialized"
     );
     assert_eq!(

@@ -820,6 +820,8 @@ fn rewrite_append_message(
             usage_limit_note,
             origin,
             turn_origin,
+            interrupted_by_shutdown,
+            refused_message_id,
         } => ConversationMessage::User {
             api_message_override: api_message_override.clone(),
             id: *id,
@@ -831,6 +833,8 @@ fn rewrite_append_message(
             usage_limit_note: *usage_limit_note,
             origin: origin.clone(),
             turn_origin: turn_origin.clone(),
+            interrupted_by_shutdown: *interrupted_by_shutdown,
+            refused_message_id: refused_message_id.clone(),
         },
         ConversationMessage::Assistant {
             id,
@@ -2332,6 +2336,33 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
+    fn session_append_rewrite_preserves_refused_message_id_utf16_carrier() {
+        let refused_message_id = Utf16JsonProjection::parse(r#""refused-\ud800-id""#).unwrap();
+        let mut original = ConversationMessage::user(MessageId::new(), "original".into());
+        if let ConversationMessage::User {
+            refused_message_id: carrier,
+            ..
+        } = &mut original
+        {
+            *carrier = Some(refused_message_id.clone());
+        }
+
+        let incoming = Utf16JsonProjection::parse(r#"{"content":[]}"#).unwrap();
+        let rewritten = rewrite_append_message(&original, &incoming).unwrap();
+        let ConversationMessage::User {
+            refused_message_id: Some(rewritten),
+            ..
+        } = rewritten
+        else {
+            panic!("session.append must retain refusal metadata");
+        };
+        assert_eq!(
+            rewritten.string_units(""),
+            refused_message_id.string_units("")
+        );
+    }
+
+    #[test]
     fn append_overlay_replays_after_every_duplicate_source_tool_identity() {
         let first = ContentBlock::ToolUse {
             id: lingxi_core::types::ToolUseId::from("source-a"),
@@ -2673,6 +2704,8 @@ mod tests {
         let message = ConversationMessage::User {
             id: MessageId::new(),
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             content: vec![
                 ContentBlock::TextJsUtf16 {
                     text: String::from_utf16_lossy(&message_units),

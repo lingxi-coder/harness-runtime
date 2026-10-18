@@ -1,0 +1,62 @@
+{
+  "schema": "lingxi.claude-alignment-harness-runtime-desktop-lib-elevated-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:25:42.847337Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [
+    "desktop"
+  ],
+  "package": "harness-runtime",
+  "command": "cargo test --locked --offline -p harness-runtime --lib --features desktop -- --nocapture",
+  "sandboxPermissions": "require_escalated (Root-authorized full runtime target after sandbox EPERM)",
+  "sourceHashFiles": [
+    "r380-harness-runtime-desktop-lib-elevated-sourcehashes-pre.txt",
+    "r380-harness-runtime-desktop-lib-elevated-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 5910,
+  "sourceStableDuringRun": true,
+  "boundCoreFiles": {
+    "crates/runtime/src/headless/run.rs": "619458cc1537665a3b278442fd572833913a31a7669b35f53c6f612fff3bf51d",
+    "crates/runtime/src/headless/run/tests.rs": "22b5202fec8425e77878a23395cdde1a03a098c09c7289859995e58fccac288e",
+    "crates/runtime/Cargo.toml": "32c37cb5d3ba4c067a816d40513c22a20991d7d6d6d50c40afde821f17369a27",
+    "Cargo.lock": "0e68e5a6f54332b205d579a6ce2e8c66975c34e10468ebebbbe79d8a40664451"
+  },
+  "exitCode": 0,
+  "testsSelected": 1179,
+  "testsPassed": 1179,
+  "testsFailed": 0,
+  "testsIgnored": 0,
+  "allTestResultLines": [
+    {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "passed": 1179,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "nestedResultLines": 2,
+  "log": "logs/63-harness-runtime-desktop-lib-elevated.log",
+  "logSha256": "7e7a9acfc343ef79dcfc31b538e8058aa067f5e4a35a277bff94b083fecc7fb4",
+  "priorSandboxRun": {
+    "receipt": "r380-harness-runtime-desktop-lib-after-constructor-fix.receipt.json",
+    "testsPassed": 1169,
+    "testsFailed": 10,
+    "note": "Default sandbox run hit EPERM on local proxy/Unix socket targets; the identical full target passes here with authorized local socket access."
+  },
+  "targetExecutable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/harness_runtime-63b1eab9d1906e2a",
+  "targetExecutablePathCorrection": "Prior receipt had a missing lingxi path component; corrected from the actual Running line before retirement."
+}

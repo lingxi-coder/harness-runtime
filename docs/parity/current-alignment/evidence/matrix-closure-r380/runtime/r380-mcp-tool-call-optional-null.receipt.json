@@ -1,0 +1,27 @@
+{
+  "schema": "lingxi.claude-alignment-mcp-tool-call-optional-null-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:12:49.394299Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "package": "mcp",
+  "command": "cargo test --locked --offline -p mcp --lib client::constructor_tests::call_tool_absent_members_yield_none_and_explicit_null_stays_present -- --exact",
+  "sourceHashFiles": [
+    "r380-mcp-tool-call-optional-null-sourcehashes-pre.txt",
+    "r380-mcp-tool-call-optional-null-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 2330,
+  "sourceStableDuringRun": true,
+  "exitCode": 0,
+  "testsSelected": 1,
+  "testsPassed": 1,
+  "testsFailed": 0,
+  "log": "logs/54-mcp-tool-call-optional-null.log",
+  "logSha256": "f4b5da07e8a131e9ffdd49ef5ca69d1d368fedd38f51207f06f52e179f4ab1ce",
+  "sourceFilesChangedDuringRun": []
+}

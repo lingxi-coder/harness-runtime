@@ -4408,7 +4408,14 @@ async fn registry_notification_subscription_uses_live_client_connection() {
         .await
         .expect("registry subscription must receive a server push")
         .expect("the live connection must remain open");
-    assert_eq!(notification.method, "notifications/resources/list_changed");
+    assert_eq!(
+        notification.method.string_units(""),
+        Some(
+            "notifications/resources/list_changed"
+                .encode_utf16()
+                .collect()
+        )
+    );
     assert_eq!(
         notification.params.to_json_string().unwrap(),
         r#"{"cursor":"next"}"#
@@ -5401,7 +5408,7 @@ async fn secret_refusal_checks_percent_encoded_stored_mcp_tokens() {
         &oauth::StoredTokens {
             access_token: "access+/=token?".into(),
             refresh_token: Some("refresh+/=token?".into()),
-            expires_at_unix: 1,
+            expires_at_millis: oauth::OAuthExpiry::Number((1.0) * 1000.0),
             client_id: None,
             client_secret: None,
             step_up_scope: None,
@@ -5495,7 +5502,7 @@ async fn oauth_grant_provenance_writes_same_grant_and_rejects_rotation_for_each_
                     &oauth::StoredTokens {
                         access_token: access,
                         refresh_token: Some(refresh),
-                        expires_at_unix: u64::MAX,
+                        expires_at_millis: oauth::OAuthExpiry::Number((1_000_000.0) * 1000.0),
                         client_id: None,
                         client_secret: None,
                         step_up_scope: None,
@@ -5659,7 +5666,7 @@ async fn oauth_without_refresh_grant_is_not_partition_or_write_eligible() {
         &oauth::StoredTokens {
             access_token: "access-only".into(),
             refresh_token: None,
-            expires_at_unix: u64::MAX,
+            expires_at_millis: oauth::OAuthExpiry::Number((1_000_000.0) * 1000.0),
             client_id: None,
             client_secret: None,
             step_up_scope: None,
@@ -7223,7 +7230,7 @@ async fn cached_failure_after_grant_rotation_preserves_both_identity_partitions(
                     &oauth::StoredTokens {
                         access_token: "test-access".into(),
                         refresh_token: Some(refresh),
-                        expires_at_unix: 3600,
+                        expires_at_millis: oauth::OAuthExpiry::Number((3600.0) * 1000.0),
                         client_id: None,
                         client_secret: None,
                         step_up_scope: None,
@@ -9357,7 +9364,7 @@ async fn stale_session_reconnect_preserves_oauth_grant() {
         &oauth::StoredTokens {
             access_token: "still-valid".into(),
             refresh_token: Some("refresh".into()),
-            expires_at_unix: 10_000,
+            expires_at_millis: oauth::OAuthExpiry::Number((10_000.0) * 1000.0),
             client_id: Some("client-id".into()),
             client_secret: None,
             step_up_scope: None,
@@ -9451,8 +9458,8 @@ async fn connect_oauth_discovery_failure_emits_server_needs_auth_with_discovery_
         &server_key,
         &oauth::StoredTokens {
             access_token: "expired".into(),
-            refresh_token: Some("refresh".into()),
-            expires_at_unix: 0,
+            refresh_token: None,
+            expires_at_millis: oauth::OAuthExpiry::Number((0.0) * 1000.0),
             client_id: Some("client-id".into()),
             client_secret: None,
             step_up_scope: None,

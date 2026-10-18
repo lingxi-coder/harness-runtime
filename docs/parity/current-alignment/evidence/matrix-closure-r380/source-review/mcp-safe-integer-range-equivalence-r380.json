@@ -1,0 +1,8 @@
+{
+  "file": "crates/platforms/common/src/mcp_remote.rs",
+  "newSha256": "b243bb11102935b4de9cc6346068da4da52790dc97ef439b991b40df3065ca2d",
+  "old": "code < -MAX_SAFE_INTEGER || code > MAX_SAFE_INTEGER",
+  "new": "!(-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&code)",
+  "equivalence": "Finite f64 comparisons preserve the same inclusive endpoints. The preceding unchanged !is_finite() short-circuit rejects NaN and infinities before either range predicate. The unchanged fract()!=0 check remains before the range test. No side effects occur in these comparisons.",
+  "validation": "Required Clippy rerun compiles this final predicate; prior workspace compile and focused functional tests reuse via the exact equivalent-expression change."
+}

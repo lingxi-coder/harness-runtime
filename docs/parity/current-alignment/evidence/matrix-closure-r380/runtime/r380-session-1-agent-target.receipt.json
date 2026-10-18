@@ -1,0 +1,39 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-session1-agent-target-r380.v1",
+  "recordedAtUtc": "2026-10-18T16:54:49Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnv": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/frozen-build-env.sh",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "command": "cargo test --locked --offline -p agent --test current_alignment_mod_append -- --nocapture",
+  "sandboxPermissions": "default; localhost escalation was not required",
+  "authorization": "Root released the independent agent-only target while the Orchestrator refusal source remained in progress.",
+  "sourceScope": [
+    "crates/agent",
+    "crates/core",
+    "crates/hooks"
+  ],
+  "sourceHashFiles": [
+    "r380-session-1-sourcehashes-pre.txt",
+    "r380-session-1-sourcehashes-post.txt"
+  ],
+  "sourceFileCount": 18,
+  "sourceStableDuringRun": true,
+  "exitCode": 0,
+  "testsSelected": 3,
+  "testsPassed": 3,
+  "testsFailed": 0,
+  "passed": [
+    "source_derived_user_lone_session_append_rewrite_preserves_return_and_transcript_units",
+    "native_system_lone_session_append_reaches_bun_worker_and_host_writer",
+    "native_session_append_middleware_contract_reaches_host_and_transcript"
+  ],
+  "log": "logs/22-agent-current-alignment-mod-append.log",
+  "logSha256": "0084e40caaca0fd8b382a40067715a5cb937afd35c3c70eb3fd8738d043e550b",
+  "scope": "Session-1 source-backed user middleware rewrite/return/transcript UTF-16 projection plus existing system and middleware contract cases; no Native raw user event claim."
+}

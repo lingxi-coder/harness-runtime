@@ -22,7 +22,7 @@ use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
 
-const CONTENT_MODIFIED: i32 = -32801;
+const CONTENT_MODIFIED: i64 = -32801;
 const CONTENT_MODIFIED_RETRIES: u32 = 3;
 const CONTENT_MODIFIED_BASE_DELAY_MS: u64 = 500;
 /// Oracle `clientInfo:{name:"Claude Code",version:{…}.VERSION}` — the same

@@ -1,0 +1,7 @@
+(version 1)
+(allow default)
+(deny file-read* (subpath "/Users/luolingfeng/lingxi"))
+(deny file-write* (subpath "/Users/luolingfeng/lingxi"))
+(deny network-outbound)
+(allow network-outbound (remote ip "127.0.0.1:58084"))
+(deny network-inbound)

@@ -1,0 +1,25 @@
+{
+  "schema": "lingxi.claude-alignment-test-executable-retirement-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:15:30.797145Z",
+  "reason": "The isolated current_alignment_refusal target passed 14/14; its test executable is no longer needed and may be rebuilt.",
+  "targetExecutable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_refusal-fb371c01a8664e22",
+  "binarySha256": "c20b4cb8b2672d83bd946be10013ad811093fb8e889db3629fbf2e48049bbc81",
+  "inode": 992305932,
+  "sizeBytes": 128350480,
+  "mode": "0o755",
+  "dependencyFileRetained": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_refusal-fb371c01a8664e22.d",
+  "dependencyFileSha256": "92cbdfee6416d74df1cfd3b39a060599cff31c4297f232536c2f2aa0446c6d5f",
+  "fingerprintFilesRetained": {
+    "dep-test-integration-test-current_alignment_refusal": "f367ff9fe99686addaa1cb2359fea4a81480eb1bab82aa9d06d63c95b5e71833",
+    "invoked.timestamp": "5a109e6643e8d3e88642e3f35e85d2a83e639d07523aa6e99166c48178e965c3",
+    "test-integration-test-current_alignment_refusal": "3aeef55bf2fdf1afb87e5ed37fb0f4d4a9c028444dde1841d045af0f34d3fa62",
+    "test-integration-test-current_alignment_refusal.json": "28c453270062cdf8f06c3e1e1f437a9056cc0550abf977755d32f50482058242"
+  },
+  "lsofBeforeDeletion": [],
+  "removed": true,
+  "verifiedAbsent": true,
+  "sourceReceipt": "r380-orchestrator-current-alignment-refusal-full14.receipt.json",
+  "sourceLog": "logs/58-orchestrator-current-alignment-refusal-full14.log",
+  "availableKiBBefore": 2176056,
+  "availableKiBAfter": 2301404
+}

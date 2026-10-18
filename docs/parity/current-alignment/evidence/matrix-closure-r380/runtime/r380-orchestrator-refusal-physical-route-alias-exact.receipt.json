@@ -1,0 +1,28 @@
+{
+  "schema": "lingxi.claude-alignment-orchestrator-refusal-physical-route-alias-exact-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:14:31.142141Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "package": "orchestrator",
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_refusal batched_refusal_catalog_gate_uses_the_physical_route_not_reported_model -- --exact --nocapture",
+  "sandboxPermissions": "require_escalated (Root-authorized bounded loopback target)",
+  "sourceHashFiles": [
+    "r380-orchestrator-refusal-physical-route-alias-sourcehashes-pre.txt",
+    "r380-orchestrator-refusal-physical-route-alias-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 2330,
+  "sourceStableDuringRun": true,
+  "testSelector": "batched_refusal_catalog_gate_uses_the_physical_route_not_reported_model",
+  "exitCode": 0,
+  "testsSelected": 1,
+  "testsPassed": 1,
+  "testsFailed": 0,
+  "log": "logs/57-orchestrator-refusal-physical-route-alias-exact.log",
+  "logSha256": "8ba88a98c3347d4cf119e52a9fca90079dbcb3b483c19c46a2f42f72c60400e4"
+}

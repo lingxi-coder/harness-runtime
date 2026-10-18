@@ -1,0 +1,30 @@
+{
+  "schema": "lingxi.claude-alignment-orchestrator-mod-tool-wire-295-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:15:50.112078Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "package": "orchestrator",
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_mod_tool_wire_295",
+  "sourceHashFiles": [
+    "r380-orchestrator-mod-tool-wire-295-sourcehashes-pre.txt",
+    "r380-orchestrator-mod-tool-wire-295-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 2331,
+  "sourceStableDuringRun": true,
+  "fixtureFiles": [
+    "crates/orchestrator/tests/fixtures/current_alignment_mod_tool_wire_295.js"
+  ],
+  "exitCode": 0,
+  "testsSelected": 1,
+  "testsPassed": 1,
+  "testsFailed": 0,
+  "log": "logs/59-orchestrator-mod-tool-wire-295.log",
+  "logSha256": "e65f85d2daf724b9f55093d8773bf1f010d05ae8e5032ad86a22742b86da99eb",
+  "sourceFilesChangedDuringRun": []
+}

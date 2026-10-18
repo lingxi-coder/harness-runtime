@@ -114,6 +114,14 @@ fn source_string_units(units: Vec<u16>) -> Utf16JsonProjection {
         .expect("display form is derived from exact UTF-16 units")
 }
 
+fn jsonrpc_method_is(method: &jsonrpc::JsonRpcString, expected: &str) -> bool {
+    method
+        .code_units()
+        .iter()
+        .copied()
+        .eq(expected.encode_utf16())
+}
+
 fn concat_source_strings(parts: &[&Utf16JsonProjection]) -> Utf16JsonProjection {
     let units = parts
         .iter()
@@ -732,7 +740,7 @@ impl McpClient {
             match receiver.recv().await {
                 Ok(notification) => Some((
                     McpNotificationDto {
-                        method: notification.method,
+                        method: source_string_units(notification.method.code_units().to_vec()),
                         params: notification.params.map_or_else(source_null, |params| {
                             Utf16JsonProjection::parse(params.as_json())
                                 .expect("JSON-RPC notification params are valid source JSON")
@@ -746,7 +754,7 @@ impl McpClient {
                 // later notification that may never arrive.
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => Some((
                     McpNotificationDto {
-                        method: "notifications/resources/list_changed".to_string(),
+                        method: source_string("notifications/resources/list_changed"),
                         params: Utf16JsonProjection::from_serde_value(
                             &serde_json::json!({ "lagged": skipped }),
                         )
@@ -1943,7 +1951,7 @@ impl McpClient {
                 loop {
                     match notifications.recv().await {
                         Ok(n) => {
-                            if n.method != "notifications/progress" {
+                            if !jsonrpc_method_is(&n.method, "notifications/progress") {
                                 continue;
                             }
                             let Some(params) = n.params.as_ref() else {
@@ -2480,7 +2488,7 @@ fn is_invalid_params(e: &jsonrpc::ConnectionError) -> bool {
 }
 
 /// JSON-RPC reserved error code for `InvalidParams` (`Qp.InvalidParams`).
-const JSONRPC_INVALID_PARAMS: i32 = -32602;
+const JSONRPC_INVALID_PARAMS: i64 = -32602;
 
 /// Wire-level shape of a `resources/read` response body.
 #[derive(Debug, Deserialize)]
@@ -3458,7 +3466,10 @@ mod constructor_tests {
                 .await
                 .expect("notification subscription must receive a server push")
                 .expect("the live connection must remain open");
-        assert_eq!(notification.method, "notifications/resources/list_changed");
+        assert_eq!(
+            notification.method.string_at(""),
+            Some("notifications/resources/list_changed")
+        );
         assert_eq!(notification.params, source_object());
 
         // Dropping the stream releases only this receiver; the client remains

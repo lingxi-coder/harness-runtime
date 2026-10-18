@@ -385,6 +385,8 @@ mod tests {
     fn skips_internal_media_analysis_blocks() {
         let msgs = vec![ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![
                 ContentBlock::Text {

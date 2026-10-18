@@ -1,0 +1,31 @@
+{
+  "schema": "lingxi.claude-alignment-orchestrator-mcp-iserror-presence-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:11:18.086828Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "package": "orchestrator",
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_mcp_tool_result_presence native_mcp_iserror_presence_round_trips_as_exact_model_tool_result_bytes -- --exact",
+  "sourceHashFiles": [
+    "r380-orchestrator-mcp-iserror-presence-sourcehashes-pre.txt",
+    "r380-orchestrator-mcp-iserror-presence-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 2720,
+  "sourceStableDuringRun": true,
+  "fixtureRoots": [
+    "docs/parity/current-alignment/fixtures/tool-result-presence-295",
+    "docs/parity/current-alignment/fixtures/mcp-mime-295"
+  ],
+  "exitCode": 0,
+  "testsSelected": 1,
+  "testsPassed": 1,
+  "testsFailed": 0,
+  "log": "logs/51-orchestrator-mcp-iserror-presence.log",
+  "logSha256": "55d82613a2d97471b7e34e1b053ea08efd3b96bc73dcbe031ccfdb1f36fb9e93",
+  "sourceFilesChangedDuringRun": []
+}

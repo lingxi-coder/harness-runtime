@@ -1,0 +1,10 @@
+$ source '/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/frozen-build-env.sh' && cargo test --locked --offline -p mcp --test input_required_native_295_roots_test native_295_roots_list_replays_loose_params_and_forwards_captured_roots_response -- --exact
+   Compiling mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp)
+    Finished `test` profile [unoptimized] target(s) in 3.91s
+     Running tests/input_required_native_295_roots_test.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/input_required_native_295_roots_test-ea093fc74765079b)
+
+running 1 test
+test native_295_roots_list_replays_loose_params_and_forwards_captured_roots_response ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.01s
+

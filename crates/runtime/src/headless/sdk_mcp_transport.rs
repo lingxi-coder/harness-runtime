@@ -201,11 +201,11 @@ fn closed() -> jsonrpc::ConnectionError {
 
 fn jsonrpc_message_from_projection(
     projection: &Utf16JsonProjection,
-) -> Result<jsonrpc::Message, serde_json::Error> {
+) -> Result<jsonrpc::Message, jsonrpc::CodecError> {
     let source = projection
         .to_json_string()
-        .map_err(|error| <serde_json::Error as serde::de::Error>::custom(error.to_string()))?;
-    serde_json::from_str(&source)
+        .map_err(|error| jsonrpc::CodecError::MessageDecode(error.to_string()))?;
+    ::mcp::decode_native_mcp_frame(source.as_bytes())
 }
 
 fn projection_from_jsonrpc_message(
@@ -238,6 +238,15 @@ enum Replay {
     Swallow,
     Response(jsonrpc::Response),
 }
+
+fn jsonrpc_method_is(method: &jsonrpc::JsonRpcString, expected: &str) -> bool {
+    method
+        .code_units()
+        .iter()
+        .copied()
+        .eq(expected.encode_utf16())
+}
+
 fn replay_manifest(endpoint: &Endpoint, message: &jsonrpc::Message) -> Replay {
     let mut manifest = endpoint
         .manifest
@@ -247,7 +256,7 @@ fn replay_manifest(endpoint: &Endpoint, message: &jsonrpc::Message) -> Replay {
         return Replay::Forward;
     };
     match message {
-        jsonrpc::Message::Request(request) if request.method == "initialize" => {
+        jsonrpc::Message::Request(request) if jsonrpc_method_is(&request.method, "initialize") => {
             let Some(result) = cache.initialize.take() else {
                 *manifest = None;
                 return Replay::Forward;
@@ -277,13 +286,14 @@ fn replay_manifest(endpoint: &Endpoint, message: &jsonrpc::Message) -> Replay {
             )
         }
         jsonrpc::Message::Notification(notification)
-            if notification.method == "notifications/initialized" && cache.swallow_initialized =>
+            if jsonrpc_method_is(&notification.method, "notifications/initialized")
+                && cache.swallow_initialized =>
         {
             cache.swallow_initialized = false;
             Replay::Swallow
         }
         jsonrpc::Message::Request(request)
-            if request.method == "tools/list"
+            if jsonrpc_method_is(&request.method, "tools/list")
                 && !cache.swallow_initialized
                 && !request
                     .params
@@ -404,8 +414,8 @@ async fn send_message(
         Replay::Swallow => return Ok(()),
         Replay::Forward => {}
     }
-    let initialize =
-        matches!(&message, jsonrpc::Message::Request(request) if request.method=="initialize");
+    let initialize = matches!(&message, jsonrpc::Message::Request(request)
+        if jsonrpc_method_is(&request.method, "initialize"));
     let wire = projection_from_jsonrpc_message(&message)?;
     let request = Utf16JsonProjection::object(vec![
         ("subtype".into(), "mcp_message".into()),
@@ -434,6 +444,7 @@ async fn send_message(
             .subprojection("/mcp_response")
             .map_err(projection_error)?;
         let reply = jsonrpc_message_from_projection(&reply_source).map_err(|error| {
+            let error = <serde_json::Error as serde::de::Error>::custom(error.to_string());
             jsonrpc::ConnectionError::Router(jsonrpc::RouterError::Deserialize(error))
         })?;
         endpoint.inbound.send(reply).map_err(|_| closed())?;
@@ -486,7 +497,11 @@ impl McpTransport for SdkMcpTransport {
                 Ok((endpoint, plane))
             },
         ));
-        let connection = Arc::new(jsonrpc::Connection::from_message_streams(reader, writer));
+        let connection = Arc::new(jsonrpc::Connection::from_message_streams(
+            reader,
+            writer,
+            Some("Method not found".into()),
+        ));
         endpoint
             .connection
             .set(connection.clone())

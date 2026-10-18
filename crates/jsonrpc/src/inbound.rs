@@ -8,7 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use crate::messages::{Request, Response, ResponseError, METHOD_NOT_FOUND};
+use crate::messages::{JsonRpcString, Request, Response, ResponseError, METHOD_NOT_FOUND};
 
 /// Handler for an inbound peer request. Implementors take a `Request`,
 /// produce a `Response`.
@@ -26,6 +26,7 @@ pub type BoxedHandler = Arc<dyn InboundHandler>;
 #[derive(Clone, Default)]
 pub struct Dispatcher {
     inner: Arc<RwLock<HashMap<String, BoxedHandler>>>,
+    method_not_found_message: Option<JsonRpcString>,
 }
 
 impl Dispatcher {
@@ -33,6 +34,17 @@ impl Dispatcher {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct a dispatcher whose unknown-method error uses a fixed message.
+    /// Protocol adapters can select this at connection construction while
+    /// generic JSON-RPC dispatch keeps its method-bearing default message.
+    #[must_use]
+    pub fn with_method_not_found_message(message: impl Into<JsonRpcString>) -> Self {
+        Self {
+            inner: Arc::default(),
+            method_not_found_message: Some(message.into()),
+        }
     }
 
     /// Register `handler` to receive requests whose `method` equals `name`.
@@ -51,7 +63,9 @@ impl Dispatcher {
     pub async fn dispatch(&self, req: Request) -> Response {
         let handler = {
             let map = self.inner.read().await;
-            map.get(&req.method).cloned()
+            String::from_utf16(req.method.code_units())
+                .ok()
+                .and_then(|method| map.get(&method).cloned())
         };
         match handler {
             Some(h) => h.handle(req).await,
@@ -59,7 +73,11 @@ impl Dispatcher {
                 Some(req.id),
                 ResponseError {
                     code: METHOD_NOT_FOUND,
-                    message: format!("method not found: {}", req.method).into(),
+                    message: self.method_not_found_message.clone().unwrap_or_else(|| {
+                        let mut units = "method not found: ".encode_utf16().collect::<Vec<_>>();
+                        units.extend_from_slice(req.method.code_units());
+                        JsonRpcString::from_code_units(units)
+                    }),
                     data: None,
                 },
             ),
@@ -112,6 +130,36 @@ mod tests {
         assert_eq!(resp.id, Some(Id::Number(42)));
         assert_eq!(resp.result.unwrap().to_value().unwrap(), json!({"x": 1}));
         assert!(resp.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn unknown_method_error_preserves_exact_utf16_units_by_default() {
+        let dispatcher = Dispatcher::new();
+        let request = Request::new(
+            JsonRpcString::from_code_units(vec![b'm' as u16, 0xd800]),
+            None,
+            Id::Number(7),
+        );
+
+        let response = dispatcher.dispatch(request).await;
+        let message = response.error.expect("method-not-found error").message;
+        let mut expected = "method not found: m".encode_utf16().collect::<Vec<_>>();
+        expected.push(0xd800);
+        assert_eq!(message.code_units(), expected.as_slice());
+    }
+
+    #[tokio::test]
+    async fn fixed_method_not_found_message_does_not_interpolate_method() {
+        let dispatcher = Dispatcher::with_method_not_found_message("Method not found");
+        let request = Request::new(
+            JsonRpcString::from_code_units(vec![b'm' as u16, 0xd800]),
+            None,
+            Id::Number(7),
+        );
+
+        let response = dispatcher.dispatch(request).await;
+        let message = response.error.expect("method-not-found error").message;
+        assert_eq!(message, "Method not found");
     }
 
     struct Two;

@@ -977,6 +977,8 @@ async fn compact_summary_source_override_preserves_session_append_rewrites() {
         origin: None,
         turn_origin: None,
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
     };
     let source_summary = summary(
         MessageId::new(),
@@ -1014,6 +1016,108 @@ async fn compact_summary_source_override_preserves_session_append_rewrites() {
     assert_eq!(
         rows[1].string_at("/message/content/0/text"),
         Some("rewritten by Mod")
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn shutdown_interruption_is_persisted_in_native_optional_slot() {
+    use lingxi_core::types::{ConversationMessage, MessageId};
+    use std::sync::Arc;
+
+    let root = tempfile::tempdir().expect("temporary transcript root");
+    let orchestrator = ConversationOrchestrator::new(
+        crate::OrchestratorConfig::default(),
+        Arc::new(crate::test_support::MockApiClient::new(Vec::new())),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        crate::test_support::noop_hook_executor(),
+        Arc::new(crate::test_support::NoOpPermissionGate),
+        Arc::new(crate::test_support::MockOutputStream::new()),
+        Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+        root.path().to_path_buf(),
+    );
+    let message = ConversationMessage::User {
+        api_message_override: None,
+        id: MessageId::new(),
+        content: vec![lingxi_core::types::ContentBlock::Text {
+            text: "[Request interrupted by user]".into(),
+            citations: None,
+        }],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+        turn_companion: None,
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
+        interrupted_by_shutdown: Some(true),
+        refused_message_id: None,
+    };
+    let row = orchestrator.to_jsonl_message(&message, "s", None, None, None, None);
+    let encoded = serde_json::to_string(&row).unwrap();
+    let timestamp = encoded.find("\"timestamp\"").unwrap();
+    let shutdown = encoded.find("\"interruptedByShutdown\":true").unwrap();
+    let user_type = encoded.find("\"userType\"").unwrap();
+    assert!(
+        timestamp < shutdown && shutdown < user_type,
+        "Native head slot: {encoded}"
+    );
+    assert_eq!(
+        row.extra
+            .at_pointer("/interruptedByShutdown")
+            .and_then(lingxi_core::types::utf16_json::JsonValueView::as_bool),
+        Some(true)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn refused_message_id_is_persisted_after_timestamp_with_exact_utf16_units() {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use lingxi_core::types::{ConversationMessage, MessageId};
+    use std::sync::Arc;
+
+    let root = tempfile::tempdir().expect("temporary transcript root");
+    let orchestrator = ConversationOrchestrator::new(
+        crate::OrchestratorConfig::default(),
+        Arc::new(crate::test_support::MockApiClient::new(Vec::new())),
+        Arc::new(tool_api::registry::ToolRegistry::new()),
+        crate::test_support::noop_hook_executor(),
+        Arc::new(crate::test_support::NoOpPermissionGate),
+        Arc::new(crate::test_support::MockOutputStream::new()),
+        Arc::new(crate::test_support::StaticMemoryProvider::empty()),
+        root.path().to_path_buf(),
+    );
+    let refused_message_id = Utf16JsonProjection::parse(r#""A\ud800B""#).unwrap();
+    let message = ConversationMessage::User {
+        api_message_override: None,
+        id: MessageId::new(),
+        content: vec![lingxi_core::types::ContentBlock::Text {
+            text: "retry".into(),
+            citations: None,
+        }],
+        is_meta: true,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+        turn_companion: Some(Some(true)),
+        usage_limit_note: None,
+        origin: None,
+        turn_origin: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: Some(refused_message_id),
+    };
+    let row = orchestrator.to_jsonl_message(&message, "s", None, None, None, None);
+    let encoded = serde_json::to_string(&row).unwrap();
+    let timestamp = encoded.find("\"timestamp\"").unwrap();
+    let refused = encoded.find("\"refusedMessageId\":\"A\\ud800B\"").unwrap();
+    let user_type = encoded.find("\"userType\"").unwrap();
+    assert!(
+        timestamp < refused && refused < user_type,
+        "Native head slot: {encoded}"
+    );
+    assert_eq!(
+        row.extra.string_units("/refusedMessageId"),
+        Some(vec![0x0041, 0xd800, 0x0042])
     );
 }
 
@@ -2429,6 +2533,23 @@ impl ConversationOrchestrator {
         if msg.is_meta() {
             extra.insert("isMeta".to_string(), serde_json::Value::Bool(true));
         }
+        if let ConversationMessage::User {
+            interrupted_by_shutdown: Some(interrupted_by_shutdown),
+            ..
+        } = msg
+        {
+            extra.insert(
+                "interruptedByShutdown".to_string(),
+                serde_json::Value::Bool(*interrupted_by_shutdown),
+            );
+        }
+        if let ConversationMessage::User {
+            refused_message_id: Some(refused_message_id),
+            ..
+        } = msg
+        {
+            source_extra_fields.push(("refusedMessageId", refused_message_id.clone()));
+        }
         // Top-level `requestId` (the Anthropic `request-id` response header) —
         // claude-code persists it on REAL assistant lines only. The caller
         // passes `Some` from the per-block real-response path; `None` (synthetic
@@ -2521,6 +2642,12 @@ impl ConversationOrchestrator {
                 extra.insert(
                     "apiErrorStatus".to_string(),
                     serde_json::Value::Number(status.into()),
+                );
+            }
+            if let Some(message_id) = ae.refused_message_id.as_ref() {
+                extra.insert(
+                    "refusedMessageId".to_string(),
+                    serde_json::Value::String(message_id.clone()),
                 );
             }
         }
@@ -3311,6 +3438,8 @@ impl ConversationOrchestrator {
                     usage_limit_note: persisted_usage_note,
                     origin: persisted_origin,
                     turn_origin: persisted_turn_origin,
+                    interrupted_by_shutdown: persisted_shutdown,
+                    refused_message_id: persisted_refused_message_id,
                     api_message_override: persisted_override,
                 },
                 ConversationMessage::User {
@@ -3323,6 +3452,8 @@ impl ConversationOrchestrator {
                     usage_limit_note: retry_usage_note,
                     origin: retry_origin,
                     turn_origin: retry_turn_origin,
+                    interrupted_by_shutdown: retry_shutdown,
+                    refused_message_id: retry_refused_message_id,
                     api_message_override: retry_override,
                 },
             ) => {
@@ -3334,6 +3465,8 @@ impl ConversationOrchestrator {
                     && persisted_usage_note == retry_usage_note
                     && persisted_origin == retry_origin
                     && persisted_turn_origin == retry_turn_origin
+                    && persisted_shutdown == retry_shutdown
+                    && persisted_refused_message_id == retry_refused_message_id
                     && persisted_override == retry_override
                     && persisted_content.len() == retry_content.len()
                     && persisted_content
@@ -4216,6 +4349,21 @@ impl ConversationOrchestrator {
             None,
             api_error.as_ref(),
         );
+        if let Some(stop_details) = api_error
+            .as_ref()
+            .and_then(|envelope| envelope.inner_stop_details.as_ref())
+        {
+            jmsg.message
+                .set_field(
+                    "stop_details",
+                    Source::parse(
+                        &serde_json::to_string(stop_details)
+                            .expect("refusal stop details serialize as exact JSON"),
+                    )
+                    .expect("refusal stop details are valid JSON"),
+                )
+                .expect("synthetic API-error message is an object");
+        }
         if let ConversationMessage::User { id, .. } = msg {
             if jmsg.message_type == "user" {
                 let (task_delivery, envelope) = {
@@ -5762,6 +5910,8 @@ async fn native_session_append_presence_survives_durable_resume_and_anthropic_wi
 
     let tool_result = ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: MessageId::new(),
         content: vec![ContentBlock::ToolResult {
             tool_use_id,
@@ -6227,7 +6377,16 @@ mod rich_append_projection_tests {
         );
 
         let prompt_id = MessageId::new();
-        let restored = ConversationMessage::user(prompt_id, "prompt".into());
+        let mut restored = ConversationMessage::user(prompt_id, "prompt".into());
+        let refused_message_id =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""msg_\ud800""#).unwrap();
+        if let ConversationMessage::User {
+            refused_message_id: carrier,
+            ..
+        } = &mut restored
+        {
+            *carrier = Some(refused_message_id.clone());
+        }
         let mut retry = restored.clone();
         if let ConversationMessage::User { content, .. } = &mut retry {
             content[0] = ContentBlock::TextJsUtf16 {
@@ -6241,6 +6400,27 @@ mod rich_append_projection_tests {
             .append_pending_prompt_message_to_history_once(&retry)
             .await
             .expect("same source units across restored text carriers are idempotent");
+        assert_eq!(orchestrator.session.lock().await.history.len(), 1);
+
+        if let ConversationMessage::User {
+            refused_message_id: carrier,
+            ..
+        } = &mut retry
+        {
+            *carrier = Some(
+                lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""other-id""#)
+                    .unwrap(),
+            );
+        }
+        let error = orchestrator
+            .append_pending_prompt_message_to_history_once(&retry)
+            .await
+            .expect_err("the same UUID with another refusal id is not idempotent");
+        assert!(matches!(
+            error,
+            OrchestratorError::Internal(message)
+                if message.contains("has different source content")
+        ));
         assert_eq!(orchestrator.session.lock().await.history.len(), 1);
 
         let invalid_id = MessageId::new();
@@ -6318,6 +6498,8 @@ mod rich_append_projection_tests {
         let data = Source::parse(r#"[{"type":"text","text":"\udc00","\udfff":"\ud800"}]"#).unwrap();
         let original = ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             is_meta: false,
             is_compact_summary: false,

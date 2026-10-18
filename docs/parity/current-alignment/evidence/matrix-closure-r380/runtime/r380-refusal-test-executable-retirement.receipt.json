@@ -1,0 +1,41 @@
+{
+  "schema": "lingxi.claude-alignment-exact-test-executable-retirement-r380.v1",
+  "recordedAtUtc": "2026-10-18T17:29:39Z",
+  "target": "orchestrator current_alignment_refusal",
+  "aggregateAcceptance": "12/13 full target passed with unchanged production hashes, then sole test-only corrected assertion passed 1/1 exact; not one 13/13 run",
+  "fullTargetReceipt": "r380-orchestrator-refusal-final-test-failure-fallback-notice.receipt.json",
+  "exactRetestReceipt": "r380-orchestrator-refusal-final-exact-fallback.receipt.json",
+  "exactRunningPath": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_refusal-f8c195d57234acd9",
+  "fileIdentity": {
+    "device": 16777234,
+    "inode": 992294878,
+    "sizeBytes": 124477344,
+    "mtimeNs": 1792344515293750579,
+    "mode": "0o100755"
+  },
+  "binarySha256": "95a64534259355a43085705a453c946c75114dba0042d55edf0ed70fc1bb3379",
+  "lsof": {
+    "exitCode": 1,
+    "stdoutEmpty": true,
+    "stderrEmpty": true
+  },
+  "retainedDependencyFile": {
+    "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_refusal-f8c195d57234acd9.d",
+    "sha256": "df3f21935838f183f962b6de53dd8bd9d4eb6bf31a3d3fee0b495fd25a2b495b"
+  },
+  "retainedFingerprintMarker": {
+    "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/orchestrator-f8c195d57234acd9/test-integration-test-current_alignment_refusal",
+    "sha256": "18009a16640a9fdebffe9a220b9ed107da485c146c43e62ca20fdd199cae2492"
+  },
+  "retainedFingerprintJson": {
+    "path": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/.fingerprint/orchestrator-f8c195d57234acd9/test-integration-test-current_alignment_refusal.json",
+    "sha256": "e7fdfab3b63ca4359d2aad532e37ced4706c0d00820efb16c1fff31d0a7ba768"
+  },
+  "action": "Unlinked only the exact test executable. Retained .d, fingerprint, libraries, and all other target files.",
+  "verifiedAfterUnlink": {
+    "executableAbsent": true,
+    "dependencyFilePresent": true,
+    "fingerprintMarkerPresent": true,
+    "fingerprintJsonPresent": true
+  }
+}

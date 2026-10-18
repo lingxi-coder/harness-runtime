@@ -835,6 +835,10 @@ pub(crate) struct ApiErrorEnvelope {
     /// Native terminal reason when the classified API failure has a specialized exit.
     pub terminal_reason: Option<&'static str>,
     pub inner_stop_reason: Option<&'static str>,
+    /// Native refusal details retained on the synthetic API-error row.
+    pub inner_stop_details: Option<llm_runtime::HistoryStopDetails>,
+    /// Provider response identity on a Native refusal API-error row.
+    pub refused_message_id: Option<String>,
     /// `truncatedAfterOutput` on the api-error assistant (cc `Co` / `tZo`).
     /// Set when the incomplete-response notice follows a partial that already
     /// yielded real output. Omitted from JSONL when false.
@@ -989,6 +993,8 @@ pub(crate) fn classify_api_error(e: &OrchestratorError) -> ApiErrorEnvelope {
         api_error_status: parsed_status.or(api_error_status),
         terminal_reason,
         inner_stop_reason: None,
+        inner_stop_details: None,
+        refused_message_id: None,
         truncated_after_output: false,
     }
 }

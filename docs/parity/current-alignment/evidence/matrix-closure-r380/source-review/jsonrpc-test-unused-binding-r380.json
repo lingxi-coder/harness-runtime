@@ -1,0 +1,8 @@
+{
+  "recordedAtUtc": "2026-10-18T18:06:01.190086+00:00",
+  "file": "crates/jsonrpc/src/connection.rs",
+  "before": "d7a4124ffc2c4ea6fa3428c56b2f6534ebc7dfa41fdda127cf56271ef5f72f12",
+  "after": "da131022b1d73a818c7f1261c6d1fa280b85611af2ddc6b0e81288cbee4f9269",
+  "change": "Rename unused test-only local conn_a to _conn_a in builder_can_select_a_fixed_unknown_method_message; preserve binding lifetime and production code exactly",
+  "validation": "Existing77PASS source differs only by this test-local identifier; later affected check may record new hash"
+}

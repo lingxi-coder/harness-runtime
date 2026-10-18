@@ -1,0 +1,64 @@
+{
+  "claim_scope": "Static source binding to the frozen Native 2.1.295 artifact; this file records no runtime observation.",
+  "target_artifact": {
+    "version": "2.1.295",
+    "path": "/Users/luolingfeng/.local/share/claude/versions/2.1.295",
+    "sha256": "0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70"
+  },
+  "query_source_slice": {
+    "path": "/private/tmp/claude295-query-single-src/src_202924418.js",
+    "artifact_offset": 202924418,
+    "length": 196943,
+    "sha256": "2612bbe89324a30f9c773abfc2cc83802fd0340cd6283094ea1ed0413ba21e9d",
+    "verified_byte_equal_to_target_artifact_slice": true,
+    "bound_spans": [
+      {
+        "label": "query imports refusal nudge symbols",
+        "local_offset": 2989,
+        "artifact_offset": 202927407,
+        "length": 11,
+        "sha256": "290fc98e67b3d8f7e65217277674aa7b8451e372bccf6b21978284776594254b",
+        "source": "Ukr,wbo,LZt"
+      },
+      {
+        "label": "Qa refusal retry constructor",
+        "local_offset": 88727,
+        "artifact_offset": 203013145,
+        "length": 127,
+        "sha256": "e773614618898f645deef8dd1b27aa7641d04911d65208308703df6d49d26a51",
+        "source": "function Qa({refused:e,kept:o,answered:n,started:r,model:u,querySource:s,queryChainId:y,queryDepth:T,deps:C,makeUserMessage:b})"
+      },
+      {
+        "label": "Qa selects the running-tool nudge variant",
+        "local_offset": 89809,
+        "artifact_offset": 203014227,
+        "length": 19,
+        "sha256": "9a8456e26f70ff0a5e6ba27b4b55338cfffb350d2b1e27af3a26c49dff053ae9",
+        "source": "content:U>0?wbo:Ukr"
+      }
+    ]
+  },
+  "query_source_classifier": {
+    "artifact_offset": 188949567,
+    "length": 175,
+    "sha256": "5972a1fd1b4bc587f5f690cef7ffa7e6d2d48fd1e07ff3d79dc4b59ecbcd6c9d",
+    "source": "function ds(e){if(e===void 0)return;if(e.startsWith(\"repl_main_thread\")||e===\"sdk\")return\"main\";if(e.startsWith(\"agent:\")||e===\"hook_agent\")return\"subagent\";return\"auxiliary\"}"
+  },
+  "refusal_nudge_definitions": {
+    "artifact_offset": 186864244,
+    "length": 398,
+    "sha256": "66cb5709cd08b2283c28b18e1bef4fcf0d72b68b4af0d0a37451633e255192b3",
+    "base_symbol": "Ukr",
+    "running_tool_symbol": "wbo",
+    "source": "Ukr=\"Your response above was stopped by a safety classifier \\u2014 this is not a tool or API error. \"+\"The rest of it was withheld, and tool calls in it that had not finished did not run. Do not produce that content again, even reworded.\",wbo=Ukr+' Exception: a tool call whose result reads \"Interrupted\" was already running when the response was stopped; it may have partially or fully completed.'",
+    "base_text": "Your response above was stopped by a safety classifier — this is not a tool or API error. The rest of it was withheld, and tool calls in it that had not finished did not run. Do not produce that content again, even reworded.",
+    "running_tool_suffix": " Exception: a tool call whose result reads \"Interrupted\" was already running when the response was stopped; it may have partially or fully completed.",
+    "interpretation": "Qa increments U for started tool-use blocks that have no answered tool_result; when U is positive it uses wbo (the base nudge plus the Interrupted-result exception), otherwise it uses Ukr."
+  },
+  "excluded_artifact": {
+    "path": "/Users/luolingfeng/.local/share/claude/ClaudeCode.app/Contents/MacOS/claude",
+    "length": 240664432,
+    "sha256": "c9b5341637becbd423ddffc5b254afb645682a3868cb708bbc6cc0e7bb419937",
+    "reason_excluded": "This app executable does not match the frozen 2.1.295 versioned artifact SHA. Its previously inspected classifier offset 189622433 is not used as parity evidence."
+  }
+}

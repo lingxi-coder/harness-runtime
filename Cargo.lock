@@ -5060,6 +5060,7 @@ dependencies = [
  "jsonrpc",
  "lingxi-llm-client",
  "llm-runtime",
+ "mcp",
  "mobile-linux-api",
  "mobile-linux-core",
  "serde",

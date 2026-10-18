@@ -1,0 +1,9 @@
+    Finished `test` profile [unoptimized] target(s) in 0.28s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/orchestrator-33c71635f98fe3bd)
+
+running 2 tests
+test conversation::reminders_impl::total_tokens_context_window_tests::countdown_stays_unknown_without_a_raw_context_window ... ok
+test conversation::reminders_impl::total_tokens_context_window_tests::padded_countdown_does_not_require_a_known_context_window ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2113 filtered out; finished in 0.00s
+

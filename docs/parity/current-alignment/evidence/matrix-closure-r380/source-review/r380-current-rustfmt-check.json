@@ -1,0 +1,14 @@
+[
+  {
+    "repository": "harness-runtime",
+    "files": 129,
+    "exitCode": 0,
+    "log": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/matrix-closure-r379/integration/harness-runtime-r380-current-rustfmt-check.log"
+  },
+  {
+    "repository": "lingxi-app",
+    "files": 3,
+    "exitCode": 0,
+    "log": "/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/acceptance/matrix-closure-r379/integration/lingxi-app-r380-current-rustfmt-check.log"
+  }
+]

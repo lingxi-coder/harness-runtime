@@ -1,0 +1,32 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-orchestrator-refusal-test-compile-diagnostic-r380.v1",
+  "recordedAtUtc": "2026-10-18T16:58:22Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_refusal",
+  "sandboxPermissions": "require_escalated; Root authorized local loopback for this target",
+  "sourceHashFiles": [
+    "r380-refusal-final-target-retry-sourcehashes-pre.txt",
+    "r380-refusal-final-target-retry-sourcehashes-post.txt"
+  ],
+  "sourceStableDuringRun": true,
+  "exitCode": 101,
+  "testsSelected": 0,
+  "testsPassed": 0,
+  "testsFailed": 0,
+  "phase": "integration-test compilation",
+  "diagnostics": [
+    "crates/orchestrator/tests/current_alignment_refusal.rs:31 imports permission::PermissionOutcome, which is not re-exported from the permission crate root; rustc suggests permission::gate::PermissionOutcome or lingxi_core::host::permission_gate::PermissionOutcome.",
+    "crates/orchestrator/tests/current_alignment_refusal.rs:946 references permission::PermissionCheckContext, which is not re-exported from the permission crate root; rustc suggests permission::gate::PermissionCheckContext or lingxi_core::host::permission_gate::PermissionCheckContext."
+  ],
+  "log": "logs/24-orchestrator-current-alignment-refusal-retry.log",
+  "logSha256": "d7eac9c0985435d1278948b09808236b5f89189ae17357404d5074980119d561",
+  "priorCompileDiagnostic": "r380-orchestrator-refusal-final-compile-error.receipt.json",
+  "scope": "The Orchestrator library compiled, but the refusal integration test did not compile; no assertions ran."
+}

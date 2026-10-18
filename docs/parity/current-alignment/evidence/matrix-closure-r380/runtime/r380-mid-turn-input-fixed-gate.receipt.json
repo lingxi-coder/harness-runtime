@@ -1,0 +1,54 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-mid-turn-input-fixed-gate-r380.v1",
+  "recordedAtUtc": "2026-10-18T17:42:42Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "sourceHashFiles": [
+    "r380-mid-turn-fix-sourcehashes-pre.txt",
+    "r380-mid-turn-fix-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 110,
+  "sourceStableDuringRuns": true,
+  "productionSourceHashes": {
+    "crates/orchestrator/src/conversation/drivers/mod.rs": "bfa9593980b76c0a6251a262707bdf374d2a535396b86b6de0c389027aeb9bf9",
+    "crates/orchestrator/src/conversation/drivers/streaming.rs": "557853c94792f870d1a442400ce2a2b66ed586f09a1d510258c3ae886412de7f",
+    "crates/orchestrator/tests/mid_turn_input_test.rs": "5ff5acb768c3cb527fd8555e98342d5318a8edb721b9d6f216c4f21b415ea6c3"
+  },
+  "precedingFailureReceipt": "r380-mid-turn-input-test-result.receipt.json",
+  "runs": [
+    {
+      "command": "cargo test --locked --offline -p orchestrator --test mid_turn_input_test batched_pre_model_shutdown_emits_the_same_shutdown_discriminator -- --exact --nocapture",
+      "exitCode": 0,
+      "testsSelected": 1,
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "log": "logs/40-orchestrator-mid-turn-pre-cancel-shutdown-exact.log",
+      "logSha256": "dea3d680cf38db4afab27b959caa4dc0544b1da732226a732c34ed8c8c79f109"
+    },
+    {
+      "command": "cargo test --locked --offline -p orchestrator --test mid_turn_input_test cold_shutdown_redelivery_reuses_the_original_user_row -- --exact --nocapture",
+      "exitCode": 0,
+      "testsSelected": 1,
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "log": "logs/41-orchestrator-mid-turn-cold-redelivery-exact.log",
+      "logSha256": "ec5d1b8d8e91338d7b510b6f675451d244537707b69b8a2714b38fb8bf632395"
+    },
+    {
+      "command": "cargo test --locked --offline -p orchestrator --test mid_turn_input_test -- --nocapture",
+      "exitCode": 0,
+      "testsSelected": 12,
+      "testsPassed": 12,
+      "testsFailed": 0,
+      "log": "logs/42-orchestrator-mid-turn-after-fix.log",
+      "logSha256": "3a3efb62599612ee998fab83de81a11cf9b2de00d88c83b344a9977db5cc85dd"
+    }
+  ],
+  "scope": "Mid-turn shutdown marker admission and streaming cold-resume same-UUID user-row reuse; no CU logic changes."
+}

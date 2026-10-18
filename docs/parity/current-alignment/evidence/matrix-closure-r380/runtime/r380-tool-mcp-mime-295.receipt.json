@@ -1,0 +1,30 @@
+{
+  "schema": "lingxi.claude-alignment-tool-mcp-mime-295-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:12:38.582141Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "package": "tool-mcp",
+  "command": "cargo test --locked --offline -p tool-mcp --test current_alignment_native_mcp_mime_295 native_295_mcp_tool_resource_blobs_use_mime_extensions_and_exact_bytes -- --exact",
+  "sourceHashFiles": [
+    "r380-tool-mcp-mime-295-sourcehashes-pre.txt",
+    "r380-tool-mcp-mime-295-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 2462,
+  "sourceStableDuringRun": true,
+  "fixtureRoots": [
+    "docs/parity/current-alignment/fixtures/mcp-mime-295"
+  ],
+  "exitCode": 0,
+  "testsSelected": 1,
+  "testsPassed": 1,
+  "testsFailed": 0,
+  "log": "logs/53-tool-mcp-mime-295.log",
+  "logSha256": "0af3d1f2f72be966e6e4c5b7aff9cd8e0a5af7a50d35fe98256a100e924ab76d",
+  "sourceFilesChangedDuringRun": []
+}

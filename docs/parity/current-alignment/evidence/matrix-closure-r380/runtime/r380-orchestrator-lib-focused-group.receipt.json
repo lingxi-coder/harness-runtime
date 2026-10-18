@@ -1,0 +1,81 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-orchestrator-lib-focused-group-r380.v1",
+  "recordedAtUtc": "2026-10-18T17:33:27Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "sourceHashFiles": [
+    "r380-focused-batch-lib-sourcehashes-pre.txt",
+    "r380-focused-batch-lib-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 110,
+  "sourceStableAcrossGroup": true,
+  "target": "-p orchestrator --lib shared unit-test executable",
+  "commands": [
+    {
+      "command": "cargo test --locked --offline -p orchestrator --lib shutdown_interruption_metadata_and_utf16_content_survive_cold_hydration",
+      "exitCode": 0,
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "log": "logs/31-orch-lib-shutdown-hydration.log",
+      "logSha256": "f7c13906a5dc4bb9ccb773dabe752121475c09291375e6d25788f41919f4b3e8"
+    },
+    {
+      "command": "cargo test --locked --offline -p orchestrator --lib refused_message_id_is_persisted_after_timestamp_with_exact_utf16_units",
+      "exitCode": 0,
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "log": "logs/32-orch-lib-refused-id-jsonl.log",
+      "logSha256": "139798d94bc05c8592360a98bc99a5c1b66f86fb8c06f1971af8913799c15c47"
+    },
+    {
+      "command": "cargo test --locked --offline -p orchestrator --lib tool_result_text::tests::cold_resume_object_matches_native_293_raw_content_bytes -- --exact",
+      "exitCode": 0,
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "log": "logs/33-orch-lib-tool-result-cold-resume.log",
+      "logSha256": "b977aa9bf5dde63a405cac7dd543b20533b282f4646d70131a20c31264b0fec1"
+    },
+    {
+      "command": "cargo test --locked --offline -p orchestrator --lib pending_prompt_history_accepts_restored_text_and_rejects_invalid_same_uuid",
+      "exitCode": 0,
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "log": "logs/34-orch-lib-pending-prompt-history.log",
+      "logSha256": "a94abc9ab65da770f085daeed4b41ce84f4a1eed4c9c250141f932029c804e02"
+    },
+    {
+      "command": "cargo test --locked --offline -p orchestrator --lib bare_ingress_omits_token_and_budget_attachments",
+      "exitCode": 0,
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "log": "logs/35-orch-lib-bare-ingress-token-budget.log",
+      "logSha256": "3c4eb599904c1115388be8c966a113a6f7f126fa3830786bc41450e23e72bb2f"
+    },
+    {
+      "command": "cargo test --locked --offline -p orchestrator --lib ledger_matches_source_extracted_286_sequences",
+      "exitCode": 0,
+      "testsPassed": 1,
+      "testsFailed": 0,
+      "log": "logs/36-orch-lib-token-ledger-286.log",
+      "logSha256": "79c58aceb36582532a4a0361f607d369f76cdd281acfcbcfd38b8756aaecc1f1"
+    },
+    {
+      "command": "cargo test --locked --offline -p orchestrator --lib total_tokens_context_window_tests",
+      "exitCode": 0,
+      "testsPassed": 2,
+      "testsFailed": 0,
+      "log": "logs/37-orch-lib-total-token-context-window.log",
+      "logSha256": "61245158d5203a37428fb50aaf15eb92f0dee8e07dceb81f99068cc2f60059aa"
+    }
+  ],
+  "testsPassed": 8,
+  "testsFailed": 0,
+  "sharedTestExecutable": "/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/orchestrator-33c71635f98fe3bd",
+  "scope": "Seven preauthorized focused library selectors; 8 selected tests total. The shared lib test executable is retained until the selector group completes."
+}

@@ -59,6 +59,7 @@ mod error_reporting;
 mod mod_batched_step;
 mod mod_fs_ancestors;
 mod mod_session_messages;
+mod refusal_retry;
 mod response;
 pub(crate) mod tool_dispatch;
 mod tool_results;
@@ -93,6 +94,10 @@ pub(crate) use error_reporting::terminal_api_error_text;
 pub(crate) use error_reporting::GoalClearReason;
 #[cfg(test)]
 pub(crate) use error_reporting::{GoalClearBucket, GOAL_CLEAR_CONDITION_WIDTH};
+pub(crate) use refusal_retry::{
+    inject_native_refusal_safety_retry, native_refusal_retry_enabled, native_refusal_retry_route,
+    native_refusal_retry_route_for_request,
+};
 use response::handle_malformed_tool_use;
 use response::handle_max_output_tokens;
 use response::handle_thinking_only;
@@ -238,6 +243,24 @@ fn select_visible_response_request_history<'a>(
     )
 }
 
+fn select_visible_response_request_route<'a>(
+    visible_response_id: &str,
+    physical_responses: &'a [mod_batched_step::PhysicalStepResponse],
+    query_model: &'a str,
+    query_profile: Option<&'a str>,
+) -> (&'a str, Option<&'a str>) {
+    let mut matching = physical_responses.iter().filter(|physical| {
+        !visible_response_id.is_empty() && physical.response.id == visible_response_id
+    });
+    let Some(physical) = matching.next() else {
+        return (query_model, query_profile);
+    };
+    if matching.next().is_some() {
+        return (query_model, query_profile);
+    }
+    (&physical.model, physical.profile.as_deref())
+}
+
 /// The byte-exact meta "resume directly" nudge injected as a user message on a
 /// `max_tokens` `stop_reason`. 1:1 with TS `query.ts:1226-1227` (note the U+2014
 /// em-dash in "directly —"). Concatenating these two string literals — exactly
@@ -360,6 +383,9 @@ pub(crate) struct RecoveryState {
     /// claude-code's `thinkingOnlyNudged` loop-state flag.
     #[allow(clippy::struct_field_names)]
     pub(crate) thinking_only_nudged: bool,
+    /// Native 2.1.295's `refusalRetrySpent` one-shot guard. The query loop
+    /// creates one state per user turn and carries it across in-place retries.
+    pub(crate) refusal_retry_spent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -411,9 +437,12 @@ pub(crate) enum NativeQueryTransition {
     NextTurn,
     /// Local retries keep the current query depth.
     InPlaceRetry,
+    /// Native 2.1.295 retries a safety refusal or reissues on its refusal
+    /// fallback route without consuming another max-turn slot.
+    RefusalReissue,
     /// Native's resumeActive request is an in-place re-entry. Retained as a
-    /// test oracle case; current production transitions are NextTurn and
-    /// InPlaceRetry, so this does not establish a Native producer route.
+    /// test oracle case; current production transitions include NextTurn,
+    /// InPlaceRetry, and RefusalReissue, so it establishes no Native route.
     #[cfg(test)]
     ResumeIncompleteThinking,
 }
@@ -425,7 +454,9 @@ pub(crate) const fn native_query_depth_after(
 ) -> u32 {
     match transition {
         NativeQueryTransition::NextTurn => current_depth.saturating_add(1),
-        NativeQueryTransition::InPlaceRetry => current_depth,
+        NativeQueryTransition::InPlaceRetry | NativeQueryTransition::RefusalReissue => {
+            current_depth
+        }
         #[cfg(test)]
         NativeQueryTransition::ResumeIncompleteThinking => current_depth,
     }
@@ -520,6 +551,8 @@ async fn execute_one_turn_with_recovery_tracked_impl(
     let mut history_snapshot = prepared.snapshot;
     let mut model = prepared.model;
     let mut model_profile = prepared.model_profile;
+    let query_model = model.clone();
+    let query_model_profile = model_profile.clone();
     // The unmodified `w` supplied to a turn.step is the correct request-history
     // fallback only for a fully synthetic Mod response. Successful physical
     // requests carry their own post-PTL/compact message snapshot below.
@@ -1171,6 +1204,12 @@ async fn execute_one_turn_with_recovery_tracked_impl(
             mod_response_request_history_source,
             &turn_step_input_history,
         );
+        let (request_model, request_profile) = select_visible_response_request_route(
+            &visible.id,
+            &physical_responses,
+            &query_model,
+            query_model_profile.as_deref(),
+        );
         outcome = visible_response::process_visible_response(
             orch,
             visible,
@@ -1179,7 +1218,8 @@ async fn execute_one_turn_with_recovery_tracked_impl(
             } else {
                 None
             },
-            &visible.model,
+            request_model,
+            request_profile,
             final_response && requested_model,
             physical_responses.is_empty(),
             !visible.server_fallback_events().is_empty(),

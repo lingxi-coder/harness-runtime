@@ -1265,6 +1265,8 @@ mod read_file_state_tests {
                     origin: None,
                     turn_origin: None,
                     api_message_override: None,
+                    interrupted_by_shutdown: None,
+                    refused_message_id: None,
                 });
         }
         let before = orch.session().lock().await.history.len();
@@ -3307,6 +3309,8 @@ mod read_file_state_tests {
                 origin: None,
                 turn_origin: None,
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
             };
             let rendered = orch
                 .mod_prompt_attachment(
@@ -6524,6 +6528,8 @@ mod malformed_and_thinking_only_tests {
             origin: None,
             turn_origin: None,
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
         }
     }
 
@@ -6542,6 +6548,8 @@ mod malformed_and_thinking_only_tests {
             origin: None,
             turn_origin: None,
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
         }
     }
 
@@ -11481,6 +11489,7 @@ mod pre_tool_hook_tests {
                     per_turn_effort: None,
                 },
                 same_turn_tool_uses: vec![],
+                refusal_call_boundary: None,
             },
             None,
             fence.clone(),

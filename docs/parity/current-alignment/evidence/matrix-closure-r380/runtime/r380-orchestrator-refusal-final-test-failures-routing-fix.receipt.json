@@ -1,0 +1,59 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-orchestrator-refusal-test-result-r380.v1",
+  "recordedAtUtc": "2026-10-18T17:16:36Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_refusal",
+  "sandboxPermissions": "require_escalated; Root authorized local loopback for this target",
+  "sourceHashFiles": [
+    "r380-refusal-final-target-after-routing-fix-sourcehashes-pre.txt",
+    "r380-refusal-final-target-after-routing-fix-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 29,
+  "sourceStableDuringRun": true,
+  "exitCode": 101,
+  "testsSelected": 13,
+  "testsPassed": 10,
+  "testsFailed": 3,
+  "passed": [
+    "refusal_safety_classifier_retry_stays_on_native_model_routes",
+    "refusal_safety_retry_matches_native_query_source_classifier",
+    "refusal_reissue_credit_does_not_cover_a_normal_next_turn_at_max_turns_one",
+    "spent_native_refusal_retry_runs_later_tool_uses_and_follows_up",
+    "tool_bearing_native_refusal_keeps_completed_and_never_dispatches_queued_calls",
+    "refusal_safety_retry_marker_does_not_suppress_a_later_user_turn",
+    "batched_native_refusal_closes_tool_uses_before_dispatch_and_retries_once",
+    "refusal_safety_retry_respects_disable_environment_flag",
+    "auxiliary_native_tool_refusal_runs_queued_work_and_follows_up",
+    "refusal_safety_retry_is_skipped_for_auxiliary_queries"
+  ],
+  "failures": [
+    {
+      "test": "native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl",
+      "category": "jsonl_row_count_review",
+      "location": "current_alignment_refusal.rs:1477",
+      "detail": "Observed 2 where the assertion expected 3 persisted rows: two refusal responses plus a terminal source row."
+    },
+    {
+      "test": "native_refusal_closes_a_permission_waiting_tool_before_physical_call",
+      "category": "permission_wait_settlement_review",
+      "location": "current_alignment_refusal.rs:2028",
+      "detail": "Expected cancelled_calls to contain the permission-waiting tool id; observed an empty list, while diagnostics showed the call started with cancelled=true."
+    },
+    {
+      "test": "native_same_model_refusal_retry_precedes_configured_refusal_fallback",
+      "category": "fallback_turn_cap_review",
+      "location": "current_alignment_refusal.rs:2248",
+      "detail": "Configured fallback completion returned MaxTurnsReached { max_turns: 1 }."
+    }
+  ],
+  "log": "logs/28-orchestrator-current-alignment-refusal-final.log",
+  "logSha256": "3fc4eeb94df6c768ffe819001b178a31817e1bf72c4cd4ce0756336414066c0b",
+  "scope": "Full current_alignment_refusal target after request_model routing fix and shared mechanical formatting; 10/13 tests pass, refusal gate remains open."
+}

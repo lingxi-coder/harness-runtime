@@ -1,0 +1,52 @@
+    Finished `test` profile [unoptimized] target(s) in 0.26s
+     Running tests/current_alignment_refusal.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_refusal-fb371c01a8664e22)
+
+running 14 tests
+
+running 1 test
+test refusal_safety_classifier_retry_stays_on_native_model_routes ... ok
+test batched_refusal_catalog_gate_uses_the_physical_route_not_reported_model ... ok
+[turn-diagnostic] tool call started id=toolu_4377564d58244b90b7d75631c72ff0a1 name=CompletedRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_4377564d58244b90b7d75631c72ff0a1 name=CompletedRefusalProbe elapsed_ms=0 outcome=ok
+[turn-diagnostic] tool call started id=toolu_be5f0579644e4087affd23bebefb6f10 name=DelayedRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call started id=toolu_58917780e711453b855487c6e8f75f11 name=CompletedRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_58917780e711453b855487c6e8f75f11 name=CompletedRefusalProbe elapsed_ms=0 outcome=ok
+[turn-diagnostic] tool call started id=toolu_a75f8bfac6b54cbba4038f73f924c905 name=DelayedRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_be5f0579644e4087affd23bebefb6f10 name=DelayedRefusalProbe elapsed_ms=101 outcome=ok
+[turn-diagnostic] tool call started id=toolu_127d13809f2c4e60aaf3aeab8d947dad name=QueuedRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_127d13809f2c4e60aaf3aeab8d947dad name=QueuedRefusalProbe elapsed_ms=0 outcome=ok
+[turn-diagnostic] tool call returned id=toolu_a75f8bfac6b54cbba4038f73f924c905 name=DelayedRefusalProbe elapsed_ms=101 outcome=ok
+[turn-diagnostic] tool call started id=toolu_fd7beee9ff944e729e03f8e816b605e0 name=QueuedRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_fd7beee9ff944e729e03f8e816b605e0 name=QueuedRefusalProbe elapsed_ms=0 outcome=ok
+test native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl ... ok
+[turn-diagnostic] tool call started id=toolu_b4eb0199d37f4e7baa173dd03d96c6b7 name=CompletedRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_b4eb0199d37f4e7baa173dd03d96c6b7 name=CompletedRefusalProbe elapsed_ms=0 outcome=ok
+[turn-diagnostic] tool call started id=toolu_ace46de9bc26407cbd3b26513ed9bad2 name=CompletedRefusalProbe cancel_present=true cancelled=true
+test refusal_reissue_credit_does_not_cover_a_normal_next_turn_at_max_turns_one ... ok
+test batched_native_refusal_closes_tool_uses_before_dispatch_and_retries_once ... ok
+test native_refusal_closes_a_permission_waiting_tool_before_physical_call ... ok
+[turn-diagnostic] tool call started id=toolu_028bb936af804c97a6dc96f74f5d5574 name=CompletedRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_028bb936af804c97a6dc96f74f5d5574 name=CompletedRefusalProbe elapsed_ms=0 outcome=ok
+[turn-diagnostic] tool call started id=toolu_3bd8656c981f47269ac463e8c99ce9f6 name=RunningRefusalProbe cancel_present=true cancelled=false
+test refusal_safety_retry_respects_disable_environment_flag ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 1.44s
+
+test refusal_safety_retry_respects_disable_environment_flag ... ok
+[turn-diagnostic] tool call returned id=toolu_3bd8656c981f47269ac463e8c99ce9f6 name=RunningRefusalProbe elapsed_ms=78 outcome=error
+test auxiliary_native_tool_refusal_runs_queued_work_and_follows_up ... ok
+test refusal_safety_retry_is_skipped_for_auxiliary_queries ... ok
+[turn-diagnostic] tool call started id=toolu_785e2f8b2fc94b6484e02ae0132ff081 name=CompletedRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_785e2f8b2fc94b6484e02ae0132ff081 name=CompletedRefusalProbe elapsed_ms=0 outcome=ok
+[turn-diagnostic] tool call started id=toolu_bb8b6217451141ca82b3aa50dd0c2aa8 name=DelayedRefusalProbe cancel_present=true cancelled=false
+test native_same_model_refusal_retry_precedes_configured_refusal_fallback ... ok
+[turn-diagnostic] tool call returned id=toolu_bb8b6217451141ca82b3aa50dd0c2aa8 name=DelayedRefusalProbe elapsed_ms=103 outcome=ok
+[turn-diagnostic] tool call started id=toolu_4d4385cef2c5465cb4cd049a28c0ebfa name=QueuedRefusalProbe cancel_present=true cancelled=false
+[turn-diagnostic] tool call returned id=toolu_4d4385cef2c5465cb4cd049a28c0ebfa name=QueuedRefusalProbe elapsed_ms=0 outcome=ok
+test refusal_safety_retry_marker_does_not_suppress_a_later_user_turn ... ok
+test tool_bearing_native_refusal_keeps_completed_and_never_dispatches_queued_calls ... ok
+test spent_native_refusal_retry_runs_later_tool_uses_and_follows_up ... ok
+test refusal_safety_retry_matches_native_query_source_classifier ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.66s
+

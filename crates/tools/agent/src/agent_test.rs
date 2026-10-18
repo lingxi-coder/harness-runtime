@@ -7047,6 +7047,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let utf16_code_units = child_message.string_units("").unwrap();
         let boilerplate = lingxi_core::types::ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: lingxi_core::types::MessageId::new(),
             content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
                 text: String::from_utf16_lossy(&utf16_code_units),

@@ -847,6 +847,8 @@ impl PoolSubagentSpawner {
                 .expect("SubagentSpawnRequest.prompt is a root string");
             vec![ConversationMessage::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id: MessageId::new(),
                 content: vec![ContentBlock::TextJsUtf16 {
                     text: String::from_utf16_lossy(&utf16_code_units),

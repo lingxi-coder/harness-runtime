@@ -1,0 +1,39 @@
+{
+  "schema": "lingxi.claude-alignment-harness-workspace-desktop-uniffi-all-targets-clippy-after-range-fix-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:35:55.144998Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline",
+    "-D warnings"
+  ],
+  "features": [
+    "harness-runtime/desktop",
+    "harness-runtime/uniffi"
+  ],
+  "workspace": true,
+  "allTargets": true,
+  "command": "cargo clippy --locked --offline --workspace --all-targets --features harness-runtime/desktop,harness-runtime/uniffi -- -D warnings",
+  "sourceHashFiles": [
+    "r380-harness-workspace-desktop-uniffi-all-targets-clippy-after-range-fix-sourcehashes-pre.txt",
+    "r380-harness-workspace-desktop-uniffi-all-targets-clippy-after-range-fix-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 6336,
+  "sourceStableDuringRun": true,
+  "boundCoreFiles": {
+    "Cargo.lock": "0e68e5a6f54332b205d579a6ce2e8c66975c34e10468ebebbbe79d8a40664451",
+    "crates/runtime/Cargo.toml": "32c37cb5d3ba4c067a816d40513c22a20991d7d6d6d50c40afde821f17369a27",
+    "crates/runtime/src/headless/run.rs": "619458cc1537665a3b278442fd572833913a31a7669b35f53c6f612fff3bf51d",
+    "crates/runtime/src/headless/run/tests.rs": "22b5202fec8425e77878a23395cdde1a03a098c09c7289859995e58fccac288e",
+    "crates/platforms/common/src/mcp_remote.rs": "b243bb11102935b4de9cc6346068da4da52790dc97ef439b991b40df3065ca2d",
+    "crates/platforms/common/tests/mcp_input_required_http_test.rs": "c4704d35d3901d74dd6892b9cd012fc451af97e4427631da613087a399d78902"
+  },
+  "exitCode": 101,
+  "warningLines": 1,
+  "errorLines": 2,
+  "log": "logs/68-harness-workspace-desktop-uniffi-all-targets-clippy-after-range-fix.log",
+  "logSha256": "e7cc8bc590e30d6f60e149bcb7e8909bd9bfad348332c4d8dd3bf7ffce3450e5",
+  "sourceFilesChangedDuringRun": []
+}

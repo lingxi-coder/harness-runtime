@@ -1,0 +1,287 @@
+   Compiling syn v2.0.117
+   Compiling smallvec v1.15.1
+   Compiling libc v0.2.186
+   Compiling jobserver v0.1.34
+   Compiling find-msvc-tools v0.1.9
+   Compiling shlex v1.3.0
+   Compiling cc v1.2.62
+   Compiling parking_lot_core v0.9.12
+   Compiling serde_derive v1.0.228
+   Compiling parking_lot v0.12.5
+   Compiling futures-channel v0.3.32
+   Compiling futures-macro v0.3.32
+   Compiling slab v0.4.12
+   Compiling futures-util v0.3.32
+   Compiling serde v1.0.228
+   Compiling tokio-macros v2.7.0
+   Compiling getrandom v0.2.17
+   Compiling socket2 v0.6.3
+   Compiling percent-encoding v2.3.2
+   Compiling tracing-attributes v0.1.31
+   Compiling tokio v1.52.3
+   Compiling subtle v2.6.1
+   Compiling tracing v0.1.44
+   Compiling http v1.4.0
+   Compiling ring v0.17.14
+   Compiling tokio-util v0.7.18
+   Compiling thiserror-impl v2.0.18
+   Compiling serde_json v1.0.150
+   Compiling autocfg v1.5.1
+   Compiling pkg-config v0.3.33
+   Compiling num-traits v0.2.19
+   Compiling thiserror v2.0.18
+   Compiling rustls-pki-types v1.14.1
+   Compiling httparse v1.10.1
+   Compiling zerocopy v0.8.48
+   Compiling untrusted v0.9.0
+   Compiling log v0.4.29
+   Compiling http-body v1.0.1
+   Compiling unicode-normalization v0.1.25
+   Compiling atomic-waker v1.1.2
+   Compiling try-lock v0.2.5
+   Compiling base64 v0.22.1
+   Compiling want v0.3.1
+   Compiling idna_adapter v1.1.0
+   Compiling rustls v0.23.45
+   Compiling tower-service v0.3.3
+   Compiling idna v1.1.0
+   Compiling digest v0.10.7
+   Compiling rustls-webpki v0.103.15
+   Compiling form_urlencoded v1.2.2
+   Compiling async-trait v0.1.89
+   Compiling getrandom v0.3.4
+   Compiling thiserror v1.0.69
+   Compiling thiserror-impl v1.0.69
+   Compiling crc32fast v1.5.0
+   Compiling ipnet v2.12.0
+   Compiling url v2.5.8
+   Compiling webpki-roots v1.0.7
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling aho-corasick v1.1.4
+   Compiling regex-syntax v0.8.10
+   Compiling simd-adler32 v0.3.9
+   Compiling adler2 v2.0.1
+   Compiling fnv v1.0.7
+   Compiling regex-automata v0.4.14
+   Compiling miniz_oxide v0.8.9
+   Compiling tokio-rustls v0.26.4
+   Compiling ppv-lite86 v0.2.21
+   Compiling futures-executor v0.3.32
+   Compiling flate2 v1.1.9
+   Compiling alloc-no-stdlib v2.0.4
+   Compiling zstd-safe v7.2.4
+   Compiling alloc-stdlib v0.2.4
+   Compiling h2 v0.4.19
+   Compiling http-body-util v0.1.3
+   Compiling sync_wrapper v1.0.2
+   Compiling httpdate v1.0.3
+   Compiling core-foundation-sys v0.8.7
+   Compiling tower-layer v0.3.3
+   Compiling tower v0.5.3
+   Compiling hyper v1.9.0
+   Compiling brotli-decompressor v5.0.3
+   Compiling webpki-roots v0.26.11
+   Compiling sha2 v0.10.9
+   Compiling num-integer v0.1.46
+   Compiling brotli v8.0.4
+   Compiling zstd v0.13.3
+   Compiling hyper-util v0.1.20
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling sha1_smol v1.0.1
+   Compiling lazy_static v1.5.0
+   Compiling compression-core v0.4.33
+   Compiling compression-codecs v0.4.39
+   Compiling toml_edit v0.22.27
+   Compiling uuid v1.10.0
+   Compiling proc-macro2-diagnostics v0.10.1
+   Compiling num-bigint v0.4.6
+   Compiling toml v0.8.23
+   Compiling pear_codegen v0.2.9
+   Compiling fancy-regex v0.18.0
+   Compiling async-compression v0.4.44
+   Compiling json-projection v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/json-projection)
+   Compiling futures v0.3.32
+   Compiling rand_core v0.9.5
+   Compiling serde_derive_internals v0.29.1
+   Compiling ryu v1.0.23
+   Compiling anyhow v1.0.104
+   Compiling dashmap v6.2.1
+   Compiling schemars_derive v0.8.22
+   Compiling serde_urlencoded v0.7.1
+   Compiling pear v0.2.9
+   Compiling rand_chacha v0.9.0
+   Compiling tower-http v0.6.11
+   Compiling mobile-linux-api v0.1.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41)
+   Compiling opentelemetry v0.31.0
+   Compiling ref-cast v1.0.25
+   Compiling data-encoding v2.11.0
+   Compiling either v1.16.0
+   Compiling schemars v0.8.22
+   Compiling itertools v0.13.0
+   Compiling rooted-fs v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/rooted-fs)
+   Compiling figment v0.10.19
+   Compiling rand v0.9.4
+   Compiling jsonrpc v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/jsonrpc)
+   Compiling mcp-wire v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp-wire)
+   Compiling device-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/device-api)
+   Compiling iana-time-zone v0.1.65
+   Compiling regex v1.12.3
+   Compiling secrecy v0.10.3
+   Compiling ref-cast-impl v1.0.25
+   Compiling pin-project-internal v1.1.13
+   Compiling minimal-lexical v0.2.1
+   Compiling core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+   Compiling pin-project v1.1.13
+   Compiling nom v7.1.3
+   Compiling chrono v0.4.44
+   Compiling prost-derive v0.14.4
+   Compiling opentelemetry_sdk v0.31.0
+   Compiling hyper-timeout v0.5.2
+   Compiling tokio-stream v0.1.18
+   Compiling rand_core v0.6.4
+   Compiling ahash v0.8.12
+   Compiling borrow-or-share v0.2.4
+   Compiling protobuf v3.7.2
+   Compiling tonic v0.14.2
+   Compiling prost v0.14.4
+   Compiling hyper-rustls v0.27.5
+   Compiling protobuf-support v3.7.2
+   Compiling hmac v0.12.1
+   Compiling block-padding v0.3.3
+   Compiling num-conv v0.2.2
+   Compiling prometheus v0.14.0
+   Compiling time-core v0.1.9
+   Compiling time-macros v0.2.32
+   Compiling inout v0.1.4
+   Compiling reqwest v0.12.28
+   Compiling tonic-prost v0.14.5
+   Compiling rand_chacha v0.3.1
+   Compiling num-rational v0.4.2
+   Compiling num-iter v0.1.45
+   Compiling lingxi-hyper v1.9.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling num-complex v0.4.6
+   Compiling const-hex v1.19.3
+   Compiling allocator-api2 v0.2.21
+   Compiling foldhash v0.2.0
+   Compiling siphasher v1.0.3
+   Compiling deranged v0.5.8
+   Compiling powerfmt v0.2.0
+   Compiling phf_shared v0.12.1
+   Compiling hashbrown v0.16.1
+   Compiling time v0.3.55
+   Compiling opentelemetry-proto v0.31.0
+   Compiling lingxi-hyper-util v0.1.21 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling num v0.4.3
+   Compiling rand v0.8.6
+   Compiling opentelemetry-http v0.31.0
+   Compiling cipher v0.4.4
+   Compiling fluent-uri v0.4.1
+   Compiling sha1 v0.10.6
+   Compiling cmake v0.1.58
+   Compiling synstructure v0.13.2
+   Compiling fs_extra v1.3.0
+   Compiling utf-8 v0.7.6
+   Compiling chrono-tz v0.10.4
+   Compiling dunce v1.0.5
+   Compiling micromap v0.3.0
+   Compiling byteorder v1.5.0
+   Compiling outref v0.5.2
+   Compiling vsimd v0.8.0
+   Compiling referencing v0.46.3
+   Compiling uuid-simd v0.8.0
+   Compiling tungstenite v0.24.0
+   Compiling aws-lc-sys v0.45.0
+   Compiling asn1-rs-derive v0.5.1
+   Compiling opentelemetry-prometheus v0.31.0
+   Compiling opentelemetry-otlp v0.31.1
+   Compiling lingxi-hyper-rustls v0.27.5 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling fraction v0.15.4
+   Compiling phf v0.12.1
+   Compiling opentelemetry-stdout v0.31.0
+   Compiling rusticata-macros v4.1.0
+   Compiling email_address v0.2.9
+   Compiling telemetry-macros v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry-macros)
+   Compiling asn1-rs-impl v0.2.0
+   Compiling displaydoc v0.2.6
+   Compiling lingxi-llm-client v0.3.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling bytecount v0.6.9
+   Compiling crossbeam-epoch v0.9.21
+   Compiling num-cmp v0.1.0
+   Compiling same-file v1.0.6
+   Compiling walkdir v2.5.0
+   Compiling jsonschema v0.46.3
+   Compiling asn1-rs v0.6.2
+   Compiling telemetry v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry)
+   Compiling lingxi-reqwest v0.12.29 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+   Compiling tokio-tungstenite v0.24.0
+   Compiling security-framework-sys v2.17.0
+   Compiling core-foundation v0.10.1
+   Compiling const-oid v0.9.6
+   Compiling oid-registry v0.7.1
+   Compiling der v0.7.10
+   Compiling security-framework v3.7.0
+   Compiling salsa20 v0.10.2
+   Compiling pbkdf2 v0.12.2
+   Compiling pem v3.0.6
+   Compiling bstr v1.12.1
+   Compiling aws-lc-rs v1.18.1
+   Compiling globset v0.4.15
+   Compiling scrypt v0.11.0
+   Compiling crossbeam-deque v0.8.6
+   Compiling rustls-native-certs v0.8.4
+   Compiling spki v0.7.3
+   Compiling der-parser v9.0.0
+   Compiling cbc v0.1.2
+   Compiling aes v0.8.4
+   Compiling secret v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/secret)
+   Compiling option-ext v0.2.0
+   Compiling urlencoding v2.1.3
+   Compiling llm-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime)
+   Compiling dirs-sys v0.4.1
+   Compiling pkcs5 v0.7.1
+   Compiling x509-parser v0.16.0
+   Compiling ignore v0.4.23
+   Compiling yasna v0.5.2
+   Compiling home v0.5.9
+   Compiling rcgen v0.13.2
+   Compiling which v6.0.3
+   Compiling pkcs8 v0.10.2
+   Compiling dirs v5.0.1
+   Compiling fluent-uri v0.3.2
+   Compiling eventsource-stream v0.2.3
+   Compiling serde_repr v0.1.20
+   Compiling fsevent-sys v4.1.0
+   Compiling bitflags v1.3.2
+   Compiling notify-types v2.0.0
+   Compiling appendlist v1.4.0
+   Compiling boon v0.6.1
+   Compiling notify v8.2.0
+   Compiling lsp-types v0.95.1
+   Compiling http-client v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/http-client)
+   Compiling sandbox-runtime v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sandbox-runtime)
+   Compiling permission v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/permission)
+   Compiling migrations v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/migrations)
+   Compiling mobile-linux-core v0.1.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41)
+   Compiling platform-common v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/common)
+   Compiling sandbox v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sandbox)
+   Compiling mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp)
+   Compiling lsp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/lsp)
+   Compiling notify-debouncer-mini v0.6.0
+   Compiling nix v0.27.1
+   Compiling hex v0.4.3
+   Compiling diff v0.1.13
+   Compiling pretty_assertions v1.4.1
+   Compiling visualization v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/visualization)
+   Compiling filetime v0.2.29
+   Compiling platform-posix v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/posix)
+   Compiling session v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/session)
+    Finished `test` profile [unoptimized] target(s) in 2m 12s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/session-1cda81294cdaa986)
+
+running 2 tests
+test jsonl::schema::shutdown_interruption_tests::interruption_flag_omits_absence_and_retains_explicit_false ... ok
+test jsonl::schema::shutdown_interruption_tests::interruption_flag_uses_native_slot_and_preserves_utf16_payload ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 379 filtered out; finished in 0.00s
+

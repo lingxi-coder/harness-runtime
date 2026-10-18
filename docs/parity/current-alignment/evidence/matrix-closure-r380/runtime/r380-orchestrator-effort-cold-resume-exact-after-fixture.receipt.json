@@ -1,0 +1,27 @@
+{
+  "schema": "lingxi.claude-alignment-orchestrator-effort-cold-resume-exact-after-fixture-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:13:10.802527Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "package": "orchestrator",
+  "command": "cargo test --locked --offline -p orchestrator --test effort_cold_resume_295_test cold_resume_295_fresh_process_preserves_effort_into_next_sdk_request -- --exact --nocapture",
+  "sourceHashFiles": [
+    "r380-orchestrator-effort-cold-resume-exact-after-fixture-sourcehashes-pre.txt",
+    "r380-orchestrator-effort-cold-resume-exact-after-fixture-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 2330,
+  "sourceStableDuringRun": true,
+  "exitCode": 0,
+  "testsSelected": 1,
+  "testsPassed": 1,
+  "testsFailed": 0,
+  "log": "logs/55-orchestrator-effort-cold-resume-exact-after-fixture.log",
+  "logSha256": "90f34df0eec02d8f9c5be14cdc843464b68a5bb575fb740bb1a7d130bba483e2",
+  "sourceFilesChangedDuringRun": []
+}

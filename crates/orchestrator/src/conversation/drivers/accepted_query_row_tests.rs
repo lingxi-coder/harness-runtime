@@ -246,6 +246,7 @@ async fn accepted_assistant_row_is_w1_current_row_but_not_prequery_history() {
             query_history: prequery.clone(),
             assistant_message: accepted_row.clone(),
             same_turn_tool_uses: Vec::new(),
+            refusal_call_boundary: None,
         },
     )
     .await

@@ -1,0 +1,187 @@
+{
+  "schema": "lingxi.claude-alignment-h-runtime-stage-summary-r380.v1",
+  "recordedAtUtc": "2026-10-18T18:42:43.057335Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "workspaceFeatureSet": [
+    "harness-runtime/desktop",
+    "harness-runtime/uniffi"
+  ],
+  "finalSourceStableDuringCheck": true,
+  "finalSourceStableDuringClippy": true,
+  "finalSourceFingerprints": 6336,
+  "finalSourceHashFiles": [
+    "r380-harness-workspace-desktop-uniffi-all-targets-final-sourcehashes-pre.txt",
+    "r380-harness-workspace-desktop-uniffi-all-targets-final-sourcehashes-post.txt"
+  ],
+  "criticalSourceHashes": {
+    "Cargo.lock": "0e68e5a6f54332b205d579a6ce2e8c66975c34e10468ebebbbe79d8a40664451",
+    "crates/runtime/src/headless/run.rs": "619458cc1537665a3b278442fd572833913a31a7669b35f53c6f612fff3bf51d",
+    "crates/runtime/src/headless/run/tests.rs": "22b5202fec8425e77878a23395cdde1a03a098c09c7289859995e58fccac288e",
+    "crates/orchestrator/src/conversation/drivers/mod.rs": "3bead355495a2bfd2e22c5635c12d3071cd49ec73ea78251aaa167c1cf9e9ce8",
+    "crates/orchestrator/src/conversation/drivers/streaming.rs": "9879d5b06c45fe0b50bb40dc64f5af1f8fdcb87f2a134b6da3cb773d27bc37b5",
+    "crates/orchestrator/tests/current_alignment_refusal.rs": "2df8dd2f60a4680700ca32efe468cd8e8030da271dbe55cba15d3238af2975e3",
+    "crates/platforms/common/src/mcp_remote.rs": "b243bb11102935b4de9cc6346068da4da52790dc97ef439b991b40df3065ca2d",
+    "crates/platforms/common/tests/mcp_input_required_http_test.rs": "c4704d35d3901d74dd6892b9cd012fc451af97e4427631da613087a399d78902"
+  },
+  "gates": {
+    "coreSession": {
+      "passed": 6,
+      "failed": 0,
+      "receipt": "r380-core-session-focused.receipt.json"
+    },
+    "coreUnanswered": {
+      "passed": 4,
+      "failed": 0,
+      "receipt": "r380-core-unanswered.receipt.json"
+    },
+    "llmRuntimeFocused": {
+      "successfulRunTestsPassed": 9,
+      "failed": 0,
+      "receipt": "r380-llm-runtime-focused.receipt.json"
+    },
+    "jsonrpc": {
+      "passed": 77,
+      "failed": 0,
+      "receipt": "r380-jsonrpc-lib-full-final.receipt.json"
+    },
+    "mcpOauthReused": {
+      "passed": 112,
+      "failed": 0,
+      "receipt": "r380-mcp-oauth-final.receipt.json",
+      "reused": true
+    },
+    "mcpSchema": {
+      "passed": 9,
+      "failed": 0,
+      "receipt": "r380-mcp-native-message-schema-after-fix.receipt.json"
+    },
+    "mcpWireNotificationUtf16": {
+      "passed": 1,
+      "failed": 0,
+      "receipt": "r380-mcp-wire-notification-utf16-filtered.receipt.json"
+    },
+    "mcpCurrentSelectors": {
+      "rootsReplay": {
+        "passed": 1,
+        "failed": 0,
+        "receipt": "r380-mcp-roots-replay.receipt.json"
+      },
+      "isErrorPresence": {
+        "passed": 1,
+        "failed": 0,
+        "receipt": "r380-orchestrator-mcp-iserror-presence.receipt.json"
+      },
+      "errorRoundtrip": {
+        "passed": 1,
+        "failed": 0,
+        "receipt": "r380-orchestrator-mcp-error-roundtrip.receipt.json"
+      },
+      "mime": {
+        "passed": 1,
+        "failed": 0,
+        "receipt": "r380-tool-mcp-mime-295.receipt.json"
+      },
+      "optionalNull": {
+        "passed": 1,
+        "failed": 0,
+        "receipt": "r380-mcp-tool-call-optional-null.receipt.json"
+      }
+    },
+    "agentAppend": {
+      "passed": 3,
+      "failed": 0,
+      "receipt": "r380-session-1-agent-target.receipt.json"
+    },
+    "orchestratorFocusedLib": {
+      "passed": 8,
+      "failed": 0,
+      "receipt": "r380-orchestrator-lib-focused-group.receipt.json"
+    },
+    "midTurnInput": {
+      "passed": 12,
+      "failed": 0,
+      "receipt": "r380-mid-turn-input-fixed-gate.receipt.json"
+    },
+    "effortColdResume": {
+      "passed": 1,
+      "failed": 0,
+      "receipt": "r380-orchestrator-effort-cold-resume-exact-after-fixture.receipt.json"
+    },
+    "refusalFallbackPrecedenceExact": {
+      "passed": 1,
+      "failed": 0,
+      "receipt": "r380-orchestrator-refusal-configured-fallback-precedence-exact.receipt.json"
+    },
+    "refusalPhysicalRouteAliasExact": {
+      "passed": 1,
+      "failed": 0,
+      "receipt": "r380-orchestrator-refusal-physical-route-alias-exact.receipt.json"
+    },
+    "refusalFullTarget": {
+      "passed": 14,
+      "failed": 0,
+      "receipt": "r380-orchestrator-current-alignment-refusal-full14.receipt.json"
+    },
+    "modToolWire": {
+      "passed": 1,
+      "failed": 0,
+      "receipt": "r380-orchestrator-mod-tool-wire-295.receipt.json"
+    },
+    "toolResultPersist": {
+      "passed": 2,
+      "failed": 0,
+      "receipt": "r380-orchestrator-tool-result-persist.receipt.json"
+    },
+    "runtimeDesktopLibElevated": {
+      "passed": 1179,
+      "failed": 0,
+      "receipt": "r380-harness-runtime-desktop-lib-elevated.receipt.json"
+    },
+    "workspaceCheck": {
+      "exitCode": 0,
+      "warnings": 0,
+      "errors": 0,
+      "receipt": "r380-harness-workspace-desktop-uniffi-all-targets-final.receipt.json"
+    },
+    "workspaceClippy": {
+      "exitCode": 0,
+      "warnings": 0,
+      "errors": 0,
+      "receipt": "r380-harness-workspace-desktop-uniffi-all-targets-clippy-after-test-format.receipt.json"
+    }
+  },
+  "nonFinalDiagnostics": [
+    {
+      "receipt": "r380-mcp-native-message-schema-final.receipt.json",
+      "issue": "Two MCP API consumers had compile errors before the frozen client/test fixes; the after-fix 9-test schema gate passed."
+    },
+    {
+      "receipt": "r380-harness-runtime-desktop-lib.receipt.json",
+      "issue": "The first desktop runtime compile found a missing Output test import and cancel_reason fixture field; both were mechanically filled in run/tests.rs."
+    },
+    {
+      "receipt": "r380-harness-runtime-desktop-lib-after-constructor-fix.receipt.json",
+      "issue": "Sandboxed full suite ran 1179 tests: 1169 passed, 10 failed, with local proxy/Unix socket EPERM among the failures; the identical full target passed 1179/1179 with authorized socket access."
+    },
+    {
+      "receipt": "r380-harness-workspace-desktop-uniffi-all-targets-check.receipt.json",
+      "issue": "The first workspace compile found a common transport test using the old projection accessor on JsonRpcString; the owner updated the assertion and final workspace check passed."
+    },
+    {
+      "receipt": "r380-harness-workspace-desktop-uniffi-all-targets-clippy.receipt.json",
+      "issue": "Initial strict Clippy attempts found one manual range lint in mcp_remote.rs and one fixed-string format lint in the refusal test; final strict Clippy passed after equivalent changes."
+    }
+  ],
+  "equivalenceNotes": [
+    "The refusal expected_notice test expression changed from format! over a fixed literal to the same literal converted with to_owned solely to satisfy Clippy. Root confirmed equivalence; the full refusal target was not repeated because the test's expected value and production source are unchanged, and final all-target Clippy compiles this test.",
+    "The safe-integer bounds rewrite uses the equivalent inclusive range check; finite and integral checks remain unchanged. Integration recorded a separate semantic-equivalence proof."
+  ],
+  "cacheRetirementReceipts": [
+    "r380-focused-test-executable-retirement-2.receipt.json",
+    "r380-harness-runtime-desktop-lib-executable-retirement.receipt.json"
+  ],
+  "phaseStatus": "H focused runtime implementation and current-feature workspace check/Clippy are complete; Runtime did not commit source or transition Product pins.",
+  "nextOwnerAction": "Root may perform the authorized H source commit and canonical Product pin/audit. Runtime Cargo queue is idle pending Root's next Product-phase selector authorization."
+}

@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized] target(s) in 0.26s
+     Running unittests src/lib.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/orchestrator-33c71635f98fe3bd)
+
+running 1 test
+test conversation::runtime_impl::total_tokens_lifecycle_tests::ledger_matches_source_extracted_286_sequences ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2114 filtered out; finished in 0.00s
+

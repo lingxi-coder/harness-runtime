@@ -1305,6 +1305,8 @@ mod tests {
                         }
                     } else {
                         ConversationMessage::User { api_message_override: None,
+                        interrupted_by_shutdown: None,
+            refused_message_id: None,
                             id: lingxi_core::types::MessageId::new(),
                             content,
                             is_meta: message["isMeta"].as_bool().unwrap_or(false),

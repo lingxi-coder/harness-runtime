@@ -27,6 +27,22 @@ fn seed_usage(orch: &ConversationOrchestrator, used: u64) {
     }));
 }
 
+#[tokio::test]
+async fn bare_ingress_omits_token_and_budget_attachments() {
+    let mut orch = orchestrator();
+    orch.config.bare = true;
+    orch.config.max_budget_nano_usd = Some(5_000_000_000);
+    anchored_usage(&orch);
+    assert!(orch
+        .total_tokens_prompt_ingress_attachment(true)
+        .await
+        .is_none());
+    assert!(orch.budget_usd_prompt_ingress_attachment().await.is_none());
+
+    // The gate must not consume or reanchor the reminder ledger.
+    assert_eq!(used(&orch, 1_000), 900);
+}
+
 fn used(orch: &ConversationOrchestrator, current: i64) -> i64 {
     orch.compaction_runtime
         .total_tokens_ledger
@@ -279,6 +295,8 @@ async fn prompt_origin_survives_compaction_and_durable_task_notifications_in_bot
                 } else {
                     ConversationMessage::User {
                         api_message_override: None,
+                        interrupted_by_shutdown: None,
+                        refused_message_id: None,
                         id: MessageId::new(),
                         content: vec![ContentBlock::ToolResult {
                             tool_use_id: ToolUseId::from("tu_before_compact"),

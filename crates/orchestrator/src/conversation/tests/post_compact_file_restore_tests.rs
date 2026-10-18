@@ -372,6 +372,8 @@ async fn preserved_unchanged_read_stub_does_not_hide_the_missing_file_content() 
     };
     let result = lingxi_core::types::ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         is_meta: false,
         is_compact_summary: false,
@@ -490,6 +492,8 @@ async fn only_meta_text_bodies_suppress_skill_registry_truncation() {
         register_invoked_skill(&orch, "large", std::path::Path::new("/skill"), &body, None).await;
         let message = lingxi_core::types::ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: lingxi_core::types::MessageId::new(),
             is_meta,
             is_compact_summary: false,

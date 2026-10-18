@@ -1,0 +1,338 @@
+   Compiling syn v2.0.117
+   Compiling indexmap v2.14.2
+   Compiling serde_json v1.0.150
+   Compiling futures-channel v0.3.32
+   Compiling slab v0.4.12
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v2.0.18
+   Compiling thiserror v2.0.18
+   Compiling serde v1.0.228
+   Compiling futures-macro v0.3.32
+   Compiling futures-util v0.3.32
+   Compiling typenum v1.20.0
+   Compiling smallvec v1.15.1
+   Compiling generic-array v0.14.7
+   Compiling tokio-macros v2.7.0
+   Compiling async-trait v0.1.89
+   Compiling getrandom v0.2.17
+   Compiling mio v1.2.0
+   Compiling rustix v0.38.44
+   Compiling proc-macro2-diagnostics v0.10.1
+   Compiling tokio v1.52.3
+   Compiling uuid v1.10.0
+   Compiling unicode-normalization v0.1.25
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling scopeguard v1.2.0
+   Compiling unicode-bidi v0.3.18
+   Compiling idna_adapter v1.1.0
+   Compiling toml_edit v0.22.27
+   Compiling lock_api v0.4.14
+   Compiling json-projection v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/json-projection)
+   Compiling parking_lot_core v0.9.12
+   Compiling pear_codegen v0.2.9
+   Compiling futures-executor v0.3.32
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling tracing-core v0.1.36
+   Compiling tracing-attributes v0.1.31
+   Compiling serde_derive_internals v0.29.1
+   Compiling aho-corasick v1.1.4
+   Compiling percent-encoding v2.3.2
+   Compiling regex-syntax v0.8.10
+   Compiling idna v1.1.0
+   Compiling regex-automata v0.4.14
+   Compiling dashmap v6.2.1
+   Compiling form_urlencoded v1.2.2
+   Compiling pear v0.2.9
+   Compiling schemars_derive v0.8.22
+   Compiling tracing v0.1.44
+   Compiling digest v0.10.7
+   Compiling futures v0.3.32
+   Compiling toml v0.8.23
+   Compiling tokio-util v0.7.18
+   Compiling schemars v0.8.22
+   Compiling jsonrpc v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/jsonrpc)
+   Compiling tempfile v3.13.0
+   Compiling secrecy v0.10.3
+   Compiling rooted-fs v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/rooted-fs)
+   Compiling sha2 v0.10.9
+   Compiling figment v0.10.19
+   Compiling fancy-regex v0.18.0
+   Compiling url v2.5.8
+   Compiling mcp-wire v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp-wire)
+   Compiling device-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/device-api)
+   Compiling mobile-linux-api v0.1.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41)
+   Compiling core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:722:67
+     |
+ 722 |         let mut row = ConversationMessage::user(MessageId::new(), "[Request interrupted by user]");
+     |                       -------------------------                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `String`, found `&str`
+     |                       |
+     |                       arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1338:12
+     |
+1338 |     pub fn user(id: MessageId, text: String) -> Self {
+     |            ^^^^                ------------
+help: try using a conversion method
+     |
+ 722 |         let mut row = ConversationMessage::user(MessageId::new(), "[Request interrupted by user]".to_string());
+     |                                                                                                  ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:735:66
+     |
+ 735 |         let anchor = ConversationMessage::user(MessageId::new(), "request");
+     |                      -------------------------                   ^^^^^^^^^ expected `String`, found `&str`
+     |                      |
+     |                      arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1338:12
+     |
+1338 |     pub fn user(id: MessageId, text: String) -> Self {
+     |            ^^^^                ------------
+help: try using a conversion method
+     |
+ 735 |         let anchor = ConversationMessage::user(MessageId::new(), "request".to_string());
+     |                                                                           ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:769:68
+     |
+ 769 |             ConversationMessage::compact_summary(MessageId::new(), "summary"),
+     |             ------------------------------------                   ^^^^^^^^^ expected `String`, found `&str`
+     |             |
+     |             arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1465:12
+     |
+1465 |     pub fn compact_summary(id: MessageId, text: String) -> Self {
+     |            ^^^^^^^^^^^^^^^                ------------
+help: try using a conversion method
+     |
+ 769 |             ConversationMessage::compact_summary(MessageId::new(), "summary".to_string()),
+     |                                                                             ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:770:62
+     |
+ 770 |             ConversationMessage::user_meta(MessageId::new(), "Goal check-in: «progress"),
+     |             ------------------------------                   ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `String`, found `&str`
+     |             |
+     |             arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1362:12
+     |
+1362 |     pub fn user_meta(id: MessageId, text: String) -> Self {
+     |            ^^^^^^^^^                ------------
+help: try using a conversion method
+     |
+ 770 |             ConversationMessage::user_meta(MessageId::new(), "Goal check-in: «progress".to_string()),
+     |                                                                                        ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:771:57
+     |
+ 771 |             ConversationMessage::user(MessageId::new(), "[Request interrupted by user]"),
+     |             -------------------------                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `String`, found `&str`
+     |             |
+     |             arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1338:12
+     |
+1338 |     pub fn user(id: MessageId, text: String) -> Self {
+     |            ^^^^                ------------
+help: try using a conversion method
+     |
+ 771 |             ConversationMessage::user(MessageId::new(), "[Request interrupted by user]".to_string()),
+     |                                                                                        ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:780:66
+     |
+ 780 |         let anchor = ConversationMessage::user(MessageId::new(), "request");
+     |                      -------------------------                   ^^^^^^^^^ expected `String`, found `&str`
+     |                      |
+     |                      arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1338:12
+     |
+1338 |     pub fn user(id: MessageId, text: String) -> Self {
+     |            ^^^^                ------------
+help: try using a conversion method
+     |
+ 780 |         let anchor = ConversationMessage::user(MessageId::new(), "request".to_string());
+     |                                                                           ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:785:57
+     |
+ 785 |             ConversationMessage::user(MessageId::new(), "[Request interrupted by user]");
+     |             -------------------------                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `String`, found `&str`
+     |             |
+     |             arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1338:12
+     |
+1338 |     pub fn user(id: MessageId, text: String) -> Self {
+     |            ^^^^                ------------
+help: try using a conversion method
+     |
+ 785 |             ConversationMessage::user(MessageId::new(), "[Request interrupted by user]".to_string());
+     |                                                                                        ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:789:57
+     |
+ 789 |             ConversationMessage::user(MessageId::new(), "[Request interrupted by user]");
+     |             -------------------------                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `String`, found `&str`
+     |             |
+     |             arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1338:12
+     |
+1338 |     pub fn user(id: MessageId, text: String) -> Self {
+     |            ^^^^                ------------
+help: try using a conversion method
+     |
+ 789 |             ConversationMessage::user(MessageId::new(), "[Request interrupted by user]".to_string());
+     |                                                                                        ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:801:76
+     |
+ 801 |         let intervening_user = ConversationMessage::user(MessageId::new(), "new human input");
+     |                                -------------------------                   ^^^^^^^^^^^^^^^^^ expected `String`, found `&str`
+     |                                |
+     |                                arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1338:12
+     |
+1338 |     pub fn user(id: MessageId, text: String) -> Self {
+     |            ^^^^                ------------
+help: try using a conversion method
+     |
+ 801 |         let intervening_user = ConversationMessage::user(MessageId::new(), "new human input".to_string());
+     |                                                                                             ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:808:74
+     |
+ 808 |             !state_with(vec![ConversationMessage::user(MessageId::new(), "other")])
+     |                              -------------------------                   ^^^^^^^ expected `String`, found `&str`
+     |                              |
+     |                              arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1338:12
+     |
+1338 |     pub fn user(id: MessageId, text: String) -> Self {
+     |            ^^^^                ------------
+help: try using a conversion method
+     |
+ 808 |             !state_with(vec![ConversationMessage::user(MessageId::new(), "other".to_string())])
+     |                                                                                 ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:813:57
+     |
+ 813 |             ConversationMessage::user(MessageId::new(), "Goal check-in: «progress");
+     |             -------------------------                   ^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `String`, found `&str`
+     |             |
+     |             arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1338:12
+     |
+1338 |     pub fn user(id: MessageId, text: String) -> Self {
+     |            ^^^^                ------------
+help: try using a conversion method
+     |
+ 813 |             ConversationMessage::user(MessageId::new(), "Goal check-in: «progress".to_string());
+     |                                                                                   ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:823:66
+     |
+ 823 |         let anchor = ConversationMessage::user(MessageId::new(), "request");
+     |                      -------------------------                   ^^^^^^^^^ expected `String`, found `&str`
+     |                      |
+     |                      arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1338:12
+     |
+1338 |     pub fn user(id: MessageId, text: String) -> Self {
+     |            ^^^^                ------------
+help: try using a conversion method
+     |
+ 823 |         let anchor = ConversationMessage::user(MessageId::new(), "request".to_string());
+     |                                                                           ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:848:73
+     |
+ 848 |             let meta = ConversationMessage::user_meta(MessageId::new(), text);
+     |                        ------------------------------                   ^^^^ expected `String`, found `&str`
+     |                        |
+     |                        arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1362:12
+     |
+1362 |     pub fn user_meta(id: MessageId, text: String) -> Self {
+     |            ^^^^^^^^^                ------------
+help: try using a conversion method
+     |
+ 848 |             let meta = ConversationMessage::user_meta(MessageId::new(), text.to_string());
+     |                                                                             ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:855:72
+     |
+ 855 |             let ordinary = ConversationMessage::user(MessageId::new(), text);
+     |                            -------------------------                   ^^^^ expected `String`, found `&str`
+     |                            |
+     |                            arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1338:12
+     |
+1338 |     pub fn user(id: MessageId, text: String) -> Self {
+     |            ^^^^                ------------
+help: try using a conversion method
+     |
+ 855 |             let ordinary = ConversationMessage::user(MessageId::new(), text.to_string());
+     |                                                                            ++++++++++++
+
+error[E0308]: mismatched types
+    --> crates/core/src/session.rs:867:73
+     |
+ 867 |             let meta = ConversationMessage::user_meta(MessageId::new(), near_miss);
+     |                        ------------------------------                   ^^^^^^^^^ expected `String`, found `&str`
+     |                        |
+     |                        arguments to this function are incorrect
+     |
+note: associated function defined here
+    --> crates/core/src/types/messages.rs:1362:12
+     |
+1362 |     pub fn user_meta(id: MessageId, text: String) -> Self {
+     |            ^^^^^^^^^                ------------
+help: try using a conversion method
+     |
+ 867 |             let meta = ConversationMessage::user_meta(MessageId::new(), near_miss.to_string());
+     |                                                                                  ++++++++++++
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `core` (lib test) due to 15 previous errors

@@ -1,0 +1,355 @@
+$ source '/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/frozen-build-env.sh' && cargo check --locked --offline --workspace --all-targets --features harness-runtime/desktop,harness-runtime/uniffi
+    Checking serde v1.0.228
+    Checking parking_lot_core v0.9.12
+    Checking parking_lot v0.12.5
+   Compiling jobserver v0.1.34
+    Checking indexmap v2.14.2
+   Compiling cc v1.2.62
+    Checking mio v1.2.0
+    Checking tokio v1.52.3
+    Checking getrandom v0.2.17
+    Checking futures-util v0.3.32
+    Checking tracing v0.1.44
+    Checking serde_json v1.0.150
+    Checking thiserror v2.0.18
+    Checking generic-array v0.14.7
+    Checking tokio-util v0.7.18
+    Checking crypto-common v0.1.7
+    Checking idna_adapter v1.1.0
+    Checking idna v1.1.0
+    Checking rustix v0.38.44
+    Checking block-buffer v0.10.4
+    Checking digest v0.10.7
+    Checking url v2.5.8
+    Checking futures-executor v0.3.32
+   Compiling libm v0.2.16
+    Checking tempfile v3.13.0
+   Compiling num-traits v0.2.19
+    Checking uuid v1.10.0
+    Checking sha2 v0.10.9
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking toml_edit v0.22.27
+    Checking json-projection v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/json-projection)
+    Checking futures v0.3.32
+    Checking branding v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/branding)
+    Checking dashmap v6.2.1
+   Compiling ring v0.17.14
+    Checking toml v0.8.23
+    Checking zerocopy v0.8.48
+    Checking mobile-linux-api v0.1.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41)
+    Checking pear v0.2.9
+    Checking jsonrpc v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/jsonrpc)
+    Checking schemars v0.8.22
+    Checking thiserror v1.0.69
+    Checking figment v0.10.19
+    Checking rooted-fs v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/rooted-fs)
+    Checking mcp-wire v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp-wire)
+    Checking device-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/device-api)
+    Checking secrecy v0.10.3
+    Checking core v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/core)
+    Checking flate2 v1.1.9
+   Compiling rustls v0.23.45
+    Checking rustls-webpki v0.103.15
+    Checking tokio-rustls v0.26.4
+    Checking ppv-lite86 v0.2.21
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+    Checking h2 v0.4.19
+   Compiling zstd-safe v7.2.4
+    Checking hyper v1.9.0
+    Checking tower v0.5.3
+    Checking hyper-util v0.1.20
+    Checking zstd v0.13.3
+    Checking compression-codecs v0.4.39
+    Checking async-compression v0.4.44
+    Checking serde_urlencoded v0.7.1
+    Checking chrono v0.4.44
+    Checking tower-http v0.6.11
+    Checking rand_chacha v0.9.0
+    Checking opentelemetry v0.31.0
+    Checking rand v0.9.4
+    Checking pin-project v1.1.13
+    Checking opentelemetry_sdk v0.31.0
+    Checking hyper-timeout v0.5.2
+    Checking tokio-stream v0.1.18
+    Checking tonic v0.14.2
+    Checking prost v0.14.4
+    Checking hyper-rustls v0.27.5
+    Checking protobuf-support v3.7.2
+    Checking protobuf v3.7.2
+    Checking tonic-prost v0.14.5
+    Checking reqwest v0.12.28
+    Checking opentelemetry-proto v0.31.0
+    Checking prometheus v0.14.0
+    Checking opentelemetry-http v0.31.0
+    Checking opentelemetry-prometheus v0.31.0
+    Checking opentelemetry-stdout v0.31.0
+    Checking opentelemetry-otlp v0.31.1
+    Checking num-integer v0.1.46
+    Checking num-bigint v0.4.6
+    Checking telemetry v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry)
+    Checking rand_core v0.6.4
+    Checking rand_chacha v0.3.1
+    Checking rand v0.8.6
+    Checking ref-cast v1.0.25
+    Checking sha1 v0.10.6
+    Checking hmac v0.12.1
+    Checking ahash v0.8.12
+    Checking num-rational v0.4.2
+    Checking num-iter v0.1.45
+    Checking lingxi-hyper v1.9.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking num-complex v0.4.6
+    Checking num v0.4.3
+    Checking lingxi-hyper-util v0.1.21 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking fluent-uri v0.4.1
+    Checking tungstenite v0.24.0
+    Checking referencing v0.46.3
+    Checking tokio-tungstenite v0.24.0
+    Checking lingxi-hyper-rustls v0.27.5 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking fraction v0.15.4
+    Checking email_address v0.2.9
+   Compiling lingxi-llm-client v0.3.0 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking jsonschema v0.46.3
+    Checking lingxi-reqwest v0.12.29 (https://github.com/lingxi-coder/llm-client.git?rev=a363c5b3a237d53eea12c3abfb3b98648ef15d3e#a363c5b3)
+    Checking chrono-tz v0.10.4
+    Checking secret v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/secret)
+    Checking core-foundation v0.10.1
+    Checking security-framework-sys v2.17.0
+    Checking security-framework v3.7.0
+    Checking rustls-native-certs v0.8.4
+    Checking crossbeam-epoch v0.9.21
+    Checking crossbeam-deque v0.8.6
+    Checking ignore v0.4.23
+    Checking fluent-uri v0.3.2
+    Checking boon v0.6.1
+    Checking time v0.3.55
+   Compiling cmake v0.1.58
+   Compiling aws-lc-sys v0.45.0
+    Checking asn1-rs v0.6.2
+    Checking llm-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/llm-runtime)
+    Checking migrations v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/migrations)
+    Checking mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/mcp)
+    Checking oid-registry v0.7.1
+    Checking der-parser v9.0.0
+    Checking tree-sitter-language v0.1.7
+    Checking x509-parser v0.16.0
+   Compiling tree-sitter v0.25.10
+    Checking yasna v0.5.2
+    Checking dirs-sys v0.4.1
+   Compiling tree-sitter-bash v0.25.1
+    Checking which v6.0.3
+    Checking dirs v5.0.1
+    Checking permission v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/permission)
+    Checking lsp-types v0.95.1
+    Checking lsp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/lsp)
+    Checking block-padding v0.3.3
+    Checking inout v0.1.4
+    Checking cipher v0.4.4
+    Checking salsa20 v0.10.2
+    Checking pbkdf2 v0.12.2
+    Checking scrypt v0.11.0
+    Checking cbc v0.1.2
+    Checking aes v0.8.4
+    Checking pkcs5 v0.7.1
+    Checking pkcs8 v0.10.2
+    Checking http-client v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/http-client)
+    Checking mobile-linux-core v0.1.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41)
+    Checking platform-common v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/common)
+    Checking nix v0.27.1
+    Checking visualization v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/visualization)
+    Checking session v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/session)
+    Checking png v0.17.16
+    Checking image v0.24.9
+    Checking arc-swap v1.9.2
+   Compiling rquickjs-sys v0.14.0
+   Compiling tree-sitter-javascript v0.23.1
+    Checking rquickjs-core v0.14.0
+    Checking rquickjs v0.14.0
+    Checking cost v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/cost)
+    Checking hooks v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/hooks)
+    Checking serde_yaml v0.9.34+deprecated
+    Checking workflow v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/workflow)
+   Compiling aws-lc-rs v1.18.1
+    Checking task-store v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/task-store)
+    Checking fsevent-sys v4.1.0
+    Checking notify v8.2.0
+    Checking notify-debouncer-mini v0.6.0
+    Checking zerofrom v0.1.8
+    Checking yoke v0.8.3
+    Checking rcgen v0.13.2
+    Checking zerovec v0.11.8
+    Checking sandbox-runtime v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sandbox-runtime)
+    Checking tinystr v0.8.4
+    Checking icu_locale_core v2.3.0
+    Checking potential_utf v0.1.6
+    Checking zerotrie v0.2.5
+    Checking sandbox v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sandbox)
+    Checking cpufeatures v0.3.1
+    Checking icu_provider v2.3.1
+    Checking rayon-core v1.13.0
+    Checking tool-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tool-api)
+    Checking platform-posix v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/posix)
+    Checking sidequery v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/sidequery)
+    Checking memory v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/memory)
+    Checking agent v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/agent)
+    Checking getrandom v0.4.3
+    Checking aes v0.9.3
+    Checking rand v0.10.3
+    Checking rayon v1.12.0
+    Checking sha2 v0.11.0
+    Checking icu_collections v2.3.0
+    Checking memmap2 v0.9.11
+    Checking lopdf v0.45.0
+    Checking grep-searcher v0.1.14
+    Checking icu_locale_fallback_data v2.3.0
+    Checking icu_locale_fallback v2.3.0
+    Checking icu_normalizer_data v2.3.0
+    Checking icu_normalizer v2.3.0
+    Checking tasks v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tasks)
+    Checking icu_collator_data v2.3.0
+    Checking icu_locale_data v2.3.0
+    Checking tool-file v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/file)
+    Checking icu_properties v2.3.0
+    Checking icu_collator v2.3.1 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/icu_collator)
+    Checking icu_locale v2.3.1
+    Checking skill v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/skill)
+    Checking outputstyles v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/outputstyles)
+    Checking tool-mcp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/mcp)
+    Checking cron v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/cron)
+    Checking tool-cron v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/cron)
+    Checking command-api v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/command-api)
+    Checking compaction v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/compaction)
+    Checking tool-task v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/task)
+    Checking tool-workflow v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/workflow)
+    Checking tool-skill v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/skill)
+    Checking tracing-subscriber v0.3.23
+    Checking string_cache v0.8.9
+    Checking markup5ever v0.12.1
+    Checking orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+    Checking html5ever v0.27.0
+    Checking xml5ever v0.18.1
+    Checking markup5ever_rcdom v0.3.0
+    Checking coordinator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/coordinator)
+    Checking htmd v0.1.6
+    Checking tool-shell v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/shell)
+    Checking tool-web v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/web)
+    Checking test-harness v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/test-harness)
+    Checking tool-agent v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/agent)
+    Checking filetime v0.2.29
+    Checking platform-posix-minimal v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/posix-minimal)
+    Checking local-app v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/local-app)
+    Checking tool-ui v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/ui)
+    Checking tool-plan v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/plan)
+    Checking tool-worktree v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/worktree)
+    Checking tool-meta v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/meta)
+    Checking tool-lsp v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/lsp)
+    Checking wait-timeout v0.2.1
+   Compiling signal-hook v0.3.18
+    Checking rusty-fork v0.3.1
+    Checking rand_xorshift v0.3.0
+    Checking proptest v1.5.0
+    Checking anyhow v1.0.104
+    Checking signal-hook-mio v0.2.5
+    Checking crossterm v0.28.1
+   Compiling uniffi_internal_macros v0.32.2
+   Compiling errno v0.3.14
+   Compiling fs-err v3.3.1
+   Compiling heck v0.5.0
+   Compiling uniffi_pipeline v0.32.2
+   Compiling serde_spanned v1.1.1
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+    Checking half v2.7.1
+    Checking ciborium-ll v0.2.2
+   Compiling toml v1.1.3+spec-1.1.0
+   Compiling uniffi_meta v0.32.2
+    Checking async-compat v0.2.5
+    Checking uniffi_core v0.32.2
+   Compiling uniffi_macros v0.32.2
+    Checking ciborium v0.2.2
+    Checking pulldown-cmark v0.13.4
+    Checking syntect v5.3.0-harness.1 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/syntect)
+    Checking uniffi v0.32.2
+    Checking axum-core v0.4.5
+    Checking serde_path_to_error v0.1.20
+    Checking axum v0.7.9
+    Checking objc2 v0.6.4
+    Checking block2 v0.6.2
+    Checking dispatch2 v0.3.1
+    Checking console v0.16.3
+    Checking insta v1.47.2
+    Checking objc2-core-foundation v0.3.2
+   Compiling libz-sys v1.1.29
+    Checking objc2-foundation v0.3.2
+    Checking client v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/client)
+   Compiling mbedtls-sys v3.6.2 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/mbedtls-sys)
+   Compiling libssh2-sys v0.3.1 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/libssh2-sys)
+   Compiling libgit2-sys v0.18.5+1.9.4 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/git2-rs/libgit2-sys)
+    Checking objc2-metal v0.3.2
+    Checking objc2-core-graphics v0.3.2
+    Checking proc-macro2 v1.0.106
+    Checking zopfli v0.8.3
+    Checking objc2-core-video v0.3.2
+    Checking objc-sys v0.3.5
+    Checking zip v2.4.2
+    Checking quote v1.0.45
+    Checking objc2-quartz-core v0.3.2
+    Checking objc2-core-image v0.3.2
+    Checking objc2 v0.5.2
+    Checking objc2-core-data v0.3.2
+    Checking objc2-cloud-kit v0.3.2
+    Checking objc2-core-text v0.3.2
+    Checking objc2-core-audio-types v0.3.2
+    Checking foreign-types v0.5.0
+    Checking objc2-app-kit v0.3.2
+    Checking objc2-foundation v0.2.2
+    Checking objc2-avf-audio v0.3.2
+    Checking objc2-core-audio v0.3.2
+    Checking objc2-media-toolbox v0.3.2
+    Checking objc2-image-io v0.3.2
+    Checking core-graphics-types v0.2.0
+    Checking tungstenite v0.21.0
+    Checking image v0.25.6
+    Checking tokio-tungstenite v0.21.0
+    Checking core-graphics v0.24.0
+    Checking objc2-av-foundation v0.3.2
+    Checking objc2-core-media v0.3.2
+    Checking objc2-app-kit v0.2.2
+    Checking plist v1.10.1
+    Checking enigo v0.3.0
+    Checking xcap v0.5.2
+    Checking arboard v3.6.1
+    Checking syn v2.0.117
+    Checking bridge v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/bridge)
+    Checking platform-macos-computer-control v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/macos-computer-control)
+    Checking tool-computer-use v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/computer-use)
+    Checking provider-config v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/provider-config)
+    Checking fusion v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/fusion)
+    Checking tool-shell-mobile v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/shell-mobile)
+    Checking tool-mobile v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/mobile)
+    Checking audio-runtime v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/audio-runtime)
+    Checking msgqueue v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/msgqueue)
+   Compiling cfg_aliases v0.1.1
+   Compiling nix v0.28.0
+    Checking platform-windows v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/windows)
+    Checking filedescriptor v0.8.3
+    Checking serial2 v0.2.37
+    Checking portable-pty v0.9.0
+    Checking platform-pty v0.12.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41)
+    Checking mobile-linux-android v0.1.0 (https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41)
+    Checking trybuild v1.0.99
+    Checking telemetry-macros v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/telemetry-macros)
+    Checking platform-android v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/platforms/android)
+    Checking git2 v0.21.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/third_party/git2-rs/git2)
+    Checking plugin v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/plugin)
+    Checking tool-git-mobile v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/tools/git-mobile)
+    Checking configuration-admin v0.1.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/configuration-admin)
+    Checking harness-runtime v0.9.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/runtime)
+error[E0599]: no method named `string_at` found for struct `JsonRpcString` in the current scope
+   --> crates/platforms/common/tests/mcp_input_required_http_test.rs:422:25
+    |
+422 |             note.method.string_at(""),
+    |                         ^^^^^^^^^ method not found in `JsonRpcString`
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `platform-common` (test "mcp_input_required_http_test") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

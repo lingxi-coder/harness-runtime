@@ -13,6 +13,7 @@ branding.workspace = true
 base64 = "0.22"
 jsonrpc = { path = "../../jsonrpc" }
 llm-runtime = { path = "../../llm-runtime" }
+mcp = { path = "../../mcp" }
 lingxi-llm-client.workspace = true
 http-client = { path = "../../http-client" }
 telemetry = { path = "../../telemetry" }

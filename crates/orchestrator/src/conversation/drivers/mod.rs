@@ -324,6 +324,9 @@ pub(crate) struct TurnLoopState {
     global_turn_tokens: u64,
     turn_count: u32,
     native_query_depth: u32,
+    /// One query reissue after a Native safety refusal or its configured
+    /// Native refusal fallback does not consume another turn-count slot.
+    pub(crate) refusal_reissue_pending: bool,
     malformed_tool_use_retried: bool,
     thinking_only_nudged: bool,
     last_message_id: MessageId,
@@ -364,6 +367,7 @@ impl TurnLoopState {
             global_turn_tokens: 0,
             turn_count: 0,
             native_query_depth: 0,
+            refusal_reissue_pending: false,
             malformed_tool_use_retried: false,
             thinking_only_nudged: false,
             last_message_id,
@@ -585,6 +589,8 @@ impl ConversationOrchestrator {
             usage_limit_note: None,
             origin: None,
             turn_origin: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             api_message_override: Some(lingxi_core::types::messages::ApiSystemMessage {
                 content,
                 output_config: None,
@@ -606,15 +612,6 @@ impl ConversationOrchestrator {
         self.note_query_user_event();
     }
 
-    /// Inject a PLAIN (non-meta) user text message. Used for interrupt markers
-    /// (`[Request interrupted by user]`) and mid-turn drained HUMAN input, which
-    /// CC 2.1.207 persists WITHOUT `isMeta` — interrupt lines are built with no
-    /// `isMeta` field, and queued human input is non-meta per the `queued_command`
-    /// guard (`r!==void 0&&!Ree(r)||e.isMeta` → `{}` for plain human input).
-    pub(super) async fn inject_user_message(&self, text: &str) {
-        self.inject_user_text(text, false).await;
-    }
-
     /// Inject and record Native's typed query interruption event. Both source
     /// variants are ordinary user rows and contribute one yielded-user count.
     pub(super) async fn inject_query_user_interruption(&self, kind: QueryUserInterruptionKind) {
@@ -622,7 +619,21 @@ impl ConversationOrchestrator {
             QueryUserInterruptionKind::Streaming => INTERRUPT_MESSAGE,
             QueryUserInterruptionKind::Tools => INTERRUPT_MESSAGE_FOR_TOOL_USE,
         };
-        self.inject_user_message(message).await;
+        let mut row = ConversationMessage::user(MessageId::new(), message.to_owned());
+        if self.cancel_reason_now() == crate::prompt::mid_turn_input::CancelReason::ServiceShutdown
+        {
+            if let ConversationMessage::User {
+                interrupted_by_shutdown,
+                ..
+            } = &mut row
+            {
+                *interrupted_by_shutdown = Some(true);
+            }
+        }
+        {
+            self.session.lock().await.history.push(row.clone());
+        }
+        self.persist_message_to_jsonl(&row).await;
         self.note_query_user_interruption(kind);
     }
 
@@ -882,6 +893,9 @@ impl ConversationOrchestrator {
         state.global_turn_tokens = state.global_turn_tokens.saturating_add(output_tokens);
         match step {
             TurnStepOutcome::Continue(transition) => {
+                if transition == crate::turn_loop::NativeQueryTransition::RefusalReissue {
+                    state.refusal_reissue_pending = true;
+                }
                 state.native_query_depth = crate::turn_loop::native_query_depth_after(
                     state.native_query_depth,
                     transition,
@@ -1414,6 +1428,8 @@ impl ConversationOrchestrator {
             let result_timestamp = crate::streaming_loop::assistant_row_timestamp();
             let raw_result = ConversationMessage::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id: MessageId::new(),
                 content: vec![drained.block],
                 is_meta: false,
@@ -1723,7 +1739,9 @@ impl ConversationOrchestrator {
         pumped: &mut crate::streaming_loop::PumpedTurn,
         settlement: &mut crate::streaming_loop::StreamToolSettlement,
         tool_use_parent_uuids: &std::collections::HashMap<lingxi_core::types::ToolUseId, String>,
+        assistant_id: MessageId,
         assistant_uuid: &Option<String>,
+        settle_refusal: bool,
     ) -> Result<(bool, crate::turn_loop::PostToolBatchDispatch), OrchestratorError> {
         // 5. Drive tools through the StreamingToolExecutor (faithful port of
         //    claude-code's `StreamingToolExecutor` + `query.ts:826-862`).
@@ -1750,23 +1768,58 @@ impl ConversationOrchestrator {
             // Native Tn is invoked after each provider event by the pump. This
             // loop only waits for results that were not ready before the stream
             // ended and sends them through the same settlement path.
-            loop {
-                exec.apply_abort_to_pending_owned().await;
-                exec.drain_ready().await;
-                let newly_completed = exec.take_newly_completed();
+            if settle_refusal {
+                let refusal_results = exec.settle_refused_tool_uses().await?;
+                pumped.refusal_retry_had_interrupted_tool = refusal_results.iter().any(|result| {
+                    result.publications.iter().any(|publication| {
+                        publication.denial_kind.as_deref() == Some("interrupted")
+                    })
+                });
+                // A refusal cancels the old execution generation. Rebind the
+                // accepted stream rows and already-completed results to the
+                // fresh publication fence so terminal settlement preserves
+                // results that completed before the refusal boundary.
+                settlement.publication_guard = Some(Arc::new(exec.publication_fence()));
+                if let Some(guard) = settlement.publication_guard.as_ref() {
+                    let mut guarded_messages =
+                        self.prompt_runtime.guarded_prompt_messages.lock().await;
+                    if let Some((_, existing_guard)) = guarded_messages
+                        .iter_mut()
+                        .find(|(message_id, _)| *message_id == assistant_id)
+                    {
+                        *existing_guard = Arc::clone(guard);
+                    } else {
+                        guarded_messages.push((assistant_id, Arc::clone(guard)));
+                    }
+                }
                 self.settle_stream_tool_results(
                     settlement,
-                    newly_completed,
+                    refusal_results,
                     tool_use_parent_uuids,
                     assistant_uuid,
                 )
                 .await;
                 self.flush_stream_event_journal(settlement, &mut pumped.assistant_rows)
                     .await;
-                if exec.is_current_generation_idle().await {
-                    break;
+            } else {
+                loop {
+                    exec.apply_abort_to_pending_owned().await;
+                    exec.drain_ready().await;
+                    let newly_completed = exec.take_newly_completed();
+                    self.settle_stream_tool_results(
+                        settlement,
+                        newly_completed,
+                        tool_use_parent_uuids,
+                        assistant_uuid,
+                    )
+                    .await;
+                    self.flush_stream_event_journal(settlement, &mut pumped.assistant_rows)
+                        .await;
+                    if exec.is_current_generation_idle().await {
+                        break;
+                    }
+                    exec.drain_one().await;
                 }
-                exec.drain_one().await;
             }
         }
         self.flush_stream_event_journal(settlement, &mut pumped.assistant_rows)
@@ -1947,14 +2000,293 @@ impl ConversationOrchestrator {
         }
     }
 
-    async fn decide_streaming_disposition(
+    /// Run the ordinary PostToolBatch boundary for results settled from a
+    /// safety-refused response. The refusal retry may proceed only when the
+    /// accepted results did not request a turn end or prevent continuation.
+    async fn finish_refusal_tool_batch(
         &self,
         loop_state: &mut TurnLoopState,
         pumped: &crate::streaming_loop::PumpedTurn,
         assistant_id: MessageId,
         tool_prevent_continuation: bool,
+        pre_batch_mcp_tool_count: usize,
+        post_tool_batch_dispatch: crate::turn_loop::PostToolBatchDispatch,
+    ) -> Result<Option<StreamingIterationDisposition>, OrchestratorError> {
+        let dispatch_guard = post_tool_batch_dispatch.publication_guard.clone();
+        let tool_ids = pumped
+            .tool_uses
+            .iter()
+            .map(|tool_use| tool_use.id.clone())
+            .collect::<Vec<_>>();
+        let mut turn_end = None;
+        let take_turn_end = async {
+            turn_end = self.take_pending_tool_result_turn_ends(&tool_ids).await;
+        };
+        if let Some(guard) = dispatch_guard.as_ref() {
+            if !guard.commit_if_current(Box::pin(take_turn_end)).await {
+                return Ok(Some(StreamingIterationDisposition::Return(
+                    ConversationOutcome::EndTurn {
+                        turn_count: loop_state.turn_count,
+                        final_message_id: assistant_id,
+                    },
+                )));
+            }
+        } else {
+            take_turn_end.await;
+        }
+        if dispatch_guard
+            .as_ref()
+            .is_some_and(|guard| !guard.is_current())
+        {
+            return Ok(Some(StreamingIterationDisposition::Return(
+                ConversationOutcome::EndTurn {
+                    turn_count: loop_state.turn_count,
+                    final_message_id: assistant_id,
+                },
+            )));
+        }
+        if tool_prevent_continuation {
+            let cost = self.snapshot_cost_real().await;
+            let emit = self.emit_turn_terminal("hook_stopped", &cost);
+            if let Some(guard) = dispatch_guard.as_ref() {
+                guard.publish_if_current(Box::pin(emit)).await;
+            } else {
+                emit.await;
+            }
+            return Ok(Some(StreamingIterationDisposition::Return(
+                ConversationOutcome::EndTurn {
+                    turn_count: loop_state.turn_count,
+                    final_message_id: assistant_id,
+                },
+            )));
+        }
+        if let Some(turn_end) = turn_end {
+            let telemetry = crate::turn_loop::emit_tool_result_ended_turn_telemetry(self, turn_end);
+            if let Some(guard) = dispatch_guard.as_ref() {
+                guard.publish_if_current(Box::pin(telemetry)).await;
+            } else {
+                telemetry.await;
+            }
+            let batch_outcome = crate::turn_loop::run_post_tool_batch_hooks_after_turn_end(
+                self,
+                post_tool_batch_dispatch,
+            )
+            .await;
+            let batch_guard = batch_outcome.publication_guard.clone();
+            crate::turn_loop::append_tool_injected_messages(
+                self,
+                batch_outcome.injected_messages,
+                batch_outcome.publication_guard,
+            )
+            .await;
+            if batch_guard
+                .as_ref()
+                .is_some_and(|guard| !guard.is_current())
+            {
+                return Ok(Some(StreamingIterationDisposition::Return(
+                    ConversationOutcome::EndTurn {
+                        turn_count: loop_state.turn_count,
+                        final_message_id: assistant_id,
+                    },
+                )));
+            }
+            return self
+                .finish_tool_requested_streaming_end(loop_state, assistant_id, batch_guard)
+                .await
+                .map(Some);
+        }
+
+        let batch_outcome =
+            crate::turn_loop::run_post_tool_batch_hooks(self, post_tool_batch_dispatch).await;
+        let batch_prevent = batch_outcome.prevent_continuation;
+        let batch_guard = batch_outcome.publication_guard.clone();
+        crate::turn_loop::append_tool_injected_messages(
+            self,
+            batch_outcome.injected_messages,
+            batch_outcome.publication_guard,
+        )
+        .await;
+        if batch_guard
+            .as_ref()
+            .is_some_and(|guard| !guard.is_current())
+        {
+            return Ok(Some(StreamingIterationDisposition::Return(
+                ConversationOutcome::EndTurn {
+                    turn_count: loop_state.turn_count,
+                    final_message_id: assistant_id,
+                },
+            )));
+        }
+        if batch_prevent {
+            let cost = self.snapshot_cost_real().await;
+            let emit = self.emit_turn_terminal("hook_stopped", &cost);
+            if let Some(guard) = batch_guard.as_ref() {
+                guard.publish_if_current(Box::pin(emit)).await;
+            } else {
+                emit.await;
+            }
+            return Ok(Some(StreamingIterationDisposition::Return(
+                ConversationOutcome::EndTurn {
+                    turn_count: loop_state.turn_count,
+                    final_message_id: assistant_id,
+                },
+            )));
+        }
+        let refreshed_telemetry = crate::turn_loop::emit_tools_refreshed_mid_turn_telemetry(
+            self,
+            pre_batch_mcp_tool_count,
+        );
+        if let Some(guard) = batch_guard.as_ref() {
+            guard
+                .publish_if_current(Box::pin(refreshed_telemetry))
+                .await;
+        } else {
+            refreshed_telemetry.await;
+        }
+        Ok(None)
+    }
+
+    async fn surface_streaming_terminal_stop(
+        &self,
+        request_model: &str,
+        pumped: &crate::streaming_loop::PumpedTurn,
+        assistant_id: MessageId,
+        stop_reason: &str,
+    ) -> Result<StreamingIterationDisposition, OrchestratorError> {
+        let request_id = self.api.last_request_id();
+        let api_error = crate::turn_loop::terminal_api_error_text(
+            request_model,
+            self.prompt_is_interactive(),
+            stop_reason,
+            request_id.as_deref(),
+            pumped.stop_details.as_ref(),
+            pumped.response_message_id.as_deref(),
+        );
+        let surfaced_id = if let Some(text) = api_error {
+            let err_msg = ConversationMessage::Assistant {
+                per_turn_effort: None,
+                id: MessageId::new(),
+                content: vec![ContentBlock::TextJsUtf16 {
+                    text: text
+                        .string_at("")
+                        .expect("terminal error is a string")
+                        .into(),
+                    utf16_code_units: text.string_units("").expect("terminal error is a string"),
+                    citations: None,
+                }],
+                stop_reason: Some(stop_reason.to_owned()),
+                resumable: None,
+            };
+            self.session.lock().await.history.push(err_msg.clone());
+            let envelope = match stop_reason {
+                "max_tokens" | "model_context_window_exceeded" => ApiErrorEnvelope {
+                    error: Some("max_output_tokens"),
+                    ..ApiErrorEnvelope::default()
+                },
+                "refusal" => ApiErrorEnvelope {
+                    error: Some("invalid_request"),
+                    inner_stop_reason: Some("refusal"),
+                    inner_stop_details: pumped.stop_details.clone(),
+                    refused_message_id: pumped.response_message_id.clone(),
+                    ..ApiErrorEnvelope::default()
+                },
+                _ => ApiErrorEnvelope::default(),
+            };
+            self.persist_api_error_message_to_jsonl(&err_msg, envelope)
+                .await;
+            if stop_reason == "refusal" {
+                self.output
+                    .emit_terminal_api_error(None, "api_error", "refusal")
+                    .await;
+            }
+            self.output.emit_text(&text).await;
+            Some(err_msg.id())
+        } else {
+            None
+        };
+        let cost = self.snapshot_cost_real().await;
+        let terminal_reason = if stop_reason == "refusal" {
+            "api_error"
+        } else {
+            stop_reason
+        };
+        self.emit_turn_terminal(terminal_reason, &cost).await;
+        Ok(StreamingIterationDisposition::Complete(
+            surfaced_id.unwrap_or(assistant_id),
+        ))
+    }
+
+    /// Persist and display a refusal API-error row without ending the turn.
+    /// Native's Ko=false path yields this row before ordinary tool results,
+    /// then continues when the refused response carried tool-use blocks. The
+    /// row is transcript-only here: Native does not add this terminal surface
+    /// row to the provider request's query history. `request_model` is the model
+    /// used for this physical request, which can differ from the session model.
+    pub(crate) async fn stage_refusal_api_error_row(
+        &self,
+        request_model: &str,
+        stop_details: Option<&llm_runtime::HistoryStopDetails>,
+        response_message_id: Option<&str>,
+    ) -> Result<bool, OrchestratorError> {
+        let text = {
+            let request_id = self.api.last_request_id();
+            crate::turn_loop::terminal_api_error_text(
+                request_model,
+                self.prompt_is_interactive(),
+                "refusal",
+                request_id.as_deref(),
+                stop_details,
+                response_message_id,
+            )
+        };
+        let Some(text) = text else {
+            return Ok(false);
+        };
+        let err_msg = ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: MessageId::new(),
+            content: vec![ContentBlock::TextJsUtf16 {
+                text: text
+                    .string_at("")
+                    .expect("terminal refusal error is a string")
+                    .into(),
+                utf16_code_units: text
+                    .string_units("")
+                    .expect("terminal refusal error is a string"),
+                citations: None,
+            }],
+            stop_reason: Some("refusal".into()),
+            resumable: None,
+        };
+        self.persist_api_error_message_to_jsonl(
+            &err_msg,
+            ApiErrorEnvelope {
+                error: Some("invalid_request"),
+                inner_stop_reason: Some("refusal"),
+                inner_stop_details: stop_details.cloned(),
+                refused_message_id: response_message_id.map(str::to_owned),
+                ..ApiErrorEnvelope::default()
+            },
+        )
+        .await;
+        self.output
+            .emit_terminal_api_error(None, "api_error", "refusal")
+            .await;
+        self.output.emit_text(&text).await;
+        Ok(true)
+    }
+
+    async fn decide_streaming_disposition(
+        &self,
+        loop_state: &mut TurnLoopState,
+        pumped: &crate::streaming_loop::PumpedTurn,
+        request_model: &str,
+        native_catalog_refusal: bool,
+        assistant_id: MessageId,
+        tool_prevent_continuation: bool,
         post_tool_batch_dispatch: crate::turn_loop::PostToolBatchDispatch,
         pre_batch_mcp_tool_count: usize,
+        refusal_tool_uses_settled: bool,
     ) -> Result<StreamingIterationDisposition, OrchestratorError> {
         let dispatch_guard = post_tool_batch_dispatch.publication_guard.clone();
         if dispatch_guard
@@ -1983,7 +2315,8 @@ impl ConversationOrchestrator {
         // this is the one point every streamed response passes through.
         self.turn_span
             .note_assistant_response(pumped.tool_uses.len());
-        let has_api_error = pumped.assistant_rows.iter().any(|row| row.is_api_error);
+        let has_api_error = pumped.refusal_api_error_staged
+            || pumped.assistant_rows.iter().any(|row| row.is_api_error);
         if !has_api_error {
             loop_state.recovery.successful_assistant_messages = loop_state
                 .recovery
@@ -2016,6 +2349,67 @@ impl ConversationOrchestrator {
             pumped.stop_reason.as_deref()
         };
         match disposition_reason {
+            // Native's refusal path runs after completed tool results have
+            // been accepted, but before generic needsFollowUp can re-dispatch
+            // the rejected tool-use blocks. The streaming finalizer has
+            // already stopped queued work and classified still-running calls.
+            Some("refusal") if refusal_tool_uses_settled => {
+                if !pumped.tool_uses.is_empty() {
+                    if let Some(disposition) = self
+                        .finish_refusal_tool_batch(
+                            loop_state,
+                            pumped,
+                            assistant_id,
+                            tool_prevent_continuation,
+                            pre_batch_mcp_tool_count,
+                            post_tool_batch_dispatch,
+                        )
+                        .await?
+                    {
+                        return Ok(disposition);
+                    }
+                }
+                let refused_message_id = pumped.response_message_id.as_deref();
+                if pumped.server_fallback_events.is_empty()
+                    && native_catalog_refusal
+                    && crate::turn_loop::native_refusal_retry_enabled(
+                        &self.config.query_source,
+                        loop_state.recovery.refusal_retry_spent,
+                    )
+                    && refused_message_id.is_some()
+                {
+                    loop_state.recovery.refusal_retry_spent = true;
+                    crate::turn_loop::inject_native_refusal_safety_retry(
+                        self,
+                        request_model,
+                        refused_message_id.expect("Native refusal response has an ID"),
+                        pumped.refusal_retry_had_interrupted_tool,
+                    )
+                    .await;
+                    return Ok(StreamingIterationDisposition::Continue(
+                        crate::turn_loop::NativeQueryTransition::RefusalReissue,
+                    ));
+                }
+                // Native computes `Ko = Wa(...)` before route selection. While
+                // Ko is true it suppresses the ordinary refusal-fallback lane,
+                // so the one same-model retry wins even when a fallback model
+                // is configured. Once that per-query retry has been spent, the
+                // fallback lane is eligible again.
+                if pumped.server_fallback_events.is_empty()
+                    && self.maybe_swap_to_refusal_fallback().await
+                {
+                    return Ok(StreamingIterationDisposition::Continue(
+                        if native_catalog_refusal {
+                            crate::turn_loop::NativeQueryTransition::RefusalReissue
+                        } else {
+                            crate::turn_loop::NativeQueryTransition::InPlaceRetry
+                        },
+                    ));
+                }
+                return self
+                    .surface_streaming_terminal_stop(request_model, pumped, assistant_id, "refusal")
+                    .await;
+            }
             // #1 needsFollowUp gate (claude-code `query.ts:554-558`/`832-835`/
             // `1062`): continuation is keyed on tool-block PRESENCE, NOT the raw
             // `stop_reason` string (the ref notes `stop_reason == "tool_use"` is
@@ -2589,7 +2983,11 @@ impl ConversationOrchestrator {
                     && self.maybe_swap_to_refusal_fallback().await =>
             {
                 Ok(StreamingIterationDisposition::Continue(
-                    crate::turn_loop::NativeQueryTransition::InPlaceRetry,
+                    if native_catalog_refusal {
+                        crate::turn_loop::NativeQueryTransition::RefusalReissue
+                    } else {
+                        crate::turn_loop::NativeQueryTransition::InPlaceRetry
+                    },
                 ))
             }
             Some(other) => {
@@ -2613,70 +3011,8 @@ impl ConversationOrchestrator {
                 // twin uses the SAME builder, so both paths surface identical
                 // text). `None` for stop_sequence / pause_turn / refusal-
                 // without-fallback's other terminals → no message, end as-is.
-                let api_error = {
-                    let model = self.session.lock().await.model.clone();
-                    let request_id = self.api.last_request_id();
-                    crate::turn_loop::terminal_api_error_text(
-                        &model,
-                        self.prompt_is_interactive(),
-                        other,
-                        request_id.as_deref(),
-                        pumped.stop_details.as_ref(),
-                        pumped.response_message_id.as_deref(),
-                    )
-                };
-                let surfaced_id = if let Some(text) = api_error {
-                    let err_msg = ConversationMessage::Assistant {
-                        per_turn_effort: None,
-                        id: MessageId::new(),
-                        content: vec![ContentBlock::TextJsUtf16 {
-                            text: text
-                                .string_at("")
-                                .expect("terminal error is a string")
-                                .into(),
-                            utf16_code_units: text
-                                .string_units("")
-                                .expect("terminal error is a string"),
-                            citations: None,
-                        }],
-                        stop_reason: Some(other.to_string()),
-                        resumable: None,
-                    };
-                    self.session.lock().await.history.push(err_msg.clone());
-                    let envelope = match other {
-                        "max_tokens" | "model_context_window_exceeded" => ApiErrorEnvelope {
-                            error: Some("max_output_tokens"),
-                            ..ApiErrorEnvelope::default()
-                        },
-                        "refusal" => ApiErrorEnvelope {
-                            error: Some("invalid_request"),
-                            inner_stop_reason: Some("refusal"),
-                            ..ApiErrorEnvelope::default()
-                        },
-                        _ => ApiErrorEnvelope::default(),
-                    };
-                    self.persist_api_error_message_to_jsonl(&err_msg, envelope)
-                        .await;
-                    if other == "refusal" {
-                        self.output
-                            .emit_terminal_api_error(None, "api_error", "refusal")
-                            .await;
-                    }
-                    self.output.emit_text(&text).await;
-                    Some(err_msg.id())
-                } else {
-                    None
-                };
-                let cost = self.snapshot_cost_real().await;
-                let terminal_reason = if other == "refusal" {
-                    "api_error"
-                } else {
-                    other
-                };
-                self.emit_turn_terminal(terminal_reason, &cost).await;
-                Ok(StreamingIterationDisposition::Complete(
-                    surfaced_id.unwrap_or(assistant_id),
-                ))
+                self.surface_streaming_terminal_stop(request_model, pumped, assistant_id, other)
+                    .await
             }
             None => {
                 // Stream ended without a stop_reason — treat as
@@ -2820,6 +3156,44 @@ impl ConversationOrchestrator {
         }
     }
 
+    /// A service shutdown can cancel a user turn before it acquires the turn
+    /// gate. Preserve Native's interruption row after any in-flight turn has
+    /// finished, while avoiding a second marker if that turn already recorded
+    /// the shutdown.
+    async fn record_pre_admission_shutdown_interruption(&self) {
+        use crate::prompt::mid_turn_input::CancelReason;
+
+        if self.cancel_reason_now() != CancelReason::ServiceShutdown {
+            return;
+        }
+
+        let _turn_guard = self.turn_gate.lock().await;
+        if self.cancel_reason_now() != CancelReason::ServiceShutdown {
+            return;
+        }
+
+        let already_recorded = {
+            let session = self.session.lock().await;
+            session.history.last().is_some_and(|message| {
+                matches!(
+                    message,
+                    ConversationMessage::User {
+                        content,
+                        interrupted_by_shutdown: Some(true),
+                        ..
+                    } if content.iter().any(|block| matches!(
+                        block,
+                        ContentBlock::Text { text, .. } if text == INTERRUPT_MESSAGE
+                    ))
+                )
+            })
+        };
+        if !already_recorded {
+            self.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
+                .await;
+        }
+    }
+
     /// Drive one user prompt through a REPL turn until `end_turn`,
     /// `max_turns`, or the given `cancel` token fires.
     ///
@@ -2861,6 +3235,7 @@ impl ConversationOrchestrator {
         let prompt = prompt.into();
         Box::pin(async move {
             let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+                self.record_pre_admission_shutdown_interruption().await;
                 return Ok(TurnOutcome::Cancelled);
             };
             self.begin_turn_metrics();
@@ -3133,17 +3508,40 @@ impl ConversationOrchestrator {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clear_idle_checkins();
-            let user_msg = user_message_from_projection(
-                message_id.unwrap_or_else(MessageId::new),
-                &screened_text,
-                false,
-                images,
-            );
-            {
-                let mut s = self.session.lock().await;
-                s.history.push(user_msg.clone());
+            let resumed_unanswered_user = if let Some(message_id) = message_id {
+                let session = self.session.lock().await;
+                session
+                    .message_turn_is_unanswered(message_id)
+                    .then(|| {
+                        session
+                            .history
+                            .iter()
+                            .find(|message| {
+                                message.id() == message_id
+                                    && matches!(message, ConversationMessage::User { .. })
+                            })
+                            .cloned()
+                    })
+                    .flatten()
+            } else {
+                None
+            };
+            let (user_msg, append_user_row) = match resumed_unanswered_user {
+                Some(message) => (message, false),
+                None => (
+                    user_message_from_projection(
+                        message_id.unwrap_or_else(MessageId::new),
+                        &screened_text,
+                        false,
+                        images,
+                    ),
+                    true,
+                ),
+            };
+            if append_user_row {
+                self.session.lock().await.history.push(user_msg.clone());
+                self.persist_message_to_jsonl(&user_msg).await;
             }
-            self.persist_message_to_jsonl(&user_msg).await;
             crate::request_context::persist_prompt_ingress_after_user(
                 self,
                 user_msg.id(),
@@ -3957,6 +4355,8 @@ pub(super) fn llm_response_to_pumped_turn(
         replacement_message_id: None,
         server_fallback_events,
         response_message_id: Some(resp.id.clone()),
+        refusal_retry_had_interrupted_tool: false,
+        refusal_api_error_staged: false,
         handled_server_fallback_events: 0,
         assistant_blocks,
         tool_uses,

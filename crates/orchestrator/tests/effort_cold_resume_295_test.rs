@@ -32,7 +32,7 @@ const CHILD_HOME_ENV: &str = "LINGXI_EFFORT_COLD_RESUME_295_HOME";
 const CHILD_CWD_ENV: &str = "LINGXI_EFFORT_COLD_RESUME_295_CWD";
 const CHILD_SESSION_ENV: &str = "LINGXI_EFFORT_COLD_RESUME_295_SESSION";
 const HISTORICAL_EFFORT: &str = "low";
-const NEXT_TURN_DEFAULT_EFFORT: &str = "medium";
+const NEXT_TURN_EFFORT: &str = "high";
 
 #[derive(Clone, Debug)]
 struct CapturedRequest {
@@ -199,14 +199,17 @@ async fn run_fresh_process_resume(home: PathBuf, cwd: PathBuf, session_id: Uuid)
     let transport = Arc::new(FixedResponseTransport {
         requests: Mutex::new(Vec::new()),
     });
-    let api: Arc<dyn orchestrator::OrchestratorApiClient> =
-        Arc::new(ProviderApiAdapter::new(api_service(transport.clone())));
+    let api: Arc<dyn orchestrator::OrchestratorApiClient> = Arc::new(
+        ProviderApiAdapter::new(api_service(transport.clone()))
+            .with_initial_effort(Some(json!(NEXT_TURN_EFFORT))),
+    );
     let writer = Arc::new(JsonlWriter::new(path, fs.clone()));
     let orchestrator = ConversationOrchestrator::with_resume(
         OrchestratorConfig {
             model: MODEL.to_owned(),
             bare: true,
             max_turns: 1,
+            effort: Some(NEXT_TURN_EFFORT.to_owned()),
             ..OrchestratorConfig::default()
         },
         session_id,
@@ -280,9 +283,9 @@ async fn run_fresh_process_resume(home: PathBuf, cwd: PathBuf, session_id: Uuid)
         string_markers(&body),
         vec![
             (1, "system".to_owned(), HISTORICAL_EFFORT.to_owned()),
-            (4, "system".to_owned(), NEXT_TURN_DEFAULT_EFFORT.to_owned()),
+            (4, "system".to_owned(), NEXT_TURN_EFFORT.to_owned()),
         ],
-        "the SDK encoder carries the historical low marker before the old assistant and the current medium marker after the resumed history"
+        "the SDK encoder carries the historical low marker before the old assistant and the current high marker after the resumed history, matching the Native 2.1.295 fixture"
     );
     let beta_header = requests[0]
         .headers

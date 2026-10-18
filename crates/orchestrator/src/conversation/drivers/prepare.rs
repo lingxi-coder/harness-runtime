@@ -1669,6 +1669,8 @@ mod prompt_ingress_classifier_tests {
     fn tool_result() -> ConversationMessage {
         ConversationMessage::User {
             api_message_override: None,
+            interrupted_by_shutdown: None,
+            refused_message_id: None,
             id: MessageId::new(),
             content: vec![ContentBlock::ToolResult {
                 tool_use_id: lingxi_core::types::ToolUseId::from("toolu_skill"),

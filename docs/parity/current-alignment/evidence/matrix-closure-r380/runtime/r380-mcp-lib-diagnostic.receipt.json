@@ -1,0 +1,30 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-mcp-lib-diagnostic-r380.v1",
+  "recordedAtUtc": "2026-10-18T16:23:29Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": ["--locked", "--offline"],
+  "features": [],
+  "command": "cargo check --locked --offline -p mcp --lib",
+  "diagnosticOnly": true,
+  "notFinalGate": true,
+  "exitCode": 0,
+  "testsRun": false,
+  "errors": [],
+  "warnings": [
+    {
+      "file": "crates/mcp/src/oauth.rs",
+      "line": 60,
+      "message": "unused import: std::collections::HashMap"
+    },
+    {
+      "file": "crates/mcp/src/oauth.rs",
+      "line": 61,
+      "message": "unused imports: Mutex as StdMutex, OnceLock, and Weak"
+    }
+  ],
+  "sourceHashFile": "r380-mcp-lib-diagnostic-sourcehashes.txt",
+  "log": "logs/14-mcp-lib-diagnostic.log",
+  "scope": "Diagnostic type-check of the temporarily frozen MCP library only; OAuth integration tests and final gate remain pending."
+}

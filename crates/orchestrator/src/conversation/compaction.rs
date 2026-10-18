@@ -501,6 +501,8 @@ fn session_compact_message_from_row(
             }
             Ok(ConversationMessage::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id,
                 content,
                 is_meta: false,
@@ -5084,6 +5086,8 @@ mod session_compact_mod_tests {
             },
             ConversationMessage::User {
                 api_message_override: None,
+                interrupted_by_shutdown: None,
+                refused_message_id: None,
                 id: lingxi_core::types::MessageId::new(),
                 content: vec![lingxi_core::types::ContentBlock::ToolResult {
                     tool_use_id: tool_use_id.clone(),

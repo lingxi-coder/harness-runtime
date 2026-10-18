@@ -1933,6 +1933,11 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
         &self,
         is_regular_user_prompt: bool,
     ) -> Option<ConversationMessage> {
+        // Native 2.1.295 NAr returns before collecting token/budget attachments
+        // in bare/simple or attachments-disabled sessions.
+        if !self.native_prompt_attachments_enabled() {
+            return None;
+        }
         use crate::prompt::total_tokens as tt;
         let mode = tt::resolve_mode(None);
         if mode == tt::TotalTokensMode::Off {
@@ -2000,6 +2005,9 @@ No need to announce the new date \u{2014} the user's own clock shows it.\n</syst
     pub(crate) async fn budget_usd_prompt_ingress_attachment(
         &self,
     ) -> Option<crate::request_context::PromptIngressAttachment> {
+        if !self.native_prompt_attachments_enabled() {
+            return None;
+        }
         use lingxi_core::types::utf16_json::Utf16JsonProjection as Source;
 
         let total_nano_usd = self.config.max_budget_nano_usd?;

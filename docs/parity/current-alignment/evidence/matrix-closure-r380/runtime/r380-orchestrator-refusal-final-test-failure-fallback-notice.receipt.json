@@ -1,0 +1,49 @@
+{
+  "schema": "lingxi.claude-alignment-runtime-orchestrator-refusal-test-result-r380.v1",
+  "recordedAtUtc": "2026-10-18T17:27:34Z",
+  "harnessHead": "693b2397a0dbec133f8605d7890bc16a3b8bf974",
+  "frozenBuildEnvSha256": "6274bdd9cf288fec4e0eb0a6c5e929c5bdf7e458a0fe70fafd2d88d61d4a6ab1",
+  "toolchain": "1.94.0",
+  "flags": [
+    "--locked",
+    "--offline"
+  ],
+  "features": [],
+  "command": "cargo test --locked --offline -p orchestrator --test current_alignment_refusal",
+  "sandboxPermissions": "require_escalated; Root authorized local loopback for this target",
+  "sourceHashFiles": [
+    "r380-refusal-final-target-after-three-fixes-sourcehashes-pre.txt",
+    "r380-refusal-final-target-after-three-fixes-sourcehashes-post.txt"
+  ],
+  "sourceFingerprintCount": 31,
+  "sourceStableDuringRun": true,
+  "exitCode": 101,
+  "testsSelected": 13,
+  "testsPassed": 12,
+  "testsFailed": 1,
+  "passed": [
+    "native_refusal_results_and_source_stop_details_reach_real_host_output_and_jsonl",
+    "refusal_safety_classifier_retry_stays_on_native_model_routes",
+    "refusal_safety_retry_matches_native_query_source_classifier",
+    "refusal_reissue_credit_does_not_cover_a_normal_next_turn_at_max_turns_one",
+    "batched_native_refusal_closes_tool_uses_before_dispatch_and_retries_once",
+    "native_refusal_closes_a_permission_waiting_tool_before_physical_call",
+    "auxiliary_native_tool_refusal_runs_queued_work_and_follows_up",
+    "refusal_safety_retry_respects_disable_environment_flag",
+    "refusal_safety_retry_is_skipped_for_auxiliary_queries",
+    "tool_bearing_native_refusal_keeps_completed_and_never_dispatches_queued_calls",
+    "refusal_safety_retry_marker_does_not_suppress_a_later_user_turn",
+    "spent_native_refusal_retry_runs_later_tool_uses_and_follows_up"
+  ],
+  "failures": [
+    {
+      "test": "native_same_model_refusal_retry_precedes_configured_refusal_fallback",
+      "category": "fallback_system_notice_assertion",
+      "location": "current_alignment_refusal.rs:2289",
+      "detail": "No OutputEvent::SystemNotice contained “Switched to Opus 4.7”; request-count/max-turn assertions passed."
+    }
+  ],
+  "log": "logs/29-orchestrator-current-alignment-refusal-final2.log",
+  "logSha256": "f0866e5f435bf43ea0afa210425d6baa0872bafb3bddd566689507448bf90a37",
+  "scope": "Full refusal target after the request_model route, transcript row, permission cleanup, and turn-credit fixes; 12/13 passed, one configured-fallback notice assertion remains."
+}

@@ -90,14 +90,24 @@ impl ConversationOrchestrator {
             let session = self.session.lock().await;
             state.structured_output_retry.observe(&session.history);
         }
-        if self.config.max_turns != 0 && state.turn_count >= self.config.max_turns {
+        // Native's refusal retry and refusal-fallback reissue remain inside
+        // the current query turn. Consume only their one-shot admission token:
+        // still run drain, budget, and structured-output checks, but neither
+        // reject nor increment the turn counter for this reissue.
+        let refusal_reissue_pending = std::mem::take(&mut state.refusal_reissue_pending);
+        if !refusal_reissue_pending
+            && self.config.max_turns != 0
+            && state.turn_count >= self.config.max_turns
+        {
             return Ok(GuardVerdict::MaxTurns);
         }
         if self.over_budget().await {
             return Ok(GuardVerdict::OverBudget);
         }
-        state.turn_count = state.turn_count.saturating_add(1);
-        self.note_turn_count(state.turn_count);
+        if !refusal_reissue_pending {
+            state.turn_count = state.turn_count.saturating_add(1);
+            self.note_turn_count(state.turn_count);
+        }
         if let Some(error) = state
             .structured_output_retry
             .exhausted(self.config.max_structured_output_retries)

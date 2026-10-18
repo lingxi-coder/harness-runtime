@@ -1037,6 +1037,8 @@ fn user_message_from_source(
         .expect("skill prompt message is a root string");
     lingxi_core::types::ConversationMessage::User {
         api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
         id: lingxi_core::types::MessageId::new(),
         content: vec![lingxi_core::types::ContentBlock::TextJsUtf16 {
             text: String::from_utf16_lossy(&units),

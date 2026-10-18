@@ -1,0 +1,141 @@
+{
+  "schema": "content-manifest-sha256-v1",
+  "scope": "All files in this delivery package except contentmanifest.json itself. Raw receipt logs are retained verbatim.",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 4514,
+      "sha256": "42b33c5d059cdc1c68d2a806a11834d62312e7ad1c9e881307c8b5b0bab6c9b5"
+    },
+    {
+      "path": "current-sdk-probe/Cargo.lock",
+      "bytes": 54892,
+      "sha256": "2fd7e6d484c391bec113961475a6dc76a22d2e6c4990e1de022a2b45e172831d"
+    },
+    {
+      "path": "current-sdk-probe/Cargo.toml",
+      "bytes": 212,
+      "sha256": "689c1886fe140c3b269a9ace629abd15d166c2c29139755e369abc0154110f6e"
+    },
+    {
+      "path": "current-sdk-probe/src/lib.rs",
+      "bytes": 72,
+      "sha256": "c859fd5573da0750e4922e83ba9ac69f17317b32d77ef127bcd8cf17392258b6"
+    },
+    {
+      "path": "current-sdk-probe/tests/current_sdk_statusless_sse.rs",
+      "bytes": 9601,
+      "sha256": "bd72bc9d2163ebfb1501192141ec7ba0a4e4fc09d9d0f98b00fa7ba7a92b5cea"
+    },
+    {
+      "path": "extract_native_ranges.py",
+      "bytes": 1912,
+      "sha256": "8a686d068eb595625d7ee7e5588467aea7847d2867c5b7fc73642278869a96af"
+    },
+    {
+      "path": "extracted-295-probe/api-error-source-extracted.js",
+      "bytes": 936,
+      "sha256": "bd2f088ac31f6f51814af53df83f7d6ff5eafd3c4569af7a10f422f7f8661f89"
+    },
+    {
+      "path": "extracted-295-probe/extracted-295-sse-probe.mjs",
+      "bytes": 11053,
+      "sha256": "004df8d3c31e3dce483f51054028501cb26c76f91fe8f14b753016398dd11d72"
+    },
+    {
+      "path": "extracted-295-probe/probe-output.json",
+      "bytes": 4345,
+      "sha256": "75f841b7dac8f97e5c3fe80b72701bca2e7fd3ecbc36c21bbe6efa57d3c4f03e"
+    },
+    {
+      "path": "fixtures/statusless-stream-error/cases.json",
+      "bytes": 3325,
+      "sha256": "2404353aa5c79ad191335fde78d881b0374c424ed9f6bc11cbeb444dc0c0b50f"
+    },
+    {
+      "path": "fixtures/statusless-stream-error/native-baseline/api-error-lone-surrogate-control/http-response.sse.raw",
+      "bytes": 101,
+      "sha256": "7821338a1afa15cbbd93ed8eaed8f2ae262605b4827e07d046ca20c034394767"
+    },
+    {
+      "path": "fixtures/statusless-stream-error/native-baseline/timeout-error-after-text-delta/http-response.sse.raw",
+      "bytes": 617,
+      "sha256": "ee203497c4c8955e87c2cdc8166f49320d642939b74cdc0ff9a227723f303ab0"
+    },
+    {
+      "path": "fixtures/statusless-stream-error/native-baseline/timeout-error-lone-surrogate/http-response.sse.raw",
+      "bytes": 109,
+      "sha256": "98c28fc61f8c8a2c4c047c7020d6d285660539678c37232b64f8bab18fef3a84"
+    },
+    {
+      "path": "foundry-public-transport-probe/Cargo.lock",
+      "bytes": 55180,
+      "sha256": "aa734ac41f0cf5efc88034e25c95ffa1dc912944f8390de07b7a7d50a9b7cc74"
+    },
+    {
+      "path": "foundry-public-transport-probe/Cargo.toml",
+      "bytes": 318,
+      "sha256": "e9efcb9228e7d8d8bd3212da66409d4d7e42098a934f513f62e6f8802083a52e"
+    },
+    {
+      "path": "foundry-public-transport-probe/public-output.json",
+      "bytes": 5563,
+      "sha256": "43343521a0236512aaca68ec80dcfbf2250814615a79439372c31107ece3e8b1"
+    },
+    {
+      "path": "foundry-public-transport-probe/raw-request.http",
+      "bytes": 370,
+      "sha256": "38c9ee6b0c4811fde07facd8d7f302956c071ca08d5c76932084aa47b37c4dcd"
+    },
+    {
+      "path": "foundry-public-transport-probe/raw-response.http",
+      "bytes": 852,
+      "sha256": "d45f6a7d796fccea47bccb4b49494f6508f8a561a840c70b7fa26291af83fdcb"
+    },
+    {
+      "path": "foundry-public-transport-probe/tests/foundry_public_transport.rs",
+      "bytes": 15786,
+      "sha256": "57e7d188cb496756e347998d925cadcfa1edcf8d0947f618336de6b9ec98b642"
+    },
+    {
+      "path": "prepare_cargo_probes.py",
+      "bytes": 4520,
+      "sha256": "7220d53cfcaa48d965222986292b3745b2fd536c91ad4de349d9780e648436ce"
+    },
+    {
+      "path": "receipt.json",
+      "bytes": 3801,
+      "sha256": "66204f105f18c8156faa67c4ddc8cd9e775b5f2b72bade2a118e2c2c719de6c4"
+    },
+    {
+      "path": "receipts/current-sdk-statusless-sse-initial-failure.log",
+      "bytes": 6050,
+      "sha256": "7a0caf2cbb113b8ca731c70692b4195b938f7e77ee277024a76ae1adf6da0b5e"
+    },
+    {
+      "path": "receipts/current-sdk-statusless-sse-r380-pass.log",
+      "bytes": 4614,
+      "sha256": "ba6e50d8db865f3812c8ae23aa3f7d12c30b816910171283a14cfedcea97a4e2"
+    },
+    {
+      "path": "receipts/extracted-295-sse-probe-node.log",
+      "bytes": 4345,
+      "sha256": "75f841b7dac8f97e5c3fe80b72701bca2e7fd3ecbc36c21bbe6efa57d3c4f03e"
+    },
+    {
+      "path": "receipts/foundry-public-transport-r380-initial-failure.log",
+      "bytes": 3751,
+      "sha256": "39f11e39b5f10f6ed3cc2715f50bbf79eadf2bc0deeeafda77ab2029d0daaa06"
+    },
+    {
+      "path": "receipts/foundry-public-transport-r380-pass.log",
+      "bytes": 7277,
+      "sha256": "5c6d827384e1156a82231a53522e2ae5b06ddec4245ea12e910040450c65b4f6"
+    },
+    {
+      "path": "source-bindings.json",
+      "bytes": 6620,
+      "sha256": "9ad41bdd4b290664eca12488e3cdec5f8b9b3229a768450f6cb95fb4efb7158a"
+    }
+  ]
+}

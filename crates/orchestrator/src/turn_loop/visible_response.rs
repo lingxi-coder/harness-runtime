@@ -9,6 +9,56 @@ struct ToolDispatchCancellationRecorder<'a> {
     cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
+const NATIVE_REFUSAL_TOOL_NOT_RUN: &str =
+    "Not run: the response that made this tool call was stopped by a safety classifier.";
+
+fn native_refusal_safety_retry_enabled(
+    orch: &ConversationOrchestrator,
+    recovery: Option<&RecoveryState>,
+) -> bool {
+    recovery.is_some_and(|state| {
+        super::native_refusal_retry_enabled(&orch.config.query_source, state.refusal_retry_spent)
+    })
+}
+
+fn refused_tool_uses_not_run(
+    tool_uses: &[(
+        ToolUseId,
+        String,
+        lingxi_core::types::utf16_json::Utf16JsonProjection,
+        Option<String>,
+    )],
+) -> DeferredToolDispatch {
+    let mut dispatch = DeferredToolDispatch::default();
+    for (id, name, _, provider_id) in tool_uses {
+        let result_text =
+            lingxi_core::types::utf16_json::Utf16JsonProjection::from(NATIVE_REFUSAL_TOOL_NOT_RUN);
+        let block = ContentBlock::ToolResult {
+            tool_use_id: id.clone(),
+            content: result_text.clone(),
+            is_error: Some(true),
+            provider_tool_use_id: provider_id.clone(),
+            content_blocks: None,
+        };
+        let error_result = lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![(
+            "error".into(),
+            result_text.clone(),
+        )])
+        .expect("refusal tool result metadata is an object");
+        let mut publication = super::tool_dispatch::ToolResultPublication::frame_only(
+            id,
+            name,
+            result_text.clone(),
+            error_result,
+        );
+        publication.tool_use_result = Some(result_text);
+        publication.denial_kind = Some("cancelled".into());
+        dispatch.results.push(block);
+        dispatch.publications.push(publication);
+    }
+    dispatch
+}
+
 impl ToolDispatchCancellationRecorder<'_> {
     fn is_cancelled(&self) -> bool {
         self.cancel
@@ -31,6 +81,7 @@ pub(super) fn process_visible_response<'a>(
     response: &'a llm_runtime::HistoryResponse,
     mut recovery: Option<&'a mut RecoveryState>,
     model: &'a str,
+    model_profile: Option<&'a str>,
     requested_model: bool,
     no_physical_responses: bool,
     has_server_fallback_event: bool,
@@ -47,13 +98,30 @@ pub(super) fn process_visible_response<'a>(
             // dispatch candidate leak into a later streamed request.
             capture.discard_unobserved_request_dispatch();
         }
+        // Decide Native's Ko branch before lowering a complete response into
+        // dispatchable tools. In particular, a batched refusal has no earlier
+        // event boundary at which the streaming executor could stop a queued
+        // tool call.
+        let native_catalog_refusal = response.stop_reason.as_deref() == Some("refusal")
+            && !has_server_fallback_event
+            && recovery.is_some()
+            && super::native_refusal_retry_route_for_request(orch, model, model_profile).await;
+        let refusal_retry = native_catalog_refusal
+            && native_refusal_safety_retry_enabled(orch, recovery.as_deref());
         // 2. Translate `HistoryResponse.content` -> `ContentBlock` history entry.
-        let mut assistant_blocks = crate::native_computer::bind_response(
-            orch,
-            response,
-            translate_response_blocks(&response.content),
-        )
-        .await?;
+        let mut assistant_blocks = if refusal_retry {
+            // Keep the provider's original assistant blocks and identities. No
+            // native-computer lowering or tool dispatch can run for a response
+            // that Native is about to retry as a refusal.
+            translate_response_blocks(&response.content)
+        } else {
+            crate::native_computer::bind_response(
+                orch,
+                response,
+                translate_response_blocks(&response.content),
+            )
+            .await?
+        };
 
         // 3. Append the assistant message to the session. We need the
         //    `final_message_id` to return to the caller.
@@ -242,6 +310,25 @@ pub(super) fn process_visible_response<'a>(
             .collect();
         orch.turn_span.note_assistant_response(tool_uses.len());
 
+        if native_catalog_refusal && !refusal_retry && !tool_uses.is_empty() {
+            // Ko=false keeps ordinary tool execution. Native first writes the
+            // refusal error as a transcript-only row, before the tool results;
+            // it is intentionally not appended to the next provider request.
+            if orch
+                .stage_refusal_api_error_row(
+                    model,
+                    response.stop_details.as_ref(),
+                    Some(&response.id),
+                )
+                .await?
+            {
+                if let Some(state) = recovery.as_deref_mut() {
+                    state.successful_assistant_messages =
+                        state.successful_assistant_messages.saturating_sub(1);
+                }
+            }
+        }
+
         // HOOK.2: a PreToolUse hook returning `continue:false` (preventContinuation)
         // stops the agent loop AFTER this turn step's tools have run (TS
         // `query.ts:1518-1521` returns `{ reason: 'hook_stopped' }`). The tracked
@@ -250,43 +337,51 @@ pub(super) fn process_visible_response<'a>(
         // the tool runs and `hook_stopped_continuation` is yielded after success).
         let mut hook_prevent_continuation = false;
         let mut post_tool_batch_calls = Vec::new();
-        let pre_batch_mcp_tool_count = if tool_uses.is_empty() {
+        let pre_batch_mcp_tool_count = if tool_uses.is_empty() || refusal_retry {
             None
         } else {
             Some(orch.filtered_mcp_tool_count().await)
         };
         if !tool_uses.is_empty() {
-            tracing::trace!(
-                request_history_source = ?request_history_source,
-                history_message_count = request_history.len(),
-                prior_same_turn_tool_use_count = same_turn_tool_uses.len(),
-                "dispatching tools with captured model-request history"
-            );
-            let tool_cancel_recorder = ToolDispatchCancellationRecorder {
-                orch,
-                cancel: crate::native_computer::current_turn_cancel(),
-            };
-            let dispatched = boxed_turn_future(|| {
-                crate::native_computer::dispatch_tools(
+            let mut dispatched = if refusal_retry {
+                // Ko=true settles every buffered call as Native's exact
+                // not-run result. It deliberately has no tool hooks,
+                // PostToolFailure, or PostToolBatch calls.
+                refused_tool_uses_not_run(&tool_uses)
+            } else {
+                tracing::trace!(
+                    request_history_source = ?request_history_source,
+                    history_message_count = request_history.len(),
+                    prior_same_turn_tool_use_count = same_turn_tool_uses.len(),
+                    "dispatching tools with captured model-request history"
+                );
+                let tool_cancel_recorder = ToolDispatchCancellationRecorder {
                     orch,
-                    &tool_uses,
-                    assistant_id,
-                    super::tool_dispatch::ToolUseDispatchFacts {
-                        native_query_depth: query_depth,
-                        query_history: request_history,
-                        assistant_message: assistant_msg.clone(),
-                        same_turn_tool_uses,
-                    },
-                    available_tool_names.clone(),
-                    publication_fence.clone(),
-                )
-            })
-            .await;
-            // A cancellation can resolve the tool dispatcher with synthetic
-            // results rather than an error. The recorder latches the phase
-            // before propagating either shape and also covers a dropped future.
-            drop(tool_cancel_recorder);
-            let mut dispatched = dispatched?;
+                    cancel: crate::native_computer::current_turn_cancel(),
+                };
+                let dispatched = boxed_turn_future(|| {
+                    crate::native_computer::dispatch_tools(
+                        orch,
+                        &tool_uses,
+                        assistant_id,
+                        super::tool_dispatch::ToolUseDispatchFacts {
+                            native_query_depth: query_depth,
+                            query_history: request_history,
+                            assistant_message: assistant_msg.clone(),
+                            same_turn_tool_uses,
+                            refusal_call_boundary: None,
+                        },
+                        available_tool_names.clone(),
+                        publication_fence.clone(),
+                    )
+                })
+                .await;
+                // A cancellation can resolve the tool dispatcher with synthetic
+                // results rather than an error. The recorder latches the phase
+                // before propagating either shape and also covers a dropped future.
+                drop(tool_cancel_recorder);
+                dispatched?
+            };
             if !dispatched.publish_results(orch, &publication_fence).await {
                 return Ok(TurnStepOutcome::Ended {
                     final_message_id: assistant_id,
@@ -339,6 +434,8 @@ pub(super) fn process_visible_response<'a>(
 
                 let mut tool_result_msg = ConversationMessage::User {
                     api_message_override: None,
+                    interrupted_by_shutdown: None,
+                    refused_message_id: None,
                     id: MessageId::new(),
                     content: result_content,
                     is_meta: false,
@@ -697,7 +794,7 @@ pub(super) fn process_visible_response<'a>(
                 // to the recovery/terminal arms below unchanged. The common `tool_use`+
                 // tools case (previously handled by the `_ => Continue` fallback) is
                 // unaffected.
-                _ if !tool_uses.is_empty() => {
+                _ if !tool_uses.is_empty() && !refusal_retry => {
                     let issues = response
                         .provider_metadata
                         .array_len("/tool_input_issues")
@@ -859,6 +956,7 @@ pub(super) fn process_visible_response<'a>(
                         };
                     handle_max_output_tokens(
                         orch,
+                        model,
                         assistant_id,
                         state,
                         response
@@ -868,18 +966,29 @@ pub(super) fn process_visible_response<'a>(
                     )
                     .await?
                 }
-                // Finding #80 (batched twin, claude-code `bin/claude.exe` offset
-                // ~205871579): a `refusal` response swaps to the configured
-                // `refusalFallbackModel` ONCE per session, warns the user, and Continues
-                // (the next step re-snapshots `session.model`, so it re-issues against
-                // the fallback). When no fallback is configured (or the latch is already
-                // set), the helper returns `false` and this falls through to the
-                // historical `_ => Continue` bare re-call — byte-identical to before.
+                // Native 2.1.295 runs its one-shot same-model refusal retry before
+                // considering the configured refusal fallback. This is that first
+                // transition: attach the safety nudge and retry the same route.
+                // Once the same-model retry is ineligible or spent, retain the
+                // configured refusal-fallback transition.
+                Some("refusal") if refusal_retry => {
+                    recovery
+                        .as_deref_mut()
+                        .expect("retry gate requires per-turn recovery state")
+                        .refusal_retry_spent = true;
+                    super::inject_native_refusal_safety_retry(orch, model, &response.id, false)
+                        .await;
+                    TurnStepOutcome::Continue(NativeQueryTransition::RefusalReissue)
+                }
                 Some("refusal")
                     if !has_server_fallback_event
                         && orch.maybe_swap_to_refusal_fallback().await =>
                 {
-                    TurnStepOutcome::Continue(NativeQueryTransition::InPlaceRetry)
+                    TurnStepOutcome::Continue(if native_catalog_refusal {
+                        NativeQueryTransition::RefusalReissue
+                    } else {
+                        NativeQueryTransition::InPlaceRetry
+                    })
                 }
                 // Terminal error stop_reasons (batched twin of the streaming
                 // `Some(other)` arm, claude.ts:2266/2279): surface the byte-locked
@@ -895,6 +1004,7 @@ pub(super) fn process_visible_response<'a>(
                     // variant fires (no-op for model_context_window_exceeded).
                     let surfaced_id = surface_terminal_api_error(
                         orch,
+                        model,
                         other,
                         response.stop_details.as_ref(),
                         Some(&response.id),

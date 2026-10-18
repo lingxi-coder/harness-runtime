@@ -1,0 +1,11 @@
+$ source '/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/frozen-build-env.sh' && cargo test --locked --offline -p orchestrator --test current_alignment_tool_result_persist
+   Compiling orchestrator v0.12.0 (/Users/luolingfeng/lingxi/.worktrees/claude-alignment-integration/harness-runtime/crates/orchestrator)
+    Finished `test` profile [unoptimized] target(s) in 1.37s
+     Running tests/current_alignment_tool_result_persist.rs (/Users/luolingfeng/lingxi/.buildcache/claude-alignment-integration-r51/target/debug/deps/current_alignment_tool_result_persist-303f69c97f87d601)
+
+running 2 tests
+test native_tool_result_lone_preview_and_utf8_file_boundary ... ok
+test native_tool_result_unicode_preview_boundary_reaches_sdk_request_and_file ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
