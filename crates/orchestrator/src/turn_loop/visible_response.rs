@@ -4,6 +4,27 @@ use super::*;
 use hooks::attachment::HookPublicationGuard;
 use std::sync::Arc;
 
+struct ToolDispatchCancellationRecorder<'a> {
+    orch: &'a ConversationOrchestrator,
+    cancel: Option<tokio_util::sync::CancellationToken>,
+}
+
+impl ToolDispatchCancellationRecorder<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.cancel
+            .as_ref()
+            .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+    }
+}
+
+impl Drop for ToolDispatchCancellationRecorder<'_> {
+    fn drop(&mut self) {
+        if self.is_cancelled() {
+            self.orch.note_query_tool_dispatch_cancelled();
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(super) fn process_visible_response<'a>(
     orch: &'a ConversationOrchestrator,
@@ -241,7 +262,11 @@ pub(super) fn process_visible_response<'a>(
                 prior_same_turn_tool_use_count = same_turn_tool_uses.len(),
                 "dispatching tools with captured model-request history"
             );
-            let mut dispatched = boxed_turn_future(|| {
+            let tool_cancel_recorder = ToolDispatchCancellationRecorder {
+                orch,
+                cancel: crate::native_computer::current_turn_cancel(),
+            };
+            let dispatched = boxed_turn_future(|| {
                 crate::native_computer::dispatch_tools(
                     orch,
                     &tool_uses,
@@ -256,7 +281,12 @@ pub(super) fn process_visible_response<'a>(
                     publication_fence.clone(),
                 )
             })
-            .await?;
+            .await;
+            // A cancellation can resolve the tool dispatcher with synthetic
+            // results rather than an error. The recorder latches the phase
+            // before propagating either shape and also covers a dropped future.
+            drop(tool_cancel_recorder);
+            let mut dispatched = dispatched?;
             if !dispatched.publish_results(orch, &publication_fence).await {
                 return Ok(TurnStepOutcome::Ended {
                     final_message_id: assistant_id,
@@ -369,6 +399,16 @@ pub(super) fn process_visible_response<'a>(
                         allow_budget_continuation: false,
                         tool_requested_end: false,
                     });
+                }
+                // This committed query batch yields one user tool-result row,
+                // followed by any per-tool injected user rows. Count them at
+                // their accepted append boundary; history may later be rebuilt
+                // by compaction or retry cleanup.
+                orch.note_query_user_event();
+                for (message, _) in &result_injected {
+                    if matches!(message, ConversationMessage::User { .. }) {
+                        orch.note_query_user_event();
+                    }
                 }
                 let parent_uuid = match &result_tool_use_id {
                     Some(id) => orch.source_tool_assistant_uuid(id).await,

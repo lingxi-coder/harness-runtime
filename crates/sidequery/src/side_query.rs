@@ -182,7 +182,7 @@ pub struct ForkedSideQueryResponse {
     /// Complete assistant blocks for a denied-tool continuation.
     pub assistant_content: Vec<lingxi_core::types::ContentBlock>,
     /// Native assistant text candidates in their emission order.
-    pub candidates: Vec<String>,
+    pub candidates: Vec<Utf16JsonProjection>,
     /// HTTP request id, distinct from the assistant's message id.
     pub request_id: Option<String>,
 }

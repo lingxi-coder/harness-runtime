@@ -302,7 +302,12 @@ async fn session_prompt_suggestion_streams_with_parent_prefix_candidates_and_htt
                 .and_then(|text| text.string_units("")),
             Some("run tests".encode_utf16().collect())
         );
-        assert_eq!(result.candidates, ["run tests", "must not concatenate"]);
+        let candidates = result
+            .candidates
+            .iter()
+            .map(|candidate| candidate.string_at("").expect("candidate string"))
+            .collect::<Vec<_>>();
+        assert_eq!(candidates, ["run tests", "must not concatenate"]);
         assert_eq!(result.request_id.as_deref(), Some("req_suggestion_http"));
         let requests = transport.seen.lock().unwrap();
         assert_eq!(requests.len(), 1 + usize::from(pin));

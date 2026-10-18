@@ -145,6 +145,49 @@ where
     }
 }
 
+fn deserialize_source_text_array<'de, D>(
+    deserializer: D,
+) -> Result<Vec<Utf16JsonProjection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let array = crate::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+    let Some(length) = array.at_pointer("").and_then(|root| root.array_len()) else {
+        return Err(serde::de::Error::custom(
+            "expected an array of source JSON strings",
+        ));
+    };
+    let mut values = Vec::with_capacity(length);
+    for index in 0..length {
+        let value = array
+            .subprojection(&format!("/{index}"))
+            .map_err(serde::de::Error::custom)?;
+        if value.string_units("").is_none() {
+            return Err(serde::de::Error::custom(
+                "expected a source JSON string array element",
+            ));
+        }
+        values.push(value);
+    }
+    Ok(values)
+}
+
+fn serialize_source_text_array<S>(
+    values: &[Utf16JsonProjection],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if values.iter().any(|value| value.string_units("").is_none()) {
+        return Err(serde::ser::Error::custom(
+            "expected an array of source JSON strings",
+        ));
+    }
+    let array = Utf16JsonProjection::array(values.to_vec()).map_err(serde::ser::Error::custom)?;
+    crate::types::utf16_json::raw_json_serde::serialize(&array, serializer)
+}
+
 /// Trusted plugin identity attached by the host before an `agent.spawn` hook
 /// can rewrite its JSON input. The identity is retained for task-list
 /// provenance, never accepted from a plugin-returned spawn payload.
@@ -453,8 +496,12 @@ pub struct SubagentSpawnRequest {
     /// Command-deny rules FROZEN at fork time and replayed ahead of the live
     /// deny list on resume, so a later settings edit cannot widen what an
     /// already-running fork is allowed to run. Empty ⇒ no key is persisted.
-    #[serde(default)]
-    pub frozen_command_denies: Vec<String>,
+    #[serde(
+        default,
+        serialize_with = "serialize_source_text_array",
+        deserialize_with = "deserialize_source_text_array"
+    )]
+    pub frozen_command_denies: Vec<Utf16JsonProjection>,
     /// A conversation recovered from this agent's persisted transcript, when
     /// this spawn is a RESTORE of an agent that parked in an earlier process.
     ///
@@ -1743,6 +1790,48 @@ mod tests {
             default_json.contains(r#""description":null"#),
             "{default_json}"
         );
+    }
+
+    #[test]
+    fn frozen_command_denies_serde_is_string_array_and_preserves_lone_units() {
+        let units = "Bash(echo "
+            .encode_utf16()
+            .chain([0xd800])
+            .chain(")".encode_utf16())
+            .collect::<Vec<_>>();
+        let deny =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        let request = super::SubagentSpawnRequest {
+            frozen_command_denies: vec![deny],
+            ..Default::default()
+        };
+
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(
+            encoded.contains(r#""frozen_command_denies":["Bash(echo \ud800)"]"#),
+            "{encoded}"
+        );
+        assert!(
+            !encoded.contains(r#""frozen_command_denies":[{"root""#),
+            "the source string array must not expose the Projection arena"
+        );
+        let restored: super::SubagentSpawnRequest = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            restored.frozen_command_denies[0].string_units(""),
+            Some(units)
+        );
+
+        for invalid in [
+            r#"{"frozen_command_denies":null}"#,
+            r#"{"frozen_command_denies":[1]}"#,
+            r#"{"frozen_command_denies":[{"root":0,"nodes":[]}]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<super::SubagentSpawnRequest>(invalid).is_err(),
+                "request must reject non-string carrier input: {invalid}"
+            );
+        }
     }
 
     #[test]

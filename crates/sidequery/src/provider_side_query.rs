@@ -419,13 +419,7 @@ fn decode_fork_response(
     // candidate; candidates must never be concatenated before normalization.
     let mut candidates: Vec<_> = assistant_content
         .iter()
-        .filter_map(|block| match block {
-            lingxi_core::types::ContentBlock::Text { text, .. } => Some(text.clone()),
-            lingxi_core::types::ContentBlock::TextJsUtf16 {
-                utf16_code_units, ..
-            } => String::from_utf16(utf16_code_units).ok(),
-            _ => None,
-        })
+        .filter_map(source_text_candidate)
         .collect();
     // Native's non-streaming fallback yields one assistant containing all
     // blocks; I(M) reads only its first text block in that transport branch.
@@ -437,6 +431,20 @@ fn decode_fork_response(
         assistant_content,
         candidates,
         response: decode_response(resp, want_structured, first_text_only, separate_text_blocks),
+    }
+}
+
+fn source_text_candidate(block: &lingxi_core::types::ContentBlock) -> Option<Utf16JsonProjection> {
+    match block {
+        lingxi_core::types::ContentBlock::Text { text, .. } => {
+            Some(Utf16JsonProjection::from(text.as_str()))
+        }
+        lingxi_core::types::ContentBlock::TextJsUtf16 {
+            text,
+            utf16_code_units,
+            ..
+        } => Utf16JsonProjection::root_string(text.clone(), utf16_code_units.clone()).ok(),
+        _ => None,
     }
 }
 
@@ -1256,6 +1264,18 @@ mod tests {
     use crate::purposes::QuerySource;
     use lingxi_core::types::{ConversationMessage, MessageId};
     use std::sync::Mutex;
+
+    #[test]
+    fn fork_text_candidate_keeps_lone_surrogate_source_units() {
+        let units = vec![b'R' as u16, 0xd800, b'!'.into()];
+        let block = lingxi_core::types::ContentBlock::TextJsUtf16 {
+            text: String::from_utf16_lossy(&units),
+            utf16_code_units: units.clone(),
+            citations: None,
+        };
+        let candidate = source_text_candidate(&block).expect("assistant text candidate");
+        assert_eq!(candidate.string_units(""), Some(units));
+    }
 
     /// Minimal in-process [`HttpTransport`] that returns a single scripted
     /// 200 body. Kept local so the sidequery crate needs no extra

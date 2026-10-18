@@ -1636,7 +1636,7 @@ export function register(on) {
                 );
                 assert_eq!(
                     s.frozen_command_denies.as_deref(),
-                    Some(["Bash(rm:*)".to_string()].as_slice())
+                    Some([Utf16JsonProjection::from("Bash(rm:*)")].as_slice())
                 );
             }
             other => panic!("expected a valid scoping record, got {other:?}"),

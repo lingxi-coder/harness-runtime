@@ -1,4 +1,4 @@
-//! Claude Code 2.1.296 post-turn suggestions and their session-owned lifecycle.
+//! Native post-turn suggestions and their session-owned lifecycle.
 use super::*;
 use lingxi_core::host::{PromptSuggestionContext, PromptSuggestionResult};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -664,16 +664,12 @@ impl ConversationOrchestrator {
             json!({}),
         )
         .await;
-        let suggestion = reply
-            .candidates
-            .iter()
-            .map(|s| filter::normalize_prompt_suggestion_response(s))
-            .find(|s| !s.is_empty());
+        let suggestion = filter::first_prompt_suggestion(&reply.candidates);
         let Some(suggestion) = suggestion else {
             self.suppress_suggestion(source, "empty", None).await;
             return None;
         };
-        if let Some(reason) = filter::prompt_suggestion_suppression_reason(&suggestion) {
+        if let Some(reason) = filter::prompt_suggestion_suppression_reason_projection(&suggestion) {
             self.suppress_suggestion(source, reason, None).await;
             return None;
         }
@@ -818,11 +814,19 @@ impl ConversationOrchestrator {
         background: Option<super::prompt_suggestion_background::BackgroundSuggestionContext>,
     ) {
         let generation_request_id = result.generation_request_id.clone();
-        let input = Utf16JsonProjection::from_serde_value(&json!({
-            "text": result.suggestion,
+        let suggestion_units = result
+            .suggestion
+            .string_units("")
+            .expect("prompt suggestion is a root JSON string");
+        let display_text = String::from_utf16_lossy(&suggestion_units);
+        let mut input = Utf16JsonProjection::from_serde_value(&json!({
+            "text": display_text,
             "origin": {"kind": "suggestion"}
         }))
         .expect("generated prompt suggestion input is JSON");
+        input
+            .replace_pointer_projection("/text", result.suggestion.clone())
+            .expect("prompt suggestion source replaces a string field");
         let placed = std::sync::atomic::AtomicBool::new(false);
         let place = |input: Option<Utf16JsonProjection>| {
             placed.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -835,11 +839,12 @@ impl ConversationOrchestrator {
                 let text_units = input.string_units("/text").ok_or_else(|| {
                     hooks::mods::ModError::Hook("prompt.suggest text must be a string".into())
                 })?;
-                let text = String::from_utf16(&text_units).map_err(|_| {
-                    hooks::mods::ModError::Hook(
-                        "prompt.suggest text must contain valid Unicode scalar values".into(),
-                    )
-                })?;
+                let suggestion = Utf16JsonProjection::root_string(
+                    String::from_utf16_lossy(&text_units),
+                    text_units.clone(),
+                )
+                .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+                let text = String::from_utf16_lossy(&text_units);
                 // Delivery and turn admission share one owner: a delayed output
                 // send cannot overtake TurnStarted or a committed session swap.
                 let _turn = tokio::select! { biased;
@@ -866,7 +871,7 @@ impl ConversationOrchestrator {
                         state.uuid = Some(uuid.clone());
                         state.first_keystroke_at = None;
                         state.presentation = controls::Presentation::Generated {
-                            text: text.clone(),
+                            text: suggestion.clone(),
                             generation_request_id,
                         };
                         true
@@ -874,10 +879,15 @@ impl ConversationOrchestrator {
                 };
                 if shown {
                     if let Some(context) = &background {
-                        self.record_background_suggested_reply(&text, context).await;
+                        self.record_background_suggested_reply(&suggestion, context)
+                            .await;
                     }
                     self.output
-                        .emit_prompt_suggestion(&session_id.as_uuid().to_string(), &uuid, &text)
+                        .emit_prompt_suggestion(
+                            &session_id.as_uuid().to_string(),
+                            &uuid,
+                            &suggestion,
+                        )
                         .await;
                 }
                 Utf16JsonProjection::from_serde_value(&json!({"isShown":shown}))

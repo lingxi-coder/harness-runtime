@@ -456,10 +456,13 @@ impl ConversationOrchestrator {
 
     pub(crate) async fn record_background_suggested_reply(
         &self,
-        text: &str,
+        text: &Utf16JsonProjection,
         context: &BackgroundSuggestionContext,
     ) {
-        if evaluate("safeReply", json!({"text":text}))
+        let classifier_input = Utf16JsonProjection::object(vec![("text".into(), text.clone())])
+            .expect("suggestion classifier input is JSON");
+        if javascript::evaluate_projection_result("safeReply", classifier_input)
+            .ok()
             .and_then(|value| value.at_pointer("").and_then(|root| root.as_bool()))
             != Some(true)
         {

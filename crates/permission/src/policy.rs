@@ -4494,6 +4494,8 @@ pub fn native_tool_wide_rule_matches(
             .any(|alias| glob_name_matches_units(&rule_units, &alias))
 }
 
+/// Match the Native `LTr`/`h` wildcard language against exact alias-source UTF-16
+/// units. Alias keys may contain lone surrogates and remain searchable as-is.
 fn glob_name_matches_units(pattern: &[u16], value: &[u16]) -> bool {
     let mut matched = vec![false; value.len() + 1];
     matched[0] = true;
@@ -4635,12 +4637,14 @@ fn native_javascript_whitespace(unit: u16) -> bool {
     )
 }
 
-/// Glob-aware tool-wide name matcher — 1:1 with claude-code `URu` (`permissions.ts`).
+/// Glob-aware tool-wide name matcher for Native permission `URu`; its name-glob
+/// branch follows the Claude Code 2.1.295 `LTr`/`h` pattern language.
 ///
 /// `glob == true` (the DENY walk `h8` and ASK walk `kqe`, both passing
 /// `globMatching:!0`) enables:
-///   - a rule `toolName` containing `*` glob-matches the tool name via `_pi`
-///     (`*`→`.*`, anchored, dotall) — e.g. `Web*` matches `WebFetch`/`WebSearch`;
+///   - a rule `toolName` containing `*` matches the `LTr`/`h` language: literal
+///     prefix/suffix plus ordered literal segments separated by wildcards;
+///     e.g. `Web*` matches `WebFetch`/`WebSearch`;
 ///   - the MCP tool-part is glob-matched (`mcp__server__foo*` matches
 ///     `mcp__server__footool`).
 ///
@@ -4801,8 +4805,9 @@ fn stringify_primitive(value: JsonValueView<'_>) -> Option<String> {
     crate::source_input::stringify_primitive(value)
 }
 
-/// claude-code `_pi(pattern, value)`: anchored, dotall glob where `*`→`.*` and
-/// every other char is regex-escaped. Used for tool-name and content globbing.
+/// H's anchored dotall-regex implementation of the Native `LTr`/`h` tool-name
+/// glob language. Native `h` splits on `*`, checks literal prefix/suffix, and
+/// searches nonempty interior literals in order using JavaScript UTF-16 units.
 #[must_use]
 fn glob_name_matches(pattern: &str, value: &str) -> bool {
     match cached_glob_regex(pattern) {
@@ -4811,8 +4816,9 @@ fn glob_name_matches(pattern: &str, value: &str) -> bool {
     }
 }
 
-/// Compile+cache an anchored dotall `_pi` glob regex for `pattern`
-/// (`^` + segments joined by `.*` + `$`, with `(?s)` for dotall).
+/// Compile+cache the H regex for the `LTr`/`h` glob language.
+/// `(?s)` lets each wildcard cross JavaScript line terminators; the anchors
+/// preserve the Native prefix/suffix checks.
 fn cached_glob_regex(pattern: &str) -> Option<regex::Regex> {
     static CACHE: std::sync::OnceLock<Mutex<HashMap<String, Option<regex::Regex>>>> =
         std::sync::OnceLock::new();

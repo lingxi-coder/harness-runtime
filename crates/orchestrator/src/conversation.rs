@@ -2104,8 +2104,8 @@ use runtime_impl::{
     PromptRuntime, SessionMemoryInFlightReset, TranscriptStore,
 };
 pub use runtime_impl::{
-    CostSessionSwitcher, PreparedSessionSwitch, SessionActivationObserver, SessionMemoryHandle,
-    TurnExecutionMetrics,
+    CostSessionSwitcher, PreparedSessionSwitch, QueryUserInterruptionKind,
+    SessionActivationObserver, SessionMemoryHandle, TurnExecutionMetrics,
 };
 
 /// Internal no-op streaming client used by [`ConversationOrchestrator::new`]

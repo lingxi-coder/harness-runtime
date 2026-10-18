@@ -3,6 +3,8 @@
 #[path = "../src/conversation/prompt_suggestion_state.rs"]
 mod state;
 
+use serde::Deserialize;
+use serde_json::value::RawValue;
 use serde_json::Value;
 use state::*;
 
@@ -12,6 +14,37 @@ fn fixture() -> Value {
     ))
     .unwrap()
 }
+
+#[derive(Deserialize)]
+struct RawPresentationFixture {
+    #[serde(rename = "presentationCases")]
+    presentation_cases: Vec<RawPresentationCase>,
+    #[serde(rename = "transitionCases")]
+    transition_cases: Vec<RawTransitionCase>,
+}
+
+#[derive(Deserialize)]
+struct RawPresentationCase {
+    state: Box<RawValue>,
+    input: String,
+    now: f64,
+    expected: Box<RawValue>,
+    after: Box<RawValue>,
+}
+
+#[derive(Deserialize)]
+struct RawTransitionCase {
+    actions: Vec<String>,
+    expected: Box<RawValue>,
+}
+
+fn raw_presentation_fixture() -> RawPresentationFixture {
+    serde_json::from_str(include_str!(
+        "fixtures/prompt_suggestion_controls_2_1_296.json"
+    ))
+    .unwrap()
+}
+
 fn boolean(value: &Value, key: &str) -> bool {
     value[key].as_bool().unwrap()
 }
@@ -194,51 +227,62 @@ fn native_submission_and_config_toggle_streak_updates() {
 
 #[test]
 fn native_presentation_transitions_and_edited_acceptance() {
-    let fixtures = fixture();
-    for case in fixtures["presentationCases"].as_array().unwrap() {
-        let mut state: Presentation = serde_json::from_value(case["state"].clone()).unwrap();
-        let actual = state.submission(case["input"].as_str().unwrap(), number(case, "now"), false);
+    let fixtures = raw_presentation_fixture();
+    for case in fixtures.presentation_cases {
+        let mut state: Presentation = serde_json::from_str(case.state.get()).unwrap();
+        let expected: Value = serde_json::from_str(case.expected.get()).unwrap();
+        let actual = state.submission(&case.input, case.now, false);
         if let Some(actual) = actual {
-            let expected = &case["expected"];
-            assert_eq!(actual.accepted, boolean(expected, "accepted"), "{case}");
+            assert_eq!(
+                actual.accepted,
+                boolean(&expected, "accepted"),
+                "{}",
+                case.state.get()
+            );
             assert_eq!(
                 actual.accept_method,
                 expected["acceptMethod"].as_str(),
-                "{case}"
+                "{}",
+                case.state.get()
             );
-            assert_eq!(actual.elapsed_ms, number(expected, "elapsedMs"), "{case}");
-            assert_eq!(actual.similarity, number(expected, "similarity"), "{case}");
+            assert_eq!(
+                actual.elapsed_ms,
+                number(&expected, "elapsedMs"),
+                "{}",
+                case.state.get()
+            );
+            assert_eq!(
+                actual.similarity,
+                number(&expected, "similarity"),
+                "{}",
+                case.state.get()
+            );
             assert_eq!(
                 actual.generation_request_id.as_deref(),
                 expected["generationRequestId"].as_str(),
-                "{case}"
+                "{}",
+                case.state.get()
             );
         } else {
-            assert!(case["expected"].is_null(), "{case}");
+            assert!(expected.is_null(), "{}", case.state.get());
         }
-        assert_eq!(
-            state,
-            serde_json::from_value(case["after"].clone()).unwrap(),
-            "{case}"
-        );
+        let after: Presentation = serde_json::from_str(case.after.get()).unwrap();
+        assert_eq!(state, after, "{}", case.state.get());
     }
-    for case in fixtures["transitionCases"].as_array().unwrap() {
+    for case in fixtures.transition_cases {
         let mut state = Presentation::Generated {
             text: "run tests".into(),
             generation_request_id: None,
         };
-        for (index, action) in case["actions"].as_array().unwrap().iter().enumerate() {
+        for (index, action) in case.actions.iter().enumerate() {
             if action == "shown" {
                 state.mark_shown(100.0 + index as f64);
             } else {
                 state.mark_accepted(100.0 + index as f64);
             }
         }
-        assert_eq!(
-            state,
-            serde_json::from_value(case["expected"].clone()).unwrap(),
-            "{case}"
-        );
+        let expected: Presentation = serde_json::from_str(case.expected.get()).unwrap();
+        assert_eq!(state, expected, "{}", case.expected.get());
     }
 }
 

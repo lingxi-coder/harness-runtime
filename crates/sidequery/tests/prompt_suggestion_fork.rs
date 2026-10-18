@@ -105,6 +105,16 @@ fn client(responses: Vec<Result<SideQueryResponse, SideQueryError>>) -> Arc<Clie
         responses: Mutex::new(responses.into()),
     })
 }
+
+fn candidate_texts(candidates: &[Utf16JsonProjection]) -> Vec<String> {
+    candidates
+        .iter()
+        .map(|candidate| {
+            String::from_utf16(&candidate.string_units("").expect("candidate is a string"))
+                .expect("fixture candidate is valid Unicode")
+        })
+        .collect()
+}
 #[tokio::test]
 async fn denied_tools_continue_in_isolation_and_keep_candidates_in_order() {
     let client = client(vec![
@@ -113,7 +123,10 @@ async fn denied_tools_continue_in_isolation_and_keep_candidates_in_order() {
     ]);
     let runner = ForkedAgentRunner::new().with_side_query_client(client.clone(), "unused".into());
     let result = runner.run(request()).await.unwrap();
-    assert_eq!(result.candidates, ["first candidate", "second candidate"]);
+    assert_eq!(
+        candidate_texts(&result.candidates),
+        ["first candidate", "second candidate"]
+    );
     assert_eq!(result.usage.tokens.input, 6);
     let seen = client.seen.lock().unwrap();
     assert_eq!(seen.len(), 2);
@@ -156,7 +169,7 @@ async fn later_api_failure_does_not_discard_earlier_candidate() {
         .run(request())
         .await
         .unwrap();
-    assert_eq!(result.candidates, ["run tests"]);
+    assert_eq!(candidate_texts(&result.candidates), ["run tests"]);
 }
 #[tokio::test]
 async fn repeated_denials_stop_at_native_fifty_turn_limit() {

@@ -6,7 +6,8 @@ pub(crate) fn synthesize(response: SideQueryResponse) -> ForkedSideQueryResponse
     let candidates = response
         .text
         .iter()
-        .filter_map(|text| String::from_utf16(&text.string_units("")?).ok())
+        .filter(|text| text.string_units("").is_some())
+        .cloned()
         .collect();
     let mut assistant_content: Vec<_> = response
         .text
@@ -43,6 +44,38 @@ pub(crate) fn synthesize(response: SideQueryResponse) -> ForkedSideQueryResponse
         assistant_content,
         candidates,
         request_id: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn synthesized_candidate_keeps_lone_surrogate_source_units() {
+        let units = vec![b'R' as u16, 0xd800, b'!'.into()];
+        let text =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        let response = SideQueryResponse {
+            text: Some(text),
+            structured: None,
+            tool_calls: Vec::new(),
+            usage: cost::Usage::default(),
+            stop_reason: None,
+            retry_count: 0,
+        };
+
+        let fork = synthesize(response);
+        assert_eq!(fork.candidates.len(), 1);
+        assert_eq!(fork.candidates[0].string_units(""), Some(units));
+        assert!(matches!(
+            fork.assistant_content.as_slice(),
+            [ContentBlock::TextJsUtf16 {
+                utf16_code_units,
+                ..
+            }] if utf16_code_units == &[b'R' as u16, 0xd800, b'!' as u16]
+        ));
     }
 }
 

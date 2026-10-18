@@ -3,7 +3,10 @@
 mod filter;
 use sha2::{Digest, Sha256};
 #[test]
-fn prompt_suggestion_matches_native_296_bytes_and_filters() {
+fn prompt_suggestion_matches_shared_fixture_cases_and_filters() {
+    // This existing 2.1.296 fixture guards shared cases; it is not claimed as
+    // a 2.1.295 parity oracle. The current production bindings are recorded in
+    // acceptance/source-closure-r377/resume/suggestion-source-binding.md.
     let fixture: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/prompt_suggestion_2_1_296.json")).unwrap();
     let prompt = include_str!("../src/conversation/prompt_suggestion_prompt.txt");
@@ -35,6 +38,46 @@ fn prompt_suggestion_matches_native_296_bytes_and_filters() {
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
+#[test]
+fn prompt_suggestion_normalization_keeps_unpaired_utf16_and_native_candidate_order() {
+    let raw_display = "<suggestion>  Run the � tests  </suggestion>";
+    let mut raw_units = raw_display.encode_utf16().collect::<Vec<_>>();
+    let surrogate = raw_units
+        .iter()
+        .position(|unit| *unit == 0xfffd)
+        .expect("test source contains the display replacement");
+    raw_units[surrogate] = 0xd800;
+    let first = Utf16JsonProjection::root_string(raw_display.into(), raw_units).unwrap();
+    let second = Utf16JsonProjection::from("Run several tests now");
+
+    let selected = filter::first_prompt_suggestion(&[first, second]).unwrap();
+    let expected_display = "Run the � tests";
+    let mut expected_units = expected_display.encode_utf16().collect::<Vec<_>>();
+    let surrogate = expected_units
+        .iter()
+        .position(|unit| *unit == 0xfffd)
+        .expect("expected display contains the replacement");
+    expected_units[surrogate] = 0xd800;
+    assert_eq!(selected.string_units(""), Some(expected_units));
+    assert_eq!(
+        filter::prompt_suggestion_suppression_reason_projection(&selected),
+        None
+    );
+
+    // Native q selects the first non-empty normalized candidate before B's
+    // rejection pass; a later valid candidate cannot replace "done".
+    let selected = filter::first_prompt_suggestion(&[
+        Utf16JsonProjection::from("done"),
+        Utf16JsonProjection::from("Run several tests now"),
+    ])
+    .unwrap();
+    assert_eq!(selected.string_at(""), Some("done"));
+    assert_eq!(
+        filter::prompt_suggestion_suppression_reason_projection(&selected),
+        Some("done")
+    );
+}
+
 use async_trait::async_trait;
 use lingxi_core::host::{CostSnapshot, OrchestratorHandle, OutputStream};
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ToolUseId};
@@ -50,6 +93,7 @@ use tokio::sync::{Notify, Semaphore};
 #[derive(Default)]
 struct SuggestionOutput {
     rows: Mutex<Vec<(String, String, String)>>,
+    source_rows: Mutex<Vec<Vec<u16>>>,
     notices: Mutex<Vec<String>>,
     ready: Notify,
 }
@@ -80,16 +124,27 @@ impl OutputStream for SuggestionOutput {
             self.notices.lock().unwrap().push(notice.to_owned());
         }
     }
-    async fn emit_prompt_suggestion(&self, session: &str, after: &str, suggestion: &str) {
+    async fn emit_prompt_suggestion(
+        &self,
+        session: &str,
+        after: &str,
+        suggestion: &Utf16JsonProjection,
+    ) {
+        let units = suggestion
+            .string_units("")
+            .expect("suggestion output is a root string");
+        let display = String::from_utf16_lossy(&units);
+        self.source_rows.lock().unwrap().push(units);
         self.rows
             .lock()
             .unwrap()
-            .push((session.into(), after.into(), suggestion.into()));
+            .push((session.into(), after.into(), display));
         self.ready.notify_one();
     }
 }
 struct SuggestionClient {
     requests: Mutex<Vec<SideQueryRequest>>,
+    suggestion: Utf16JsonProjection,
     entered: Notify,
     release: Semaphore,
 }
@@ -100,7 +155,7 @@ impl SideQueryClient for SuggestionClient {
         self.entered.notify_one();
         self.release.acquire().await.unwrap().forget();
         Ok(SideQueryResponse {
-            text: Some("建议：运行测试".into()),
+            text: Some(self.suggestion.clone()),
             structured: None,
             tool_calls: vec![],
             usage: cost::Usage::default(),
@@ -115,9 +170,21 @@ fn setup() -> (
     Arc<SuggestionOutput>,
     Arc<sidequery::CacheSafeParamsSlot>,
 ) {
+    setup_with_suggestion(Utf16JsonProjection::from("建议：运行测试"))
+}
+
+fn setup_with_suggestion(
+    suggestion: Utf16JsonProjection,
+) -> (
+    Arc<ConversationOrchestrator>,
+    Arc<SuggestionClient>,
+    Arc<SuggestionOutput>,
+    Arc<sidequery::CacheSafeParamsSlot>,
+) {
     telemetry::feature_flags::test_set_flag("tengu_chomp_inflection", true);
     let client = Arc::new(SuggestionClient {
         requests: Mutex::new(vec![]),
+        suggestion,
         entered: Notify::new(),
         release: Semaphore::new(0),
     });
@@ -235,6 +302,41 @@ async fn post_turn_suggestion_is_nonblocking_uses_parent_prefix_and_never_change
         serde_json::to_value(before).unwrap()
     );
     assert_eq!(slot.get_last().await.unwrap().generation, cached.generation);
+}
+
+#[tokio::test]
+async fn post_turn_output_stream_emits_the_exact_normalized_suggestion_units() {
+    let raw_display = "<suggestion>  Run the � tests  </suggestion>";
+    let mut raw_units = raw_display.encode_utf16().collect::<Vec<_>>();
+    let surrogate = raw_units
+        .iter()
+        .position(|unit| *unit == 0xfffd)
+        .expect("test source contains the display replacement");
+    raw_units[surrogate] = 0xd800;
+    let suggestion = Utf16JsonProjection::root_string(raw_display.into(), raw_units).unwrap();
+    let (orch, client, output, _) = setup_with_suggestion(suggestion);
+
+    orch.run_turn_streaming("first turn").await.unwrap();
+    orch.run_turn_streaming("second turn").await.unwrap();
+    wait(&client.entered).await;
+    client.release.add_permits(1);
+    wait(&output.ready).await;
+
+    let expected_display = "Run the � tests";
+    let mut expected_units = expected_display.encode_utf16().collect::<Vec<_>>();
+    let surrogate = expected_units
+        .iter()
+        .position(|unit| *unit == 0xfffd)
+        .expect("expected display contains the replacement");
+    expected_units[surrogate] = 0xd800;
+    assert_eq!(
+        output.source_rows.lock().unwrap().last(),
+        Some(&expected_units)
+    );
+    assert_eq!(
+        output.rows.lock().unwrap().last().unwrap().2,
+        expected_display
+    );
 }
 
 #[tokio::test]

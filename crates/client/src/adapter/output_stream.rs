@@ -911,10 +911,17 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
-    async fn emit_prompt_suggestion(&self, session_id: &str, uuid: &str, suggestion: &str) {
+    async fn emit_prompt_suggestion(
+        &self,
+        session_id: &str,
+        uuid: &str,
+        suggestion: &Utf16JsonProjection,
+    ) {
+        let suggestion = ClientTextDto::from_projection(suggestion)
+            .expect("prompt suggestion must be a root-string projection");
         self.sink
             .emit(ClientEvent::PromptSuggestion {
-                suggestion: suggestion.into(),
+                suggestion,
                 session_id: session_id.into(),
                 uuid: uuid.into(),
             })

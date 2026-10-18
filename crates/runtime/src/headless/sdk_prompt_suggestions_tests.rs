@@ -1,11 +1,78 @@
 use super::*;
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 
-fn line(frame: &Value) -> String {
-    serde_json::to_string(frame)
+fn line(frame: &Utf16JsonProjection) -> String {
+    frame
+        .to_json_string()
         .unwrap()
         .replace('\u{2028}', "\\u2028")
         .replace('\u{2029}', "\\u2029")
         + "\n"
+}
+
+#[test]
+fn suggestion_frame_serializes_lone_surrogate_as_json_string() {
+    let mut state = SdkPromptSuggestionState::new(true);
+    let generation = match state.after_result(true, false, false, false, Some("user")) {
+        AfterResult::Generate(generation) => generation,
+        other => panic!("expected a suggestion query, got {other:?}"),
+    };
+    let suggestion = Utf16JsonProjection::parse(r#""try \ud800 next""#).unwrap();
+    let frame = state
+        .generated(
+            generation,
+            suggestion,
+            None,
+            "suggestion-1",
+            "session-1",
+            10,
+            false,
+        )
+        .expect("current generation emits a frame");
+    let wire = frame.to_json_string().unwrap();
+    assert_eq!(
+        wire,
+        r#"{"type":"prompt_suggestion","suggestion":"try \ud800 next","uuid":"suggestion-1","session_id":"session-1"}"#
+    );
+    assert!(!wire.contains(r#""suggestion":["#));
+    assert_eq!(
+        frame.string_units("/suggestion"),
+        Some(
+            "try "
+                .encode_utf16()
+                .chain([0xd800])
+                .chain(" next".encode_utf16())
+                .collect()
+        )
+    );
+}
+
+#[test]
+fn pending_suggestion_feedback_keeps_source_surrogate_distinct_from_display_text() {
+    let mut state = SdkPromptSuggestionState::new(true);
+    let generation = match state.after_result(true, false, false, false, Some("user")) {
+        AfterResult::Generate(generation) => generation,
+        other => panic!("expected a suggestion query, got {other:?}"),
+    };
+    let suggestion = Utf16JsonProjection::parse(r#""\ud800""#).unwrap();
+    assert!(state
+        .generated(
+            generation,
+            suggestion,
+            None,
+            "suggestion-1",
+            "session-1",
+            10,
+            true,
+        )
+        .is_none());
+
+    let pending = state.emit_pending(11).expect("held suggestion is released");
+    assert_eq!(pending.string_units("/suggestion"), Some(vec![0xd800]));
+    let feedback = state
+        .on_command(true, Some(&json!("�")), 12)
+        .expect("prompt input records feedback");
+    assert_eq!(feedback["outcome"], "ignored");
 }
 
 #[test]
@@ -141,8 +208,12 @@ fn pause_validation_matches_native_no_provider_control_capture() {
         (Some("[]"), "array"),
         (Some("{}"), "object"),
     ] {
-        assert_eq!(parse_raw(value).unwrap_err(),
-            format!("Invalid set_prompt_suggestions_paused: Invalid input: expected boolean, received {received}"));
+        assert_eq!(
+            parse_raw(value).unwrap_err(),
+            format!(
+                "Invalid set_prompt_suggestions_paused: Invalid input: expected boolean, received {received}"
+            )
+        );
     }
     assert_eq!(parse_raw(Some("true")), Ok(true));
     assert_eq!(parse_raw(Some("false")), Ok(false));

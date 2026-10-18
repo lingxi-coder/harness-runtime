@@ -56,6 +56,7 @@ pub(super) async fn handle_max_output_tokens(
             let mut s = orch.session.lock().await;
             s.history.push(nudge_msg.clone());
         }
+        orch.note_query_user_event();
         orch.persist_message_to_jsonl(&nudge_msg).await;
 
         state.max_output_tokens_recovery_count =
@@ -198,6 +199,7 @@ pub(super) async fn handle_malformed_tool_use(
         let mut s = orch.session.lock().await;
         s.history.push(nudge_msg.clone());
     }
+    orch.note_query_user_event();
     orch.persist_message_to_jsonl(&nudge_msg).await;
     // TS resets the recovery counters on the retry transition.
     state.reset_max_output_tokens_recovery();
@@ -223,6 +225,7 @@ pub(super) async fn handle_thinking_only(
         let mut s = orch.session.lock().await;
         s.history.push(nudge_msg.clone());
     }
+    orch.note_query_user_event();
     orch.persist_message_to_jsonl(&nudge_msg).await;
     state.thinking_only_nudged = true;
     Ok(TurnStepOutcome::Continue(

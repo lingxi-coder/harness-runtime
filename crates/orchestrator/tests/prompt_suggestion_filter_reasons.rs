@@ -2,7 +2,17 @@
 #[allow(dead_code)]
 #[path = "../src/conversation/prompt_suggestion_filter.rs"]
 mod filter;
-use filter::*;
+use filter::{parse_prompt_suggestion_response, prompt_suggestion_suppression_reason};
+
+fn normalize_prompt_suggestion_response(raw: &str) -> String {
+    let raw = lingxi_core::types::utf16_json::Utf16JsonProjection::from(raw);
+    let normalized = filter::normalize_prompt_suggestion_projection(&raw)
+        .expect("prompt suggestion fixture input is a root string");
+    let units = normalized
+        .string_units("")
+        .expect("normalized suggestion remains a root string");
+    String::from_utf16_lossy(&units)
+}
 
 #[test]
 fn native_normalization_and_suppression_reasons() {

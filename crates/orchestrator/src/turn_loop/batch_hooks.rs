@@ -316,6 +316,7 @@ pub(crate) async fn append_tool_injected_messages(
         return;
     }
     for (message, source_id) in messages {
+        let is_user_row = matches!(&message, ConversationMessage::User { .. });
         let guard = match publication_guard.as_ref() {
             Some(guard) => Some(Arc::clone(guard)),
             None => {
@@ -325,8 +326,12 @@ pub(crate) async fn append_tool_injected_messages(
             }
         };
         if let Some(guard) = guard {
-            orch.append_guarded_injected_message(&message, source_id, guard)
+            let accepted = orch
+                .append_guarded_injected_message(&message, source_id, guard)
                 .await;
+            if accepted && is_user_row {
+                orch.note_query_user_event();
+            }
             continue;
         }
         let append = async {
@@ -342,6 +347,9 @@ pub(crate) async fn append_tool_injected_messages(
             }
         };
         append.await;
+        if is_user_row {
+            orch.note_query_user_event();
+        }
     }
 }
 

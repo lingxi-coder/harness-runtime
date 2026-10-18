@@ -171,4 +171,6 @@
 /// requires host-derived `header` / `display` projections on tool blocks and
 /// tool events. `ToolResultDisplayDto.diff` remains optional for non-diff tools.
 /// Version 28 requires ordered inline image attachments on RunSlashCommand.
-pub const CLIENT_PROTOCOL_VERSION: &str = "28.0.0";
+/// Version 29 carries prompt suggestions as exact UTF-16 text in native
+/// bindings while preserving their JSON string wire representation.
+pub const CLIENT_PROTOCOL_VERSION: &str = "29.0.0";

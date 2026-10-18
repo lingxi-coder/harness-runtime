@@ -795,7 +795,7 @@ define_client_event! {
         reference: Option<crate::protocol::message::VisualizationRefDto>,
     },
     PromptSuggestion {
-        suggestion: String,
+        suggestion: ClientTextDto,
         uuid: String,
         session_id: String,
     },

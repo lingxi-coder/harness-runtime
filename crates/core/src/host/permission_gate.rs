@@ -292,6 +292,13 @@ pub struct PermissionCheckContext {
     /// layers; the gate hoists both to the head of this stack before folding, so
     /// a layer here can still override them.
     pub permission_layers: Vec<Utf16JsonProjection>,
+    /// Fork-time `alwaysDenyRules.command` strings, captured before the fork
+    /// and replayed as exact `command`-source rules before the live command
+    /// rules for this permission check. Kept separate from `permission_layers`
+    /// because upstream merges this source array before live command rules;
+    /// treating it as a post-base `disallowed_tools` layer reverses source
+    /// order-sensitive negation semantics. Empty for ordinary calls.
+    pub frozen_command_denies: Vec<Utf16JsonProjection>,
     /// (Finding 22) `true` only when this dispatch was issued through a
     /// [`crate::host::tool_invoker::ToolInvoker`] the composition root built
     /// EXCLUSIVELY for a background task with no owning interactive turn — as

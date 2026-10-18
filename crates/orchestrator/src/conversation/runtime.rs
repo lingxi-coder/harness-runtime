@@ -381,6 +381,25 @@ pub struct TurnExecutionMetrics {
     pub api_error_stop_reason: Option<String>,
 }
 
+/// User interruption row emitted by the streaming query driver.
+///
+/// This stays separate from transcript identity because a Mod compaction may
+/// rebuild message IDs while the query is still active.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryUserInterruptionKind {
+    /// The provider response was interrupted before tool execution.
+    Streaming,
+    /// The interruption happened while dispatched tools were running.
+    Tools,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct QueryUserEventMetrics {
+    yielded_users: u64,
+    interruption: Option<QueryUserInterruptionKind>,
+    cancelled_during_tool_dispatch: bool,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct TurnTimingMarks {
     pub(crate) time_to_request_ms: Option<u64>,
@@ -508,6 +527,8 @@ pub(crate) struct TurnExecutionMetricsState {
     active: Option<TurnExecutionMetrics>,
     completed: Option<TurnExecutionMetrics>,
     active_timing: Option<std::sync::Arc<TurnTimingCapture>>,
+    active_query_user_events: Option<QueryUserEventMetrics>,
+    completed_query_user_events: Option<QueryUserEventMetrics>,
 }
 
 impl TurnExecutionMetricsState {
@@ -515,6 +536,8 @@ impl TurnExecutionMetricsState {
         self.active = Some(TurnExecutionMetrics::default());
         self.completed = None;
         self.active_timing = Some(std::sync::Arc::new(TurnTimingCapture::new()));
+        self.active_query_user_events = Some(QueryUserEventMetrics::default());
+        self.completed_query_user_events = None;
     }
 
     fn active_timing_capture(&self) -> Option<std::sync::Arc<TurnTimingCapture>> {
@@ -523,6 +546,7 @@ impl TurnExecutionMetricsState {
 
     fn complete_turn(&mut self) {
         let timing = self.active_timing.take();
+        self.completed_query_user_events = self.active_query_user_events.take();
         self.completed = self.active.take().map(|mut metrics| {
             if let Some(marks) = timing.map(|capture| capture.snapshot()) {
                 metrics.time_to_request_ms = marks.time_to_request_ms;
@@ -532,6 +556,30 @@ impl TurnExecutionMetricsState {
             }
             metrics
         });
+    }
+
+    fn note_query_user_event(&mut self) {
+        if let Some(events) = self.active_query_user_events.as_mut() {
+            events.yielded_users = events.yielded_users.saturating_add(1);
+        }
+    }
+
+    fn note_query_user_interruption(&mut self, kind: QueryUserInterruptionKind) {
+        if let Some(events) = self.active_query_user_events.as_mut() {
+            events.yielded_users = events.yielded_users.saturating_add(1);
+            events.interruption = Some(kind);
+        }
+    }
+
+    fn note_query_tool_dispatch_cancelled(&mut self) {
+        if let Some(events) = self.active_query_user_events.as_mut() {
+            events.cancelled_during_tool_dispatch = true;
+        }
+    }
+
+    fn query_tool_dispatch_cancelled(&self) -> bool {
+        self.active_query_user_events
+            .is_some_and(|events| events.cancelled_during_tool_dispatch)
     }
 }
 
@@ -547,6 +595,19 @@ impl ConversationOrchestrator {
             .clone()
     }
 
+    /// Read the completed query's yielded user-row count and interruption kind.
+    /// The count excludes the initial prompt; print mode adds Native's initial
+    /// count of one when projecting a terminal result.
+    pub fn completed_query_user_events(&self) -> Option<(u64, Option<QueryUserInterruptionKind>)> {
+        let state = self
+            .prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let metrics = state.completed_query_user_events?;
+        Some((metrics.yielded_users, metrics.interruption))
+    }
+
     pub(super) fn begin_turn_metrics(&self) {
         let mut state = self
             .prompt_runtime
@@ -554,6 +615,38 @@ impl ConversationOrchestrator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.begin_turn();
+    }
+
+    pub(crate) fn note_query_user_event(&self) {
+        self.prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .note_query_user_event();
+    }
+
+    pub(crate) fn note_query_user_interruption(&self, kind: QueryUserInterruptionKind) {
+        self.prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .note_query_user_interruption(kind);
+    }
+
+    pub(crate) fn note_query_tool_dispatch_cancelled(&self) {
+        self.prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .note_query_tool_dispatch_cancelled();
+    }
+
+    pub(crate) fn query_tool_dispatch_cancelled(&self) -> bool {
+        self.prompt_runtime
+            .turn_execution_metrics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .query_tool_dispatch_cancelled()
     }
 
     pub(crate) fn active_turn_timing_capture(&self) -> Option<std::sync::Arc<TurnTimingCapture>> {
@@ -2440,6 +2533,34 @@ mod turn_timing_tests {
         assert_eq!(previous_metrics.ttft_stream_ms, None);
         assert_eq!(previous_metrics.first_content_frame_ms, None);
     }
+
+    #[test]
+    fn query_user_events_are_query_local_and_survive_turn_completion() {
+        let mut state = TurnExecutionMetricsState::default();
+        state.begin_turn();
+        state.note_query_user_event(); // meta user row
+        state.note_query_user_event(); // tool result row
+        state.note_query_tool_dispatch_cancelled();
+        state.note_query_user_interruption(QueryUserInterruptionKind::Tools);
+        state.complete_turn();
+
+        assert_eq!(
+            state.completed_query_user_events,
+            Some(QueryUserEventMetrics {
+                yielded_users: 3,
+                interruption: Some(QueryUserInterruptionKind::Tools),
+                cancelled_during_tool_dispatch: true,
+            })
+        );
+
+        state.begin_turn();
+        assert_eq!(state.completed_query_user_events, None);
+        assert_eq!(
+            state.active_query_user_events,
+            Some(QueryUserEventMetrics::default())
+        );
+        assert!(!state.query_tool_dispatch_cancelled());
+    }
 }
 
 #[derive(Default)]
@@ -2521,6 +2642,59 @@ mod api_error_metrics_tests {
         assert_eq!(metrics.api_error_stop_reason, None);
         assert_eq!(metrics.api_error_status, None);
         assert_eq!(metrics.api_error_terminal_reason, None);
+    }
+
+    #[tokio::test]
+    async fn compaction_rebuilt_message_ids_do_not_change_query_user_event_metrics() {
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        orch.begin_turn_metrics();
+
+        let old_prompt_id = MessageId::new();
+        let old_event_id = MessageId::new();
+        let old_interrupt_id = MessageId::new();
+        {
+            let session = orch.session();
+            let mut session = session.lock().await;
+            session.history = vec![
+                ConversationMessage::user(old_prompt_id, "query prompt".into()),
+                ConversationMessage::user_meta(old_event_id, "query-local meta event".into()),
+                ConversationMessage::user(old_interrupt_id, INTERRUPT_MESSAGE.into()),
+            ];
+        }
+        orch.note_query_user_event();
+        orch.note_query_user_interruption(QueryUserInterruptionKind::Streaming);
+
+        let rebuilt_prompt_id = MessageId::new();
+        let rebuilt_event_id = MessageId::new();
+        let rebuilt_interrupt_id = MessageId::new();
+        {
+            let session = orch.session();
+            let mut session = session.lock().await;
+            session.history = vec![
+                ConversationMessage::compact_summary(MessageId::new(), "compacted context".into()),
+                ConversationMessage::user(rebuilt_prompt_id, "query prompt".into()),
+                ConversationMessage::user_meta(rebuilt_event_id, "query-local meta event".into()),
+                ConversationMessage::user(rebuilt_interrupt_id, INTERRUPT_MESSAGE.into()),
+            ];
+        }
+        assert_ne!(old_prompt_id, rebuilt_prompt_id);
+        assert_ne!(old_event_id, rebuilt_event_id);
+        assert_ne!(old_interrupt_id, rebuilt_interrupt_id);
+
+        orch.complete_turn_metrics(None);
+        assert_eq!(
+            orch.completed_query_user_events(),
+            Some((2, Some(QueryUserInterruptionKind::Streaming)))
+        );
     }
 
     #[test]

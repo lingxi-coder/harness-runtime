@@ -388,7 +388,7 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::UiClientFrame.runtime_id", "String");
     put("ClientEvent::UiClientFrame.frame_json", "String");
     put("ClientEvent::PromptSuggestion", "prompt_suggestion");
-    put("ClientEvent::PromptSuggestion.suggestion", "String");
+    put("ClientEvent::PromptSuggestion.suggestion", "ClientTextDto");
     put("ClientEvent::PromptSuggestion.uuid", "String");
     put("ClientEvent::PromptSuggestion.session_id", "String");
     put(
@@ -2414,7 +2414,7 @@ fn contract_index_covers_every_dto() {
             frame_json: String::new(),
         },
         ClientEvent::PromptSuggestion {
-            suggestion: String::new(),
+            suggestion: String::new().into(),
             uuid: String::new(),
             session_id: String::new(),
         },

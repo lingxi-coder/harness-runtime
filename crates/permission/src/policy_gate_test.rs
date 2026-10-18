@@ -2566,6 +2566,139 @@ agent's Bash use is clamped to a fixed set of command forms (per-spawn bashComma
     }
 
     #[tokio::test]
+    async fn frozen_live_and_additional_read_rules_keep_native_source_order() {
+        // Native fLn merges frozen rules, then the live Command source, then
+        // skill `disallowed-tools`. A current-input negation must carve the
+        // frozen deny; a later per-call positive rule must then re-deny its
+        // narrower path, all within one Command source.
+        let policy = policy_with_roots(r#"{ "permissions": {} }"#, PermissionMode::Default);
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        gate.set_command_input_denies(&["Read(!src/public/**)".into()], false);
+        let ctx = PermissionCheckContext {
+            frozen_command_denies: vec!["Read(src/**)".into()],
+            permission_layers: vec![json!({
+                "kind": "disallowed_tools",
+                "disallowedTools": ["Read(src/public/keys/**)"],
+            })],
+            ..PermissionCheckContext::default()
+        };
+
+        let public = gate
+            .check_with_context(
+                "Read",
+                &json!({"file_path": "/proj/src/public/index.html"}),
+                &ctx,
+            )
+            .await;
+        assert!(
+            matches!(public, PermissionOutcome::Allow { .. }),
+            "the current Command negation must carve an exception from the frozen deny: {public:?}"
+        );
+        let key = gate
+            .check_with_context(
+                "Read",
+                &json!({"file_path": "/proj/src/public/keys/id_rsa"}),
+                &ctx,
+            )
+            .await;
+        assert!(
+            matches!(key, PermissionOutcome::Deny { .. }),
+            "the later additional positive rule must re-establish the deny for its path: {key:?}"
+        );
+    }
+
+    #[test]
+    fn frozen_live_and_additional_command_denies_use_exact_first_seen_order() {
+        let command_deny = |spec: &str| crate::rule::PermissionRule {
+            value: crate::rule::PermissionRuleValue::from_rule_string(spec),
+            behavior: crate::rule::PermissionBehavior::Deny,
+            source: PermissionRuleSource::Command,
+        };
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Default,
+            vec![command_deny("Bash(*)"), command_deny("Read(src/**)")],
+        ));
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        gate.set_command_input_denies(&["Input".into()], false);
+        let ctx = PermissionCheckContext {
+            frozen_command_denies: vec!["Bash".into(), "Bash(*)".into(), "Frozen".into()],
+            permission_layers: vec![json!({
+                "kind": "disallowed_tools",
+                "disallowedTools": ["Bash(*)", "Layer"],
+            })],
+            ..PermissionCheckContext::default()
+        };
+
+        let folded = gate.fold_call_context(&ctx);
+        let policy = gate.live_policy_with_layers(&folded);
+        let command = policy
+            .deny_rules
+            .get(&PermissionRuleSource::Command)
+            .expect("merged command source exists");
+        let source_spellings = command
+            .iter()
+            .map(|rule| {
+                rule.value
+                    .original_rule_projection()
+                    .cloned()
+                    .unwrap_or_else(|| rule.value.to_rule_projection())
+                    .string_at("")
+                    .expect("fixture rules are valid UTF-8")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            source_spellings,
+            vec![
+                "Bash".to_owned(),
+                "Bash(*)".to_owned(),
+                "Frozen".to_owned(),
+                "Read(src/**)".to_owned(),
+                "Input".to_owned(),
+                "Layer".to_owned(),
+            ],
+            "dedupe is exact-string and source order is frozen, live, then additional"
+        );
+    }
+
+    #[test]
+    fn command_input_union_keeps_semantically_equal_source_spellings() {
+        let live = crate::rule::PermissionRule {
+            value: crate::rule::PermissionRuleValue::from_rule_string("Bash"),
+            behavior: crate::rule::PermissionBehavior::Deny,
+            source: PermissionRuleSource::Command,
+        };
+        let policy = Arc::new(PermissionPolicy::from_rules(
+            PermissionMode::Default,
+            vec![live],
+        ));
+        let gate =
+            PolicyPermissionGate::new(policy, RecordingInner::new(PermissionDecision::Allow));
+        gate.set_command_input_denies(&["Bash(*)".into()], false);
+
+        let policy = gate.live_policy();
+        let command = policy
+            .deny_rules
+            .get(&PermissionRuleSource::Command)
+            .expect("merged command source exists");
+        let source_spellings = command
+            .iter()
+            .map(|rule| {
+                rule.value
+                    .original_rule_projection()
+                    .cloned()
+                    .unwrap_or_else(|| rule.value.to_rule_projection())
+                    .string_at("")
+                    .expect("fixture rules are valid UTF-8")
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(source_spellings, vec!["Bash", "Bash(*)"]);
+    }
+
+    #[tokio::test]
     async fn a_permission_mode_layer_is_the_general_form_of_mode_override() {
         let policy = policy_with(
             r#"{ "permissions": {} }"#,

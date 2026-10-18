@@ -4040,6 +4040,104 @@ mod tests {
         assert!(!glob_name_matches("Web", "WebFetch")); // exact, no wildcard
     }
 
+    /// Fixed outcomes derived from the pinned 2.1.295 `LTr`/`h` source at
+    /// `src_186325155.js` (artifact SHA-256
+    /// `0116ee2e0a513900b633d9951367f18747686478e2b462805b8c31609f047f70`).
+    /// The 7,419-byte source range has SHA-256
+    /// `a66f6f6d6f121ab2a8a9b5acf8ad8fa5d95ce3c6b55175dd7bbf5463b3567f0b`; `h`
+    /// begins at absolute byte 186326569.
+    /// The table records source outcomes directly; it does not duplicate the
+    /// Native matcher or use the candidate implementation as its oracle.
+    #[test]
+    fn native_ltr_tool_name_globs_follow_source_case_table() {
+        let cases = [
+            // `*` is the wildcard; ?, [ and ] stay ordinary literal units.
+            ("tool?[]*suffix", "tool?[]suffix", true),
+            ("tool?[]*suffix", "toolX[]suffix", false),
+            // Empty and repeated wildcard segments match the empty span.
+            ("*", "", true),
+            ("a**b", "ab", true),
+            // Interior literals are ordered, and the prefix/suffix stay anchored.
+            ("a*b*c", "aXXbYYc", true),
+            ("a*b*c", "aXXcYYb", false),
+            ("a*b", "xa-b", false),
+            // Prefix and suffix may not overlap on one literal unit.
+            ("a*a", "a", false),
+            // A final terminator after the literal suffix is still extra input.
+            ("a*b", "a\nb\n", false),
+        ];
+
+        for (pattern, value, expected) in cases {
+            assert_eq!(
+                native_tool_wide_rule_matches(pattern, value, None, true, true),
+                expected,
+                "Native LTr source case pattern={pattern:?}, value={value:?}"
+            );
+        }
+
+        // Native h searches UTF-16 strings, so none of the four JavaScript
+        // line terminators has special treatment inside a wildcard span.
+        for terminator in ["\r", "\n", "\u{2028}", "\u{2029}"] {
+            let value = format!("left{terminator}right");
+            assert!(
+                native_tool_wide_rule_matches("left*right", &value, None, true, true),
+                "Native LTr wildcard must cross {terminator:?}"
+            );
+        }
+
+        // Alias keys remain exact UTF-16 source strings, including both a
+        // surrogate pair and a lone surrogate inside the wildcard span.
+        let surrogate_pair = Utf16JsonProjection::parse(r#"{"legacy\ud83d\ude00name":"Read"}"#)
+            .expect("well-formed surrogate pair alias is valid JSON");
+        assert!(native_tool_wide_rule_matches(
+            "legacy*name",
+            "Read",
+            Some(&surrogate_pair),
+            true,
+            true,
+        ));
+
+        let lone_surrogate = Utf16JsonProjection::parse(r#"{"legacy\ud800name":"Read"}"#)
+            .expect("lone surrogate alias key is valid JSON source");
+        assert!(native_tool_wide_rule_matches(
+            "legacy*name",
+            "Read",
+            Some(&lone_surrogate),
+            true,
+            true,
+        ));
+        assert!(!native_tool_wide_rule_matches(
+            "legacy*name",
+            "Read",
+            Some(&lone_surrogate),
+            true,
+            false,
+        ));
+
+        // Native h searches UTF-16 units, so a wildcard may even split a
+        // surrogate pair when matching its extracted pattern and name strings.
+        let split_pair_pattern = [
+            b'u' as u16,
+            b'n' as u16,
+            b'i' as u16,
+            b't' as u16,
+            b'_' as u16,
+            0xd83d,
+            b'*' as u16,
+            0xde00,
+        ];
+        let paired_name = [
+            b'u' as u16,
+            b'n' as u16,
+            b'i' as u16,
+            b't' as u16,
+            b'_' as u16,
+            0xd83d,
+            0xde00,
+        ];
+        assert!(glob_name_matches_units(&split_pair_pattern, &paired_name));
+    }
+
     // ---- GENFIELD-01: generic `field:pattern` content matcher (Mjr) --------
 
     /// `deny:["WebSearch(query:*secret*)"]` glob-matches the input's `query`

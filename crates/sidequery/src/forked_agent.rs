@@ -87,9 +87,10 @@ pub struct ForkedAgentRequest {
 pub struct ForkedAgentResult {
     /// Aggregated final assistant text.
     pub final_text: Utf16JsonProjection,
-    /// Native text candidates, in assistant emission order. Prompt suggestion
-    /// normalization selects the first candidate that passes its text rules.
-    pub candidates: Vec<String>,
+    /// Native text candidates, in assistant emission order. Prompt-suggestion
+    /// normalization selects the first non-empty normalized candidate before
+    /// the separate suppression classifier runs.
+    pub candidates: Vec<Utf16JsonProjection>,
     /// HTTP request id of the first assistant, not its provider message id.
     pub generation_request_id: Option<String>,
     /// Tool calls emitted by the one-shot provider response. The runner does
@@ -441,7 +442,6 @@ impl ForkedAgentRunner {
                 .candidates
                 .first()
                 .cloned()
-                .map(Utf16JsonProjection::from)
                 .unwrap_or_else(|| Utf16JsonProjection::from(""));
         }
         Ok(result)

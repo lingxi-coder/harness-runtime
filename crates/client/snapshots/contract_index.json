@@ -398,7 +398,7 @@
   "ClientEvent::PlanUpdated.tasks": "Vec<PlanTaskDto>",
   "ClientEvent::PromptSuggestion": "prompt_suggestion",
   "ClientEvent::PromptSuggestion.session_id": "String",
-  "ClientEvent::PromptSuggestion.suggestion": "String",
+  "ClientEvent::PromptSuggestion.suggestion": "ClientTextDto",
   "ClientEvent::PromptSuggestion.uuid": "String",
   "ClientEvent::PromptSuggestionState": "prompt_suggestion_state",
   "ClientEvent::PromptSuggestionState.enabled": "bool",

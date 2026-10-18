@@ -1,13 +1,13 @@
-//! Claude Code 2.1.296 `HS` SDK suggestion state. The wire frame is deliberately
+//! SDK suggestion state. The wire frame is deliberately
 //! separate from its private generation request ID and acceptance timestamp.
-use lingxi_core::types::utf16_json::JsonValueView;
+use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 use serde_json::{json, Map, Value};
 
 pub(crate) const SDK_SUGGESTION_SETTLE_TIMEOUT_MS: u64 = 30_000;
 
 #[derive(Clone, Debug)]
 struct EmittedSuggestion {
-    text: String,
+    text: Utf16JsonProjection,
     generation_request_id: Option<String>,
     emitted_at: u64,
 }
@@ -19,7 +19,7 @@ pub(crate) struct SdkPromptSuggestionState {
     initialized: bool,
     generation: u64,
     last_emitted: Option<EmittedSuggestion>,
-    pending: Option<(Value, EmittedSuggestion)>,
+    pending: Option<(Utf16JsonProjection, EmittedSuggestion)>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -109,36 +109,45 @@ impl SdkPromptSuggestionState {
     pub(crate) fn generated(
         &mut self,
         generation: u64,
-        suggestion: String,
+        suggestion: Utf16JsonProjection,
         generation_request_id: Option<String>,
         uuid: &str,
         session_id: &str,
         now: u64,
         holds_results: bool,
-    ) -> Option<Value> {
+    ) -> Option<Utf16JsonProjection> {
         if generation != self.generation {
             return None;
         }
-        let mut frame = Map::new();
-        frame.insert("type".into(), json!("prompt_suggestion"));
-        frame.insert("suggestion".into(), json!(suggestion));
-        frame.insert("uuid".into(), json!(uuid));
-        frame.insert("session_id".into(), json!(session_id));
+        assert!(
+            suggestion.string_units("").is_some(),
+            "prompt suggestion must be a root JSON string"
+        );
+        let frame = Utf16JsonProjection::object(vec![
+            (
+                "type".into(),
+                Utf16JsonProjection::from("prompt_suggestion"),
+            ),
+            ("suggestion".into(), suggestion.clone()),
+            ("uuid".into(), Utf16JsonProjection::from(uuid)),
+            ("session_id".into(), Utf16JsonProjection::from(session_id)),
+        ])
+        .expect("prompt suggestion frame is an object");
         let entry = EmittedSuggestion {
             text: suggestion,
             generation_request_id,
             emitted_at: now,
         };
         if holds_results {
-            self.pending = Some((Value::Object(frame), entry));
+            self.pending = Some((frame, entry));
             None
         } else {
             self.last_emitted = Some(entry);
-            Some(Value::Object(frame))
+            Some(frame)
         }
     }
 
-    pub(crate) fn emit_pending(&mut self, now: u64) -> Option<Value> {
+    pub(crate) fn emit_pending(&mut self, now: u64) -> Option<Utf16JsonProjection> {
         let (frame, mut entry) = self.pending.take()?;
         entry.emitted_at = now;
         self.last_emitted = Some(entry);
@@ -182,9 +191,14 @@ pub(crate) fn host_suppression(
 }
 
 fn feedback(last: &EmittedSuggestion, input: &str, now: u64) -> Value {
-    let accepted = input.to_lowercase() == last.text.to_lowercase();
-    let denominator = last.text.encode_utf16().count().max(1) as f64;
-    let similarity = (input.encode_utf16().count() as f64 / denominator * 100.0).round() / 100.0;
+    let last_units = last
+        .text
+        .string_units("")
+        .expect("stored suggestion is a root JSON string");
+    let input_units = input.encode_utf16().collect::<Vec<_>>();
+    let accepted = lowercase_utf16(&input_units) == lowercase_utf16(&last_units);
+    let denominator = last_units.len().max(1) as f64;
+    let similarity = (input_units.len() as f64 / denominator * 100.0).round() / 100.0;
     let mut payload = Map::new();
     payload.insert("source".into(), json!("sdk"));
     payload.insert(
@@ -219,6 +233,27 @@ fn feedback(last: &EmittedSuggestion, input: &str, now: u64) -> Value {
     Value::Object(payload)
 }
 
+fn lowercase_utf16(units: &[u16]) -> Vec<u16> {
+    // Keep Rust's existing Unicode case mapping for every well-formed run,
+    // while copying an isolated surrogate through unchanged as a JavaScript
+    // string unit. This lets feedback state retain the same source identity as
+    // the suggestion frame without converting the carrier through display.
+    let mut output = Vec::with_capacity(units.len());
+    let mut run = String::new();
+    for decoded in char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok(character) => run.push(character),
+            Err(error) => {
+                output.extend(run.to_lowercase().encode_utf16());
+                run.clear();
+                output.push(error.unpaired_surrogate());
+            }
+        }
+    }
+    output.extend(run.to_lowercase().encode_utf16());
+    output
+}
+
 /// Exact first Zod issue used by the native control handler.
 pub(crate) fn parse_paused(value: Option<JsonValueView<'_>>) -> Result<bool, String> {
     if let Some(paused) = value.and_then(JsonValueView::as_bool) {
@@ -233,7 +268,9 @@ pub(crate) fn parse_paused(value: Option<JsonValueView<'_>>) -> Result<bool, Str
         Some(value) if value.object_entries().is_some() => "object",
         Some(_) => unreachable!("boolean values returned above"),
     };
-    Err(format!("Invalid set_prompt_suggestions_paused: Invalid input: expected boolean, received {received}"))
+    Err(format!(
+        "Invalid set_prompt_suggestions_paused: Invalid input: expected boolean, received {received}"
+    ))
 }
 
 #[cfg(test)]

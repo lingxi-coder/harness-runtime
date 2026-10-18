@@ -305,14 +305,20 @@ pub struct LayerFoldInputs {
     pub bypass_permissions_available: bool,
 }
 
-/// The result of folding a layer stack: the DELTA this call applies on top of
-/// the session's boot/live permission state.
+/// The result of folding a layer stack plus a fork-time command-deny source:
+/// the DELTA this call applies on top of the session's boot/live permission
+/// state.
 ///
-/// Every field is empty/`None` for an empty layer stack, and
-/// [`Self::is_empty`] then reports `true` — which is how the gate keeps the
-/// no-layer path byte-identical to its pre-layer behavior.
+/// Every field is empty/`None` when there are no layers and no frozen command
+/// denies, and [`Self::is_empty`] then reports `true` — which is how the gate
+/// keeps the ordinary no-layer path byte-identical to its pre-layer behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FoldedPermissionContext {
+    /// Fork-time `alwaysDenyRules.command` source strings. This is carried
+    /// separately from ordinary permission layers so the policy gate can merge
+    /// it BEFORE the live `command` source and the per-call layer additions,
+    /// matching `fLn`'s exact-string first-occurrence union.
+    pub frozen_command_denies: Vec<Utf16JsonProjection>,
     /// The winning `permission_mode` layer (LAST one wins; a `bypassPermissions`
     /// layer is skipped when the killswitch is on or bypass is unavailable).
     pub mode: Option<PermissionMode>,
@@ -334,7 +340,8 @@ impl FoldedPermissionContext {
     /// policy-clone path when it does not.)
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.mode.is_none()
+        self.frozen_command_denies.is_empty()
+            && self.mode.is_none()
             && self.allow_command_rules.is_empty()
             && self.deny_command_rules.is_empty()
             && self.bash_command_clamps.is_empty()

@@ -430,7 +430,7 @@ pub struct SubagentContext {
     /// See [`lingxi_core::host::tool_invoker::SubagentInvocationContext::frozen_command_denies`]
     /// for why they exist and why a frozen deny beats a live allow. Empty for
     /// every non-fork spawn, which keeps the dispatch path unchanged.
-    pub frozen_command_denies: Vec<String>,
+    pub frozen_command_denies: Vec<Utf16JsonProjection>,
     /// Optional per-turn output token cap (Fusion panel ceilings).
     pub max_output_tokens_per_turn: Option<u32>,
     /// Optional per-turn input payload cap in bytes (oldest messages dropped).

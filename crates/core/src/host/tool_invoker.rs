@@ -357,8 +357,8 @@ pub struct SubagentInvocationContext {
     /// taken from the BOOT policy (`PermissionPolicy::deny_rules`), not from the
     /// gate's `live_state`, so a deny ADDED at runtime is never frozen.
     ///
-    /// Empty ⇒ no layer is added and the fold is byte-identical to before.
-    pub frozen_command_denies: Vec<String>,
+    /// Empty ⇒ the gate receives no frozen command-deny prefix.
+    pub frozen_command_denies: Vec<Utf16JsonProjection>,
 }
 
 /// Opaque, host-owned context state carried through the provider-neutral Core

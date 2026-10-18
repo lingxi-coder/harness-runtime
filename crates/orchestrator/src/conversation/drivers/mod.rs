@@ -494,6 +494,7 @@ impl ConversationOrchestrator {
                     if let Some(identity) = identity {
                         self.inject_pending_user_projection_once(&wrapped, images, identity)
                             .await?;
+                        self.note_query_user_event();
                     } else {
                         self.inject_user_projection_with_images(&wrapped, false, images)
                             .await;
@@ -547,6 +548,7 @@ impl ConversationOrchestrator {
                 .unwrap_or_else(MessageId::new);
             let message = Self::queued_human_attachment_projection(id, &prompt)?;
             self.session.lock().await.history.push(message);
+            self.note_query_user_event();
             if let Some(delivery) = &input.queue_delivery {
                 let rendered = projected_content::queued_human_rendered(&prompt)?;
                 self.persist_queued_input_to_jsonl(
@@ -599,6 +601,9 @@ impl ConversationOrchestrator {
     /// extraction, exactly as in CC 2.1.207.
     async fn inject_meta_user_message(&self, text: &str) {
         self.inject_user_text(text, true).await;
+        // Native's query generator yields retry/nudge rows as user events; the
+        // print producer counts them even when they are meta companions.
+        self.note_query_user_event();
     }
 
     /// Inject a PLAIN (non-meta) user text message. Used for interrupt markers
@@ -608,6 +613,17 @@ impl ConversationOrchestrator {
     /// guard (`r!==void 0&&!Ree(r)||e.isMeta` → `{}` for plain human input).
     pub(super) async fn inject_user_message(&self, text: &str) {
         self.inject_user_text(text, false).await;
+    }
+
+    /// Inject and record Native's typed query interruption event. Both source
+    /// variants are ordinary user rows and contribute one yielded-user count.
+    pub(super) async fn inject_query_user_interruption(&self, kind: QueryUserInterruptionKind) {
+        let message = match kind {
+            QueryUserInterruptionKind::Streaming => INTERRUPT_MESSAGE,
+            QueryUserInterruptionKind::Tools => INTERRUPT_MESSAGE_FOR_TOOL_USE,
+        };
+        self.inject_user_message(message).await;
+        self.note_query_user_interruption(kind);
     }
 
     /// Drain accepted cross-session inbox lines into history as meta user-role
@@ -685,6 +701,7 @@ impl ConversationOrchestrator {
             let mut session = self.session.lock().await;
             session.history.push(msg.clone());
         }
+        self.note_query_user_event();
         self.persist_message_to_jsonl(&msg).await;
     }
 
@@ -763,6 +780,7 @@ impl ConversationOrchestrator {
                     let mut s = self.session.lock().await;
                     s.history.push(nudge_msg.clone());
                 }
+                self.note_query_user_event();
                 self.persist_message_to_jsonl(&nudge_msg).await;
                 // Reset the A1 recovery count on each budget continuation
                 // (TS `query.ts:1332` `maxOutputTokensRecoveryCount: 0` +
@@ -2521,6 +2539,7 @@ impl ConversationOrchestrator {
                     let mut s = self.session.lock().await;
                     s.history.push(nudge_msg.clone());
                 }
+                self.note_query_user_event();
                 self.persist_message_to_jsonl(&nudge_msg).await;
                 loop_state.recovery.max_output_tokens_recovery_count = loop_state
                     .recovery
@@ -3178,7 +3197,8 @@ impl ConversationOrchestrator {
                 if self.cancel_reason_now()
                     != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
                 {
-                    self.inject_user_message(INTERRUPT_MESSAGE).await;
+                    self.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
+                        .await;
                 }
                 return Ok(TurnOutcome::Cancelled);
             }
@@ -3216,16 +3236,24 @@ impl ConversationOrchestrator {
             )
             .await;
             if cancel.is_cancelled() {
-                // claude-code `query.ts:1046-1050`: inject the non-tool-use
-                // interrupt message when the cancel fires mid-API-call
-                // (model was in-flight, no tool_use blocks produced yet).
-                // NOW-ABORT disambiguation: skip the message for a
-                // `Now`-command abort (default behavior unchanged).
-                if result.is_err()
-                    && self.cancel_reason_now()
+                // `execute_one_turn_with_recovery_tracked` includes both the
+                // model request and any tool dispatch it starts. The response
+                // consumer records a cancelled token observed after entering
+                // tool dispatch; all other errors here are request/streaming
+                // cancellation. Native selects its marker from that phase.
+                let interruption_kind = if self.query_tool_dispatch_cancelled() {
+                    Some(QueryUserInterruptionKind::Tools)
+                } else if result.is_err() {
+                    Some(QueryUserInterruptionKind::Streaming)
+                } else {
+                    None
+                };
+                // NOW-ABORT disambiguation: skip the marker for a `Now` command.
+                if let Some(kind) = interruption_kind.filter(|_| {
+                    self.cancel_reason_now()
                         != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
-                {
-                    self.inject_user_message(INTERRUPT_MESSAGE).await;
+                }) {
+                    self.inject_query_user_interruption(kind).await;
                 }
                 return Ok(TurnOutcome::Cancelled);
             }

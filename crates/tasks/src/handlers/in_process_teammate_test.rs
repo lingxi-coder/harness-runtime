@@ -3263,7 +3263,12 @@ impl lingxi_core::host::ToolInvoker for PlanReviewTransport {
     > {
         let mode = ctx.mode_override.unwrap_or_default();
         self.modes.lock().unwrap().push(mode.clone());
-        assert_eq!(ctx.frozen_command_denies, vec!["Bash(rm)"]);
+        assert_eq!(
+            ctx.frozen_command_denies,
+            vec![lingxi_core::types::utf16_json::Utf16JsonProjection::from(
+                "Bash(rm)"
+            )]
+        );
         if name == "Write" && mode == "plan" {
             return Err(lingxi_core::host::tool_invoker::ToolInvokerError::Abort(
                 "plan mode disallows mutation".into(),

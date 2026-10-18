@@ -68,18 +68,16 @@ impl BackgroundSuggestionState {
         self.last_result.clone()
     }
 
-    pub fn record_reply(&mut self, text: &str, needs: Option<&[u16]>) -> bool {
+    pub fn record_reply(&mut self, text: &Utf16JsonProjection, needs: Option<&[u16]>) -> bool {
         let Some(state) = self.persisted.as_mut() else {
             return false;
         };
         if state.string_at("/tempo") != Some("blocked")
             || state.string_units("/needs").as_deref() != needs
-            || state.string_at("/suggestedReply") == Some(text)
+            || state.string_units("/suggestedReply").as_deref() == text.string_units("").as_deref()
         {
             return false;
         }
-        state
-            .set_field("suggestedReply", Utf16JsonProjection::from(text))
-            .is_ok()
+        state.set_field("suggestedReply", text.clone()).is_ok()
     }
 }

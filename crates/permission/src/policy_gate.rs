@@ -66,7 +66,7 @@ use lingxi_core::host::permission_gate::PermissionRequestSource;
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
 #[cfg(test)]
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -1605,17 +1605,20 @@ impl PolicyPermissionGate {
     /// the settings killswitch (`gq()`), which upstream checks first.
     fn fold_call_context(&self, ctx: &PermissionCheckContext) -> FoldedPermissionContext {
         let layers = Self::call_layers(ctx);
-        if layers.is_empty() {
-            return FoldedPermissionContext::default();
-        }
-        fold_permission_layers(
-            &layers,
-            LayerFoldInputs {
-                bypass_killswitch_active: self.policy.bypass_killswitch_active,
-                bypass_permissions_available: self.policy.bypass_permissions_available
-                    || self.effective_mode() == PermissionMode::BypassPermissions,
-            },
-        )
+        let mut folded = if layers.is_empty() {
+            FoldedPermissionContext::default()
+        } else {
+            fold_permission_layers(
+                &layers,
+                LayerFoldInputs {
+                    bypass_killswitch_active: self.policy.bypass_killswitch_active,
+                    bypass_permissions_available: self.policy.bypass_permissions_available
+                        || self.effective_mode() == PermissionMode::BypassPermissions,
+                },
+            )
+        };
+        folded.frozen_command_denies = ctx.frozen_command_denies.clone();
+        folded
     }
 
     /// Authorize under the live overlay PLUS this call's folded layer delta.
@@ -1687,12 +1690,22 @@ impl PolicyPermissionGate {
             &folded.allow_command_rules,
             PermissionBehavior::Allow,
         );
-        Self::extend_command_rules(
-            &mut deny_rules,
-            &folded.deny_command_rules,
-            PermissionBehavior::Deny,
-        );
-        self.fold_command_input_denies(&mut deny_rules);
+        let command_input_denies = self
+            .command_input_denies
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if !folded.frozen_command_denies.is_empty()
+            || !folded.deny_command_rules.is_empty()
+            || !command_input_denies.is_empty()
+        {
+            Self::merge_ordered_command_deny_rules(
+                &mut deny_rules,
+                &folded.frozen_command_denies,
+                &command_input_denies,
+                &folded.deny_command_rules,
+            );
+        }
         // PARITY `Zm` `case "working_directory"`:
         // `if (!ctx.additionalWorkingDirectories.has(dir))
         //    …set(dir, {path: dir, source: "session"})` — an existing entry keeps
@@ -1791,6 +1804,62 @@ impl PolicyPermissionGate {
         }
     }
 
+    /// Merge the fork-time `alwaysDenyRules.command` source before the live
+    /// command bucket, then the current command-input source and per-call
+    /// additions, matching Native `fLn`'s
+    /// `D([...frozen, ...live, ...currentInput, ...additional])` first-occurrence semantics.
+    ///
+    /// Dedupe the source spellings as UTF-16 strings BEFORE parsing rules. Rule
+    /// equality is semantic (`Bash` == `Bash(*)`), whereas Native's array Set
+    /// keeps both distinct source strings and their first-seen order.
+    fn merge_ordered_command_deny_rules(
+        deny_rules: &mut HashMap<PermissionRuleSource, Vec<PermissionRule>>,
+        frozen: &[Utf16JsonProjection],
+        command_input: &[Utf16JsonProjection],
+        additional: &[Utf16JsonProjection],
+    ) {
+        let live_command = deny_rules
+            .remove(&PermissionRuleSource::Command)
+            .unwrap_or_default();
+        let mut seen: HashSet<Vec<u16>> = HashSet::new();
+        let mut ordered_specs = Vec::new();
+        let mut push_exact = |spec: &Utf16JsonProjection| {
+            if let Some(units) = spec.string_units("") {
+                if seen.insert(units) {
+                    ordered_specs.push(spec.clone());
+                }
+            }
+        };
+
+        for spec in frozen {
+            push_exact(spec);
+        }
+        for rule in &live_command {
+            let source = rule
+                .value
+                .original_rule_projection()
+                .cloned()
+                .unwrap_or_else(|| rule.value.to_rule_projection());
+            push_exact(&source);
+        }
+        for spec in command_input.iter().chain(additional) {
+            push_exact(spec);
+        }
+
+        let merged = ordered_specs
+            .iter()
+            .filter_map(PermissionRuleValue::from_rule_projection)
+            .map(|value| PermissionRule {
+                value,
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::Command,
+            })
+            .collect::<Vec<_>>();
+        if !merged.is_empty() {
+            deny_rules.insert(PermissionRuleSource::Command, merged);
+        }
+    }
+
     /// Fold the current input's command denies into a deny bucket about to be
     /// evaluated. Every policy-building path calls this, so the rules behave
     /// exactly like the `command`-source denies upstream stores directly —
@@ -1805,7 +1874,10 @@ impl PolicyPermissionGate {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        Self::extend_command_rules(deny_rules, &specs, PermissionBehavior::Deny);
+        if specs.is_empty() {
+            return;
+        }
+        Self::merge_ordered_command_deny_rules(deny_rules, &[], &specs, &[]);
     }
 
     fn live_policy(&self) -> PermissionPolicy {

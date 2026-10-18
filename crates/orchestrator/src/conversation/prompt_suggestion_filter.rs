@@ -1,4 +1,7 @@
-//! Pure native 2.1.296 normalization/filtering, also used by the differential test.
+//! Pure prompt-suggestion normalization/filtering. `W`, `q`, `b`, and `y` are
+//! bound to Native 2.1.295 `src_202897693.js` (SHA-256
+//! `acf37ad492d7c7b27a6432c0be5dd3388f7f890afce3df697cf078bb752dc74`).
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 const PROMPT_SUGGESTION_XML_RE: &str = r"^<(suggestion|response|output|answer|result)>([\s\S]*)</(suggestion|response|output|answer|result)>$";
 const PROMPT_SUGGESTION_LABEL_RE: &str = r"^\s*(suggested\s+(response|reply|input|prompt)|suggestion|response|reply|answer|output|result|提案|回答|返信|応答|出力|結果|建议|回复|答案|输出|结果|제안|답변|응답|출력|결과)\s*[:：]\s*";
 const PROMPT_SUGGESTION_SILENCE_RE: &str = r"\bsilence is\b|\bstay(s|ing)? silent\b";
@@ -15,8 +18,12 @@ const PROMPT_SUGGESTION_SINGLE_WORD_ALLOWLIST: &[&str] = &[
     "continue", "check", "exit", "quit", "no",
 ];
 
-/// Native `W`, without the later rejection pass.
-pub(crate) fn normalize_prompt_suggestion_response(raw: &str) -> String {
+/// Native `W` over a source string. Matching uses a display projection whose
+/// UTF-16 length matches the source units; every slice is then taken from the
+/// original units so isolated surrogates survive normalization.
+pub(crate) fn normalize_prompt_suggestion_projection(
+    raw: &Utf16JsonProjection,
+) -> Option<Utf16JsonProjection> {
     static XML: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         native_regex(PROMPT_SUGGESTION_XML_RE).expect("valid xml regex")
     });
@@ -25,7 +32,9 @@ pub(crate) fn normalize_prompt_suggestion_response(raw: &str) -> String {
         native_regex(PROMPT_SUGGESTION_LABEL_RE).expect("valid label regex")
     });
     let labeled = &*LABELED;
-    let mut suggestion = raw.trim_matches(js_whitespace);
+    let mut units = raw.string_units("")?;
+    units = trim_source_units(&units);
+    let mut suggestion = String::from_utf16_lossy(&units);
     let ascii_lower = suggestion.to_ascii_lowercase();
     if let Some(caps) = xml.captures(&ascii_lower) {
         let opening = caps.get(1).map_or("", |m| m.as_str());
@@ -37,14 +46,48 @@ pub(crate) fn normalize_prompt_suggestion_response(raw: &str) -> String {
             && !inner.contains(&nested_lower)
             && !inner.contains(&nested_upper)
         {
-            suggestion = inner;
+            let Some(inner_match) = caps.get(2) else {
+                return None;
+            };
+            let start = utf16_offset_at_byte(&ascii_lower, inner_match.start());
+            let end = utf16_offset_at_byte(&ascii_lower, inner_match.end());
+            units = units.get(start..end)?.to_vec();
+            suggestion = String::from_utf16_lossy(&units);
         }
     }
     let ascii_lower = suggestion.to_ascii_lowercase();
     if let Some(label) = labeled.find(&ascii_lower) {
-        suggestion = &suggestion[label.end()..];
+        let end = utf16_offset_at_byte(&ascii_lower, label.end());
+        units = units.get(end..)?.to_vec();
     }
-    suggestion.trim_matches(js_whitespace).to_owned()
+    units = trim_source_units(&units);
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units).ok()
+}
+
+fn utf16_offset_at_byte(text: &str, byte: usize) -> usize {
+    text[..byte].encode_utf16().count()
+}
+
+fn trim_source_units(units: &[u16]) -> Vec<u16> {
+    let display = String::from_utf16_lossy(units);
+    let mut start_byte = display.len();
+    let mut end_byte = 0;
+    let mut found_non_whitespace = false;
+    for (byte, character) in display.char_indices() {
+        if !js_whitespace(character) {
+            if !found_non_whitespace {
+                start_byte = byte;
+                found_non_whitespace = true;
+            }
+            end_byte = byte + character.len_utf8();
+        }
+    }
+    if !found_non_whitespace {
+        return Vec::new();
+    }
+    let start = utf16_offset_at_byte(&display, start_byte);
+    let end = utf16_offset_at_byte(&display, end_byte);
+    units[start..end].to_vec()
 }
 
 /// Native `q`: retain its first-match order for suppression telemetry.
@@ -165,12 +208,40 @@ pub(crate) fn prompt_suggestion_suppression_reason(suggestion: &str) -> Option<&
     None
 }
 
+pub(crate) fn prompt_suggestion_suppression_reason_projection(
+    suggestion: &Utf16JsonProjection,
+) -> Option<&'static str> {
+    let units = suggestion.string_units("")?;
+    let display = String::from_utf16_lossy(&units);
+    prompt_suggestion_suppression_reason(&display)
+}
+
+/// Native `q` selects the first nonempty `W` result, preserving its source
+/// units for every later host or JSON consumer.
+pub(crate) fn first_prompt_suggestion(
+    candidates: &[Utf16JsonProjection],
+) -> Option<Utf16JsonProjection> {
+    candidates.iter().find_map(|candidate| {
+        let normalized = normalize_prompt_suggestion_projection(candidate)?;
+        normalized
+            .string_units("")
+            .is_some_and(|units| !units.is_empty())
+            .then_some(normalized)
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn parse_prompt_suggestion_response(raw: &str) -> Option<String> {
-    let suggestion = normalize_prompt_suggestion_response(raw);
-    prompt_suggestion_suppression_reason(&suggestion)
+    let suggestion = normalize_prompt_suggestion_projection(&Utf16JsonProjection::from(raw))?;
+    prompt_suggestion_suppression_reason_projection(&suggestion)
         .is_none()
-        .then_some(suggestion)
+        .then(|| {
+            String::from_utf16_lossy(
+                &suggestion
+                    .string_units("")
+                    .expect("normalized suggestion is a root string"),
+            )
+        })
 }
 
 fn prompt_suggestion_script_counts(text: &str) -> (u32, u32, u32, u32) {
@@ -210,7 +281,7 @@ fn prompt_suggestion_script_counts(text: &str) -> (u32, u32, u32, u32) {
     (han_n, phonetic_n, hangul_n, other_n)
 }
 
-/// Native 2.1.296 `b`: whitespace tokens, with Han/kana/Thai weighted so CJK
+/// Native 2.1.295 `b`: whitespace tokens, with Han/kana/Thai weighted so CJK
 /// suggestions are not dropped as "one English word".
 fn prompt_suggestion_word_weight(text: &str) -> usize {
     let trimmed = text.trim_matches(js_whitespace);
@@ -233,7 +304,7 @@ fn prompt_suggestion_word_weight(text: &str) -> usize {
     weight.ceil() as usize
 }
 
-/// Native 2.1.296 `y`: Han + kana/Thai + Hangul count. A CJK token with ≥2 of these
+/// Native 2.1.295 `y`: Han + kana/Thai + Hangul count. A CJK token with ≥2 of these
 /// letters is kept even when the whitespace word count is 1.
 fn prompt_suggestion_cjk_count(text: &str) -> u32 {
     let (han, phonetic, hangul, _) = prompt_suggestion_script_counts(text);

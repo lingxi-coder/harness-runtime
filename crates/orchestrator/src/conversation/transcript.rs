@@ -3074,8 +3074,24 @@ impl ConversationOrchestrator {
         raw: &ConversationMessage,
         publication_guard: Option<Arc<dyn HookPublicationGuard>>,
     ) -> ConversationMessage {
-        self.mod_session_append_row(raw, None, false, publication_guard)
-            .await
+        // Native increments its query-local num_turns counter when this
+        // through-wrapper yields a user row. Count here instead of diffing
+        // session history: compaction can rebuild IDs, and fallback cleanup
+        // can later remove already-yielded attempt rows without undoing that
+        // event.
+        let current_before = publication_guard
+            .as_ref()
+            .is_none_or(|guard| guard.is_current());
+        let stored = self
+            .mod_session_append_row(raw, None, false, publication_guard.clone())
+            .await;
+        let current_after = publication_guard
+            .as_ref()
+            .is_none_or(|guard| guard.is_current());
+        if current_before && current_after && matches!(&stored, ConversationMessage::User { .. }) {
+            self.note_query_user_event();
+        }
+        stored
     }
 
     /// Commit the canonical merged assistant turn to session history while

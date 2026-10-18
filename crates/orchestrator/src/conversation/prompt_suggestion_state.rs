@@ -1,8 +1,10 @@
-//! Pure Claude Code 2.1.296 suggestion controls and presentation transitions.
+//! Pure Native prompt-suggestion controls and presentation transitions.
 //!
 //! The native-source oracle executes the shipped functions; persistence, clocks,
 //! feature flags and protocol delivery are deliberately supplied by the caller.
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 pub(crate) const UNUSED_THRESHOLD: f64 = 20.0;
 pub(crate) const NOTICE_CLAIMED: f64 = 21.0;
@@ -268,25 +270,28 @@ pub(crate) fn claim_notice(streak: f64, backing_off: bool) -> Option<f64> {
 }
 
 /// Native composer state. `generated` is not counted until actually displayed.
-#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
 #[serde(tag = "status", rename_all = "lowercase")]
 pub(crate) enum Presentation {
     #[default]
     Empty,
     Generated {
-        text: String,
+        #[serde(serialize_with = "serialize_root_string_projection")]
+        text: Utf16JsonProjection,
         #[serde(rename = "generationRequestId")]
         generation_request_id: Option<String>,
     },
     Shown {
-        text: String,
+        #[serde(serialize_with = "serialize_root_string_projection")]
+        text: Utf16JsonProjection,
         #[serde(rename = "generationRequestId")]
         generation_request_id: Option<String>,
         #[serde(rename = "shownAt")]
         shown_at: f64,
     },
     Accepted {
-        text: String,
+        #[serde(serialize_with = "serialize_root_string_projection")]
+        text: Utf16JsonProjection,
         #[serde(rename = "generationRequestId")]
         generation_request_id: Option<String>,
         #[serde(rename = "shownAt")]
@@ -294,6 +299,116 @@ pub(crate) enum Presentation {
         #[serde(rename = "acceptedAt")]
         accepted_at: f64,
     },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawPresentationFields {
+    status: String,
+    #[serde(default)]
+    text: Option<Box<RawValue>>,
+    #[serde(default)]
+    generation_request_id: Option<Box<RawValue>>,
+    #[serde(default)]
+    shown_at: Option<Box<RawValue>>,
+    #[serde(default)]
+    accepted_at: Option<Box<RawValue>>,
+}
+
+impl<'de> Deserialize<'de> for Presentation {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        let fields: RawPresentationFields =
+            serde_json::from_str(raw.get()).map_err(serde::de::Error::custom)?;
+
+        match fields.status.as_str() {
+            "empty" => Ok(Self::Empty),
+            "generated" => Ok(Self::Generated {
+                text: parse_presentation_text::<D::Error>(fields.text.as_deref())?,
+                generation_request_id: parse_optional_raw_field::<String, D::Error>(
+                    fields.generation_request_id.as_deref(),
+                )?,
+            }),
+            "shown" => Ok(Self::Shown {
+                text: parse_presentation_text::<D::Error>(fields.text.as_deref())?,
+                generation_request_id: parse_optional_raw_field::<String, D::Error>(
+                    fields.generation_request_id.as_deref(),
+                )?,
+                shown_at: parse_required_raw_field::<f64, D::Error>(
+                    fields.shown_at.as_deref(),
+                    "shownAt",
+                )?,
+            }),
+            "accepted" => Ok(Self::Accepted {
+                text: parse_presentation_text::<D::Error>(fields.text.as_deref())?,
+                generation_request_id: parse_optional_raw_field::<String, D::Error>(
+                    fields.generation_request_id.as_deref(),
+                )?,
+                shown_at: parse_required_raw_field::<f64, D::Error>(
+                    fields.shown_at.as_deref(),
+                    "shownAt",
+                )?,
+                accepted_at: parse_required_raw_field::<f64, D::Error>(
+                    fields.accepted_at.as_deref(),
+                    "acceptedAt",
+                )?,
+            }),
+            other => Err(<D::Error as serde::de::Error>::unknown_variant(
+                other,
+                &["empty", "generated", "shown", "accepted"],
+            )),
+        }
+    }
+}
+
+fn parse_optional_raw_field<T, E>(raw: Option<&RawValue>) -> Result<Option<T>, E>
+where
+    T: serde::de::DeserializeOwned,
+    E: serde::de::Error,
+{
+    raw.map(|raw| serde_json::from_str(raw.get()).map_err(E::custom))
+        .transpose()
+}
+
+fn parse_required_raw_field<T, E>(raw: Option<&RawValue>, field: &'static str) -> Result<T, E>
+where
+    T: serde::de::DeserializeOwned,
+    E: serde::de::Error,
+{
+    let raw = raw.ok_or_else(|| E::missing_field(field))?;
+    serde_json::from_str(raw.get()).map_err(E::custom)
+}
+
+fn parse_presentation_text<E>(raw: Option<&RawValue>) -> Result<Utf16JsonProjection, E>
+where
+    E: serde::de::Error,
+{
+    let raw = raw.ok_or_else(|| E::missing_field("text"))?;
+    let projection = Utf16JsonProjection::parse(raw.get()).map_err(E::custom)?;
+    if projection.string_units("").is_none() {
+        return Err(E::custom(
+            "prompt suggestion presentation must be a root JSON string",
+        ));
+    }
+    Ok(projection)
+}
+
+fn serialize_root_string_projection<S>(
+    text: &Utf16JsonProjection,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if text.string_units("").is_none() {
+        return Err(serde::ser::Error::custom(
+            "prompt suggestion presentation must be a root JSON string",
+        ));
+    }
+    lingxi_core::types::utf16_json::raw_json_serde::serialize(text, serializer)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -318,7 +433,7 @@ impl Presentation {
         } = self
         {
             *self = Self::Shown {
-                text: std::mem::take(text),
+                text: std::mem::replace(text, Utf16JsonProjection::from("")),
                 generation_request_id: generation_request_id.take(),
                 shown_at: now_ms,
             };
@@ -339,7 +454,7 @@ impl Presentation {
                 ..
             } => {
                 *self = Self::Accepted {
-                    text: std::mem::take(text),
+                    text: std::mem::replace(text, Utf16JsonProjection::from("")),
                     generation_request_id: generation_request_id.take(),
                     shown_at: *shown_at,
                     accepted_at: now_ms,
@@ -370,13 +485,17 @@ impl Presentation {
             _ => return None,
         };
         let via_tab = accepted_at > shown_at;
-        let accepted = via_tab || input.to_lowercase() == text.to_lowercase();
+        let text_units = text
+            .string_units("")
+            .expect("prompt suggestion presentation is a root string");
+        let input_units = input.encode_utf16().collect::<Vec<_>>();
+        let accepted = via_tab || lowercase_utf16(&input_units) == lowercase_utf16(&text_units);
         let at = if accepted && accepted_at != 0.0 {
             accepted_at
         } else {
             now_ms
         };
-        let denominator = text.encode_utf16().count().max(1) as f64;
+        let denominator = text_units.len().max(1) as f64;
         let outcome = SubmissionOutcome {
             accepted,
             accept_method: accepted.then_some(if via_tab { "tab" } else { "enter" }),
@@ -389,5 +508,73 @@ impl Presentation {
             *self = Self::Empty;
         }
         Some(outcome)
+    }
+}
+
+fn lowercase_utf16(units: &[u16]) -> Vec<u16> {
+    let mut output = Vec::with_capacity(units.len());
+    let mut run = String::new();
+    for decoded in char::decode_utf16(units.iter().copied()) {
+        match decoded {
+            Ok(character) => run.push(character),
+            Err(error) => {
+                output.extend(run.to_lowercase().encode_utf16());
+                run.clear();
+                output.push(error.unpaired_surrogate());
+            }
+        }
+    }
+    output.extend(run.to_lowercase().encode_utf16());
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presentation_json_round_trip_preserves_unpaired_surrogate_units() {
+        let source = r#"{"status":"shown","text":"left\ud800right","generationRequestId":null,"shownAt":1.0}"#;
+        let decoded: Presentation = serde_json::from_str(source).unwrap();
+        let text_units = match &decoded {
+            Presentation::Shown { text, .. } => text.string_units("").unwrap(),
+            _ => panic!("expected shown presentation"),
+        };
+        assert_eq!(
+            text_units,
+            [
+                b'l' as u16,
+                b'e' as u16,
+                b'f' as u16,
+                b't' as u16,
+                0xd800,
+                b'r' as u16,
+                b'i' as u16,
+                b'g' as u16,
+                b'h' as u16,
+                b't' as u16,
+            ]
+        );
+
+        let encoded = serde_json::to_string(&decoded).unwrap();
+        let wire = Utf16JsonProjection::parse(&encoded).unwrap();
+        assert_eq!(wire.string_units("/text").unwrap(), text_units);
+        let replayed: Presentation = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(replayed, decoded);
+    }
+
+    #[test]
+    fn submission_does_not_conflate_unpaired_source_with_replacement_character() {
+        let suggestion = Utf16JsonProjection::root_string("�".into(), vec![0xd800]).unwrap();
+        let mut presentation = Presentation::Shown {
+            text: suggestion,
+            generation_request_id: None,
+            shown_at: 1.0,
+        };
+
+        let outcome = presentation.submission("�", 2.0, false).unwrap();
+
+        assert!(!outcome.accepted);
+        assert_eq!(outcome.accept_method, None);
     }
 }

@@ -2650,7 +2650,7 @@ pub struct PromptSuggestionContext {
 /// The native suggestion query result; the HTTP request id is internal telemetry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptSuggestionResult {
-    pub suggestion: String,
+    pub suggestion: Utf16JsonProjection,
     pub generation_request_id: Option<String>,
 }
 
@@ -4375,7 +4375,13 @@ pub trait OutputStream: Send + Sync {
     async fn emit_prompt_suggestion_state(&self, _enabled: bool, _notice: Option<&str>) {}
 
     /// Ephemeral completion of a background query, anchored to its parent reply.
-    async fn emit_prompt_suggestion(&self, _session_id: &str, _uuid: &str, _suggestion: &str) {}
+    async fn emit_prompt_suggestion(
+        &self,
+        _session_id: &str,
+        _uuid: &str,
+        _suggestion: &Utf16JsonProjection,
+    ) {
+    }
 
     /// Emit when compaction has STARTED (before the summarizer call). The
     /// consumer (TUI / CLI / bridge) should display a progress indicator

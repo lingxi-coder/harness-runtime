@@ -513,11 +513,49 @@ mod tests {
     async fn a_row_round_trips_its_full_launch_configuration() {
         let dir = tempdir().unwrap();
         let id = lingxi_core::types::AgentId::new();
-        let r = row(id);
+        let mut r = row(id);
+        let lone_units = "Bash(echo "
+            .encode_utf16()
+            .chain([0xd800])
+            .chain(")".encode_utf16())
+            .collect::<Vec<_>>();
+        let lone = lingxi_core::types::utf16_json::Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&lone_units),
+            lone_units.clone(),
+        )
+        .unwrap();
+        let replacement = lingxi_core::types::utf16_json::Utf16JsonProjection::from("Bash(echo �)");
+        r.request.frozen_command_denies = vec![lone.clone(), replacement.clone(), lone.clone()];
         write_row(dir.path(), &r).await.unwrap();
+
+        // The cold-restore launch configuration lives in the immutable
+        // payload, and the request's serde adapter must write real JSON
+        // strings while retaining exact UTF-16 units and duplicate order.
+        let metadata = tokio::fs::read(row_path(dir.path(), &id.to_string()))
+            .await
+            .unwrap();
+        let stored: StoredParkedAgentRow = serde_json::from_slice(&metadata).unwrap();
+        let payload = tokio::fs::read_to_string(dir.path().join(stored.handback_payload.file))
+            .await
+            .unwrap();
+        assert!(
+            payload.contains(
+                r#""frozen_command_denies":["Bash(echo \ud800)","Bash(echo �)","Bash(echo \ud800)"]"#
+            ),
+            "parked request payload must store a source string array: {payload}"
+        );
 
         let got = read_row(dir.path(), &id.to_string()).await.expect("row");
         assert_eq!(got, r);
+        assert_eq!(
+            got.request.frozen_command_denies,
+            vec![lone.clone(), replacement, lone],
+            "cold restore request keeps source units, U+FFFD distinction, and ordered duplicate"
+        );
+        assert_eq!(
+            got.request.frozen_command_denies[0].string_units(""),
+            Some(lone_units)
+        );
         // The pieces a faithful rebuild needs, not just an approximation.
         assert_eq!(got.request.model.as_deref(), Some("claude-opus-5"));
         assert_eq!(got.request.cwd.as_deref(), Some("/repo"));

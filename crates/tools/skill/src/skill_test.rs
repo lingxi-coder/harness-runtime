@@ -2280,8 +2280,8 @@ mod fork_dispatch_tests {
     }
 
     /// The command denies in force at LAUNCH are snapshotted onto the spawn, so
-    /// the scoping record persists them. Deterministic order — `deny_rules` is
-    /// keyed by source and a HashMap has no stable iteration order.
+    /// the scoping record persists them. Native copies the ordered command
+    /// array as-is; the source bucket's order and duplicate entries survive.
     #[tokio::test]
     async fn a_fork_freezes_the_command_denies_in_force_at_launch() {
         use permission::rule::{
@@ -2290,6 +2290,25 @@ mod fork_dispatch_tests {
         let spawner: Arc<RecordingSpawner> = Arc::default();
         let mut ctx = shell_test_ctx(out());
         let mut policy = permission::PermissionPolicy::new(permission::PermissionMode::Default);
+        let source_rule = |unit: u16| {
+            let mut content_units = "echo ".encode_utf16().collect::<Vec<_>>();
+            content_units.push(unit);
+            PermissionRule {
+                value: PermissionRuleValue {
+                    tool_name: "Bash".into(),
+                    rule_content: Some(
+                        Utf16JsonProjection::root_string(
+                            String::from_utf16_lossy(&content_units),
+                            content_units,
+                        )
+                        .unwrap(),
+                    ),
+                    original_rule: None,
+                },
+                behavior: PermissionBehavior::Deny,
+                source: PermissionRuleSource::Command,
+            }
+        };
         // `alwaysDenyRules.command` is keyed by rule SOURCE, not by tool. The
         // `Command` bucket is frozen WHATEVER tool its rules name — it is the
         // volatile one (`/permissions add`, skill frontmatter), which a resume
@@ -2313,6 +2332,18 @@ mod fork_dispatch_tests {
                     behavior: PermissionBehavior::Deny,
                     source: PermissionRuleSource::Command,
                 },
+                // Current valid tool-wide spelling must remain lexical data,
+                // even when the parsed permission rule canonicalizes to Bash.
+                PermissionRule {
+                    value: PermissionRuleValue::from_rule_string("Bash(*)"),
+                    behavior: PermissionBehavior::Deny,
+                    source: PermissionRuleSource::Command,
+                },
+                // Equal and replacement-looking malformed source values must
+                // retain their original order and exact UTF-16 identities.
+                source_rule(0xd800),
+                source_rule(0xd800),
+                source_rule(0xfffd),
             ],
         );
         // A different SOURCE is not frozen, even for the same tool.
@@ -2339,11 +2370,25 @@ mod fork_dispatch_tests {
         .expect("fork dispatch succeeds");
 
         let req = spawner.seen.lock().unwrap().clone().expect("spawned");
+        let mut d800_rule = "Bash(echo ".encode_utf16().collect::<Vec<_>>();
+        d800_rule.push(0xd800);
+        d800_rule.extend(")".encode_utf16());
+        let d800_projection =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&d800_rule), d800_rule)
+                .unwrap();
+        let replacement_rule = Utf16JsonProjection::from("Bash(echo �)");
         assert_eq!(
             req.frozen_command_denies,
-            vec!["Bash(rm:*)".to_string(), "Write".to_string()],
-            "the whole command SOURCE bucket is frozen, regardless of tool, and \
-             nothing from another source is"
+            vec![
+                "Bash(rm:*)".into(),
+                "Write".into(),
+                "Bash(*)".into(),
+                d800_projection.clone(),
+                d800_projection,
+                replacement_rule,
+            ],
+            "the whole command SOURCE bucket is copied in array order with duplicates, \
+             while U+D800 and U+FFFD remain different identities; nothing from another source is"
         );
     }
 

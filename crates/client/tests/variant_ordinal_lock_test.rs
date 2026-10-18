@@ -1,13 +1,14 @@
-//! Positional variant locks for the current Client protocol 28.0.0 baseline.
+//! Positional variant locks for the current Client protocol 29.0.0 baseline.
 //!
 //! UniFFI encodes each enum variant by declaration index, so inserting, removing,
 //! or reordering a variant can change the mobile ABI even when JSON tags remain
 //! stable. The arrays below retain the full enum prefix frozen at protocol 27.0.0.
-//! Protocol 28 adds a required field but leaves all enum declarations in place,
-//! so the positional ABI prefix stays unchanged. A later append remains
+//! Protocol 28 added a required field and protocol 29 changed a field carrier;
+//! both leave all enum declarations in place, so the positional ABI prefix stays
+//! unchanged. A later append remains
 //! compatible with this frozen prefix; any ordinal change requires a deliberate
 //! major-version re-cut. The wire contract major is separately recorded in
-//! snapshots/blessed_major.txt (currently 28).
+//! snapshots/blessed_major.txt (currently 29).
 
 const COMMANDS_SRC: &str = include_str!("../src/protocol/commands.rs");
 const EVENTS_SRC: &str = include_str!("../src/protocol/events.rs");

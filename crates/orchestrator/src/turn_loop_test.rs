@@ -3785,7 +3785,9 @@ mod read_file_state_tests {
             persisted
                 .get(uses[0].0.as_str())
                 .and_then(|value| value.string_at("")),
-            Some("Error: tool.call step resolved ParserError with a result that does not match its output shape: output parser unavailable")
+            Some(
+                "Error: tool.call step resolved ParserError with a result that does not match its output shape: output parser unavailable"
+            )
         );
     }
 
@@ -8618,11 +8620,19 @@ mod pre_tool_hook_tests {
             }],
             Some("tool_use"),
         );
+        let final_resp = mock_message_response(
+            vec![llm_runtime::ContentBlock::Text {
+                text: "done".into(),
+                cache_control: None,
+                citations: None,
+            }],
+            Some("end_turn"),
+        );
         let mut registry = ToolRegistry::new();
         registry.register_builtin(Arc::new(InjectingTool) as Arc<dyn Tool>);
         let orch = ConversationOrchestrator::new(
             OrchestratorConfig::default(),
-            Arc::new(MockApiClient::new(vec![api_resp])),
+            Arc::new(MockApiClient::new(vec![api_resp, final_resp])),
             Arc::new(registry),
             pre_hook_executor(HookResponse::default()),
             Arc::new(crate::test_support::NoOpPermissionGate),
@@ -8630,16 +8640,14 @@ mod pre_tool_hook_tests {
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
         );
-        let _ = crate::turn_loop::execute_one_turn_with_recovery_tracked(
-            &orch,
-            None,
-            &mut crate::turn_loop::RecoveryState::default(),
-            None,
-            0,
-        )
-        .await
-        .expect("turn step")
-        .0;
+        orch.run_turn_with_cancel("query prompt", tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("batched turn completes after the injected tool row");
+        assert_eq!(
+            orch.completed_query_user_events(),
+            Some((2, None)),
+            "the actual batched tool-result and injected user rows both count"
+        );
         let h = orch.session.lock().await.history.clone();
         // Locate the tool_result user message; the very next message must be the
         // injected expanded-skill-prompt user message.
@@ -11505,8 +11513,8 @@ mod pre_tool_hook_tests {
 mod pre_cancel_tests {
     use crate::conversation::ConversationOrchestrator;
     use crate::test_support::{
-        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
-        StaticMemoryProvider,
+        mock_message_response, noop_hook_executor, MockApiClient, MockOutputStream,
+        NoOpPermissionGate, StaticMemoryProvider,
     };
     use crate::turn_loop::{dispatch_tool_uses_tracked, CANCEL_MESSAGE};
     use crate::OrchestratorConfig;
@@ -11942,6 +11950,59 @@ mod pre_cancel_tests {
         assert_eq!(
             output.denial_snapshot().await,
             vec![(id, "interrupted".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_during_batched_tool_dispatch_records_tool_interruption() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let tool_use_id = ToolUseId::new();
+        let response = mock_message_response(
+            vec![llm_runtime::ContentBlock::ToolCall {
+                id: tool_use_id.to_string(),
+                name: "NonCooperativeCancel".into(),
+                input: lingxi_llm_client::protocol::JsonPayload::parse("{}").unwrap(),
+            }],
+            Some("tool_use"),
+        );
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(NonCooperativeCancelTool {
+            started: started.clone(),
+        }) as Arc<dyn Tool>);
+        let orch = ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![response])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        );
+        let cancel = CancellationToken::new();
+        let cancel_after_start = cancel.clone();
+        let cancel_task = tokio::spawn(async move {
+            started.notified().await;
+            cancel_after_start.cancel();
+        });
+
+        let outcome = orch
+            .run_turn_with_cancel("query prompt", cancel)
+            .await
+            .expect("a cancelled tool turn is a completed cancellation outcome");
+        cancel_task.await.expect("cancel task");
+
+        assert!(matches!(
+            outcome,
+            crate::conversation::TurnOutcome::Cancelled
+        ));
+        assert_eq!(
+            orch.completed_query_user_events(),
+            Some((
+                2,
+                Some(crate::conversation::QueryUserInterruptionKind::Tools)
+            )),
+            "the accepted tool_result and terminal tool-use marker both count"
         );
     }
 

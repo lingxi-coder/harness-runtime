@@ -264,3 +264,36 @@ async fn accepted_assistant_row_is_w1_current_row_but_not_prequery_history() {
     assert_eq!(captured[0].assistant_message, Some(accepted_row.clone()));
     assert!(captured[0].same_turn_tool_uses.is_empty());
 }
+
+#[tokio::test]
+async fn appended_batched_tool_injection_contributes_query_user_event() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let orch = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(Vec::new())),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        root.path().to_path_buf(),
+    );
+    orch.begin_turn_metrics();
+
+    crate::turn_loop::append_tool_injected_messages(
+        &orch,
+        vec![(
+            ConversationMessage::user_meta(MessageId::new(), "post-tool injected user".into()),
+            ToolUseId::new(),
+        )],
+        None,
+    )
+    .await;
+    orch.complete_turn_metrics(None);
+
+    assert_eq!(
+        orch.completed_query_user_events(),
+        Some((1, None)),
+        "the accepted meta user row appended by the batched helper is a query yield"
+    );
+}

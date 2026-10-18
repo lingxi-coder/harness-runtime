@@ -111,9 +111,11 @@ pub struct ForkedSkillScoping {
     #[serde(
         rename = "frozenCommandDenies",
         default,
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "source_string_array_serde::serialize",
+        deserialize_with = "source_string_array_serde::deserialize"
     )]
-    pub frozen_command_denies: Option<Vec<String>>,
+    pub frozen_command_denies: Option<Vec<Utf16JsonProjection>>,
 }
 
 impl ForkedSkillScoping {
@@ -136,12 +138,77 @@ impl ForkedSkillScoping {
         }
         if let Some(denies) = &self.frozen_command_denies {
             if denies.len() > FROZEN_DENY_MAX_COUNT
-                || denies.iter().any(|d| d.len() > FROZEN_DENY_MAX_LEN)
+                || denies.iter().any(|deny| {
+                    deny.string_units("")
+                        .is_none_or(|units| units.len() > FROZEN_DENY_MAX_LEN)
+                })
             {
                 return false;
             }
         }
         true
+    }
+}
+
+/// Serde adapter for an optional array of source-preserving JSON strings.
+/// `Utf16JsonProjection`'s derived serde shape is its internal flat arena, so
+/// sidecar fields must use this adapter to retain the native `string[]` shape
+/// while preserving isolated UTF-16 units such as `\ud800`.
+mod source_string_array_serde {
+    use lingxi_core::types::utf16_json::Utf16JsonProjection;
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(
+        values: &Option<Vec<Utf16JsonProjection>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match values {
+            Some(values) => {
+                if values.iter().any(|value| value.string_units("").is_none()) {
+                    return Err(serde::ser::Error::custom(
+                        "expected frozen command deny strings",
+                    ));
+                }
+                let array = Utf16JsonProjection::array(values.clone())
+                    .map_err(serde::ser::Error::custom)?;
+                lingxi_core::types::utf16_json::raw_json_serde::serialize(&array, serializer)
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(
+        deserializer: D,
+    ) -> Result<Option<Vec<Utf16JsonProjection>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Parsing the raw array through the flat projection preserves every
+        // element's exact UTF-16 units. Unlike Option<Vec<_>>'s default serde
+        // behavior, an explicit null is rejected: the Native field is
+        // `.optional()` over an array and null is not an array.
+        let array = lingxi_core::types::utf16_json::raw_json_serde::deserialize(deserializer)?;
+        let Some(length) = array.at_pointer("").and_then(|root| root.array_len()) else {
+            return Err(serde::de::Error::custom(
+                "expected frozen command deny string array",
+            ));
+        };
+        let mut values = Vec::with_capacity(length);
+        for index in 0..length {
+            let value = array
+                .subprojection(&format!("/{index}"))
+                .map_err(serde::de::Error::custom)?;
+            if value.string_units("").is_none() {
+                return Err(serde::de::Error::custom(
+                    "expected frozen command deny string",
+                ));
+            }
+            values.push(value);
+        }
+        Ok(Some(values))
     }
 }
 
@@ -494,24 +561,12 @@ pub fn check_fork_capable(
 /// Build the command deny list a resumed fork runs under (claude `Ofo`'s
 /// `frozenCommandDenies !== undefined` branch).
 ///
-/// WHY THIS HAS NO CALLER IN-PROCESS, verified rather than assumed:
-/// `PolicyPermissionGate` holds a BOOT-snapshot `Arc<PermissionPolicy>` — only
-/// the mode and a few overrides are live, the allow/deny RULES are fixed for
-/// the process. Claude needs the union because its resume rebuilds the
-/// permission context from live app state, so a settings edit made while a fork
-/// was parked could REMOVE a deny that was in force at launch. In this port the
-/// two cannot drift within a process: frozen, live, and boot are the same set.
-///
-/// SUPERSEDED as the resume transform: the replay now runs through the general
-/// permission-LAYER fold instead. `tool_api::tool_invoker_impl::
-/// frozen_command_deny_layers` turns the frozen set into a `disallowed_tools`
-/// layer, and `PolicyPermissionGate::extend_command_rules` APPENDS it to the
-/// live command-deny bucket — which is the same "frozen first, live unioned in,
-/// the set only ever grows" result, expressed once in the fold rather than twice.
-/// This function is kept as the standalone statement of that ordering (and for
-/// the skill's own `disallowed` list, which the layer path does not carry); do
-/// not wire it at the resume boundary without first removing the layer path, or
-/// the union will be applied twice.
+/// This standalone utility expresses the Native first-seen union. Production
+/// replay passes frozen rules as a distinct permission-check context field;
+/// `PolicyPermissionGate` combines that prefix with the live Command source,
+/// the current input's command rules, and per-call additions before parsing.
+/// The gate reads live rules, so a parked fork retains its frozen snapshot
+/// even when settings change before it resumes.
 ///
 /// Order is `frozen`, then `live`, then the skill's own `disallowed` —
 /// deduplicated, first occurrence winning. Putting the FROZEN rules first is
@@ -521,14 +576,13 @@ pub fn check_fork_capable(
 /// added since the fork launched still apply — the set only ever grows.
 #[must_use]
 pub fn union_frozen_command_denies(
-    frozen: &[String],
-    live: &[String],
-    disallowed: &[String],
-) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
+    frozen: &[Utf16JsonProjection],
+    live: &[Utf16JsonProjection],
+    disallowed: &[Utf16JsonProjection],
+) -> Vec<Utf16JsonProjection> {
     let mut out = Vec::with_capacity(frozen.len() + live.len() + disallowed.len());
     for rule in frozen.iter().chain(live).chain(disallowed) {
-        if seen.insert(rule.as_str()) {
+        if !out.iter().any(|seen| seen == rule) {
             out.push(rule.clone());
         }
     }
@@ -785,17 +839,43 @@ mod tests {
     fn scoping_validation_matches_the_schema_bounds() {
         let mut rec = scoping("s");
         assert!(rec.is_valid());
-        rec.frozen_command_denies = Some(vec!["x".repeat(FROZEN_DENY_MAX_LEN)]);
+        rec.frozen_command_denies = Some(vec!["x".repeat(FROZEN_DENY_MAX_LEN).into()]);
         assert!(rec.is_valid());
-        rec.frozen_command_denies = Some(vec!["x".repeat(FROZEN_DENY_MAX_LEN + 1)]);
+        rec.frozen_command_denies = Some(vec!["x".repeat(FROZEN_DENY_MAX_LEN + 1).into()]);
         assert!(!rec.is_valid(), "a rule over 1024 chars is unpersistable");
-        rec.frozen_command_denies = Some(vec!["d".into(); FROZEN_DENY_MAX_COUNT + 1]);
+        rec.frozen_command_denies = Some(vec![
+            Utf16JsonProjection::from("d");
+            FROZEN_DENY_MAX_COUNT + 1
+        ]);
         assert!(!rec.is_valid(), "over 1000 rules is unpersistable");
         rec.frozen_command_denies = None;
         rec.effort = Some(Effort::Steps(EFFORT_MAX));
         assert!(rec.is_valid());
         rec.effort = Some(Effort::Steps(EFFORT_MAX + 1));
         assert!(!rec.is_valid());
+    }
+
+    #[test]
+    fn frozen_deny_length_uses_utf16_units_and_accepts_exact_1024_boundary() {
+        let mut units = "😀".repeat(511).encode_utf16().collect::<Vec<_>>(); // 1022 UTF-16 units
+        units.extend(['a' as u16, 'b' as u16]);
+        let at_limit =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units.clone())
+                .unwrap();
+        let mut rec = scoping("s");
+        rec.frozen_command_denies = Some(vec![at_limit]);
+        assert!(rec.is_valid(), "1024 UTF-16 units satisfy Native's max");
+
+        units.push('c' as u16);
+        rec.frozen_command_denies = Some(vec![Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&units),
+            units,
+        )
+        .unwrap()]);
+        assert!(
+            !rec.is_valid(),
+            "1025 UTF-16 units exceed Native's max even when most are emoji"
+        );
     }
 
     // ── resume gate ─────────────────────────────────────────────────────────
@@ -933,23 +1013,95 @@ mod tests {
     /// remove one that was in force at launch.
     #[test]
     fn the_deny_union_keeps_frozen_rules_and_only_grows() {
-        let frozen = vec!["Bash(rm:*)".to_string(), "Bash(curl:*)".to_string()];
-        let live = vec!["Bash(curl:*)".to_string(), "Bash(dd:*)".to_string()];
-        let disallowed = vec!["Write".to_string()];
+        let frozen = vec!["Bash(rm:*)".into(), "Bash(curl:*)".into()];
+        let live = vec!["Bash(curl:*)".into(), "Bash(dd:*)".into()];
+        let disallowed = vec!["Write".into()];
         assert_eq!(
             union_frozen_command_denies(&frozen, &live, &disallowed),
-            vec!["Bash(rm:*)", "Bash(curl:*)", "Bash(dd:*)", "Write"]
+            vec![
+                "Bash(rm:*)".into(),
+                "Bash(curl:*)".into(),
+                "Bash(dd:*)".into(),
+                "Write".into()
+            ]
         );
         // The rule the live settings dropped is still enforced.
-        assert!(union_frozen_command_denies(&frozen, &[], &[]).contains(&"Bash(rm:*)".to_string()));
+        assert!(union_frozen_command_denies(&frozen, &[], &[]).contains(&"Bash(rm:*)".into()));
     }
 
     #[test]
     fn the_deny_union_dedupes_keeping_the_first_occurrence() {
-        let dup = vec!["A".to_string(), "A".to_string()];
+        let dup = vec!["A".into(), "A".into()];
         assert_eq!(
             union_frozen_command_denies(&dup, &dup, &dup),
-            vec!["A".to_string()]
+            vec!["A".into()]
         );
+
+        let mut units = "Bash(echo ".encode_utf16().collect::<Vec<_>>();
+        units.push(0xd800);
+        units.extend(")".encode_utf16());
+        let exact =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units).unwrap();
+        let replacement = Utf16JsonProjection::from("Bash(echo �)");
+        assert_eq!(
+            union_frozen_command_denies(
+                &[exact.clone(), exact.clone()],
+                std::slice::from_ref(&replacement),
+                std::slice::from_ref(&replacement),
+            ),
+            vec![exact, replacement],
+            "dedup collapses exact UTF-16 duplicates but keeps D800 distinct from U+FFFD"
+        );
+    }
+
+    #[tokio::test]
+    async fn frozen_deny_sidecar_round_trip_keeps_lone_surrogate_and_exact_identity() {
+        let dir = tempdir().unwrap();
+        let jsonl = dir.path().join("surrogate-deny.jsonl");
+        let mut deny_units = "Bash(echo ".encode_utf16().collect::<Vec<_>>();
+        deny_units.push(0xd800);
+        deny_units.extend(")".encode_utf16());
+        let exact = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&deny_units),
+            deny_units.clone(),
+        )
+        .unwrap();
+        let replacement = Utf16JsonProjection::from("Bash(echo �)");
+        let mut record = scoping("skill");
+        record.frozen_command_denies =
+            Some(vec![exact.clone(), replacement.clone(), exact.clone()]);
+
+        write_fork_records(&jsonl, &record).await.unwrap();
+        let paths = forked_skill_paths(&jsonl);
+        let wire = tokio::fs::read_to_string(paths.scoping).await.unwrap();
+        assert!(
+            wire.contains(
+                r#""frozenCommandDenies":["Bash(echo \ud800)","Bash(echo �)","Bash(echo \ud800)"]"#
+            ),
+            "{wire}"
+        );
+        let ScopingStatus::Valid(read_back) = read_scoping(&jsonl).await else {
+            panic!("source string-array record should cold-read");
+        };
+        let denies = read_back.frozen_command_denies.unwrap();
+        assert_eq!(denies, vec![exact.clone(), replacement, exact]);
+        assert_ne!(
+            denies[0], denies[1],
+            "D800 and U+FFFD are distinct identities"
+        );
+    }
+
+    #[test]
+    fn frozen_deny_sidecar_rejects_non_string_array_values() {
+        for source in [
+            r#"{"skillName":"s","attributionName":"s","frozenCommandDenies":null}"#,
+            r#"{"skillName":"s","attributionName":"s","frozenCommandDenies":[1]}"#,
+            r#"{"skillName":"s","attributionName":"s","frozenCommandDenies":[{}]}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ForkedSkillScoping>(source).is_err(),
+                "sidecar accepts only an omitted field or an array of strings: {source}"
+            );
+        }
     }
 }

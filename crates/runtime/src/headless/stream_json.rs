@@ -1540,26 +1540,42 @@ impl StreamJsonStream {
         }
     }
 
-    fn build_prompt_suggestion_frame(session_id: &str, suggestion: &str, uuid: &str) -> Value {
-        let mut obj = serde_json::Map::new();
-        obj.insert("type".into(), json!("prompt_suggestion"));
-        obj.insert("suggestion".into(), json!(suggestion));
-        obj.insert("uuid".into(), json!(uuid));
-        obj.insert("session_id".into(), json!(session_id));
-        Value::Object(obj)
+    fn build_prompt_suggestion_frame(
+        session_id: &str,
+        suggestion: &Utf16JsonProjection,
+        uuid: &str,
+    ) -> Utf16JsonProjection {
+        assert!(
+            suggestion.string_units("").is_some(),
+            "prompt suggestion must be a root JSON string"
+        );
+        Utf16JsonProjection::object(vec![
+            (
+                "type".into(),
+                Utf16JsonProjection::from("prompt_suggestion"),
+            ),
+            ("suggestion".into(), suggestion.clone()),
+            ("uuid".into(), Utf16JsonProjection::from(uuid)),
+            ("session_id".into(), Utf16JsonProjection::from(session_id)),
+        ])
+        .expect("prompt suggestion frame is an object")
     }
 
     /// Enqueue a `prompt_suggestion` frame for non-empty suggestion text.
     ///
     /// The frame is omitted when output frames are suppressed or the text is blank.
-    pub async fn emit_prompt_suggestion(&self, suggestion: &str) {
-        if self.suppress_frames || suggestion.trim().is_empty() {
+    pub async fn emit_prompt_suggestion(&self, suggestion: &Utf16JsonProjection) {
+        let Some(suggestion_text) = suggestion.string_at("") else {
+            self.abort_delivery("prompt suggestion must be a root-string projection");
+            return;
+        };
+        if self.suppress_frames || suggestion_text.trim().is_empty() {
             return;
         }
         let session_id = self.session_id.lock().await.clone();
         let uuid = uuid::Uuid::new_v4().to_string();
         let frame = Self::build_prompt_suggestion_frame(&session_id, suggestion, &uuid);
-        self.enqueue(&frame);
+        self.enqueue_projected(&frame);
     }
 
     pub(crate) fn holds_print_results(&self) -> bool {
@@ -1621,9 +1637,9 @@ impl StreamJsonStream {
         }
     }
 
-    pub(crate) fn emit_prompt_suggestion_frame(&self, frame: &Value) {
+    pub(crate) fn emit_prompt_suggestion_frame(&self, frame: &Utf16JsonProjection) {
         if !self.suppress_frames {
-            let _ = self.with_result_publication(|| self.enqueue(frame));
+            let _ = self.with_result_publication(|| self.enqueue_projected(frame));
         }
     }
 
@@ -5240,22 +5256,23 @@ mod tests {
 
     #[test]
     fn prompt_suggestion_frame_matches_expected_shape() {
+        let suggestion = Utf16JsonProjection::from("How should I test this?");
         let frame = StreamJsonStream::build_prompt_suggestion_frame(
             "sess-prompt",
-            "How should I test this?",
+            &suggestion,
             "uuid-prompt",
         );
-        let keys: Vec<&str> = frame
-            .as_object()
-            .expect("object")
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(keys, vec!["type", "suggestion", "uuid", "session_id"]);
-        assert_eq!(frame["type"], "prompt_suggestion");
-        assert_eq!(frame["suggestion"], "How should I test this?");
-        assert_eq!(frame["session_id"], "sess-prompt");
-        assert_eq!(frame["uuid"], "uuid-prompt");
+        assert_eq!(
+            frame.to_json_string().unwrap(),
+            r#"{"type":"prompt_suggestion","suggestion":"How should I test this?","uuid":"uuid-prompt","session_id":"sess-prompt"}"#
+        );
+        assert_eq!(frame.string_at("/type"), Some("prompt_suggestion"));
+        assert_eq!(
+            frame.string_at("/suggestion"),
+            Some("How should I test this?")
+        );
+        assert_eq!(frame.string_at("/session_id"), Some("sess-prompt"));
+        assert_eq!(frame.string_at("/uuid"), Some("uuid-prompt"));
     }
 
     #[tokio::test]
@@ -7369,10 +7386,12 @@ mod refusal_publication_tests {
         stream.set_policy_helper_refusal_probe(probe.clone());
         probe.trigger_refusal_for_test();
 
-        stream.emit_prompt_suggestion_frame(&json!({
-            "type": "prompt_suggestion",
-            "suggestion": "should not publish",
-        }));
+        let frame = StreamJsonStream::build_prompt_suggestion_frame(
+            "session-fixture",
+            &Utf16JsonProjection::from("should not publish"),
+            "suggestion-fixture",
+        );
+        stream.emit_prompt_suggestion_frame(&frame);
         stream.flush().await.unwrap();
         stream.finish_before_runtime().await.unwrap();
         assert!(bytes.lock().unwrap().is_empty());

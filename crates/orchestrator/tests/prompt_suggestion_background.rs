@@ -41,6 +41,10 @@ fn contains_utf16(haystack: &[u16], needle: &str) -> bool {
             .any(|window| window == needle.as_slice())
 }
 
+fn source_text(text: &str) -> Utf16JsonProjection {
+    Utf16JsonProjection::from(text)
+}
+
 #[test]
 fn native_background_classifier_and_redactor_execute_in_quickjs() {
     let blocked = javascript::evaluate_result("prepare", json!({
@@ -170,11 +174,11 @@ fn background_reply_requires_unchanged_blocked_need_and_epoch_resets() {
     };
     let pick_one = "pick one".encode_utf16().collect::<Vec<_>>();
     let different = "different".encode_utf16().collect::<Vec<_>>();
-    assert!(!state.record_reply("Use the first option", Some(&different)));
-    assert!(state.record_reply("Use the first option", Some(&pick_one)));
-    assert!(!state.record_reply("Use the first option", Some(&pick_one)));
+    assert!(!state.record_reply(&source_text("Use the first option"), Some(&different)));
+    assert!(state.record_reply(&source_text("Use the first option"), Some(&pick_one)));
+    assert!(!state.record_reply(&source_text("Use the first option"), Some(&pick_one)));
     state.mark_active();
-    assert!(!state.record_reply("Use the second option", Some(&pick_one)));
+    assert!(!state.record_reply(&source_text("Use the second option"), Some(&pick_one)));
     let epoch = state.epoch;
     state.reset();
     assert_ne!(state.epoch, epoch);
@@ -198,8 +202,8 @@ fn background_reply_persistence_round_trips_lone_needs_units_exactly() {
         };
         let expected = [unit];
         let wrong = [if unit == 0xd800 { 0xdfff } else { 0xd800 }];
-        assert!(!state.record_reply("Use the first option", Some(&wrong)));
-        assert!(state.record_reply("Use the first option", Some(&expected)));
+        assert!(!state.record_reply(&source_text("Use the first option"), Some(&wrong)));
+        assert!(state.record_reply(&source_text("Use the first option"), Some(&expected)));
 
         let serialized = state.persisted.as_ref().unwrap().to_json_string().unwrap();
         let reloaded = Utf16JsonProjection::parse(&serialized).unwrap();
@@ -214,6 +218,37 @@ fn background_reply_persistence_round_trips_lone_needs_units_exactly() {
             "a same-session persistence round trip keeps its epoch"
         );
     }
+}
+
+#[test]
+fn background_reply_persists_suggestion_units_without_loss() {
+    let suggestion_units = vec![b'R' as u16, 0xd800, b'!'.into()];
+    let suggestion = Utf16JsonProjection::root_string(
+        String::from_utf16_lossy(&suggestion_units),
+        suggestion_units.clone(),
+    )
+    .unwrap();
+    let mut state = state::BackgroundSuggestionState {
+        persisted: Some(
+            Utf16JsonProjection::from_serde_value(&json!({
+                "tempo":"blocked", "needs":"pick one"
+            }))
+            .unwrap(),
+        ),
+        ..Default::default()
+    };
+    assert!(state.record_reply(
+        &suggestion,
+        Some(&"pick one".encode_utf16().collect::<Vec<_>>())
+    ));
+    assert_eq!(
+        state
+            .persisted
+            .as_ref()
+            .unwrap()
+            .string_units("/suggestedReply"),
+        Some(suggestion_units)
+    );
 }
 
 #[test]
@@ -304,8 +339,12 @@ async fn background_pipeline() {
         fn wants_prompt_suggestions(&self) -> bool {
             true
         }
-        async fn emit_prompt_suggestion(&self, _: &str, _: &str, text: &str) {
-            self.rows.lock().unwrap().push(text.into());
+        async fn emit_prompt_suggestion(&self, _: &str, _: &str, text: &Utf16JsonProjection) {
+            self.rows.lock().unwrap().push(String::from_utf16_lossy(
+                &text
+                    .string_units("")
+                    .expect("suggestion output is a root string"),
+            ));
             self.ready.notify_one();
         }
     }
@@ -514,7 +553,7 @@ async fn background_pipeline() {
             Ok(sidequery::ForkedSideQueryResponse {
                 response,
                 assistant_content: vec![],
-                candidates: vec![text],
+                candidates: vec![Utf16JsonProjection::from(text)],
                 request_id: None,
             })
         }

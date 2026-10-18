@@ -573,11 +573,9 @@ impl SkillTool {
         // main loop and the Agent tool use (`tools/agent/src/agent.rs`). Without
         // it `RegistryToolInvoker::gate` is `None` and the ENTIRE permission
         // block in `invoke_with_workspace_lease` is skipped — including the
-        // `disallowed_tools` layer built from the `frozen_command_denies` this
-        // very function just snapshotted, which is why the freeze appeared to
-        // work only after a cold restore (the restore inheritance is the one
-        // bundle that was already gated). `None` ⇒ unconditional dispatch, as
-        // before, for a host that wires no gate at all.
+        // frozen command-deny prefix carried in the invocation context. Bind
+        // the gate for both the initial fork and its later cold restoration.
+        // Hosts with no gate continue to dispatch unconditionally.
         if let Some(gate) = self.ctx.permission_gate.clone() {
             invoker_impl = invoker_impl.with_gate(gate);
         }
@@ -757,8 +755,8 @@ static SCHEMA: Lazy<Value> = Lazy::new(|| {
 });
 static SOURCE_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| generated_builtin_schema(&SCHEMA));
 
-/// Snapshot the COMMAND deny rules currently in force, as canonical rule
-/// strings (claude `freezeCommandDenies` — `getAppState().toolPermissionContext
+/// Snapshot the COMMAND deny rules currently in force as canonical source
+/// projections (claude `freezeCommandDenies` — `getAppState().toolPermissionContext
 /// .alwaysDenyRules.command ?? []`, captured only on the background fork path).
 ///
 /// Claude freezes these because its resume rebuilds the permission context from
@@ -767,29 +765,29 @@ static SOURCE_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| generated_builtin
 /// true in-process here: `PolicyPermissionGate::apply_permission_update` mutates
 /// the live deny rules, so a host update CAN drop an in-force deny while a fork
 /// is parked. Persisting the snapshot is what makes the resume checkable.
-fn frozen_command_denies(policy: &permission::PermissionPolicy) -> Vec<String> {
+fn frozen_command_denies(policy: &permission::PermissionPolicy) -> Vec<Utf16JsonProjection> {
     // `alwaysDenyRules.command` is keyed by rule SOURCE, not by tool. The port's
     // `PermissionRuleSource::Command` is the same bucket — "rules emitted by a
     // command" — and it legitimately holds rules for tools other than `Bash`
     // (skill frontmatter `disallowed-tools` lands here too).
     //
     // This used to filter `tool_name == "Bash"`, which read `command` as if it
-    // meant "the command tool" and under-froze every non-Bash deny. The matching
-    // filter in the consumer (`frozen_command_deny_layers`, tool-api) was dropped
-    // in the SAME change: the two halves are self-locking, and fixing only one
-    // makes the newly captured rules get discarded there as a corrupt record.
-    let mut out: Vec<String> = policy
+    // meant "the command tool" and under-froze every non-Bash deny. Native
+    // snapshots the source bucket's array directly, preserving order and
+    // duplicates; this Vec is already ordered and must not be sorted or
+    // deduplicated at the sidecar boundary.
+    policy
         .deny_rules
         .get(&permission::PermissionRuleSource::Command)
         .into_iter()
         .flatten()
-        .map(|r| r.value.to_rule_string())
-        .collect();
-    // `deny_rules` is keyed by source, and a HashMap has no stable iteration
-    // order — sort so the persisted record is deterministic across runs.
-    out.sort();
-    out.dedup();
-    out
+        .map(|r| {
+            r.value
+                .original_rule_projection()
+                .cloned()
+                .unwrap_or_else(|| r.value.to_rule_projection())
+        })
+        .collect()
 }
 
 /// The per-session subagent spawn cap (claude 2.1.212 `xtu()` =

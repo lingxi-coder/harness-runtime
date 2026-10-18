@@ -17,7 +17,7 @@ use super::{
 use crate::conversation::{
     assistant_usage_value, classify_api_error, output_accounting_impl, ApiErrorEnvelope,
     ConversationOrchestrator, ConversationOutcome, ModelCallPath, OutgoingHistoryRewriter,
-    PreparedContextAnnouncements, INTERRUPT_MESSAGE, INTERRUPT_MESSAGE_FOR_TOOL_USE,
+    PreparedContextAnnouncements, QueryUserInterruptionKind, INTERRUPT_MESSAGE,
 };
 use crate::error::OrchestratorError;
 use crate::mod_turn_step::{TurnStepDecoder, TurnStepEncoder};
@@ -1335,7 +1335,8 @@ impl StreamingTurnDriver<'_> {
             if orch.cancel_reason_now()
                 != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
             {
-                orch.inject_user_message(INTERRUPT_MESSAGE).await;
+                orch.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
+                    .await;
             }
             return Ok(OpenStreamingOutcome::Complete(assistant_id));
         }
@@ -1408,7 +1409,10 @@ impl StreamingTurnDriver<'_> {
                         if orch.cancel_reason_now()
                             != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
                         {
-                            orch.inject_user_message(INTERRUPT_MESSAGE).await;
+                            orch.inject_query_user_interruption(
+                                QueryUserInterruptionKind::Streaming,
+                            )
+                            .await;
                         }
                         return Ok(OpenStreamingOutcome::Complete(assistant_id));
                     }
@@ -3800,10 +3804,10 @@ impl StreamingTurnDriver<'_> {
                         )
                         .await;
                     let cost = orch.snapshot_cost_real().await;
-                    let (abort_reason, interrupt_message) = if aborted_during_stream {
-                        ("aborted_streaming", INTERRUPT_MESSAGE)
+                    let (abort_reason, interruption_kind) = if aborted_during_stream {
+                        ("aborted_streaming", QueryUserInterruptionKind::Streaming)
                     } else {
-                        ("aborted_tools", INTERRUPT_MESSAGE_FOR_TOOL_USE)
+                        ("aborted_tools", QueryUserInterruptionKind::Tools)
                     };
                     orch.emit_turn_terminal(abort_reason, &cost).await;
                     // NOW-ABORT disambiguation: a `Now`-driven cancellation means the
@@ -3815,7 +3819,7 @@ impl StreamingTurnDriver<'_> {
                     if orch.cancel_reason_now()
                         != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
                     {
-                        orch.inject_user_message(interrupt_message).await;
+                        orch.inject_query_user_interruption(interruption_kind).await;
                     }
                     return Ok(Some(StepExit::FinishThroughEpilogue(assistant_id)));
                 }
@@ -4508,7 +4512,8 @@ impl StreamingTurnDriver<'_> {
                 if orch.cancel_reason_now()
                     != crate::prompt::mid_turn_input::CancelReason::QueueNowCommand
                 {
-                    orch.inject_user_message(INTERRUPT_MESSAGE).await;
+                    orch.inject_query_user_interruption(QueryUserInterruptionKind::Streaming)
+                        .await;
                 }
                 final_message_id = loop_state.last_message_id;
                 break;

@@ -134,7 +134,7 @@ pub struct ForkLaunchInputs<'a> {
     pub effort: Option<session::forked_skill::Effort>,
     /// Command-deny rules frozen at fork time. An EMPTY list writes no key —
     /// claude gates the spread on `f !== undefined && f.length > 0`.
-    pub frozen_command_denies: Vec<String>,
+    pub frozen_command_denies: Vec<Utf16JsonProjection>,
     /// This spawn's nesting depth (parent depth + 1).
     pub depth: usize,
     /// The nesting cap.
@@ -523,7 +523,7 @@ Do the skill's work directly in this context instead of invoking further skills.
     fn an_unpersistable_scoping_record_forces_inline() {
         let tasks = vec![];
         let mut i = inputs("s", &tasks);
-        i.frozen_command_denies = vec!["x".repeat(2000)];
+        i.frozen_command_denies = vec!["x".repeat(2000).into()];
         assert_eq!(
             decide_fork_launch(&i),
             ForkDecision::Inline(InlineFallback::ScopingUnpersistable)
@@ -547,7 +547,7 @@ Do the skill's work directly in this context instead of invoking further skills.
         };
         assert_eq!(
             scoping.frozen_command_denies.as_deref(),
-            Some(["Bash(rm:*)".to_string()].as_slice())
+            Some([Utf16JsonProjection::from("Bash(rm:*)")].as_slice())
         );
     }
 
