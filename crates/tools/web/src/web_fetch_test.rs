@@ -463,6 +463,106 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
     /// async tests.
     static SKIP_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    struct ProviderFetch {
+        seen: std::sync::Mutex<Vec<tool_api::HostedFetchRequest>>,
+        fail: bool,
+    }
+    #[async_trait::async_trait]
+    impl tool_api::HostedWebSearchClient for ProviderFetch {
+        fn supports(&self, _: &str, _: Option<&str>) -> bool {
+            false
+        }
+        fn supports_fetch(&self, model: &str, profile: Option<&str>) -> bool {
+            model == "deepseek-flash" && profile == Some("deepseek")
+        }
+        async fn fetch(
+            &self,
+            request: tool_api::HostedFetchRequest,
+        ) -> Result<tool_api::HostedFetchOutput, tool_api::HostedSearchError> {
+            self.seen.lock().unwrap().push(request);
+            if self.fail {
+                return Err(tool_api::HostedSearchError {
+                    message: "fetch denied".into(),
+                    http_status: Some(403),
+                    timeout: false,
+                });
+            }
+            Ok(tool_api::HostedFetchOutput {
+                title: "Native page".into(),
+                content: "Markdown body".into(),
+                billable_requests: 1,
+            })
+        }
+        async fn search(
+            &self,
+            _: tool_api::HostedSearchRequest,
+            _: tokio::sync::mpsc::UnboundedSender<()>,
+        ) -> Result<tool_api::HostedSearchOutput, tool_api::HostedSearchError> {
+            panic!("fetch must not generate a search/model request")
+        }
+    }
+    #[tokio::test]
+    async fn provider_fetch_uses_live_route_and_skips_http_preflight() {
+        let (mut builtin, http, _) = make_web_ctx();
+        let provider = Arc::new(ProviderFetch {
+            seen: std::sync::Mutex::new(vec![]),
+            fail: false,
+        });
+        builtin.hosted_search = Some(provider.clone());
+        let tool = WebFetchTool::new(builtin);
+        let mut ctx = fresh_ctx();
+        ctx.options.main_loop_model = "deepseek-flash".into();
+        ctx.options.model_profile = Some("deepseek".into());
+        let result = tool
+            .call(
+                generated(json!({"url":"http://example.com/page"})),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.data.number_at("/code"), Some(200.0));
+        assert!(result
+            .data
+            .string_at("/result")
+            .unwrap()
+            .contains("Markdown body"));
+        assert_eq!(
+            result.data.string_at("/url"),
+            Some("http://example.com/page")
+        );
+        assert_eq!(
+            provider.seen.lock().unwrap()[0].url,
+            "https://example.com/page"
+        );
+        assert!(http.received_requests().is_empty());
+    }
+    #[tokio::test]
+    async fn provider_fetch_failure_never_falls_back_to_local_http() {
+        let (mut builtin, http, _) = make_web_ctx();
+        let provider = Arc::new(ProviderFetch {
+            seen: std::sync::Mutex::new(vec![]),
+            fail: true,
+        });
+        builtin.hosted_search = Some(provider.clone());
+        let tool = WebFetchTool::new(builtin);
+        let mut ctx = fresh_ctx();
+        ctx.options.main_loop_model = "deepseek-flash".into();
+        ctx.options.model_profile = Some("deepseek".into());
+        let error = tool
+            .call(
+                generated(json!({"url":"https://example.com/page"})),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .err()
+            .expect("provider failure");
+        assert!(error.to_string().contains("fetch denied"));
+        assert_eq!(provider.seen.lock().unwrap().len(), 1);
+        assert!(http.received_requests().is_empty());
+    }
+
     fn make_web_ctx() -> (
         BuiltinToolContext,
         Arc<MockHttpTransport>,

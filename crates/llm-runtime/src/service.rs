@@ -1363,6 +1363,7 @@ pub struct ApiService {
     request_session_id_source: RwLock<Option<RequestSessionIdSource>>,
     client: Arc<ModelRuntime>,
     transport: Arc<dyn Transport>,
+    independent_web_services: OnceLock<Result<crate::services::ProviderServices, String>>,
     /// Subscriber state for the 429 gate (Task 8 wires real value).
     ///
     /// Build-time seed/fallback: when [`Self::subscription`] is attached and
@@ -2225,6 +2226,97 @@ impl ApiService {
         )
     }
 
+    pub fn uses_deepseek_web(&self, model: &str, profile: Option<&str>) -> bool {
+        self.client.deepseek_web_profile(model, profile).is_some()
+    }
+
+    async fn deepseek_web_client(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Result<
+        (
+            lingxi_llm_client::providers::DeepSeekClient,
+            lingxi_llm_client::RequestOptions,
+        ),
+        LlmError,
+    > {
+        let started = tokio::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(60);
+        let profile = self
+            .client
+            .deepseek_web_profile(model, profile)
+            .ok_or_else(|| LlmError::UnsupportedCapability {
+                capability: "independent DeepSeek web APIs require a first-party route".into(),
+            })?;
+        let services = self
+            .independent_web_services
+            .get_or_init(|| {
+                self.client
+                    .provider_services(
+                        lingxi_llm_client::protocol::Region::International,
+                        self.transport.clone(),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .as_ref()
+            .map_err(|message| LlmError::InvalidRequest {
+                message: message.clone(),
+            })?;
+        let client = services
+            .client()
+            .provider::<lingxi_llm_client::providers::DeepSeekClient>(&profile)
+            .map_err(|error| LlmError::InvalidRequest {
+                message: error.to_string(),
+            })?;
+        let options = lingxi_llm_client::RequestOptions {
+            credential: Some(
+                tokio::time::timeout(
+                    timeout.saturating_sub(started.elapsed()),
+                    self.client.service_credential(&profile),
+                )
+                .await
+                .map_err(|_| LlmError::TransportTimeout {
+                    message: "DeepSeek web credential deadline elapsed".into(),
+                })??,
+            ),
+            total_timeout: Some(timeout.saturating_sub(started.elapsed())),
+            ..Default::default()
+        };
+        Ok((client, options))
+    }
+
+    /// One independent request; retries and turn generation are not involved.
+    pub async fn deepseek_search(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        request: &lingxi_llm_client::providers::deepseek::web::DeepSeekSearchRequest,
+    ) -> Result<lingxi_llm_client::providers::deepseek::web::DeepSeekSearchResponse, LlmError> {
+        request.validate().map_err(crate::upstream::error)?;
+        let (client, options) = self.deepseek_web_client(model, profile).await?;
+        client
+            .web()
+            .search(request, &options)
+            .await
+            .map_err(crate::upstream::error)
+    }
+
+    pub async fn deepseek_fetch(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        request: &lingxi_llm_client::providers::deepseek::web::DeepSeekFetchRequest,
+    ) -> Result<lingxi_llm_client::providers::deepseek::web::DeepSeekFetchResponse, LlmError> {
+        request.validate().map_err(crate::upstream::error)?;
+        let (client, options) = self.deepseek_web_client(model, profile).await?;
+        client
+            .web()
+            .fetch(request, &options)
+            .await
+            .map_err(crate::upstream::error)
+    }
+
     pub fn hosted_search_route(
         &self,
         model: &str,
@@ -2238,9 +2330,8 @@ impl ApiService {
             .is_some_and(lingxi_llm_client::providers::openai::codex_search::supports)
     }
     pub fn supports_hosted_search(&self, model: &str, profile: Option<&str>) -> bool {
-        self.client
-            .search_profile(model, profile)
-            .is_some_and(lingxi_llm_client::hosted_search::supports)
+        self.uses_deepseek_web(model, profile)
+            || self.supports_hosted_search_config(model, profile, &Default::default())
     }
     pub fn supports_hosted_search_config(
         &self,
@@ -2248,10 +2339,20 @@ impl ApiService {
         profile: Option<&str>,
         config: &lingxi_llm_client::protocol::WebSearchConfig,
     ) -> bool {
+        if self.uses_deepseek_web(model, profile) {
+            return config.max_uses.is_none();
+        }
+        let Ok(route) = self.hosted_search_route(model, profile) else {
+            return false;
+        };
         self.client
             .search_profile(model, profile)
             .is_some_and(|profile| {
-                lingxi_llm_client::hosted_search::supports_with_config(profile, config)
+                lingxi_llm_client::hosted_search::supports_model_with_config(
+                    profile,
+                    &route.request_model,
+                    config,
+                )
             })
     }
     pub fn hosted_search_max_uses(&self, model: &str, profile: Option<&str>) -> Option<u32> {
@@ -3283,6 +3384,7 @@ impl ApiService {
             effort_table_options: Default::default(),
             session_effort: RwLock::new(Default::default()),
             transport,
+            independent_web_services: OnceLock::new(),
             subscriber,
             subscription: None,
             retry_reporter: None,

@@ -62,8 +62,8 @@ pub use defer::{
 };
 pub use host_git_root_cache::HostGitRootCache;
 pub use hosted_search::{
-    HostedSearchError, HostedSearchOutput, HostedSearchRequest, HostedWebSearchClient,
-    McpTokenCounter,
+    HostedFetchOutput, HostedFetchRequest, HostedSearchError, HostedSearchOutput,
+    HostedSearchRequest, HostedWebSearchClient, McpTokenCounter,
 };
 pub use model_prompt_gate::dh_simple_system_prompt;
 pub use progress::{progress_channel, ToolProgress, ToolProgressReceiver, ToolProgressSender};

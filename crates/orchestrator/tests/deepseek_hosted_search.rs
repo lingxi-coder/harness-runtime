@@ -8,6 +8,7 @@ use tool_api::HostedWebSearchClient;
 
 struct SearchTransport {
     prose_only: bool,
+    status: std::sync::atomic::AtomicU16,
     requests: Mutex<Vec<sdk::HttpRequest>>,
 }
 #[async_trait::async_trait]
@@ -16,30 +17,26 @@ impl llm_runtime::Transport for SearchTransport {
         &self,
         request: sdk::HttpRequest,
     ) -> Result<sdk::StreamResponse, sdk::protocol::LlmError> {
-        use futures::StreamExt;
-        self.requests.lock().unwrap().push(request);
-        let block = if self.prose_only {
-            json!({"type":"text","text":"An unverified answer mentions https://example.com", "citations":[{"type":"web_search_result_location","url":"https://example.com","title":"Unverified","cited_text":"provider prose"}]})
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        let output = if self.prose_only {
+            json!({"text":"unverified prose"})
+        } else if request.url.ends_with("/fetch") {
+            json!({"title":"Article", "content":"# Native Markdown"})
+        } else if body["query"].as_str().unwrap().starts_with("empty") {
+            json!({"results":[]})
         } else {
-            json!({"type":"web_search_tool_result","tool_use_id":"search-1","content":[{"type":"web_search_result","url":"https://example.com/weather","title":"Weather","encrypted_content":"opaque"}]})
+            json!({"results":[
+                {"rerank_score":2.5,"title":"Weather","url":"https://example.com/weather","snippet":"Weather snippet","summary":"Weather summary", "content":"", "site_name":null,"site_icon":null,"date":null,"authority":3},
+                {"rerank_score":2.0,"title":"Other","url":"https://other.test/news","snippet":"Other snippet","summary":"Other summary", "content":"", "site_name":null,"site_icon":null,"date":null,"authority":1}
+            ]})
         };
-        let events = [
-            json!({"type":"message_start","message":{"id":"m","model":"deepseek-flash","role":"assistant","content":[],"usage":{"input_tokens":7,"output_tokens":0}}}),
-            json!({"type":"content_block_start","index":0,"content_block":block}),
-            json!({"type":"content_block_stop","index":0}),
-            json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3,"server_tool_use":{"web_search_requests":1}}}),
-            json!({"type":"message_stop"}),
-        ];
-        Ok(sdk::StreamResponse {
-            status: 200,
+        self.requests.lock().unwrap().push(request);
+        Ok(sdk::HttpResponse {
+            status: self.status.load(std::sync::atomic::Ordering::Relaxed),
             headers: vec![],
-            body: futures::stream::iter(
-                events
-                    .into_iter()
-                    .map(|event| Ok(format!("data: {event}\n\n").into())),
-            )
-            .boxed(),
-        })
+            body: output.to_string().into(),
+        }
+        .into())
     }
 }
 fn adapter(
@@ -65,6 +62,7 @@ fn adapter(
     );
     let transport = Arc::new(SearchTransport {
         prose_only,
+        status: std::sync::atomic::AtomicU16::new(200),
         requests: Mutex::new(vec![]),
     });
     let service = Arc::new(ApiService::new(
@@ -107,7 +105,7 @@ async fn deepseek_auxiliary_search_reuses_credentials_and_keeps_conversation_rou
     for request in requests.iter() {
         assert_eq!(
             request.url.split('?').next(),
-            Some("https://api.deepseek.com/anthropic/v1/messages")
+            Some("https://api.deepseek.com/v1/tools/search")
         );
         assert!(
             request
@@ -117,8 +115,9 @@ async fn deepseek_auxiliary_search_reuses_credentials_and_keeps_conversation_rou
                     && v == "Bearer test-search-key")
         );
         let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-        assert_eq!(body["model"], "deepseek-flash");
-        assert_eq!(body["tools"][0]["type"], "web_search_20250305");
+        assert_eq!(body["query"], "武汉 天气");
+        assert!(body.get("model").is_none());
+        assert!(body.get("tools").is_none());
     }
     assert_eq!(
         client
@@ -128,11 +127,8 @@ async fn deepseek_auxiliary_search_reuses_credentials_and_keeps_conversation_rou
     );
 }
 #[test]
-fn deepseek_search_does_not_redirect_custom_gateways_or_other_credentials() {
-    for (url, credential) in [
-        ("https://custom.example/v1", "DEEPSEEK_ROUTE_TEST_KEY"),
-        ("https://api.deepseek.com", "ANOTHER_ACCOUNT_KEY"),
-    ] {
+fn deepseek_search_does_not_redirect_custom_gateways() {
+    for (url, credential) in [("https://custom.example/v1", "DEEPSEEK_ROUTE_TEST_KEY")] {
         let (adapter, transport, _) = adapter(url, credential, false);
         assert!(!adapter.supports_request(&request("deepseek-flash")));
         assert!(transport.requests.lock().unwrap().is_empty());
@@ -150,5 +146,115 @@ async fn deepseek_prose_without_native_results_is_an_error() {
     assert!(error
         .message
         .string_at("")
-        .is_some_and(|message| message.contains("no structured web_search_tool_result")));
+        .is_some_and(|message| message.contains("invalid DeepSeek web API response")));
+}
+
+#[tokio::test]
+async fn independent_search_keeps_source_credentials_with_a_different_search_account() {
+    let (adapter, transport, _) = adapter("https://api.deepseek.com", "ANOTHER_ACCOUNT_KEY", false);
+    let (progress, _) = tokio::sync::mpsc::unbounded_channel();
+    assert!(adapter.supports_request(&request("deepseek-flash")));
+    adapter
+        .search(request("deepseek-flash"), progress)
+        .await
+        .unwrap();
+    assert!(transport.requests.lock().unwrap()[0]
+        .headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("authorization") && v == "Bearer test-search-key"));
+}
+#[tokio::test]
+async fn independent_search_domains_snippets_and_empty_billing() {
+    let (adapter, transport, _) =
+        adapter("https://api.deepseek.com", "DEEPSEEK_ROUTE_TEST_KEY", false);
+    let mut input = request("deepseek-flash");
+    input.allowed_domains = vec!["example.com".into()];
+    assert!(adapter.supports_request(&input));
+    let (progress, _) = tokio::sync::mpsc::unbounded_channel();
+    let output = adapter.search(input, progress).await.unwrap();
+    assert_eq!(output.searches, 1);
+    assert_eq!(output.input_tokens, 0);
+    assert_eq!(output.output_tokens, 0);
+    let tool_api::hosted_search::SearchResultEntry::Hit(hit) = &output.results[0] else {
+        panic!("missing hits")
+    };
+    assert_eq!(hit.array_len("/content"), Some(1));
+    assert_eq!(
+        hit.string_at("/content/0/summary").as_deref(),
+        Some("Weather summary")
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&transport.requests.lock().unwrap()[0].body).unwrap();
+    assert_eq!(body["query"], "武汉 天气 site:example.com");
+    let mut empty = request("deepseek-flash");
+    empty.query = "empty search".into();
+    let (progress, _) = tokio::sync::mpsc::unbounded_channel();
+    let output = adapter.search(empty, progress).await.unwrap();
+    assert_eq!(output.searches, 0);
+    assert!(output.results.is_empty());
+}
+#[tokio::test]
+async fn independent_fetch_uses_selected_route_and_no_model_generation() {
+    let (adapter, transport, _) = adapter("https://api.deepseek.com", "ANOTHER_ACCOUNT_KEY", false);
+    assert!(adapter.supports_fetch("deepseek-flash", Some("deepseek")));
+    let fetched = adapter
+        .fetch(tool_api::HostedFetchRequest {
+            model: "deepseek-flash".into(),
+            profile: Some("deepseek".into()),
+            url: "https://example.com/article".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(fetched.title, "Article");
+    assert_eq!(fetched.content, "# Native Markdown");
+    assert_eq!(fetched.billable_requests, 1);
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url, "https://api.deepseek.com/v1/tools/fetch");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&requests[0].body).unwrap(),
+        json!({"url":"https://example.com/article"})
+    );
+}
+#[test]
+fn invalid_unicode_and_oversized_search_fail_admission() {
+    let (adapter, transport, _) =
+        adapter("https://api.deepseek.com", "DEEPSEEK_ROUTE_TEST_KEY", false);
+    let mut input = request("deepseek-flash");
+    input.query = "a".repeat(129).into();
+    assert!(!adapter.supports_request(&input));
+    input.query =
+        lingxi_core::types::utf16_json::Utf16JsonProjection::parse(r#""\ud800""#).unwrap();
+    assert!(!adapter.supports_request(&input));
+    input.query = "q".into();
+    input.allowed_domains = vec!["example.com OR evil.test".into()];
+    assert!(!adapter.supports_request(&input));
+    assert!(transport.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn provider_errors_retain_http_status_and_timeout_without_retry() {
+    for (status, timeout) in [
+        (402, false),
+        (403, false),
+        (408, true),
+        (429, false),
+        (500, false),
+        (504, true),
+    ] {
+        let (adapter, transport, _) =
+            adapter("https://api.deepseek.com", "DEEPSEEK_ROUTE_TEST_KEY", false);
+        transport
+            .status
+            .store(status, std::sync::atomic::Ordering::Relaxed);
+        let (progress, _) = tokio::sync::mpsc::unbounded_channel();
+        let error = adapter
+            .search(request("deepseek-flash"), progress)
+            .await
+            .err()
+            .expect("provider error");
+        assert_eq!(error.http_status, Some(status));
+        assert_eq!(error.timeout, timeout);
+        assert_eq!(transport.requests.lock().unwrap().len(), 1);
+    }
 }

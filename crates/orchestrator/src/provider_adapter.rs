@@ -4817,6 +4817,12 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
         self.service.supports_hosted_search(model, profile)
     }
     fn supports_request(&self, request: &tool_api::HostedSearchRequest) -> bool {
+        if self
+            .service
+            .uses_deepseek_web(&request.model, request.profile.as_deref())
+        {
+            return deepseek_search_request(request).is_ok();
+        }
         let Some(allowed_domains) = request
             .allowed_domains
             .iter()
@@ -4845,6 +4851,30 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
             },
         )
     }
+    fn supports_fetch(&self, model: &str, profile: Option<&str>) -> bool {
+        self.service.uses_deepseek_web(model, profile)
+    }
+    async fn fetch(
+        &self,
+        request: tool_api::HostedFetchRequest,
+    ) -> Result<tool_api::HostedFetchOutput, tool_api::HostedSearchError> {
+        let output = self
+            .service
+            .deepseek_fetch(
+                &request.model,
+                request.profile.as_deref(),
+                &llm_runtime::services::sdk::providers::deepseek::web::DeepSeekFetchRequest::new(
+                    request.url,
+                ),
+            )
+            .await
+            .map_err(hosted_search_error)?;
+        Ok(tool_api::HostedFetchOutput {
+            billable_requests: output.billable_requests(),
+            title: output.title,
+            content: output.content,
+        })
+    }
     async fn search(
         &self,
         input: tool_api::HostedSearchRequest,
@@ -4853,6 +4883,40 @@ impl tool_api::HostedWebSearchClient for ProviderApiAdapter {
         use futures::StreamExt;
         use llm_runtime::services::sdk;
         use llm_runtime::HistoryEvent;
+        if self
+            .service
+            .uses_deepseek_web(&input.model, input.profile.as_deref())
+        {
+            let request = deepseek_search_request(&input)?;
+            let output = self
+                .service
+                .deepseek_search(&input.model, input.profile.as_deref(), &request)
+                .await
+                .map_err(hosted_search_error)?;
+            let searches = output.billable_requests();
+            let hits = output
+                .results
+                .into_iter()
+                .filter(|hit| deepseek_search_domain_matches(&hit.url, &input))
+                .collect::<Vec<_>>();
+            let results = if hits.is_empty() {
+                vec![]
+            } else {
+                let content = serde_json::json!({"tool_use_id":"deepseek-search", "content": hits});
+                vec![sdk::hosted_search::SearchResultEntry::Hit(
+                    sdk::protocol::JsonPayload::from_generated_value(&content).map_err(|_| {
+                        hosted_search_input_error("cannot project DeepSeek search results")
+                    })?,
+                )]
+            };
+            let _ = progress.send(());
+            return Ok(tool_api::HostedSearchOutput {
+                results,
+                searches,
+                input_tokens: 0,
+                output_tokens: 0,
+            });
+        }
         let route = self
             .service
             .hosted_search_route(&input.model, input.profile.as_deref())
@@ -5121,7 +5185,10 @@ fn hosted_search_error(error: llm_runtime::LlmError) -> tool_api::HostedSearchEr
     });
     tool_api::HostedSearchError {
         http_status,
-        timeout: matches!(classification, LlmError::TransportTimeout { .. }),
+        timeout: matches!(
+            classification,
+            LlmError::TransportTimeout { .. } | LlmError::ProviderTimeout { .. }
+        ),
         message: match &error {
             LlmError::SettingsSource { message, .. } => message.clone(),
             _ => Utf16JsonProjection::from(error.to_string()),
@@ -5170,4 +5237,55 @@ mod hosted_error_tests {
             assert_eq!(mapped.timeout, timeout);
         }
     }
+}
+
+fn deepseek_search_request(
+    input: &tool_api::HostedSearchRequest,
+) -> Result<
+    llm_runtime::services::sdk::providers::deepseek::web::DeepSeekSearchRequest,
+    tool_api::HostedSearchError,
+> {
+    fn scalar(
+        value: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> Result<String, tool_api::HostedSearchError> {
+        let units = value.string_units("").ok_or_else(|| {
+            hosted_search_input_error("search query and domains must be JSON strings")
+        })?;
+        String::from_utf16(&units)
+            .map_err(|_| hosted_search_input_error("DeepSeek search requires valid Unicode"))
+    }
+    let allowed = input
+        .allowed_domains
+        .iter()
+        .map(scalar)
+        .collect::<Result<Vec<_>, _>>()?;
+    let blocked = input
+        .blocked_domains
+        .iter()
+        .map(scalar)
+        .collect::<Result<Vec<_>, _>>()?;
+    llm_runtime::services::sdk::providers::deepseek::web::DeepSeekSearchRequest::new(scalar(
+        &input.query,
+    )?)
+    .with_domains(&allowed, &blocked)
+    .map_err(|error| hosted_search_input_error(&error.to_string()))
+}
+fn deepseek_search_domain_matches(url: &str, input: &tool_api::HostedSearchRequest) -> bool {
+    let Ok(url) = url::Url::parse(url) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let matches = |domain: &lingxi_core::types::utf16_json::Utf16JsonProjection| {
+        domain.string_at("").is_some_and(|domain| {
+            let domain = domain.to_ascii_lowercase();
+            host == domain || host.ends_with(&format!(".{domain}"))
+        })
+    };
+    (input.allowed_domains.is_empty() || input.allowed_domains.iter().any(matches))
+        && !input.blocked_domains.iter().any(matches)
 }

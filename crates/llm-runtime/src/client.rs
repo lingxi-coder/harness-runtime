@@ -473,6 +473,19 @@ impl ModelRuntime {
         ))
     }
 
+    /// Exact first-party profile for independent web APIs. Never selects a
+    /// different connection/account or rewrites custom gateway origins.
+    pub(crate) fn deepseek_web_profile(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+    ) -> Option<String> {
+        let route = self.registry.resolve_in(model, profile).ok()?;
+        let entry = self.routes.get(&route.profile_name)?;
+        lingxi_llm_client::providers::deepseek::web::supports(&entry.profile)
+            .then_some(route.profile_name)
+    }
+
     /// Resolve an auxiliary hosted-search route without changing conversation routing.
     pub(crate) fn hosted_search_route(
         &self,
@@ -484,7 +497,11 @@ impl ModelRuntime {
             .routes
             .get(&route.profile_name)
             .ok_or(LlmError::ModelUnavailable)?;
-        if lingxi_llm_client::hosted_search::supports(&source.profile) {
+        if lingxi_llm_client::hosted_search::supports_model_with_config(
+            &source.profile,
+            &route.request_model,
+            &Default::default(),
+        ) {
             return Ok(route);
         }
         // The caller chooses a format supporting native search from the SDK's
@@ -504,7 +521,11 @@ impl ModelRuntime {
             ) {
                 if let Some(target) = self.routes.get(&selected.profile_name) {
                     if target.credential == source.credential
-                        && lingxi_llm_client::hosted_search::supports(&target.profile)
+                        && lingxi_llm_client::hosted_search::supports_model_with_config(
+                            &target.profile,
+                            &selected.request_model,
+                            &Default::default(),
+                        )
                     {
                         return self
                             .registry
