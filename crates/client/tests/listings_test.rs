@@ -93,6 +93,7 @@ fn session_lifecycle_events_round_trip() {
         session_id: "sess-2".to_string(),
         mode: SessionModeDto::Chat,
         messages: vec![MessageDto {
+            transcript_uuid: None,
             sent_at_ms: None,
             loop_wakeup: None,
             visualization_context: None,

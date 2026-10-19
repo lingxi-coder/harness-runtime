@@ -80,6 +80,7 @@ pub fn lower_conversation_message_with(
                 |text| vec![MessageBlockDto::Text { text: text.into() }],
             );
             MessageDto {
+                transcript_uuid: Some(message.id().as_uuid().to_string()),
                 sent_at_ms: None,
                 loop_wakeup: None,
                 visualization_context,
@@ -90,6 +91,7 @@ pub fn lower_conversation_message_with(
         }
         ConversationMessage::Assistant { content, .. } => {
             MessageDto {
+                transcript_uuid: Some(message.id().as_uuid().to_string()),
                 sent_at_ms: None,
                 loop_wakeup: None,
                 visualization_context: None,
@@ -118,6 +120,7 @@ pub fn lower_conversation_message_with(
                     .and_then(|text| ClientTextDto::from_projection(&text).ok())
                     .unwrap_or_else(|| ClientTextDto::from_utf8(""));
                 MessageDto {
+                    transcript_uuid: Some(message.id().as_uuid().to_string()),
                     sent_at_ms: None,
                     role: "system".into(),
                     images: Vec::new(),
@@ -134,6 +137,7 @@ pub fn lower_conversation_message_with(
                             .ok()
                     });
                 MessageDto {
+                    transcript_uuid: Some(message.id().as_uuid().to_string()),
                     sent_at_ms: None,
                     role: "system".into(),
                     blocks: Vec::new(),
@@ -148,6 +152,7 @@ pub fn lower_conversation_message_with(
             compact_metadata,
             ..
         } if subtype.as_deref() == Some("compact_boundary") => MessageDto {
+            transcript_uuid: Some(message.id().as_uuid().to_string()),
             sent_at_ms: None,
             loop_wakeup: None,
             visualization_context: None,
@@ -163,6 +168,7 @@ pub fn lower_conversation_message_with(
             images: Vec::new(),
         },
         ConversationMessage::System { content, .. } => MessageDto {
+            transcript_uuid: Some(message.id().as_uuid().to_string()),
             sent_at_ms: None,
             loop_wakeup: None,
             visualization_context: None,
@@ -376,6 +382,9 @@ pub fn lower_transcript_with_identities<S: std::hash::BuildHasher>(
             }
         }
     }
+    for (id, message) in &mut transcript {
+        message.transcript_uuid = Some(id.as_uuid().to_string());
+    }
     transcript
 }
 
@@ -492,6 +501,7 @@ fn lower_transcript_inner(
                     transcript.push((
                         message.id(),
                         MessageDto {
+                            transcript_uuid: None,
                             sent_at_ms: None,
                             role: "user".to_string(),
                             blocks,
@@ -585,6 +595,8 @@ mod identity_projection_tests {
         };
         let rows = lower_replayed_transcript(&replayed);
         assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].transcript_uuid.as_deref(), Some(first.as_uuid().to_string().as_str()));
+        assert_eq!(rows[1].transcript_uuid.as_deref(), Some(last.as_uuid().to_string().as_str()));
         assert_eq!(rows[0].sent_at_ms, Some(1_791_417_600_000));
         assert_eq!(rows[1].sent_at_ms, Some(1_791_417_660_000));
     }
@@ -656,6 +668,7 @@ pub fn lower_replayed_transcript_with_identities(
     )
     .into_iter()
     .map(|(id, mut message)| {
+        message.transcript_uuid = Some(id.as_uuid().to_string());
         message.sent_at_ms = replayed
             .display_timestamps
             .get(&id.as_uuid().to_string())

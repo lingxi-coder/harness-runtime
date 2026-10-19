@@ -1829,6 +1829,7 @@ mod session_agent_identity_contract_tests {
             message_index: index,
             message_uuid: uuid.into(),
             message: MessageDto {
+                transcript_uuid: None,
                 sent_at_ms: None,
                 role: "assistant".into(),
                 blocks: vec![MessageBlockDto::Text {

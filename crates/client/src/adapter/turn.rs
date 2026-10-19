@@ -265,6 +265,7 @@ pub fn lower_content_block_with(
 #[must_use]
 pub fn synthesize_message(turn: &PumpedTurn) -> MessageDto {
     MessageDto {
+        transcript_uuid: None,
         sent_at_ms: None,
         loop_wakeup: None,
         visualization_context: None,

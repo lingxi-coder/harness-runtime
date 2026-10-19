@@ -1031,6 +1031,7 @@ async fn dispatch(
                     .push(ClientEvent::MessageComplete {
                         stop_reason: None,
                         message: Some(client::protocol::message::MessageDto {
+                            transcript_uuid: None,
                             role: "user".into(),
                             blocks: vec![client::protocol::message::MessageBlockDto::Text {
                                 text: text.clone(),
@@ -1075,6 +1076,7 @@ async fn dispatch(
                             .push(ClientEvent::MessageComplete {
                                 stop_reason: None,
                                 message: Some(client::protocol::message::MessageDto {
+                                    transcript_uuid: None,
                                     role: "user".into(),
                                     blocks: vec![
                                         client::protocol::message::MessageBlockDto::Text {
@@ -1108,6 +1110,7 @@ async fn dispatch(
                             .push(ClientEvent::MessageComplete {
                                 stop_reason: None,
                                 message: Some(client::protocol::message::MessageDto {
+                                    transcript_uuid: None,
                                     role: "user".into(),
                                     blocks: vec![
                                         client::protocol::message::MessageBlockDto::Text {

@@ -467,6 +467,7 @@ impl AdapterOutputStream {
             .emit(ClientEvent::MessageComplete {
                 stop_reason: stop_reason.map(str::to_string),
                 message: Some(MessageDto {
+                    transcript_uuid: None,
                     sent_at_ms: None,
                     loop_wakeup: None,
                     visualization_context: None,
