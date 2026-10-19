@@ -5631,21 +5631,31 @@ pub async fn build_with_credential_stack(
     .with_model_resolution_context_provider(model_resolution_context_provider.clone())
     .with_native_model_settings_snapshot(crate::native_model_settings::snapshot(Some(
         &effective_settings,
-    )))
-    .with_main_model_selection(
-        Some(main_model_setting.clone()),
-        main_model_source,
-        main_model_setting_provenance,
-        session_model_restriction.clone(),
-    )
-    .await
-    .with_dynamic_workflows_gate(dynamic_workflows_gate)
-    .with_instruction_user_email_provider(instruction_identity.clone())
-    .with_mod_surface_roster(mod_surface_roster.clone())
-    .with_native_sandbox_host_facts_provider(sandbox_host_facts_provider)
-    .with_native_policy_host_facts_provider(native_policy_host_facts_provider)
-    .with_native_tool_pool_refresh_callback_available(native_tool_pool_refresh_callback_available)
-    .with_native_settings_agent_context(cfg.native_settings_agent_context);
+    )));
+    // Seed the resolved profile before main-model binding can prepare requests.
+    // Bare model IDs may be shared by several independent provider profiles.
+    if let Some(profile) = default_model_profile.as_deref() {
+        orch_builder
+            .seed_initial_model_profile(&default_model_id, profile)
+            .await;
+    }
+    let orch_builder = orch_builder
+        .with_main_model_selection(
+            Some(main_model_setting.clone()),
+            main_model_source,
+            main_model_setting_provenance,
+            session_model_restriction.clone(),
+        )
+        .await
+        .with_dynamic_workflows_gate(dynamic_workflows_gate)
+        .with_instruction_user_email_provider(instruction_identity.clone())
+        .with_mod_surface_roster(mod_surface_roster.clone())
+        .with_native_sandbox_host_facts_provider(sandbox_host_facts_provider)
+        .with_native_policy_host_facts_provider(native_policy_host_facts_provider)
+        .with_native_tool_pool_refresh_callback_available(
+            native_tool_pool_refresh_callback_available,
+        )
+        .with_native_settings_agent_context(cfg.native_settings_agent_context);
     let orch_builder = orch_builder.with_workflow_size_guideline(workflow_size_guideline_state);
     let orch_builder = orch_builder.with_idle_compaction_enabled(cfg.idle_compaction_enabled);
     // Gap #5: wire the production JSONL writer (constructed just above) so the
@@ -5909,12 +5919,6 @@ pub async fn build_with_credential_stack(
         _ => orch_builder,
     };
     let orch_builder = orch_builder.with_workflow_output_scopes(workflow_output_scopes);
-    // Keep the resolved provider identity for models shared by multiple profiles.
-    if let Some(profile) = default_model_profile.as_deref() {
-        orch_builder
-            .seed_initial_model_profile(&default_model_id, profile)
-            .await;
-    }
     let orch = orchestrator::ConversationOrchestrator::into_shared(orch_builder);
     let native_settings_prompt_provider: Arc<
         dyn lingxi_core::host::NativeSettingsPromptAttachmentProvider,
