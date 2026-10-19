@@ -167,10 +167,7 @@ pub(crate) fn test_model_text(value: Option<&Utf16JsonProjection>) -> Option<&st
 /// lexically, matching Native `VE`/`Ke`. The result is the read-state key and
 /// observed route; canonical paths remain separate for permission and I/O.
 #[must_use]
-pub(crate) fn normalize_model_file_path(
-    file_path: &str,
-    cwd: &std::path::Path,
-) -> std::path::PathBuf {
+pub fn normalize_model_file_path(file_path: &str, cwd: &std::path::Path) -> std::path::PathBuf {
     let path = tool_api::util::path_validation::resolve_against_cwd(
         std::path::PathBuf::from(file_path),
         cwd,

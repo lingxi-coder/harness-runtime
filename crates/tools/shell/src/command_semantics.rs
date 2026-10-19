@@ -122,11 +122,13 @@ fn extract_base_command(command: &str) -> String {
 }
 
 /// Best-effort parse-only scan for files a Bash command likely WRITES, so the
-/// caller can invalidate stale read-file-state. Conservative: detects `>`/`>>`
+/// caller can select candidates for before/after content checks. Detects `>`/`>>`
 /// redirects, `tee [-a] FILE...`, heredoc `> FILE`, and common write tools
 /// (`cp dst`, `mv dst`, `touch`, `install`). Never executes; returns deduped
 /// path tokens. An empty result means "no write recognized", NOT "no write".
-/// Unknown-but-risky shapes are left to the caller's conservative invalidation.
+/// Tokens are only hints: quoted operators, skipped branches, and later command
+/// arguments can appear here without being written. Never invalidate from this
+/// list alone; only a comparison of the actual file contents establishes change.
 #[must_use]
 pub fn parsed_written_paths(command: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();

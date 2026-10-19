@@ -1330,22 +1330,110 @@ fn stale_read_file_state_hint(
     ))
 }
 
-fn invalidate_written_read_state(ctx: &BuiltinToolContext, cwd: &std::path::Path, command: &str) {
-    let paths = crate::command_semantics::parsed_written_paths(command);
-    if paths.is_empty() {
-        return;
+struct WrittenReadStateCandidate {
+    path: std::path::PathBuf,
+    entry: tool_api::read_file_state::ReadFileEntry,
+    fingerprint: Option<[u8; 32]>,
+}
+
+/// Hash only a previously read candidate, through the same translated,
+/// trusted, no-follow path boundary as file tools. Streaming avoids allocating
+/// an entire file when its cached Read covered only a small range.
+fn read_state_fingerprint(ctx: &BuiltinToolContext, path: &std::path::Path) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    use tool_api::util::path_validation::{canonicalize_and_validate, translate_model_path};
+
+    let requested = translate_model_path(&ctx.fs, path.to_path_buf(), false).ok()?;
+    let trusted = ctx.trusted_dirs();
+    let approved = canonicalize_and_validate(&requested, &trusted).ok()?;
+    let (root, relative) = trusted
+        .iter()
+        .filter_map(|root| {
+            let root = std::fs::canonicalize(root).ok()?;
+            let relative = approved.strip_prefix(&root).ok()?.to_path_buf();
+            Some((root, relative))
+        })
+        .max_by_key(|(root, _)| root.components().count())?;
+    let mut file = lingxi_core::host::rooted_fs::open_file_after_permission(
+        &root, &relative, &requested, &approved,
+    )
+    .ok()?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let size = file.read(&mut buffer).ok()?;
+        if size == 0 {
+            return Some(digest.finalize().into());
+        }
+        digest.update(&buffer[..size]);
     }
-    let Ok(mut state) = ctx.read_file_state.lock() else {
-        return;
-    };
-    for raw in paths {
-        let path = std::path::Path::new(&raw);
-        let absolute = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            cwd.join(path)
+}
+
+fn written_read_state_candidates(
+    ctx: &BuiltinToolContext,
+    cwd: &std::path::Path,
+    command: &str,
+) -> Vec<WrittenReadStateCandidate> {
+    crate::command_semantics::parsed_written_paths(command)
+        .into_iter()
+        .filter_map(|raw| {
+            let resolved = tool_api::util::path_validation::resolve_against_cwd(raw.into(), cwd);
+            // File tools key the cache by the lexically normalized model
+            // route, not its canonical inode path. Match that spelling before
+            // probing the cache (e.g. `sub/../target.txt`).
+            let mut path = std::path::PathBuf::new();
+            for component in resolved.components() {
+                match component {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        if path.file_name().is_some() {
+                            path.pop();
+                        }
+                    }
+                    component => path.push(component.as_os_str()),
+                }
+            }
+            // Uncached parser guesses must never cause filesystem reads.
+            let entry = ctx.read_file_state.lock().ok()?.peek(&path)?;
+            Some(WrittenReadStateCandidate {
+                path,
+                entry,
+                fingerprint: None,
+            })
+        })
+        .collect()
+}
+
+fn snapshot_written_read_state(
+    ctx: &BuiltinToolContext,
+    mut candidates: Vec<WrittenReadStateCandidate>,
+) -> Vec<WrittenReadStateCandidate> {
+    for candidate in &mut candidates {
+        candidate.fingerprint = read_state_fingerprint(ctx, &candidate.path);
+    }
+    candidates
+}
+
+fn invalidate_written_read_state(
+    ctx: &BuiltinToolContext,
+    candidates: Vec<WrittenReadStateCandidate>,
+) {
+    for candidate in candidates {
+        let after = read_state_fingerprint(ctx, &candidate.path);
+        if candidate.fingerprint.is_some() && candidate.fingerprint == after {
+            continue;
+        }
+        let Ok(mut state) = ctx.read_file_state.lock() else {
+            continue;
         };
-        state.remove(&absolute);
+        // Keep the model's original snapshot and force the normal content
+        // check even if a writer preserved/backdated mtime. Equal full-file
+        // content remains safe, and changed/partial content requires Read.
+        // A failed content probe is conservatively stale for this path only.
+        // The compare-and-mark preserves a concurrent Read/Edit/Write and
+        // leaves LRU order and the entry's source routes untouched.
+        state.mark_stale_if_unchanged(&candidate.path, &candidate.entry);
     }
 }
 
@@ -3496,6 +3584,16 @@ impl Tool for BashTool {
             _ => None,
         };
 
+        let candidates = written_read_state_candidates(&self.ctx, &cwd, &cmd_str);
+        let written_read_state = if candidates.is_empty() {
+            candidates
+        } else {
+            let context = self.ctx.clone();
+            tokio::task::spawn_blocking(move || snapshot_written_read_state(&context, candidates))
+                .await
+                .map_err(|error| ToolError::Internal(error.to_string()))?
+        };
+
         // ===== Foreground spawn =====
         // Race the live runner against turn/sibling cancellation. When
         // backgrounding is enabled, preserve the child before returning;
@@ -4041,14 +4139,19 @@ impl Tool for BashTool {
                 // completion, so `was_backgrounded` is `false`, not absent.
                 meta.insert("was_backgrounded".into(), AnalyticsValue::Bool(false));
                 self.ctx.bus.log_event(BASH_COMPLETED, meta).await;
-                // `staleReadFileStateHint` — computed BEFORE the read-state
-                // refresh (oracle order: `te = …OcT(…)` then `await Zmm(…)`),
-                // and only on the non-interrupted, non-image, non-background
-                // arm (`if(!g&&!J&&!_.backgroundTaskId)`). This arm is exactly
-                // that one.
+                // Compute the advisory hint before marking changed snapshots
+                // stale. The content comparison below, not shell syntax,
+                // determines whether an entry needs invalidating.
                 let stale_hint =
                     stale_read_file_state_hint(&self.ctx, &cmd_str, &cwd, call_start_ms);
-                invalidate_written_read_state(&self.ctx, &cwd, &cmd_str);
+                if !written_read_state.is_empty() {
+                    let context = self.ctx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        invalidate_written_read_state(&context, written_read_state)
+                    })
+                    .await
+                    .map_err(|error| ToolError::Internal(error.to_string()))?;
+                }
 
                 // BASH-07 `ghRateLimitHint` (`q` in the oracle's `call`): a
                 // non-background `gh` command whose output reports a GitHub API
@@ -5968,6 +6071,80 @@ mod tests {
             exit_code: 0,
             timed_out: false,
         })
+    }
+
+    #[test]
+    fn written_read_state_preserves_a_concurrent_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("target.txt");
+        std::fs::write(&path, "old").unwrap();
+        let ctx = noop_ctx();
+        ctx.session_cwd.swap(root.clone(), vec![root.clone()]);
+        seed_read_entry(&ctx, &path, 1);
+        let candidates = snapshot_written_read_state(
+            &ctx,
+            written_read_state_candidates(&ctx, &root, "echo new > target.txt"),
+        );
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].fingerprint.is_some());
+        std::fs::write(&path, "new").unwrap();
+        let mut refreshed = candidates[0].entry.clone();
+        refreshed.content = "new".into();
+        refreshed.mtime_ms = 2;
+        tool_api::read_file_state::set(&ctx.read_file_state, path.clone(), refreshed.clone());
+
+        invalidate_written_read_state(&ctx, candidates);
+
+        assert_eq!(
+            tool_api::read_file_state::get(&ctx.read_file_state, &path),
+            Some(refreshed)
+        );
+    }
+
+    #[test]
+    fn written_read_state_uses_only_cached_translated_trusted_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("target.txt");
+        std::fs::write(&path, "old").unwrap();
+        let mut ctx = noop_ctx();
+        ctx.session_cwd.swap(root.clone(), vec![root.clone()]);
+        ctx.fs = tool_api::test_support::make_guest_alias_fs("/guest", &root, "/blocked");
+        let guest = std::path::Path::new("/guest/target.txt");
+        seed_read_entry(&ctx, guest, 1);
+        let candidates = snapshot_written_read_state(
+            &ctx,
+            written_read_state_candidates(&ctx, &root, "echo new > /guest/target.txt"),
+        );
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].fingerprint.is_some());
+        assert!(
+            written_read_state_candidates(&ctx, &root, "echo new > /guest/uncached.txt").is_empty()
+        );
+
+        // A translated path outside the trusted root must never be opened,
+        // even if an earlier read-state entry still exists for that route.
+        let outside = tempfile::tempdir().unwrap();
+        ctx.fs = tool_api::test_support::make_guest_alias_fs("/guest", outside.path(), "/blocked");
+        std::fs::write(outside.path().join("target.txt"), "private").unwrap();
+        assert!(read_state_fingerprint(&ctx, guest).is_none());
+
+        // Failure to inspect one candidate does not delete unrelated entries.
+        seed_read_entry(&ctx, &path, 1);
+        invalidate_written_read_state(&ctx, candidates);
+        assert_eq!(
+            tool_api::read_file_state::get(&ctx.read_file_state, guest)
+                .unwrap()
+                .mtime_ms,
+            i64::MIN
+        );
+        assert_eq!(
+            tool_api::read_file_state::get(&ctx.read_file_state, &path)
+                .unwrap()
+                .mtime_ms,
+            1
+        );
     }
 
     #[test]

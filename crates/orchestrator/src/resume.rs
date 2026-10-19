@@ -47,6 +47,10 @@ use tokio::sync::Mutex;
 use tool_api::registry::ToolRegistry;
 use uuid::Uuid;
 
+mod file_state;
+#[cfg(test)]
+mod file_state_tests;
+
 /// Errors raised by the resume path. Forwards loader errors verbatim.
 #[derive(Debug, thiserror::Error)]
 pub enum ResumeError {
@@ -3200,6 +3204,7 @@ impl ConversationOrchestrator {
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             model_reminder_attachments_from_messages(messages);
         self.restore_prompt_ingress_sent_sets(messages).await;
+        self.restore_file_read_state().await;
     }
 
     /// Restore only metadata that may live off the resumable model chain.
@@ -3262,6 +3267,30 @@ impl ConversationOrchestrator {
         *self.prompt_runtime.sent_agent_names.lock().await = agents;
         *self.prompt_runtime.sent_skill_names.lock().await = skills;
         restore_deferred_tool_state_from_history(self.tools.deferral(), &history, &attachments);
+        self.restore_file_read_state().await;
+    }
+
+    /// Rebuild only historical file contents proven by the adopted model
+    /// history. The replay never reads current disk bytes as if the model had
+    /// seen them; restored entries require content verification on first use.
+    pub(crate) async fn restore_file_read_state(&self) {
+        let session = self.session.lock().await;
+        self.restore_file_read_state_for_session(&session);
+    }
+
+    pub(crate) fn restore_file_read_state_for_session(&self, session: &SessionState) {
+        self.prompt_runtime.reset_read_state();
+        let attachments = self
+            .transcript
+            .model_reminder_attachments
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        file_state::restore_file_state(
+            session,
+            &self.cwd,
+            &self.prompt_runtime.read_state_map,
+            &attachments,
+        );
     }
 
     async fn restore_mod_attachment_provenance_from_messages(&self, messages: &[JsonlMessage]) {
@@ -3418,6 +3447,7 @@ impl ConversationOrchestrator {
             orch.transcript.jsonl_writer = Some(writer);
         }
         orch.sync_active_goal_stop_hook_for_current_state().await;
+        orch.restore_file_read_state().await;
         if !replayed.runtime_metadata.deferred_tools.is_empty() {
             replay_deferred_tools_after_resume(
                 &orch,

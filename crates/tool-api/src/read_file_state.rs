@@ -197,6 +197,20 @@ impl ReadFileStateLru {
         self.map.get(path).map(|n| n.entry.clone())
     }
 
+    /// Mark a snapshot stale only if no concurrent Read/Edit/Write replaced
+    /// it. Preserve content, source routes, visibility, byte accounting and LRU
+    /// order; the sentinel timestamp forces the file tools' content check.
+    pub fn mark_stale_if_unchanged(&mut self, path: &Path, expected: &ReadFileEntry) -> bool {
+        let Some(node) = self.map.get_mut(path) else {
+            return false;
+        };
+        if node.entry != *expected {
+            return false;
+        }
+        node.entry.mtime_ms = i64::MIN;
+        true
+    }
+
     /// Return the file-tool route groups captured for an entry, in
     /// first-observed order, without changing LRU recency. Each group contains
     /// the model spelling plus any translated filesystem spelling. An empty
@@ -615,6 +629,33 @@ mod tests {
     fn get_missing_is_none() {
         let map = new_read_file_state_map();
         assert_eq!(get(&map, Path::new("/nope")), None);
+    }
+
+    #[test]
+    fn marking_stale_preserves_routes_visibility_and_lru_without_overwriting_refreshes() {
+        let mut state = ReadFileStateLru::with_limits(100, u64::MAX);
+        let path = PathBuf::from("/tmp/a.txt");
+        let alias = PathBuf::from("/guest/a.txt");
+        let original = entry("old");
+        state.set_with_requested_aliases(path.clone(), original.clone(), true, vec![alias.clone()]);
+        state.set(PathBuf::from("/tmp/b.txt"), entry("other"));
+        let order = state.keys();
+        let bytes = state.total_bytes;
+
+        assert!(state.mark_stale_if_unchanged(&path, &original));
+        let mut stale = original.clone();
+        stale.mtime_ms = i64::MIN;
+        assert_eq!(state.peek(&path), Some(stale));
+        assert_eq!(state.keys(), order);
+        assert_eq!(state.total_bytes, bytes);
+        assert_eq!(state.requested_path_groups(&path), vec![vec![alias]]);
+        assert!(state.model_context_keys().contains(&path));
+
+        let refreshed = entry("fresh");
+        state.set(path.clone(), refreshed.clone());
+        assert!(!state.mark_stale_if_unchanged(&path, &original));
+        assert_eq!(state.peek(&path), Some(refreshed));
+        assert!(!state.mark_stale_if_unchanged(Path::new("/missing"), &original));
     }
 
     #[test]

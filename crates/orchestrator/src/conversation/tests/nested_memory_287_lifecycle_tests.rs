@@ -571,20 +571,16 @@ async fn retained_raw_nested_memory_survives_real_compaction_and_cold_or_hot_res
                 .unwrap()
             );
         }
-        assert!(tool_api::read_file_state::get(
-            &resumed.prompt_runtime.read_state_map,
-            &fixture.memory
-        )
-        .is_none());
+        assert_restored_read_state(&resumed, &fixture.memory, body);
         read_trigger(&resumed, &fixture).await;
         assert!(
             resumed
                 .nested_memory_reminder_messages(&[])
                 .await
                 .is_empty(),
-            "cold={cold_resume}: retained body must dedup without a restored path cursor"
+            "cold={cold_resume}: retained full file context must dedup after resume"
         );
-        assert_seeded(&resumed, &fixture.memory, body);
+        assert_restored_read_state(&resumed, &fixture.memory, body);
         assert_eq!(
             nested_rows(&fixture.rows().await).len(),
             1,
@@ -594,12 +590,12 @@ async fn retained_raw_nested_memory_survives_real_compaction_and_cold_or_hot_res
 }
 
 #[tokio::test]
-async fn discarded_raw_nested_memory_does_not_suppress_after_compaction_and_cold_or_hot_resume() {
+async fn compact_file_state_survives_resume_without_reviving_discarded_nested_memory() {
     for cold_resume in [false, true] {
         let body = " \ndiscarded guidance\n\t";
         let fixture = Fixture::new(body);
         let root = fixture.root();
-        let (original, _) = initial_memory(&root, &fixture).await;
+        initial_memory(&root, &fixture).await;
         compact(&root, Vec::new()).await;
         assert_restored_read_state(&root, &fixture.memory, body);
         assert!(root.nested_memory_history().await.nested.is_empty());
@@ -632,11 +628,7 @@ async fn discarded_raw_nested_memory_does_not_suppress_after_compaction_and_cold
                 .unwrap()[&restored_id],
             restored_payload
         );
-        assert!(tool_api::read_file_state::get(
-            &resumed.prompt_runtime.read_state_map,
-            &fixture.memory
-        )
-        .is_none());
+        assert_restored_read_state(&resumed, &fixture.memory, body);
         // Archived sidecars alone must never revive a discarded baseline.
         resumed
             .restore_resume_prompt_metadata(&fixture.rows().await)
@@ -644,31 +636,20 @@ async fn discarded_raw_nested_memory_does_not_suppress_after_compaction_and_cold
         assert!(resumed.nested_memory_history().await.nested.is_empty());
         read_trigger(&resumed, &fixture).await;
         let emitted = resumed.nested_memory_reminder_messages(&[]).await;
-        assert_eq!(
-            emitted.len(),
-            1,
-            "cold={cold_resume}: body absent after the compact boundary must attach again"
+        assert!(
+            emitted.is_empty(),
+            "cold={cold_resume}: full compact file context survives without a duplicate nested row"
         );
-        assert_ne!(emitted[0].id(), original[0].id());
-        assert_seeded(&resumed, &fixture.memory, body);
+        assert_restored_read_state(&resumed, &fixture.memory, body);
         persist_user(&resumed, "continue after discarded context reload").await;
         let replayed = fixture.replay().await;
         let raw = nested_rows(&replayed.messages);
-        assert_eq!(raw.len(), 1);
-        assert_eq!(raw[0].uuid, emitted[0].id().as_uuid().to_string());
-        assert!(raw[0]
-            .message
-            .at_pointer("")
-            .is_some_and(|value| value.is_null()));
-        assert_eq!(
-            raw[0]
-                .attachment_projection
-                .as_ref()
-                .and_then(|attachment| attachment.string_at("/content/content")),
-            Some(body)
+        assert!(
+            raw.is_empty(),
+            "discarded nested-memory baseline stays discarded"
         );
-
-        assert_eq!(nested_rows(&fixture.rows().await).len(), 2);
+        assert_restored_file_row(&replayed.messages, &fixture, body);
+        assert_eq!(nested_rows(&fixture.rows().await).len(), 1);
     }
 }
 

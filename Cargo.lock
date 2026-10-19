@@ -7571,12 +7571,14 @@ dependencies = [
  "sandbox",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "telemetry",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tool-api",
+ "tool-file",
  "tracing",
 ]
 

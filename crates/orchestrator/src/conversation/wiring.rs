@@ -312,6 +312,16 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_read_state_map(mut self, map: tool_api::read_file_state::ReadFileStateMap) -> Self {
         self.prompt_runtime.read_state_map = map;
+        // with_resume builds its private registry before a host can attach
+        // the shared tool registry. Rebuild in the adopted map as well, or
+        // that final builder step would discard the restored file snapshots.
+        if self.config.resume_session_id.is_some() {
+            let session = self
+                .session
+                .try_lock()
+                .expect("with_read_state_map runs at construction, before any turn holds the lock");
+            self.restore_file_read_state_for_session(&session);
+        }
         self
     }
 
