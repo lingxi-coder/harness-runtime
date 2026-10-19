@@ -4702,12 +4702,21 @@ mod current_prompt_upe_scope_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.jsonl");
         let output = MockOutputStream::new();
+        let session_id = lingxi_core::types::SessionId::new();
+        let state_root = dir.path().join("state");
+        std::fs::create_dir(&state_root).unwrap();
         let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
             path.clone(),
             Arc::new(platform_posix::fs::PosixFileSystem::new(
                 dir.path().to_path_buf(),
             )),
         ));
+        writer.activate_session_target_with_durable_lock(
+            session_id,
+            path.clone(),
+            dir.path().to_path_buf(),
+            Arc::new(session::jsonl::DurableTranscriptWriter::open(&state_root).unwrap()),
+        );
         let orch = ConversationOrchestrator::new(
             crate::OrchestratorConfig::default(),
             Arc::new(MockApiClient::new(vec![])),
@@ -4718,9 +4727,10 @@ mod current_prompt_upe_scope_tests {
             Arc::new(StaticMemoryProvider::empty()),
             dir.path().to_path_buf(),
         )
-        .with_jsonl_writer(writer);
+        .with_jsonl_writer(writer)
+        .with_session_id(session_id);
         let identity = crate::prompt::mid_turn_input::PendingMidTurnPromptIdentity {
-            session_id: "session".into(),
+            session_id: session_id.to_string(),
             owner_turn_id: 101,
             message_id: MessageId::new(),
             prompt_id: uuid::Uuid::new_v4().to_string(),
