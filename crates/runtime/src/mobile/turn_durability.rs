@@ -328,7 +328,7 @@ impl DurableTurnCheckpoint {
         &self,
     ) -> Result<Vec<orchestrator::QueuedPromptInput>, DurableTurnStoreError> {
         let mut inputs = match (self.skill_prompt.as_ref(), self.prompt_identity.as_ref()) {
-            (Some(skill), None) => skill.queued_prompt_inputs(),
+            (Some(skill), None) => skill.queued_prompt_inputs(&self.images),
             (None, Some(identity)) => {
                 vec![identity.queued_prompt_input(self.prompt.clone(), &self.images)]
             }
@@ -2666,13 +2666,27 @@ mod tests {
             ),
         ] {
             store
-                .admit_queued_slash("session", Some(turn_id), Some(turn_id + 1), "/skill".into())
+                .admit_queued_slash(
+                    "session",
+                    Some(turn_id),
+                    Some(turn_id + 1),
+                    "/skill".into(),
+                    vec![ImageRefDto {
+                        media_type: "image/png".into(),
+                        base64: "AA==".into(),
+                    }],
+                )
                 .unwrap();
             store.claim_queued_slash("session", turn_id).unwrap();
             let checkpoint = store
                 .prepare_claimed_slash_turn("session", turn_id, "expanded".into(), skill)
                 .unwrap();
             let inputs = checkpoint.initial_prompt_inputs().unwrap();
+            assert_eq!(
+                inputs[0].images.len(),
+                1,
+                "slash/skill images survive correlation"
+            );
             assert_eq!(
                 inputs[0].transcript_row_token,
                 Some(format!("client-turn:{}", turn_id + 1))
@@ -2691,6 +2705,7 @@ mod tests {
                 .initial_prompt_inputs()
                 .unwrap();
             assert_eq!(restored[0].message_id, inputs[0].message_id);
+            assert_eq!(restored[0].images.len(), 1, "images survive cold restore");
             assert_eq!(
                 restored[0].transcript_row_token,
                 inputs[0].transcript_row_token
