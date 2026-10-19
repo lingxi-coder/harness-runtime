@@ -324,6 +324,49 @@ struct CachedTurn {
 }
 
 impl DurableTurnCheckpoint {
+    pub(crate) fn initial_prompt_inputs(
+        &self,
+    ) -> Result<Vec<orchestrator::QueuedPromptInput>, DurableTurnStoreError> {
+        let mut inputs = match (self.skill_prompt.as_ref(), self.prompt_identity.as_ref()) {
+            (Some(skill), None) => skill.queued_prompt_inputs(),
+            (None, Some(identity)) => {
+                vec![identity.queued_prompt_input(self.prompt.clone(), &self.images)]
+            }
+            _ => {
+                return Err(DurableTurnStoreError::Storage(
+                    "durable turn prompt identity is inconsistent".into(),
+                ))
+            }
+        };
+        self.correlate_prompt_inputs(&mut inputs);
+        Ok(inputs)
+    }
+
+    /// Bind only the explicitly identified user row; expansion/meta rows retain
+    /// their own identities and coalesced inputs keep their member tokens.
+    pub(crate) fn correlate_prompt_inputs(&self, inputs: &mut [orchestrator::QueuedPromptInput]) {
+        let row_id = self
+            .prompt_identity
+            .as_ref()
+            .map(|identity| identity.message_id)
+            .or_else(|| {
+                self.skill_prompt
+                    .as_ref()
+                    .map(|skill| skill.input_message_ids[0])
+            });
+        let Some(row_id) = row_id else {
+            return;
+        };
+        for input in inputs {
+            if input.message_id == Some(row_id) && input.transcript_row_token.is_none() {
+                input.transcript_row_token = Some(format!(
+                    "client-turn:{}",
+                    self.original_client_turn_id.unwrap_or(self.turn_id)
+                ));
+            }
+        }
+    }
+
     pub(crate) fn queued_prompt_inputs(
         &self,
         store: &DurableTurnStore,
@@ -396,6 +439,7 @@ impl DurableTurnCheckpoint {
                 trailing_history_rows: vec![result_row],
                 ..orchestrator::QueuedPromptInput::default()
             });
+            self.correlate_prompt_inputs(&mut inputs);
             return Ok(inputs);
         }
         let members = if let Some(batch) = self.coalesced_batch.as_ref() {
@@ -2605,6 +2649,102 @@ mod tests {
             .scan_pending("session")
             .expect("batch is terminal after acknowledgment")
             .is_empty());
+    }
+
+    #[test]
+    fn slash_and_skill_first_run_keep_the_restored_client_turn_token() {
+        let (temp, store) = store();
+        for (turn_id, skill) in [
+            (101, None),
+            (
+                102,
+                Some(DurableSkillPrompt::new(
+                    "/skill".into(),
+                    "expanded body".into(),
+                    Vec::new(),
+                )),
+            ),
+        ] {
+            store
+                .admit_queued_slash("session", Some(turn_id), Some(turn_id + 1), "/skill".into())
+                .unwrap();
+            store.claim_queued_slash("session", turn_id).unwrap();
+            let checkpoint = store
+                .prepare_claimed_slash_turn("session", turn_id, "expanded".into(), skill)
+                .unwrap();
+            let inputs = checkpoint.initial_prompt_inputs().unwrap();
+            assert_eq!(
+                inputs[0].transcript_row_token,
+                Some(format!("client-turn:{}", turn_id + 1))
+            );
+            assert!(
+                inputs
+                    .iter()
+                    .skip(1)
+                    .all(|input| input.transcript_row_token.is_none()),
+                "expanded/meta skill rows never impersonate the user command"
+            );
+            let cold = DurableTurnStore::new(temp.path().join("turns"));
+            let restored = cold
+                .load("session", turn_id)
+                .unwrap()
+                .initial_prompt_inputs()
+                .unwrap();
+            assert_eq!(restored[0].message_id, inputs[0].message_id);
+            assert_eq!(
+                restored[0].transcript_row_token,
+                inputs[0].transcript_row_token
+            );
+        }
+    }
+
+    #[test]
+    fn direct_and_restored_prompt_inputs_keep_the_original_client_turn_token() {
+        let (temp, store) = store();
+        let checkpoint = store
+            .admit_queued_prompt(
+                "session",
+                Some(101),
+                Some(7),
+                Utf16JsonProjection::from("same prompt"),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        let identity = checkpoint.prompt_identity.as_ref().unwrap();
+        let mut inputs = vec![
+            orchestrator::QueuedPromptInput::default(),
+            identity.queued_prompt_input("same prompt".into(), &[]),
+        ];
+        checkpoint.correlate_prompt_inputs(&mut inputs);
+        assert_eq!(
+            inputs[0].transcript_row_token, None,
+            "never bind an unrelated row"
+        );
+        assert_eq!(
+            inputs[1].transcript_row_token.as_deref(),
+            Some("client-turn:7")
+        );
+        inputs[1].transcript_row_token = Some("client-turn:7,8".into());
+        checkpoint.correlate_prompt_inputs(&mut inputs);
+        assert_eq!(
+            inputs[1].transcript_row_token.as_deref(),
+            Some("client-turn:7,8"),
+            "preserve coalesced correlators"
+        );
+        drop(store);
+        let cold = DurableTurnStore::new(temp.path().join("turns"));
+        let restored = cold.load("session", checkpoint.turn_id).unwrap();
+        let mut inputs = vec![restored
+            .prompt_identity
+            .as_ref()
+            .unwrap()
+            .queued_prompt_input(restored.prompt.clone(), &restored.images)];
+        restored.correlate_prompt_inputs(&mut inputs);
+        assert_eq!(
+            inputs[0].transcript_row_token.as_deref(),
+            Some("client-turn:7")
+        );
     }
 
     #[test]
