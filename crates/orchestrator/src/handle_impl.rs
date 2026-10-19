@@ -1215,6 +1215,9 @@ impl ConversationOrchestrator {
         *self.compaction_runtime.compaction_tracking.lock().await =
             compaction::AutoCompactTrackingState::default();
         self.hooks.clear_session_hooks(old_session_id).await;
+        // Mods retain their module state across in-place session switches.
+        // Notify them after activation so session.usage() reads this session.
+        self.fire_mod_session_start().await;
         Ok(())
     }
 
@@ -1602,6 +1605,9 @@ impl ConversationOrchestrator {
                 .await
                 .map_err(|error| HandleError::ActionFailed(format!("deferred replay: {error}")))?;
         }
+        // Restore usage and the selected route before Mods take their first
+        // reading; otherwise token-weather keeps the empty boot snapshot.
+        self.fire_mod_session_start().await;
         Ok(())
     }
 

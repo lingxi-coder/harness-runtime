@@ -3760,7 +3760,7 @@ impl ConversationOrchestrator {
     /// user prompt — claude-code `if(p.initialUserMessage)$os=p.initialUserMessage`)
     /// and return the folded hook aggregate so the composition root can apply
     /// host-owned follow-up actions such as `reloadSkills`.
-    async fn fire_mod_session_start(&self) {
+    pub(crate) async fn fire_mod_session_start(&self) {
         let Some(registry) = &self.lifecycle_runtime.hook_registry else {
             return;
         };
