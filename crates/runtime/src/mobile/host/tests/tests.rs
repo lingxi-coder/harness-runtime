@@ -54,7 +54,7 @@ async fn mobile_midturn_source_acks_last_identity_and_ordered_members() {
         .admit_queued_prompt(
             "session",
             None,
-            None,
+            Some(71),
             source_text("first"),
             None,
             vec![client::protocol::commands::ImageRefDto {
@@ -67,7 +67,7 @@ async fn mobile_midturn_source_acks_last_identity_and_ordered_members() {
         .admit_queued_prompt(
             "session",
             None,
-            None,
+            Some(72),
             source_text("last"),
             None,
             vec![client::protocol::commands::ImageRefDto {
@@ -110,6 +110,11 @@ async fn mobile_midturn_source_acks_last_identity_and_ordered_members() {
     ));
     let identity = inputs[0].pending_prompt_identity.as_ref().unwrap();
     assert_eq!(identity.owner_turn_id, first.turn_id);
+    assert_eq!(
+        identity.transcript_row_token,
+        Some("client-turn:71,72".into())
+    );
+
     assert_eq!(identity.message_id, last_identity.message_id);
     assert_eq!(identity.prompt_id, last_identity.prompt_id);
     assert_eq!(identity.member_turn_ids, [first.turn_id, last.turn_id]);

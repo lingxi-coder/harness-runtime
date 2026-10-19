@@ -2611,11 +2611,18 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueue
                 Err(error) => return Err(error.to_string()),
             };
             let mut inputs = Vec::with_capacity(batch.member_turn_ids.len());
+            let mut client_turn_ids = Vec::with_capacity(batch.member_turn_ids.len());
             for turn_id in &batch.member_turn_ids {
                 let checkpoint = self
                     .durable_turns
                     .load(&session_id, *turn_id)
                     .map_err(|error| error.to_string())?;
+                client_turn_ids.push(
+                    checkpoint
+                        .original_client_turn_id
+                        .unwrap_or(checkpoint.turn_id)
+                        .to_string(),
+                );
                 inputs.push(MidTurnInput {
                     text: checkpoint.prompt,
                     images: checkpoint
@@ -2641,6 +2648,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueue
                 owner_turn_id: batch.owner_turn_id,
                 message_id: batch.aggregate_identity.message_id,
                 prompt_id: batch.aggregate_identity.prompt_id,
+                transcript_row_token: Some(format!("client-turn:{}", client_turn_ids.join(","))),
                 member_turn_ids: batch.member_turn_ids,
             });
             self.loop_state
@@ -4807,6 +4815,13 @@ impl MobileEngineHandle {
                     self.release_unspawned_turn(&owner).await;
                     return Err(error);
                 }
+                let queued_inputs = match checkpoint.initial_prompt_inputs() {
+                    Ok(inputs) => inputs,
+                    Err(error) => {
+                        self.release_unspawned_turn(&owner).await;
+                        return Err(Self::map_durable_turn_error(error));
+                    }
+                };
                 self.start_streaming_turn_inner(
                     prompt,
                     None,
@@ -4815,7 +4830,7 @@ impl MobileEngineHandle {
                     checkpoint.original_client_turn_id,
                     false,
                     false,
-                    None,
+                    Some(queued_inputs),
                     None,
                     Some(owner),
                 )
@@ -4827,7 +4842,6 @@ impl MobileEngineHandle {
                 hook_messages,
             } => {
                 let skill_prompt = DurableSkillPrompt::new(command.clone(), body, hook_messages);
-                let queued_inputs = skill_prompt.queued_prompt_inputs();
                 let checkpoint = match self.durable_turns.prepare_claimed_slash_turn(
                     &owner.session_id,
                     checkpoint.turn_id,
@@ -4850,6 +4864,13 @@ impl MobileEngineHandle {
                     self.release_unspawned_turn(&owner).await;
                     return Err(error);
                 }
+                let queued_inputs = match checkpoint.initial_prompt_inputs() {
+                    Ok(inputs) => inputs,
+                    Err(error) => {
+                        self.release_unspawned_turn(&owner).await;
+                        return Err(Self::map_durable_turn_error(error));
+                    }
+                };
                 self.start_streaming_turn_inner(
                     command,
                     None,
@@ -5448,19 +5469,19 @@ impl MobileEngineHandle {
                 })
             };
             if let Some(checkpoint) = checkpoint_result {
-                match checkpoint {
+                match checkpoint.and_then(|checkpoint| {
+                    if queued_inputs.is_none() {
+                        queued_inputs = Some(
+                            checkpoint
+                                .initial_prompt_inputs()
+                                .map_err(Self::map_durable_turn_error)?,
+                        );
+                    }
+                    Ok(checkpoint)
+                }) {
                     Ok(checkpoint) => {
-                        if queued_inputs.is_none() {
-                            queued_inputs = checkpoint
-                                .skill_prompt
-                                .as_ref()
-                                .map(DurableSkillPrompt::queued_prompt_inputs)
-                                .or_else(|| {
-                                    checkpoint.prompt_identity.as_ref().map(|identity| {
-                                        vec![identity
-                                            .queued_prompt_input(text.clone(), &checkpoint.images)]
-                                    })
-                                });
+                        if let Some(inputs) = queued_inputs.as_mut() {
+                            checkpoint.correlate_prompt_inputs(inputs);
                         }
                         tracing::debug!(
                             session_id = %checkpoint.session_id,
@@ -6096,29 +6117,23 @@ impl MobileEngineHandle {
                             "mobile: resuming turn from pre-execution checkpoint"
                         );
                         let skill_prompt = checkpoint.skill_prompt.clone();
-                        let queued_inputs = if checkpoint.prompt_mode == Some(PromptModeDto::Bash) {
-                            Some(
-                                checkpoint
-                                    .queued_prompt_inputs(&self.durable_turns)
-                                    .map_err(Self::map_durable_turn_error)?,
-                            )
-                        } else {
-                            match (skill_prompt.as_ref(), checkpoint.prompt_identity.as_ref()) {
-                                (Some(skill_prompt), None) => {
-                                    Some(skill_prompt.queued_prompt_inputs())
-                                }
-                                (None, Some(identity)) => Some(vec![identity.queued_prompt_input(
-                                    checkpoint.prompt.clone(),
-                                    &checkpoint.images,
-                                )]),
-                                _ => {
-                                    return Err(ClientError::Rejected {
-                                        message: "durable turn prompt identity is inconsistent"
-                                            .into(),
-                                    });
-                                }
-                            }
-                        };
+                        let mut queued_inputs =
+                            if checkpoint.prompt_mode == Some(PromptModeDto::Bash) {
+                                Some(
+                                    checkpoint
+                                        .queued_prompt_inputs(&self.durable_turns)
+                                        .map_err(Self::map_durable_turn_error)?,
+                                )
+                            } else {
+                                Some(
+                                    checkpoint
+                                        .initial_prompt_inputs()
+                                        .map_err(Self::map_durable_turn_error)?,
+                                )
+                            };
+                        if let Some(inputs) = queued_inputs.as_mut() {
+                            checkpoint.correlate_prompt_inputs(inputs);
+                        }
                         self.start_streaming_turn_inner(
                             checkpoint.prompt,
                             checkpoint.prompt_mode,

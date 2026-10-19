@@ -221,6 +221,8 @@ pub struct PendingMidTurnPromptIdentity {
     pub owner_turn_id: u64,
     pub message_id: MessageId,
     pub prompt_id: String,
+    /// Explicit UI correlators for this persisted aggregate row.
+    pub transcript_row_token: Option<String>,
     /// Ordered Native source members; the aggregate history row uses the last
     /// member identity while this list preserves every accepted source.
     pub member_turn_ids: Vec<u64>,
