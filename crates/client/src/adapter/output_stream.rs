@@ -450,15 +450,28 @@ impl AdapterOutputStream {
 
     async fn emit_buffered_message(&self, stop_reason: Option<&str>, include_empty: bool) {
         self.finish_text_block().await;
-        let blocks = {
+        let (blocks, transcript_uuid) = {
             let mut buffer = self.message_blocks.lock().await;
+            // A completed DTO can represent several persisted rows. Expose a
+            // link identity only when every buffered block names one same row.
+            let transcript_uuid = buffer
+                .blocks
+                .first()
+                .and_then(|entry| entry.row_id.clone())
+                .filter(|uuid| {
+                    buffer
+                        .blocks
+                        .iter()
+                        .all(|entry| entry.row_id.as_ref() == Some(uuid))
+                });
             buffer.active_block_key = None;
             buffer.last_completed_row_id = None;
             buffer.pending_continuation = None;
-            std::mem::take(&mut buffer.blocks)
+            let blocks = std::mem::take(&mut buffer.blocks)
                 .into_iter()
                 .map(|entry| entry.block)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (blocks, transcript_uuid)
         };
         if blocks.is_empty() && !include_empty {
             return;
@@ -467,7 +480,7 @@ impl AdapterOutputStream {
             .emit(ClientEvent::MessageComplete {
                 stop_reason: stop_reason.map(str::to_string),
                 message: Some(MessageDto {
-                    transcript_uuid: None,
+                    transcript_uuid,
                     sent_at_ms: None,
                     loop_wakeup: None,
                     visualization_context: None,
@@ -1311,6 +1324,81 @@ mod tests {
             panic!("expected completed text block")
         };
         assert_eq!(text.code_units, units);
+    }
+
+    #[tokio::test]
+    async fn message_complete_preserves_single_row_uuid_and_resets_it_at_boundary() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        let row_id = lingxi_core::types::MessageId::new();
+        stream.emit_assistant_block_start(1).await;
+        stream.emit_thinking("reason", Some("signature")).await;
+        stream.emit_text(&projection("answer")).await;
+        stream.emit_assistant_block_identity(1, &row_id).await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+        stream
+            .emit_text(&projection("unidentified next response"))
+            .await;
+        stream.emit_message_boundary(Some("end_turn"), None).await;
+
+        let completed = sink
+            .events()
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                ClientEvent::MessageComplete {
+                    message: Some(message),
+                    ..
+                } => Some(message),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 2);
+        assert_eq!(
+            completed[0].blocks.len(),
+            2,
+            "several blocks may belong to one row"
+        );
+        assert_eq!(
+            completed[0].transcript_uuid,
+            Some(row_id.as_uuid().to_string())
+        );
+        assert_eq!(
+            completed[1].transcript_uuid, None,
+            "the preceding identity cannot leak into a later response"
+        );
+    }
+
+    #[tokio::test]
+    async fn message_complete_never_guesses_uuid_for_mixed_or_unidentified_rows() {
+        for identify_second in [false, true] {
+            let sink = MockSink::arc();
+            let stream = AdapterOutputStream::new(sink.clone());
+            let first_row = lingxi_core::types::MessageId::new();
+            let second_row = lingxi_core::types::MessageId::new();
+            stream.emit_assistant_block_start(1).await;
+            stream.emit_text(&projection("first row")).await;
+            stream.emit_assistant_block_identity(1, &first_row).await;
+            stream.emit_assistant_block_start(2).await;
+            stream.emit_text(&projection("second row")).await;
+            if identify_second {
+                stream.emit_assistant_block_identity(2, &second_row).await;
+            }
+            stream.emit_message_boundary(Some("end_turn"), None).await;
+            let events = sink.events().await;
+            let ClientEvent::MessageComplete {
+                message: Some(message),
+                ..
+            } = events.last().unwrap()
+            else {
+                panic!("missing completed message");
+            };
+            assert_eq!(message.blocks.len(), 2);
+            assert_eq!(
+                message.transcript_uuid, None,
+                "mixed persisted rows or a missing identity must not produce a false link target"
+            );
+        }
     }
 
     #[tokio::test]
