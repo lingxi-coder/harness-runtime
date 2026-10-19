@@ -726,6 +726,7 @@ impl ConversationOrchestrator {
             text: text.clone(),
             images: images.clone(),
             message_id: Some(identity.message_id),
+            transcript_row_token: identity.transcript_row_token.clone(),
             pending_prompt_identity: Some(PendingPromptIdentity {
                 prompt_id: identity.prompt_id.clone(),
                 trailing_history_row_ids: Vec::new(),
@@ -4695,6 +4696,72 @@ mod current_prompt_upe_scope_tests {
         StaticMemoryProvider,
     };
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn pending_mid_turn_client_turn_token_reports_the_append_once_uuid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.jsonl");
+        let output = MockOutputStream::new();
+        let session_id = lingxi_core::types::SessionId::new();
+        let state_root = dir.path().join("state");
+        std::fs::create_dir(&state_root).unwrap();
+        let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+            path.clone(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(
+                dir.path().to_path_buf(),
+            )),
+        ));
+        writer.activate_session_target_with_durable_lock(
+            session_id,
+            path.clone(),
+            dir.path().to_path_buf(),
+            Arc::new(session::jsonl::DurableTranscriptWriter::open(&state_root).unwrap()),
+        );
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(tool_api::registry::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(output.clone()),
+            Arc::new(StaticMemoryProvider::empty()),
+            dir.path().to_path_buf(),
+        )
+        .with_jsonl_writer(writer)
+        .with_session_id(session_id);
+        let identity = crate::prompt::mid_turn_input::PendingMidTurnPromptIdentity {
+            session_id: session_id.to_string(),
+            owner_turn_id: 101,
+            message_id: MessageId::new(),
+            prompt_id: uuid::Uuid::new_v4().to_string(),
+            member_turn_ids: vec![101, 102],
+            transcript_row_token: Some("client-turn:7,8".into()),
+        };
+        for _ in 0..2 {
+            orch.inject_pending_user_projection_once(
+                &"same\nsame".into(),
+                Vec::new(),
+                identity.clone(),
+            )
+            .await
+            .unwrap();
+        }
+        let raw = std::fs::read_to_string(path).unwrap();
+        let rows = raw
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows.len(),
+            1,
+            "recovery never appends the coalesced row twice"
+        );
+        let persisted_uuid = rows[0]["uuid"].as_str().unwrap();
+        let events = output.snapshot().await;
+        assert!(events.iter().any(|event| matches!(event,
+            lingxi_core::host::OutputEvent::UserTranscriptRowIdentity { row_token, uuid }
+                if row_token == "client-turn:7,8" && uuid == persisted_uuid)));
+    }
 
     struct AfterToolsMidTurnBatch(std::sync::Mutex<Option<Vec<MidTurnInput>>>);
 

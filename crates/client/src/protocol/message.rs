@@ -18,6 +18,9 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 pub struct MessageDto {
+    /// UUID of the durable transcript row; absent for transient projections.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_uuid: Option<String>,
     /// The message role (e.g. `"assistant"`, `"user"`).
     pub role: String,
     /// The ordered content blocks comprising the message.

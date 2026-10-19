@@ -93,6 +93,7 @@ fn session_agent_events_round_trip() {
     assert_eq!(serde_json::from_value::<ClientEvent>(json).unwrap(), list);
 
     let message = MessageDto {
+        transcript_uuid: None,
         sent_at_ms: None,
         loop_wakeup: None,
         visualization_context: None,
@@ -389,6 +390,7 @@ fn message_complete_round_trips() {
     let ev = ClientEvent::MessageComplete {
         stop_reason: Some("end_turn".to_string()),
         message: Some(MessageDto {
+            transcript_uuid: None,
             sent_at_ms: None,
             loop_wakeup: None,
             visualization_context: None,

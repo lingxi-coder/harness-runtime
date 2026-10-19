@@ -324,6 +324,49 @@ struct CachedTurn {
 }
 
 impl DurableTurnCheckpoint {
+    pub(crate) fn initial_prompt_inputs(
+        &self,
+    ) -> Result<Vec<orchestrator::QueuedPromptInput>, DurableTurnStoreError> {
+        let mut inputs = match (self.skill_prompt.as_ref(), self.prompt_identity.as_ref()) {
+            (Some(skill), None) => skill.queued_prompt_inputs(&self.images),
+            (None, Some(identity)) => {
+                vec![identity.queued_prompt_input(self.prompt.clone(), &self.images)]
+            }
+            _ => {
+                return Err(DurableTurnStoreError::Storage(
+                    "durable turn prompt identity is inconsistent".into(),
+                ))
+            }
+        };
+        self.correlate_prompt_inputs(&mut inputs);
+        Ok(inputs)
+    }
+
+    /// Bind only the explicitly identified user row; expansion/meta rows retain
+    /// their own identities and coalesced inputs keep their member tokens.
+    pub(crate) fn correlate_prompt_inputs(&self, inputs: &mut [orchestrator::QueuedPromptInput]) {
+        let row_id = self
+            .prompt_identity
+            .as_ref()
+            .map(|identity| identity.message_id)
+            .or_else(|| {
+                self.skill_prompt
+                    .as_ref()
+                    .map(|skill| skill.input_message_ids[0])
+            });
+        let Some(row_id) = row_id else {
+            return;
+        };
+        for input in inputs {
+            if input.message_id == Some(row_id) && input.transcript_row_token.is_none() {
+                input.transcript_row_token = Some(format!(
+                    "client-turn:{}",
+                    self.original_client_turn_id.unwrap_or(self.turn_id)
+                ));
+            }
+        }
+    }
+
     pub(crate) fn queued_prompt_inputs(
         &self,
         store: &DurableTurnStore,
@@ -396,6 +439,7 @@ impl DurableTurnCheckpoint {
                 trailing_history_rows: vec![result_row],
                 ..orchestrator::QueuedPromptInput::default()
             });
+            self.correlate_prompt_inputs(&mut inputs);
             return Ok(inputs);
         }
         let members = if let Some(batch) = self.coalesced_batch.as_ref() {
@@ -425,10 +469,21 @@ impl DurableTurnCheckpoint {
         for member in &members {
             images.extend(member.images.iter().cloned());
         }
-        Ok(vec![identity.queued_prompt_input(
-            join_source_prompts(&prompts),
-            &images,
-        )])
+        let mut input = identity.queued_prompt_input(join_source_prompts(&prompts), &images);
+        // A persisted coalesced row may represent several UI prompts. Preserve
+        // each client correlator without guessing from duplicate prompt text.
+        let turns = members
+            .iter()
+            .map(|member| {
+                member
+                    .original_client_turn_id
+                    .unwrap_or(member.turn_id)
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        input.transcript_row_token = Some(format!("client-turn:{turns}"));
+        Ok(vec![input])
     }
 
     pub(crate) fn is_pending_mobile_bash(&self) -> bool {
@@ -2594,6 +2649,183 @@ mod tests {
             .scan_pending("session")
             .expect("batch is terminal after acknowledgment")
             .is_empty());
+    }
+
+    #[test]
+    fn slash_and_skill_first_run_keep_the_restored_client_turn_token() {
+        let (temp, store) = store();
+        for (turn_id, skill) in [
+            (101, None),
+            (
+                102,
+                Some(DurableSkillPrompt::new(
+                    "/skill".into(),
+                    "expanded body".into(),
+                    Vec::new(),
+                )),
+            ),
+        ] {
+            store
+                .admit_queued_slash(
+                    "session",
+                    Some(turn_id),
+                    Some(turn_id + 1),
+                    "/skill".into(),
+                    vec![ImageRefDto {
+                        media_type: "image/png".into(),
+                        base64: "AA==".into(),
+                    }],
+                )
+                .unwrap();
+            store.claim_queued_slash("session", turn_id).unwrap();
+            let checkpoint = store
+                .prepare_claimed_slash_turn("session", turn_id, "expanded".into(), skill)
+                .unwrap();
+            let inputs = checkpoint.initial_prompt_inputs().unwrap();
+            assert_eq!(
+                inputs[0].images.len(),
+                1,
+                "slash/skill images survive correlation"
+            );
+            assert_eq!(
+                inputs[0].transcript_row_token,
+                Some(format!("client-turn:{}", turn_id + 1))
+            );
+            assert!(
+                inputs
+                    .iter()
+                    .skip(1)
+                    .all(|input| input.transcript_row_token.is_none()),
+                "expanded/meta skill rows never impersonate the user command"
+            );
+            let cold = DurableTurnStore::new(temp.path().join("turns"));
+            let restored = cold
+                .load("session", turn_id)
+                .unwrap()
+                .initial_prompt_inputs()
+                .unwrap();
+            assert_eq!(restored[0].message_id, inputs[0].message_id);
+            assert_eq!(restored[0].images.len(), 1, "images survive cold restore");
+            assert_eq!(
+                restored[0].transcript_row_token,
+                inputs[0].transcript_row_token
+            );
+        }
+    }
+
+    #[test]
+    fn direct_and_restored_prompt_inputs_keep_the_original_client_turn_token() {
+        let (temp, store) = store();
+        let checkpoint = store
+            .admit_queued_prompt(
+                "session",
+                Some(101),
+                Some(7),
+                Utf16JsonProjection::from("same prompt"),
+                None,
+                Vec::new(),
+            )
+            .unwrap();
+        let identity = checkpoint.prompt_identity.as_ref().unwrap();
+        let mut inputs = vec![
+            orchestrator::QueuedPromptInput::default(),
+            identity.queued_prompt_input("same prompt".into(), &[]),
+        ];
+        checkpoint.correlate_prompt_inputs(&mut inputs);
+        assert_eq!(
+            inputs[0].transcript_row_token, None,
+            "never bind an unrelated row"
+        );
+        assert_eq!(
+            inputs[1].transcript_row_token.as_deref(),
+            Some("client-turn:7")
+        );
+        inputs[1].transcript_row_token = Some("client-turn:7,8".into());
+        checkpoint.correlate_prompt_inputs(&mut inputs);
+        assert_eq!(
+            inputs[1].transcript_row_token.as_deref(),
+            Some("client-turn:7,8"),
+            "preserve coalesced correlators"
+        );
+        drop(store);
+        let cold = DurableTurnStore::new(temp.path().join("turns"));
+        let restored = cold.load("session", checkpoint.turn_id).unwrap();
+        let mut inputs = vec![restored
+            .prompt_identity
+            .as_ref()
+            .unwrap()
+            .queued_prompt_input(restored.prompt.clone(), &restored.images)];
+        restored.correlate_prompt_inputs(&mut inputs);
+        assert_eq!(
+            inputs[0].transcript_row_token.as_deref(),
+            Some("client-turn:7")
+        );
+    }
+
+    #[test]
+    fn queued_prompt_client_turn_token_preserves_correlators_across_cold_coalescing() {
+        let (temp, store) = store();
+        let members = [(101, Some(7)), (102, None), (103, Some(8))]
+            .into_iter()
+            .map(|(turn_id, client_turn_id)| {
+                store
+                    .admit_queued_prompt(
+                        "session",
+                        Some(turn_id),
+                        client_turn_id,
+                        Utf16JsonProjection::from("identical prompt"),
+                        None,
+                        Vec::new(),
+                    )
+                    .expect("admit independently correlated prompt")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            members[0].queued_prompt_inputs(&store).unwrap()[0]
+                .transcript_row_token
+                .as_deref(),
+            Some("client-turn:7"),
+            "an unbatched prompt uses the original client ID instead of the durable ID"
+        );
+        assert_eq!(
+            members[1].queued_prompt_inputs(&store).unwrap()[0]
+                .transcript_row_token
+                .as_deref(),
+            Some("client-turn:102"),
+            "missing original correlators fall back to the allocated durable ID"
+        );
+        let ids = members
+            .iter()
+            .map(|member| member.turn_id)
+            .collect::<Vec<_>>();
+        let batch = store.prepare_mid_turn_batch("session", &ids).unwrap();
+        drop(store);
+
+        let cold = DurableTurnStore::new(temp.path().join("turns"));
+        let restored = cold
+            .scan_pending("session")
+            .expect("restore aggregate owner");
+        assert_eq!(restored.len(), 1);
+        let inputs = restored[0].queued_prompt_inputs(&cold).unwrap();
+        assert_eq!(
+            inputs.len(),
+            1,
+            "a coalesced group remains one persisted row"
+        );
+        assert_eq!(
+            inputs[0].text.string_at(""),
+            Some("identical prompt\nidentical prompt\nidentical prompt")
+        );
+        assert_eq!(
+            inputs[0].message_id,
+            Some(batch.aggregate_identity.message_id)
+        );
+        assert_eq!(inputs[0].transcript_row_token.as_deref(), Some("client-turn:7,102,8"), "the token retains each admitted correlator in order, independent of duplicate prompt text");
+        assert_eq!(
+            restored[0].queued_prompt_inputs(&cold).unwrap()[0].transcript_row_token,
+            inputs[0].transcript_row_token,
+            "repeated reconstruction keeps the exact same correlation token"
+        );
     }
 
     #[test]

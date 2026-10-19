@@ -43,6 +43,7 @@ fn test_tool_display() -> ToolResultDisplayDto {
 #[test]
 fn message_dto_round_trips() {
     let msg = MessageDto {
+        transcript_uuid: None,
         sent_at_ms: Some(1_791_417_600_000),
         loop_wakeup: None,
         visualization_context: None,
@@ -99,6 +100,7 @@ fn message_dto_round_trips() {
 #[test]
 fn message_text_keeps_lone_surrogates_as_a_json_string() {
     let message = MessageDto {
+        transcript_uuid: None,
         sent_at_ms: None,
         loop_wakeup: None,
         visualization_context: None,
@@ -228,6 +230,7 @@ fn loop_wakeup_metadata_is_additive_and_round_trips() {
     let old: MessageDto = serde_json::from_str(r#"{"role":"assistant","blocks":[]}"#).unwrap();
     assert!(old.loop_wakeup.is_none());
     let dto = MessageDto {
+        transcript_uuid: None,
         sent_at_ms: None,
         role: "system".into(),
         blocks: vec![],
@@ -272,6 +275,7 @@ fn visualization_block_and_context_are_additive_and_round_trip() {
     let old: MessageDto = serde_json::from_str(r#"{"role":"user","blocks":[]}"#).unwrap();
     assert!(old.visualization_context.is_none());
     let dto = MessageDto {
+        transcript_uuid: None,
         sent_at_ms: None,
         role: "user".into(),
         blocks: vec![],
