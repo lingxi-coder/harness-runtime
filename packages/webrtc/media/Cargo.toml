@@ -1,0 +1,38 @@
+[package]
+name = "lingxi-webrtc-media"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[features]
+default = []
+gstreamer-media = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-audio", "dep:gstreamer-video"]
+desktop-devices = ["gstreamer-media", "dep:cpal"]
+static-plugins = ["gstreamer-media"]
+diagnostics = ["gstreamer-media"]
+
+[dependencies]
+gstreamer-video = { version = "=0.25.3", features = ["v1_28"], optional = true }
+gstreamer = { version = "=0.25.3", features = ["v1_28"], optional = true }
+gstreamer-app = { version = "=0.25.2", features = ["v1_28"], optional = true }
+gstreamer-audio = { version = "=0.25.3", features = ["v1_28"], optional = true }
+cpal = { version = "=0.18.2", optional = true }
+
+lingxi-webrtc-core = { path = "../core" }
+crossbeam-queue = "=0.3.12"
+opus = "=0.4.0"
+rubato = { version = "=5.0.0", default-features = false }
+sonora = { version = "=0.2.0", default-features = false }
+
+[dev-dependencies]
+rtc = "=0.20.3"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+pretty_assertions = "1"
+
+[build-dependencies]
+pkg-config = "0.3"
+cc = "1"
+
+[[example]]
+name = "codec_probe"
+required-features = ["diagnostics"]
