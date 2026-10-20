@@ -56,10 +56,10 @@ Stop with docker compose down.
 
 1. Integrate the validated libraries into product Desktop/CLI/mobile host owners; the standalone diagnostics are not product integration.
 2. Large-record framing, control/file lanes, TURN TCP/TLS and mobile/real-NAT forced-relay acceptance (host UDP relay acceptance passed). The current C ABI accepts bounded ICE JSON; this is not device relay acceptance.
-3. Complete device audio/camera/screen/lifecycle acceptance, including iOS system-wide Broadcast Upload Extension (current ReplayKit fixture captures this app only).
+3. Complete device audio/camera/screen/lifecycle acceptance, including the implemented iOS system-wide Broadcast Upload Extension. App-screen capture and system broadcast have separate owners and acceptance records.
 4. Production Remote relay with account/device auth, persistent journal, cursors and epochs.
 5. Four-client Remote UI/CLI and existing Harness control-plane integration.
-6. Claude 2.1.301 frozen oracle and byte differential matrix. No byte-parity claim yet.
+6. Claude 2.1.295 frozen runtime reference and the self-hosted Remote contract matrix. Remote uses LingXi service/protocol ownership; no Anthropic service integration or byte-parity claim is implied.
 
 ## Current evidence (2026-10-16)
 
@@ -83,7 +83,7 @@ is not echoed back to its own speaker. Subjective audio quality remains separate
 iPhone app-screen capture and Android single-app MediaProjection return frames
 through the same Rust VP8 transport. Simultaneous camera/screen performance and
 remaining lifecycle checks are detailed in DEVICE_VALIDATION.md. iOS system-wide
-broadcast is not implemented. The diagnostic UI shows connecting/error states and
+broadcast is implemented but its cross-app device acceptance is still pending. The diagnostic UI shows connecting/error states and
 stops native devices after failure.
 
 Device test applications are in platform/android-probe and platform/ios-probe.
@@ -108,4 +108,4 @@ Use `RtcSession::with_config(SessionConfig { ice: IceConfig { servers, relay_onl
 for host-supplied relay configuration. Credentials belong to the existing host
 owner. UDP STUN/TURN is currently supported; TCP/TLS is explicitly rejected.
 The separate loopback-only Coturn fixture and ignored transport acceptance test
-are documented in DEVICE_VALIDATION.md. Native device probes still use direct ICE.
+are documented in DEVICE_VALIDATION.md. Native device probes accept explicit ICE configuration; defaults use direct ICE.

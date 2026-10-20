@@ -1,5 +1,6 @@
 #import <ReplayKit/ReplayKit.h>
 #import "LXWebRTCCapture.h"
+#import "LXWebRTCFrameGate.h"
 #import <mach/mach.h>
 
 @interface LxBroadcastLease:NSObject
@@ -75,8 +76,9 @@
     if(type!=RPSampleBufferTypeVideo || self.paused)return;
     self.callbacks+=1;LxBroadcastLease *lease=self.lease;if(!lease)return;
     uint64_t now=lingxi_webrtc_clock_ns(),period=1000000000/30;
-    if(now+period/2<self.lastFrame)return;
-    self.lastFrame=self.lastFrame && now-self.lastFrame<period?self.lastFrame+period:now+period;
+    uint64_t deadline=self.lastFrame;
+    if(!LXWebRTCAdmitBroadcastFrame(now,&deadline,period))return;
+    self.lastFrame=deadline;
     CVPixelBufferRef pixels=CMSampleBufferGetImageBuffer(sample);if(!pixels)return;
     self.width=(uint32_t)CVPixelBufferGetWidth(pixels);self.height=(uint32_t)CVPixelBufferGetHeight(pixels);
     self.submitResult=LXWebRTCSubmitVideo(lease.handle,pixels,CMSampleBufferGetPresentationTimeStamp(sample),2);

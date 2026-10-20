@@ -3,6 +3,27 @@
 These are standalone acceptance applications. Product host integration and Remote
 have not been accepted.
 
+## Current-source follow-up — 2026-10-19
+
+The broadcast admission gate subtracted a future deadline from an early callback
+using unsigned integers. A permitted early frame therefore reset the capture
+phase instead of advancing the existing 30 Hz deadline. The shared C helper now
+checks ordering before subtraction. Its regression fails on the previous logic
+and passes for early admission, rejected duplicate callbacks, late recovery and
+the reset used after ReplayKit resumes:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror platform/tests/ios-broadcast-frame-gate.c -o /tmp/lingxi-webrtc-frame-gate
+/tmp/lingxi-webrtc-frame-gate
+```
+
+The current optimized arm64 iPhoneOS Rust static library and matching Flare-signed
+probe plus Broadcast extension build successfully. Strict recursive signature
+verification and installation/launch on the paired iPhone pass. These are fresh
+build/install results; cross-app broadcast, returned frames and its stop/resume
+lifecycle still require actual device evidence. No system-broadcast receipt was
+present before the user's system-picker confirmation.
+
 ## iPhone connectivity
 
 - Initial Rust TCP error: EHOSTUNREACH, diagnostic code -1065.
@@ -135,8 +156,9 @@ the connected state. Android background server-loss acceptance passed in the fol
   the aggregate dual-stream throughput measurements above.
 - MediaProjection/ReplayKit stop/restart, permission cancellation, interruption,
   route changes and background/foreground behavior.
-- iOS cross-app/system broadcast requires a Broadcast Upload Extension; current
-  ReplayKit capture is limited to the diagnostic application.
+- iOS cross-app/system broadcast has a separate Broadcast Upload Extension;
+  its device acceptance remains pending. The app-screen ReplayKit path alone
+  does not establish cross-app capture.
 - Desktop/CLI host/device integration, forced TURN and complete four-client media
   acceptance precede Remote implementation and byte-differential claims.
 
