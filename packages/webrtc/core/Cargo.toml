@@ -1,0 +1,16 @@
+[package]
+name = "lingxi-webrtc-core"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+bytes = "1"
+futures = "0.3"
+rtc = "=0.20.3"
+webrtc = "=0.20.3"
+rand = "0.9"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+[dev-dependencies]
+pretty_assertions = "1"

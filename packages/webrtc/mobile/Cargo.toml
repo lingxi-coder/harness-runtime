@@ -1,0 +1,19 @@
+[package]
+name = "lingxi-webrtc-mobile"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["lib", "staticlib"]
+
+[features]
+default = []
+static-plugins = ["lingxi-webrtc-media/static-plugins"]
+
+[dependencies]
+lingxi-webrtc-media = { path = "../media", features = ["diagnostics"] }
+lingxi-webrtc-core = { path = "../core" }
+crossbeam-queue = "=0.3.12"
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time"] }

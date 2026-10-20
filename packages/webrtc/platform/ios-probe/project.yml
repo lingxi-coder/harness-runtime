@@ -1,0 +1,117 @@
+name: LingXiWebRTCProbe
+options:
+  deploymentTarget:
+    iOS: "18.0"
+targets:
+  LingXiWebRTCProbe:
+    type: application
+    platform: iOS
+    sources: [Sources, ../ios-native]
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: LingXi WebRTC Probe
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIRequiresFullScreen: true
+        NSMicrophoneUsageDescription: Verify WebRTC microphone capture and shared Rust audio processing.
+        NSCameraUsageDescription: Verify WebRTC camera capture through the shared Rust VP8 codec.
+        NSLocalNetworkUsageDescription: Connect to the local WebRTC media test server.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        LingxiWebRTCFixtureEndpoint: $(LINGXI_WEBRTC_ENDPOINT)
+        LingxiWebRTCIceConfig: $(LINGXI_WEBRTC_ICE_CONFIG)
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.webrtc.probe
+        CODE_SIGN_ENTITLEMENTS: Probe.entitlements
+        DEVELOPMENT_TEAM: AZ4AX7J833
+        CODE_SIGN_STYLE: Automatic
+        LINGXI_WEBRTC_ENDPOINT: 127.0.0.1:18080
+        LINGXI_WEBRTC_ICE_CONFIG: ""
+        HEADER_SEARCH_PATHS: $(inherited) $(SRCROOT)/../../mobile/include $(SRCROOT)/../ios-native
+        LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/../../target/aarch64-apple-ios/debug $(GSTREAMER_IOS_SLICE)
+        OTHER_LDFLAGS: $(inherited) -llingxi_webrtc_mobile -lGStreamer -liconv -lresolv -lz -lc++
+    dependencies:
+      - target: LingXiWebRTCBroadcast
+        embed: true
+      - sdk: Foundation.framework
+      - sdk: UIKit.framework
+      - sdk: CoreFoundation.framework
+      - sdk: Security.framework
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreAudio.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
+      - sdk: VideoToolbox.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreText.framework
+      - sdk: Accelerate.framework
+      - sdk: CFNetwork.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: Network.framework
+      - sdk: OpenGLES.framework
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: IOSurface.framework
+      - sdk: ReplayKit.framework
+  LingXiWebRTCProbeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: LingXiWebRTCProbe
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.webrtc.probe.uitests
+        DEVELOPMENT_TEAM: AZ4AX7J833
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: YES
+
+  LingXiWebRTCBroadcast:
+    type: app-extension
+    platform: iOS
+    sources: [Broadcast, ../ios-native]
+    info:
+      path: Broadcast/Info.plist
+      properties:
+        CFBundleDisplayName: LingXi Screen Share
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.broadcast-services-upload
+          NSExtensionPrincipalClass: LxWebRTCBroadcastHandler
+          NSExtensionAttributes:
+            RPBroadcastProcessMode: RPBroadcastProcessModeSampleBuffer
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.lingxi.webrtc.probe.broadcast
+        DEVELOPMENT_TEAM: AZ4AX7J833
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_ENTITLEMENTS: Broadcast/Broadcast.entitlements
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+        HEADER_SEARCH_PATHS: $(inherited) $(SRCROOT)/../../mobile/include $(SRCROOT)/../ios-native
+        LIBRARY_SEARCH_PATHS: $(inherited) $(SRCROOT)/../../target/aarch64-apple-ios/debug $(GSTREAMER_IOS_SLICE)
+        OTHER_LDFLAGS: $(inherited) -llingxi_webrtc_mobile -lGStreamer -liconv -lresolv -lz -lc++
+    dependencies:
+      - sdk: Foundation.framework
+      - sdk: UIKit.framework
+      - sdk: CoreFoundation.framework
+      - sdk: Security.framework
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreAudio.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
+      - sdk: VideoToolbox.framework
+      - sdk: CoreGraphics.framework
+      - sdk: CoreText.framework
+      - sdk: Accelerate.framework
+      - sdk: CFNetwork.framework
+      - sdk: SystemConfiguration.framework
+      - sdk: Network.framework
+      - sdk: OpenGLES.framework
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: IOSurface.framework
+      - sdk: ReplayKit.framework
