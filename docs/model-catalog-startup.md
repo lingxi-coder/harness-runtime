@@ -40,7 +40,7 @@ embedded model shortlist through an internal, non-serialized metadata flag. The
 same registry supplies routing, prices, provider settings and model pickers.
 This also allows a fully defined new model to appear without updating a static
 shortlist. A retired built-in boot default can choose an available route without
-rewriting saved settings; managed model policies and unknown custom names are
+rewriting saved settings; managed policies, explicit CLI/environment pins and unknown custom names are
 not replaced by this fallback.
 
 Validation commands:

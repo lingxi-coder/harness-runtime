@@ -1068,7 +1068,11 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         .collect();
     let (mut default_model_id, mut default_model_profile) =
         lingxi_core::host::parse_model_ref(&configured_model, &default_listings);
-    if cfg.startup_catalog.is_some() && !model_provenance.is_managed() {
+    if cfg.startup_catalog.is_some()
+        && !model_provenance.is_managed()
+        && !cfg.default_model_explicit
+        && !cfg.default_model_env_pinned
+    {
         if let Some((model, profile)) = provider_config::startup_catalog::retired_default(
             &configured_model,
             &assembled.client_config.providers,
