@@ -258,6 +258,8 @@ pub trait DesktopDiagnosticSink: Send + Sync {
 /// ```
 #[derive(Clone)]
 pub struct DesktopConfig {
+    /// Host-scoped official catalog delivery; absent in deterministic embedders.
+    pub startup_catalog: Option<provider_config::startup_catalog::StartupCatalog>,
     /// Host-owned Git root-marker cache shared by cloned configs and every
     /// session the host builds from them.
     pub host_git_root_cache: Arc<tool_api::HostGitRootCache>,
@@ -1158,6 +1160,7 @@ impl std::fmt::Debug for DesktopConfig {
 impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
+            startup_catalog: None,
             host_git_root_cache: Arc::new(tool_api::HostGitRootCache::new()),
             managed_policy_snapshot_cache:
                 super::settings_watch::ManagedPolicySnapshotCache::default(),

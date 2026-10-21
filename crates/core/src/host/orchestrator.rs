@@ -1529,6 +1529,10 @@ pub enum ModelContextWindowSource {
 #[serde(rename_all = "camelCase")]
 #[allow(missing_docs)]
 pub struct ModelMetadata {
+    /// An explicit host catalog/user declaration already decided availability.
+    /// Internal only: never sent to providers or added to client protocols.
+    #[serde(skip)]
+    pub catalog_offered: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_budget: Option<super::ModelContextBudget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2436,7 +2440,8 @@ pub fn curated_model_listings(
         }
     }
     for listing in listings {
-        if is_offered_model(&listing.provider_id, &listing.request_model)
+        if (listing.metadata.catalog_offered
+            || is_offered_model(&listing.provider_id, &listing.request_model))
             && listing.metadata.status.as_deref() != Some("deprecated")
         {
             let key = (listing.provider_id.clone(), listing.request_model.clone());
@@ -2459,7 +2464,8 @@ pub fn provider_model_catalog_listings(listings: &[ModelListing]) -> Vec<ModelLi
     let mut seen = std::collections::HashSet::new();
     for listing in listings {
         if !listing.capabilities.tools
-            || !is_offered_model(&listing.provider_id, &listing.request_model)
+            || (!listing.metadata.catalog_offered
+                && !is_offered_model(&listing.provider_id, &listing.request_model))
             || listing.metadata.status.as_deref() == Some("deprecated")
         {
             continue;

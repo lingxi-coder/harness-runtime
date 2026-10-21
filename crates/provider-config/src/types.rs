@@ -67,6 +67,9 @@ pub struct CredentialSource {
 /// the raw settings JSON the engine already holds.
 #[derive(Debug, Clone)]
 pub struct AssembleInputs {
+    /// Settled official startup snapshot. User profiles and credentials are
+    /// merged afterwards and remain owned by the host.
+    pub official_catalog: Option<llm_runtime::BuiltinCatalog>,
     /// Anthropic base URL (`cfg.api_base`).
     pub anthropic_api_base: String,
     /// Anthropic model ids to declare on the Anthropic profile (pre-resolved by

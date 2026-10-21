@@ -66,8 +66,8 @@ use linux_runtime::{
 use provider_services::{
     anthropic_models, apply_mobile_profile_allowlist, builtin_provider_catalog,
     classify_provider_connection_response, lower_auth_state, mobile_provider_settings,
-    model_listings, probe_provider, provider_connection_failure, provider_id_is_valid,
-    provider_model_catalog_from_listings, resolve_default_model_ref,
+    model_listings, probe_provider, provider_catalog_from_profiles, provider_connection_failure,
+    provider_id_is_valid, provider_model_catalog_from_listings, resolve_default_model_ref,
 };
 pub use provider_services::{
     MobileOAuthManager, MobileOAuthSessionDto, MobileOAuthStateDto, ProviderCatalogEntryDto,
@@ -261,6 +261,8 @@ use crate::mobile::{
 /// runtime); F3-05 adds the async `submit` that drives the orchestrator and
 /// resolves the permission gate.
 pub struct MobileRuntime {
+    /// Official provider settings data from the same settled startup snapshot.
+    pub provider_catalog: Vec<ProviderCatalogEntryDto>,
     /// Per-host owner for V2 installed-plugin archive materializations.
     /// Plugin discovery and the manager retain clones of this same session.
     pub(crate) plugin_archive_session: Arc<plugin::PluginArchiveSession>,
@@ -5736,7 +5738,7 @@ impl MobileEngineHandle {
     /// snapshots used to build the live LLM registry.
     #[must_use]
     pub fn builtin_provider_catalog(&self) -> Vec<ProviderCatalogEntryDto> {
-        builtin_provider_catalog()
+        self.inner.provider_catalog.clone()
     }
 
     /// Start a native OAuth authorization-code flow. PKCE verifier/state stay

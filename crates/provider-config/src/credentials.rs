@@ -865,6 +865,7 @@ mod tests {
     async fn cold_anthropic_route_authenticates_after_key_is_added() {
         let credentials = manager();
         let assembled = crate::assemble::assemble(crate::AssembleInputs {
+            official_catalog: None,
             anthropic_api_base: "https://api.anthropic.com".to_string(),
             anthropic_models: vec![ModelProfile {
                 display_model: "claude-sonnet-4-6".to_string(),

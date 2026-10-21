@@ -2,6 +2,7 @@ use super::{anthropic_models, resolve_default_model_ref};
 
 fn listings() -> Vec<lingxi_core::host::ModelListing> {
     let assembled = provider_config::assemble(provider_config::AssembleInputs {
+        official_catalog: None,
         anthropic_api_base: "https://api.anthropic.com".to_string(),
         anthropic_models: anthropic_models("claude-sonnet-5"),
         anthropic_has_api_key: false,

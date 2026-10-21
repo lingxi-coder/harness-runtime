@@ -434,6 +434,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     shared: SharedCredentialStack,
     proxy_auth_helper: Option<Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper>>,
 ) -> Result<LlmStack, BuildError> {
+    let _catalog_refresh = cfg.startup_catalog.as_ref().map(|source| source.prefetch());
     // Resolve the winning model setting from the canonical tier stack before
     // assembling provider profiles. Managed `settings.model` is the only
     // administrator-owned default; explicit CLI/env pins remain user-owned.
@@ -977,8 +978,13 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         lingxi_core::settings::ProviderRegion::ChinaMainland => llm_runtime::Region::ChinaMainland,
         lingxi_core::settings::ProviderRegion::International => llm_runtime::Region::International,
     };
+    let official_catalog = match &cfg.startup_catalog {
+        Some(source) => Some((*source.load().await).clone()),
+        None => None,
+    };
     let assembled = provider_config::assemble_for_region(
         provider_config::AssembleInputs {
+            official_catalog,
             anthropic_api_base: cfg.api_base.clone(),
             anthropic_models: anthropic_models_for(
                 &configured_model,
@@ -1062,6 +1068,16 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         .collect();
     let (mut default_model_id, mut default_model_profile) =
         lingxi_core::host::parse_model_ref(&configured_model, &default_listings);
+    if cfg.startup_catalog.is_some() && !model_provenance.is_managed() {
+        if let Some((model, profile)) = provider_config::startup_catalog::retired_default(
+            &configured_model,
+            &assembled.client_config.providers,
+        ) {
+            tracing::warn!(from = %configured_model, to = %model, "official catalog retired the startup model; using an available route without changing saved settings");
+            default_model_id = model;
+            default_model_profile = Some(profile);
+        }
+    }
 
     // Per-profile Claude provider tag, captured while
     // `assembled.client_config.providers` is still owned (`from_config` moves it

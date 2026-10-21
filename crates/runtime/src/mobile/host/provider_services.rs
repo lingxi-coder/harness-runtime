@@ -78,13 +78,15 @@ pub struct MobileOAuthStateDto {
     pub fedramp: bool,
 }
 
-pub(super) fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
+pub(super) fn provider_catalog_from_profiles(
+    providers: Vec<llm_runtime::ProviderProfile>,
+) -> Vec<ProviderCatalogEntryDto> {
     let to_entry = |provider: llm_runtime::ProviderProfile| {
-        let display_name = if provider.profile_name == "anthropic" {
-            "Anthropic".to_string()
-        } else {
-            provider.profile_name.clone()
-        };
+        let display_name = provider
+            .wire_profile
+            .as_ref()
+            .and_then(|p| p.info.display_name.clone())
+            .unwrap_or_else(|| provider.profile_name.clone());
         let credential_env = match &provider.credential {
             CredentialConfig::Env { var } => Some(var.clone()),
             _ => None,
@@ -93,7 +95,11 @@ pub(super) fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
         let curated = listings
             .into_iter()
             .filter(|listing| {
-                lingxi_core::host::is_curated_model(&provider.profile_name, &listing.request_model)
+                listing.metadata.catalog_offered
+                    || lingxi_core::host::is_curated_model(
+                        &provider.profile_name,
+                        &listing.request_model,
+                    )
                     || !lingxi_core::host::provider_has_curated_list(&provider.profile_name)
             })
             .collect::<Vec<_>>();
@@ -112,22 +118,15 @@ pub(super) fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
         }
     };
 
-    let anthropic = llm_runtime::anthropic_provider_profile(
-        ANTHROPIC_OAUTH_API_BASE,
-        llm_runtime::AuthStrategy::ApiKey,
-        CredentialConfig::Env {
-            var: "ANTHROPIC_API_KEY".to_string(),
-        },
-    );
-    let mut entries = vec![to_entry(anthropic)];
-    entries.extend(
-        llm_runtime::builtin_presets()
-            .providers
-            .into_iter()
-            .filter(|provider| provider.profile_name != "anthropic" && !provider.connection.hidden)
-            .map(to_entry),
-    );
-    entries
+    providers
+        .into_iter()
+        .filter(|p| !p.connection.hidden)
+        .map(to_entry)
+        .collect()
+}
+
+pub(super) fn builtin_provider_catalog() -> Vec<ProviderCatalogEntryDto> {
+    provider_catalog_from_profiles(llm_runtime::builtin_presets().providers)
 }
 
 pub(super) fn provider_model_catalog_from_listings(

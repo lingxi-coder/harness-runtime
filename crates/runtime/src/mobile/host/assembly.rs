@@ -38,17 +38,18 @@ use tool_api::{BuiltinToolContext, ToolRegistry};
 
 use super::{
     anthropic_models, apply_mobile_profile_allowlist, build_mobile_runtime_environment,
-    build_mobile_subagent_env_renderer, fast_mode_preference, gate_mobile_git_ctx,
-    gate_mobile_shell_ctx, mobile_launch_is_interactive, mobile_mcp_oauth_authorization_callback,
-    mobile_mcp_preflight, mobile_mcp_record_reload_intent, mobile_mcp_run_reload_job,
-    mobile_provider_settings, mobile_reload_skills_handler, mobile_settings_write_lock,
-    mobile_skill_listing_provider_with_settings, mobile_typescript_lsp_mode,
-    mobile_typescript_lsp_ready, model_listings, model_preference, model_visible_mobile_cwd,
-    permission_preference, provider_model_catalog_from_listings,
-    rebuild_mobile_prompt_dispatch_cache, resolve_default_model_ref, settings_commands,
-    settle_mobile_loop_turn, ActiveTurn, MobileBuildError, MobileConfig, MobileEngineError,
-    MobileEngineHandle, MobileMcpReloadJob, MobileMsgQueueInput, MobileOAuthManager, MobileRuntime,
-    MobileSessionAgentObserver, MobileWakeupDelivery, TurnLifecycleListener, MOBILE_CRON_HANDLES,
+    build_mobile_subagent_env_renderer, builtin_provider_catalog, fast_mode_preference,
+    gate_mobile_git_ctx, gate_mobile_shell_ctx, mobile_launch_is_interactive,
+    mobile_mcp_oauth_authorization_callback, mobile_mcp_preflight, mobile_mcp_record_reload_intent,
+    mobile_mcp_run_reload_job, mobile_provider_settings, mobile_reload_skills_handler,
+    mobile_settings_write_lock, mobile_skill_listing_provider_with_settings,
+    mobile_typescript_lsp_mode, mobile_typescript_lsp_ready, model_listings, model_preference,
+    model_visible_mobile_cwd, permission_preference, provider_catalog_from_profiles,
+    provider_model_catalog_from_listings, rebuild_mobile_prompt_dispatch_cache,
+    resolve_default_model_ref, settings_commands, settle_mobile_loop_turn, ActiveTurn,
+    MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle, MobileMcpReloadJob,
+    MobileMsgQueueInput, MobileOAuthManager, MobileRuntime, MobileSessionAgentObserver,
+    MobileWakeupDelivery, TurnLifecycleListener, MOBILE_CRON_HANDLES,
 };
 
 // Recompute from admitted mobile settings for each plugin-owner connect. This
@@ -326,6 +327,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     ask_user_question_tx: Option<tokio::sync::mpsc::Sender<tool_ui::AskUserQuestionExchange>>,
 ) -> Result<MobileRuntime, MobileBuildError> {
     let cwd = cfg.cwd.clone();
+    let _catalog_refresh = cfg.startup_catalog.as_ref().map(|source| source.prefetch());
     settings_commands::prepare_mobile_mcp_storage(&cfg.lingxi_home).map_err(|error| {
         MobileBuildError::Orchestrator(format!("MCP settings migration: {error}"))
     })?;
@@ -599,8 +601,17 @@ pub(super) async fn build_mobile_inner_with_ask(
         lingxi_core::settings::ProviderRegion::ChinaMainland => llm_runtime::Region::ChinaMainland,
         lingxi_core::settings::ProviderRegion::International => llm_runtime::Region::International,
     };
+    let official_catalog = match &cfg.startup_catalog {
+        Some(source) => Some((*source.load().await).clone()),
+        None => None,
+    };
+    let provider_catalog = official_catalog
+        .as_ref()
+        .map(|catalog| provider_catalog_from_profiles(catalog.providers.clone()))
+        .unwrap_or_else(builtin_provider_catalog);
     let mut assembled = provider_config::assemble_for_region(
         provider_config::AssembleInputs {
+            official_catalog,
             anthropic_api_base: cfg.api_base.clone(),
             anthropic_models: anthropic_models(&cfg.default_model),
             anthropic_has_api_key: has_api_key,
@@ -3118,6 +3129,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         commands: shared_command_registry.clone(),
     });
     Ok(MobileRuntime {
+        provider_catalog,
         plugin_archive_session,
         side_chat_factory,
         provider_region,

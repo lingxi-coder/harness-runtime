@@ -12,6 +12,9 @@
 /// rather than committing the entire allocation as resident memory.
 pub const RUNTIME_THREAD_STACK_SIZE: usize = 8 * 1024 * 1024;
 
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+pub use provider_config::startup_catalog::{CatalogPlatform, StartupCatalog};
+
 #[cfg(feature = "engine")]
 pub mod api;
 #[cfg(feature = "engine")]

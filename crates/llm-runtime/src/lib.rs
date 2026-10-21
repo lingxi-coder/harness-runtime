@@ -100,7 +100,7 @@ pub use auth::provider::{
     AnthropicAuthSnapshot, CopilotExchangeCredentialProvider, Credential, CredentialProvider,
     CredentialScope, CredentialSource, EnvCredentialProvider, StaticCredentialProvider,
 };
-pub use catalog::{builtin_presets, BuiltinCatalog};
+pub use catalog::{builtin_presets, catalog_from_profiles, BuiltinCatalog};
 pub use client::{
     FileActivationPoll, ModelRuntime, PreparedLlmCall, ResponsesSession,
     ResponsesWebSocketRequestSnapshot,

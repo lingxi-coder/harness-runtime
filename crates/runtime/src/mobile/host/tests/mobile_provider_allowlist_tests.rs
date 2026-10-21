@@ -64,6 +64,7 @@ fn file_provider_settings_override_launch_defaults_and_enable_new_profiles() {
     assert_eq!(routing["aliases"]["retained"], "alpha/model-a");
     assert_eq!(routing["mobileEnabledProfiles"], json!(["alpha", "beta"]));
     let mut assembled = provider_config::assemble(provider_config::AssembleInputs {
+        official_catalog: None,
         anthropic_api_base: cfg.api_base,
         anthropic_models: anthropic_models(&cfg.default_model),
         anthropic_has_api_key: false,
@@ -128,6 +129,7 @@ fn assembled(routing: Option<Value>) -> provider_config::Assembled {
         ),
     ]);
     provider_config::assemble(provider_config::AssembleInputs {
+        official_catalog: None,
         anthropic_api_base: "https://api.anthropic.com".to_string(),
         anthropic_models: anthropic_models("claude-sonnet-4-20250514"),
         anthropic_has_api_key: false,

@@ -5862,6 +5862,7 @@ async fn build_with_providers_and_routing_merges_config_chains_availability() {
         .await
         .expect("build() failed with providers + routing");
     let assembled = provider_config::assemble(provider_config::AssembleInputs {
+        official_catalog: None,
         anthropic_api_base: cfg.api_base.clone(),
         anthropic_models: super::anthropic_models_for(
             &cfg.default_model,

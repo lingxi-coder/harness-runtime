@@ -27,9 +27,15 @@ fn context_window_source(
 }
 
 pub fn builtin_presets() -> BuiltinCatalog {
+    catalog_from_profiles(
+        lingxi_llm_client::builtin_providers().expect("pinned provider catalog must parse"),
+    )
+}
+
+/// Project a validated SDK snapshot without losing its execution definitions.
+pub fn catalog_from_profiles(profiles: Vec<wire::ProviderProfile>) -> BuiltinCatalog {
     let mut pricing = PricingCatalog::empty();
-    let mut providers: Vec<ProviderProfile> = lingxi_llm_client::builtin_providers()
-        .expect("pinned provider catalog must parse")
+    let mut providers: Vec<ProviderProfile> = profiles
         .into_iter()
         .map(|profile| {
             // Provider identity is independent of the caller-selected wire.

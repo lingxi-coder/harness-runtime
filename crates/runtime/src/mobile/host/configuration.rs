@@ -20,6 +20,8 @@ use super::MobileEngineError;
 // Mirrors the `DesktopConfig` pattern (harness-runtime::desktop/src/lib.rs:799-846).
 #[derive(Clone)]
 pub struct MobileConfig {
+    /// Host-scoped official catalog delivery; never inferred from credentials.
+    pub startup_catalog: Option<provider_config::startup_catalog::StartupCatalog>,
     /// Host-owned Git root-marker cache shared by cloned configs and every
     /// session the host builds from them.
     pub host_git_root_cache: Arc<tool_api::HostGitRootCache>,
@@ -179,6 +181,7 @@ impl std::fmt::Debug for MobileConfig {
 impl Default for MobileConfig {
     fn default() -> Self {
         Self {
+            startup_catalog: None,
             host_git_root_cache: Arc::new(tool_api::HostGitRootCache::new()),
             build_info: command_api::builtins::BuildInfo::default(),
             api_base: "https://api.anthropic.com".to_string(),

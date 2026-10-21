@@ -12,6 +12,7 @@ mod availability;
 mod cost_translate;
 mod credentials;
 pub mod parse_routing;
+pub mod startup_catalog;
 pub mod types;
 
 pub use assemble::{assemble, assemble_for_region};

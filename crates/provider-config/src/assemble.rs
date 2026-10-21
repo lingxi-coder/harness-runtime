@@ -10,7 +10,10 @@ use crate::parse_routing::parse_routing;
 use crate::types::{AssembleInputs, Assembled, ChainEntry, CredentialKind, CredentialSource};
 
 /// Build the Anthropic provider profile from the 3-way auth state.
-fn anthropic_profile(inputs: &AssembleInputs) -> (ProviderProfile, Option<CredentialSource>) {
+fn anthropic_profile(
+    inputs: &AssembleInputs,
+    catalog: &llm_runtime::BuiltinCatalog,
+) -> (ProviderProfile, Option<CredentialSource>) {
     let (auth, credential, cred_source) = if inputs.anthropic_has_api_key {
         (
             AuthStrategy::ApiKey,
@@ -63,15 +66,26 @@ fn anthropic_profile(inputs: &AssembleInputs) -> (ProviderProfile, Option<Creden
 
     let mut profile =
         llm_runtime::anthropic_provider_profile(&inputs.anthropic_api_base, auth, credential);
-    if let Some(preset) = llm_runtime::builtin_presets()
+    if let Some(preset) = catalog
+        .clone()
         .providers
         .into_iter()
         .find(|p| p.profile_name == "anthropic")
     {
+        if inputs.official_catalog.is_some()
+            && inputs.anthropic_api_base == "https://api.anthropic.com"
+        {
+            profile.base_url = preset.base_url.clone();
+        }
         profile.regions = preset.regions;
         profile.wire_profile = preset.wire_profile;
         profile.models = preset.models;
         for model in &inputs.anthropic_models {
+            if inputs.official_catalog.is_some()
+                && inputs.anthropic_api_base == "https://api.anthropic.com"
+            {
+                continue;
+            }
             if !profile.models.iter().any(|existing| {
                 existing.request_model == model.request_model
                     || existing.display_model == model.request_model
@@ -123,14 +137,26 @@ pub fn assemble_for_region(inputs: AssembleInputs, region: llm_runtime::Region) 
     let mut credential_sources: Vec<CredentialSource> = Vec::new();
 
     // 1. Anthropic profile.
-    let (anthropic, anthropic_cred) = anthropic_profile(&inputs);
-    providers.push(anthropic);
-    if let Some(cs) = anthropic_cred {
-        credential_sources.push(cs);
+    let catalog = inputs
+        .official_catalog
+        .clone()
+        .unwrap_or_else(llm_runtime::builtin_presets);
+    let credential_baseline = llm_runtime::builtin_presets();
+    if catalog
+        .providers
+        .iter()
+        .any(|p| p.profile_name == "anthropic")
+        || inputs.official_catalog.is_none()
+        || inputs.anthropic_api_base != "https://api.anthropic.com"
+    {
+        let (anthropic, anthropic_cred) = anthropic_profile(&inputs, &catalog);
+        providers.push(anthropic);
+        if let Some(cs) = anthropic_cred {
+            credential_sources.push(cs);
+        }
     }
 
     // 2. Built-in presets: rewrite Env -> Static{id = profile_name}.
-    let catalog = llm_runtime::builtin_presets();
     for mut preset in catalog.providers.iter().cloned() {
         if preset.profile_name == "anthropic" {
             continue;
@@ -147,6 +173,7 @@ pub fn assemble_for_region(inputs: AssembleInputs, region: llm_runtime::Region) 
             .and_then(|wire| {
                 std::iter::once(&preset)
                     .chain(catalog.providers.iter())
+                    .chain(credential_baseline.providers.iter())
                     .filter(|candidate| {
                         candidate.profile_name == preset.profile_name
                             || wire
@@ -201,6 +228,9 @@ pub fn assemble_for_region(inputs: AssembleInputs, region: llm_runtime::Region) 
         }
         let id = pu.profile.profile_name.clone();
         let mut profile = pu.profile;
+        for model in &mut profile.models {
+            model.metadata.catalog_offered = true;
+        }
         let credential_id = match &profile.credential {
             CredentialConfig::Static { id } | CredentialConfig::HostManaged { id } => id.clone(),
             CredentialConfig::Env { var } => var.clone(),
@@ -447,6 +477,7 @@ mod tests {
 
     fn anthropic_only_inputs() -> AssembleInputs {
         AssembleInputs {
+            official_catalog: None,
             anthropic_api_base: "https://api.anthropic.com".to_string(),
             anthropic_models: vec![ModelProfile {
                 display_model: "claude-opus-4-6".to_string(),

@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 fn inputs() -> AssembleInputs {
     AssembleInputs {
+        official_catalog: None,
         anthropic_api_base: "https://api.anthropic.com".to_string(),
         anthropic_models: vec![llm_runtime::ModelProfile {
             display_model: "claude-opus-4-6".to_string(),
