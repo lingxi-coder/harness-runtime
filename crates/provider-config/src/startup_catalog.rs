@@ -63,8 +63,8 @@ impl StartupCatalog {
         }
     }
 
-    /// Settle while unrelated host startup runs; dropping the guard cancels
-    /// the cold-start wait. Cache revalidation is a bounded runtime task.
+    /// Settle the local snapshot while unrelated host startup runs. Dropping
+    /// the guard cancels this settling task; network refresh is always bounded.
     pub fn prefetch(&self) -> CatalogRefreshGuard {
         let source = self.clone();
         CatalogRefreshGuard(tokio::spawn(async move {
@@ -75,26 +75,24 @@ impl StartupCatalog {
     /// Settle once before constructing a runtime. Existing runtimes keep their
     /// immutable request snapshot; no in-flight route or credential is changed.
     pub async fn load(&self) -> Arc<llm_runtime::BuiltinCatalog> {
-        self.settled.get_or_init(|| async {
-            if let Some((_, cached)) = self.cached() {
-                // Preserve the selected snapshot for this runtime. A bounded
-                // background task refreshes the cache for the next owner.
+        self.settled
+            .get_or_init(|| async {
+                let catalog = self
+                    .cached()
+                    .map(|(_, parsed)| parsed.catalog)
+                    .unwrap_or_else(llm_runtime::builtin_presets);
+                // Neither cold nor cached startup waits for the network. The
+                // selected snapshot remains immutable for this runtime owner.
                 let source = self.clone();
                 tokio::spawn(async move {
                     if let Err(error) = source.refresh().await {
                         tracing::warn!(%error, "background official model catalog refresh failed");
                     }
                 });
-                return Arc::new(cached.catalog);
-            }
-            match self.refresh().await {
-                Ok(catalog) => Arc::new(catalog),
-                Err(error) => {
-                    tracing::warn!(%error, platform = self.platform.label(), "official model catalog refresh failed");
-                    Arc::new(self.cached().map(|(_, parsed)| parsed.catalog).unwrap_or_else(llm_runtime::builtin_presets))
-                }
-            }
-        }).await.clone()
+                Arc::new(catalog)
+            })
+            .await
+            .clone()
     }
 
     fn cache_path(&self) -> PathBuf {
@@ -135,7 +133,9 @@ impl StartupCatalog {
         Some((saved, parsed))
     }
 
-    async fn refresh(&self) -> Result<llm_runtime::BuiltinCatalog, String> {
+    /// Fetch, validate and cache a publication for the next runtime owner.
+    /// This explicit prewarm operation never replaces an already settled snapshot.
+    pub async fn refresh(&self) -> Result<llm_runtime::BuiltinCatalog, String> {
         semver::Version::parse(&self.app_version).map_err(|_| "invalid application version")?;
         let url = reqwest::Url::parse(&self.endpoint).map_err(|_| "invalid catalog endpoint")?;
         if url.scheme() != "https"

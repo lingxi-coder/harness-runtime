@@ -350,8 +350,13 @@ fn settings_models_connections_credential_ids_and_routing_win_after_refresh() {
 async fn conditional_get_304_cold_cache_and_owner_snapshot_are_consistent() {
     let home = Home::new();
     let body = fixture().to_string();
-    let (url, server) = serve(vec![(200, body), (304, String::new())]);
+    let (url, server) = serve(vec![
+        (200, body),
+        (304, String::new()),
+        (304, String::new()),
+    ]);
     let first = source(&home, &url, CatalogPlatform::Android, "0.1.0");
+    first.refresh().await.unwrap();
     let snapshot = first.load().await;
     assert_eq!(deepseek(&snapshot).models.len(), 1);
     assert!(Arc::ptr_eq(&snapshot, &first.clone().load().await));
@@ -393,7 +398,11 @@ async fn malformed_refresh_and_outage_preserve_valid_cache_without_touching_sett
         (200, "broken JSON".into()),
         (503, "down".into()),
     ]);
-    for _ in 0..3 {
+    source(&home, &url, CatalogPlatform::Desktop, "0.1.0")
+        .refresh()
+        .await
+        .unwrap();
+    for _ in 0..2 {
         assert_eq!(
             context(
                 source(&home, &url, CatalogPlatform::Desktop, "0.1.0")
@@ -447,17 +456,16 @@ async fn background_refresh_is_used_by_new_owners_and_never_swaps_an_active_snap
         (304, String::new()),
     ]);
     let first = source(&home, &url, CatalogPlatform::Ios, "2.4.1");
+    first.refresh().await.unwrap();
     let active = first.load().await;
     assert_eq!(context(&active), 333333);
-    let second = source(&home, &url, CatalogPlatform::Ios, "2.4.1");
-    assert_eq!(context(second.load().await.as_ref()), 333333);
     for _ in 0..100 {
-        if second.cached().is_some_and(|(_, p)| p.published_at == 2000) {
+        if first.cached().is_some_and(|(_, p)| p.published_at == 2000) {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(second.cached().unwrap().1.published_at, 2000);
+    assert_eq!(first.cached().unwrap().1.published_at, 2000);
     assert!(Arc::ptr_eq(&active, &first.load().await));
     assert_eq!(context(&active), 333333);
     let newest = source(&home, &url, CatalogPlatform::Ios, "2.4.1")
@@ -477,8 +485,25 @@ async fn canceling_a_cold_prefetch_does_not_poison_the_startup_owner() {
     drop(source.prefetch());
     tokio::task::yield_now().await;
     assert!(source.settled.get().is_none());
-    assert_eq!(deepseek(source.load().await.as_ref()).models.len(), 1);
+    // A cold owner settles embedded definitions without waiting for HTTP.
+    assert!(source.load().await.providers.len() > 2);
     tokio::task::spawn_blocking(move || server.join().unwrap())
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn cold_start_does_not_wait_for_a_stalled_network() {
+    let home = Home::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    // Keep the socket listening without accepting or sending any HTTP response.
+    let source = source(&home, &endpoint, CatalogPlatform::Desktop, "0.1.0");
+    let local = tokio::time::timeout(Duration::from_secs(1), source.load())
+        .await
+        .expect("cold startup must settle local data without HTTP");
+    assert!(local.providers.len() > 2);
+    assert!(Arc::ptr_eq(&local, &source.load().await));
+    assert!(source.cached().is_none());
+    drop(listener);
 }

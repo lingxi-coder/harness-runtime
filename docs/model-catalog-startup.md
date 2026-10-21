@@ -6,9 +6,9 @@ and iOS use `MobileConfig`. The default embedder configuration performs no
 catalog networking. This does not change the Claude Code 2.1.295 target.
 
 An existing validated cache starts the runtime immediately while an eight-second
-HTTP request revalidates it in the background. A cold owner overlaps its bounded
-fetch with unrelated startup work; an unsuccessful cold fetch uses embedded SDK
-definitions. Updated cache data is admitted by the next runtime owner. An active
+HTTP request revalidates it in the background. A cold owner starts from embedded
+SDK definitions and performs the same bounded fetch in the background; network
+latency never gates local startup. Updated cache data is admitted by the next runtime owner. An active
 runtime and its model list retain their original snapshot, including during
 settings refreshes and in-process side chats.
 

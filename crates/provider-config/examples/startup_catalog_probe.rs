@@ -11,13 +11,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rows = Vec::new();
     for (platform, version) in [
         (CatalogPlatform::Desktop, "0.1.0"),
-        (CatalogPlatform::Cli, "0.9.0"),
+        (CatalogPlatform::Cli, "0.12.0"),
         (CatalogPlatform::Android, "0.1.0"),
         (CatalogPlatform::Ios, "2.4.1"),
     ] {
         let source = StartupCatalog::new(platform, version, &home);
         let start = std::time::Instant::now();
-        let catalog = source.load().await;
+        let catalog = source.refresh().await?;
         let offered = catalog
             .providers
             .iter()
