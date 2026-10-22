@@ -410,8 +410,18 @@ async fn branched_fixture_surfaces_ai_title() {
 async fn sanitized_dir_collision_filters_rows_by_transcript_cwd() {
     let temp = TempDir::new().expect("tempdir");
     let lingxi_home = temp.path().join("home");
-    let cwd_a = "/tmp/collision-a_b".to_string();
-    let cwd_b = "/tmp/collision-a-b".to_string();
+    let cwd_a = temp
+        .path()
+        .join("collision-a_b")
+        .to_string_lossy()
+        .into_owned();
+    let cwd_b = temp
+        .path()
+        .join("collision-a-b")
+        .to_string_lossy()
+        .into_owned();
+    std::fs::create_dir(&cwd_a).unwrap();
+    std::fs::create_dir(&cwd_b).unwrap();
     assert_eq!(
         project_dir_name(&cwd_a),
         project_dir_name(&cwd_b),

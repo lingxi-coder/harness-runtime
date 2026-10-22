@@ -62,6 +62,34 @@ fn queue_journal_error(error: WriterError) -> TranscriptWriterError {
     }
 }
 
+fn initialize_identity_for_fresh_metadata(
+    store: &IdentityLogStore,
+    path: &Path,
+    root: &Path,
+    identity: &lingxi_core::host::rooted_fs::RootIdentity,
+) -> Result<(), FsError> {
+    let relative = path
+        .file_name()
+        .map(PathBuf::from)
+        .ok_or_else(|| FsError::Io("transcript has no filename".into()))?;
+    match lingxi_core::host::rooted_fs::open_read_file_pinned(root, &relative, Some(identity)) {
+        Ok(file)
+            if file
+                .metadata()
+                .map_err(|error| FsError::Io(error.to_string()))?
+                .len()
+                > 0 =>
+        {
+            // Metadata can be appended to Native files, but it must not import
+            // their message identities outside the explicit resume boundary.
+            return Ok(());
+        }
+        Ok(_) | Err(FsError::NotFound(_)) => {}
+        Err(error) => return Err(error),
+    }
+    message_identity::initialize_empty_host_log_at(store, path, root, identity)
+}
+
 /// SC-07 — stamp `sessionKind` on a chain entry that does not carry one.
 ///
 /// The oracle sets it inside the persistence layer, on every entry
@@ -144,7 +172,7 @@ pub struct JsonlWriter {
     /// file, the lock and the byte counter. Any other owner would have to be
     /// threaded from the composition root through the resume path to reach the
     /// same place.
-    metadata_state: Mutex<SessionMetadataState>,
+    metadata_states: std::sync::RwLock<HashMap<String, Arc<Mutex<SessionMetadataState>>>>,
     /// Bytes appended to the active transcript since the last SUCCESSFUL
     /// transcript rewrite — the oracle's `bytesSinceCompact`
     /// (increment site @296775839, trigger @296777239).
@@ -197,16 +225,26 @@ fn writes_compact_boundary(msg: &JsonlMessage) -> bool {
     msg.message_type == "system" && msg.extra.string_at("/subtype") == Some("compact_boundary")
 }
 
+/// UUID identity ignores hexadecimal case; physical transcript paths retain it.
+fn canonical_metadata_session_id(session_id: &str) -> String {
+    uuid::Uuid::parse_str(session_id)
+        .map(|id| id.to_string())
+        .unwrap_or_else(|_| session_id.to_owned())
+}
+
 /// Read the newest custom-title record when the bounded tail no longer
 /// contains one. This protects the in-process metadata state from a title
 /// appended by another host (for example Electron's metadata-only rename)
 /// before a large transcript write crosses the backstop in one operation.
 fn latest_custom_title(path: &Path, session_id: &str) -> Option<Option<Utf16JsonProjection>> {
+    let session_id = canonical_metadata_session_id(session_id);
     let contents = std::fs::read_to_string(path).ok()?;
     contents.lines().rev().find_map(|line| {
         let value = Utf16JsonProjection::parse(line).ok()?;
         if value.string_at("/type") != Some("custom-title")
-            || value.string_at("/sessionId") != Some(session_id)
+            || !value
+                .string_at("/sessionId")
+                .is_some_and(|recorded| canonical_metadata_session_id(recorded) == session_id)
         {
             return None;
         }
@@ -472,7 +510,7 @@ impl JsonlWriter {
             lock: Mutex::new(()),
             identity_store: Arc::new(std::sync::Mutex::new(HashMap::new())),
             bytes_since_metadata_re_append: AtomicUsize::new(0),
-            metadata_state: Mutex::new(SessionMetadataState::default()),
+            metadata_states: std::sync::RwLock::new(HashMap::new()),
             bytes_since_compact: AtomicU64::new(0),
             compact_backstop_bytes: AtomicU64::new(COMPACT_BACKSTOP_BYTES),
         }
@@ -733,6 +771,24 @@ impl JsonlWriter {
         transcript_path: &Path,
         uuid: Option<&str>,
     ) -> Result<Box<dyn FlockGuard>, WriterError> {
+        self.prepare_identity_non_durable(transcript_path, uuid, false)
+            .await
+    }
+
+    async fn prepare_metadata_identity_non_durable(
+        &self,
+        transcript_path: &Path,
+    ) -> Result<Box<dyn FlockGuard>, WriterError> {
+        self.prepare_identity_non_durable(transcript_path, None, true)
+            .await
+    }
+
+    async fn prepare_identity_non_durable(
+        &self,
+        transcript_path: &Path,
+        uuid: Option<&str>,
+        metadata_only: bool,
+    ) -> Result<Box<dyn FlockGuard>, WriterError> {
         let root = transcript_path
             .parent()
             .ok_or_else(|| FsError::Io("transcript has no parent directory".into()))?
@@ -765,6 +821,8 @@ impl JsonlWriter {
                     &uuid,
                 )
                 .map(|_| ())
+            } else if metadata_only {
+                initialize_identity_for_fresh_metadata(&store, &transcript_path, &root, &identity)
             } else {
                 message_identity::initialize_empty_host_log_at(
                     &store,
@@ -835,6 +893,33 @@ impl JsonlWriter {
         &self,
         transcript_path: &Path,
     ) -> Result<SessionMessageIdentitySnapshot, WriterError> {
+        self.bootstrap_session_message_identity_snapshot_with_authority(
+            transcript_path,
+            None,
+        )
+        .await
+    }
+
+    /// Import a resume target before publishing it as the active session.
+    /// The supplied authority belongs to the prepared destination; an older
+    /// active session must not lend its transaction to the destination import.
+    pub async fn bootstrap_prepared_session_message_identity_snapshot(
+        &self,
+        transcript_path: &Path,
+        durable_writer: Arc<DurableTranscriptWriter>,
+    ) -> Result<SessionMessageIdentitySnapshot, WriterError> {
+        self.bootstrap_session_message_identity_snapshot_with_authority(
+            transcript_path,
+            Some(durable_writer),
+        )
+        .await
+    }
+
+    async fn bootstrap_session_message_identity_snapshot_with_authority(
+        &self,
+        transcript_path: &Path,
+        durable_writer: Option<Arc<DurableTranscriptWriter>>,
+    ) -> Result<SessionMessageIdentitySnapshot, WriterError> {
         let _guard = self.lock.lock().await;
         let root = transcript_path
             .parent()
@@ -852,7 +937,9 @@ impl JsonlWriter {
             #[cfg(not(unix))]
             std::fs::create_dir_all(root).map_err(|error| FsError::Io(error.to_string()))?;
         }
-        if let Some(durable_writer) = self.durable_writer_for_path(transcript_path) {
+        if let Some(durable_writer) =
+            durable_writer.or_else(|| self.durable_writer_for_path(transcript_path))
+        {
             let path = transcript_path.to_path_buf();
             let store = self.identity_store.clone();
             return tokio::task::spawn_blocking(move || {
@@ -905,6 +992,227 @@ impl JsonlWriter {
     #[must_use]
     pub fn filesystem_handle(&self) -> Arc<dyn FileSystem> {
         self.fs.clone()
+    }
+
+    /// Capture only each metadata kind's latest exact source record. This is
+    /// prepared from the same transcript read that supplied resumed history.
+    pub fn capture_session_metadata_source(
+        content: &str,
+        session_id: &str,
+    ) -> Vec<Utf16JsonProjection> {
+        let session_id = canonical_metadata_session_id(session_id);
+        const KINDS: &[&str] = &[
+            "custom-title",
+            "ai-title",
+            "tag",
+            "relocated",
+            "last-prompt",
+            "agent-name",
+            "agent-color",
+            "agent-setting",
+            "mode",
+            "permission-mode",
+            "session-mode",
+            "isolation-latch",
+            "atis-latch",
+            "worktree-state",
+            "pr-link",
+            "bridge-session",
+        ];
+        let mut latest = std::collections::BTreeMap::new();
+        for line in content.lines() {
+            let Ok(row) = Utf16JsonProjection::parse(line) else {
+                continue;
+            };
+            if !row
+                .string_at("/sessionId")
+                .is_some_and(|recorded| canonical_metadata_session_id(recorded) == session_id)
+            {
+                continue;
+            }
+            let Some(kind) = row.string_at("/type").filter(|kind| KINDS.contains(kind)) else {
+                continue;
+            };
+            if kind == "relocated"
+                && !row
+                    .string_at("/relocatedCwd")
+                    .is_some_and(|cwd| !cwd.is_empty())
+            {
+                continue;
+            }
+            if kind == "atis-latch"
+                && !row
+                    .string_at("/atis")
+                    .is_some_and(crate::jsonl::reader::is_valid_atis_latch)
+            {
+                continue;
+            }
+            latest.insert(kind.to_owned(), row);
+        }
+        latest.into_values().collect()
+    }
+
+    fn metadata_from_source(rows: &[Utf16JsonProjection]) -> SessionMetadataState {
+        let mut state = SessionMetadataState::default();
+        for row in rows {
+            let string = |field: &str| row.string_at(&format!("/{field}")).map(str::to_owned);
+            let value = || {
+                row.to_json_string()
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            };
+            match row.string_at("/type") {
+                Some("custom-title") => {
+                    state.title = row
+                        .subprojection("/customTitle")
+                        .ok()
+                        .filter(|title| title.string_units("").is_some())
+                }
+                Some("ai-title") => state.ai_title = string("aiTitle"),
+                Some("tag") => state.tag = string("tag"),
+                Some("relocated") => state.relocated_cwd = string("relocatedCwd"),
+                Some("last-prompt") => {
+                    state.last_prompt = string("lastPrompt");
+                    state.leaf_uuid = string("leafUuid");
+                }
+                Some("agent-name") => state.agent_name = string("agentName"),
+                Some("agent-color") => state.agent_color = string("agentColor"),
+                Some("agent-setting") => state.agent_setting = string("agentSetting"),
+                Some("mode") => state.mode = string("mode"),
+                Some("permission-mode") => state.permission_mode = string("permissionMode"),
+                Some("session-mode") => state.session_mode = string("sessionMode"),
+                Some("isolation-latch") => state.isolation_latch = string("side"),
+                Some("atis-latch") => {
+                    state.atis = string("atis")
+                        .filter(|value| crate::jsonl::reader::is_valid_atis_latch(value))
+                }
+                Some("worktree-state") => {
+                    state.worktree = value().and_then(|value| value.get("worktreeSession").cloned())
+                }
+                Some("pr-link") => {
+                    state.pr_number = value().and_then(|value| {
+                        value.get("prNumber").and_then(serde_json::Value::as_u64)
+                    });
+                    state.pr_url = string("prUrl");
+                    state.pr_repository = string("prRepository");
+                }
+                Some("bridge-session") => {
+                    state.bridge_id = string("bridgeSessionId");
+                    state.bridge_seq = value().and_then(|value| {
+                        value
+                            .get("lastSequenceNum")
+                            .and_then(serde_json::Value::as_u64)
+                    });
+                    state.bridge_grouping_id = string("sessionGroupingId");
+                    state.bridge_dialog_kinds = value()
+                        .and_then(|value| {
+                            value
+                                .get("declaredDialogKinds")
+                                .and_then(serde_json::Value::as_array)
+                                .cloned()
+                        })
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter_map(|value| value.as_str().map(str::to_owned))
+                        .collect();
+                }
+                _ => {}
+            }
+        }
+        state
+    }
+
+    /// Install a captured metadata mirror at the synchronous session commit.
+    /// Other in-flight metadata owners retain their old, session-pinned Arc.
+    pub fn install_session_metadata_source(&self, session_id: &str, rows: &[Utf16JsonProjection]) {
+        self.metadata_states
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                canonical_metadata_session_id(session_id),
+                Arc::new(Mutex::new(Self::metadata_from_source(rows))),
+            );
+    }
+
+    async fn session_metadata_state(
+        &self,
+        session_id: &str,
+        path: &Path,
+    ) -> Arc<Mutex<SessionMetadataState>> {
+        let session_id = canonical_metadata_session_id(session_id);
+        if let Some(state) = self
+            .metadata_states
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session_id)
+            .cloned()
+        {
+            return state;
+        }
+        // Direct library writers may not have a prepared replay snapshot.
+        // Hydrate their first mirror from the complete target so old titles
+        // outside the 64 KiB tail remain available to the backstop.
+        let content = if tokio::fs::symlink_metadata(path)
+            .await
+            .is_ok_and(|metadata| metadata.file_type().is_file())
+        {
+            self.fs
+                .read_file(&path.to_string_lossy(), None, None)
+                .await
+                .map(|file| file.content)
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let rows = Self::capture_session_metadata_source(&content, &session_id);
+        self.metadata_states
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(session_id.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(Self::metadata_from_source(&rows))))
+            .clone()
+    }
+
+    fn capture_active_target(&self) -> (PathBuf, Option<Arc<DurableTranscriptWriter>>) {
+        self.active_durable_target().map_or_else(
+            || (self.active_path(), None),
+            |target| (target.path, Some(target.writer)),
+        )
+    }
+
+    fn capture_metadata_target(
+        &self,
+        session_id: &str,
+    ) -> Result<(PathBuf, Option<Arc<DurableTranscriptWriter>>), WriterError> {
+        let session_id = canonical_metadata_session_id(session_id);
+        let session_id = session_id.as_str();
+        let active = self.capture_active_target();
+        if Self::metadata_session_id_from_path(&active.0).as_deref() == Some(session_id) {
+            return Ok(active);
+        }
+        let target = SessionId::parse_prefixed(session_id).and_then(|id| {
+            self.session_targets
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&id)
+                .cloned()
+        });
+        target
+            .map(|target| (target.path, Some(target.writer)))
+            .ok_or_else(|| {
+                FsError::Io("metadata session has no bound transcript target".into()).into()
+            })
+    }
+
+    /// Resolve again while holding the append mutex. A metadata operation may
+    /// have waited for this session's slot while `/cd` moved its transcript.
+    /// A different active UUID still leaves the captured owner's file intact.
+    fn admitted_metadata_target(
+        &self,
+        session_id: &str,
+        captured: (PathBuf, Option<Arc<DurableTranscriptWriter>>),
+    ) -> (PathBuf, Option<Arc<DurableTranscriptWriter>>) {
+        self.capture_metadata_target(session_id).unwrap_or(captured)
     }
 
     /// Atomically switch subsequent appends to another session transcript.
@@ -976,7 +1284,10 @@ impl JsonlWriter {
         payload.push_str(&line);
         payload.push('\n');
 
-        let mut metadata_state = self.metadata_state.lock().await;
+        let metadata_slot = self
+            .session_metadata_state(&session_id, &self.active_path())
+            .await;
+        let mut metadata_state = metadata_slot.lock().await;
         let _writer_guard = self.lock.lock().await;
         let old_path = self.active_path();
         let same_path = old_path == path;
@@ -1217,7 +1528,10 @@ impl JsonlWriter {
         // Keep lock ordering consistent with maybe_re_append_metadata:
         // metadata_state -> append lock.  No append path takes these locks in
         // the opposite order while the metadata guard is held.
-        let mut metadata_state = self.metadata_state.lock().await;
+        let metadata_slot = self
+            .session_metadata_state(session_id, &self.active_path())
+            .await;
+        let mut metadata_state = metadata_slot.lock().await;
         let _g = self.lock.lock().await;
         let old_path = self.active_path();
         let same_path = old_path == path;
@@ -1777,6 +2091,13 @@ impl JsonlWriter {
                         parent,
                         &identity,
                     )?;
+                } else {
+                    initialize_identity_for_fresh_metadata(
+                        &identity_store,
+                        &active_path,
+                        parent,
+                        &identity,
+                    )?;
                 }
                 transaction.append_raw_json_at(parent, &identity, &relative, payload)
             })
@@ -1964,10 +2285,13 @@ impl JsonlWriter {
     /// which is exactly the BARE form the loader keys its maps by (see
     /// [`Self::append_custom_title`]'s contract).
     fn session_id_from_path(&self) -> Option<String> {
-        self.active_path()
-            .file_stem()
+        Self::metadata_session_id_from_path(&self.active_path())
+    }
+
+    fn metadata_session_id_from_path(path: &Path) -> Option<String> {
+        path.file_stem()
             .and_then(|s| s.to_str())
-            .map(ToString::to_string)
+            .map(canonical_metadata_session_id)
     }
 
     /// Fire the metadata backstop if enough bytes have accumulated.
@@ -1986,12 +2310,14 @@ impl JsonlWriter {
         if !self.metadata_re_append_due() {
             return 0;
         }
-        let Some(sid) = self.session_id_from_path() else {
+        let target = self.capture_active_target();
+        let Some(sid) = Self::metadata_session_id_from_path(&target.0) else {
             return 0;
         };
-        let mut state = self.metadata_state.lock().await;
+        let slot = self.session_metadata_state(&sid, &target.0).await;
+        let mut state = slot.lock().await;
         match self
-            .re_append_session_metadata(&mut state, &sid, false, true)
+            .re_append_session_metadata_to_target(&mut state, &sid, false, true, target)
             .await
         {
             Ok(n) => n,
@@ -2097,10 +2423,12 @@ impl JsonlWriter {
         // — the rewrite just deleted every superseded metadata record, so the
         // survivors have to be re-stated at the tail with dedup SKIPPED (the
         // tail it would have deduped against no longer exists).
-        if let Some(sid) = self.session_id_from_path() {
-            let mut state = self.metadata_state.lock().await;
+        let target = self.capture_active_target();
+        if let Some(sid) = Self::metadata_session_id_from_path(&target.0) {
+            let slot = self.session_metadata_state(&sid, &target.0).await;
+            let mut state = slot.lock().await;
             if let Err(e) = self
-                .re_append_session_metadata(&mut state, &sid, false, true)
+                .re_append_session_metadata_to_target(&mut state, &sid, false, true, target)
                 .await
             {
                 tracing::error!("Metadata re-append after transcript compact failed: {e}");
@@ -2136,10 +2464,38 @@ impl JsonlWriter {
         skip_title_adopt: bool,
         skip_dedup: bool,
     ) -> Result<usize, WriterError> {
+        self.re_append_session_metadata_to_target(
+            state,
+            session_id,
+            skip_title_adopt,
+            skip_dedup,
+            self.capture_active_target(),
+        )
+        .await
+    }
+
+    async fn re_append_session_metadata_to_target(
+        &self,
+        state: &mut SessionMetadataState,
+        session_id: &str,
+        skip_title_adopt: bool,
+        skip_dedup: bool,
+        target: (PathBuf, Option<Arc<DurableTranscriptWriter>>),
+    ) -> Result<usize, WriterError> {
+        let session_id = canonical_metadata_session_id(session_id);
+        let session_id = session_id.as_str();
         let _g = self.lock.lock().await;
-        self.bytes_since_metadata_re_append
-            .store(0, Ordering::Relaxed);
-        let path = self.active_path();
+        let (path, durable) = self.admitted_metadata_target(session_id, target);
+        if Self::metadata_session_id_from_path(&path).as_deref() != Some(session_id) {
+            return Err(FsError::Io(
+                "metadata session does not match its captured transcript".into(),
+            )
+            .into());
+        }
+        if self.active_path() == path {
+            self.bytes_since_metadata_re_append
+                .store(0, Ordering::Relaxed);
+        }
         let tail = read_tail(&path);
         // Electron can append a title through its host process while this
         // writer remains live. If a single large append pushed that record
@@ -2159,11 +2515,24 @@ impl JsonlWriter {
             return Ok(0);
         }
         let count = plan.entries.len();
-        self.append_payload(&plan.to_jsonl()).await?;
+        if let Some(durable) = durable {
+            for line in plan.to_jsonl().lines() {
+                let payload = Utf16JsonProjection::parse(line)
+                    .map_err(crate::jsonl::exact_json::projection_error)?;
+                self.append_json_durable_locked(path.clone(), durable.clone(), payload, None)
+                    .await?;
+            }
+        } else {
+            let _identity_guard = self.prepare_metadata_identity_non_durable(&path).await?;
+            self.append_payload_to_path(&path, &plan.to_jsonl(), true)
+                .await?;
+        }
         // The re-appended bytes are the metadata itself; they must not count
         // toward the next backstop.
-        self.bytes_since_metadata_re_append
-            .store(0, Ordering::Relaxed);
+        if self.active_path() == path {
+            self.bytes_since_metadata_re_append
+                .store(0, Ordering::Relaxed);
+        }
         Ok(count)
     }
 
@@ -2215,6 +2584,8 @@ impl JsonlWriter {
         session_id: &str,
         custom_title: Utf16JsonProjection,
     ) -> Result<(), WriterError> {
+        let session_id = canonical_metadata_session_id(session_id);
+        let session_id = session_id.as_str();
         let value = Utf16JsonProjection::object(vec![
             ("type".into(), Utf16JsonProjection::from("custom-title")),
             ("customTitle".into(), custom_title.clone()),
@@ -2228,8 +2599,15 @@ impl JsonlWriter {
         // Removing this line does NOT fail `appends_alone_drive_the_metadata_backstop`
         // — verified by mutation. It matters only when state is set without a
         // corresponding record already on disk.
-        self.metadata_state.lock().await.title = Some(custom_title);
-        self.append_source_side_record(&value).await
+        let target = self.capture_metadata_target(session_id)?;
+        let slot = self.session_metadata_state(session_id, &target.0).await;
+        let mut state = slot.lock().await;
+        state.title = Some(custom_title);
+        self.append_source_side_record_to_target(&value, target)
+            .await?;
+        drop(state);
+        self.maybe_re_append_metadata().await;
+        Ok(())
     }
 
     /// Persist a mobile-created zero-message session before its first turn.
@@ -2258,30 +2636,48 @@ impl JsonlWriter {
     /// transcript restores its last selected mode without changing other
     /// sessions. The active writer path is the source of the bare session UUID.
     pub async fn append_permission_mode(&self, permission_mode: &str) -> Result<(), WriterError> {
-        let Some(session_id) = self.session_id_from_path() else {
+        let target = self.capture_active_target();
+        let Some(session_id) = Self::metadata_session_id_from_path(&target.0) else {
             return Ok(());
         };
-        self.metadata_state.lock().await.permission_mode = Some(permission_mode.to_string());
+        let slot = self.session_metadata_state(&session_id, &target.0).await;
+        let mut state = slot.lock().await;
+        state.permission_mode = Some(permission_mode.to_string());
         let value = serde_json::json!({
             "type": "permission-mode",
             "permissionMode": permission_mode,
             "sessionId": session_id,
         });
-        self.append_side_record(&value).await
+        let source = Utf16JsonProjection::from_serde_value(&value)
+            .map_err(crate::jsonl::exact_json::projection_error)?;
+        self.append_source_side_record_to_target(&source, target)
+            .await?;
+        drop(state);
+        self.maybe_re_append_metadata().await;
+        Ok(())
     }
 
     /// Persist the mobile chat/code capability profile for this transcript.
     pub async fn append_session_mode(&self, session_mode: &str) -> Result<(), WriterError> {
-        let Some(session_id) = self.session_id_from_path() else {
+        let target = self.capture_active_target();
+        let Some(session_id) = Self::metadata_session_id_from_path(&target.0) else {
             return Ok(());
         };
-        self.metadata_state.lock().await.session_mode = Some(session_mode.to_string());
+        let slot = self.session_metadata_state(&session_id, &target.0).await;
+        let mut state = slot.lock().await;
+        state.session_mode = Some(session_mode.to_string());
         let value = serde_json::json!({
             "type": "session-mode",
             "sessionMode": session_mode,
             "sessionId": session_id,
         });
-        self.append_side_record(&value).await
+        let source = Utf16JsonProjection::from_serde_value(&value)
+            .map_err(crate::jsonl::exact_json::projection_error)?;
+        self.append_source_side_record_to_target(&source, target)
+            .await?;
+        drop(state);
+        self.maybe_re_append_metadata().await;
+        Ok(())
     }
 
     /// Append an `agent-setting` metadata line for `session_id` — the persisted
@@ -2356,12 +2752,83 @@ impl JsonlWriter {
         session_id: &str,
         worktree_session: Option<&serde_json::Value>,
     ) -> Result<(), WriterError> {
+        let session_id = canonical_metadata_session_id(session_id);
+        let session_id = session_id.as_str();
         let value = serde_json::json!({
             "type": "worktree-state",
             "worktreeSession": worktree_session.cloned().unwrap_or(serde_json::Value::Null),
             "sessionId": session_id,
         });
-        self.append_side_record(&value).await
+        let target = self.capture_metadata_target(session_id)?;
+        let slot = self.session_metadata_state(session_id, &target.0).await;
+        let mut state = slot.lock().await;
+        let source = Utf16JsonProjection::from_serde_value(&value)
+            .map_err(crate::jsonl::exact_json::projection_error)?;
+        self.append_source_side_record_to_target(&source, target)
+            .await?;
+        state.worktree = Some(worktree_session.cloned().unwrap_or(serde_json::Value::Null));
+        drop(state);
+        self.maybe_re_append_metadata().await;
+        Ok(())
+    }
+
+    /// Persist worktree state to the currently selected transcript with the
+    /// identity and durable authority captured from that same target. Reusing
+    /// the main writer makes this follow hot resume and transcript relocation.
+    pub async fn append_worktree_state_for_current_session(
+        &self,
+        worktree_session: Option<&serde_json::Value>,
+    ) -> Result<(), WriterError> {
+        loop {
+            let target = self.capture_active_target();
+            let session_id = Self::metadata_session_id_from_path(&target.0)
+                .as_deref()
+                .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+                .ok_or_else(|| {
+                    FsError::Io("worktree transcript target has no session UUID".into())
+                })?
+                .to_owned();
+            let slot = self.session_metadata_state(&session_id, &target.0).await;
+            let mut state = slot.lock().await;
+            let guard = self.lock.lock().await;
+            let admitted = self.capture_active_target();
+            let same_authority = match (&target.1, &admitted.1) {
+                (None, None) => true,
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                _ => false,
+            };
+            if target.0 != admitted.0 || !same_authority {
+                drop(guard);
+                drop(state);
+                continue;
+            }
+            let value = serde_json::json!({
+                "type": "worktree-state",
+                "worktreeSession": worktree_session.cloned().unwrap_or(serde_json::Value::Null),
+                "sessionId": session_id,
+            });
+            if let Some(durable) = admitted.1 {
+                self.flush_queue_operations_locked().await?;
+                let payload = Utf16JsonProjection::from_serde_value(&value)
+                    .map_err(crate::jsonl::exact_json::projection_error)?;
+                self.append_json_durable_locked(admitted.0, durable, payload, None)
+                    .await?;
+            } else {
+                let mut line = serde_json::to_string(&value)?;
+                line.push('\n');
+                let _identity_guard = self
+                    .prepare_metadata_identity_non_durable(&admitted.0)
+                    .await?;
+                self.append_payload_to_path(&admitted.0, &line, true)
+                    .await?;
+            }
+            state.worktree = Some(worktree_session.cloned().unwrap_or(serde_json::Value::Null));
+            drop(guard);
+            drop(state);
+            break;
+        }
+        self.maybe_re_append_metadata().await;
+        Ok(())
     }
 
     /// Append one ordered context-collapse commit record.
@@ -2865,23 +3332,37 @@ impl JsonlWriter {
         Ok(())
     }
 
-    async fn append_source_side_record(
+    async fn append_source_side_record_to_target(
         &self,
         value: &Utf16JsonProjection,
+        target: (PathBuf, Option<Arc<DurableTranscriptWriter>>),
     ) -> Result<(), WriterError> {
         let line = value
             .to_json_string()
             .map_err(crate::jsonl::exact_json::projection_error)?;
         {
             let _g = self.lock.lock().await;
-            let mut payload = String::with_capacity(line.len() + 1);
-            payload.push_str(&line);
-            payload.push('\n');
-            self.append_payload(&payload).await?;
+            let target = value.string_at("/sessionId").map_or_else(
+                || target.clone(),
+                |session_id| self.admitted_metadata_target(session_id, target.clone()),
+            );
+            if let Some(durable) = target.1 {
+                self.append_json_durable_locked(target.0, durable, value.clone(), None)
+                    .await?;
+            } else {
+                let mut payload = String::with_capacity(line.len() + 1);
+                payload.push_str(&line);
+                payload.push('\n');
+                let _identity_guard = self
+                    .prepare_metadata_identity_non_durable(&target.0)
+                    .await?;
+                self.append_payload_to_path(&target.0, &payload, true)
+                    .await?;
+            }
         }
-        self.maybe_re_append_metadata().await;
         Ok(())
     }
+
 }
 
 #[cfg(test)]
@@ -4468,12 +4949,13 @@ mod tests {
     /// already knows which session it is writing, so no caller has to thread it.
     #[tokio::test]
     async fn appends_alone_drive_the_metadata_backstop() {
-        let (_dir, path, writer) = temp_writer("22222222-3333-4444-5555-666666666666");
+        let (_dir, path, writer) = temp_writer("drive-backstop");
+        let session_id = path.file_stem().unwrap().to_str().unwrap();
 
         // A title recorded through the writer is remembered in its own state.
         writer
             .append_custom_title(
-                "22222222-3333-4444-5555-666666666666",
+                session_id,
                 "Long Session".into(),
             )
             .await
@@ -4500,6 +4982,303 @@ mod tests {
             "the backstop must have restored the title into the tail window \
              without an explicit re_append call"
         );
+    }
+
+    fn metadata_identity_writer(
+        durable: bool,
+    ) -> (tempfile::TempDir, PathBuf, SessionId, JsonlWriter) {
+        let root = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
+        let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            root.path().to_path_buf(),
+        ));
+        let writer = JsonlWriter::new(path.clone(), fs);
+        let writer = if durable {
+            let authority = root.path().join("authority");
+            std::fs::create_dir(&authority).unwrap();
+            let lock = Arc::new(DurableTranscriptWriter::open(authority).unwrap());
+            let writer = writer.with_durable_lock(lock.clone());
+            writer.activate_session_target_with_durable_lock(
+                id,
+                path.clone(),
+                root.path().to_path_buf(),
+                lock,
+            );
+            writer
+        } else {
+            writer
+        };
+        (root, path, id, writer)
+    }
+
+    #[tokio::test]
+    async fn uppercase_uuid_filename_keeps_one_canonical_metadata_owner_and_the_selected_path() {
+        let upper = "ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF";
+        let sid = upper.to_ascii_lowercase();
+        let id = SessionId::parse_prefixed(&sid).unwrap();
+        for durable in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join(format!("{upper}.jsonl"));
+            let content = format!(
+                "{}\n{}\n{}\n",
+                json!({"type":"user","uuid":uuid::Uuid::new_v4(),"sessionId":sid,"parentUuid":null,"message":{"role":"user","content":"selected source"}}),
+                json!({"type":"custom-title","sessionId":sid,"customTitle":"saved title"}),
+                json!({"type":"relocated","sessionId":sid,"relocatedCwd":"/selected-root"}),
+            );
+            std::fs::write(&path, &content).unwrap();
+            let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+                root.path().to_path_buf(),
+            ));
+            let mut writer = JsonlWriter::new(path.clone(), fs);
+            if durable {
+                let authority = root.path().join("state");
+                std::fs::create_dir_all(&authority).unwrap();
+                writer = writer.with_durable_lock(Arc::new(
+                    DurableTranscriptWriter::open(&authority).unwrap(),
+                ));
+                writer
+                    .activate_session_target(id, path.clone(), root.path().to_path_buf())
+                    .unwrap();
+            }
+            writer
+                .bootstrap_session_message_identity_snapshot(&path)
+                .await
+                .unwrap();
+            let captured = JsonlWriter::capture_session_metadata_source(&content, upper);
+            assert_eq!(captured.len(), 2);
+            writer.install_session_metadata_source(upper, &captured);
+            writer
+                .append_custom_title(&sid, "renamed selected copy".into())
+                .await
+                .unwrap();
+            writer.append_permission_mode("acceptEdits").await.unwrap();
+            writer.append_session_mode("chat").await.unwrap();
+            writer
+                .append_worktree_state_for_current_session(None)
+                .await
+                .unwrap();
+            let mut message = identity_row(
+                "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                &"x".repeat(METADATA_REAPPEND_BACKSTOP_BYTES),
+            );
+            message.session_id = sid.clone();
+            writer.append(&message).await.unwrap();
+            let contents = std::fs::read_to_string(&path).unwrap();
+            let tail = read_tail(&path);
+            for value in [
+                "renamed selected copy",
+                "acceptEdits",
+                "\"sessionMode\":\"chat\"",
+                "\"worktreeSession\":null",
+                "/selected-root",
+            ] {
+                assert!(tail.contains(value), "missing {value} (durable={durable})");
+            }
+            let loaded = crate::jsonl::route_lines(&contents);
+            assert_eq!(loaded.custom_titles[&sid], "renamed selected copy");
+            assert_eq!(writer.active_path(), path);
+            let mirrors = writer.metadata_states.read().unwrap();
+            assert_eq!(mirrors.len(), 1);
+            assert!(mirrors.contains_key(&sid));
+            let files = std::fs::read_dir(root.path())
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "jsonl")
+                })
+                .map(|entry| entry.file_name())
+                .collect::<Vec<_>>();
+            assert_eq!(files, [std::ffi::OsString::from(format!("{upper}.jsonl"))]);
+        }
+    }
+
+    #[tokio::test]
+    async fn metadata_waiting_for_relocation_follows_the_same_session_to_its_new_target() {
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+
+        for durable in [false, true] {
+            for operation in ["backstop", "title", "permission", "mode", "worktree"] {
+                let root = tempfile::tempdir().unwrap();
+                let id = SessionId::new();
+                let sid = id.as_uuid().to_string();
+                let old = root.path().join("A").join(format!("{sid}.jsonl"));
+                let new = root.path().join("B").join(format!("{sid}.jsonl"));
+                let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+                    root.path().to_path_buf(),
+                ));
+                let mut writer = JsonlWriter::new(old.clone(), fs);
+                if durable {
+                    let authority = root.path().join("state");
+                    std::fs::create_dir_all(&authority).unwrap();
+                    writer = writer.with_durable_lock(Arc::new(
+                        DurableTranscriptWriter::open(&authority).unwrap(),
+                    ));
+                    writer
+                        .activate_session_target(id, old.clone(), root.path().join("A"))
+                        .unwrap();
+                }
+                writer
+                    .append_custom_title(&sid, "before-move".into())
+                    .await
+                    .unwrap();
+                writer
+                    .bytes_since_metadata_re_append
+                    .store(METADATA_REAPPEND_BACKSTOP_BYTES, Ordering::Relaxed);
+                let slot = writer.session_metadata_state(&sid, &old).await;
+                let held = slot.lock().await;
+                let movement = writer.retarget_with_relocation(new.clone(), &sid, "/new-workspace");
+                tokio::pin!(movement);
+                poll_fn(|cx| {
+                    assert!(movement.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                let metadata = async {
+                    match operation {
+                        "backstop" => {
+                            assert!(writer.maybe_re_append_metadata().await > 0);
+                            Ok(())
+                        }
+                        "title" => writer.append_custom_title(&sid, "during-move".into()).await,
+                        "permission" => writer.append_permission_mode("acceptEdits").await,
+                        "mode" => writer.append_session_mode("chat").await,
+                        "worktree" => writer.append_worktree_state(&sid, None).await,
+                        _ => unreachable!(),
+                    }
+                };
+                tokio::pin!(metadata);
+                poll_fn(|cx| {
+                    assert!(metadata.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                drop(held);
+                movement.await.unwrap();
+                metadata.await.unwrap();
+                assert!(
+                    !old.exists(),
+                    "{operation} recreated the old target (durable={durable})"
+                );
+                assert_eq!(writer.active_path(), new);
+                let contents = std::fs::read_to_string(new).unwrap();
+                assert!(contents.contains("before-move"));
+                assert!(contents.contains("/new-workspace"));
+                match operation {
+                    "backstop" => assert!(contents.matches("before-move").count() >= 2),
+                    "title" => assert!(contents.contains("during-move")),
+                    "permission" => assert!(contents.contains("acceptEdits")),
+                    "mode" => assert!(contents.contains("\"sessionMode\":\"chat\"")),
+                    "worktree" => assert!(contents.contains("\"worktreeSession\":null")),
+                    _ => unreachable!(),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_title_then_first_message_persists_with_message_index_zero() {
+        for durable in [false, true] {
+            let (_root, path, id, writer) = metadata_identity_writer(durable);
+            assert!(!path.exists());
+            writer
+                .append_custom_title(&id.as_uuid().to_string(), "Before first message".into())
+                .await
+                .unwrap();
+            let title_only = std::fs::read_to_string(&path).unwrap();
+            assert!(title_only.contains("Before first message"));
+            let mut row = identity_row("first-human-message", "First message after the title");
+            row.session_id = id.as_uuid().to_string();
+            writer.append(&row).await.unwrap();
+            let content = std::fs::read_to_string(&path).unwrap();
+            assert!(content.starts_with(&title_only));
+            assert!(content.contains("First message after the title"));
+            let identities = writer
+                .read_session_message_identity_snapshot(&path)
+                .await
+                .unwrap();
+            assert_eq!(identities.by_uuid["first-human-message"], 0);
+            assert_eq!(identities.next_message_index, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_metadata_cannot_bind_a_foreign_uuid_or_leak_across_session_switches() {
+        let (_root, path_a, id_a, writer) = metadata_identity_writer(false);
+        let id_b = SessionId::new();
+        let path_b = path_a.with_file_name(format!("{}.jsonl", id_b.as_uuid()));
+        assert!(writer
+            .append_custom_title(&id_b.as_uuid().to_string(), "Unbound B title".into())
+            .await
+            .is_err());
+        assert!(!path_a.exists());
+        assert!(!path_b.exists());
+        writer
+            .append_custom_title(&id_a.as_uuid().to_string(), "A title".into())
+            .await
+            .unwrap();
+        writer.retarget(path_b.clone()).await;
+        let mut row = identity_row("first-b-message", &"B content ".repeat(10_000));
+        row.session_id = id_b.as_uuid().to_string();
+        writer.append(&row).await.unwrap();
+        writer
+            .append_custom_title(&id_b.as_uuid().to_string(), "Bound B title".into())
+            .await
+            .unwrap();
+        let content_b = std::fs::read_to_string(path_b).unwrap();
+        assert!(content_b.contains("Bound B title"));
+        assert!(!content_b.contains("A title"));
+        assert!(!content_b.contains("Unbound B title"));
+        assert!(!content_b.contains(&id_a.as_uuid().to_string()));
+        let content_a = std::fs::read_to_string(path_a).unwrap();
+        assert!(content_a.contains("A title"));
+        assert!(!content_a.contains("Bound B title"));
+    }
+
+    #[tokio::test]
+    async fn metadata_on_nonempty_native_transcript_does_not_import_its_identity_history() {
+        for durable in [false, true] {
+            let (_root, path, id, writer) = metadata_identity_writer(durable);
+            let mut native = identity_row("native-history", "Existing Native history");
+            native.session_id = id.as_uuid().to_string();
+            std::fs::write(
+                &path,
+                format!("{}\n", serde_json::to_string(&native).unwrap()),
+            )
+            .unwrap();
+            writer
+                .append_custom_title(
+                    &id.as_uuid().to_string(),
+                    "Metadata preserves import guard".into(),
+                )
+                .await
+                .unwrap();
+            let mut next = identity_row("next-human-message", "After explicit import");
+            next.session_id = id.as_uuid().to_string();
+            assert!(writer.append(&next).await.is_err());
+            assert_eq!(
+                writer
+                    .read_session_message_identity_snapshot(&path)
+                    .await
+                    .unwrap(),
+                SessionMessageIdentitySnapshot::default(),
+            );
+            writer
+                .bootstrap_session_message_identity_snapshot(&path)
+                .await
+                .unwrap();
+            writer.append(&next).await.unwrap();
+            let identities = writer
+                .read_session_message_identity_snapshot(&path)
+                .await
+                .unwrap();
+            assert_eq!(identities.by_uuid["native-history"], 0);
+            assert_eq!(identities.by_uuid["next-human-message"], 1);
+        }
     }
 
     #[tokio::test]
@@ -4877,7 +5656,13 @@ mod tests {
                     .starts_with("new.jsonl.superseded")),
             "a rejected source must not leave a quarantined target"
         );
-        assert!(writer.metadata_state.lock().await.relocated_cwd.is_none());
+        assert!(writer
+            .session_metadata_state("11111111-2222-3333-4444-555555555555", &old_path)
+            .await
+            .lock()
+            .await
+            .relocated_cwd
+            .is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -4926,7 +5711,13 @@ mod tests {
             "stale destination\n",
             "source validation must happen before destination quarantine"
         );
-        assert!(writer.metadata_state.lock().await.relocated_cwd.is_none());
+        assert!(writer
+            .session_metadata_state("22222222-3333-4444-5555-666666666666", &old_path)
+            .await
+            .lock()
+            .await
+            .relocated_cwd
+            .is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -4983,7 +5774,13 @@ mod tests {
             .expect("destination symlink remains")
             .file_type()
             .is_symlink());
-        assert!(writer.metadata_state.lock().await.relocated_cwd.is_none());
+        assert!(writer
+            .session_metadata_state(session_id, &old_path)
+            .await
+            .lock()
+            .await
+            .relocated_cwd
+            .is_none());
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -5340,6 +6137,373 @@ mod tests {
         let routed = crate::jsonl::reader::route_lines(&raw);
         assert!(routed.agent_snapshots.contains_key(session_id));
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn metadata_backstop_keeps_resumed_source_metadata_without_previous_session_leaks() {
+        let root = tempfile::tempdir().unwrap();
+        let id_a = SessionId::new();
+        let id_b = SessionId::new();
+        let path_a =
+            crate::jsonl::session_path(root.path(), "/workspace/a", &id_a.as_uuid().to_string());
+        let moved_a = crate::jsonl::session_path(
+            root.path(),
+            "/workspace/a-moved",
+            &id_a.as_uuid().to_string(),
+        );
+        let path_b =
+            crate::jsonl::session_path(root.path(), "/workspace/b", &id_b.as_uuid().to_string());
+        let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            root.path().to_path_buf(),
+        ));
+        let writer = JsonlWriter::new(path_a.clone(), fs);
+        writer
+            .append_custom_title(&id_a.as_uuid().to_string(), "title-A".into())
+            .await
+            .unwrap();
+        writer.append_permission_mode("plan").await.unwrap();
+        writer.append_session_mode("code-A").await.unwrap();
+        writer
+            .retarget_with_relocation(
+                moved_a.clone(),
+                &id_a.as_uuid().to_string(),
+                "/workspace/a-moved",
+            )
+            .await
+            .unwrap();
+        let before_a = std::fs::read_to_string(&moved_a).unwrap();
+
+        let title = Utf16JsonProjection::root_string(
+            "title-B �".into(),
+            "title-B ".encode_utf16().chain([0xd800]).collect(),
+        )
+        .unwrap();
+        let title_record = Utf16JsonProjection::object(vec![
+            ("type".into(), "custom-title".into()),
+            ("sessionId".into(), id_b.as_uuid().to_string().into()),
+            ("customTitle".into(), title.clone()),
+        ])
+        .unwrap();
+        let source_b = format!(
+            "{}\n{}\n{}\n",
+            title_record.to_json_string().unwrap(),
+            json!({"type":"mode", "mode":"resumed-B", "sessionId":id_b.as_uuid().to_string()}),
+            json!({"type":"user", "message":{"content":"b".repeat(90_000)}})
+        );
+        std::fs::create_dir_all(path_b.parent().unwrap()).unwrap();
+        std::fs::write(&path_b, &source_b).unwrap();
+        let rows =
+            JsonlWriter::capture_session_metadata_source(&source_b, &id_b.as_uuid().to_string());
+        writer.install_session_metadata_source(&id_b.as_uuid().to_string(), &rows);
+        writer.retarget(path_b.clone()).await;
+        writer
+            .append_side_record_for_test(
+                &json!({"type":"user", "message":{"content":"next".repeat(10_000)}}),
+            )
+            .await;
+        let tail_b = crate::jsonl::read_tail(&path_b);
+        assert!(
+            tail_b.contains(r#""customTitle":"title-B \ud800""#),
+            "{tail_b}"
+        );
+        assert!(tail_b.contains("resumed-B"));
+        assert!(!tail_b.contains("/workspace/a-moved"));
+        assert!(!tail_b.contains("title-A"));
+        assert!(!tail_b.contains("code-A"));
+        assert!(!tail_b.contains(r#""permissionMode":"plan""#));
+        assert_eq!(std::fs::read_to_string(&moved_a).unwrap(), before_a);
+        let slot_b = writer
+            .session_metadata_state(&id_b.as_uuid().to_string(), &path_b)
+            .await;
+        assert_eq!(
+            slot_b
+                .lock()
+                .await
+                .title
+                .as_ref()
+                .and_then(|source| source.string_units("")),
+            title.string_units("")
+        );
+
+        writer.retarget(moved_a.clone()).await;
+        writer
+            .append_side_record_for_test(
+                &json!({"type":"user", "message":{"content":"back".repeat(10_000)}}),
+            )
+            .await;
+        let tail_a = crate::jsonl::read_tail(&moved_a);
+        assert!(tail_a.contains("/workspace/a-moved"));
+        assert!(tail_a.contains("title-A"));
+        assert!(!tail_a.contains("title-B"));
+    }
+
+    #[tokio::test]
+    async fn metadata_backstop_waiting_during_activation_stays_on_captured_session() {
+        let root = tempfile::tempdir().unwrap();
+        let id_a = SessionId::new();
+        let id_b = SessionId::new();
+        let path_a = root.path().join(format!("{}.jsonl", id_a.as_uuid()));
+        let path_b = root.path().join(format!("{}.jsonl", id_b.as_uuid()));
+        let authority_a = root.path().join("authority-a");
+        let authority_b = root.path().join("authority-b");
+        std::fs::create_dir(&authority_a).unwrap();
+        std::fs::create_dir(&authority_b).unwrap();
+        let lock_a = Arc::new(DurableTranscriptWriter::open(&authority_a).unwrap());
+        let lock_b = Arc::new(DurableTranscriptWriter::open(&authority_b).unwrap());
+        let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            root.path().to_path_buf(),
+        ));
+        let writer =
+            Arc::new(JsonlWriter::new(path_a.clone(), fs).with_durable_lock(lock_a.clone()));
+        writer.activate_session_target_with_durable_lock(
+            id_a,
+            path_a.clone(),
+            root.path().to_path_buf(),
+            lock_a,
+        );
+        writer
+            .append_custom_title(&id_a.as_uuid().to_string(), "captured-A".into())
+            .await
+            .unwrap();
+        let slot = writer
+            .session_metadata_state(&id_a.as_uuid().to_string(), &path_a)
+            .await;
+        let guard = slot.lock().await;
+        writer
+            .bytes_since_metadata_re_append
+            .store(METADATA_REAPPEND_BACKSTOP_BYTES, Ordering::Relaxed);
+        let pending = {
+            let writer = writer.clone();
+            tokio::spawn(async move { writer.maybe_re_append_metadata().await })
+        };
+        tokio::task::yield_now().await;
+        writer.activate_session_target_with_durable_lock(
+            id_b,
+            path_b.clone(),
+            root.path().to_path_buf(),
+            lock_b,
+        );
+        drop(guard);
+        assert!(pending.await.unwrap() > 0);
+        assert!(
+            !path_b.exists(),
+            "A's pending backstop cannot manufacture metadata in B"
+        );
+        assert!(std::fs::read_to_string(path_a)
+            .unwrap()
+            .contains("captured-A"));
+    }
+
+    #[tokio::test]
+    async fn prepared_identity_import_uses_destination_authority_without_activating_it() {
+        let root = tempfile::tempdir().unwrap();
+        let id_a = SessionId::new();
+        let id_b = SessionId::new();
+        let path_a = root.path().join(format!("{}.jsonl", id_a.as_uuid()));
+        let path_b = root.path().join(format!("{}.jsonl", id_b.as_uuid()));
+        let authority_a = root.path().join("authority-a");
+        let authority_b = root.path().join("authority-b");
+        std::fs::create_dir(&authority_a).unwrap();
+        std::fs::create_dir(&authority_b).unwrap();
+        let lock_a = Arc::new(DurableTranscriptWriter::open(&authority_a).unwrap());
+        let lock_b = Arc::new(DurableTranscriptWriter::open(&authority_b).unwrap());
+        let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            root.path().to_path_buf(),
+        ));
+        let writer = JsonlWriter::new(path_a.clone(), fs).with_durable_lock(lock_a.clone());
+        writer.activate_session_target_with_durable_lock(
+            id_a,
+            path_a.clone(),
+            root.path().to_path_buf(),
+            lock_a,
+        );
+        let mut native = identity_row("native-source-row", "selected native history");
+        native.session_id = id_b.as_uuid().to_string();
+        let source = format!("{}\n", serde_json::to_string(&native).unwrap());
+        std::fs::write(&path_b, &source).unwrap();
+        let original_authority_b = root.path().join("authority-b-original");
+        std::fs::rename(&authority_b, &original_authority_b).unwrap();
+        std::fs::create_dir(&authority_b).unwrap();
+        assert!(writer
+            .bootstrap_prepared_session_message_identity_snapshot(&path_b, lock_b.clone())
+            .await
+            .is_err());
+        assert_eq!(writer.active_path(), path_a);
+        assert_eq!(writer.session_target_path(id_b), None);
+        std::fs::remove_dir(&authority_b).unwrap();
+        std::fs::rename(original_authority_b, &authority_b).unwrap();
+        let imported = writer
+            .bootstrap_prepared_session_message_identity_snapshot(&path_b, lock_b.clone())
+            .await
+            .unwrap();
+        assert_eq!(imported.by_uuid["native-source-row"], 0);
+        assert_eq!(writer.active_path(), path_a);
+        assert_eq!(std::fs::read_to_string(&path_b).unwrap(), source);
+        writer.activate_session_target_with_durable_lock(
+            id_b,
+            path_b.clone(),
+            root.path().to_path_buf(),
+            lock_b,
+        );
+        let mut appended = identity_row("after-import-row", "after prepared import");
+        appended.session_id = id_b.as_uuid().to_string();
+        writer.append(&appended).await.unwrap();
+        assert!(std::fs::read_to_string(path_b)
+            .unwrap()
+            .contains("after prepared import"));
+        assert!(!path_a.exists());
+    }
+
+    #[tokio::test]
+    async fn current_worktree_state_follows_session_switch_and_relocation() {
+        let root = tempfile::tempdir().unwrap();
+        let session_a = SessionId::new();
+        let session_b = SessionId::new();
+        let path_a = crate::jsonl::session_path(
+            root.path(),
+            "/workspace/a",
+            &session_a.as_uuid().to_string(),
+        );
+        let path_b = crate::jsonl::session_path(
+            root.path(),
+            "/workspace/b",
+            &session_b.as_uuid().to_string(),
+        );
+        let moved_b = crate::jsonl::session_path(
+            root.path(),
+            "/workspace/moved",
+            &session_b.as_uuid().to_string(),
+        );
+        let authority_a = root.path().join("authority-a");
+        let authority_b = root.path().join("authority-b");
+        std::fs::create_dir(&authority_a).unwrap();
+        std::fs::create_dir(&authority_b).unwrap();
+        let lock_a = Arc::new(DurableTranscriptWriter::open(&authority_a).unwrap());
+        let lock_b = Arc::new(DurableTranscriptWriter::open(&authority_b).unwrap());
+        let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            root.path().to_path_buf(),
+        ));
+        let writer = JsonlWriter::new(path_a.clone(), fs).with_durable_lock(lock_a.clone());
+        writer.activate_session_target_with_durable_lock(
+            session_a,
+            path_a.clone(),
+            PathBuf::from("/workspace/a"),
+            lock_a,
+        );
+        writer
+            .append_worktree_state_for_current_session(Some(&json!({"worktreePath":"/wt/a"})))
+            .await
+            .unwrap();
+        let before_a = std::fs::read_to_string(&path_a).unwrap();
+        writer.activate_session_target_with_durable_lock(
+            session_b,
+            path_b.clone(),
+            PathBuf::from("/workspace/b"),
+            lock_b,
+        );
+        writer
+            .append_worktree_state_for_current_session(Some(&json!({"worktreePath":"/wt/b"})))
+            .await
+            .unwrap();
+        writer
+            .retarget_with_relocation(
+                moved_b.clone(),
+                &session_b.as_uuid().to_string(),
+                "/workspace/moved",
+            )
+            .await
+            .unwrap();
+        writer
+            .append_worktree_state_for_current_session(None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(path_a).unwrap(), before_a);
+        assert!(!path_b.exists());
+        let raw = std::fs::read_to_string(moved_b).unwrap();
+        let states = crate::jsonl::reader::route_lines(&raw).worktree_states;
+        assert_eq!(states.len(), 1);
+        assert_eq!(
+            states[&session_b.as_uuid().to_string()],
+            serde_json::Value::Null
+        );
+        assert!(raw
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|row| row["type"] == "worktree-state")
+            .all(|row| row["sessionId"] == session_b.as_uuid().to_string()));
+    }
+
+    #[tokio::test]
+    async fn current_worktree_state_captures_target_after_waiting_for_writer_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let id_a = SessionId::new();
+        let id_b = SessionId::new();
+        let path_a = root.path().join(format!("{}.jsonl", id_a.as_uuid()));
+        let path_b = root.path().join(format!("{}.jsonl", id_b.as_uuid()));
+        let authority = root.path().join("authority");
+        std::fs::create_dir(&authority).unwrap();
+        let lock = Arc::new(DurableTranscriptWriter::open(&authority).unwrap());
+        let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            root.path().to_path_buf(),
+        ));
+        let writer = Arc::new(JsonlWriter::new(path_a.clone(), fs).with_durable_lock(lock.clone()));
+        writer.activate_session_target_with_durable_lock(
+            id_a,
+            path_a.clone(),
+            root.path().to_path_buf(),
+            lock.clone(),
+        );
+        let guard = writer.lock.lock().await;
+        let pending = {
+            let writer = writer.clone();
+            tokio::spawn(
+                async move { writer.append_worktree_state_for_current_session(None).await },
+            )
+        };
+        tokio::task::yield_now().await;
+        writer.activate_session_target_with_durable_lock(
+            id_b,
+            path_b.clone(),
+            root.path().to_path_buf(),
+            lock,
+        );
+        drop(guard);
+        pending.await.unwrap().unwrap();
+        assert!(!path_a.exists());
+        let raw = std::fs::read_to_string(path_b).unwrap();
+        let states = crate::jsonl::reader::route_lines(&raw).worktree_states;
+        assert_eq!(states.len(), 1);
+        assert!(states.contains_key(&id_b.as_uuid().to_string()));
+    }
+
+    #[tokio::test]
+    async fn current_worktree_state_rejects_replaced_durable_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let path = root.path().join(format!("{}.jsonl", id.as_uuid()));
+        let authority = root.path().join("authority");
+        std::fs::create_dir(&authority).unwrap();
+        let lock = Arc::new(DurableTranscriptWriter::open(&authority).unwrap());
+        let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::fs::PosixFileSystem::new(
+            root.path().to_path_buf(),
+        ));
+        let writer = JsonlWriter::new(path.clone(), fs).with_durable_lock(lock.clone());
+        writer.activate_session_target_with_durable_lock(
+            id,
+            path.clone(),
+            root.path().to_path_buf(),
+            lock,
+        );
+        std::fs::rename(&authority, root.path().join("original-authority")).unwrap();
+        std::fs::create_dir(&authority).unwrap();
+        assert!(writer
+            .append_worktree_state_for_current_session(None)
+            .await
+            .is_err());
+        assert!(
+            !path.exists(),
+            "a side-record append cannot bypass pinned durable authority"
+        );
     }
 
     /// The `EnterWorktree` persist path emits a `worktree-state` line whose

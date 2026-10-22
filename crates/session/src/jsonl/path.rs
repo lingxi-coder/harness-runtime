@@ -7,14 +7,21 @@ use std::path::{Path, PathBuf};
 /// `MAX_SANITIZED_LENGTH` from `sessionStoragePortable.ts:293`.
 pub const MAX_SANITIZED_LENGTH: usize = 200;
 
+pub(crate) fn sanitized_cwd(cwd: &str) -> String {
+    cwd.encode_utf16()
+        .map(|unit| {
+            char::from_u32(u32::from(unit))
+                .filter(char::is_ascii_alphanumeric)
+                .unwrap_or('-')
+        })
+        .collect()
+}
+
 /// `cwd.replace(/[^a-zA-Z0-9]/g, '-')` then suffix with djb2-base36 if > 200 chars.
 #[must_use]
 pub fn project_dir_name(cwd: &str) -> String {
-    let sanitized: String = cwd
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    if sanitized.chars().count() <= MAX_SANITIZED_LENGTH {
+    let sanitized = sanitized_cwd(cwd);
+    if sanitized.len() <= MAX_SANITIZED_LENGTH {
         return sanitized;
     }
     let head: String = sanitized.chars().take(MAX_SANITIZED_LENGTH).collect();

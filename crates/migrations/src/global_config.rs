@@ -25,6 +25,7 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
@@ -37,6 +38,26 @@ use serde_json::{Map, Value};
 /// disk) via `setSessionTrustAccepted(true)` (`TrustDialog.tsx:174-175`), so
 /// hooks/features work this run without persisting trust for `$HOME`.
 static SESSION_TRUST_ACCEPTED: AtomicBool = AtomicBool::new(false);
+static GLOBAL_CONFIG_PATH_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+static CONFIG_HOME_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Keep process-owned migration/session storage on the host's fixed identity.
+pub fn set_config_home_override(path: PathBuf) -> Result<(), PathBuf> {
+    if !path.is_absolute() {
+        return Err(path);
+    }
+    CONFIG_HOME_OVERRIDE.set(path)
+}
+
+/// Pin the host's already-resolved persistent owner before configuration reads.
+/// Child tools may still receive settings-owned HOME/config-dir environment.
+/// Other hosts keep the ordinary environment-based selection by not calling this.
+pub fn set_global_config_path_override(path: PathBuf) -> Result<(), PathBuf> {
+    if !path.is_absolute() {
+        return Err(path);
+    }
+    GLOBAL_CONFIG_PATH_OVERRIDE.set(path)
+}
 
 /// `setSessionTrustAccepted` (`bootstrap/state.ts:1317-1319`): set the
 /// in-memory session trust flag.
@@ -120,6 +141,9 @@ fn lingxi_config_dir_env() -> Option<PathBuf> {
 /// divergence), else `$HOME/.lingxi`. `None` when neither env var exists.
 #[must_use]
 pub fn lingxi_config_home() -> Option<PathBuf> {
+    if let Some(path) = CONFIG_HOME_OVERRIDE.get() {
+        return Some(path.clone());
+    }
     if let Some(dir) = lingxi_config_dir_env() {
         return Some(dir);
     }
@@ -136,6 +160,9 @@ pub fn lingxi_config_home() -> Option<PathBuf> {
 /// so `.lingxi.json` is hardcoded here.
 #[must_use]
 pub fn global_config_path() -> Option<PathBuf> {
+    if let Some(path) = GLOBAL_CONFIG_PATH_OVERRIDE.get() {
+        return Some(path.clone());
+    }
     let home = lingxi_config_home()?;
     let legacy = home.join(branding::LEGACY_GLOBAL_CONFIG_FILE);
     if legacy.exists() {
@@ -1469,6 +1496,51 @@ mod tests {
     use super::*;
     use crate::test_support::env_lock;
     use serde_json::json;
+
+    #[test]
+    fn global_owner_override_child() {
+        let Some(path) = std::env::var_os("HARNESS_TEST_GLOBAL_OWNER") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        assert!(set_global_config_path_override(PathBuf::from("relative")).is_err());
+        set_global_config_path_override(path.clone()).unwrap();
+        let home = path.parent().unwrap().to_path_buf();
+        set_config_home_override(home.clone()).unwrap();
+        assert_eq!(lingxi_config_home(), Some(home));
+        assert_eq!(global_config_path(), Some(path.clone()));
+        assert!(set_global_config_path_override(path.with_file_name("other.json")).is_err());
+        assert_eq!(global_config_path(), Some(path));
+        assert_eq!(std::env::var_os("HOME"), Some("/tool-home".into()));
+        assert_eq!(
+            std::env::var_os(branding::CONFIG_DIR_ENV),
+            Some("/tool-config".into())
+        );
+    }
+
+    #[test]
+    fn global_owner_override_preserves_tools_environment() {
+        let root = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "global_config::tests::global_owner_override_child",
+            ])
+            .env(
+                "HARNESS_TEST_GLOBAL_OWNER",
+                root.path().join("owner/.lingxi.json"),
+            )
+            .env("HOME", "/tool-home")
+            .env(branding::CONFIG_DIR_ENV, "/tool-config")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
 
     fn write_test_lock_dir(lock_dir: &Path, owner: &ConfigLockOwner) {
         create_secure_dir(lock_dir).unwrap();

@@ -59,10 +59,12 @@ mod managed_plist;
 mod oauth_refresh_lock;
 mod pane_teammate;
 mod policy_helpers;
+mod prompt_directories;
 pub use policy_helpers::{
     NativePolicySemanticWorkerFailure, NativePolicyWarningLogger, PolicyHelperRefusalProbe,
     PolicyHelperStartupError, PolicySemanticWorkerProbe,
 };
+pub use prompt_directories::{PromptDirectoryCapabilities, PromptDirectoryRegistration};
 mod sandbox_runner;
 pub mod session_agents;
 pub mod session_state;
@@ -1354,7 +1356,66 @@ impl orchestrator::StopHookSnapshotProvider for RegistryStopHookSnapshot {
 /// (matching claude's `.catch(...)` on `xX`).
 struct JsonlWorktreeStatePersister {
     writer: Arc<session::jsonl::writer::JsonlWriter>,
-    session_uuid: String,
+}
+
+fn configure_session_hook_root(
+    executor: hooks::HookExecutorImpl,
+    cfg: &DesktopConfig,
+) -> hooks::HookExecutorImpl {
+    executor.with_project_root(
+        cfg.initial_project_root
+            .clone()
+            .unwrap_or_else(|| cfg.cwd.clone()),
+    )
+}
+
+/// A deferred headless mount owns its truncated/fork history and lifecycle.
+/// Ordinary desktop mounts restore the captured source before hooks append.
+async fn hydrate_captured_session_before_start(
+    orchestrator: &orchestrator::ConversationOrchestrator,
+    cfg: &DesktopConfig,
+    model_provenance: lingxi_core::host::ModelProvenance,
+) -> Result<&'static str, BuildError> {
+    if cfg.defer_session_start {
+        return Ok("startup");
+    }
+    let Some(snapshot) = cfg.session_resume_snapshot.as_ref() else {
+        return Ok("startup");
+    };
+    let session_id = orchestrator.session().lock().await.session_id.as_uuid();
+    if snapshot.source_session_id != session_id.to_string() {
+        return Err(BuildError::Orchestrator(
+            "cold resume snapshot does not match the active session".into(),
+        ));
+    }
+    let loaded = session::jsonl::route_lines(&snapshot.content);
+    let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &session_id.to_string());
+    if messages.is_empty()
+        && !loaded
+            .mobile_empty_sessions
+            .contains(&session_id.to_string())
+    {
+        return Err(BuildError::Orchestrator(
+            "cold resume snapshot contains no conversation".into(),
+        ));
+    }
+    let plan_mode = orchestrator::state_from_messages(session_id, &messages).plan_mode;
+    let permission_mode = if !cfg.permission_mode_cli_explicit && plan_mode {
+        permission::PermissionMode::Plan
+    } else {
+        cfg.permission_mode
+    };
+    orchestrator
+        .restore_captured_session_history(
+            session_id,
+            &messages,
+            &loaded.messages_in_order,
+            model_provenance != lingxi_core::host::ModelProvenance::ProviderCatalogTier,
+            permission_mode,
+        )
+        .await
+        .map_err(BuildError::Orchestrator)?;
+    Ok("resume")
 }
 
 #[async_trait::async_trait]
@@ -1363,13 +1424,42 @@ impl tool_api::WorktreeStatePersister for JsonlWorktreeStatePersister {
         let payload = session.map(tool_api::WorktreeSession::to_persisted_json);
         if let Err(e) = self
             .writer
-            .append_worktree_state(&self.session_uuid, payload.as_ref())
+            .append_worktree_state_for_current_session(payload.as_ref())
             .await
         {
             tracing::warn!(error = %e, "failed to persist worktree-state transcript record");
         }
     }
 }
+
+async fn restore_session_worktree_state(
+    payload: serde_json::Value,
+    persistent: bool,
+    writer: &session::JsonlWriter,
+    cwd: &SessionCwd,
+    cell: &tool_api::WorktreeSessionCell,
+) {
+    match tool_api::WorktreeSession::from_persisted_json(&payload)
+        .filter(|restored| restored.worktree_path.is_dir())
+    {
+        Some(restored) => {
+            cwd.change_cwd(restored.worktree_path.clone());
+            *cell
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(restored);
+        }
+        None if !payload.is_null() && persistent && writer.active_path().is_file() => {
+            if let Err(error) = writer.append_worktree_state_for_current_session(None).await {
+                tracing::warn!(%error, "failed to clear unavailable resumed worktree state");
+            }
+        }
+        None => {}
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/workspace_session_identity_tests.rs"]
+mod workspace_session_identity_tests;
 
 #[cfg(test)]
 #[path = "tests/desktop_fusion_price_book_test.rs"]
@@ -1879,6 +1969,14 @@ async fn desktop_command_registry(
                 .join("skills")
         })
         .collect();
+    let additional_command_dirs = native_skill_roots
+        .iter()
+        .map(|root| {
+            permission_config::expand_trusted_dir(root, cwd, Some(&home))
+                .join(branding::DOT_DIR)
+                .join("commands")
+        })
+        .collect::<Vec<_>>();
     // Batch 8: the newly-ported implemented commands (`/fork`, `/goal`,
     // `/recap`, `/reload-skills`, `/skill-doctor`, `/stop`). Wired here (after
     // the skill-discovery roots are known, before the `disables_skills` early
@@ -1908,17 +2006,29 @@ async fn desktop_command_registry(
             additional_skill_dirs.clone(),
             gates.safe_mode,
         )
-        .with_locked_post_reload_finalizer(false, reload_finalizer),
+        .with_additional_command_dirs(additional_command_dirs.clone())
+        .with_additional_skills_only(gates.bare)
+        .with_locked_post_reload_finalizer(!additional_command_dirs.is_empty(), reload_finalizer),
     ));
-    // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom-command + skill
-    // dir discovery (`K5d.skills:!1` / `V5d.skills:!0`; the commands-dir
-    // loader `cWa` bails on `xd()||Hc("skills")`). Builtins above stay — only
-    // the on-disk customization layers are skipped, including the managed dir
-    // (the binary's `aGe` returns `[]` before reaching its managed root).
-    if gates.disables_skills() {
+    // Native CMr suppresses all disk customizations in safe mode. Bare mode
+    // admits only explicitly supplied additional skill roots; it skips the
+    // managed/user/project scan and all legacy command directories.
+    if gates.safe_mode
+        || (gates.bare && (additional_skill_dirs.is_empty() || strict_plugin_only_skills))
+    {
         return Ok(reg);
     }
-    let (registered, registered_skills) = if strict_plugin_only_skills {
+    let (registered, registered_skills) = if gates.bare {
+        (
+            0,
+            command_api::builtins::load_and_register_additional_skill_commands(
+                &mut reg,
+                cwd,
+                &additional_skill_dirs,
+            )
+            .await,
+        )
+    } else if strict_plugin_only_skills {
         (
             command_api::builtins::load_and_register_managed_custom_commands(
                 &mut reg,
@@ -1930,12 +2040,13 @@ async fn desktop_command_registry(
         )
     } else {
         (
-            command_api::builtins::load_and_register_custom_commands(
+            command_api::builtins::load_and_register_custom_commands_with_roots(
                 &mut reg,
                 cwd,
                 lingxi_home,
                 &managed_dir,
                 &home,
+                &additional_command_dirs,
             )
             .await,
             command_api::builtins::load_and_register_skill_commands_with_roots(
@@ -1955,7 +2066,8 @@ async fn desktop_command_registry(
             lingxi_home.to_path_buf(),
             Some(managed_dir),
             additional_skill_dirs,
-        ),
+        )
+        .with_additional_skills_only(gates.bare),
     ));
     tracing::debug!(
         custom_commands = registered,
@@ -2521,6 +2633,7 @@ pub struct DesktopRuntime {
     pub hook_registry: Arc<RwLock<hooks::HookRegistry>>,
     /// Live skill/plugin catalog refresher shared with runtime root reloads.
     pub repo_root_reloader: Arc<dyn lingxi_core::host::RepoRootReloader>,
+    prompt_directory_reloader: Arc<DesktopRepoRootReloader>,
     /// Shared Claude.ai subscription snapshot (Task 4). Seeded at build time
     /// with the scope-derived `is_subscriber` flag; for subscribers a
     /// background OAuth profile + roles fetch overwrites it with the full
@@ -2640,6 +2753,10 @@ pub struct DesktopRuntime {
     /// Local policy verdict captured at assembly for `/team-onboarding`.
     pub native_team_onboarding_policy_gate: Option<bool>,
     pub session_cwd: Arc<SessionCwd>,
+    /// Source inputs retained for additional-directory folding during an
+    /// authorized lifecycle move and the original hook project root. Project
+    /// services are remounted by the host after the migration commits.
+    working_directory_config: DesktopConfig,
     command_visibility_settings_loader: NativeSkillListingSettingsLoader,
     /// (P1-08 runtime `/add-dir`) The live MCP registry. The CLI `/add-dir`
     /// effect calls `add_root(...)` + `notify_roots_list_changed_all()` on it so
@@ -2677,6 +2794,83 @@ pub struct DesktopRuntime {
 }
 
 impl DesktopRuntime {
+    /// Apply SessionStart reload requests through the session's live handler,
+    /// retaining registered prompt directories and shared producer refreshes.
+    pub async fn apply_session_start_effects(
+        &self,
+        effects: &hooks::response::AggregateHookResult,
+    ) -> Option<command_api::CommandResult> {
+        prompt_directories::reload_skills_after_session_start(&self.shared_command_registry, effects)
+            .await
+    }
+
+    /// Original session launch root used by hooks. A host remounting this
+    /// session must retain it in [`DesktopConfig::initial_project_root`].
+    pub fn initial_project_root(&self) -> std::path::PathBuf {
+        self.working_directory_config
+            .initial_project_root
+            .clone()
+            .unwrap_or_else(|| self.working_directory_config.cwd.clone())
+    }
+
+    /// Move the selected session's transcript, sidecars and logical cwd after
+    /// the host has validated target permission and workspace trust. This
+    /// lifecycle primitive is never exposed as a model tool. Hosts must
+    /// remount composition at the new cwd to reload project settings, hooks,
+    /// MCP servers and skills, retaining [`Self::initial_project_root`] in
+    /// the remounted configuration.
+    pub async fn change_working_directory(
+        &self,
+        target: std::path::PathBuf,
+    ) -> Result<(), lingxi_core::host::HandleError> {
+        let cfg = &self.working_directory_config;
+        let managed = settings_watch::managed_settings_snapshot().await;
+        if managed.read_failed() {
+            return Err(lingxi_core::host::HandleError::ActionFailed(
+                "change_working_directory: managed settings could not be loaded".into(),
+            ));
+        }
+        let tiers = permission_config::load_boot_permission_tiers_with_policy_snapshot(
+            &cfg.lingxi_home,
+            &target,
+            if cfg.restricted {
+                (false, false)
+            } else {
+                cfg.setting_source_scope
+            },
+            cfg.flag_settings.as_ref(),
+            cfg.flag_settings_source.as_deref(),
+            &managed,
+        )
+        .await;
+        let home = dirs::home_dir();
+        let mut trusted = vec![target.clone()];
+        for path in tiers.additional_working_dirs.paths() {
+            let path = permission_config::expand_trusted_dir(&path, &target, home.as_deref());
+            if !trusted.contains(&path) {
+                trusted.push(path);
+            }
+        }
+        // CLI paths were resolved against the original launch directory;
+        // later /add-dir grants already carry their admitted absolute path.
+        for path in cfg
+            .add_dir
+            .iter()
+            .map(|path| permission_config::expand_trusted_dir(path, &cfg.cwd, home.as_deref()))
+            .chain(self.session_cwd.explicit_trusted_dirs())
+        {
+            if !trusted.contains(&path) {
+                trusted.push(path);
+            }
+        }
+        lingxi_core::host::OrchestratorHandle::change_working_directory(
+            self.orchestrator.as_ref(),
+            target,
+            trusted,
+        )
+        .await
+    }
+
     /// Resolve one current Native command-visibility settings snapshot for an
     /// init projection. The captured config remains fixed to this runtime while
     /// settings files, process environment, and session cwd are read live.
@@ -4847,9 +5041,15 @@ struct DesktopRepoRootReloader {
     managed_dir: Option<std::path::PathBuf>,
     home: std::path::PathBuf,
     safe_mode: bool,
+    bare: bool,
     /// Host-owned extension roots captured from startup `--add-dir`. These
     /// remain part of skill discovery when a later runtime root is registered.
     native_skill_roots: Vec<std::path::PathBuf>,
+    agent_catalog: Arc<RwLock<Vec<agent::AgentDefinition>>>,
+    prompt_directory_capabilities: PromptDirectoryCapabilities,
+    prompt_roots: RwLock<Vec<std::path::PathBuf>>,
+    catalog_reload_lock: tokio::sync::Mutex<()>,
+    reload_finalizer: OnceLock<Arc<dyn Fn(&mut CommandRegistry) + Send + Sync>>,
     registered_roots: Arc<RwLock<Vec<std::path::PathBuf>>>,
     plugin_runtime: Arc<RwLock<Option<Arc<PluginRuntime>>>>,
 }
@@ -4861,7 +5061,11 @@ impl DesktopRepoRootReloader {
         lingxi_home: std::path::PathBuf,
         native_skill_roots: Vec<std::path::PathBuf>,
         safe_mode: bool,
+        bare: bool,
         workflow_command_snapshot: Arc<crate::workflow_catalog::WorkflowCommandSnapshot>,
+        agent_catalog: Arc<RwLock<Vec<agent::AgentDefinition>>>,
+        prompt_directory_capabilities: PromptDirectoryCapabilities,
+        initial_prompt_roots: Vec<std::path::PathBuf>,
     ) -> Self {
         Self {
             registry,
@@ -4872,6 +5076,12 @@ impl DesktopRepoRootReloader {
             home: dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")),
             safe_mode,
             native_skill_roots,
+            bare,
+            agent_catalog,
+            prompt_directory_capabilities,
+            prompt_roots: RwLock::new(initial_prompt_roots),
+            catalog_reload_lock: tokio::sync::Mutex::new(()),
+            reload_finalizer: OnceLock::new(),
             registered_roots: Arc::new(RwLock::new(Vec::new())),
             plugin_runtime: Arc::new(RwLock::new(None)),
         }
@@ -4879,6 +5089,10 @@ impl DesktopRepoRootReloader {
 
     fn registered_roots(&self) -> Arc<RwLock<Vec<std::path::PathBuf>>> {
         self.registered_roots.clone()
+    }
+
+    fn set_reload_finalizer(&self, finalizer: Arc<dyn Fn(&mut CommandRegistry) + Send + Sync>) {
+        let _ = self.reload_finalizer.set(finalizer);
     }
 
     async fn set_plugin_runtime(&self, runtime: Option<Arc<PluginRuntime>>) {
@@ -4892,6 +5106,7 @@ impl lingxi_core::host::RepoRootReloader for DesktopRepoRootReloader {
         &self,
         request: lingxi_core::host::RepoRootReloadRequest,
     ) -> lingxi_core::host::RepoRootReloadOutcome {
+        let _catalog_reload = self.catalog_reload_lock.lock().await;
         {
             let mut roots = self.registered_roots.write().await;
             if !roots.contains(&request.root) {
@@ -4902,10 +5117,12 @@ impl lingxi_core::host::RepoRootReloader for DesktopRepoRootReloader {
         let mut outcome = lingxi_core::host::RepoRootReloadOutcome::default();
         if request.reload_skills {
             let dynamic_roots = self.registered_roots.read().await.clone();
+            let prompt_roots = self.prompt_roots.read().await.clone();
             let additional_skill_dirs = self
                 .native_skill_roots
                 .iter()
                 .chain(dynamic_roots.iter())
+                .chain(prompt_roots.iter())
                 .map(|root| {
                     permission_config::expand_trusted_dir(root, &self.cwd, Some(&self.home))
                         .join(branding::DOT_DIR)
@@ -4917,18 +5134,20 @@ impl lingxi_core::host::RepoRootReloader for DesktopRepoRootReloader {
                     }
                     dirs
                 });
-            let handler = command_api::builtins::ReloadSkillsHandler::with_all_roots(
+            let handler = self.live_prompt_reload_handler(
                 self.registry.clone(),
-                self.cwd.clone(),
-                self.lingxi_home.clone(),
-                self.managed_dir.clone(),
-                self.home.clone(),
-                additional_skill_dirs,
-                self.safe_mode,
+                &additional_skill_dirs,
+                &additional_skill_dirs
+                    .iter()
+                    .filter_map(|directory| directory.parent().map(|parent| parent.join("commands")))
+                    .collect::<Vec<_>>(),
             );
             match parse_slash_command(&"/reload-skills".into()) {
                 Some(parsed) => match handler.handle(&parsed).await {
-                    CommandResult::Done { .. } => outcome.skills_reloaded = true,
+                    CommandResult::Done { .. } => {
+                        outcome.skills_reloaded = true;
+                        self.registry.write().await.register_builtin_handler(Arc::new(handler));
+                    }
                     _ => outcome
                         .errors
                         .push("skill catalog returned a non-terminal reload result".to_string()),

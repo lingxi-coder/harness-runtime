@@ -68,6 +68,7 @@ pub const MERGE_STRATEGIES: &[(&str, MergeStrategy)] = &[
     // as the other array keys (later-tier entries appended, dupes dropped).
     ("companyAnnouncements", MergeStrategy::ConcatDedup),
     // Object-merge fields (spec §7).
+    ("env", MergeStrategy::DeepMerge),
     ("sandbox", MergeStrategy::DeepMerge),
     ("hooks", MergeStrategy::DeepMerge),
     ("permissions", MergeStrategy::DeepMerge),
@@ -194,7 +195,7 @@ fn deserialize_prompt_cache_ttl<'de, D: serde::Deserializer<'de>>(
 /// `SettingsSchema` `.passthrough()` (`types.ts:1072`; `safeParse` at
 /// `settings.ts:219`). Known fields keep their typed parses. Tolerance also
 /// un-breaks settings files carrying keys written by `ConfigTool`, `/effort`
-/// (`effortLevel`), or the migrations subsystem (`env`,
+/// (`effortLevel`), or the migrations subsystem (
 /// `skipDangerousModePermissionPrompt`, `enableAllProjectMcpServers`, …) —
 /// under the previous `deny_unknown_fields` strictness any such key made the
 /// whole-file load fail, and production callers' `.ok()` then silently
@@ -924,6 +925,10 @@ impl ProviderRegion {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsJson {
+    /// Settings-owned environment values. Hosts install the merged map before
+    /// creating a child process; changing settings never mutates Tokio's process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_suggestion_enabled: Option<bool>,
     /// Native Fast mode default and session-only opt-in policy.

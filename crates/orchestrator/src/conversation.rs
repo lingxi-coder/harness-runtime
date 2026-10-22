@@ -1835,6 +1835,9 @@ pub struct ConversationOrchestrator {
     /// then returns `vec![]`. The CLI binary (M6-07 init.rs) populates
     /// this from `.mcp.json` + `~/.config/lingxi/mcp.json`.
     pub(crate) mcp_registry: Option<Arc<mcp::McpRegistry>>,
+    /// Active EnterWorktree state shared with the host's tools. Session
+    /// switches replace it alongside cwd and transcript authority.
+    pub(crate) worktree_session: Option<tool_api::WorktreeSessionCell>,
     /// Live task state for Mod agent enumeration and completion waits.
     pub(crate) task_registry: Option<Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>>,
     /// The same live name store used by the Agent tool and its spawner.

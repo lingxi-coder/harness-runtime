@@ -9,6 +9,19 @@ use crate::settings::schema::SettingsJson;
 use crate::settings::SettingsError;
 use crate::types::utf16_json::Utf16JsonProjection;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+static USER_SETTINGS_PATH_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Pin the host's resolved user settings owner before any reads. This does not
+/// change the process environment inherited by tools, and is inert for hosts
+/// that use the normal environment-derived settings path.
+pub fn set_user_settings_path_override(path: PathBuf) -> Result<(), PathBuf> {
+    if !path.is_absolute() {
+        return Err(path);
+    }
+    USER_SETTINGS_PATH_OVERRIDE.set(path)
+}
 
 /// Claude Code rejects settings files above 2 MiB before reading/parsing them.
 pub const MAX_SETTINGS_FILE_BYTES: u64 = 2 * 1024 * 1024;
@@ -225,6 +238,9 @@ pub fn read_raw_settings_projection(
 /// `None` if neither resolves (e.g. on a misconfigured CI runner).
 #[must_use]
 pub fn user_settings_path() -> Option<PathBuf> {
+    if let Some(path) = USER_SETTINGS_PATH_OVERRIDE.get() {
+        return Some(path.clone());
+    }
     config_home_dir().map(|h| h.join("settings.json"))
 }
 
@@ -363,6 +379,48 @@ pub(crate) fn settings_size_limit_error() -> std::io::Error {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn user_settings_owner_override_child() {
+        let Some(path) = std::env::var_os("HARNESS_TEST_SETTINGS_OWNER") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        assert!(set_user_settings_path_override(PathBuf::from("relative")).is_err());
+        set_user_settings_path_override(path.clone()).unwrap();
+        assert_eq!(user_settings_path(), Some(path.clone()));
+        assert!(set_user_settings_path_override(path.with_file_name("other.json")).is_err());
+        assert_eq!(user_settings_path(), Some(path));
+        assert_eq!(std::env::var_os("HOME"), Some("/tool-home".into()));
+        assert_eq!(
+            std::env::var_os(branding::CONFIG_DIR_ENV),
+            Some("/tool-config".into())
+        );
+    }
+
+    #[test]
+    fn user_settings_owner_override_preserves_tools_environment() {
+        let root = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "settings::loader::tests::user_settings_owner_override_child",
+            ])
+            .env(
+                "HARNESS_TEST_SETTINGS_OWNER",
+                root.path().join("owner/settings.json"),
+            )
+            .env("HOME", "/tool-home")
+            .env(branding::CONFIG_DIR_ENV, "/tool-config")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    }
 
     #[test]
     fn returns_none_when_file_missing() {

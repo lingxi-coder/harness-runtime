@@ -99,13 +99,12 @@ pub async fn prepare(
         }
     };
     let missing = || format!("No conversation found with session ID: {source_id}");
-    let source_path =
-        session::jsonl::resolve_session_path_across_worktrees(&config.lingxi_home, &cwd, source_id)
-            .await
-            .map_err(|error| match error {
-                session::jsonl::loader::LoaderError::SessionNotFound { .. } => missing(),
-                other => other.to_string(),
-            })?;
+    let source_path = session::jsonl::resolve_session_path(&config.lingxi_home, &cwd, source_id)
+        .await
+        .map_err(|error| match error {
+            session::jsonl::loader::LoaderError::SessionNotFound { .. } => missing(),
+            other => other.to_string(),
+        })?;
     // Do not create a live-session directory for a nonexistent resume target.
     if !tokio::fs::try_exists(&source_path)
         .await
@@ -116,18 +115,26 @@ pub async fn prepare(
     let source_lease = claim_source(config, source_id)?;
     // Path discovery can race the old writer's final relocation; repeat it
     // under the claim, then retain this exact path throughout assembly.
-    let source_path =
-        session::jsonl::resolve_session_path_across_worktrees(&config.lingxi_home, &cwd, source_id)
-            .await
-            .map_err(|error| match error {
-                session::jsonl::loader::LoaderError::SessionNotFound { .. } => missing(),
-                other => other.to_string(),
-            })?;
+    let source_path = session::jsonl::resolve_session_path(&config.lingxi_home, &cwd, source_id)
+        .await
+        .map_err(|error| match error {
+            session::jsonl::loader::LoaderError::SessionNotFound { .. } => missing(),
+            other => other.to_string(),
+        })?;
     let content: Arc<str> = tokio::fs::read_to_string(&source_path)
         .await
         .map_err(|error| error.to_string())?
         .into();
     let loaded = session::jsonl::route_lines(&content);
+    // Keep the selected file authoritative. Workspace restoration changes
+    // runtime composition only; a missing workspace does not rehome JSONL.
+    let resumed_cwd = if !fork {
+        session::jsonl::loader::transcript_workspace_path(&source_path, &loaded)
+            .map(std::path::PathBuf::from)
+            .filter(|workspace| workspace.is_dir())
+    } else {
+        None
+    };
     let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &source_id.to_string());
     if messages.is_empty() {
         return Err(missing());
@@ -157,6 +164,25 @@ pub async fn prepare(
         )
     };
     config.session_id_override = Some(session_id.to_string());
+    if let Some(workspace) = resumed_cwd {
+        // Explicit relative --add-dir paths belong to the caller's launch
+        // directory, whereas project settings below load from the restored cwd.
+        config.add_dir = config
+            .add_dir
+            .iter()
+            .map(|raw| {
+                let raw = std::path::PathBuf::from(raw.to_string_lossy().trim());
+                if let Ok(rest) = raw.strip_prefix("~") {
+                    dirs::home_dir().map_or(raw.clone(), |home| home.join(rest))
+                } else if raw.is_absolute() {
+                    raw
+                } else {
+                    config.cwd.join(raw)
+                }
+            })
+            .collect();
+        config.cwd = workspace;
+    }
     config.session_transcript_path = Some(target_path);
     config.session_resume_snapshot = Some(DesktopSessionResumeSnapshot {
         source_session_id: source_id.to_string(),
@@ -328,25 +354,7 @@ async fn mount_prepared(
         "startup"
     };
     let effects = runtime.orchestrator.fire_session_start(source).await;
-    if effects.reload_skills {
-        let handler = command_api::builtins::reload_skills::ReloadSkillsHandler::with_all_roots(
-            runtime.shared_command_registry.clone(),
-            config.cwd.clone(),
-            config.lingxi_home.clone(),
-            Some(crate::desktop::settings_watch::managed_settings_dir()),
-            config
-                .lingxi_home
-                .parent()
-                .unwrap_or(&config.lingxi_home)
-                .to_path_buf(),
-            Vec::new(),
-            config.customization_gates.safe_mode,
-        );
-        if let Some(command) = command_api::parse_slash_command(&"/reload-skills".into()) {
-            use command_api::BuiltinCommandHandler;
-            let _ = handler.handle(&command).await;
-        }
-    }
+    let _ = runtime.apply_session_start_effects(&effects).await;
     runtime.orchestrator.fire_instructions_loaded().await;
     Ok(())
 }
@@ -475,6 +483,72 @@ mod tests {
         );
         drop(config);
         assert!(claim_session(&_root.path().join("home"), source_id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn cross_workspace_resume_restores_existing_cwd_without_rehoming_source() {
+        let (_root, mut config, source_id, path, content) = fixture().await;
+        let source_cwd = config.cwd.clone();
+        let other = _root.path().join("other-workspace");
+        std::fs::create_dir(&other).unwrap();
+        config.cwd = other.clone();
+        config.add_dir = vec![std::path::PathBuf::from("relative-explicit")];
+        prepare(&mut config, &resume(source_id, false))
+            .await
+            .unwrap();
+        assert_eq!(config.cwd, source_cwd);
+        assert_eq!(config.add_dir, vec![other.join("relative-explicit")]);
+        assert_eq!(config.session_transcript_path, Some(path.clone()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        assert!(!session::jsonl::session_path(
+            &config.lingxi_home,
+            &other.to_string_lossy(),
+            &source_id.to_string()
+        )
+        .exists());
+    }
+
+    #[tokio::test]
+    async fn missing_resume_workspace_keeps_launch_cwd_and_authoritative_source_path() {
+        let (_root, mut config, source_id, path, content) = fixture().await;
+        std::fs::remove_dir(&config.cwd).unwrap();
+        let other = _root.path().join("other-workspace");
+        std::fs::create_dir(&other).unwrap();
+        config.cwd = other.clone();
+        prepare(&mut config, &resume(source_id, false))
+            .await
+            .unwrap();
+        assert_eq!(config.cwd, other);
+        assert_eq!(config.session_transcript_path, Some(path.clone()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn cold_resume_prefers_latest_relocated_cwd_in_the_captured_snapshot() {
+        let (_root, mut config, source_id, path, mut content) = fixture().await;
+        let target = _root.path().join("relocated");
+        std::fs::create_dir(&target).unwrap();
+        content.push_str(&format!(
+            "{}\n",
+            serde_json::json!({
+                "type":"relocated", "sessionId":source_id, "relocatedCwd":target,
+            })
+        ));
+        std::fs::write(&path, &content).unwrap();
+        prepare(&mut config, &resume(source_id, false))
+            .await
+            .unwrap();
+        assert_eq!(config.cwd, target);
+        assert_eq!(config.session_transcript_path, Some(path));
+        assert_eq!(
+            config
+                .session_resume_snapshot
+                .as_ref()
+                .unwrap()
+                .content
+                .as_ref(),
+            content
+        );
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use super::platform::{
 use crate::desktop::ide::DesktopIdeHandle;
 use client::adapter::{AdapterPermissionGate, PermissionRequestSink};
 use command_api::model::BuiltinCommandHandler;
-use command_api::{parse_slash_command, CommandRegistry, RegistrySlashDispatcher};
+use command_api::{CommandRegistry, RegistrySlashDispatcher};
 use cost::CostHydrator;
 use lingxi_core::host::{McpTransport, OrchestratorHandle, OutputStream};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -33,9 +33,10 @@ use super::{
     agent_restore, agent_skill_loader, agent_source_is_trusted, append_mcp_permission_rules,
     append_restricted_builtin_denies, apple_events_override, apply_worktree_launch,
     auto_mode_propose, aws_auth_refresher, background_agent, build_agent_mcp_tool_set,
-    build_shared_credential_stack_for_config, capture_legacy_opening_balance, cron_command,
-    cron_management, cron_native, cron_scheduler_enabled, current_uid, desktop_command_registry,
-    desktop_fusion_attempts, desktop_fusion_executor, desktop_skill_registry, discover_plugin_set,
+    build_shared_credential_stack_for_config, capture_legacy_opening_balance,
+    configure_session_hook_root, cron_command, cron_management, cron_native,
+    cron_scheduler_enabled, current_uid, desktop_command_registry, desktop_fusion_attempts,
+    desktop_fusion_executor, desktop_skill_registry, discover_plugin_set,
     emit_mcp_servers_inventory, ephemeral_session_home, expand_trusted_dir, file_changed_watch,
     fork_resume, fusion_command, fusion_recorder, is_env_truthy, job_dir_from_env, lingxi_temp_dir,
     load_ask_user_question_timeout, load_blocked_marketplaces,
@@ -743,7 +744,13 @@ pub async fn build(
         .with_tool_aliases(cfg.tool_aliases.clone())
         .map_err(BuildError::InvalidToolAliases)?;
     let shared = build_shared_credential_stack_for_config(&cfg).await?;
-    build_with_credential_stack(cfg, output, permission_sink, shared).await
+    Box::pin(build_with_credential_stack(
+        cfg,
+        output,
+        permission_sink,
+        shared,
+    ))
+    .await
 }
 
 /// Build a bridge runtime whose host owns versioned automation execution.
@@ -757,9 +764,27 @@ pub async fn build_with_host_automation(
     cron_native::HOST_AUTOMATION
         .scope(
             true,
-            build_with_credential_stack(cfg, output, permission_sink, shared),
+            // Keep the large runtime assembly future on the heap while retaining
+            // this task-local scope; spawning it would lose host automation ownership.
+            Box::pin(build_with_credential_stack(
+                cfg,
+                output,
+                permission_sink,
+                shared,
+            )),
         )
         .await
+}
+
+// Each by-value builder temporary contains the complete orchestrator. Keep
+// bounded groups outside the assembly future's poll frame so debug builds can
+// assemble on an ordinary worker stack as well as the process main thread.
+#[inline(never)]
+fn configure_boxed_orchestrator(
+    builder: Box<ConversationOrchestrator>,
+    configure: impl FnOnce(ConversationOrchestrator) -> ConversationOrchestrator,
+) -> Box<ConversationOrchestrator> {
+    Box::new(configure(*builder))
 }
 
 async fn bootstrap_main_transcript_identity_if_nonempty(
@@ -1781,6 +1806,18 @@ pub async fn build_with_credential_stack(
     } else {
         Arc::new(main_jsonl_writer)
     };
+    if let Some(snapshot) = cfg.session_resume_snapshot.as_ref() {
+        let rows = if snapshot.source_session_id == main_session_uuid {
+            session::JsonlWriter::capture_session_metadata_source(
+                &snapshot.content,
+                &snapshot.source_session_id,
+            )
+        } else {
+            // A fork has its own workspace and metadata identity.
+            Vec::new()
+        };
+        main_jsonl_writer.install_session_metadata_source(&main_session_uuid, &rows);
+    }
     if cfg.session_persistence {
         bootstrap_main_transcript_identity_if_nonempty(
             main_jsonl_writer.as_ref(),
@@ -2318,6 +2355,18 @@ pub async fn build_with_credential_stack(
     //       catalog; plugin agents still land later via the plugin bootstrap's
     //       `plugin_agent_catalog` writes.
     let user_agents_dir = cfg.lingxi_home.join("agents");
+    let boot_prompt_directories = cfg
+        .add_dir
+        .iter()
+        .chain(cfg.initial_prompt_directories.iter())
+        .filter(|_| cfg.setting_source_scope.1)
+        .cloned()
+        .fold(Vec::new(), |mut roots, root| {
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+            roots
+        });
     // claude `O5` walks UP from the cwd collecting `<dir>/<DOT_DIR>/agents` at
     // every level to the enclosing project root, so a monorepo's per-package
     // agents and its root agents are both in scope, with the definition closest
@@ -2333,7 +2382,7 @@ pub async fn build_with_credential_stack(
             .map_or_else(|| std::path::PathBuf::from("/"), std::path::PathBuf::from)
             .as_path(),
         permission::set_cwd::project_root_of(&cwd).as_deref(),
-        &cfg.add_dir,
+        &boot_prompt_directories,
     );
     // (M3 cc2.1.198) `--safe-mode` / `--bare` disable custom agent definitions
     // (`V5d.agents:!0`, `K5d.agents:!1`) — skip the dir scan, empty catalog.
@@ -3110,7 +3159,7 @@ pub async fn build_with_credential_stack(
         model_resolution_context_provider.clone(),
     ));
     let hook_mcp_invoker = DesktopHookMcpInvoker::default();
-    let hooks = Arc::new(
+    let hooks = Arc::new(configure_session_hook_root(
         hooks::HookExecutorImpl::new(
             hook_registry.clone(),
             http.clone(),
@@ -3147,7 +3196,8 @@ pub async fn build_with_credential_stack(
         .with_hook_observer(output.clone())
         // One transcript `attachment` line per hook run, matching claude-code.
         .with_attachment_sink(hook_attachment_sink.clone() as Arc<dyn hooks::HookAttachmentSink>),
-    );
+        &cfg,
+    ));
 
     // G4: fill the subagent spawner's hook-executor cell now that `hooks` exists,
     // so a child runner can fire `SubagentStart` (collecting + injecting the
@@ -4363,6 +4413,7 @@ pub async fn build_with_credential_stack(
     // `trusted_dirs` set (cwd + `--add-dir`/`additionalDirectories`) so the
     // file tools' `ctx.trusted_dirs()` gate keeps allowing the additional dirs.
     let session_cwd = SessionCwd::new(cwd.clone(), trusted_dirs);
+    let working_directory_config = cfg.clone();
     let _ = teammate_session_cwd_cell.set(session_cwd.clone());
     // Local IDE endpoints are discovered lazily by the provider-neutral
     // controller. The same MCP registry owns their live JSON-RPC connection;
@@ -4407,19 +4458,14 @@ pub async fn build_with_credential_stack(
             .await
         };
         if let Some(payload) = worktree_state {
-            if let Some(restored) = tool_api::WorktreeSession::from_persisted_json(&payload) {
-                if restored.worktree_path.is_dir() {
-                    // Move the session into the worktree exactly as EnterWorktree's
-                    // own swap does (worktree path as the sole trusted dir).
-                    session_cwd.swap(
-                        restored.worktree_path.clone(),
-                        vec![restored.worktree_path.clone()],
-                    );
-                    *worktree_session_cell
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(restored);
-                }
-            }
+            super::restore_session_worktree_state(
+                payload,
+                cfg.session_persistence,
+                main_jsonl_writer.as_ref(),
+                &session_cwd,
+                &worktree_session_cell,
+            )
+            .await;
         }
     }
     // P1-06: ONE per-session read-file-state registry (claude-code's single
@@ -4541,7 +4587,7 @@ pub async fn build_with_credential_stack(
         // `--continue`/`--resume` it may have just been rehydrated from the
         // persisted `worktree-state` transcript record above (parity 2.1.212), so
         // ExitWorktree operates on the resumed worktree instead of no-oping.
-        worktree_session: worktree_session_cell,
+        worktree_session: worktree_session_cell.clone(),
         platform: sandbox_platform,
         http: http.clone(),
         hosted_search: Some(provider_adapter.clone()),
@@ -4699,7 +4745,7 @@ pub async fn build_with_credential_stack(
     let workflow_tool_slot = Arc::new(RwLock::new(None));
     // Share the same mutable cwd observed by Bash, worktree swaps, the
     // orchestrator, and the workflow snapshot cache key.
-    let current_cwd_cell = std::sync::Arc::new(std::sync::Mutex::new(cwd.clone()));
+    let current_cwd_cell = std::sync::Arc::new(std::sync::Mutex::new(session_cwd.cwd()));
     session_cwd.link_live_cwd(current_cwd_cell.clone());
     let workflow_command_snapshot =
         Arc::new(crate::workflow_catalog::WorkflowCommandSnapshot::new(
@@ -4718,7 +4764,18 @@ pub async fn build_with_credential_stack(
         cfg.lingxi_home.clone(),
         cfg.add_dir.clone(),
         cfg.customization_gates.safe_mode,
+        cfg.customization_gates.bare,
         workflow_command_snapshot.clone(),
+        agent_catalog.clone(),
+        super::PromptDirectoryCapabilities {
+            skills: cfg.setting_source_scope.1
+                && !cfg.customization_gates.safe_mode
+                && !strict_plugin_only_skills,
+            agents: cfg.setting_source_scope.1
+                && !cfg.customization_gates.disables_custom_agents()
+                && !strict_plugin_only_agents,
+        },
+        cfg.initial_prompt_directories.clone(),
     ));
     // Bind the forked-skill resume gate's skill resolver to the SAME `Arc` that
     // is filled with the real registry at (6). Binding the slot (not its
@@ -4813,12 +4870,7 @@ pub async fn build_with_credential_stack(
     let worktree_state_persister: Option<Arc<dyn tool_api::WorktreeStatePersister>> =
         if cfg.session_persistence {
             Some(Arc::new(JsonlWorktreeStatePersister {
-                writer: Arc::new(session::jsonl::writer::JsonlWriter::new(
-                    main_transcript_path.clone(),
-                    Arc::new(DesktopFileSystem::new(cwd.clone()))
-                        as Arc<dyn lingxi_core::host::FileSystem>,
-                )),
-                session_uuid: main_session_uuid.clone(),
+                writer: main_jsonl_writer.clone(),
             }))
         } else {
             None
@@ -5039,7 +5091,13 @@ pub async fn build_with_credential_stack(
         let visualizations = cfg
             .inline_visualization
             .then(|| crate::inline_visualization::shared_store(ctx.fs.clone(), &cfg.lingxi_home));
-        tools_inner.register_builtin(Arc::new(tool_ui::desktop_local_app::DesktopLocalAppTool::new(ctx, cfg.lingxi_home.clone(), visualizations)));
+        tools_inner.register_builtin(Arc::new(
+            tool_ui::desktop_local_app::DesktopLocalAppTool::new(
+                ctx,
+                cfg.lingxi_home.clone(),
+                visualizations,
+            ),
+        ));
     }
     // Workflow tool (desktop-only — it fans out subagents). Registered here,
     // after `register_desktop_tools`, because its launcher needs `task_registry`
@@ -5127,6 +5185,9 @@ pub async fn build_with_credential_stack(
         }
         workflow_tool = Arc::new(workflow_tool_builder);
         *workflow_tool_slot.write().await = Some(workflow_tool.clone());
+        repo_root_reloader.set_reload_finalizer(
+            workflow_command_snapshot.locked_post_reload_finalizer(workflow_tool.clone()),
+        );
         #[cfg(test)]
         {
             wired_workflow_tool = Some(workflow_tool.clone());
@@ -5638,23 +5699,20 @@ pub async fn build_with_credential_stack(
             .seed_initial_model_profile(&default_model_id, profile)
             .await;
     }
-    let orch_builder = orch_builder
-        .with_main_model_selection(
-            Some(main_model_setting.clone()),
-            main_model_source,
-            main_model_setting_provenance,
-            session_model_restriction.clone(),
-        )
-        .await
-        .with_dynamic_workflows_gate(dynamic_workflows_gate)
-        .with_instruction_user_email_provider(instruction_identity.clone())
-        .with_mod_surface_roster(mod_surface_roster.clone())
-        .with_native_sandbox_host_facts_provider(sandbox_host_facts_provider)
-        .with_native_policy_host_facts_provider(native_policy_host_facts_provider)
-        .with_native_tool_pool_refresh_callback_available(
-            native_tool_pool_refresh_callback_available,
-        )
-        .with_native_settings_agent_context(cfg.native_settings_agent_context);
+    let orch_builder = Box::pin(orch_builder.with_main_model_selection(
+        Some(main_model_setting.clone()),
+        main_model_source,
+        main_model_setting_provenance,
+        session_model_restriction.clone(),
+    ))
+    .await
+    .with_dynamic_workflows_gate(dynamic_workflows_gate)
+    .with_instruction_user_email_provider(instruction_identity.clone())
+    .with_mod_surface_roster(mod_surface_roster.clone())
+    .with_native_sandbox_host_facts_provider(sandbox_host_facts_provider)
+    .with_native_policy_host_facts_provider(native_policy_host_facts_provider)
+    .with_native_tool_pool_refresh_callback_available(native_tool_pool_refresh_callback_available)
+    .with_native_settings_agent_context(cfg.native_settings_agent_context);
     let orch_builder = orch_builder.with_workflow_size_guideline(workflow_size_guideline_state);
     let orch_builder = orch_builder.with_idle_compaction_enabled(cfg.idle_compaction_enabled);
     // Gap #5: wire the production JSONL writer (constructed just above) so the
@@ -5668,145 +5726,155 @@ pub async fn build_with_credential_stack(
     } else {
         orch_builder
     };
-    let orch_builder = orch_builder
-        // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
-        // carry a deterministically-computed `transcript_path`
-        // (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
-        // `getTranscriptPathForSession`). This is the SAME path the Gap #5
-        // `JsonlWriter` (wired just above) persists to, so the hook payload path and
-        // the on-disk transcript agree. Without this every PreToolUse /
-        // PostToolBatch / lifecycle hook fired with an empty path.
-        // (/fast) Share the same fast-mode flag the adapter reads, so the
-        // `set_fast_mode` handle flips the value the next request-build sees.
-        .with_fast_mode(fast_flag.clone())
-        // (/rewind) Share the file-history store so the turn loop snapshots each
-        // turn + the write tools back up pre-edit content.
-        .with_file_history(file_history.clone())
-        .with_vision_delegation(vision_delegation_enabled)
-        .with_config_home(cfg.lingxi_home.clone())
-        .with_mod_settings_reader(mod_settings_reader.clone())
-        .with_mod_command_catalog(mod_command_catalog.clone())
-        // Share the SAME mutable-cwd cell the `cwd_changed_firer` writes on a Bash
-        // `cd`, so hook payloads read the post-`cd` directory (claude-code parity).
-        .with_current_cwd(current_cwd_cell)
-        // Task 5 (worktree 206 session-cwd plumbing): share the SAME
-        // `Arc<SessionCwd>` the tool context swaps on `EnterWorktree`/
-        // `ExitWorktree`, so the system prompt's `Primary working directory:`
-        // line and the conditional-rules memory cache re-derive from the
-        // post-swap worktree cwd instead of the frozen boot cwd.
-        .with_session_cwd(session_cwd.clone())
-        // FIX A/B/C: adopt the boot-canonical session id so the orchestrator's LIVE
-        // session matches the id baked into the leaf firers' `transcript_path` and the
-        // subagent spawner's subagents dir — one consistent session id end-to-end.
-        .with_session_id(main_session_id)
-        .with_cost_tracker(cost_tracker.clone())
-        .with_observer_pairings(observer_pairings.clone())
-        .with_loop_usage_opt(
-            cron_scheduler
-                .clone()
-                .map(|scheduler| scheduler as Arc<dyn lingxi_core::host::LoopUsageProvider>),
-        )
-        .with_cost_session_switcher_opt(Some(session_state_manager.clone()))
-        .with_tool_execution_journal(session_state_manager.clone())
-        .with_session_activation_observer(Arc::new(ProcessSessionActivationObserver))
-        // (review #12) Wire the /goal trust + hooks-restricted gates (resolved
-        // above) into the orchestrator, replacing the hardcoded trusted=true /
-        // restricted=false defaults.
-        .with_workspace_trusted(workspace_trusted)
-        .with_hooks_restricted(goal_hooks_restricted)
-        .with_analytics_bus(analytics_bus.clone())
-        .with_mcp_registry(mcp_registry.clone())
-        .with_task_registry(task_registry.clone())
-        .with_mod_agent_name_registry(subagent_spawner_arc.agent_name_registry())
-        .with_ide_handle(ide_handle.clone())
-        .with_hook_registry(hook_registry.clone())
-        .with_agent_catalog(agent_catalog)
-        .with_repo_root_reloader(repo_root_reloader.clone())
-        .with_output_style_registry(plugin_output_style_registry.clone())
-        .with_compaction(compactor)
-        .with_cache_safe_slot(cache_safe_slot)
-        // `/fork` engine seam: hand the orchestrator the background-agent spawner
-        // (`BackgroundAgentSpawner`, built above) + the budget the spawned agent
-        // inherits, so `fork_conversation` can dispatch a detached background agent.
-        .with_fork_spawner(subagent_spawner.clone())
-        .with_fork_budget(budget_enforcer.clone())
-        .with_hook_agent_inheritance(hook_agent_inheritance)
-        // `/recap` engine seam: the SAME forked runner the summarizer uses (cloned
-        // above), so recap replays the identical cache-safe prefix, read-only.
-        .with_recap_runner(recap_runner)
-        // Surface LSP `<new-diagnostics>` to the model each turn (the same sink the
-        // LSP registry drains publishDiagnostics into).
-        .with_new_diagnostics_source(
-            Arc::new(lsp_diagnostics.clone()) as Arc<dyn lingxi_core::host::NewDiagnosticsSource>
-        )
-        // SKILLLIST.1: enumerate model-invocable skills each turn so the model
-        // can discover them. Reads `shared_command_registry` lazily at turn time
-        // (populated below at (6), before any turn fires).
-        .with_skill_listing({
-            let provider = registry_skill_listing_provider_for_desktop(
-                shared_command_registry.clone(),
-                read_state_map.clone(),
-                super::code_review_suggestion_provider(cfg.clone(), session_cwd.clone()),
-                cfg.clone(),
-                session_cwd.clone(),
-                command_visibility_settings_loader.clone(),
-                command_snapshot_provider.clone(),
-            );
-            let child_provider = provider.clone();
-            tools.set_bash_precommit_skills_provider(move || {
-                let provider = child_provider.clone();
-                async move {
-                    let snapshot = provider.skill_listing_snapshot().await?;
-                    provider.bash_precommit_skills(&snapshot.entries).await
-                }
-            });
-            provider
-        })
-        // B5: fold completed background (`async`) hook responses back into the
-        // next turn. Backed by the completion-channel drain buffer above.
-        .with_async_hook_responses(Arc::new(async_hook_response_buffer.clone()))
-        // T35: fold terminal background tasks (a backgrounded `local_bash` /
-        // `local_agent` / MCP `monitor` …) back into the next turn as a
-        // `<task-notification>` reminder so the model learns its async task
-        // finished. Backed by the SAME `TaskRegistry` Arc wired into the tool
-        // context above; the provider drains the registry's terminal-not-notified
-        // tasks each turn (mark-notified + evict ⇒ each completion surfaces once).
-        .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
-            task_registry.clone() as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
-            orchestrator::task_notifications_provider::TaskDeliveryHostFacts {
-                windows_or_wsl: cfg!(windows)
-                    || matches!(
-                        platform_posix::wsl_detect::detect(),
-                        platform_posix::wsl_detect::WslKind::WslOne
-                            | platform_posix::wsl_detect::WslKind::WslTwo
-                    ),
-                strict_tool_result_pairing: false,
-                bare_mode: cfg.customization_gates.bare,
-            },
-        )))
-        // hook-bg-fields: populate the `Stop` / `SubagentStop` hook payload's
-        // `background_tasks` (claude-code `Lic(taskRegistry.all())`) +
-        // `session_crons` (claude-code `Mic()`) from the SAME live `TaskRegistry`
-        // Arc wired above plus the project-root `.lingxi/scheduled_tasks.json` cron
-        // file (located via the shared `current_cwd` cell). The orchestrator stamps
-        // the snapshot onto the payload ONLY at its Stop / SubagentStop firings
-        // (claude's tool-use-context `s` gate).
-        .with_stop_hook_snapshot(Arc::new(RegistryStopHookSnapshot {
-            registry: task_registry.clone()
-                as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
-            project_root: watch_cwd.clone(),
-        }))
-        // Finding #73: supply the V2 task list to the per-turn `task_reminder`
-        // (the default variant when tasks are enabled). Reads the file-backed
-        // `TodoStore` for the active list each turn, resolving the list id via the
-        // same env/team precedence the `Task*` tools use. V1 (`todo_reminder`)
-        // needs no provider; it reads `session.todos` directly.
-        .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()))
-        // P1-06: hand the orchestrator the SAME `readFileState` map the file tools'
-        // `BuiltinToolContext` share (created just above), so a tool's
-        // `readFileState.set` feeds the post-compact file restore + staleness /
-        // `/files` consumers — 1:1 with claude-code's single per-session map.
-        .with_read_state_map(read_state_map);
+    let orch_builder = configure_boxed_orchestrator(Box::new(orch_builder), |orch_builder| {
+        orch_builder
+            // FIX A: hand the orchestrator the resolved claude-home so its hook payloads
+            // carry a deterministically-computed `transcript_path`
+            // (`<config_home>/projects/<sanitize(cwd)>/<uuid>.jsonl`, claude-code
+            // `getTranscriptPathForSession`). This is the SAME path the Gap #5
+            // `JsonlWriter` (wired just above) persists to, so the hook payload path and
+            // the on-disk transcript agree. Without this every PreToolUse /
+            // PostToolBatch / lifecycle hook fired with an empty path.
+            // (/fast) Share the same fast-mode flag the adapter reads, so the
+            // `set_fast_mode` handle flips the value the next request-build sees.
+            .with_fast_mode(fast_flag.clone())
+            // (/rewind) Share the file-history store so the turn loop snapshots each
+            // turn + the write tools back up pre-edit content.
+            .with_file_history(file_history.clone())
+            .with_vision_delegation(vision_delegation_enabled)
+            .with_config_home(cfg.lingxi_home.clone())
+            .with_mod_settings_reader(mod_settings_reader.clone())
+            .with_mod_command_catalog(mod_command_catalog.clone())
+            // Share the SAME mutable-cwd cell the `cwd_changed_firer` writes on a Bash
+            // `cd`, so hook payloads read the post-`cd` directory (claude-code parity).
+            .with_current_cwd(current_cwd_cell)
+            // Task 5 (worktree 206 session-cwd plumbing): share the SAME
+            // `Arc<SessionCwd>` the tool context swaps on `EnterWorktree`/
+            // `ExitWorktree`, so the system prompt's `Primary working directory:`
+            // line and the conditional-rules memory cache re-derive from the
+            // post-swap worktree cwd instead of the frozen boot cwd.
+            .with_session_cwd(session_cwd.clone())
+            .with_worktree_session(worktree_session_cell)
+            // FIX A/B/C: adopt the boot-canonical session id so the orchestrator's LIVE
+            // session matches the id baked into the leaf firers' `transcript_path` and the
+            // subagent spawner's subagents dir — one consistent session id end-to-end.
+            .with_session_id(main_session_id)
+            .with_cost_tracker(cost_tracker.clone())
+    });
+    let orch_builder = configure_boxed_orchestrator(orch_builder, |orch_builder| {
+        orch_builder
+            .with_observer_pairings(observer_pairings.clone())
+            .with_loop_usage_opt(
+                cron_scheduler
+                    .clone()
+                    .map(|scheduler| scheduler as Arc<dyn lingxi_core::host::LoopUsageProvider>),
+            )
+            .with_cost_session_switcher_opt(Some(session_state_manager.clone()))
+            .with_tool_execution_journal(session_state_manager.clone())
+            .with_session_activation_observer(Arc::new(ProcessSessionActivationObserver))
+            // (review #12) Wire the /goal trust + hooks-restricted gates (resolved
+            // above) into the orchestrator, replacing the hardcoded trusted=true /
+            // restricted=false defaults.
+            .with_workspace_trusted(workspace_trusted)
+            .with_hooks_restricted(goal_hooks_restricted)
+            .with_analytics_bus(analytics_bus.clone())
+            .with_mcp_registry(mcp_registry.clone())
+            .with_task_registry(task_registry.clone())
+            .with_mod_agent_name_registry(subagent_spawner_arc.agent_name_registry())
+            .with_ide_handle(ide_handle.clone())
+            .with_hook_registry(hook_registry.clone())
+            .with_agent_catalog(agent_catalog)
+            .with_repo_root_reloader(repo_root_reloader.clone())
+            .with_output_style_registry(plugin_output_style_registry.clone())
+            .with_compaction(compactor)
+    });
+    let orch_builder = configure_boxed_orchestrator(orch_builder, |orch_builder| {
+        orch_builder
+            .with_cache_safe_slot(cache_safe_slot)
+            // `/fork` engine seam: hand the orchestrator the background-agent spawner
+            // (`BackgroundAgentSpawner`, built above) + the budget the spawned agent
+            // inherits, so `fork_conversation` can dispatch a detached background agent.
+            .with_fork_spawner(subagent_spawner.clone())
+            .with_fork_budget(budget_enforcer.clone())
+            .with_hook_agent_inheritance(hook_agent_inheritance)
+            // `/recap` engine seam: the SAME forked runner the summarizer uses (cloned
+            // above), so recap replays the identical cache-safe prefix, read-only.
+            .with_recap_runner(recap_runner)
+            // Surface LSP `<new-diagnostics>` to the model each turn (the same sink the
+            // LSP registry drains publishDiagnostics into).
+            .with_new_diagnostics_source(Arc::new(lsp_diagnostics.clone())
+                as Arc<dyn lingxi_core::host::NewDiagnosticsSource>)
+            // SKILLLIST.1: enumerate model-invocable skills each turn so the model
+            // can discover them. Reads `shared_command_registry` lazily at turn time
+            // (populated below at (6), before any turn fires).
+            .with_skill_listing({
+                let provider = registry_skill_listing_provider_for_desktop(
+                    shared_command_registry.clone(),
+                    read_state_map.clone(),
+                    super::code_review_suggestion_provider(cfg.clone(), session_cwd.clone()),
+                    cfg.clone(),
+                    session_cwd.clone(),
+                    command_visibility_settings_loader.clone(),
+                    command_snapshot_provider.clone(),
+                );
+                let child_provider = provider.clone();
+                tools.set_bash_precommit_skills_provider(move || {
+                    let provider = child_provider.clone();
+                    async move {
+                        let snapshot = provider.skill_listing_snapshot().await?;
+                        provider.bash_precommit_skills(&snapshot.entries).await
+                    }
+                });
+                provider
+            })
+            // B5: fold completed background (`async`) hook responses back into the
+            // next turn. Backed by the completion-channel drain buffer above.
+            .with_async_hook_responses(Arc::new(async_hook_response_buffer.clone()))
+            // T35: fold terminal background tasks (a backgrounded `local_bash` /
+            // `local_agent` / MCP `monitor` …) back into the next turn as a
+            // `<task-notification>` reminder so the model learns its async task
+            // finished. Backed by the SAME `TaskRegistry` Arc wired into the tool
+            // context above; the provider drains the registry's terminal-not-notified
+            // tasks each turn (mark-notified + evict ⇒ each completion surfaces once).
+            .with_task_notifications(Arc::new(orchestrator::RegistryTaskNotifications::new(
+                task_registry.clone()
+                    as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+                orchestrator::task_notifications_provider::TaskDeliveryHostFacts {
+                    windows_or_wsl: cfg!(windows)
+                        || matches!(
+                            platform_posix::wsl_detect::detect(),
+                            platform_posix::wsl_detect::WslKind::WslOne
+                                | platform_posix::wsl_detect::WslKind::WslTwo
+                        ),
+                    strict_tool_result_pairing: false,
+                    bare_mode: cfg.customization_gates.bare,
+                },
+            )))
+            // hook-bg-fields: populate the `Stop` / `SubagentStop` hook payload's
+            // `background_tasks` (claude-code `Lic(taskRegistry.all())`) +
+            // `session_crons` (claude-code `Mic()`) from the SAME live `TaskRegistry`
+            // Arc wired above plus the project-root `.lingxi/scheduled_tasks.json` cron
+            // file (located via the shared `current_cwd` cell). The orchestrator stamps
+            // the snapshot onto the payload ONLY at its Stop / SubagentStop firings
+            // (claude's tool-use-context `s` gate).
+            .with_stop_hook_snapshot(Arc::new(RegistryStopHookSnapshot {
+                registry: task_registry.clone()
+                    as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+                project_root: watch_cwd.clone(),
+            }))
+            // Finding #73: supply the V2 task list to the per-turn `task_reminder`
+            // (the default variant when tasks are enabled). Reads the file-backed
+            // `TodoStore` for the active list each turn, resolving the list id via the
+            // same env/team precedence the `Task*` tools use. V1 (`todo_reminder`)
+            // needs no provider; it reads `session.todos` directly.
+            .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()))
+            // P1-06: hand the orchestrator the SAME `readFileState` map the file tools'
+            // `BuiltinToolContext` share (created just above), so a tool's
+            // `readFileState.set` feeds the post-compact file restore + staleness /
+            // `/files` consumers — 1:1 with claude-code's single per-session map.
+            .with_read_state_map(read_state_map)
+    });
+    let orch_builder = *orch_builder;
 
     // MEM-1 ACTIVATION. The composition-root presence of the prefetch IS the
     // gate (`memory_prefetch.is_some()`), and that presence is now decided by
@@ -5966,6 +6034,12 @@ pub async fn build_with_credential_stack(
             selection,
         );
     }
+    let session_start_source = Box::pin(super::hydrate_captured_session_before_start(
+        &orch,
+        &cfg,
+        model_provenance,
+    ))
+    .await?;
     orch.enable_goal_retries();
     orch.attach_owned_session_switches();
     orch.set_main_report_waker(Arc::new(
@@ -6208,7 +6282,7 @@ pub async fn build_with_credential_stack(
         connect_chatgpt,
         cfg.customization_gates,
         strict_plugin_only_skills,
-        &cfg.add_dir,
+        &boot_prompt_directories,
         cfg.managed_policy_snapshot_cache.clone(),
         shared_command_registry.clone(),
         workflow_tool.clone(),
@@ -6998,39 +7072,22 @@ pub async fn build_with_credential_stack(
     //     the SessionStart path) with `source` = one of
     //     `startup` / `resume` / `clear` / `compact`. The desktop composition root
     //     OWNS the session lifecycle (it constructs the orchestrator), and `build`
-    //     assembles exactly one fresh session per call, so the byte-faithful
-    //     `source` here is `"startup"`. Best-effort: `fire_session_start` discards
-    //     the hook aggregate, so a failing or malformed `SessionStart` hook never
+    //     adopts any captured resume state before this call. A failing or
+    //     malformed `SessionStart` hook never
     //     breaks boot, and it is a strict no-op when no `SessionStart` hook is
     //     registered (the common case). The matching `SessionEnd` is fired by
     //     `DesktopSessionLifecycle::shutdown_and_drain`, or earlier by the REPL
     //     with its precise exit reason; the orchestrator deduplicates both paths.
-    let session_start = orch.fire_session_start("startup").await;
-    if session_start.reload_skills {
-        let home = dirs::home_dir().unwrap_or_else(|| cfg.lingxi_home.clone());
-        let managed_dir = crate::desktop::settings_watch::managed_settings_dir();
-        let additional_skill_dirs = cfg
-            .add_dir
-            .iter()
-            .map(|root| {
-                crate::desktop::permission_config::expand_trusted_dir(root, &cwd, Some(&home))
-                    .join(branding::DOT_DIR)
-                    .join("skills")
-            })
-            .collect();
-        let handler = command_api::builtins::reload_skills::ReloadSkillsHandler::with_all_roots(
-            shared_command_registry.clone(),
-            cfg.cwd.clone(),
-            cfg.lingxi_home.clone(),
-            Some(managed_dir),
-            home,
-            additional_skill_dirs,
-            cfg.customization_gates.safe_mode,
-        );
-        if let Some(parsed) = parse_slash_command(&"/reload-skills".into()) {
-            let _ = handler.handle(&parsed).await;
-        }
-    }
+    let session_start = if cfg.defer_session_start {
+        hooks::response::AggregateHookResult::default()
+    } else {
+        orch.fire_session_start(session_start_source).await
+    };
+    let _ = super::prompt_directories::reload_skills_after_session_start(
+        &shared_command_registry,
+        &session_start,
+    )
+    .await;
 
     // (7.1) Instruction-load lifecycle: fire the `InstructionsLoaded` hooks now
     //       that memory + the hook registry are wired. claude-code fires this
@@ -7332,6 +7389,7 @@ pub async fn build_with_credential_stack(
         settings_watcher,
         file_changed_watcher,
         repo_root_reloader: repo_root_reloader.clone(),
+        prompt_directory_reloader: repo_root_reloader.clone(),
         subscription,
         sandbox_toggle,
         sandbox_desc_auto_allow,
@@ -7361,6 +7419,7 @@ pub async fn build_with_credential_stack(
         native_insights_policy_gate,
         native_team_onboarding_policy_gate,
         session_cwd: runtime_session_cwd,
+        working_directory_config,
         command_visibility_settings_loader,
         mcp_registry: runtime_mcp_registry,
         ide_handle,

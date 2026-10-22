@@ -33,7 +33,8 @@ pub use builtin::{desktop_builtin_skill, desktop_builtin_skill_content, register
 pub use conditional::{is_conditional, ConditionalSkills};
 pub use frontmatter::{parse_skill_markdown, SkillLoadError};
 pub use listing::{
-    load_file_skill_sections, load_file_skill_sections_with_roots, FileSkillRow, FileSkillSection,
+    load_additional_file_skill_sections, load_file_skill_sections,
+    load_file_skill_sections_with_roots, FileSkillRow, FileSkillSection,
 };
 pub use mcp_builders::skill_from_mcp_tool;
 pub use model::{LoadedFrom, Skill, SkillFrontmatter, SkillSource};

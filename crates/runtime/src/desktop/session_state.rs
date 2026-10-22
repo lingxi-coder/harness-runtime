@@ -31,7 +31,7 @@ const COST_QUEUE_CAPACITY: usize = 64;
 mod attempts;
 mod resume;
 mod retention;
-pub(crate) use resume::capture_resume_cost;
+pub use resume::capture_resume_cost;
 mod tool_execution;
 use attempts::AttemptProjection;
 use lingxi_core::host::{

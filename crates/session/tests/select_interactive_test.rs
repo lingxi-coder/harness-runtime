@@ -18,6 +18,7 @@ fn rows(n: usize) -> Vec<SessionMetadata> {
             message_count: 3,
             mode: session::jsonl::SessionMode::Code,
             path: PathBuf::from(format!("s{i}.jsonl")),
+            workspace_path: None,
             pr_number: None,
             custom_or_ai_title: Some(format!("title-{i}")),
             resume_model: None,

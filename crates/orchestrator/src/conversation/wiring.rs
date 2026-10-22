@@ -191,6 +191,7 @@ impl ConversationOrchestrator {
             should_exit: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fast_mode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_registry: None,
+            worktree_session: None,
             task_registry: None,
             mod_agent_name_registry: None,
             model_resolution_context_provider: None,
@@ -646,6 +647,13 @@ impl ConversationOrchestrator {
     #[must_use]
     pub fn with_mcp_registry(mut self, mcp: Arc<mcp::McpRegistry>) -> Self {
         self.mcp_registry = Some(mcp);
+        self
+    }
+
+    /// Share the same active-worktree record used by EnterWorktree/ExitWorktree.
+    #[must_use]
+    pub fn with_worktree_session(mut self, cell: tool_api::WorktreeSessionCell) -> Self {
+        self.worktree_session = Some(cell);
         self
     }
 

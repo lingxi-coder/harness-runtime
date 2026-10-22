@@ -20,6 +20,8 @@ pub mod builtins;
 pub mod argument_substitution;
 pub mod builtin_support;
 pub mod cd;
+#[cfg(feature = "builtin-handlers")]
+pub mod cd_permissions;
 pub mod describe;
 pub mod dispatcher;
 pub mod expand;
@@ -32,6 +34,8 @@ pub mod parser;
 pub mod registry;
 pub mod shell_expansion;
 pub mod skill_usage;
+#[cfg(feature = "builtin-handlers")]
+pub mod workspace_directory;
 
 pub use argument_substitution::{
     generate_progressive_argument_hint, parse_argument_names, parse_arguments,

@@ -8,6 +8,7 @@ use llm_runtime::LlmError;
 
 /// Construct large phase futures outside the caller's poll stack frame.
 /// Passing the factory also avoids a large temporary before heap allocation.
+#[inline(never)]
 pub(crate) fn boxed_turn_future<'a, T, F>(
     create: impl FnOnce() -> F,
 ) -> futures::future::BoxFuture<'a, T>

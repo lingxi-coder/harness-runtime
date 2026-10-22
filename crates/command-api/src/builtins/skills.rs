@@ -54,6 +54,7 @@ struct SkillsRoots {
     lingxi_home: PathBuf,
     managed_dir: Option<PathBuf>,
     additional_skill_dirs: Vec<PathBuf>,
+    additional_skills_only: bool,
 }
 
 impl SkillsHandler {
@@ -72,6 +73,7 @@ impl SkillsHandler {
                 lingxi_home,
                 managed_dir: None,
                 additional_skill_dirs: Vec::new(),
+                additional_skills_only: false,
             }),
         }
     }
@@ -91,8 +93,18 @@ impl SkillsHandler {
                 lingxi_home,
                 managed_dir,
                 additional_skill_dirs,
+                additional_skills_only: false,
             }),
         }
+    }
+
+    /// Native bare mode lists only explicitly requested additional roots.
+    #[must_use]
+    pub fn with_additional_skills_only(mut self, additional_only: bool) -> Self {
+        self.roots
+            .get_or_insert_with(SkillsRoots::default)
+            .additional_skills_only = additional_only;
+        self
     }
 }
 
@@ -104,17 +116,22 @@ impl BuiltinCommandHandler for SkillsHandler {
             lingxi_home: lingxi_home_dir(),
             managed_dir: None,
             additional_skill_dirs: Vec::new(),
+            additional_skills_only: false,
         });
+        let listing = if roots.additional_skills_only {
+            render_sections(&skill::load_additional_file_skill_sections(
+                &roots.additional_skill_dirs,
+            ))
+        } else {
+            render_available_skills_with_roots(
+                &roots.cwd,
+                &roots.lingxi_home,
+                roots.managed_dir.as_deref(),
+                &roots.additional_skill_dirs,
+            )
+        };
         CommandResult::Done {
-            display: Some(
-                (render_available_skills_with_roots(
-                    &roots.cwd,
-                    &roots.lingxi_home,
-                    roots.managed_dir.as_deref(),
-                    &roots.additional_skill_dirs,
-                ))
-                .into(),
-            ),
+            display: Some(listing.into()),
         }
     }
 

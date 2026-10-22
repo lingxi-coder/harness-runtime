@@ -442,6 +442,19 @@ pub async fn load_command_markdown_files(
     managed_dir: &Path,
     home: &Path,
 ) -> Vec<MarkdownCommandFile> {
+    load_command_markdown_files_with_roots(cwd, lingxi_home, managed_dir, home, &[]).await
+}
+
+/// Load legacy commands with explicit additional command directories.
+/// Managed, user and ordinary project entries retain priority over additions.
+#[must_use]
+pub async fn load_command_markdown_files_with_roots(
+    cwd: &Path,
+    lingxi_home: &Path,
+    managed_dir: &Path,
+    home: &Path,
+    additional_command_dirs: &[PathBuf],
+) -> Vec<MarkdownCommandFile> {
     const SUBDIR: &str = "commands";
 
     let user_dir = lingxi_home.join(SUBDIR);
@@ -486,6 +499,12 @@ pub async fn load_command_markdown_files(
     for project_dir in &project_dirs {
         all_files.extend(load_markdown_dir(
             project_dir,
+            CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
+        ));
+    }
+    for directory in additional_command_dirs {
+        all_files.extend(load_markdown_dir(
+            directory,
             CommandSource::Settings(lingxi_core::types::SettingsScope::Project),
         ));
     }
@@ -548,6 +567,17 @@ pub async fn load_skill_markdown_files_with_roots(
             &collator,
         ));
     }
+    all_files.extend(load_additional_skill_markdown_files(additional_skill_dirs).await);
+    deduplicate_skill_files_by_inode(all_files)
+}
+
+/// Native bare mode admits explicitly registered roots without ambient skills.
+#[must_use]
+pub async fn load_additional_skill_markdown_files(
+    additional_skill_dirs: &[PathBuf],
+) -> Vec<SkillMarkdownCommandFile> {
+    let collator = native_skill_name_collator();
+    let mut all_files = Vec::new();
     for dir in additional_skill_dirs {
         all_files.extend(load_skill_dir(
             dir,

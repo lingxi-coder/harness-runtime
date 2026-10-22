@@ -150,7 +150,8 @@ pub use version::{runtime_build_info, BuildInfo, VersionHandler};
 pub use workflows::WorkflowsHandler;
 
 pub use custom_commands::{
-    load_and_register_custom_commands, load_and_register_managed_custom_commands,
+    load_and_register_additional_skill_commands, load_and_register_custom_commands,
+    load_and_register_custom_commands_with_roots, load_and_register_managed_custom_commands,
     load_and_register_managed_skill_commands, load_and_register_skill_commands,
     load_and_register_skill_commands_with_roots,
 };

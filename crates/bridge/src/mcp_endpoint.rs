@@ -132,6 +132,14 @@ pub trait FramePump: Send + Sync + 'static {
     /// cooperative cancellation or own their work in the host lifecycle.
     async fn on_frame(&self, frame: Frame, out: FrameSink);
 
+    /// Called once when socket I/O ends, before joining started frame callbacks.
+    /// Fail closed any parked interactions that require this connection, and
+    /// prevent new interactions from waiting for it. Match `sink` when a pump
+    /// is shared by several connections. Do not abort callbacks or durable
+    /// work here; final cleanup remains in [`Self::on_close_with_sink`] after
+    /// those callbacks finish. This notification must not wait for them.
+    async fn on_transport_disconnected(&self, _sink: FrameSink) {}
+
     /// Whether this frame may bypass a pending ordinary command. Authentication
     /// and connection ownership must still be checked by `on_frame`.
     fn is_priority_frame(&self, _frame: &Frame) -> bool {
@@ -142,11 +150,9 @@ pub trait FramePump: Send + Sync + 'static {
     /// sent a Close, or the read side errored. The default is a no-op so
     /// hold-open pumps (e.g. the `EchoPump` test fixture) need no override.
     ///
-    /// The bridge-server connection pump (F2-06) overrides this to DRAIN its
-    /// `AdapterPermissionGate` (fail-closed): any in-flight permission `check()`
-    /// parked on a oneshot resolves `Deny` the moment the resolving transport
-    /// task vanishes, so a turn future can never hang waiting for an approval
-    /// from a client that is gone.
+    /// Started frame callbacks have finished before this notification. Pumps
+    /// with callbacks parked on client interaction must unblock them earlier
+    /// through [`Self::on_transport_disconnected`].
     async fn on_close(&self) {}
 
     /// Connection-aware close notification. The default preserves the original
@@ -529,6 +535,11 @@ async fn run_frame_pump<S>(
         }
     }
 
+    // A callback can be parked on approval from the socket that just closed.
+    // Release those interactions before waiting for the callback, while the
+    // connection identity is still available for ownership checks.
+    pump.on_transport_disconnected(sink.clone()).await;
+
     // Never cancel a callback that may have started a durable transaction.
     // Queued callbacks have not been dispatched and are discarded like unread
     // socket frames. Promotion alone does not dispatch: shutdown can win before
@@ -550,9 +561,7 @@ async fn run_frame_pump<S>(
         },
     );
 
-    // The connection ended (disconnect / Close / read error). Notify the pump so
-    // it can run fail-closed teardown (the bridge-server connection drains its
-    // permission gate here — F2-06).
+    // Final cleanup follows accepted callbacks and their durable work.
     pump.on_close_with_sink(sink).await;
 }
 
@@ -703,6 +712,122 @@ mod tests {
         release: Notify,
         seen: std::sync::Mutex<Vec<u64>>,
         shutdown_on_release: Option<watch::Sender<bool>>,
+    }
+
+    struct ParkedInteractionPump {
+        parked: tokio::sync::Mutex<Option<(FrameSink, oneshot::Sender<()>)>>,
+        callback_started: Notify,
+        durable_started: Notify,
+        finish_durable: Notify,
+        disconnects: AtomicUsize,
+        commits: AtomicUsize,
+        closes: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl FramePump for ParkedInteractionPump {
+        async fn on_frame(&self, _frame: Frame, out: FrameSink) {
+            let (sender, received) = oneshot::channel();
+            *self.parked.lock().await = Some((out, sender));
+            self.callback_started.notify_one();
+            assert!(
+                received.await.is_err(),
+                "disconnect must fail closed the parked interaction"
+            );
+            self.durable_started.notify_one();
+            self.finish_durable.notified().await;
+            self.commits.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn on_transport_disconnected(&self, sink: FrameSink) {
+            self.disconnects.fetch_add(1, Ordering::SeqCst);
+            let mut parked = self.parked.lock().await;
+            if parked
+                .as_ref()
+                .is_some_and(|(owner, _)| owner.same_channel(&sink))
+            {
+                parked.take();
+            }
+        }
+
+        async fn on_close_with_sink(&self, _sink: FrameSink) {
+            assert_eq!(
+                self.commits.load(Ordering::SeqCst),
+                1,
+                "final cleanup must wait for durable callback completion"
+            );
+            self.closes.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn disconnect_unblocks_parked_interactions_before_joining_durable_callbacks() {
+        for client_closes in [false, true] {
+            let pump = Arc::new(ParkedInteractionPump {
+                parked: tokio::sync::Mutex::new(None),
+                callback_started: Notify::new(),
+                durable_started: Notify::new(),
+                finish_durable: Notify::new(),
+                disconnects: AtomicUsize::new(0),
+                commits: AtomicUsize::new(0),
+                closes: AtomicUsize::new(0),
+            });
+            let (client_io, server_io) = tokio::io::duplex(8192);
+            let server = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                server_io,
+                tokio_tungstenite::tungstenite::protocol::Role::Server,
+                None,
+            )
+            .await;
+            let mut client = tokio_tungstenite::WebSocketStream::from_raw_socket(
+                client_io,
+                tokio_tungstenite::tungstenite::protocol::Role::Client,
+                None,
+            )
+            .await;
+            let (shutdown_tx, shutdown_rx) = watch::channel(false);
+            let mut task = tokio::spawn(run_frame_pump(
+                server,
+                "127.0.0.1:1".parse().unwrap(),
+                pump.clone(),
+                shutdown_rx,
+            ));
+            let frame = Frame::Request(crate::wire::BridgeRequest {
+                id: 1,
+                method: "resume_selected_session".into(),
+                params: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap(),
+            });
+            client
+                .send(Message::Text(serde_json::to_string(&frame).unwrap()))
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(1), pump.callback_started.notified())
+                .await
+                .unwrap();
+            if client_closes {
+                client.close(None).await.unwrap();
+            } else {
+                shutdown_tx.send(true).unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(1), pump.durable_started.notified())
+                .await
+                .expect("transport loss must release approval before joining its callback");
+            assert_eq!(pump.disconnects.load(Ordering::SeqCst), 1);
+            assert_eq!(pump.closes.load(Ordering::SeqCst), 0);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut task)
+                    .await
+                    .is_err(),
+                "a disconnected transport cannot drop an accepted durable callback"
+            );
+            pump.finish_durable.notify_one();
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(pump.commits.load(Ordering::SeqCst), 1);
+            assert_eq!(pump.closes.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[async_trait::async_trait]

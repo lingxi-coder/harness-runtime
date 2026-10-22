@@ -592,6 +592,7 @@ fn copy_session_sidecar(source: &std::path::Path, target: &std::path::Path) -> s
 }
 
 #[derive(Debug)]
+#[cfg(test)]
 enum SidecarCopyError {
     Copy(std::io::Error),
     Cleanup(std::io::Error),
@@ -601,6 +602,7 @@ enum SidecarCopyError {
 /// successful copy is already a complete, authoritative destination; failure
 /// while removing the old source must therefore leave that destination in
 /// place rather than entering the copy-failure rollback path.
+#[cfg(test)]
 fn copy_then_cleanup_with<C, R>(
     source: &std::path::Path,
     target: &std::path::Path,
@@ -655,6 +657,7 @@ fn sidecar_path_is_rooted(root: &std::path::Path, candidate: &std::path::Path) -
 /// runtime primarily stores `tool-results` here, but Claude keeps all
 /// session-scoped artifacts under this directory; moving the directory as a
 /// unit avoids stranding future attachment/state files after `/cd`.
+#[cfg(test)]
 fn move_session_sidecar_best_effort(source: &std::path::Path, target: &std::path::Path) {
     if source == target {
         return;
@@ -759,6 +762,122 @@ fn move_session_sidecar_best_effort(source: &std::path::Path, target: &std::path
             %error,
             "failed to move session sidecar"
         );
+    }
+}
+
+/// Stage the complete session artifact directory before changing transcript
+/// authority. Until commit, dropping this token restores both the source and
+/// any destination set aside for the move.
+struct SessionSidecarRelocation {
+    source: std::path::PathBuf,
+    target: std::path::PathBuf,
+    superseded: Option<std::path::PathBuf>,
+    copied: bool,
+    committed: bool,
+}
+
+impl SessionSidecarRelocation {
+    fn prepare(
+        source: std::path::PathBuf,
+        target: std::path::PathBuf,
+    ) -> std::io::Result<Option<Self>> {
+        if source == target {
+            return Ok(None);
+        }
+        let metadata = match std::fs::symlink_metadata(&source) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(std::io::Error::other(
+                "session sidecar source is not a real directory",
+            ));
+        }
+        let root = source
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| std::io::Error::other("session sidecar source has no projects root"))?;
+        if target.parent().and_then(std::path::Path::parent) != Some(root)
+            || !sidecar_path_is_rooted(root, &source)
+            || !sidecar_path_is_rooted(root, &target)
+        {
+            return Err(std::io::Error::other(
+                "unsafe session sidecar relocation path",
+            ));
+        }
+        std::fs::create_dir_all(target.parent().expect("validated sidecar parent"))?;
+        if !sidecar_path_is_rooted(root, &source) || !sidecar_path_is_rooted(root, &target) {
+            return Err(std::io::Error::other(
+                "unsafe session sidecar relocation parent",
+            ));
+        }
+        let superseded = match std::fs::symlink_metadata(&target) {
+            Ok(_) => Some(superseded_sidecar_path(&target)?),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let mut relocation = Self {
+            source,
+            target,
+            superseded,
+            copied: false,
+            committed: false,
+        };
+        match std::fs::rename(&relocation.source, &relocation.target) {
+            Ok(()) => Ok(Some(relocation)),
+            Err(error) if is_cross_device(&error) => {
+                relocation.copied = true;
+                if let Err(error) = copy_session_sidecar(&relocation.source, &relocation.target) {
+                    let _ = relocation.rollback();
+                    return Err(error);
+                }
+                Ok(Some(relocation))
+            }
+            Err(error) => {
+                // No source move occurred; only restore a quarantined target.
+                relocation.committed = true;
+                if let Some(previous) = &relocation.superseded {
+                    std::fs::rename(previous, &relocation.target)?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn rollback(&mut self) -> std::io::Result<()> {
+        if self.committed {
+            return Ok(());
+        }
+        if self.copied {
+            if self.target.exists() {
+                std::fs::remove_dir_all(&self.target)?;
+            }
+        } else {
+            std::fs::rename(&self.target, &self.source)?;
+        }
+        if let Some(previous) = &self.superseded {
+            std::fs::rename(previous, &self.target)?;
+        }
+        self.committed = true;
+        Ok(())
+    }
+
+    fn commit(mut self) {
+        self.committed = true;
+        if self.copied {
+            if let Err(error) = std::fs::remove_dir_all(&self.source) {
+                tracing::warn!(%error, source = %self.source.display(), "relocated session sidecar source cleanup failed");
+            }
+        }
+    }
+}
+
+impl Drop for SessionSidecarRelocation {
+    fn drop(&mut self) {
+        if let Err(error) = self.rollback() {
+            tracing::error!(%error, source = %self.source.display(), target = %self.target.display(), "session sidecar relocation rollback failed");
+        }
     }
 }
 
@@ -1802,8 +1921,9 @@ impl ConversationOrchestrator {
 
     /// Persist a session-cwd move before directing future transcript appends
     /// into the cwd's project directory. The writer rehomes an existing
-    /// transcript before appending the relocation marker; the complete
-    /// per-session sidecar directory follows best-effort after that transaction.
+    /// transcript before appending the relocation marker. The complete
+    /// per-session sidecar directory is staged first and rolled back if the
+    /// transcript transaction fails.
     /// This is intentionally a no-op when session persistence is disabled (or
     /// the config home was not wired), preserving the in-memory/library setup.
     /// On successful persistence returns the writer's published transcript
@@ -1824,26 +1944,31 @@ impl ConversationOrchestrator {
         let cwd = cwd.to_string_lossy().into_owned();
         let target = session::jsonl::path::session_path(config_home, &cwd, &session_uuid);
         let previous = writer.active_path();
-        writer
+        let old_sidecar = previous
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(&session_uuid);
+        let new_sidecar = target
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(&session_uuid);
+        let mut sidecar_move = SessionSidecarRelocation::prepare(old_sidecar, new_sidecar)
+            .map_err(|error| format!("stage session sidecar relocation: {error}"))?;
+        if let Err(error) = writer
             .retarget_with_relocation(target.clone(), &session_uuid, &cwd)
             .await
-            .map_err(|error| format!("retarget transcript for cwd {cwd}: {error}"))?;
-        // Hook/MCP output files and other session-scoped artifacts live beside
-        // the transcript under `<session-id>/`. Keep the whole sidecar
-        // directory with the rehomed transcript when the project directory
-        // changes. This is deliberately best-effort: the transcript move is
-        // the transactional operation; a sidecar move failure is logged but
-        // must not strand the conversation in a half-accepted `/cd`.
-        if previous != target {
-            let old_sidecar = previous
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
-                .join(&session_uuid);
-            let new_sidecar = target
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."))
-                .join(&session_uuid);
-            move_session_sidecar_best_effort(&old_sidecar, &new_sidecar);
+        {
+            let rollback = sidecar_move
+                .as_mut()
+                .map(SessionSidecarRelocation::rollback)
+                .transpose();
+            return Err(match rollback {
+                Ok(_) => format!("retarget transcript for cwd {cwd}: {error}"),
+                Err(rollback) => format!("retarget transcript for cwd {cwd}: {error}; sidecar rollback failed: {rollback}"),
+            });
+        }
+        if let Some(sidecar_move) = sidecar_move {
+            sidecar_move.commit();
         }
         Ok(Some(writer.active_path()))
     }

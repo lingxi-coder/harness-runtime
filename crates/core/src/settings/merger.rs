@@ -37,6 +37,7 @@ pub fn merge(
     next: SettingsJson,
 ) -> Result<SettingsJson, Utf16JsonProjectionError> {
     Ok(SettingsJson {
+        env: merge_string_map(prev.env, next.env),
         teammate_mode: next.teammate_mode.or(prev.teammate_mode),
         prompt_cache_ttl: next.prompt_cache_ttl.or(prev.prompt_cache_ttl),
         subagent_prompt_cache_ttl: next
@@ -2983,6 +2984,11 @@ mod tests {
             ("additionalIncludes", json!(["a.md"]), json!(["b.md"])),
             ("lingxiMdExcludes", json!(["x/**"]), json!(["y/**"])),
             ("companyAnnouncements", json!(["one"]), json!(["two"])),
+            (
+                "env",
+                json!({"LOWER":"kept", "SAME":"lower"}),
+                json!({"UPPER":"added", "SAME":"upper"}),
+            ),
             // Each side names a DIFFERENT field, so the typed and raw paths
             // only agree if both deep-merge per field — an override on either
             // side would drop one of the two and show up as a mismatch.

@@ -15,6 +15,7 @@ fn meta(uuid_byte: u8, secs: u64, created_secs: u64, name: &str) -> SessionMetad
         message_count: 1,
         mode: session::jsonl::SessionMode::Code,
         path: PathBuf::from(name),
+        workspace_path: None,
         pr_number: None,
         custom_or_ai_title: Some(format!("title-{uuid_byte}")),
         resume_model: None,

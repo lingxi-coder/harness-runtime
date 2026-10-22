@@ -5764,20 +5764,22 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
             // the tool-owned check before the saved answer is considered.
             decision_otel_source = "unknown";
             let (checked, _, _, updated_input, _, mod_changed_decision) =
-                apply_mod_tool_check_lazy_normal(
-                    orch,
-                    name,
-                    &effective_input,
-                    tool_use_id,
-                    tool_handle.as_ref(),
-                    &ctx,
-                    tool_check_ceiling,
-                    plan_mode,
-                    hook_ask,
-                    requires_user_interaction,
-                    restricted_protected_mutation,
-                    publication_fence.clone(),
-                )
+                super::boxed_turn_future(|| {
+                    apply_mod_tool_check_lazy_normal(
+                        orch,
+                        name,
+                        &effective_input,
+                        tool_use_id,
+                        tool_handle.as_ref(),
+                        &ctx,
+                        tool_check_ceiling,
+                        plan_mode,
+                        hook_ask,
+                        requires_user_interaction,
+                        restricted_protected_mutation,
+                        publication_fence.clone(),
+                    )
+                })
                 .await?;
             mod_changed_tool_check_decision = mod_changed_decision;
             if let Some(updated) = updated_input {
@@ -6027,20 +6029,22 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                 updated_input,
                 normal_tool_check_evaluation,
                 mod_changed_decision,
-            ) = apply_mod_tool_check_lazy_normal(
-                orch,
-                name,
-                &effective_input,
-                tool_use_id,
-                tool_handle.as_ref(),
-                &ctx,
-                tool_check_ceiling,
-                plan_mode,
-                hook_ask,
-                requires_user_interaction,
-                restricted_protected_mutation,
-                publication_fence.clone(),
-            )
+            ) = super::boxed_turn_future(|| {
+                apply_mod_tool_check_lazy_normal(
+                    orch,
+                    name,
+                    &effective_input,
+                    tool_use_id,
+                    tool_handle.as_ref(),
+                    &ctx,
+                    tool_check_ceiling,
+                    plan_mode,
+                    hook_ask,
+                    requires_user_interaction,
+                    restricted_protected_mutation,
+                    publication_fence.clone(),
+                )
+            })
             .await?;
             mod_changed_tool_check_decision = mod_changed_decision;
             if let Some(updated) = updated_input {

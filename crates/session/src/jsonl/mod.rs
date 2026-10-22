@@ -45,6 +45,7 @@ impl SessionMode {
     }
 }
 
+pub mod aliases;
 pub mod djb2;
 pub mod durable_writer;
 pub mod exact_json;
@@ -62,6 +63,7 @@ pub mod uuid;
 pub mod writer;
 
 // Re-export pre-existing public surface so dependents keep their imports.
+pub use aliases::{read_session_aliases, record_session_alias, SESSION_ALIASES_FILE};
 pub use recover::{read_recover, RecoveryResult, StorageError};
 
 // New M5-07 public surface.
@@ -105,13 +107,19 @@ pub use writer::JsonlWriter;
 
 // New M5-08 public surface.
 pub use loader::{
-    build_conversation_chain, discovered_tool_names, find_session_with_diagnostics, find_tip,
-    list_recent_sessions, list_recent_sessions_with_diagnostics,
-    load_routed_session_across_worktrees, load_session, load_session_across_worktrees,
+    build_conversation_chain, discovered_tool_names, find_session_exact_raw_with_diagnostics,
+    find_session_exact_with_diagnostics, find_session_in_scope_with_diagnostics,
+    find_session_with_diagnostics, find_tip, list_recent_sessions, list_recent_sessions_in_scope,
+    list_recent_sessions_in_scope_with_diagnostics, list_recent_sessions_with_diagnostics,
+    load_routed_session_across_worktrees, load_routed_session_across_worktrees_with_path,
+    load_routed_session_from_path_with_source, load_routed_session_with_path,
+    load_routed_session_with_source, load_session, load_session_across_worktrees,
     load_session_entries, load_session_entries_across_worktrees, pre_compact_discovered_tools,
-    read_agent_resume_state, read_agent_snapshot, resolve_session_path_across_worktrees,
-    search_sessions_by_custom_title, select_session_interactive, LoaderError, SessionCatalog,
-    SessionMetadata,
+    read_agent_resume_state, read_agent_snapshot, resolve_job_transcript_raw, resolve_session_path,
+    resolve_session_path_across_worktrees, resolve_session_path_in_scope, resolve_session_path_raw,
+    search_sessions_by_custom_title, select_session_interactive, transcript_workspace_path,
+    JobTranscriptResolveOptions, LoaderError, ResolvedJobTranscriptPath, SessionCatalog,
+    SessionDiscoveryScope, SessionMetadata,
 };
 pub use message_identity::SessionMessageIdentitySnapshot;
 pub use title::{derive_fork_name, extract_title, FORK_NAME_FALLBACK};

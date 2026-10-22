@@ -351,6 +351,9 @@ pub struct HookExecutorImpl {
     /// [`lingxi_core::host::SandboxedCommand`] the runner accepts. Attached via
     /// [`Self::with_process_runner`].
     sandbox: Option<Arc<dyn Sandbox>>,
+    /// Original session launch root for hook environment and token expansion.
+    /// Kept separate from each hook's current working directory.
+    project_root: Option<PathBuf>,
     /// Optional name-addressed MCP invoker for `mcp_tool` hooks.
     mcp_invoker: Option<Arc<dyn HookMcpInvoker>>,
     /// `YYe()` — whether this is a confined eval-harness run, resolved ONCE at
@@ -430,7 +433,10 @@ impl HookExecutorImpl {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(provider);
     }
 
-    async fn capture_model_safety(&self, ctx: &mut HookContext) {
+    async fn prepare_context(&self, ctx: &mut HookContext) {
+        if ctx.project_dir.is_none() {
+            ctx.project_dir = self.project_root.clone();
+        }
         if ctx.model_safety_observer.is_some() {
             return;
         }
@@ -478,6 +484,7 @@ impl HookExecutorImpl {
             prompt_runner: None,
             process: None,
             sandbox: None,
+            project_root: None,
             mcp_invoker: None,
             eval_confined: eval_confined_session(),
             session_end_timeout_override: None,
@@ -487,6 +494,15 @@ impl HookExecutorImpl {
             http_hook_policy: HttpHookPolicy::default(),
             attachment_sink: None,
         }
+    }
+
+    /// Retain the original session launch root for hooks across workspace moves
+    /// and host remounts. An explicit [`HookContext::project_dir`] takes
+    /// precedence; a hook's `cwd` and project configuration sources are unchanged.
+    #[must_use]
+    pub fn with_project_root(mut self, project_root: PathBuf) -> Self {
+        self.project_root = Some(project_root);
+        self
     }
 
     /// Attach the transcript sink for per-hook-run `attachment` records.
@@ -1004,7 +1020,7 @@ impl HookExecutorImpl {
         event: HookEvent,
         mut ctx: HookContext,
     ) -> AggregateHookResult {
-        self.capture_model_safety(&mut ctx).await;
+        self.prepare_context(&mut ctx).await;
         // #41 runner-head gate (`h$`): `policySettings.disableAllHooks` skips the
         // SessionEnd batch entirely (the binary's `cH` head runs before the
         // SessionEnd deadline race too).
@@ -1301,7 +1317,7 @@ impl HookExecutorImpl {
         excluded: Option<lingxi_core::types::HookId>,
         partition: HookSourcePartition,
     ) -> AggregateHookResult {
-        self.capture_model_safety(&mut ctx).await;
+        self.prepare_context(&mut ctx).await;
         // #41 runner-head gate (`h$`): `policySettings.disableAllHooks` skips
         // ALL hooks before any matching/dispatch.
         if let Some(skipped) = self.policy_disable_gate(&event) {
@@ -1741,7 +1757,7 @@ impl HookExecutorImpl {
         mut ctx: HookContext,
         agent_id: lingxi_core::types::AgentId,
     ) -> AggregateHookResult {
-        self.capture_model_safety(&mut ctx).await;
+        self.prepare_context(&mut ctx).await;
         // #41 runner-head gate (`h$`).
         if let Some(skipped) = self.policy_disable_gate(&event) {
             return skipped;
@@ -1849,7 +1865,7 @@ impl HookExecutorImpl {
         mut ctx: HookContext,
         exclude_agent_id: lingxi_core::types::AgentId,
     ) -> AggregateHookResult {
-        self.capture_model_safety(&mut ctx).await;
+        self.prepare_context(&mut ctx).await;
         if matches!(&event, HookEvent::SubagentStop { agent_id, .. } if *agent_id == exclude_agent_id)
         {
             // Consume even if hooks are disabled or none match.

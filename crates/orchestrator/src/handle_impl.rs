@@ -30,6 +30,7 @@ use lingxi_core::host::{
     ModelSelectionOrigin, ModelSelectionRequest, ModelSourceBinding, ModelValidationMode,
     OrchestratorHandle, RecapOutcome, SkillInfo, StatusSnapshot,
 };
+use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -962,6 +963,15 @@ impl ConversationOrchestrator {
 
 enum OwnedSessionSwitch {
     Clear,
+    CompleteColdResume {
+        session_id: lingxi_core::types::SessionId,
+        transcript_path: std::path::PathBuf,
+        deferred_tools: Vec<lingxi_core::host::DeferredToolReplay>,
+    },
+    ChangeDirectory {
+        cwd: std::path::PathBuf,
+        trusted_dirs: Vec<std::path::PathBuf>,
+    },
     Resume {
         session_id: lingxi_core::types::SessionId,
         history: Vec<lingxi_core::types::ConversationMessage>,
@@ -976,6 +986,8 @@ enum PreparedTranscriptSwitch {
     Legacy {
         writer: Arc<session::jsonl::writer::JsonlWriter>,
         path: std::path::PathBuf,
+        session_id: lingxi_core::types::SessionId,
+        metadata: Option<Vec<Utf16JsonProjection>>,
     },
     Durable {
         writer: Arc<session::jsonl::writer::JsonlWriter>,
@@ -983,26 +995,97 @@ enum PreparedTranscriptSwitch {
         path: std::path::PathBuf,
         cwd: std::path::PathBuf,
         durable_lock: Arc<session::jsonl::DurableTranscriptWriter>,
+        metadata: Option<Vec<Utf16JsonProjection>>,
     },
 }
 
 impl PreparedTranscriptSwitch {
+    async fn import_resume_identity(&self, required_source: bool) -> Result<(), HandleError> {
+        let (writer, path, authority) = match self {
+            Self::None => return Ok(()),
+            Self::Legacy { writer, path, .. } => (writer, path, None),
+            Self::Durable {
+                writer,
+                path,
+                durable_lock,
+                ..
+            } => (writer, path, Some(durable_lock.clone())),
+        };
+        let metadata = match tokio::fs::symlink_metadata(path).await {
+            Ok(metadata) if metadata.file_type().is_file() => metadata,
+            Ok(_) => {
+                return Err(HandleError::ActionFailed(
+                    "resume transcript is not a regular file".into(),
+                ));
+            }
+            Err(error) if !required_source && error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(HandleError::ActionFailed(format!(
+                    "Could not inspect resume transcript: {error}"
+                )));
+            }
+        };
+        if metadata.len() == 0 {
+            return Ok(());
+        }
+        let imported = match authority {
+            Some(authority) => {
+                writer
+                    .bootstrap_prepared_session_message_identity_snapshot(path, authority)
+                    .await
+            }
+            None => {
+                writer
+                    .bootstrap_session_message_identity_snapshot(path)
+                    .await
+            }
+        };
+        imported.map(|_| ()).map_err(|error| {
+            HandleError::ActionFailed(format!("Transcript identity import failed: {error}"))
+        })
+    }
+
     async fn prepare_legacy(&self) {
-        if let Self::Legacy { writer, path } = self {
+        if let Self::Legacy { writer, path, .. } = self {
             writer.retarget(path.clone()).await;
         }
     }
 
     fn activate(self) {
-        if let Self::Durable {
-            writer,
-            session_id,
-            path,
-            cwd,
-            durable_lock,
-        } = self
-        {
-            writer.activate_session_target_with_durable_lock(session_id, path, cwd, durable_lock);
+        match self {
+            Self::Durable {
+                writer,
+                session_id,
+                path,
+                cwd,
+                durable_lock,
+                metadata,
+            } => {
+                if let Some(metadata) = metadata {
+                    writer.install_session_metadata_source(
+                        &session_id.as_uuid().to_string(),
+                        &metadata,
+                    );
+                }
+                writer.activate_session_target_with_durable_lock(
+                    session_id,
+                    path,
+                    cwd,
+                    durable_lock,
+                );
+            }
+            Self::Legacy {
+                writer,
+                session_id,
+                metadata: Some(metadata),
+                ..
+            } => {
+                writer
+                    .install_session_metadata_source(&session_id.as_uuid().to_string(), &metadata);
+            }
+            _ => {}
         }
     }
 }
@@ -1012,19 +1095,27 @@ impl ConversationOrchestrator {
         &self,
         session_id: lingxi_core::types::SessionId,
         durable_lock: Option<Arc<session::jsonl::DurableTranscriptWriter>>,
+        selected_path: Option<std::path::PathBuf>,
+        selected_cwd: Option<std::path::PathBuf>,
+        metadata: Option<Vec<Utf16JsonProjection>>,
     ) -> Result<PreparedTranscriptSwitch, HandleError> {
         let Some(writer) = self.transcript.jsonl_writer.as_ref().cloned() else {
             return Ok(PreparedTranscriptSwitch::None);
         };
-        let Some(config_home) = self.config_home.as_ref() else {
-            return Ok(PreparedTranscriptSwitch::None);
+        let cwd = selected_cwd.unwrap_or_else(|| self.current_cwd());
+        let path = match selected_path {
+            Some(path) => path,
+            None => {
+                let Some(config_home) = self.config_home.as_ref() else {
+                    return Ok(PreparedTranscriptSwitch::None);
+                };
+                session::jsonl::path::session_path(
+                    config_home,
+                    &cwd.to_string_lossy(),
+                    &session_id.as_uuid().to_string(),
+                )
+            }
         };
-        let cwd = self.current_cwd();
-        let path = session::jsonl::path::session_path(
-            config_home,
-            &cwd.to_string_lossy(),
-            &session_id.as_uuid().to_string(),
-        );
         if writer.durable_transcript_enabled() {
             let durable_lock = durable_lock.ok_or_else(|| {
                 HandleError::ActionFailed(
@@ -1037,10 +1128,33 @@ impl ConversationOrchestrator {
                 path,
                 cwd,
                 durable_lock,
+                metadata,
             })
         } else {
-            Ok(PreparedTranscriptSwitch::Legacy { writer, path })
+            Ok(PreparedTranscriptSwitch::Legacy {
+                writer,
+                path,
+                session_id,
+                metadata,
+            })
         }
+    }
+
+    /// Finish deferred tool execution after a cold host has connected its
+    /// permission transport. This keeps the already-restored history and
+    /// lifecycle intact, and admits work through the ordinary owned gate.
+    pub async fn complete_cold_resume_deferred_tools(
+        &self,
+        session_id: lingxi_core::types::SessionId,
+        transcript_path: std::path::PathBuf,
+        deferred_tools: Vec<lingxi_core::host::DeferredToolReplay>,
+    ) -> Result<(), HandleError> {
+        self.run_owned_session_switch(OwnedSessionSwitch::CompleteColdResume {
+            session_id,
+            transcript_path,
+            deferred_tools,
+        })
+        .await
     }
 
     async fn run_owned_session_switch(
@@ -1060,7 +1174,10 @@ impl ConversationOrchestrator {
             .get()
             .and_then(std::sync::Weak::upgrade);
         let Some(owner) = owner else {
-            let result = self.execute_owned_session_switch(turn_guard, request).await;
+            let result = crate::turn_loop::boxed_turn_future(|| {
+                self.execute_owned_session_switch(turn_guard, request)
+            })
+            .await;
             claim.complete(None);
             return result;
         };
@@ -1071,9 +1188,10 @@ impl ConversationOrchestrator {
             // outer owner keeps the lifecycle claim until all borrowed state
             // and the turn gate have been released.
             let execution = tokio::spawn(async move {
-                owner
-                    .execute_owned_session_switch(turn_guard, request)
-                    .await
+                crate::turn_loop::boxed_turn_future(|| {
+                    owner.execute_owned_session_switch(turn_guard, request)
+                })
+                .await
             })
             .await;
             let result = match execution {
@@ -1104,8 +1222,67 @@ impl ConversationOrchestrator {
         // A model hook sequence must belong entirely to one session even
         // though live selections no longer acquire the turn gate.
         let _switch_guard = self.model_switch_gate.lock().await;
+        // Keep each operation's large child future out of this enum's poll
+        // frame; cold replay must leave stack room for permission classifiers.
         match request {
-            OwnedSessionSwitch::Clear => self.execute_clear_session(turn_guard).await,
+            OwnedSessionSwitch::Clear => {
+                crate::turn_loop::boxed_turn_future(|| self.execute_clear_session(turn_guard)).await
+            }
+            OwnedSessionSwitch::CompleteColdResume {
+                session_id,
+                transcript_path,
+                deferred_tools,
+            } => {
+                if self.session.lock().await.session_id != session_id
+                    || self
+                        .transcript
+                        .jsonl_writer
+                        .as_ref()
+                        .map(|writer| writer.active_path())
+                        != Some(transcript_path)
+                {
+                    return Err(HandleError::ActionFailed(
+                        "cold resume target changed before deferred replay".into(),
+                    ));
+                }
+                crate::turn_loop::boxed_turn_future(|| {
+                    crate::resume::replay_deferred_tools_after_resume(self, deferred_tools)
+                })
+                .await
+                .map_err(|error| HandleError::ActionFailed(format!("deferred replay: {error}")))
+            }
+            OwnedSessionSwitch::ChangeDirectory {
+                cwd,
+                mut trusted_dirs,
+            } => {
+                if !cwd.is_dir() {
+                    return Err(HandleError::ActionFailed(
+                        "change_working_directory: target directory disappeared before admission"
+                            .into(),
+                    ));
+                }
+                // Explicit additions admitted by an earlier turn while this
+                // move waited for the gate remain part of the user's grant set.
+                for grant in self.session_cwd.explicit_trusted_dirs() {
+                    if !trusted_dirs.contains(&grant) {
+                        trusted_dirs.push(grant);
+                    }
+                }
+                crate::turn_loop::boxed_turn_future(|| self.retarget_transcript_for_cwd(&cwd))
+                    .await
+                    .map_err(HandleError::ActionFailed)?;
+                // All fallible persistence is complete before any consumer can
+                // observe the new directory. Boot hook project_root remains
+                // immutable; composition owners remount project services.
+                self.session_cwd.swap(cwd.clone(), trusted_dirs);
+                *self
+                    .current_cwd
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = cwd;
+                self.clear_instruction_files();
+                drop(turn_guard);
+                Ok(())
+            }
             OwnedSessionSwitch::Resume {
                 session_id,
                 history,
@@ -1113,14 +1290,16 @@ impl ConversationOrchestrator {
                 active_goal,
                 runtime,
             } => {
-                self.execute_resume_session(
-                    turn_guard,
-                    session_id,
-                    history,
-                    last_jsonl_uuid,
-                    active_goal,
-                    runtime,
-                )
+                crate::turn_loop::boxed_turn_future(|| {
+                    self.execute_resume_session(
+                        turn_guard,
+                        session_id,
+                        history,
+                        last_jsonl_uuid,
+                        active_goal,
+                        runtime,
+                    )
+                })
                 .await
             }
         }
@@ -1151,8 +1330,13 @@ impl ConversationOrchestrator {
                 let (cost, durable_lock, on_activated) = prepared.into_parts();
                 (Some(cost), durable_lock, on_activated)
             });
-        let prepared_transcript =
-            self.prepare_transcript_switch(new_session_id_value, durable_lock)?;
+        let prepared_transcript = self.prepare_transcript_switch(
+            new_session_id_value,
+            durable_lock,
+            None,
+            None,
+            Some(Vec::new()),
+        )?;
         prepared_transcript.prepare_legacy().await;
         self.compaction_runtime.roll_over_total_tokens_context();
         self.reset_session_scoped_runtime().await;
@@ -1342,7 +1526,32 @@ impl ConversationOrchestrator {
                 let (cost, durable_lock, on_activated) = prepared.into_parts();
                 (Some(cost), durable_lock, on_activated)
             });
-        let prepared_transcript = self.prepare_transcript_switch(session_id, durable_lock)?;
+        let resumed_cwd = runtime
+            .working_directory
+            .as_ref()
+            .filter(|path| path.is_dir())
+            .cloned();
+        let resumed_worktree = runtime
+            .worktree_session
+            .as_ref()
+            .and_then(tool_api::WorktreeSession::from_persisted_json)
+            .filter(|state| state.worktree_path.is_dir());
+        let clear_unavailable_worktree = self.worktree_session.is_some()
+            && runtime
+                .worktree_session
+                .as_ref()
+                .is_some_and(|state| !state.is_null())
+            && resumed_worktree.is_none();
+        let prepared_transcript = self.prepare_transcript_switch(
+            session_id,
+            durable_lock,
+            runtime.transcript_path.clone(),
+            resumed_cwd.clone(),
+            runtime.transcript_metadata.clone(),
+        )?;
+        prepared_transcript
+            .import_resume_identity(runtime.transcript_path.is_some())
+            .await?;
         prepared_transcript.prepare_legacy().await;
         self.reset_session_scoped_runtime().await;
         self.restore_prompt_suggestion_api_errors(runtime.api_error_message_ids.iter().copied());
@@ -1359,6 +1568,26 @@ impl ConversationOrchestrator {
             registry.reset_agent_session_statistics(session_id, None);
         }
         prepared_transcript.activate();
+        if let Some(cwd) = resumed_cwd {
+            self.session_cwd.change_cwd(cwd.clone());
+            *self
+                .current_cwd
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = cwd;
+        }
+        if let Some(cell) = &self.worktree_session {
+            if let Some(state) = &resumed_worktree {
+                self.session_cwd.change_cwd(state.worktree_path.clone());
+                *self
+                    .current_cwd
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    state.worktree_path.clone();
+            }
+            *cell
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = resumed_worktree;
+        }
         self.model_runtime.activate_cost_session(prepared_cost);
         self.install_output_session(prepared_output);
         s.history = history;
@@ -1495,6 +1724,13 @@ impl ConversationOrchestrator {
         }
         self.notify_session_activated(old_session_id, session_id)
             .await;
+        if clear_unavailable_worktree {
+            if let Some(writer) = &self.transcript.jsonl_writer {
+                if let Err(error) = writer.append_worktree_state_for_current_session(None).await {
+                    tracing::warn!(%error, "failed to clear unavailable resumed worktree state");
+                }
+            }
+        }
         self.recover_main_reports_after_activation();
         self.invoked_skill_session_guard
             .replace(session_id.to_string());
@@ -1706,6 +1942,27 @@ impl OrchestratorHandle for ConversationOrchestrator {
             runtime,
         })
         .await
+    }
+
+    async fn change_working_directory(
+        &self,
+        cwd: std::path::PathBuf,
+        trusted_dirs: Vec<std::path::PathBuf>,
+    ) -> Result<(), HandleError> {
+        if !cwd.is_absolute() || !cwd.is_dir() {
+            return Err(HandleError::ActionFailed(
+                "change_working_directory: target is not an absolute directory".into(),
+            ));
+        }
+        if !trusted_dirs.contains(&cwd) {
+            return Err(HandleError::ActionFailed(
+                "change_working_directory: target is absent from the authorized directory set"
+                    .into(),
+            ));
+        }
+        self.cancel_prompt_suggestion();
+        self.run_owned_session_switch(OwnedSessionSwitch::ChangeDirectory { cwd, trusted_dirs })
+            .await
     }
 
     async fn force_compact(&self) -> Result<CompactionSummary, HandleError> {

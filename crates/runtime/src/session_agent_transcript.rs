@@ -14,6 +14,10 @@ mod tests {
         assert_eq!(state.history.len(), 1);
         let runtime_metadata = orchestrator::runtime_metadata_from_messages(&messages);
         let replayed = orchestrator::ReplayedSession {
+            transcript_metadata: Vec::new(),
+            transcript_path: Default::default(),
+            working_directory: None,
+            worktree_session: None,
             display_timestamps: messages
                 .iter()
                 .map(|row| (row.uuid.clone(), 1_791_417_600_000))

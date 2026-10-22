@@ -7,7 +7,7 @@ use lingxi_core::host::live_sessions::SharedSessionWriterLease;
 /// Capture while the caller holds the source writer claim. An existing WAL
 /// always wins over the native compatibility record; a broken WAL never falls
 /// back to a cheaper or empty transcript cost.
-pub(crate) async fn capture_resume_cost(
+pub async fn capture_resume_cost(
     home: &Path,
     source_id: uuid::Uuid,
     lease: SharedSessionWriterLease,

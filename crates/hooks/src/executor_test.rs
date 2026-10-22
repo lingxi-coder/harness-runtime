@@ -1290,6 +1290,35 @@ mod command_arm_tests {
     }
 
     #[tokio::test]
+    async fn executor_project_root_is_stable_and_explicit_context_keeps_precedence() {
+        for explicit_root in [None, Some(PathBuf::from("/explicit/root"))] {
+            let runner = MockRunner::ok(output("", "", 0));
+            let exec = executor_with(runner.clone())
+                .with_project_root(PathBuf::from("/original/session/root"));
+            let ctx = HookContext {
+                project_dir: explicit_root.clone(),
+                cwd: std::env::temp_dir(),
+                ..Default::default()
+            };
+
+            let _ = exec.execute(pre_event(), ctx).await;
+
+            let env = runner.recorded_env.lock().unwrap().clone().unwrap();
+            assert_eq!(
+                env.get("LINGXI_PROJECT_DIR").map(String::as_str),
+                explicit_root
+                    .as_deref()
+                    .and_then(std::path::Path::to_str)
+                    .or(Some("/original/session/root")),
+            );
+            assert_eq!(
+                runner.recorded_cwd.lock().unwrap().clone().unwrap(),
+                Some(std::env::temp_dir()),
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn command_env_engine_project_dir_wins_over_user_env() {
         // The hook declares its own LINGXI_PROJECT_DIR; the engine value is set
         // AFTER the base spread in claude-code (`utils/hooks.ts:882-885`), so

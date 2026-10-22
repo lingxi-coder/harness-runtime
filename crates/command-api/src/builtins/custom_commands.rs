@@ -47,9 +47,9 @@
 //! path by kind rather than through the shadowed builtin handler.
 
 use crate::markdown_loader::{
-    build_markdown_command, build_skill_command, load_command_markdown_files,
-    load_managed_command_markdown_files, load_managed_skill_markdown_files,
-    load_skill_markdown_files_with_roots,
+    build_markdown_command, build_skill_command, load_additional_skill_markdown_files,
+    load_command_markdown_files_with_roots, load_managed_command_markdown_files,
+    load_managed_skill_markdown_files, load_skill_markdown_files_with_roots,
 };
 use crate::{CommandRegistry, SlashCommand};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -97,7 +97,27 @@ pub async fn load_and_register_custom_commands(
     managed_dir: &Path,
     home: &Path,
 ) -> usize {
-    let files = load_command_markdown_files(cwd, lingxi_home, managed_dir, home).await;
+    load_and_register_custom_commands_with_roots(reg, cwd, lingxi_home, managed_dir, home, &[])
+        .await
+}
+
+/// Register legacy commands, including session-owned additional command roots.
+pub async fn load_and_register_custom_commands_with_roots(
+    reg: &mut CommandRegistry,
+    cwd: &Path,
+    lingxi_home: &Path,
+    managed_dir: &Path,
+    home: &Path,
+    additional_command_dirs: &[PathBuf],
+) -> usize {
+    let files = load_command_markdown_files_with_roots(
+        cwd,
+        lingxi_home,
+        managed_dir,
+        home,
+        additional_command_dirs,
+    )
+    .await;
 
     // First-wins over the loader's `[managed, user, project]` order (see the
     // module docs): `register_command` is last-wins, so we must skip a name once
@@ -163,9 +183,27 @@ pub async fn load_and_register_skill_commands_with_roots(
         additional_skill_dirs,
     )
     .await;
+    register_skill_files(reg, cwd, &files)
+}
+
+/// Register only explicitly supplied skills, as Native's bare-mode loader does.
+pub async fn load_and_register_additional_skill_commands(
+    reg: &mut CommandRegistry,
+    cwd: &Path,
+    additional_skill_dirs: &[PathBuf],
+) -> usize {
+    let files = load_additional_skill_markdown_files(additional_skill_dirs).await;
+    register_skill_files(reg, cwd, &files)
+}
+
+fn register_skill_files(
+    reg: &mut CommandRegistry,
+    cwd: &Path,
+    files: &[crate::markdown_loader::SkillMarkdownCommandFile],
+) -> usize {
     let mut duplicate_counts: HashMap<Vec<u16>, usize> = HashMap::new();
     let mut commands = Vec::with_capacity(files.len());
-    for file in &files {
+    for file in files {
         let command = build_skill_command(file, file.source);
         if let Some(name) = command.name.string_units("") {
             *duplicate_counts.entry(name).or_default() += 1;

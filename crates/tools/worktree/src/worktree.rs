@@ -645,9 +645,7 @@ impl EnterWorktreeTool {
                 // single swap is what makes subsequent tool calls observe the
                 // worktree; it also fires the orchestrator's registered
                 // cache-invalidation callback (Task 5).
-                self.ctx
-                    .session_cwd
-                    .swap(handle.path.clone(), vec![handle.path.clone()]);
+                self.ctx.session_cwd.change_cwd(handle.path.clone());
                 self.emit_completed(invocation_id, &handle.branch_name, duration_ms)
                     .await;
                 self.emit_worktree_event(WORKTREE_ENTERED_EXISTING).await;
@@ -733,9 +731,7 @@ impl EnterWorktreeTool {
                 // (parity 2.1.212) Persist for resume restoration — see the
                 // matching call in `call_enter_existing`.
                 self.persist_worktree_state().await;
-                self.ctx
-                    .session_cwd
-                    .swap(handle.path.clone(), vec![handle.path.clone()]);
+                self.ctx.session_cwd.change_cwd(handle.path.clone());
                 self.emit_completed(invocation_id, &handle.branch_name, duration_ms)
                     .await;
                 self.emit_worktree_event(WORKTREE_CREATED).await;
@@ -1264,9 +1260,7 @@ impl ExitWorktreeTool {
     fn restore_cwd(&self, original_cwd: &Path, worktree_path: &Path) -> CwdRestore {
         let exists = self.dir_exists;
         if exists(original_cwd) {
-            self.ctx
-                .session_cwd
-                .swap(original_cwd.to_path_buf(), vec![original_cwd.to_path_buf()]);
+            self.ctx.session_cwd.change_cwd(original_cwd.to_path_buf());
             return CwdRestore {
                 restored_cwd: original_cwd.to_path_buf(),
                 original_cwd_missing: false,
@@ -1288,9 +1282,7 @@ impl ExitWorktreeTool {
             .find(|p| exists(p))
             .unwrap_or_else(|| original_cwd.to_path_buf());
         let fell_back_to_worktree = restored == *worktree_path;
-        self.ctx
-            .session_cwd
-            .swap(restored.clone(), vec![restored.clone()]);
+        self.ctx.session_cwd.change_cwd(restored.clone());
         CwdRestore {
             restored_cwd: restored,
             original_cwd_missing: true,
@@ -2323,6 +2315,27 @@ mod tests {
         let path = PathBuf::from(data_value(&res.data)["path"].as_str().unwrap());
         assert_eq!(tool.ctx.cwd(), path, "session cwd must swap to worktree");
         assert_ne!(tool.ctx.cwd(), boot_cwd);
+    }
+
+    #[tokio::test]
+    async fn enter_and_exit_preserve_additional_directory_grants() {
+        let mock = Arc::new(MockWorktreeManager::with_root("/tmp/repo-grants"));
+        let (bctx, _sink) = make_bctx(mock);
+        let original = bctx.cwd();
+        let additional = PathBuf::from("/tmp/shared-explicit-grant");
+        bctx.session_cwd.add_trusted_dir(additional.clone());
+        let enter = EnterWorktreeTool::new(bctx.clone());
+        enter
+            .call(source_json!({"name":"grants"}), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        assert!(bctx.trusted_dirs().contains(&additional));
+        let exit = ExitWorktreeTool::new_assuming_cwd_exists(bctx.clone());
+        exit.call(source_json!({"action":"keep"}), fresh_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        assert_eq!(bctx.cwd(), original);
+        assert!(bctx.trusted_dirs().contains(&additional));
     }
 
     #[tokio::test]

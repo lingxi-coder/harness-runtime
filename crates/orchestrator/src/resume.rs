@@ -38,7 +38,7 @@ use lingxi_core::SessionState;
 use llm_runtime::services::sdk::protocol::JsonPayload;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use session::jsonl::{JsonlMessage, JsonlWriter, LoaderError};
+use session::jsonl::{JsonlMessage, JsonlWriter, LoadedTranscript, LoaderError};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -445,6 +445,15 @@ mod mod_session_turn_resume_tests {
 /// messages (callers may want to inspect them, e.g. interop tests).
 #[derive(Debug)]
 pub struct ReplayedSession {
+    /// Actual transcript selected by cross-worktree/alias discovery.
+    pub transcript_path: PathBuf,
+    /// Existing workspace recorded by the transcript; missing directories do
+    /// not force a resumed session away from the caller's current directory.
+    pub working_directory: Option<PathBuf>,
+    /// Latest durable active-worktree record (JSON null means no worktree).
+    pub worktree_session: Option<Value>,
+    /// Latest metadata records captured from the same source read as history.
+    pub transcript_metadata: Vec<Utf16JsonProjection>,
     /// Replayed session state with `history` populated from the JSONL.
     pub state: SessionState,
     /// Complete main-thread history for UI transcript replay. This may include
@@ -492,6 +501,10 @@ impl ReplayedSession {
                     .is_some_and(|s| !s.is_empty() && !(s.starts_with('<') && s.ends_with('>')))
         });
         lingxi_core::host::ResumeRuntimeSnapshot {
+            transcript_path: Some(self.transcript_path.clone()),
+            working_directory: self.working_directory.clone(),
+            worktree_session: self.worktree_session.clone(),
+            transcript_metadata: Some(self.transcript_metadata.clone()),
             api_error_message_ids: prompt_suggestion_api_error_ids(&self.messages),
             current_usage: self.runtime_metadata.current_usage,
             main_loop_latest_assistant_usage: self
@@ -618,18 +631,49 @@ pub async fn replay_session_state(
     session_id: Uuid,
     fs: Arc<dyn FileSystem>,
 ) -> Result<ReplayedSession, ResumeError> {
-    let sid_str = session_id.to_string();
     // One routed read yields the resumable chain, every entry, and the agent
     // state, each exactly as its own loader derives it from that file.
-    let loaded =
-        session::jsonl::load_routed_session_across_worktrees(lingxi_home, cwd, session_id, fs)
-            .await?;
+    let (transcript_path, source, loaded) =
+        session::jsonl::load_routed_session_with_source(lingxi_home, cwd, session_id, fs).await?;
+    replay_captured_session(transcript_path, source, loaded, session_id)
+}
+
+/// Replay the exact transcript selected by a resume catalog row. This never
+/// resolves the UUID again, so a newer sibling copy cannot replace the chosen
+/// source. History, cwd and metadata all come from one captured source read.
+pub async fn replay_session_state_from_path(
+    path: &Path,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+) -> Result<ReplayedSession, ResumeError> {
+    let (transcript_path, source, loaded) =
+        session::jsonl::load_routed_session_from_path_with_source(path, session_id, fs).await?;
+    replay_captured_session(transcript_path, source, loaded, session_id)
+}
+
+/// Replay the complete display and model state from one captured transcript.
+/// The host must already have validated the selected path and session identity
+/// and captured `source` and `loaded` from the same claimed source revision.
+/// This function performs no filesystem reads.
+pub fn replay_captured_session(
+    transcript_path: PathBuf,
+    source: String,
+    loaded: LoadedTranscript,
+    session_id: Uuid,
+) -> Result<ReplayedSession, ResumeError> {
+    let sid_str = session_id.to_string();
     let (messages, _) = session::jsonl::build_conversation_chain(&loaded, &sid_str);
     if messages.is_empty() {
         return Err(session::jsonl::LoaderError::EmptyDirectory.into());
     }
     let (agent_type, agent_definition) =
         session::jsonl::loader::agent_resume_state_from_loaded(&loaded, &sid_str);
+    let working_directory =
+        session::jsonl::loader::transcript_workspace_path(&transcript_path, &loaded)
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir());
+    let worktree_session = loaded.worktree_states.get(&sid_str).cloned();
+    let transcript_metadata = JsonlWriter::capture_session_metadata_source(&source, &sid_str);
     let transcript_entries = loaded.messages_in_order;
     let (state, last_uuid, mut runtime_metadata) = build_state_from_jsonl(session_id, &messages);
     let display_entries = transcript_entries
@@ -655,6 +699,10 @@ pub async fn replay_session_state(
         message_count = messages.len() as u64,
     );
     Ok(ReplayedSession {
+        transcript_path,
+        working_directory,
+        worktree_session,
+        transcript_metadata,
         state,
         display_timestamps: display_entries
             .iter()
@@ -2162,17 +2210,26 @@ async fn replay_deferred_tool_after_resume(
         deferred.tool_input,
         None,
     )];
+    // Replay can enter the full permission/classifier stack. Construct large
+    // futures outside this poll frame, preserving the same per-poll trace scope.
     let (tool_results, _prevent, injected_messages, context_modifiers) =
-        telemetry::otel::with_trace_context_future(
-            trace_context.as_ref(),
-            crate::turn_loop::dispatch_tool_uses_tracked(orch, &tool_uses, None),
-        )
+        crate::turn_loop::boxed_turn_future(|| {
+            telemetry::otel::with_trace_context_future(
+                trace_context.as_ref(),
+                crate::turn_loop::boxed_turn_future(|| {
+                    crate::turn_loop::dispatch_tool_uses_tracked(orch, &tool_uses, None)
+                }),
+            )
+        })
         .await?;
 
     // Applied per tool, before the next one is dispatched: a context modifier
     // is about the model's context, not about message shape, and the following
     // replay has to see it.
-    crate::turn_loop::apply_model_context_modifiers(orch, context_modifiers).await?;
+    crate::turn_loop::boxed_turn_future(|| {
+        crate::turn_loop::apply_model_context_modifiers(orch, context_modifiers)
+    })
+    .await?;
     Ok(DeferredReplayOutcome {
         tool_use_id,
         tool_results,
@@ -2197,7 +2254,10 @@ pub async fn replay_deferred_tools_after_resume(
     let mut tool_results: Vec<ContentBlock> = Vec::new();
     let mut injected_messages: Vec<(ConversationMessage, ToolUseId)> = Vec::new();
     for deferred in deferred_tools {
-        let outcome = replay_deferred_tool_after_resume(orch, deferred).await?;
+        let outcome = crate::turn_loop::boxed_turn_future(|| {
+            replay_deferred_tool_after_resume(orch, deferred)
+        })
+        .await?;
         if outcome.tool_results.is_empty() {
             continue;
         }
@@ -2227,11 +2287,14 @@ pub async fn replay_deferred_tools_after_resume(
         let mut session = orch.session.lock().await;
         session.history.push(tool_results_msg.clone());
     }
-    orch.persist_message_to_jsonl(&tool_results_msg).await;
+    crate::turn_loop::boxed_turn_future(|| orch.persist_message_to_jsonl(&tool_results_msg)).await;
     for tool_use_id in &tool_use_ids {
-        orch.flush_hook_attachments(tool_use_id).await;
+        crate::turn_loop::boxed_turn_future(|| orch.flush_hook_attachments(tool_use_id)).await;
     }
-    crate::turn_loop::append_tool_injected_messages(orch, injected_messages, None).await;
+    crate::turn_loop::boxed_turn_future(|| {
+        crate::turn_loop::append_tool_injected_messages(orch, injected_messages, None)
+    })
+    .await;
     Ok(())
 }
 
@@ -3162,6 +3225,64 @@ impl ConversationOrchestrator {
                 .saturating_add(usage.output_tokens),
             std::sync::atomic::Ordering::Relaxed,
         );
+    }
+
+    /// Adopt a host-captured cold transcript before any startup hooks can write.
+    /// The host has already selected and claimed the writer target; this only
+    /// restores conversation state from those same captured bytes.
+    pub async fn restore_captured_session_history(
+        &self,
+        session_id: Uuid,
+        messages: &[JsonlMessage],
+        entries: &[JsonlMessage],
+        preserve_boot_model: bool,
+        permission_mode: permission::PermissionMode,
+    ) -> Result<(), String> {
+        let (replayed, last_uuid, metadata) = build_state_from_jsonl(session_id, messages);
+        let model_recovered = messages.iter().any(|message| {
+            carries_human_turn_settings(message)
+                && message.message.string_at("/model").is_some_and(|model| {
+                    !model.is_empty() && !(model.starts_with('<') && model.ends_with('>'))
+                })
+        });
+        self.seed_last_jsonl_uuid(last_uuid.map(|id| id.to_string()))
+            .await;
+        {
+            let mut state = self.session.lock().await;
+            state.session_id = replayed.session_id;
+            state.history = replayed.history;
+            state.compacted_user_turns = replayed.compacted_user_turns;
+            state.virtual_user_messages = replayed.virtual_user_messages;
+            state.transcript_only_messages = replayed.transcript_only_messages;
+            state.compact_summary_messages = replayed.compact_summary_messages;
+            state.model_context_excluded_messages = replayed.model_context_excluded_messages;
+            state.active_goal = replayed.active_goal;
+            if !preserve_boot_model && model_recovered {
+                state.model = replayed.model;
+                state.model_profile = replayed.model_profile;
+            }
+            state.plan_mode = permission_mode == permission::PermissionMode::Plan;
+            if state.plan_mode {
+                state.plan_reminder_shown = false;
+            }
+        }
+        self.set_permission_mode(permission_mode.wire_str()).await?;
+        self.sync_active_goal_stop_hook_for_current_state().await;
+        self.restore_resume_runtime_metadata(messages).await;
+        self.restore_resume_prompt_metadata(entries).await;
+        let (model, profile) = {
+            let state = self.session.lock().await;
+            (state.model.clone(), state.model_profile.clone())
+        };
+        if let Some(selection) = metadata.reasoning_selection {
+            self.restore_reasoning_selection_from_resume(&model, profile.as_deref(), selection);
+        } else if model_recovered || metadata.effort.is_some() {
+            self.restore_effort_from_resume(&model, profile.as_deref(), metadata.effort);
+        }
+        self.sync_thinking_signature_strip_flag_to_api().await;
+        // Tool execution requires the host's permission transport and hook
+        // runners. The post-assembly resume handshake owns that replay.
+        Ok(())
     }
 
     /// Restore transcript-derived compaction state on an already-built runtime.

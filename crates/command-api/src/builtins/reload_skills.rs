@@ -81,6 +81,7 @@ struct ReloadSkillsRoots {
     managed_dir: Option<PathBuf>,
     home: PathBuf,
     additional_skill_dirs: Vec<PathBuf>,
+    additional_command_dirs: Vec<PathBuf>,
 }
 
 /// `/reload-skills` handler — a 1:1 port of `Jtf` (`reload-skills/index.ts`).
@@ -94,7 +95,9 @@ pub struct ReloadSkillsHandler {
     /// empty: reload may invalidate stale entries but must not rediscover
     /// on-disk customization that boot intentionally disabled.
     safe_mode: bool,
-    /// Mobile-only opt-in: also reload legacy `.lingxi/commands/*.md` entries
+    /// Native bare mode admits only skills from explicit additional roots.
+    additional_skills_only: bool,
+    /// Host opt-in: also reload legacy `.lingxi/commands/*.md` entries
     /// inside the same locked mutation so decoy command names cannot surface
     /// between disk reload and bundled restoration.
     reload_legacy_commands: bool,
@@ -117,8 +120,10 @@ impl ReloadSkillsHandler {
                 managed_dir: None,
                 home: home_dir(),
                 additional_skill_dirs: Vec::new(),
+                additional_command_dirs: Vec::new(),
             },
             safe_mode: false,
+            additional_skills_only: false,
             reload_legacy_commands: false,
             post_reload_finalizer: None,
         }
@@ -147,8 +152,10 @@ impl ReloadSkillsHandler {
                 managed_dir,
                 home,
                 additional_skill_dirs,
+                additional_command_dirs: Vec::new(),
             },
             safe_mode,
+            additional_skills_only: false,
             reload_legacy_commands: false,
             post_reload_finalizer: None,
         }
@@ -164,6 +171,21 @@ impl ReloadSkillsHandler {
     ) -> Self {
         self.reload_legacy_commands = reload_legacy_commands;
         self.post_reload_finalizer = Some(finalizer);
+        self
+    }
+
+    /// Retain live legacy-command roots along with the skill roots on reload.
+    #[must_use]
+    pub fn with_additional_command_dirs(mut self, directories: Vec<PathBuf>) -> Self {
+        self.reload_legacy_commands = true;
+        self.roots.additional_command_dirs = directories;
+        self
+    }
+
+    /// Keep bare-mode reloads on the explicitly registered skills producer.
+    #[must_use]
+    pub fn with_additional_skills_only(mut self, additional_only: bool) -> Self {
+        self.additional_skills_only = additional_only;
         self
     }
 }
@@ -266,30 +288,40 @@ impl BuiltinCommandHandler for ReloadSkillsHandler {
                 reg.unregister_loaded_from("commands_DEPRECATED");
             }
             if !self.safe_mode {
-                if self.reload_legacy_commands {
+                if self.reload_legacy_commands && !self.additional_skills_only {
                     let no_managed = self
                         .roots
                         .lingxi_home
                         .join("__lingxi_no_managed_settings__");
                     let managed_dir = self.roots.managed_dir.as_deref().unwrap_or(&no_managed);
-                    crate::builtins::custom_commands::load_and_register_custom_commands(
+                    crate::builtins::custom_commands::load_and_register_custom_commands_with_roots(
                         &mut reg,
                         &self.roots.cwd,
                         &self.roots.lingxi_home,
                         managed_dir,
                         &self.roots.home,
+                        &self.roots.additional_command_dirs,
                     )
                     .await;
                 }
-                crate::builtins::custom_commands::load_and_register_skill_commands_with_roots(
-                    &mut reg,
-                    &self.roots.cwd,
-                    &self.roots.lingxi_home,
-                    self.roots.managed_dir.as_deref(),
-                    &self.roots.home,
-                    &self.roots.additional_skill_dirs,
-                )
-                .await;
+                if self.additional_skills_only {
+                    crate::builtins::custom_commands::load_and_register_additional_skill_commands(
+                        &mut reg,
+                        &self.roots.cwd,
+                        &self.roots.additional_skill_dirs,
+                    )
+                    .await;
+                } else {
+                    crate::builtins::custom_commands::load_and_register_skill_commands_with_roots(
+                        &mut reg,
+                        &self.roots.cwd,
+                        &self.roots.lingxi_home,
+                        self.roots.managed_dir.as_deref(),
+                        &self.roots.home,
+                        &self.roots.additional_skill_dirs,
+                    )
+                    .await;
+                }
             }
             if let Some(finalizer) = &self.post_reload_finalizer {
                 finalizer(&mut reg);

@@ -798,6 +798,17 @@ impl Eq for MainLoopAssistantUsageSnapshot {}
 /// the JSONL loader.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ResumeRuntimeSnapshot {
+    /// Exact transcript selected by the loader. A cross-worktree resume keeps
+    /// appending here even when the stored working directory no longer exists.
+    pub transcript_path: Option<std::path::PathBuf>,
+    /// Existing transcript workspace to adopt while mounting this session.
+    /// `None` keeps the caller's current working directory.
+    pub working_directory: Option<std::path::PathBuf>,
+    /// Latest persisted EnterWorktree state, independent of model history.
+    pub worktree_session: Option<serde_json::Value>,
+    /// Exact latest metadata records captured from the same loaded source.
+    /// `None` lets library callers hydrate metadata lazily from their target.
+    pub transcript_metadata: Option<Vec<Utf16JsonProjection>>,
     /// Native isApiErrorMessage identities retained independently of provider stop reasons.
     pub api_error_message_ids: Vec<crate::types::MessageId>,
     /// Latest real assistant usage in the restored, post-compaction chain.
@@ -3726,6 +3737,21 @@ pub trait OrchestratorHandle: Send + Sync {
     ) -> Result<(), HandleError> {
         let _ = (session_id, history, last_jsonl_uuid, active_goal, runtime);
         Err(HandleError::Unimplemented("resume_session".into()))
+    }
+
+    /// Commit a host-authorized directory move after its permission and trust
+    /// checks. This is a host control operation, never a model-facing tool.
+    /// `trusted_dirs` is the host's effective target cwd/additional-dir set.
+    /// Persistence failure leaves the running cwd and transcript unchanged.
+    async fn change_working_directory(
+        &self,
+        cwd: std::path::PathBuf,
+        trusted_dirs: Vec<std::path::PathBuf>,
+    ) -> Result<(), HandleError> {
+        let _ = (cwd, trusted_dirs);
+        Err(HandleError::Unimplemented(
+            "change_working_directory".into(),
+        ))
     }
 }
 

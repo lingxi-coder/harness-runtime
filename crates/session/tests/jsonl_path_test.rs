@@ -67,3 +67,30 @@ fn session_path_layout_matches_claude_code() {
         )
     );
 }
+
+#[test]
+fn native_307_path_fixture_matches_utf16_sanitization_and_long_path_hashes() {
+    let fixture: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/workspace_session_2_1_307.json")).unwrap();
+    for case in fixture["path_cases"].as_array().unwrap() {
+        let cwd = case["input"].as_str().unwrap();
+        assert_eq!(
+            project_dir_name(cwd),
+            case["expected"]["slug"].as_str().unwrap(),
+            "{cwd}"
+        );
+    }
+}
+
+#[test]
+fn astral_characters_count_as_two_sanitized_utf16_units_at_the_boundary() {
+    let at_limit = format!("{}😀", "a".repeat(198));
+    assert_eq!(
+        project_dir_name(&at_limit),
+        format!("{}--", "a".repeat(198))
+    );
+    let over_limit = format!("{}😀", "a".repeat(199));
+    let result = project_dir_name(&over_limit);
+    assert!(result.starts_with(&format!("{}--", "a".repeat(199))));
+    assert!(result.len() > MAX_SANITIZED_LENGTH);
+}

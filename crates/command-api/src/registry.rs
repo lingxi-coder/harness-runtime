@@ -12,6 +12,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 /// Owns all known slash commands and built-in handler implementations.
+#[derive(Clone)]
 pub struct CommandRegistry {
     commands: HashMap<Vec<u16>, SlashCommand>,
     /// Snapshot of workflow commands supplied by the shared Workflow catalog.

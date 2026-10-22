@@ -119,6 +119,27 @@ pub fn load_file_skill_sections_with_roots(
     sections
 }
 
+/// List only explicit additional roots, without reading ambient skill folders.
+#[must_use]
+pub fn load_additional_file_skill_sections(
+    additional_skill_dirs: &[PathBuf],
+) -> Vec<FileSkillSection> {
+    let rows = load_skills_from_dirs(
+        additional_skill_dirs,
+        SkillSource::Settings(lingxi_core::types::SettingsScope::Project),
+        &mut HashSet::new(),
+    );
+    if rows.is_empty() {
+        Vec::new()
+    } else {
+        vec![FileSkillSection {
+            title: "Additional skills".to_string(),
+            rows,
+            path: additional_skill_dirs.first().cloned(),
+        }]
+    }
+}
+
 fn project_skills_dirs(cwd: &Path, lingxi_home: &Path) -> Vec<PathBuf> {
     let home = lingxi_home.parent();
     let git_root = nearest_git_root(cwd);

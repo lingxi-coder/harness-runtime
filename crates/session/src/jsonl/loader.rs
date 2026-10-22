@@ -27,8 +27,9 @@
 //! the durable continuation, including when the process exited before updating
 //! `last-prompt` (Claude Code 2.1.286).
 
-use crate::jsonl::path::{project_dir_name, session_path};
-use crate::jsonl::re_append::{find_last_typed_field, read_tail};
+use crate::jsonl::aliases::{normalized_directory_path, read_session_aliases};
+use crate::jsonl::path::{project_dir_name, sanitized_cwd, MAX_SANITIZED_LENGTH};
+use crate::jsonl::re_append::find_last_typed_field;
 use crate::jsonl::reader::{
     extract_json_string_field, lines_naming_types, route_line_seq, route_lines,
     strip_transcript_bom, JsonlReader, LoadedTranscript,
@@ -52,8 +53,54 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
+
+/// Resume catalog scope, matching the native picker's current/repository/all
+/// choices. Direct `/add-dir` links are included in the first two scopes.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum SessionDiscoveryScope {
+    /// The current directory's bucket and its direct session aliases.
+    #[default]
+    Current,
+    /// The current directory, its repository worktrees and direct aliases.
+    Repository,
+    /// Every project bucket, without recursively following session aliases.
+    All,
+}
+
+/// Native resolveJobTranscript (Iue) inputs. Ordinary CLI resume and picker
+/// row loading deliberately use separate entry points.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobTranscriptResolveOptions {
+    pub link_scan_path: Option<PathBuf>,
+    pub cross_worktree: bool,
+}
+
+impl Default for JobTranscriptResolveOptions {
+    fn default() -> Self {
+        Self {
+            link_scan_path: None,
+            cross_worktree: true,
+        }
+    }
+}
+
+/// Native Iue's observable result. A false probe retains its first scoped
+/// candidate path; it does not select an arbitrary unrelated global copy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedJobTranscriptPath {
+    pub path: PathBuf,
+    pub has_messages: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessagePresence {
+    Has,
+    None,
+    Unknown,
+}
 
 /// Metadata for one resumable session row (uuid + title + activity time + visible-message count).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +129,10 @@ pub struct SessionMetadata {
     pub mode: SessionMode,
     /// Absolute path to the `.jsonl` file (kept so callers can re-load without re-resolving).
     pub path: PathBuf,
+    /// Original workspace directory recovered from the relocation marker or a
+    /// first message whose cwd agrees with this transcript's storage bucket.
+    /// Hosts can use this launch hint without guessing from a sanitized name.
+    pub workspace_path: Option<String>,
     /// Pull-request number linked to this session, when a `pr-link` metadata
     /// entry exists. This powers Claude-compatible `--from-pr` filtering.
     pub pr_number: Option<u64>,
@@ -141,6 +192,13 @@ pub enum LoaderError {
         /// The arg (UUID string) that was looked up.
         arg: String,
     },
+    /// A UUID exists in several unrelated project buckets and has no local or
+    /// repository-scoped winner. Global UUID lookup must not choose arbitrarily.
+    #[error("Session {arg} exists in multiple project directories.")]
+    AmbiguousSession {
+        /// The UUID requested by the caller.
+        arg: String,
+    },
     /// The `parentUuid` chain is broken at the named message.
     #[error("Session {arg} corrupted: parentUuid chain broken at message {at_uuid}.")]
     ChainBroken {
@@ -191,17 +249,16 @@ fn project_dir_for_cwd(lingxi_home: &Path, cwd: &str) -> PathBuf {
 }
 
 fn canonicalized_path_string(path: &str) -> String {
-    std::fs::canonicalize(path)
-        .unwrap_or_else(|_| PathBuf::from(path))
+    normalized_directory_path(Path::new(path))
         .to_string_lossy()
         .into_owned()
 }
 
 fn transcript_cwd_from_path(path: &Path, loaded: &LoadedTranscript) -> Option<String> {
-    let tail = read_tail(path);
-    if let Some(relocated) = find_last_typed_field(&tail, "relocated", "relocatedCwd") {
+    let session_id = path.file_stem().and_then(|stem| stem.to_str());
+    if let Some(relocated) = session_id.and_then(|id| loaded.relocated_cwds.get(id)) {
         if !relocated.is_empty() {
-            return Some(relocated);
+            return Some(relocated.clone());
         }
     }
     loaded
@@ -211,22 +268,253 @@ fn transcript_cwd_from_path(path: &Path, loaded: &LoadedTranscript) -> Option<St
         .filter(|cwd| !cwd.is_empty())
 }
 
+/// Recover a workspace launch hint from the selected transcript. A relocation
+/// marker is authoritative; without one, the first message's cwd is accepted
+/// only when its sanitized directory name agrees with the selected file.
+#[must_use]
+pub fn transcript_workspace_path(path: &Path, loaded: &LoadedTranscript) -> Option<String> {
+    let session_id = path.file_stem().and_then(|stem| stem.to_str());
+    if let Some(relocated) = session_id.and_then(|id| loaded.relocated_cwds.get(id)) {
+        if !relocated.is_empty() && Path::new(&relocated).is_absolute() {
+            return Some(relocated.clone());
+        }
+    }
+    let cwd = loaded.messages_in_order.first()?.cwd.as_str();
+    if cwd.is_empty() || !Path::new(cwd).is_absolute() {
+        return None;
+    }
+    let bucket = path.parent()?.file_name()?.to_str()?;
+    (project_dir_name(cwd) == bucket || project_dir_name(&canonicalized_path_string(cwd)) == bucket)
+        .then(|| cwd.to_string())
+}
+
 fn transcript_matches_target_dirs(transcript_cwd: Option<&str>, target_cwds: &[String]) -> bool {
     let Some(transcript_cwd) = transcript_cwd else {
         return true;
     };
-    let transcript_canonical = canonicalized_path_string(transcript_cwd);
-    if target_cwds
+    // Native multi-worktree rows carry ownWorktrees. Any recorded directory
+    // inside one of those roots is already owned by this repository (g3r).
+    if target_cwds.len() > 1 && belongs_to_worktree(transcript_cwd, target_cwds) {
+        return true;
+    }
+    !target_cwds
         .iter()
-        .any(|target| canonicalized_path_string(target) == transcript_canonical)
+        .any(|target| foreign_colliding_directory(transcript_cwd, target))
+}
+
+fn belongs_to_worktree(path: &str, roots: &[String]) -> bool {
+    let path = normalized_identity_path(path).to_lowercase();
+    roots.iter().any(|root| {
+        let root = normalized_identity_path(root).to_lowercase();
+        path == root
+            || path.starts_with(&if root.ends_with('/') {
+                root
+            } else {
+                format!("{root}/")
+            })
+    })
+}
+
+fn colliding_directory_spellings(left: &str, right: &str) -> bool {
+    let left = left.nfc().collect::<String>();
+    let right = right.nfc().collect::<String>();
+    sanitized_cwd(&left).eq_ignore_ascii_case(&sanitized_cwd(&right))
+        && normalized_identity_path(&left).to_lowercase()
+            != normalized_identity_path(&right).to_lowercase()
+}
+
+/// Native MG's namespace checks, before touching a possibly remote path.
+fn guarded_directory_namespace(path: &str, devices: bool) -> bool {
+    let separator = |character| matches!(character, '/' | '\\');
+    let bytes = path.as_bytes();
+    let unc =
+        bytes.len() >= 2 && matches!(bytes[0], b'/' | b'\\') && matches!(bytes[1], b'/' | b'\\');
+    let nt = bytes.len() >= 4
+        && matches!(bytes[0], b'/' | b'\\')
+        && &bytes[1..3] == b"??"
+        && matches!(bytes[3], b'/' | b'\\');
+    if unc {
+        let mut parts = path[2..].split(separator);
+        let host = parts.next().unwrap_or("");
+        let distribution = parts.next().unwrap_or("");
+        let local_wsl = (host.eq_ignore_ascii_case("wsl$")
+            || host.eq_ignore_ascii_case("wsl.localhost"))
+            && distribution
+                .chars()
+                .any(|character| !matches!(character, '.' | ' '));
+        if !local_wsl {
+            return true;
+        }
+    }
+    if devices {
+        let mut windows_parts = Vec::new();
+        if path.contains("??") {
+            for part in path.split(separator) {
+                match part {
+                    "" | "." => {}
+                    ".." => {
+                        windows_parts.pop();
+                    }
+                    part => windows_parts.push(part),
+                }
+            }
+        }
+        let normalized_nt = path.starts_with(separator)
+            && windows_parts.first().is_some_and(|part| *part == "??")
+            && windows_parts.len() > 1;
+        let first = path
+            .trim_start_matches(separator)
+            .split(separator)
+            .next()
+            .unwrap_or("");
+        if nt
+            || normalized_nt
+            || (path.starts_with(separator)
+                && ["global??", "globalroot", "dosdevices", "device"]
+                    .iter()
+                    .any(|prefix| first.eq_ignore_ascii_case(prefix))
+                && path.trim_start_matches(separator).contains(separator))
+        {
+            return true;
+        }
+    }
+    if !path.starts_with('/') {
+        return false;
+    }
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => continue,
+            ".." => {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+        if parts.len() == 1
+            && ["network", ".vol", ".file", ".nofollow", ".resolve"]
+                .iter()
+                .any(|root| parts[0].eq_ignore_ascii_case(root))
+        {
+            return true;
+        }
+        if parts.len() == 2 && parts[0].eq_ignore_ascii_case("net") {
+            return true;
+        }
+    }
+    parts.len() == 1 && parts[0].eq_ignore_ascii_case("net")
+}
+
+fn lexical_absolute_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/"))
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// The local default branch of native mkt/Ce. Safe local links can resolve;
+/// namespace landings and exhausted link chains are unverifiable. Ordinary
+/// lstat/readlink errors return no route, matching Ce with default options.
+fn guarded_directory_route(path: &str) -> bool {
+    if path.split(['/', '\\']).any(|part| part == "..") || guarded_directory_namespace(path, false)
     {
         return true;
     }
+    let absolute = lexical_absolute_path(Path::new(path));
+    let mut current = PathBuf::from("/");
+    let mut pending = absolute
+        .to_string_lossy()
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect::<std::collections::VecDeque<_>>();
+    let mut hops = 0;
+    let mut seen = HashSet::new();
+    while !pending.is_empty() && hops < 64 {
+        let component = pending.front().expect("non-empty route");
+        let next = lexical_absolute_path(&current.join(component));
+        if guarded_directory_namespace(&next.to_string_lossy(), false) {
+            return true;
+        }
+        let metadata = match std::fs::symlink_metadata(&next) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                #[cfg(unix)]
+                if !matches!(
+                    error.raw_os_error(),
+                    Some(libc::ENOENT | libc::ENOTDIR | libc::ENAMETOOLONG)
+                ) {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    if std::fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                        .open(&next)
+                        .is_ok()
+                    {
+                        pending.pop_front();
+                        current = next;
+                        continue;
+                    }
+                }
+                return false;
+            }
+        };
+        if !metadata.file_type().is_symlink() {
+            pending.pop_front();
+            current = next;
+            continue;
+        }
+        hops += 1;
+        if !seen.insert((next.clone(), pending.iter().cloned().collect::<Vec<_>>())) {
+            return false;
+        }
+        let Ok(target) = std::fs::read_link(&next) else {
+            return false;
+        };
+        let target = target.to_string_lossy();
+        pending.pop_front();
+        if target.starts_with('/') {
+            if guarded_directory_namespace(&target, false) {
+                return true;
+            }
+            current = PathBuf::from("/");
+        }
+        for component in target.split('/').filter(|part| !part.is_empty()).rev() {
+            pending.push_front(component.to_string());
+        }
+    }
+    !pending.is_empty()
+}
 
-    let transcript_dir = project_dir_name(transcript_cwd);
-    !target_cwds
-        .iter()
-        .any(|target| project_dir_name(target) == transcript_dir)
+fn foreign_colliding_directory(recorded: &str, target: &str) -> bool {
+    if !colliding_directory_spellings(recorded, target)
+        || guarded_directory_namespace(recorded, true)
+        || guarded_directory_namespace(target, true)
+        || guarded_directory_route(recorded)
+        || guarded_directory_route(target)
+    {
+        return false;
+    }
+    let Ok(recorded) = std::fs::canonicalize(recorded) else {
+        return false;
+    };
+    colliding_directory_spellings(
+        &recorded.to_string_lossy(),
+        &canonicalized_path_string(target),
+    )
 }
 
 fn transcript_logical_modified(
@@ -248,71 +536,27 @@ fn transcript_logical_modified(
     Some(std::cmp::min(transcript_modified, file_modified))
 }
 
-async fn transcript_logical_modified_from_path(
-    path: &Path,
-    file_modified: SystemTime,
-) -> SystemTime {
-    let Ok(file) = tokio::fs::File::open(path).await else {
-        return file_modified;
-    };
-    let mut lines = BufReader::new(file).lines();
-    let mut last_timestamp = None;
-    while let Ok(Some(line)) = lines.next_line().await {
-        let line = line.strip_prefix('\u{FEFF}').unwrap_or(&line);
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if !matches!(
-            value.get("type").and_then(Value::as_str),
-            Some("user" | "assistant")
-        ) {
-            continue;
-        }
-        let Some(timestamp) = value.get("timestamp").and_then(Value::as_str) else {
-            continue;
-        };
-        let millis = timestamp_millis(timestamp);
-        if millis != i64::MIN {
-            last_timestamp = Some(millis);
-        }
-    }
-    let Some(millis) = last_timestamp.and_then(|value| u64::try_from(value).ok()) else {
-        return file_modified;
-    };
-    SystemTime::UNIX_EPOCH
-        .checked_add(std::time::Duration::from_millis(millis))
-        .map_or(file_modified, |logical| {
-            std::cmp::min(logical, file_modified)
-        })
-}
-
 /// Parse the `worktree ` lines of `git worktree list --porcelain` into absolute
 /// path strings — 1:1 with claude-code `getWorktreePaths`'s porcelain parse
 /// (`claude-code/src/utils/getWorktreePaths.ts:50-53`: keep lines starting with
 /// `"worktree "`, strip that prefix).
 ///
-/// Divergence from TS: TS applies `.normalize('NFC')` to each path; we do not
-/// (no `unicode-normalization` dependency is permitted, and the rest of this
-/// crate already sanitizes the cwd without NFC). The prefix comparison runs over
-/// [`project_dir_name`]-sanitized strings, which map every non-`[a-zA-Z0-9]` byte
-/// to `-`, so ASCII paths — the overwhelming common case — are unaffected.
-/// `str::lines()` also strips a trailing `\r`, which is harmless (and slightly
-/// more correct than TS on Windows).
+/// Split only on LF and normalize retained paths to NFC, as the native parser
+/// does. A carriage return is not silently removed from a path.
 fn parse_worktree_list(stdout: &str) -> Vec<String> {
     stdout
-        .lines()
-        .filter_map(|line| line.strip_prefix("worktree ").map(str::to_string))
+        .split('\n')
+        .filter_map(|line| {
+            line.strip_prefix("worktree ")
+                .map(|path| path.nfc().collect())
+        })
         .collect()
 }
 
 /// Run `git worktree list --porcelain` in `cwd` and return the absolute worktree
-/// paths, OR an empty vec on ANY failure (git missing, `cwd` unreadable, not a
-/// repo, non-zero exit) **or** when the repo has a single worktree.
-///
-/// claude-code only cross-lists sibling worktrees when `worktreePaths.length > 1`
-/// (`getStatOnlyLogsForWorktrees`, `sessionStorage.ts`); folding the `<= 1` gate
-/// in here means an empty return is the single, unambiguous "behave exactly as
-/// before" signal for the caller.
+/// paths, or an empty vec on failure (git missing, `cwd` unreadable, not a repo,
+/// non-zero exit). A single root still identifies which aliases and retained
+/// worktree buckets belong to a session launched in a repository subdirectory.
 ///
 /// Uses [`std::process::Command`] (no new dependency; `tokio`'s `process` feature
 /// is not enabled in this crate). `output()` blocks the calling task briefly,
@@ -327,12 +571,453 @@ fn git_worktree_paths(cwd: &str) -> Vec<String> {
         _ => return Vec::new(),
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let paths = parse_worktree_list(&stdout);
-    if paths.len() <= 1 {
-        Vec::new()
-    } else {
-        paths
+    parse_worktree_list(&stdout)
+}
+
+async fn transcript_windows(path: &Path) -> Option<(String, String)> {
+    let mut file = tokio::fs::File::open(path).await.ok()?;
+    let metadata = file.metadata().await.ok()?;
+    if !metadata.is_file() {
+        return None;
     }
+    let window = crate::jsonl::LITE_READ_BUF_SIZE;
+    let mut buffer = vec![0; window];
+    let read = file.read(&mut buffer).await.ok()?;
+    if read == 0 {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&buffer[..read]).into_owned();
+    let offset = metadata.len().saturating_sub(u64::try_from(window).ok()?);
+    let tail = if offset > 0 {
+        file.seek(std::io::SeekFrom::Start(offset)).await.ok()?;
+        let read = file.read(&mut buffer).await.ok()?;
+        String::from_utf8_lossy(&buffer[..read]).into_owned()
+    } else {
+        head.clone()
+    };
+    Some((head, tail))
+}
+
+fn strict_head_cwd(head: &str) -> Option<String> {
+    head.split('\n').find_map(|line| {
+        if !line.contains("\"cwd\":") {
+            return None;
+        }
+        serde_json::from_str::<Value>(line)
+            .ok()?
+            .get("cwd")?
+            .as_str()
+            .map(str::to_string)
+    })
+}
+
+fn scoped_cwd_from_source(source: &str) -> Option<String> {
+    let bytes = source.as_bytes();
+    let window = crate::jsonl::LITE_READ_BUF_SIZE;
+    let head = String::from_utf8_lossy(&bytes[..bytes.len().min(window)]);
+    let tail = String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(window)..]);
+    find_last_typed_field(&tail, "relocated", "relocatedCwd").or_else(|| strict_head_cwd(&head))
+}
+
+fn normalized_identity_path(path: &str) -> String {
+    path.nfc().collect::<String>().replace('\\', "/")
+}
+
+fn ambiguous_project_path(path: &str) -> bool {
+    path.chars().any(|character| {
+        !character.is_ascii_alphanumeric() && !matches!(character, '/' | '\\' | ':' | '-')
+    })
+}
+
+async fn bucket_transcripts_by_mtime(project_dir: &Path) -> Vec<(PathBuf, SystemTime)> {
+    let Ok(mut entries) = tokio::fs::read_dir(project_dir).await else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if !entry.file_type().await.is_ok_and(|kind| kind.is_file())
+            || path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
+            || !path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .is_some_and(crate::jsonl::validate_uuid)
+        {
+            continue;
+        }
+        if let Ok(metadata) = entry.metadata().await {
+            files.push((path, metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH)));
+        }
+    }
+    files.sort_by(|left, right| right.1.cmp(&left.1));
+    files
+}
+
+/// Native Ice/NAt only invoke collision recovery when every scoped row has a
+/// verified foreign cwd. Unknown or malformed head/tail data prevents it.
+async fn buckets_are_foreign(
+    directories: &[PathBuf],
+    target_cwds: &[String],
+    limit: usize,
+) -> bool {
+    for directory in directories {
+        let mut files = bucket_transcripts_by_mtime(directory).await;
+        if limit > 0 {
+            files.truncate(limit);
+        }
+        for (path, _) in files {
+            let Some((head, tail)) = transcript_windows(&path).await else {
+                return false;
+            };
+            let recorded = find_last_typed_field(&tail, "relocated", "relocatedCwd")
+                .or_else(|| strict_head_cwd(&head));
+            if recorded.is_none()
+                || transcript_matches_target_dirs(recorded.as_deref(), target_cwds)
+            {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Native FAt/O0e: classify a storage directory by its newest UUID file's
+/// strict head cwd or final tail relocation. Do not infer ownership from an
+/// arbitrary sanitized directory name or inspect older files after that row.
+async fn collision_recovery_directories(
+    lingxi_home: &Path,
+    cwd: &str,
+    excluded: &Path,
+    include_descendants: bool,
+) -> Vec<PathBuf> {
+    let Ok(mut entries) = tokio::fs::read_dir(lingxi_home.join("projects")).await else {
+        return Vec::new();
+    };
+    let expected = normalized_identity_path(cwd);
+    let mut directories = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let directory = entry.path();
+        if directory == excluded || !entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let files = bucket_transcripts_by_mtime(&directory).await;
+        let Some((newest, _)) = files.first() else {
+            continue;
+        };
+        let Some((head, tail)) = transcript_windows(newest).await else {
+            continue;
+        };
+        let recorded = find_last_typed_field(&tail, "relocated", "relocatedCwd")
+            .or_else(|| strict_head_cwd(&head));
+        let Some(recorded) = recorded else { continue };
+        let recorded = normalized_identity_path(&recorded);
+        if recorded == expected
+            || (include_descendants && recorded.starts_with(&format!("{expected}/")))
+        {
+            directories.push(directory);
+        }
+    }
+    directories
+}
+
+/// Native Kbn/ne: a truncated bucket is associated with a registered root only
+/// when one regular JSONL file's last relocation or strict head cwd sanitizes
+/// to the same complete root. The head and tail are bounded 64-KiB windows.
+async fn bucket_matches_worktree_root(project_dir: &Path, root: &str) -> bool {
+    let Ok(mut entries) = tokio::fs::read_dir(project_dir).await else {
+        return false;
+    };
+    let expected = sanitized_cwd(root);
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if !entry.file_type().await.is_ok_and(|kind| kind.is_file())
+            || entry
+                .path()
+                .extension()
+                .and_then(|extension| extension.to_str())
+                != Some("jsonl")
+        {
+            continue;
+        }
+        let Some((head, tail)) = transcript_windows(&entry.path()).await else {
+            continue;
+        };
+        let recorded = find_last_typed_field(&tail, "relocated", "relocatedCwd")
+            .or_else(|| strict_head_cwd(&head));
+        if recorded.is_some_and(|cwd| sanitized_cwd(&cwd.nfc().collect::<String>()) == expected) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Native rRe for local storage: retain the normal directory first, then
+/// verified directories with the same truncated prefix. This also recovers a
+/// long cwd stored under an older suffix without guessing from its directory.
+async fn project_directories_for_cwd(lingxi_home: &Path, cwd: &str) -> Vec<PathBuf> {
+    let current = project_dir_for_cwd(lingxi_home, cwd);
+    let mut directories = Vec::new();
+    if tokio::fs::read_dir(&current).await.is_ok() {
+        directories.push(current.clone());
+    }
+    let name = project_dir_name(cwd);
+    if name.len() <= MAX_SANITIZED_LENGTH {
+        return directories;
+    }
+    let prefix = format!("{}-", &name[..MAX_SANITIZED_LENGTH]);
+    let Ok(mut entries) = tokio::fs::read_dir(lingxi_home.join("projects")).await else {
+        return directories;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if entry.path() == current
+            || !entry.file_type().await.is_ok_and(|kind| kind.is_dir())
+            || !entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(&prefix))
+        {
+            continue;
+        }
+        if bucket_matches_worktree_root(&entry.path(), cwd).await {
+            directories.push(entry.path());
+        }
+    }
+    directories
+}
+
+async fn append_repository_project_dirs(
+    projects_root: &Path,
+    directories: &mut Vec<PathBuf>,
+    worktree_paths: &[String],
+) -> Result<bool, LoaderError> {
+    let mut roots: Vec<_> = worktree_paths
+        .iter()
+        .map(|root| (root, project_dir_name(root)))
+        .collect();
+    roots.sort_by(|left, right| right.1.len().cmp(&left.1.len()));
+    let Ok(mut entries) = tokio::fs::read_dir(projects_root).await else {
+        return Ok(false);
+    };
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|source| LoaderError::Io {
+            arg: projects_root.display().to_string(),
+            source,
+        })?
+    {
+        if !entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        for (root, exact_name) in &roots {
+            let matches = if name == exact_name.as_str() {
+                true
+            } else if exact_name.len() > MAX_SANITIZED_LENGTH {
+                name.starts_with(&format!("{}-", &exact_name[..MAX_SANITIZED_LENGTH]))
+                    && bucket_matches_worktree_root(&entry.path(), root).await
+            } else {
+                exact_name.len() < MAX_SANITIZED_LENGTH && worktree_dir_matches(name, exact_name)
+            };
+            if matches {
+                push_project_dir(directories, entry.path());
+                break;
+            }
+        }
+    }
+    Ok(true)
+}
+
+struct DiscoveryDirectories {
+    project_dirs: Vec<PathBuf>,
+    target_cwds: Vec<String>,
+    unfiltered_dirs: Vec<PathBuf>,
+    limited_dirs: Vec<PathBuf>,
+    has_aliases: bool,
+}
+
+fn push_project_dir(directories: &mut Vec<PathBuf>, path: PathBuf) {
+    if !directories.contains(&path) {
+        directories.push(path);
+    }
+}
+
+async fn append_project_dirs_matching(
+    projects_root: &Path,
+    directories: &mut Vec<PathBuf>,
+    matches: impl Fn(&str) -> bool,
+) -> Result<(), LoaderError> {
+    // Native directory enumeration falls back to the current bucket when the
+    // projects root cannot be read. It has already been included by the caller.
+    let Ok(mut entries) = tokio::fs::read_dir(projects_root).await else {
+        return Ok(());
+    };
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|source| LoaderError::Io {
+            arg: projects_root.display().to_string(),
+            source,
+        })?
+    {
+        if !entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        if entry.file_name().to_str().is_some_and(&matches) {
+            push_project_dir(directories, entry.path());
+        }
+    }
+    Ok(())
+}
+
+async fn discover_session_directories(
+    lingxi_home: &Path,
+    cwd: &str,
+    scope: SessionDiscoveryScope,
+    worktree_paths: &[String],
+    limit: usize,
+) -> Result<DiscoveryDirectories, LoaderError> {
+    let projects_root = lingxi_home.join("projects");
+    let current_project = project_dir_for_cwd(lingxi_home, cwd);
+    let current_storage = if scope == SessionDiscoveryScope::Current {
+        project_directories_for_cwd(lingxi_home, cwd)
+            .await
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| current_project.clone())
+    } else {
+        current_project.clone()
+    };
+    let mut project_dirs = vec![current_storage];
+    let mut target_cwds = vec![cwd.to_string()];
+    let mut unfiltered_dirs = Vec::new();
+    let mut limited_dirs = Vec::new();
+    let mut has_aliases = false;
+    if scope == SessionDiscoveryScope::All {
+        append_project_dirs_matching(&projects_root, &mut project_dirs, |_| true).await?;
+        return Ok(DiscoveryDirectories {
+            project_dirs,
+            target_cwds: Vec::new(),
+            unfiltered_dirs,
+            limited_dirs,
+            has_aliases,
+        });
+    }
+
+    let canonical_cwd = normalized_directory_path(Path::new(cwd));
+    let repository_root = worktree_paths
+        .iter()
+        .filter(|root| canonical_cwd.starts_with(Path::new(root)))
+        .max_by_key(|root| Path::new(root).components().count());
+    if scope == SessionDiscoveryScope::Current
+        && ambiguous_project_path(cwd)
+        && buckets_are_foreign(&project_dirs, &target_cwds, limit).await
+    {
+        project_dirs =
+            collision_recovery_directories(lingxi_home, cwd, &project_dirs[0], false).await;
+    }
+    if scope == SessionDiscoveryScope::Repository {
+        target_cwds.extend(
+            worktree_paths
+                .iter()
+                .filter(|root| root.as_str() != cwd)
+                .cloned(),
+        );
+        if worktree_paths.len() > 1 {
+            if repository_root.is_some() {
+                project_dirs.clear();
+            }
+            if !append_repository_project_dirs(&projects_root, &mut project_dirs, worktree_paths)
+                .await?
+            {
+                limited_dirs.push(current_project.clone());
+            }
+            // A long/truncated bucket name must not make the current session
+            // disappear, even when it does not match a registered root prefix.
+            push_project_dir(&mut project_dirs, current_project.clone());
+            for root in &target_cwds {
+                if !ambiguous_project_path(root) {
+                    continue;
+                }
+                let scoped = project_dirs
+                    .iter()
+                    .filter(|directory| {
+                        directory
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| worktree_dir_matches(name, &project_dir_name(root)))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if buckets_are_foreign(&scoped, &target_cwds, 0).await {
+                    for recovered in collision_recovery_directories(
+                        lingxi_home,
+                        &canonicalized_path_string(root),
+                        &project_dir_for_cwd(lingxi_home, root),
+                        true,
+                    )
+                    .await
+                    {
+                        push_project_dir(&mut limited_dirs, recovered.clone());
+                        push_project_dir(&mut project_dirs, recovered);
+                    }
+                }
+            }
+        } else {
+            if ambiguous_project_path(cwd)
+                && buckets_are_foreign(&project_dirs, &[cwd.to_string()], 0).await
+            {
+                for recovered in
+                    collision_recovery_directories(lingxi_home, cwd, &current_project, false).await
+                {
+                    push_project_dir(&mut limited_dirs, recovered.clone());
+                    push_project_dir(&mut project_dirs, recovered);
+                }
+            }
+            // Native LAt retains sessions from removed managed worktrees even
+            // when git now reports only the primary checkout. The namespace
+            // remains LingXi's deliberate branding adaptation.
+            let prefix = format!(
+                "{}-{}-worktrees-",
+                project_dir_name(repository_root.map_or(cwd, String::as_str)),
+                branding::DOT_DIR.replace('.', "-")
+            );
+            let before = project_dirs.len();
+            append_project_dirs_matching(&projects_root, &mut project_dirs, |name| {
+                name.starts_with(&prefix)
+            })
+            .await?;
+            limited_dirs.extend(project_dirs[before..].iter().cloned());
+            unfiltered_dirs.extend(project_dirs[before..].iter().cloned());
+        }
+    }
+
+    // Read only the link files at the current directory and (for Repository)
+    // its closest containing worktree root. A linked directory's own aliases
+    // are never traversed, nor are aliases at unrelated sibling worktree roots.
+    let mut alias_sources = vec![current_project];
+    if scope == SessionDiscoveryScope::Repository {
+        if let Some(root) = repository_root.filter(|root| root.as_str() != cwd) {
+            push_project_dir(&mut alias_sources, project_dir_for_cwd(lingxi_home, root));
+        }
+    }
+    for source in alias_sources {
+        for alias in read_session_aliases(&source).await {
+            has_aliases = true;
+            if !project_dirs.contains(&alias) {
+                push_project_dir(&mut unfiltered_dirs, alias.clone());
+                push_project_dir(&mut limited_dirs, alias.clone());
+            }
+            push_project_dir(&mut project_dirs, alias);
+        }
+    }
+    Ok(DiscoveryDirectories {
+        project_dirs,
+        target_cwds,
+        unfiltered_dirs,
+        limited_dirs,
+        has_aliases,
+    })
 }
 
 /// claude-code's worktree dir-name match
@@ -356,18 +1041,22 @@ fn worktree_dir_matches(dir_name: &str, prefix: &str) -> bool {
 /// `log.modified.getTime() > existing.modified.getTime()` replaces and keeps the
 /// first-seen entry on a tie. The same session can appear under multiple
 /// worktree project dirs; this collapses it to one.
+#[cfg(test)]
 fn deduplicate_by_session_id(rows: Vec<SessionMetadata>) -> Vec<SessionMetadata> {
-    let mut by_id: HashMap<Uuid, SessionMetadata> = HashMap::with_capacity(rows.len());
+    let mut by_id: HashMap<Uuid, usize> = HashMap::with_capacity(rows.len());
+    let mut deduplicated: Vec<SessionMetadata> = Vec::with_capacity(rows.len());
     for row in rows {
-        match by_id.get(&row.uuid) {
+        match by_id.get(&row.uuid).copied() {
             // Keep the existing row unless the incoming one is STRICTLY newer.
-            Some(existing) if existing.modified >= row.modified => {}
-            _ => {
-                by_id.insert(row.uuid, row);
+            Some(index) if deduplicated[index].modified >= row.modified => {}
+            Some(index) => deduplicated[index] = row,
+            None => {
+                by_id.insert(row.uuid, deduplicated.len());
+                deduplicated.push(row);
             }
         }
     }
-    by_id.into_values().collect()
+    deduplicated
 }
 
 /// `isLoopSession` — detect whether a transcript was started by `/loop`, by
@@ -465,6 +1154,30 @@ struct CatalogCandidate {
     file_created: SystemTime,
 }
 
+/// Native G9 runs on KBe's lite rows before jAt clamps logical timestamps.
+/// Its identity is the original filename stem, including UUID case.
+fn deduplicate_catalog_candidates(candidates: Vec<CatalogCandidate>) -> Vec<CatalogCandidate> {
+    let mut by_id: HashMap<String, usize> = HashMap::with_capacity(candidates.len());
+    let mut rows: Vec<CatalogCandidate> = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        match by_id.get(&candidate.stem).copied() {
+            Some(index) if rows[index].file_modified >= candidate.file_modified => {}
+            Some(index) => rows[index] = candidate,
+            None => {
+                by_id.insert(candidate.stem.clone(), rows.len());
+                rows.push(candidate);
+            }
+        }
+    }
+    rows.sort_by(|left, right| {
+        right
+            .file_modified
+            .cmp(&left.file_modified)
+            .then_with(|| right.file_created.cmp(&left.file_created))
+    });
+    rows
+}
+
 #[derive(Clone)]
 struct CatalogCacheEntry {
     fs_identity: FileSystemCacheIdentity,
@@ -474,6 +1187,7 @@ struct CatalogCacheEntry {
     file_created: SystemTime,
     current_is_sdk_entrypoint: bool,
     target_cwds: Vec<String>,
+    scoped_cwd: Option<String>,
     row: Option<SessionMetadata>,
     skipped: bool,
 }
@@ -526,6 +1240,9 @@ async fn collect_dir(
                 continue;
             }
         };
+        if !metadata.is_file() {
+            continue;
+        }
         let file_modified = match metadata.modified() {
             Ok(modified) => modified,
             Err(_) => {
@@ -545,6 +1262,9 @@ async fn collect_dir(
         let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
+        if !crate::jsonl::validate_uuid(stem) {
+            continue;
+        }
         let Ok(uuid) = Uuid::parse_str(stem) else {
             continue;
         };
@@ -592,6 +1312,7 @@ async fn enrich_candidates(
     fs: &Arc<dyn FileSystem>,
     current_is_sdk_entrypoint: bool,
     target_cwds: &[String],
+    unfiltered_dirs: &[PathBuf],
     skipped_files: &mut usize,
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
     let parallelism = std::thread::available_parallelism()
@@ -609,7 +1330,14 @@ async fn enrich_candidates(
             };
             let fs = Arc::clone(fs);
             let cache_identity = cache_identity.clone();
-            let target_cwds = target_cwds.to_vec();
+            let target_cwds =
+                if candidate.path.parent().is_some_and(|parent| {
+                    unfiltered_dirs.iter().any(|directory| directory == parent)
+                }) {
+                    Vec::new()
+                } else {
+                    target_cwds.to_vec()
+                };
             jobs.spawn(async move {
                 let mut skipped = 0;
                 let row = enrich_candidate(
@@ -658,11 +1386,13 @@ async fn enrich_candidate(
     skipped_files: &mut usize,
 ) -> Result<Option<SessionMetadata>, LoaderError> {
     let Some(cache_identity) = cache_identity else {
+        let mut scoped_cwd = None;
         return enrich_candidate_uncached(
             candidate,
             fs,
             current_is_sdk_entrypoint,
             target_cwds,
+            &mut scoped_cwd,
             skipped_files,
         )
         .await;
@@ -681,19 +1411,29 @@ async fn enrich_candidate(
                 && entry.current_is_sdk_entrypoint == current_is_sdk_entrypoint
                 && entry.target_cwds == target_cwds
         }) {
-            if entry.skipped {
-                *skipped_files += 1;
+            // Directory existence or a local link target can change without
+            // changing the transcript revision. Recheck native m3r for a
+            // cached row; a filtered row must be reparsed if it may now belong.
+            if !transcript_matches_target_dirs(entry.scoped_cwd.as_deref(), target_cwds) {
+                return Ok(None);
             }
-            return Ok(entry.row.clone());
+            if target_cwds.is_empty() || entry.row.is_some() || entry.scoped_cwd.is_none() {
+                if entry.skipped {
+                    *skipped_files += 1;
+                }
+                return Ok(entry.row.clone());
+            }
         }
     }
 
     let skipped_before = *skipped_files;
+    let mut scoped_cwd = None;
     let result = enrich_candidate_uncached(
         candidate.clone(),
         fs,
         current_is_sdk_entrypoint,
         target_cwds,
+        &mut scoped_cwd,
         skipped_files,
     )
     .await?;
@@ -712,6 +1452,7 @@ async fn enrich_candidate(
         file_created: candidate.file_created,
         current_is_sdk_entrypoint,
         target_cwds: target_cwds.to_vec(),
+        scoped_cwd,
         row: result.clone(),
         skipped,
     });
@@ -723,6 +1464,7 @@ async fn enrich_candidate_uncached(
     fs: &Arc<dyn FileSystem>,
     current_is_sdk_entrypoint: bool,
     target_cwds: &[String],
+    scoped_cwd: &mut Option<String>,
     skipped_files: &mut usize,
 ) -> Result<Option<SessionMetadata>, LoaderError> {
     let CatalogCandidate {
@@ -749,6 +1491,7 @@ async fn enrich_candidate_uncached(
             return Ok(None);
         }
     };
+    *scoped_cwd = scoped_cwd_from_source(&content);
     // The parse is the whole cost of a row: keep it off the async workers so
     // concurrent rows (see `enrich_candidates`) parse on separate threads.
     let loaded = match tokio::task::spawn_blocking(move || route_lines(&content)).await {
@@ -775,8 +1518,7 @@ async fn enrich_candidate_uncached(
     // The prefix check is only an early reject. A missing/partial first
     // line must not turn into an implicit allow: re-run the authoritative
     // cwd extraction after the tolerant full parse.
-    let transcript_cwd = transcript_cwd_from_path(&path, &loaded);
-    if !transcript_matches_target_dirs(transcript_cwd.as_deref(), target_cwds) {
+    if !transcript_matches_target_dirs(scoped_cwd.as_deref(), target_cwds) {
         return Ok(None);
     }
 
@@ -916,6 +1658,23 @@ async fn enrich_candidate_uncached(
         .and_then(|value| SessionMode::from_str(value))
         .unwrap_or(SessionMode::Code);
     let (resume_model, resume_model_profile) = persisted_model_ref(&loaded, tip);
+    let workspace_path = scoped_cwd
+        .as_deref()
+        .filter(|cwd| Path::new(cwd).is_absolute())
+        .filter(|cwd| {
+            path.parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .is_some_and(|bucket| {
+                    project_dir_name(cwd) == bucket
+                        || project_dir_name(&canonicalized_path_string(cwd)) == bucket
+                })
+                || target_cwds.iter().any(|target| {
+                    canonicalized_path_string(target) == canonicalized_path_string(cwd)
+                })
+        })
+        .map(str::to_string)
+        .or_else(|| transcript_workspace_path(&path, &loaded));
 
     Ok(Some(SessionMetadata {
         uuid,
@@ -931,6 +1690,7 @@ async fn enrich_candidate_uncached(
         message_count: count_visible_messages(&loaded.messages_in_order),
         mode,
         path,
+        workspace_path,
         pr_number,
         resume_model,
         resume_model_profile,
@@ -1141,22 +1901,31 @@ fn has_visible_content(content: Option<JsonValueView<'_>>, assistant: bool) -> b
 ///   open + fully-parse because our `JsonlReader::read_all` is already in hand from M5-07.
 ///   (The sidechain/teamName decision still reads ONLY the first line, per TS.)
 ///
-/// SESSION.5 — cross-worktree resume: like claude-code, when the cwd's repo has more
-/// than one git worktree we ALSO surface sessions created in SIBLING worktrees of the
-/// same repo. We run `git worktree list --porcelain` ([`git_worktree_paths`]), and for
-/// each worktree path scan every projects-root subdir whose name matches the worktree's
-/// sanitized [`project_dir_name`] prefix (`dirName === prefix || startsWith(prefix + '-')`,
-/// per `getStatOnlyLogsForWorktrees`), then [`deduplicate_by_session_id`]. With 0/1
-/// worktrees — or when git is unavailable / not a repo — we scan ONLY the exact cwd's
-/// project dir, behaving byte-for-byte as before.
+/// The default scope is the current directory and its direct session links.
+/// Hosts explicitly choose [`SessionDiscoveryScope::Repository`] when the user
+/// requests sibling worktrees, or [`SessionDiscoveryScope::All`] for all projects.
 pub async fn list_recent_sessions(
     lingxi_home: &Path,
     cwd: &str,
     limit: usize,
     fs: Arc<dyn FileSystem>,
 ) -> Result<Vec<SessionMetadata>, LoaderError> {
+    list_recent_sessions_in_scope(lingxi_home, cwd, SessionDiscoveryScope::Current, limit, fs).await
+}
+
+/// Enumerate resumable sessions in an explicit picker scope. Repository's
+/// count applies per alias/orphan bucket, without capping the repository union.
+/// Current count zero is unbounded unless direct aliases trigger a merged
+/// final slice, matching the native selector's count truthiness rules.
+pub async fn list_recent_sessions_in_scope(
+    lingxi_home: &Path,
+    cwd: &str,
+    scope: SessionDiscoveryScope,
+    limit: usize,
+    fs: Arc<dyn FileSystem>,
+) -> Result<Vec<SessionMetadata>, LoaderError> {
     Ok(
-        list_recent_sessions_with_diagnostics(lingxi_home, cwd, limit, fs)
+        list_recent_sessions_in_scope_with_diagnostics(lingxi_home, cwd, scope, limit, fs)
             .await?
             .sessions,
     )
@@ -1233,18 +2002,46 @@ pub async fn list_recent_sessions_with_diagnostics(
     limit: usize,
     fs: Arc<dyn FileSystem>,
 ) -> Result<SessionCatalog, LoaderError> {
-    // `git_worktree_paths` already returns empty for git-error / non-repo /
-    // single-worktree, so an empty vec is the "behave exactly as before" signal.
-    let worktree_paths = git_worktree_paths(cwd);
-    list_recent_sessions_inner_with_diagnostics(lingxi_home, cwd, limit, &fs, &worktree_paths, None)
-        .await
+    list_recent_sessions_in_scope_with_diagnostics(
+        lingxi_home,
+        cwd,
+        SessionDiscoveryScope::Current,
+        limit,
+        fs,
+    )
+    .await
+}
+
+/// [`list_recent_sessions_in_scope`] with unreadable-file diagnostics.
+pub async fn list_recent_sessions_in_scope_with_diagnostics(
+    lingxi_home: &Path,
+    cwd: &str,
+    scope: SessionDiscoveryScope,
+    limit: usize,
+    fs: Arc<dyn FileSystem>,
+) -> Result<SessionCatalog, LoaderError> {
+    let worktree_paths = if scope == SessionDiscoveryScope::Repository {
+        git_worktree_paths(cwd)
+    } else {
+        Vec::new()
+    };
+    list_recent_sessions_inner_with_diagnostics(
+        lingxi_home,
+        cwd,
+        scope,
+        limit,
+        &fs,
+        &worktree_paths,
+        None,
+    )
+    .await
 }
 
 /// [`list_recent_sessions_with_diagnostics`] narrowed to one session: the
 /// full catalog's answer with every other row removed.
 ///
-/// Candidates are collected exactly as for the full catalog (same project
-/// directories, same worktree union, same filters), but only this session's
+/// Candidates are collected exactly as for the current-directory catalog (same
+/// direct aliases and filters), but only this session's
 /// transcript is parsed. A host that needs one row before opening a session
 /// therefore no longer waits for every transcript in the project, which took
 /// most of a second once one of them reached tens of megabytes. Only when the
@@ -1257,12 +2054,102 @@ pub async fn find_session_with_diagnostics(
     session_id: Uuid,
     fs: Arc<dyn FileSystem>,
 ) -> Result<SessionCatalog, LoaderError> {
-    find_session_inner(lingxi_home, cwd, session_id, &fs, &git_worktree_paths(cwd)).await
+    find_session_in_scope_with_diagnostics(
+        lingxi_home,
+        cwd,
+        SessionDiscoveryScope::Current,
+        session_id,
+        fs,
+    )
+    .await
+}
+
+/// Find one catalog row using the same explicit directory scope as a picker.
+pub async fn find_session_in_scope_with_diagnostics(
+    lingxi_home: &Path,
+    cwd: &str,
+    scope: SessionDiscoveryScope,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+) -> Result<SessionCatalog, LoaderError> {
+    let worktree_paths = if scope == SessionDiscoveryScope::Repository {
+        git_worktree_paths(cwd)
+    } else {
+        Vec::new()
+    };
+    find_session_inner(lingxi_home, cwd, scope, session_id, &fs, &worktree_paths).await
+}
+
+/// Resolve an exact UUID once, then enrich only that selected transcript. This
+/// keeps a launch hint and its source path on the same discovery decision.
+pub async fn find_session_exact_with_diagnostics(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+) -> Result<SessionCatalog, LoaderError> {
+    find_session_exact_raw_with_diagnostics(lingxi_home, cwd, &session_id.to_string(), fs).await
+}
+
+/// Exact catalog lookup that preserves the raw UUID filename's case.
+pub async fn find_session_exact_raw_with_diagnostics(
+    lingxi_home: &Path,
+    cwd: &str,
+    raw_session_id: &str,
+    fs: Arc<dyn FileSystem>,
+) -> Result<SessionCatalog, LoaderError> {
+    let path = resolve_session_path_raw(lingxi_home, cwd, raw_session_id).await?;
+    let session_id = Uuid::parse_str(raw_session_id).map_err(|_| LoaderError::SessionNotFound {
+        arg: raw_session_id.to_string(),
+    })?;
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .map_err(|source| LoaderError::Io {
+            arg: path.display().to_string(),
+            source,
+        })?;
+    let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let candidate = CatalogCandidate {
+        uuid: session_id,
+        stem: raw_session_id.to_string(),
+        path: path.clone(),
+        file_len: metadata.len(),
+        file_modified: modified,
+        file_created: metadata.created().unwrap_or(modified),
+    };
+    let current_is_sdk_entrypoint = matches!(
+        std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
+        Ok("sdk-cli" | "sdk-ts" | "sdk-py")
+    );
+    let mut skipped_files = 0;
+    let sessions = enrich_candidates(
+        vec![candidate],
+        &fs,
+        current_is_sdk_entrypoint,
+        &[],
+        &[],
+        &mut skipped_files,
+    )
+    .await?;
+    if sessions.is_empty() && skipped_files > 0 {
+        return Err(LoaderError::Io {
+            arg: path.display().to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "session transcript is unreadable",
+            ),
+        });
+    }
+    Ok(SessionCatalog {
+        sessions,
+        skipped_files,
+    })
 }
 
 async fn find_session_inner(
     lingxi_home: &Path,
     cwd: &str,
+    scope: SessionDiscoveryScope,
     session_id: Uuid,
     fs: &Arc<dyn FileSystem>,
     worktree_paths: &[String],
@@ -1270,6 +2157,7 @@ async fn find_session_inner(
     if let Ok(found) = list_recent_sessions_inner_with_diagnostics(
         lingxi_home,
         cwd,
+        scope,
         1,
         fs,
         worktree_paths,
@@ -1283,6 +2171,7 @@ async fn find_session_inner(
     let mut catalog = list_recent_sessions_inner_with_diagnostics(
         lingxi_home,
         cwd,
+        scope,
         usize::MAX,
         fs,
         worktree_paths,
@@ -1293,13 +2182,12 @@ async fn find_session_inner(
     Ok(catalog)
 }
 
-/// Worktree-path-injectable core of [`list_recent_sessions`] (so unit tests can
-/// drive the multi-worktree branch without a real git repo). `worktree_paths`
-/// empty ⇒ today's single-cwd-dir behavior; len > 1 ⇒ the SESSION.5 union.
+/// Explicit-scope core with injectable worktree paths for deterministic tests.
 #[cfg(test)]
 async fn list_recent_sessions_inner(
     lingxi_home: &Path,
     cwd: &str,
+    scope: SessionDiscoveryScope,
     limit: usize,
     fs: &Arc<dyn FileSystem>,
     worktree_paths: &[String],
@@ -1307,6 +2195,7 @@ async fn list_recent_sessions_inner(
     Ok(list_recent_sessions_inner_with_diagnostics(
         lingxi_home,
         cwd,
+        scope,
         limit,
         fs,
         worktree_paths,
@@ -1319,6 +2208,7 @@ async fn list_recent_sessions_inner(
 async fn list_recent_sessions_inner_with_diagnostics(
     lingxi_home: &Path,
     cwd: &str,
+    scope: SessionDiscoveryScope,
     limit: usize,
     fs: &Arc<dyn FileSystem>,
     worktree_paths: &[String],
@@ -1326,82 +2216,37 @@ async fn list_recent_sessions_inner_with_diagnostics(
 ) -> Result<SessionCatalog, LoaderError> {
     let mut candidates: Vec<CatalogCandidate> = Vec::new();
     let mut skipped_files = 0;
-    let target_cwds: Vec<String> = if worktree_paths.len() > 1 {
-        worktree_paths.to_vec()
-    } else {
-        vec![cwd.to_string()]
-    };
-
-    if worktree_paths.len() <= 1 {
-        // 0/1 worktrees (or git unavailable): scan ONLY the cwd's project dir.
-        // `collect_dir` returns false on NotFound; the `rows.is_empty()` check
-        // below collapses both "missing dir" and "no resumable files" into the
-        // original `EmptyDirectory`, while other I/O errors propagate as `Io`.
-        collect_dir(
-            &project_dir_for_cwd(lingxi_home, cwd),
+    let DiscoveryDirectories {
+        project_dirs,
+        target_cwds,
+        unfiltered_dirs,
+        limited_dirs,
+        has_aliases,
+    } = discover_session_directories(lingxi_home, cwd, scope, worktree_paths, limit).await?;
+    for project_dir in project_dirs {
+        let collected = collect_dir(
+            &project_dir,
             &target_cwds,
             fs,
             &mut candidates,
             &mut skipped_files,
         )
-        .await?;
-    } else {
-        // > 1 worktrees: union every projects-root subdir whose name matches a
-        // worktree's sanitized prefix (this also covers the cwd's own dir, since
-        // the cwd is — or is under — one of the worktree paths), then dedupe by
-        // session id. Mirrors `getStatOnlyLogsForWorktrees`.
-        let projects_root = lingxi_home.join("projects");
-        let prefixes: Vec<String> = worktree_paths
-            .iter()
-            .map(|wt| project_dir_name(wt))
-            .collect();
-
-        match tokio::fs::read_dir(&projects_root).await {
-            Ok(mut entries) => {
-                while let Some(entry) =
-                    entries
-                        .next_entry()
-                        .await
-                        .map_err(|source| LoaderError::Io {
-                            arg: projects_root.display().to_string(),
-                            source,
-                        })?
-                {
-                    if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
-                        continue;
-                    }
-                    let name = entry.file_name();
-                    let Some(name) = name.to_str() else { continue };
-                    if prefixes.iter().any(|p| worktree_dir_matches(name, p)) {
-                        collect_dir(
-                            &entry.path(),
-                            &target_cwds,
-                            fs,
-                            &mut candidates,
-                            &mut skipped_files,
-                        )
-                        .await?;
-                    }
-                }
+        .await;
+        if let Err(error) = collected {
+            if project_dir == project_dir_for_cwd(lingxi_home, cwd) {
+                return Err(error);
             }
-            // Projects root unreadable: fall back to the cwd's project dir, like
-            // claude-code's `getStatOnlyLogsForWorktrees` catch branch.
-            Err(_) => {
-                collect_dir(
-                    &project_dir_for_cwd(lingxi_home, cwd),
-                    &target_cwds,
-                    fs,
-                    &mut candidates,
-                    &mut skipped_files,
-                )
-                .await?;
-            }
+            // Direct aliases are best-effort storage references. A removed,
+            // inaccessible, or malformed linked path must not poison the
+            // current directory's readable catalog (native RDt returns []).
+            tracing::debug!(path = %project_dir.display(), %error, "linked session directory unavailable");
         }
     }
 
     if let Some(session_id) = only_session {
         candidates.retain(|candidate| candidate.uuid == session_id);
     }
+    let candidates = deduplicate_catalog_candidates(candidates);
     let current_is_sdk_entrypoint = matches!(
         std::env::var("CLAUDE_CODE_ENTRYPOINT").as_deref(),
         Ok("sdk-cli" | "sdk-ts" | "sdk-py")
@@ -1411,11 +2256,27 @@ async fn list_recent_sessions_inner_with_diagnostics(
         fs,
         current_is_sdk_entrypoint,
         &target_cwds,
+        &unfiltered_dirs,
         &mut skipped_files,
     )
     .await?;
-    if worktree_paths.len() > 1 {
-        rows = deduplicate_by_session_id(rows);
+    // Native Repository keeps the current/worktree buckets unbounded. Its
+    // count applies separately to direct aliases and retained worktree
+    // buckets; Current performs its final slice only after a linked merge.
+    if scope == SessionDiscoveryScope::Repository && limit > 0 {
+        let mut kept = Vec::with_capacity(rows.len());
+        for directory in limited_dirs {
+            let mut bucket = rows
+                .iter()
+                .filter(|row| row.path.parent() == Some(directory.as_path()))
+                .cloned()
+                .collect::<Vec<_>>();
+            bucket.sort();
+            kept.extend(bucket.into_iter().take(limit).map(|row| row.path));
+            rows.retain(|row| {
+                row.path.parent() != Some(directory.as_path()) || kept.contains(&row.path)
+            });
+        }
     }
 
     if rows.is_empty() {
@@ -1432,7 +2293,11 @@ async fn list_recent_sessions_inner_with_diagnostics(
     }
 
     rows.sort();
-    rows.truncate(limit);
+    if scope == SessionDiscoveryScope::All
+        || (scope == SessionDiscoveryScope::Current && (limit > 0 || has_aliases))
+    {
+        rows.truncate(limit);
+    }
     Ok(SessionCatalog {
         sessions: rows,
         skipped_files,
@@ -1479,9 +2344,12 @@ pub async fn load_session(
     session_id: Uuid,
     fs: Arc<dyn FileSystem>,
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
-    let arg = session_id.to_string();
-    let path = session_path(lingxi_home, cwd, &arg);
-    load_session_from_path(path, arg, fs).await
+    let (_, _, loaded) = load_routed_session_with_source(lingxi_home, cwd, session_id, fs).await?;
+    let (chain, _) = build_conversation_chain(&loaded, &session_id.to_string());
+    if chain.is_empty() {
+        return Err(LoaderError::EmptyDirectory);
+    }
+    Ok(chain)
 }
 
 /// Load every transcript entry in file order, including attachment records
@@ -1495,9 +2363,11 @@ pub async fn load_session_entries(
     session_id: Uuid,
     fs: Arc<dyn FileSystem>,
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
-    let arg = session_id.to_string();
-    let path = session_path(lingxi_home, cwd, &arg);
-    load_session_entries_from_path(path, arg, fs).await
+    let (_, _, loaded) = load_routed_session_with_source(lingxi_home, cwd, session_id, fs).await?;
+    if loaded.messages_in_order.is_empty() {
+        return Err(LoaderError::EmptyDirectory);
+    }
+    Ok(loaded.messages_in_order)
 }
 
 async fn load_session_entries_from_path(
@@ -1539,23 +2409,21 @@ async fn read_routed_session(
     Ok(loaded)
 }
 
-/// Load a session by UUID from the same worktree-aware corpus used by
-/// [`list_recent_sessions`].
+/// Load a UUID using the legacy repository union's logical-activity selection.
 ///
-/// The resume picker and title search intentionally union sibling worktrees.
-/// Loading the selected UUID only from the current cwd's project directory
-/// made those rows visible but impossible to resume. This function keeps
-/// discovery and loading on the same scope, choosing the newest transcript if
-/// a UUID is present under more than one sibling project directory (the same
-/// dedupe rule as [`deduplicate_by_session_id`]).
+/// Duplicate transcripts are compared after clamping their message timestamps
+/// to file mtime. Native picker rows instead select by physical mtime before
+/// enrichment; open their exact source with
+/// [`load_routed_session_from_path_with_source`] rather than resolving again.
+/// When no scoped copy exists, only one usable global transcript can be selected.
 pub async fn load_session_across_worktrees(
     lingxi_home: &Path,
     cwd: &str,
     session_id: Uuid,
     fs: Arc<dyn FileSystem>,
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
-    let worktree_paths = git_worktree_paths(cwd);
-    load_session_across_worktrees_inner(lingxi_home, cwd, session_id, fs, &worktree_paths).await
+    let path = resolve_session_path_across_worktrees(lingxi_home, cwd, session_id).await?;
+    load_session_from_path(path, session_id.to_string(), fs).await
 }
 
 /// Load every routed transcript entry for a session selected from the same
@@ -1568,12 +2436,11 @@ pub async fn load_session_entries_across_worktrees(
     session_id: Uuid,
     fs: Arc<dyn FileSystem>,
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
-    let worktree_paths = git_worktree_paths(cwd);
-    load_session_entries_across_worktrees_inner(lingxi_home, cwd, session_id, fs, &worktree_paths)
-        .await
+    let path = resolve_session_path_across_worktrees(lingxi_home, cwd, session_id).await?;
+    load_session_entries_from_path(path, session_id.to_string(), fs).await
 }
 
-/// Route the transcript the worktree-aware resume loaders select, once.
+/// Route the transcript the legacy logical-activity union selects, once.
 ///
 /// [`load_session_across_worktrees`], [`load_session_entries_across_worktrees`]
 /// and [`read_agent_resume_state`] each select and read that file again; a
@@ -1586,31 +2453,491 @@ pub async fn load_routed_session_across_worktrees(
     session_id: Uuid,
     fs: Arc<dyn FileSystem>,
 ) -> Result<LoadedTranscript, LoaderError> {
-    let worktree_paths = git_worktree_paths(cwd);
-    let arg = session_id.to_string();
-    let path = if worktree_paths.len() <= 1 {
-        session_path(lingxi_home, cwd, &arg)
-    } else {
-        select_session_path_across_worktrees(lingxi_home, cwd, session_id, &worktree_paths).await?
-    };
-    read_routed_session(path, arg, fs).await
+    Ok(
+        load_routed_session_across_worktrees_with_path(lingxi_home, cwd, session_id, fs)
+            .await?
+            .1,
+    )
 }
 
-/// Resolve the transcript path selected by the worktree-aware resume loader.
-/// The path is exposed so callers that read adjacent resume metadata do not
-/// accidentally fall back to the process cwd after selecting a sibling file.
+/// Resolve once and return both the selected source path and its routed
+/// transcript, so a resume cannot lose the authoritative storage directory.
+pub async fn load_routed_session_across_worktrees_with_path(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+) -> Result<(PathBuf, LoadedTranscript), LoaderError> {
+    let path = resolve_session_path_across_worktrees(lingxi_home, cwd, session_id).await?;
+    let loaded = read_routed_session(path.clone(), session_id.to_string(), fs).await?;
+    Ok((path, loaded))
+}
+
+/// CLI flag UUID resume with its authoritative source path, preferring a usable
+/// current-directory copy. Picker rows use their selected source path through
+/// [`load_routed_session_from_path_with_source`].
+pub async fn load_routed_session_with_path(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+) -> Result<(PathBuf, LoadedTranscript), LoaderError> {
+    let (path, _, loaded) =
+        load_routed_session_with_source(lingxi_home, cwd, session_id, fs).await?;
+    Ok((path, loaded))
+}
+
+/// Capture raw source and routed state from one filesystem read. Resume callers
+/// use the same snapshot for history, metadata hydration and source identity.
+pub async fn load_routed_session_with_source(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+) -> Result<(PathBuf, String, LoadedTranscript), LoaderError> {
+    let raw_id = session_id.to_string();
+    let roots = git_worktree_paths(cwd);
+    resolve_cli_transcript_source(lingxi_home, cwd, &raw_id, Some(&fs), &roots)
+        .await?
+        .ok_or(LoaderError::SessionNotFound { arg: raw_id })
+}
+
+/// Open the source selected by a picker without resolving its UUID again.
+/// Filename identity is checked before the single source read; history and
+/// metadata are then routed from the same captured revision. Fork ancestors
+/// may retain a different sessionId, as in native full transcript recovery.
+pub async fn load_routed_session_from_path_with_source(
+    path: &Path,
+    expected_id: Uuid,
+    fs: Arc<dyn FileSystem>,
+) -> Result<(PathBuf, String, LoadedTranscript), LoaderError> {
+    let stem = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| crate::jsonl::validate_uuid(stem));
+    if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
+        || stem.and_then(|stem| Uuid::parse_str(stem).ok()) != Some(expected_id)
+    {
+        return Err(LoaderError::SessionNotFound {
+            arg: expected_id.to_string(),
+        });
+    }
+    let content = fs
+        .read_file(path.to_str().expect("UTF-8 transcript path"), None, None)
+        .await
+        .map_err(|error| LoaderError::Io {
+            arg: path.display().to_string(),
+            source: std::io::Error::other(error.to_string()),
+        })?
+        .content;
+    let loaded = route_lines(&content);
+    if loaded.messages_in_order.is_empty()
+        && !stem.is_some_and(|stem| loaded.mobile_empty_sessions.contains(stem))
+    {
+        return Err(LoaderError::EmptyDirectory);
+    }
+    Ok((path.to_path_buf(), content, loaded))
+}
+
+/// Resolve CLI `--resume UUID` through native FIe: current full transcript,
+/// repository full transcripts, then the unique global raw-message candidate.
+/// Picker aliases are selected by scoped catalog rows and source-path loading.
+pub async fn resolve_session_path(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+) -> Result<PathBuf, LoaderError> {
+    resolve_session_path_raw(lingxi_home, cwd, &session_id.to_string()).await
+}
+
+/// Raw CLI UUID lookup preserves filename case. This is FIe's ordinary resume
+/// selector, not resolveJobTranscript's raw-message probe or a picker lookup.
+pub async fn resolve_session_path_raw(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: &str,
+) -> Result<PathBuf, LoaderError> {
+    let roots = git_worktree_paths(cwd);
+    resolve_cli_transcript_source(lingxi_home, cwd, session_id, None, &roots)
+        .await?
+        .map(|(path, _, _)| path)
+        .ok_or_else(|| LoaderError::SessionNotFound {
+            arg: session_id.to_string(),
+        })
+}
+
+fn cli_worktree_order(cwd: &str, roots: &[String]) -> Vec<String> {
+    let containing = roots
+        .iter()
+        .find(|root| cwd == root.as_str() || cwd.starts_with(&format!("{root}/")));
+    let mut others = roots
+        .iter()
+        .filter(|root| Some(*root) != containing)
+        .cloned()
+        .collect::<Vec<_>>();
+    let collator = cli_worktree_collator();
+    others.sort_by(|left, right| collator.compare(left, right));
+    if let Some(root) = containing {
+        others.insert(0, root.clone());
+    }
+    others
+}
+
+fn cli_worktree_collator() -> icu_collator::CollatorBorrowed<'static> {
+    use icu_collator::options::{AlternateHandling, CollatorOptions, Strength};
+    use icu_collator::preferences::{CollationCaseFirst, CollationNumericOrdering};
+    let locale = cli_default_locale();
+    let locale = icu_locale::Locale::try_from_str(&locale).unwrap_or_else(|_| {
+        icu_locale::Locale::try_from_str("en-US").expect("compiled ICU data includes en-US")
+    });
+    let mut preferences = icu_collator::CollatorPreferences::from(&locale);
+    preferences.case_first = Some(CollationCaseFirst::False);
+    preferences.numeric_ordering = Some(CollationNumericOrdering::False);
+    let mut options = CollatorOptions::default();
+    options.strength = Some(Strength::Tertiary);
+    options.alternate_handling = Some(AlternateHandling::NonIgnorable);
+    icu_collator::Collator::try_new(preferences, options)
+        .expect("compiled ICU data provides the native default collation profile")
+}
+
+fn cli_default_locale() -> String {
+    #[cfg(any(target_vendor = "apple", target_os = "windows", target_os = "android"))]
+    let locale = sys_locale::get_locale();
+    #[cfg(all(unix, not(any(target_vendor = "apple", target_os = "android"))))]
+    let locale = lingxi_core::native_locale::current_lc_ctype();
+    #[cfg(not(any(unix, target_os = "windows", target_os = "android")))]
+    let locale: Option<String> = None;
+    let locale = locale.as_deref().unwrap_or("en-US");
+    let locale = locale
+        .split('.')
+        .next()
+        .unwrap_or(locale)
+        .split('@')
+        .next()
+        .unwrap_or(locale);
+    if locale.is_empty() || locale.eq_ignore_ascii_case("C") || locale.eq_ignore_ascii_case("POSIX")
+    {
+        "en-US".to_string()
+    } else {
+        locale.replace('_', "-")
+    }
+}
+
+type CapturedCliTranscript = (PathBuf, String, LoadedTranscript);
+
+async fn read_cli_transcript_source(
+    path: PathBuf,
+    session_id: &str,
+    fs: Option<&Arc<dyn FileSystem>>,
+) -> Result<Option<CapturedCliTranscript>, LoaderError> {
+    // Host adapters may wrap ENOENT in their generic I/O variant. Native's
+    // local reader still treats an absent computed _co path as a null result,
+    // allowing repository/global fallback instead of throwing that wrapper.
+    if let Err(error) = tokio::fs::metadata(&path).await {
+        if error.kind() == std::io::ErrorKind::NotFound
+            || error.raw_os_error() == Some(libc::ENOTDIR)
+        {
+            return Ok(None);
+        }
+    }
+    let content = if let Some(fs) = fs {
+        match fs
+            .read_file(path.to_str().expect("UTF-8 transcript path"), None, None)
+            .await
+        {
+            Ok(read) => read.content,
+            Err(lingxi_core::host::FsError::NotFound(_)) => return Ok(None),
+            Err(error) => {
+                return Err(LoaderError::Io {
+                    arg: path.display().to_string(),
+                    source: std::io::Error::other(error.to_string()),
+                })
+            }
+        }
+    } else {
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ENOTDIR) =>
+            {
+                return Ok(None)
+            }
+            Err(source) => {
+                return Err(LoaderError::Io {
+                    arg: path.display().to_string(),
+                    source,
+                })
+            }
+        }
+    };
+    let loaded = route_lines(&content);
+    // Mui first requires at least one parsed message; a cleared transcript
+    // can then represent an empty continuation. Local selection uses the full
+    // parser, so spaces around a JSON type colon remain valid here.
+    if loaded.by_uuid.is_empty()
+        || (!loaded.cleared_to_empty && find_tip(&loaded, session_id).is_none())
+    {
+        return Ok(None);
+    }
+    Ok(Some((path, content, loaded)))
+}
+
+async fn resolve_cli_transcript_source(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: &str,
+    fs: Option<&Arc<dyn FileSystem>>,
+    worktree_paths: &[String],
+) -> Result<Option<CapturedCliTranscript>, LoaderError> {
+    if !crate::jsonl::validate_uuid(session_id) {
+        return Ok(None);
+    }
+    let filename = format!("{session_id}.jsonl");
+    // Native _co returns the first rRe path whose stat succeeds, before the
+    // full reader determines whether that chosen transcript is resumable.
+    let mut current = project_dir_for_cwd(lingxi_home, cwd).join(&filename);
+    for directory in project_directories_for_cwd(lingxi_home, cwd).await {
+        let candidate = directory.join(&filename);
+        if tokio::fs::metadata(&candidate).await.is_ok() {
+            current = candidate;
+            break;
+        }
+    }
+    if let Some(captured) = read_cli_transcript_source(current, session_id, fs).await? {
+        return Ok(Some(captured));
+    }
+    // Gfe puts the first containing registered root first, with all remaining
+    // roots sorted by the native localeCompare collation profile. iQo includes
+    // the current root again and full-loads each rRe directory in that order.
+    for root in cli_worktree_order(cwd, worktree_paths) {
+        for directory in project_directories_for_cwd(lingxi_home, &root).await {
+            if let Some(captured) =
+                read_cli_transcript_source(directory.join(&filename), session_id, fs).await?
+            {
+                return Ok(Some(captured));
+            }
+        }
+    }
+    // fQo calls f3r without an exclusion set: even an unparseable local file
+    // with a raw message marker participates in global ambiguity detection.
+    let mut directories = Vec::new();
+    if append_project_dirs_matching(&lingxi_home.join("projects"), &mut directories, |_| true)
+        .await
+        .is_err()
+    {
+        return Ok(None);
+    }
+    let mut selected = None;
+    for directory in directories {
+        let candidate = directory.join(&filename);
+        if message_presence(&candidate).await != MessagePresence::Has {
+            continue;
+        }
+        if selected.is_some() {
+            return Ok(None);
+        }
+        selected = Some(candidate);
+    }
+    if let Some(path) = selected {
+        return read_cli_transcript_source(path, session_id, fs).await;
+    }
+    Ok(None)
+}
+
+async fn message_presence(path: &Path) -> MessagePresence {
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if !metadata.is_file() => return MessagePresence::None,
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return MessagePresence::None,
+        Err(_) => return MessagePresence::Unknown,
+    }
+    let Ok(file) = tokio::fs::File::open(path).await else {
+        return MessagePresence::Unknown;
+    };
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match reader.read_until(b'\n', &mut line).await {
+            Ok(0) => return MessagePresence::None,
+            Err(_) => return MessagePresence::Unknown,
+            Ok(_) => {}
+        }
+        if [
+            b"\"type\":\"user\"".as_slice(),
+            b"\"type\":\"assistant\"".as_slice(),
+        ]
+        .iter()
+        .any(|marker| line.windows(marker.len()).any(|window| window == *marker))
+        {
+            return MessagePresence::Has;
+        }
+    }
+}
+
+/// Resolve a raw UUID without lowercasing its filename. The returned false
+/// result preserves native Iue's first scoped candidate, including when global
+/// copies are ambiguous or the only local transcript has metadata but no user
+/// or assistant marker. `cross_worktree: false` also disables global fallback.
+pub async fn resolve_job_transcript_raw(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: &str,
+    options: &JobTranscriptResolveOptions,
+) -> Result<ResolvedJobTranscriptPath, LoaderError> {
+    let canonical_cwd = canonicalized_path_string(cwd);
+    let worktrees = if options.cross_worktree {
+        git_worktree_paths(&canonical_cwd)
+    } else {
+        Vec::new()
+    };
+    resolve_job_transcript_raw_inner(lingxi_home, &canonical_cwd, session_id, options, &worktrees)
+        .await
+}
+
+async fn resolve_job_transcript_raw_inner(
+    lingxi_home: &Path,
+    cwd: &str,
+    session_id: &str,
+    options: &JobTranscriptResolveOptions,
+    worktree_paths: &[String],
+) -> Result<ResolvedJobTranscriptPath, LoaderError> {
+    let project = project_dir_for_cwd(lingxi_home, cwd);
+    if !crate::jsonl::validate_uuid(session_id) {
+        return Ok(ResolvedJobTranscriptPath {
+            path: project.join("invalid-resume-id.jsonl"),
+            has_messages: false,
+        });
+    }
+    let filename = format!("{session_id}.jsonl");
+    let computed = project.join(&filename);
+    let mut candidates = Vec::new();
+    if let Some(path) = &options.link_scan_path {
+        candidates.push(if path.to_string_lossy().ends_with(&filename) {
+            path.clone()
+        } else {
+            path.parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(&filename)
+        });
+    }
+    for directory in project_directories_for_cwd(lingxi_home, cwd).await {
+        candidates.push(directory.join(&filename));
+    }
+    candidates.push(computed);
+    let fallback = candidates[0].clone();
+    let mut seen = HashSet::new();
+    for candidate in candidates {
+        if seen.insert(candidate.clone())
+            && message_presence(&candidate).await != MessagePresence::None
+        {
+            return Ok(ResolvedJobTranscriptPath {
+                path: candidate,
+                has_messages: true,
+            });
+        }
+    }
+    if options.cross_worktree {
+        for root in worktree_paths.iter().filter(|root| root.as_str() != cwd) {
+            for directory in project_directories_for_cwd(lingxi_home, root).await {
+                let candidate = directory.join(&filename);
+                if seen.insert(candidate.clone())
+                    && message_presence(&candidate).await != MessagePresence::None
+                {
+                    return Ok(ResolvedJobTranscriptPath {
+                        path: candidate,
+                        has_messages: true,
+                    });
+                }
+            }
+        }
+        let mut directories = Vec::new();
+        if append_project_dirs_matching(&lingxi_home.join("projects"), &mut directories, |_| true)
+            .await
+            .is_err()
+        {
+            return Ok(ResolvedJobTranscriptPath {
+                path: fallback,
+                has_messages: false,
+            });
+        }
+        let mut global = None;
+        for directory in directories {
+            let candidate = directory.join(&filename);
+            if seen.contains(&candidate)
+                || message_presence(&candidate).await != MessagePresence::Has
+            {
+                continue;
+            }
+            if global.is_some() {
+                return Ok(ResolvedJobTranscriptPath {
+                    path: fallback,
+                    has_messages: false,
+                });
+            }
+            global = Some(candidate);
+        }
+        if let Some(path) = global {
+            return Ok(ResolvedJobTranscriptPath {
+                path,
+                has_messages: true,
+            });
+        }
+    }
+    Ok(ResolvedJobTranscriptPath {
+        path: fallback,
+        has_messages: false,
+    })
+}
+
+/// Resolve the source selected by the legacy logical-activity repository union.
+/// Native picker rows retain their own physical-mtime selection and should be
+/// opened directly with [`load_routed_session_from_path_with_source`].
 pub async fn resolve_session_path_across_worktrees(
     lingxi_home: &Path,
     cwd: &str,
     session_id: Uuid,
 ) -> Result<PathBuf, LoaderError> {
-    let worktree_paths = git_worktree_paths(cwd);
-    if worktree_paths.len() <= 1 {
-        return Ok(session_path(lingxi_home, cwd, &session_id.to_string()));
+    match resolve_session_path_in_scope(
+        lingxi_home,
+        cwd,
+        SessionDiscoveryScope::Repository,
+        session_id,
+    )
+    .await
+    {
+        Err(LoaderError::SessionNotFound { .. }) => {}
+        result => return result,
     }
-    select_session_path_across_worktrees(lingxi_home, cwd, session_id, &worktree_paths).await
+    resolve_session_path_in_scope(lingxi_home, cwd, SessionDiscoveryScope::All, session_id).await
 }
 
+/// Resolve a UUID within an explicit directory scope using legacy selection.
+/// Global scope requires a unique transcript with messages; repository scope
+/// compares logical activity. This does not re-resolve a native picker row.
+pub async fn resolve_session_path_in_scope(
+    lingxi_home: &Path,
+    cwd: &str,
+    scope: SessionDiscoveryScope,
+    session_id: Uuid,
+) -> Result<PathBuf, LoaderError> {
+    let worktree_paths = if scope == SessionDiscoveryScope::Repository {
+        git_worktree_paths(cwd)
+    } else {
+        Vec::new()
+    };
+    let directories =
+        discover_session_directories(lingxi_home, cwd, scope, &worktree_paths, usize::MAX).await?;
+    select_session_path_from_directories(
+        directories,
+        session_id,
+        scope == SessionDiscoveryScope::All,
+    )
+    .await
+}
+
+#[cfg(test)]
 async fn load_session_across_worktrees_inner(
     lingxi_home: &Path,
     cwd: &str,
@@ -1618,15 +2945,12 @@ async fn load_session_across_worktrees_inner(
     fs: Arc<dyn FileSystem>,
     worktree_paths: &[String],
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
-    if worktree_paths.len() <= 1 {
-        return load_session(lingxi_home, cwd, session_id, fs).await;
-    }
-
     let path =
         select_session_path_across_worktrees(lingxi_home, cwd, session_id, worktree_paths).await?;
     load_session_from_path(path, session_id.to_string(), fs).await
 }
 
+#[cfg(test)]
 async fn load_session_entries_across_worktrees_inner(
     lingxi_home: &Path,
     cwd: &str,
@@ -1634,96 +2958,88 @@ async fn load_session_entries_across_worktrees_inner(
     fs: Arc<dyn FileSystem>,
     worktree_paths: &[String],
 ) -> Result<Vec<JsonlMessage>, LoaderError> {
-    if worktree_paths.len() <= 1 {
-        return load_session_entries(lingxi_home, cwd, session_id, fs).await;
-    }
-
     let path =
         select_session_path_across_worktrees(lingxi_home, cwd, session_id, worktree_paths).await?;
     load_session_entries_from_path(path, session_id.to_string(), fs).await
 }
 
+#[cfg(test)]
 async fn select_session_path_across_worktrees(
     lingxi_home: &Path,
     cwd: &str,
     session_id: Uuid,
     worktree_paths: &[String],
 ) -> Result<PathBuf, LoaderError> {
+    let directories = discover_session_directories(
+        lingxi_home,
+        cwd,
+        SessionDiscoveryScope::Repository,
+        worktree_paths,
+        usize::MAX,
+    )
+    .await?;
+    select_session_path_from_directories(directories, session_id, false).await
+}
+
+async fn select_session_path_from_directories(
+    directories: DiscoveryDirectories,
+    session_id: Uuid,
+    require_unique_messages: bool,
+) -> Result<PathBuf, LoaderError> {
     let arg = session_id.to_string();
-    let projects_root = lingxi_home.join("projects");
-    let prefixes: Vec<String> = worktree_paths
-        .iter()
-        .map(|worktree| project_dir_name(worktree))
-        .collect();
-    let mut entries = match tokio::fs::read_dir(&projects_root).await {
-        // Keep the catalog's fallback semantics: when the projects root cannot
-        // be enumerated, use the exact cwd project directory before failing.
-        Err(_) => {
-            let path = session_path(lingxi_home, cwd, &arg);
-            match tokio::fs::metadata(&path).await {
-                Ok(_) => return Ok(path),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    return Err(LoaderError::SessionNotFound { arg });
-                }
-                Err(source) => {
-                    return Err(LoaderError::Io {
-                        arg: path.display().to_string(),
-                        source,
-                    });
-                }
-            }
-        }
-        Ok(entries) => entries,
-    };
     let mut selected: Option<(PathBuf, SystemTime)> = None;
-
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|source| LoaderError::Io {
-            arg: projects_root.display().to_string(),
-            source,
-        })?
-    {
-        if !entry
-            .file_type()
-            .await
-            .map(|kind| kind.is_dir())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        if !prefixes
-            .iter()
-            .any(|prefix| worktree_dir_matches(name, prefix))
-        {
-            continue;
-        }
-
-        let candidate = entry.path().join(format!("{arg}.jsonl"));
+    for directory in directories.project_dirs {
+        let candidate = directory.join(format!("{arg}.jsonl"));
         let metadata = match tokio::fs::metadata(&candidate).await {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(LoaderError::Io {
-                    arg: candidate.display().to_string(),
-                    source,
-                });
-            }
+            Err(_) if require_unique_messages => continue,
+            // An inaccessible local candidate has Native's "unknown" presence
+            // and must not silently select an unrelated global transcript.
+            Err(_) => return Ok(candidate),
         };
         if !metadata.is_file() {
-            return Err(LoaderError::Io {
-                arg: candidate.display().to_string(),
-                source: std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "session transcript is not a regular file",
-                ),
-            });
+            continue;
+        }
+        // Native M performs a byte-substring probe, without JSON parsing. An
+        // unreadable local candidate is "unknown" and remains selectable;
+        // global fallback accepts only a positive message marker.
+        let content = tokio::fs::read(&candidate).await.ok();
+        let has_messages = content.as_ref().is_some_and(|bytes| {
+            [
+                b"\"type\":\"user\"".as_slice(),
+                b"\"type\":\"assistant\"".as_slice(),
+            ]
+            .iter()
+            .any(|marker| bytes.windows(marker.len()).any(|window| window == *marker))
+        });
+        if content.is_some() && !has_messages {
+            continue;
+        }
+        if require_unique_messages && !has_messages {
+            continue;
+        }
+        let loaded = content
+            .as_ref()
+            .map(|bytes| route_lines(&String::from_utf8_lossy(bytes)));
+        let transcript_cwd = loaded
+            .as_ref()
+            .and_then(|loaded| transcript_cwd_from_path(&candidate, loaded));
+        if !directories.unfiltered_dirs.contains(&directory)
+            && !transcript_matches_target_dirs(transcript_cwd.as_deref(), &directories.target_cwds)
+        {
+            continue;
+        }
+        if require_unique_messages {
+            if selected.is_some() {
+                return Err(LoaderError::AmbiguousSession { arg });
+            }
         }
         let file_modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        let modified = transcript_logical_modified_from_path(&candidate, file_modified).await;
+        let modified = loaded
+            .as_ref()
+            .and_then(|loaded| transcript_logical_modified(loaded, file_modified))
+            .unwrap_or(file_modified);
         let replace = selected
             .as_ref()
             .is_none_or(|(_, selected_modified)| modified > *selected_modified);
@@ -3572,6 +4888,807 @@ mod tests {
         assert!(parse_worktree_list("not a porcelain output\n").is_empty());
     }
 
+    #[tokio::test]
+    async fn current_scope_does_not_implicitly_include_sibling_worktrees() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let current = "/native/repo/sub";
+        let sibling = "/native/sibling";
+        let current_id = Uuid::new_v4();
+        let sibling_id = Uuid::new_v4();
+        let now = SystemTime::now();
+        write_session_id(
+            &project_dir_for_cwd(&home, current),
+            current_id,
+            current,
+            "current",
+            now,
+        );
+        write_session_id(
+            &project_dir_for_cwd(&home, sibling),
+            sibling_id,
+            sibling,
+            "sibling",
+            now,
+        );
+        let worktrees = vec!["/native/repo".to_string(), sibling.to_string()];
+        let fs = make_fs(temp.path());
+        let current_rows = list_recent_sessions_inner(
+            &home,
+            current,
+            SessionDiscoveryScope::Current,
+            20,
+            &fs,
+            &worktrees,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            current_rows.iter().map(|row| row.uuid).collect::<Vec<_>>(),
+            [current_id]
+        );
+        let repository_rows = list_recent_sessions_inner(
+            &home,
+            current,
+            SessionDiscoveryScope::Repository,
+            20,
+            &fs,
+            &worktrees,
+        )
+        .await
+        .unwrap();
+        assert_eq!(repository_rows.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn repository_scope_keeps_current_root_aliases_and_removed_managed_worktrees() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let root = "/native/repo";
+        let current = "/native/repo/sub";
+        let orphan = "/native/repo/.lingxi/worktrees/removed";
+        let linked = "/native/linked";
+        let now = SystemTime::now();
+        let current_id = Uuid::new_v4();
+        let root_id = Uuid::new_v4();
+        let orphan_id = Uuid::new_v4();
+        let linked_id = Uuid::new_v4();
+        for (cwd, id) in [
+            (current, current_id),
+            (root, root_id),
+            (orphan, orphan_id),
+            (linked, linked_id),
+        ] {
+            write_session_id(&project_dir_for_cwd(&home, cwd), id, cwd, cwd, now);
+        }
+        std::fs::write(
+            project_dir_for_cwd(&home, root).join(".session-aliases"),
+            format!("{}\n", project_dir_for_cwd(&home, linked).display()),
+        )
+        .unwrap();
+        let rows = list_recent_sessions_inner(
+            &home,
+            current,
+            SessionDiscoveryScope::Repository,
+            20,
+            &make_fs(temp.path()),
+            &[root.to_string()],
+        )
+        .await
+        .unwrap();
+        let ids: HashSet<_> = rows.iter().map(|row| row.uuid).collect();
+        assert_eq!(ids, HashSet::from([current_id, orphan_id, linked_id]));
+        assert!(
+            !ids.contains(&root_id),
+            "a single repository root bucket is not implicitly a subdirectory's current bucket"
+        );
+    }
+
+    #[test]
+    fn deduplication_preserves_native_input_order_for_equal_sort_keys() {
+        let mut first = search_row(1, 10, "first", None);
+        let mut second = search_row(2, 10, "second", None);
+        first.created = SystemTime::UNIX_EPOCH;
+        second.created = SystemTime::UNIX_EPOCH;
+        let mut rows = deduplicate_by_session_id(vec![first.clone(), second, first]);
+        rows.sort();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.title.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second"]
+        );
+    }
+
+    fn native_fixture_path(home: &Path, path: &str) -> PathBuf {
+        if let Some(suffix) = path.strip_prefix("/oracle/.claude/") {
+            home.join(suffix)
+        } else if let Some(suffix) = path.strip_prefix("/linked/") {
+            home.join("linked").join(suffix)
+        } else {
+            PathBuf::from(path)
+        }
+    }
+
+    #[test]
+    fn native_collision_probe_requires_a_real_recorded_directory() {
+        let temp = TempDir::new().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let a = base.join("same_path");
+        let b = base.join("same-path");
+        let a = a.to_string_lossy();
+        let b = b.to_string_lossy();
+        assert!(
+            !foreign_colliding_directory(&a, &b),
+            "missing recorded cwd is unverifiable"
+        );
+        std::fs::create_dir(a.as_ref()).unwrap();
+        assert!(
+            foreign_colliding_directory(&a, &b),
+            "a missing target retains its raw spelling"
+        );
+        std::fs::create_dir(b.as_ref()).unwrap();
+        assert!(foreign_colliding_directory(&a, &b));
+        assert!(belongs_to_worktree("/repo/child", &["/REPO".into()]));
+        assert!(!belongs_to_worktree("/repository", &["/repo".into()]));
+        for guarded in [
+            "/net/host/a_b",
+            "/Network/Servers/host/a_b",
+            "/.vol/a_b",
+            "\\\\host\\a_b",
+        ] {
+            assert!(guarded_directory_namespace(guarded, true), "{guarded}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn native_collision_route_allows_safe_local_symlinks() {
+        use std::os::unix::fs::symlink;
+        let temp = TempDir::new().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let target = base.join("same-path");
+        let link = base.join("same_path");
+        std::fs::create_dir(&target).unwrap();
+        symlink(&target, &link).unwrap();
+        assert!(!guarded_directory_route(&link.to_string_lossy()));
+        assert!(!foreign_colliding_directory(
+            &link.to_string_lossy(),
+            &target.to_string_lossy()
+        ));
+        let network_link = base.join("network-link");
+        symlink("/net/host/workspace", &network_link).unwrap();
+        assert!(guarded_directory_route(&network_link.to_string_lossy()));
+    }
+
+    #[tokio::test]
+    async fn current_recovers_colliding_storage_by_each_buckets_newest_strict_cwd() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let cwd = base.join("project+name").to_string_lossy().into_owned();
+        let other = base.join("project-name").to_string_lossy().into_owned();
+        std::fs::create_dir(&cwd).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let current_bucket = project_dir_for_cwd(&home, &cwd);
+        let recovered = home.join("projects/legacy-good");
+        let rejected = home.join("projects/legacy-newest-is-other");
+        let good_id = Uuid::new_v4();
+        let now = SystemTime::now();
+        write_session_id(&current_bucket, Uuid::new_v4(), &other, "foreign", now);
+        write_session_id(&recovered, good_id, &cwd, "recovered", now);
+        write_session_id(&rejected, Uuid::new_v4(), &cwd, "older own", now);
+        write_session_id(
+            &rejected,
+            Uuid::new_v4(),
+            &other,
+            "newer foreign",
+            now + Duration::from_secs(1),
+        );
+        let rows = list_recent_sessions_inner(
+            &home,
+            &cwd,
+            SessionDiscoveryScope::Current,
+            20,
+            &make_fs(temp.path()),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.uuid).collect::<Vec<_>>(),
+            [good_id]
+        );
+        assert_eq!(rows[0].workspace_path.as_deref(), Some(cwd.as_str()));
+    }
+
+    #[tokio::test]
+    async fn native_current_zero_and_repository_bucket_limits_are_preserved() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let current = "/native/current";
+        let current_bucket = project_dir_for_cwd(&home, current);
+        let linked = project_dir_for_cwd(&home, "/native/linked");
+        let orphan = project_dir_for_cwd(&home, "/native/current/.lingxi/worktrees/removed");
+        let now = SystemTime::now();
+        for directory in [&current_bucket, &linked, &orphan] {
+            for index in 0..2 {
+                write_session_id(
+                    directory,
+                    Uuid::new_v4(),
+                    if directory == &current_bucket {
+                        current
+                    } else {
+                        "/native/linked"
+                    },
+                    "session",
+                    now + Duration::from_secs(index),
+                );
+            }
+        }
+        let fs = make_fs(temp.path());
+        let without_alias =
+            list_recent_sessions_inner(&home, current, SessionDiscoveryScope::Current, 0, &fs, &[])
+                .await
+                .unwrap();
+        assert_eq!(without_alias.len(), 2);
+        std::fs::write(
+            current_bucket.join(".session-aliases"),
+            format!("{}\n", linked.display()),
+        )
+        .unwrap();
+        let with_alias =
+            list_recent_sessions_inner(&home, current, SessionDiscoveryScope::Current, 0, &fs, &[])
+                .await
+                .unwrap();
+        assert!(with_alias.is_empty());
+        let repository = list_recent_sessions_inner(
+            &home,
+            current,
+            SessionDiscoveryScope::Repository,
+            1,
+            &fs,
+            &[current.to_string()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repository.len(),
+            4,
+            "current is unbounded, linked/orphan buckets each contribute one"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_alias_is_not_filtered_as_a_current_directory_collision() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let current = temp.path().join("same-path").to_string_lossy().into_owned();
+        let other = temp.path().join("same_path");
+        std::fs::create_dir(&current).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let alias = temp
+            .path()
+            .join("imported")
+            .join(project_dir_name(&current));
+        let current_bucket = project_dir_for_cwd(&home, &current);
+        let own_id = Uuid::new_v4();
+        let alias_id = Uuid::new_v4();
+        write_session_id(&current_bucket, own_id, &current, "own", SystemTime::now());
+        write_session_id(
+            &alias,
+            alias_id,
+            &other.to_string_lossy(),
+            "linked",
+            SystemTime::now(),
+        );
+        std::fs::write(
+            current_bucket.join(".session-aliases"),
+            format!("{}\n", alias.display()),
+        )
+        .unwrap();
+        let rows = list_recent_sessions_inner(
+            &home,
+            &current,
+            SessionDiscoveryScope::Current,
+            20,
+            &make_fs(temp.path()),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.uuid).collect::<HashSet<_>>(),
+            HashSet::from([own_id, alias_id])
+        );
+    }
+
+    #[tokio::test]
+    async fn picker_deduplicates_physical_mtime_before_logical_timestamp_enrichment() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let current = "/workspace/A";
+        let sibling = "/workspace/B";
+        let id = Uuid::new_v4();
+        let current_bucket = project_dir_for_cwd(&home, current);
+        let sibling_bucket = project_dir_for_cwd(&home, sibling);
+        for (bucket, cwd, physical, logical) in [
+            (&current_bucket, current, 100, 10),
+            (&sibling_bucket, sibling, 90, 80),
+        ] {
+            let physical = SystemTime::UNIX_EPOCH + Duration::from_secs(physical);
+            write_session_id(bucket, id, cwd, "copy", physical);
+            let path = bucket.join(format!("{id}.jsonl"));
+            let mut row: Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            row["timestamp"] = json!(chrono::DateTime::<chrono::Utc>::from(
+                SystemTime::UNIX_EPOCH + Duration::from_secs(logical),
+            )
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+            std::fs::write(&path, format!("{row}\n")).unwrap();
+            filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(physical))
+                .unwrap();
+        }
+        std::fs::write(
+            current_bucket.join(".session-aliases"),
+            format!("{}\n", sibling_bucket.display()),
+        )
+        .unwrap();
+        let roots = [current.to_string(), sibling.to_string()];
+        for scope in [
+            SessionDiscoveryScope::Current,
+            SessionDiscoveryScope::Repository,
+        ] {
+            let rows = list_recent_sessions_inner(
+                &home,
+                current,
+                scope,
+                20,
+                &make_fs(temp.path()),
+                &roots,
+            )
+            .await
+            .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].path, current_bucket.join(format!("{id}.jsonl")));
+            assert_eq!(
+                rows[0].modified,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(10)
+            );
+            let found =
+                find_session_inner(&home, current, scope, id, &make_fs(temp.path()), &roots)
+                    .await
+                    .unwrap();
+            assert_eq!(found.sessions[0].path, rows[0].path);
+        }
+        assert_eq!(
+            select_session_path_across_worktrees(&home, current, id, &roots)
+                .await
+                .unwrap(),
+            sibling_bucket.join(format!("{id}.jsonl")),
+            "the explicit legacy union loader retains logical-activity selection",
+        );
+    }
+
+    #[test]
+    fn native_307_g9_fixture_uses_physical_mtime_and_original_identity() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/workspace_session_2_1_307.json"
+        ))
+        .unwrap();
+        for case in fixture["dedup_cases"].as_array().unwrap() {
+            let candidates = case["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|row| {
+                    let stem = row["session_id"]
+                        .as_str()
+                        .filter(|stem| crate::jsonl::validate_uuid(stem))?;
+                    Some(CatalogCandidate {
+                        uuid: Uuid::parse_str(stem).unwrap(),
+                        path: PathBuf::from(row["tag"].as_str().unwrap_or(stem)),
+                        stem: stem.to_string(),
+                        file_len: 0,
+                        file_modified: SystemTime::UNIX_EPOCH
+                            + Duration::from_millis(row["modified_ms"].as_u64().unwrap()),
+                        file_created: SystemTime::UNIX_EPOCH
+                            + Duration::from_millis(row["created_ms"].as_u64().unwrap()),
+                    })
+                })
+                .collect();
+            let actual = deduplicate_catalog_candidates(candidates);
+            let expected = case["expected"].as_array().unwrap();
+            assert_eq!(actual.len(), expected.len(), "{}", case["name"]);
+            for (actual, expected) in actual.iter().zip(expected) {
+                assert_eq!(
+                    actual.stem,
+                    expected["session_id"].as_str().unwrap(),
+                    "{}",
+                    case["name"]
+                );
+                assert_eq!(
+                    actual
+                        .file_modified
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                    u128::from(expected["modified_ms"].as_u64().unwrap())
+                );
+                assert_eq!(
+                    actual
+                        .file_created
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis(),
+                    u128::from(expected["created_ms"].as_u64().unwrap())
+                );
+                if let Some(tag) = expected["tag"].as_str() {
+                    assert_eq!(actual.path, PathBuf::from(tag), "{}", case["name"]);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cli_flag_uses_current_full_parser_while_repository_picker_uses_newest_copy() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let current = "/workspace/A";
+        let sibling = "/workspace/W";
+        let id = Uuid::new_v4();
+        let now = SystemTime::now();
+        let current_bucket = project_dir_for_cwd(&home, current);
+        write_session_id(&current_bucket, id, current, "current", now);
+        write_session_id(
+            &project_dir_for_cwd(&home, sibling),
+            id,
+            sibling,
+            "newer sibling",
+            now + Duration::from_secs(5),
+        );
+        let path = current_bucket.join(format!("{id}.jsonl"));
+        let source = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"type\":\"user\"", "\"type\": \"user\"");
+        std::fs::write(&path, &source).unwrap();
+        let roots = [current.to_string(), sibling.to_string()];
+        let selected = resolve_cli_transcript_source(&home, current, &id.to_string(), None, &roots)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.0, path);
+        assert_eq!(selected.1, source);
+        let rows = list_recent_sessions_inner(
+            &home,
+            current,
+            SessionDiscoveryScope::Repository,
+            20,
+            &make_fs(temp.path()),
+            &roots,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].path,
+            project_dir_for_cwd(&home, sibling).join(format!("{id}.jsonl"))
+        );
+    }
+
+    #[tokio::test]
+    async fn cli_flag_does_not_prioritize_picker_aliases_over_global_ambiguity() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let current = "/workspace/A";
+        let linked = project_dir_for_cwd(&home, "/workspace/B");
+        let unrelated = project_dir_for_cwd(&home, "/workspace/C");
+        let id = Uuid::new_v4();
+        write_session_id(&linked, id, "/workspace/B", "linked", SystemTime::now());
+        write_session_id(&unrelated, id, "/workspace/C", "other", SystemTime::now());
+        let current_bucket = project_dir_for_cwd(&home, current);
+        std::fs::create_dir_all(&current_bucket).unwrap();
+        std::fs::write(
+            current_bucket.join(".session-aliases"),
+            format!("{}\n", linked.display()),
+        )
+        .unwrap();
+        assert!(
+            resolve_cli_transcript_source(&home, current, &id.to_string(), None, &[])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let rows = list_recent_sessions_inner(
+            &home,
+            current,
+            SessionDiscoveryScope::Current,
+            20,
+            &make_fs(temp.path()),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows[0].path, linked.join(format!("{id}.jsonl")));
+    }
+
+    #[tokio::test]
+    async fn cli_repository_fallback_tries_the_containing_worktree_before_primary() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let primary = "/workspace/P";
+        let linked = "/linked/W";
+        let current = "/linked/W/subdirectory";
+        let id = Uuid::new_v4();
+        write_session_id(
+            &project_dir_for_cwd(&home, primary),
+            id,
+            primary,
+            "primary",
+            SystemTime::now(),
+        );
+        let linked_bucket = project_dir_for_cwd(&home, linked);
+        write_session_id(&linked_bucket, id, linked, "linked", SystemTime::now());
+        let roots = [primary.to_string(), linked.to_string()];
+        assert_eq!(cli_worktree_order(current, &roots), [linked, primary]);
+        let selected = resolve_cli_transcript_source(&home, current, &id.to_string(), None, &roots)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.0, linked_bucket.join(format!("{id}.jsonl")));
+    }
+
+    #[tokio::test]
+    async fn cli_reader_errors_propagate_without_repository_fallback() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let current = "/workspace/A";
+        let sibling = "/workspace/W";
+        let id = Uuid::new_v4();
+        std::fs::create_dir_all(project_dir_for_cwd(&home, current).join(format!("{id}.jsonl")))
+            .unwrap();
+        write_session_id(
+            &project_dir_for_cwd(&home, sibling),
+            id,
+            sibling,
+            "usable",
+            SystemTime::now(),
+        );
+        let result = resolve_cli_transcript_source(
+            &home,
+            current,
+            &id.to_string(),
+            None,
+            &[current.to_string(), sibling.to_string()],
+        )
+        .await;
+        assert!(matches!(result, Err(LoaderError::Io { .. })));
+    }
+
+    #[test]
+    fn cli_worktree_sort_matches_native_locale_punctuation_and_case() {
+        let roots = ["/p/foo-2", "/p/foo_2", "/p/A", "/p/a"].map(str::to_string);
+        assert_eq!(
+            cli_worktree_order("/unrelated", &roots),
+            ["/p/a", "/p/A", "/p/foo_2", "/p/foo-2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn native_307_job_uuid_fixture_preserves_priority_and_false_candidates() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/workspace_session_2_1_307.json"
+        ))
+        .unwrap();
+        let mut exercised = 0;
+        for case in fixture["uuid_resolution_cases"].as_array().unwrap() {
+            let input = &case["input"];
+            let transcripts = input["transcripts"].as_array().cloned().unwrap_or_default();
+            // Native's injected I/O and realpath results are covered by its VM
+            // oracle. This replay exercises actual local files; uppercase
+            // lookup is separate because macOS can use case-insensitive APFS.
+            if input.get("realpath_result").is_some()
+                || input.get("project_directory_error").is_some()
+                || case["name"] == "uppercase_UUID_is_valid_but_filename_lookup_preserves_case"
+                || transcripts.iter().any(|row| {
+                    ["lstat_error", "open_error", "stream_error"]
+                        .iter()
+                        .any(|key| row.get(key).is_some())
+                })
+            {
+                continue;
+            }
+            let temp = TempDir::new().unwrap();
+            let home = temp.path().join("home");
+            for directory in input["project_directories"].as_array().unwrap() {
+                let path = home
+                    .join("projects")
+                    .join(directory["name"].as_str().unwrap());
+                if directory["is_directory"].as_bool().unwrap() {
+                    std::fs::create_dir_all(path).unwrap();
+                } else {
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, "").unwrap();
+                }
+            }
+            for row in transcripts {
+                let path = native_fixture_path(&home, row["path"].as_str().unwrap());
+                if row["kind"] == "directory" {
+                    std::fs::create_dir_all(path).unwrap();
+                } else {
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, row["utf8"].as_str().unwrap()).unwrap();
+                }
+            }
+            let roots = input["repository_paths"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|root| root.as_str().unwrap().to_string())
+                .collect::<Vec<_>>();
+            let options = JobTranscriptResolveOptions {
+                link_scan_path: input["link_scan_path"]
+                    .as_str()
+                    .map(|path| native_fixture_path(&home, path)),
+                cross_worktree: input["cross_worktree"].as_bool().unwrap_or(true),
+            };
+            let actual = resolve_job_transcript_raw_inner(
+                &home,
+                input["current_dir"].as_str().unwrap(),
+                input["session_id"].as_str().unwrap(),
+                &options,
+                &roots,
+            )
+            .await
+            .unwrap();
+            let expected = &case["expected"]["resolution"];
+            assert_eq!(
+                actual.path,
+                native_fixture_path(&home, expected["path"].as_str().unwrap()),
+                "{}",
+                case["name"]
+            );
+            assert_eq!(
+                actual.has_messages,
+                expected["hasMessages"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+            exercised += 1;
+        }
+        assert!(exercised >= 18, "the native local-file UUID cases must run");
+    }
+
+    #[tokio::test]
+    async fn native_307_kbn_fixture_verifies_regular_jsonl_head_and_tail() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../tests/fixtures/workspace_session_2_1_307.json"
+        ))
+        .unwrap();
+        let mut exercised = 0;
+        for case in fixture["kbn_cases"].as_array().unwrap() {
+            let input = &case["input"];
+            let files = input["probe_files"].as_array().unwrap();
+            if files
+                .iter()
+                .any(|file| file.get("open_error").is_some() || file.get("read_error").is_some())
+            {
+                continue;
+            }
+            assert_eq!(input["case_insensitive"], false);
+            let temp = TempDir::new().unwrap();
+            let home = temp.path().join("home");
+            let directory = native_fixture_path(&home, input["project_dir"].as_str().unwrap());
+            std::fs::create_dir_all(&directory).unwrap();
+            for file in files {
+                let path = native_fixture_path(&home, file["path"].as_str().unwrap());
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                if file["kind"] == "directory" {
+                    std::fs::create_dir_all(path).unwrap();
+                } else if file["kind"] == "symlink" {
+                    let target = temp.path().join("symlink-target");
+                    std::fs::write(&target, file["utf8"].as_str().unwrap()).unwrap();
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink(target, path).unwrap();
+                    #[cfg(not(unix))]
+                    continue;
+                } else {
+                    std::fs::write(path, file["utf8"].as_str().unwrap()).unwrap();
+                }
+            }
+            assert_eq!(
+                bucket_matches_worktree_root(&directory, input["target_root"].as_str().unwrap())
+                    .await,
+                case["expected"]["matches"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+            exercised += 1;
+        }
+        assert_eq!(exercised, 15);
+    }
+
+    #[tokio::test]
+    async fn truncated_repository_prefix_requires_native_cwd_verification() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let current = "/native/current";
+        let root = format!("/native/{}", "a".repeat(220));
+        let name = project_dir_name(&root);
+        let prefix = &name[..MAX_SANITIZED_LENGTH];
+        let good_bucket = home.join("projects").join(format!("{prefix}-old-good"));
+        let bad_bucket = home.join("projects").join(format!("{prefix}-old-bad"));
+        let current_id = Uuid::new_v4();
+        let good_id = Uuid::new_v4();
+        let bad_id = Uuid::new_v4();
+        let now = SystemTime::now();
+        write_session_id(
+            &project_dir_for_cwd(&home, current),
+            current_id,
+            current,
+            "current",
+            now,
+        );
+        write_session_id(&good_bucket, good_id, &root, "verified", now);
+        write_session_id(&bad_bucket, bad_id, &format!("{root}x"), "wrong root", now);
+        let roots = [current.to_string(), root.clone()];
+        let rows = list_recent_sessions_inner(
+            &home,
+            current,
+            SessionDiscoveryScope::Repository,
+            20,
+            &make_fs(temp.path()),
+            &roots,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.uuid).collect::<HashSet<_>>(),
+            HashSet::from([current_id, good_id]),
+        );
+        // Kbn probes every regular .jsonl filename, not only UUID transcripts.
+        std::fs::write(
+            bad_bucket.join("not-a-uuid.jsonl"),
+            format!("{}\n", json!({"type":"relocated", "relocatedCwd":root})),
+        )
+        .unwrap();
+        assert!(bucket_matches_worktree_root(&bad_bucket, &root).await);
+        let recovered = project_directories_for_cwd(&home, &root).await;
+        assert!(recovered.contains(&good_bucket));
+        assert!(recovered.contains(&bad_bucket));
+        let current_rows = list_recent_sessions_inner(
+            &home,
+            &root,
+            SessionDiscoveryScope::Current,
+            20,
+            &make_fs(temp.path()),
+            &[],
+        )
+        .await
+        .unwrap();
+        assert!(
+            !current_rows.is_empty(),
+            "rRe recovers a verified legacy suffix for Current"
+        );
+    }
+
+    #[tokio::test]
+    async fn repository_root_at_200_units_has_no_generic_subdirectory_prefix() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path().join("home");
+        let root = format!("/{}", "a".repeat(199));
+        assert_eq!(project_dir_name(&root).len(), MAX_SANITIZED_LENGTH);
+        let child = home
+            .join("projects")
+            .join(format!("{}-child", project_dir_name(&root)));
+        std::fs::create_dir_all(&child).unwrap();
+        let mut selected = Vec::new();
+        append_repository_project_dirs(&home.join("projects"), &mut selected, &[root])
+            .await
+            .unwrap();
+        assert!(selected.is_empty());
+    }
+
     #[test]
     fn worktree_dir_match_rule() {
         // `dirName === prefix` and `dirName.startsWith(prefix + '-')` match…
@@ -3610,9 +5727,16 @@ mod tests {
         };
 
         let fs = make_fs(temp.path());
-        let rows = list_recent_sessions_inner(&lingxi_home, &cwd, 5, &fs, &[])
-            .await
-            .expect("list");
+        let rows = list_recent_sessions_inner(
+            &lingxi_home,
+            &cwd,
+            SessionDiscoveryScope::Current,
+            5,
+            &fs,
+            &[],
+        )
+        .await
+        .expect("list");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].uuid, main);
     }
@@ -3631,15 +5755,29 @@ mod tests {
             None,
         );
         let fs = make_fs(temp.path());
-        let full = list_recent_sessions_inner(&lingxi_home, &cwd, 5, &fs, &[])
-            .await
-            .expect("list");
+        let full = list_recent_sessions_inner(
+            &lingxi_home,
+            &cwd,
+            SessionDiscoveryScope::Current,
+            5,
+            &fs,
+            &[],
+        )
+        .await
+        .expect("list");
         assert_eq!(full.len(), 2);
 
         for id in [older, newer] {
-            let found = find_session_inner(&lingxi_home, &cwd, id, &fs, &[])
-                .await
-                .expect("find");
+            let found = find_session_inner(
+                &lingxi_home,
+                &cwd,
+                SessionDiscoveryScope::Current,
+                id,
+                &fs,
+                &[],
+            )
+            .await
+            .expect("find");
             let expected = full.iter().find(|row| row.uuid == id).expect("listed");
             assert_eq!(found.sessions.len(), 1);
             assert_eq!(found.sessions[0].uuid, expected.uuid);
@@ -3660,18 +5798,40 @@ mod tests {
         )
         .unwrap();
         for id in [corrupt, Uuid::new_v4()] {
-            let found = find_session_inner(&lingxi_home, &cwd, id, &fs, &[])
-                .await
-                .expect("other sessions are readable");
+            let found = find_session_inner(
+                &lingxi_home,
+                &cwd,
+                SessionDiscoveryScope::Current,
+                id,
+                &fs,
+                &[],
+            )
+            .await
+            .expect("other sessions are readable");
             assert!(found.sessions.is_empty());
         }
         // ...and the catalog's own error once nothing is readable.
         std::fs::remove_file(dir.join(format!("{older}.jsonl"))).unwrap();
         std::fs::remove_file(dir.join(format!("{newer}.jsonl"))).unwrap();
-        let full =
-            list_recent_sessions_inner_with_diagnostics(&lingxi_home, &cwd, 5, &fs, &[], None)
-                .await;
-        let found = find_session_inner(&lingxi_home, &cwd, Uuid::new_v4(), &fs, &[]).await;
+        let full = list_recent_sessions_inner_with_diagnostics(
+            &lingxi_home,
+            &cwd,
+            SessionDiscoveryScope::Current,
+            5,
+            &fs,
+            &[],
+            None,
+        )
+        .await;
+        let found = find_session_inner(
+            &lingxi_home,
+            &cwd,
+            SessionDiscoveryScope::Current,
+            Uuid::new_v4(),
+            &fs,
+            &[],
+        )
+        .await;
         assert!(matches!(full, Err(LoaderError::Io { .. })));
         assert!(matches!(found, Err(LoaderError::Io { .. })));
     }
@@ -3706,9 +5866,16 @@ mod tests {
         )
         .unwrap();
 
-        let rows = list_recent_sessions_inner(&lingxi_home, &cwd, 5, &make_fs(temp.path()), &[])
-            .await
-            .unwrap();
+        let rows = list_recent_sessions_inner(
+            &lingxi_home,
+            &cwd,
+            SessionDiscoveryScope::Current,
+            5,
+            &make_fs(temp.path()),
+            &[],
+        )
+        .await
+        .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].uuid, id);
     }
@@ -3818,9 +5985,16 @@ mod tests {
 
         let fs = make_fs(temp.path());
         let worktrees = vec![wt_a.to_string(), wt_b.to_string()];
-        let rows = list_recent_sessions_inner(&lingxi_home, wt_a, 50, &fs, &worktrees)
-            .await
-            .expect("list");
+        let rows = list_recent_sessions_inner(
+            &lingxi_home,
+            wt_a,
+            SessionDiscoveryScope::Repository,
+            50,
+            &fs,
+            &worktrees,
+        )
+        .await
+        .expect("list");
 
         let ids: std::collections::HashSet<Uuid> = rows.iter().map(|r| r.uuid).collect();
         assert!(ids.contains(&a_root), "alpha-root included (exact prefix)");
@@ -3908,7 +6082,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_loader_uses_logical_activity_not_raw_mtime() {
+    async fn repository_picker_and_legacy_loader_choose_their_own_activity_winners() {
         let temp = TempDir::new().unwrap();
         let lingxi_home = temp.path().join("home");
         let wt_a = "/wt/alpha";
@@ -3916,7 +6090,7 @@ mod tests {
         let dir_a = lingxi_home.join("projects").join(project_dir_name(wt_a));
         let dir_b = lingxi_home.join("projects").join(project_dir_name(wt_b));
         let id = Uuid::new_v4();
-        let base = SystemTime::now() - Duration::from_secs(60);
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
 
         write_session_id(
             &dir_a,
@@ -3939,13 +6113,26 @@ mod tests {
         );
 
         let worktrees = vec![wt_a.to_string(), wt_b.to_string()];
-        let rows =
-            list_recent_sessions_inner(&lingxi_home, wt_a, 10, &make_fs(temp.path()), &worktrees)
-                .await
-                .unwrap();
+        let rows = list_recent_sessions_inner(
+            &lingxi_home,
+            wt_a,
+            SessionDiscoveryScope::Repository,
+            10,
+            &make_fs(temp.path()),
+            &worktrees,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].path, dir_a.join(format!("{id}.jsonl")));
+        assert_eq!(rows[0].title, "older logical");
+        assert_eq!(rows[0].modified, base + Duration::from_secs(10));
         assert_eq!(
-            rows.iter().find(|row| row.uuid == id).unwrap().title,
-            "newer logical"
+            select_session_path_across_worktrees(&lingxi_home, wt_a, id, &worktrees)
+                .await
+                .unwrap(),
+            dir_b.join(format!("{id}.jsonl")),
+            "the explicit legacy resolver compares logical activity after the picker has selected by physical mtime",
         );
 
         let loaded = load_session_across_worktrees_inner(
@@ -3961,6 +6148,19 @@ mod tests {
             loaded[0].message.string_at("/content"),
             Some("newer logical")
         );
+        let entries = load_session_entries_across_worktrees_inner(
+            &lingxi_home,
+            wt_a,
+            id,
+            make_fs(temp.path()),
+            &worktrees,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            entries[0].message.string_at("/content"),
+            Some("newer logical")
+        );
     }
 
     #[tokio::test]
@@ -3974,7 +6174,16 @@ mod tests {
 
         let fs = make_fs(temp.path());
         let worktrees = vec!["/wt/alpha".to_string(), "/wt/beta".to_string()];
-        match list_recent_sessions_inner(&lingxi_home, "/wt/alpha", 5, &fs, &worktrees).await {
+        match list_recent_sessions_inner(
+            &lingxi_home,
+            "/wt/alpha",
+            SessionDiscoveryScope::Repository,
+            5,
+            &fs,
+            &worktrees,
+        )
+        .await
+        {
             Err(LoaderError::EmptyDirectory) => {}
             other => panic!("expected EmptyDirectory, got {other:?}"),
         }
@@ -3996,6 +6205,7 @@ mod tests {
             message_count: 1,
             mode: SessionMode::Code,
             path: PathBuf::from("z.jsonl"),
+            workspace_path: None,
             pr_number: None,
             custom_or_ai_title: None,
             resume_model: None,
@@ -4009,6 +6219,7 @@ mod tests {
             message_count: 1,
             mode: SessionMode::Code,
             path: PathBuf::from("a.jsonl"),
+            workspace_path: None,
             pr_number: None,
             custom_or_ai_title: None,
             resume_model: None,
@@ -4075,6 +6286,7 @@ mod tests {
             message_count: 1,
             mode: SessionMode::Code,
             path: PathBuf::from(format!("{id}.jsonl")),
+            workspace_path: None,
             pr_number: None,
             custom_or_ai_title: searchable.map(str::to_string),
             resume_model: None,

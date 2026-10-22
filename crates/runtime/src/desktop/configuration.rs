@@ -398,6 +398,10 @@ pub struct DesktopConfig {
     pub anthropic_key_fd_present: bool,
     /// Working directory the orchestrator + tool context are rooted at.
     pub cwd: std::path::PathBuf,
+    /// Original session launch root, retained across a host remount after `/cd`.
+    /// Only hook project-root identity uses this value; project settings,
+    /// permissions, skills and MCP configuration are still loaded from `cwd`.
+    pub initial_project_root: Option<std::path::PathBuf>,
     /// Whether the embedding host reports this workspace as remote.
     /// Ordinary local CLI/Desktop hosts leave this false; remote hosts must
     /// set it from their session capability rather than inferred transport.
@@ -584,7 +588,12 @@ pub struct DesktopConfig {
     /// Canonical transcript selected by cold resume, or the new fork target.
     /// The writer must append to the same file that supplied resumed history.
     pub session_transcript_path: Option<std::path::PathBuf>,
+    /// Session prompt roots retained through a host remount. Unlike `add_dir`,
+    /// these load extensions without granting additional filesystem access.
+    pub initial_prompt_directories: Vec<std::path::PathBuf>,
     /// One leased source snapshot shared by history and startup metadata.
+    /// A non-deferred build adopts its matching session history before hooks;
+    /// deferred headless builds mount their prepared truncated/fork history.
     pub session_resume_snapshot: Option<DesktopSessionResumeSnapshot>,
     /// Captured cumulative usage to seed only a target with no durable ledger.
     pub session_resume_cost: Option<cost::CostState>,
@@ -906,8 +915,8 @@ impl CustomizationGates {
     /// `xd()||Hc("skills")`). RESIDUAL: in bare mode the binary still loads
     /// skills from `--add-dir` roots (`aGe` @213453497 `if(xd())return …
     /// o.map(S=>jht(join(S,".claude","skills")…))`) so `/skill-name` keeps
-    /// resolving; lingxi's registry loader has no add-dir root wiring yet, so
-    /// bare loads none (seam: `desktop_command_registry`'s skill-roots arg).
+    /// resolving. Desktop handles those explicit roots separately while this
+    /// predicate continues to suppress ambient customization directories.
     #[must_use]
     pub fn disables_skills(&self) -> bool {
         self.safe_mode || self.bare
@@ -1199,6 +1208,7 @@ impl Default for DesktopConfig {
             managed_oauth_only: false,
             anthropic_key_fd_present: false,
             cwd: std::path::PathBuf::from("."),
+            initial_project_root: None,
             remote_workspace: false,
             diskless: false,
             trusted_network_directories: Vec::new(),
@@ -1238,6 +1248,7 @@ impl Default for DesktopConfig {
             session_id_override: None,
             session_writer_lease: None,
             session_transcript_path: None,
+            initial_prompt_directories: Vec::new(),
             session_resume_snapshot: None,
             session_resume_cost: None,
             parent_session_id: None,

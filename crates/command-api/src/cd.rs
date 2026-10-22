@@ -1,58 +1,93 @@
-//! `/cd` — byte-exact model-visible strings for the "move this session to a
-//! new working directory" command (claude-code 2.1.207 `local-jsx` `name:"cd"`).
+//! Directory-move notice text verified against Claude Code 2.1.307's `WAt`.
 //!
-//! The command itself is interactive (a confirm prompt, then a
-//! [`crate::builtin_support`]-registered `SessionCwd` swap driven by the TUI +
-//! the CLI `run_permission_action` effect channel). This module is the single
-//! source of the two byte-faithful strings both surfaces render — the confirm
-//! prompt and the post-move result message — so the TUI confirm view
-//! (`tui::bottom_pane::cd_confirm_view`) and the CLI swap effect
-//! (`apps/cli/src/mode.rs`) can never drift.
-//!
-//! Oracle (2.1.207, canonical binary):
-//! - confirm prompt @ byte 198796864 (`? This moves the session's working …`).
-//! - result template @ the `tengu_cd_command` module: `The session's working
-//!   directory has changed to ${s} (${t==="cd_command"?"via /cd":"by the
-//!   user"}). The environment block at the start of this conversation still
-//!   names the ` + `previous directory — that information is stale. All
-//!   tool calls and ` + `relative paths now resolve from ${s}.` — for the `/cd`
-//!   slash path `t === "cd_command"`, so the parenthetical is `via /cd`.
+//! UI notices use the plain body; model notices use its system-reminder wrapper.
+//! The runtime appends any gated-project notice and loaded memory separately.
 
-/// The confirm prompt shown before the working directory is moved. Byte-exact
-/// to claude-code 2.1.207's `/cd` safety-check message (142 bytes, including
-/// the leading `? ` and the ASCII apostrophe).
+/// Confirmation copy used by the interactive directory-change view.
 pub const CONFIRM_PROMPT: &str = "? This moves the session's working directory and write access there, and loads project configuration (CLAUDE.md, settings) from that location.";
 
-/// The `tengu_*` analytics event name claude-code emits after a successful
-/// `/cd` move (`N("tengu_cd_command", { source: xe(t) })`).
+/// Native analytics name and the semantic source before analytics hashing.
 pub const TELEMETRY_EVENT: &str = "tengu_cd_command";
-
-/// The `source` property value for a move triggered by the `/cd` slash command
-/// (claude-code's `t = "cd_command"`; the analytics layer hashes it before the
-/// wire, so this is the pre-hash semantic source, not the wire bytes).
+/// Native source value for a slash-command move.
 pub const TELEMETRY_SOURCE_CD_COMMAND: &str = "cd_command";
 
-/// The post-move result message for the `/cd` slash path, byte-exact to
-/// claude-code 2.1.207. `new_cwd` is interpolated at BOTH `${s}` sites (the
-/// binary uses the same formatted new path in each). The message deliberately
-/// does NOT name the previous directory — it only notes that the frozen
-/// `<env>` block still references it and is now stale.
+/// Entry point that initiated the confirmed move.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MoveSource {
+    /// The interactive `/cd` command.
+    CdCommand,
+    /// A private host control request.
+    User,
+}
+
+/// State after the move's final freshness check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MoveMessageOptions {
+    /// Initiating entry point, used in the model notice.
+    pub source: MoveSource,
+    /// Whether the session has dequeued a request before the move.
+    pub request_built: bool,
+    /// Whether no user or assistant history has been established yet.
+    pub fresh_session: bool,
+}
+
+impl Default for MoveMessageOptions {
+    fn default() -> Self {
+        Self {
+            source: MoveSource::CdCommand,
+            request_built: true,
+            fresh_session: false,
+        }
+    }
+}
+
+/// Plain notice body after an interactive `/cd` in a session with prior history.
 #[must_use]
 pub fn result_message(new_cwd: &str) -> String {
-    // Fragment-by-fragment to mirror the binary's template/concat boundaries
-    // exactly, keeping every inter-word space unambiguous (no `\`-continuation
-    // whitespace hazard).
-    let mut s = String::new();
-    s.push_str("The session's working directory has changed to ");
-    s.push_str(new_cwd);
-    s.push_str(
-        " (via /cd). The environment block at the start of this conversation still names the ",
-    );
-    s.push_str("previous directory \u{2014} that information is stale. All tool calls and ");
-    s.push_str("relative paths now resolve from ");
-    s.push_str(new_cwd);
-    s.push('.');
-    s
+    move_result_message(new_cwd, MoveMessageOptions::default())
+}
+
+/// Plain notice body for a host-initiated move in a session with prior history.
+#[must_use]
+pub fn user_result_message(new_cwd: &str) -> String {
+    move_result_message(
+        new_cwd,
+        MoveMessageOptions {
+            source: MoveSource::User,
+            ..MoveMessageOptions::default()
+        },
+    )
+}
+
+/// Native base body for the confirmed session state.
+/// `new_cwd` must already have the caller's display escaping applied.
+#[must_use]
+pub fn move_result_message(new_cwd: &str, options: MoveMessageOptions) -> String {
+    if options.fresh_session {
+        return String::new();
+    }
+    let source = match options.source {
+        MoveSource::CdCommand => "via /cd",
+        MoveSource::User => "by the user",
+    };
+    let mut message =
+        format!("The session's working directory has changed to {new_cwd} ({source}). ");
+    if options.request_built {
+        message.push_str("The environment block at the start of this conversation still names the previous directory — that information is stale. ");
+    }
+    message.push_str(&format!("All tool calls and relative paths now resolve from {new_cwd}. Project settings (permission rules, hooks), project MCP servers, and project skills now come from {new_cwd}; its CLAUDE.md, if any, follows below. Environment variables set by the previous directory's settings stay in effect for this process — they cannot be unset — and the new directory's settings env is applied on top of them."));
+    message
+}
+
+/// Model-visible base notice, before optional gated-project and memory blocks.
+#[must_use]
+pub fn model_result_message(new_cwd: &str, options: MoveMessageOptions) -> String {
+    let body = move_result_message(new_cwd, options);
+    if body.is_empty() {
+        body
+    } else {
+        format!("<system-reminder>\n{body}\n</system-reminder>")
+    }
 }
 
 #[cfg(test)]
@@ -60,41 +95,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn confirm_prompt_is_byte_exact() {
+    fn move_notice_bytes_follow_native_307_replay() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../session/tests/fixtures/workspace_session_2_1_307.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["version"], "2.1.307");
+        for case in fixture["cd_move_cases"].as_array().unwrap() {
+            if case["expected"].get("result").is_none() {
+                continue;
+            }
+            let input = &case["input"];
+            let source = if input["source"] == "cd_command" {
+                MoveSource::CdCommand
+            } else {
+                MoveSource::User
+            };
+            let options = MoveMessageOptions {
+                source,
+                request_built: input["request_built"].as_bool().unwrap_or(true),
+                fresh_session: case["expected"]["result"]["freshSession"]
+                    .as_bool()
+                    .unwrap(),
+            };
+            let target = input["target_dir"].as_str().unwrap();
+            assert_eq!(
+                move_result_message(target, options),
+                case["expected"]["base_message"].as_str().unwrap(),
+                "{}",
+                case["name"]
+            );
+            if input["project_grants_gated"].as_bool() != Some(true)
+                && input.get("memory_context").is_none()
+            {
+                assert_eq!(
+                    model_result_message(target, options),
+                    case["expected"]["result"]["modelMessage"].as_str().unwrap(),
+                    "{}",
+                    case["name"]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_sources_match_their_native_move_cases() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../session/tests/fixtures/workspace_session_2_1_307.json"
+        ))
+        .unwrap();
+        let cases = fixture["cd_move_cases"].as_array().unwrap();
         assert_eq!(
-            CONFIRM_PROMPT,
-            "? This moves the session's working directory and write access there, and loads project configuration (CLAUDE.md, settings) from that location."
+            result_message("/workspace/B"),
+            cases
+                .iter()
+                .find(|case| case["name"] == "cd_used_session")
+                .unwrap()["expected"]["base_message"]
+                .as_str()
+                .unwrap()
         );
-        // The oracle constant is 142 bytes (leading `? `, ASCII apostrophe).
-        assert_eq!(CONFIRM_PROMPT.len(), 142);
-        assert!(CONFIRM_PROMPT.starts_with("? This moves the session's"));
-        assert!(CONFIRM_PROMPT.ends_with("from that location."));
-    }
-
-    #[test]
-    fn telemetry_names_are_byte_exact() {
-        assert_eq!(TELEMETRY_EVENT, "tengu_cd_command");
-        assert_eq!(TELEMETRY_SOURCE_CD_COMMAND, "cd_command");
-    }
-
-    #[test]
-    fn result_message_is_byte_exact() {
-        let got = result_message("/tmp/new");
-        // Single-line expected literal (no `\`-continuations) so every space is
-        // unambiguous. The em-dash is U+2014.
-        let expected = "The session's working directory has changed to /tmp/new (via /cd). The environment block at the start of this conversation still names the previous directory \u{2014} that information is stale. All tool calls and relative paths now resolve from /tmp/new.";
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn result_message_interpolates_path_at_both_sites() {
-        let got = result_message("/home/me/project");
-        assert_eq!(got.matches("/home/me/project").count(), 2);
-        assert!(got.starts_with(
-            "The session's working directory has changed to /home/me/project (via /cd)."
-        ));
-        assert!(got.ends_with("relative paths now resolve from /home/me/project."));
-        // The em-dash is U+2014, not a hyphen.
-        assert!(got.contains("previous directory \u{2014} that information"));
+        assert_eq!(
+            user_result_message("/workspace/B"),
+            cases
+                .iter()
+                .find(|case| case["name"] == "remote_used_session")
+                .unwrap()["expected"]["base_message"]
+                .as_str()
+                .unwrap()
+        );
     }
 }

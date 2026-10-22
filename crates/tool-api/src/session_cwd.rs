@@ -36,6 +36,9 @@ pub struct SessionCwd {
     project_root: PathBuf,
     state: ArcSwap<CwdState>,
     on_swap: Mutex<Option<OnSwapCallback>>,
+    /// Explicit grants made after composition, kept separate from project
+    /// settings so a project move can replace only the settings-owned roots.
+    explicit_grants: Mutex<Vec<PathBuf>>,
     /// Shared live-cwd cells (the file/shell/LSP tools' `LiveCwdCell`) kept in
     /// sync with every [`SessionCwd::swap`]. Empty until [`link_live_cwd`] is
     /// called, so an unlinked cell is fully inert.
@@ -56,6 +59,7 @@ impl SessionCwd {
                 trusted_dirs: trusted,
             }),
             on_swap: Mutex::new(None),
+            explicit_grants: Mutex::new(Vec::new()),
             mirror_cells: Mutex::new(Vec::new()),
         })
     }
@@ -146,6 +150,14 @@ impl SessionCwd {
     /// NOT fire the on-swap callback or mirror the live-cwd cells (both key off
     /// a cwd change, and none happened here).
     pub fn add_trusted_dir(&self, dir: PathBuf) -> bool {
+        let mut grants = self
+            .explicit_grants
+            .lock()
+            .expect("explicit grants mutex poisoned");
+        if !grants.contains(&dir) {
+            grants.push(dir.clone());
+        }
+        drop(grants);
         let cur = self.state.load();
         if cur.trusted_dirs.iter().any(|d| d == &dir) {
             return false;
@@ -157,6 +169,16 @@ impl SessionCwd {
             trusted_dirs: trusted,
         }));
         true
+    }
+
+    /// Explicit runtime additions, including an explicit grant that happened
+    /// to match a settings-owned root when it was added.
+    #[must_use]
+    pub fn explicit_trusted_dirs(&self) -> Vec<PathBuf> {
+        self.explicit_grants
+            .lock()
+            .expect("explicit grants mutex poisoned")
+            .clone()
     }
 
     /// Move the session cwd to `target` while PRESERVING the additional
@@ -348,6 +370,15 @@ mod tests {
             "the cwd is already trusted — re-adding it must report NO change"
         );
         assert_eq!(sc.trusted_dirs(), vec![boot(), extra]);
+    }
+
+    #[test]
+    fn explicit_add_of_a_settings_root_retains_its_grant_provenance() {
+        let settings_root = PathBuf::from("/settings/root");
+        let sc = SessionCwd::new(boot(), vec![boot(), settings_root.clone()]);
+        assert!(!sc.add_trusted_dir(settings_root.clone()));
+        assert_eq!(sc.explicit_trusted_dirs(), vec![settings_root]);
+        assert_eq!(sc.cwd(), boot());
     }
 
     #[test]
