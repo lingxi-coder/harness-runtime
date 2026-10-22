@@ -734,6 +734,18 @@ mod mcp_prompt_refresh_tests {
     }
 }
 
+/// The `askUserQuestionTimeout` the tool context carries: the host override
+/// (`DesktopConfig::ask_user_question_timeout_override`) wins over the loaded
+/// user/`--settings`/managed value, in the same settings-string form.
+pub(super) fn resolve_ask_user_question_timeout(
+    host_override: Option<tool_ui::ask_user_question::AskUserQuestionTimeout>,
+    loaded: Option<String>,
+) -> Option<String> {
+    host_override
+        .map(|timeout| timeout.as_settings_str().to_string())
+        .or(loaded)
+}
+
 pub async fn build(
     cfg: DesktopConfig,
     output: Arc<dyn OutputStream>,
@@ -879,6 +891,9 @@ pub async fn build_with_credential_stack(
     let fallback_permission_policy = permission::PermissionPolicy::new(cfg.permission_mode)
         .with_tool_aliases(cfg.tool_aliases.clone())
         .map_err(BuildError::InvalidToolAliases)?;
+    // Validate once at the boundary; every desktop-answered gate below (main,
+    // side chat) and the native cron seed (a clone of `cfg`) use this value.
+    let permission_timeout = cfg.resolved_permission_timeout()?;
     let native_cron_seed = cron_native::should_start_native_scheduler(&cfg).then(|| {
         let mut seed = cfg.clone();
         seed.session_writer_lease = None;
@@ -2204,12 +2219,14 @@ pub async fn build_with_credential_stack(
             }
         } else {
             // (3c) Persist an `AllowAlways` choice to `<cwd>/.lingxi/settings.local.json`.
-            let gate = Arc::new(AdapterPermissionGate::new(permission_sink).with_persist(
-                permission::PermissionPaths {
-                    lingxi_home: cfg.lingxi_home.clone(),
-                    cwd: cwd.clone(),
-                },
-            ));
+            let gate = Arc::new(
+                AdapterPermissionGate::new(permission_sink)
+                    .with_timeout(permission_timeout)
+                    .with_persist(permission::PermissionPaths {
+                        lingxi_home: cfg.lingxi_home.clone(),
+                        cwd: cwd.clone(),
+                    }),
+            );
             (gate.clone() as Arc<dyn PermissionGate>, Some(gate))
         };
 
@@ -4476,10 +4493,13 @@ pub async fn build_with_credential_stack(
     // (and the staleness / `/files` consumers).
     let read_state_map = tool_api::read_file_state::new_read_file_state_map();
     let ask_user_question_settings = load_ask_user_question_timeout(&cfg).await?;
-    let ask_user_question_timeout = ask_user_question_settings
-        .settings
-        .ask_user_question_timeout
-        .clone();
+    let ask_user_question_timeout = resolve_ask_user_question_timeout(
+        cfg.ask_user_question_timeout_override,
+        ask_user_question_settings
+            .settings
+            .ask_user_question_timeout
+            .clone(),
+    );
     // The device-audio capability, read ONCE here so the tool context below and
     // the `DesktopRuntime` returned at the end carry the very same `Arc`s (the
     // bridge's one `AudioBridge`), not two independent reads of `cfg` that a
@@ -7354,6 +7374,7 @@ pub async fn build_with_credential_stack(
         context: side_chat_tool_context,
         commands: shared_command_registry.clone(),
         availability: provider_availability.clone(),
+        permission_timeout,
     });
     Ok(DesktopRuntime {
         plugin_archive_session,

@@ -3244,6 +3244,10 @@ pub enum BuildError {
     /// create-session warning).
     #[error("tmux is not installed.\n{0}")]
     TmuxNotInstalled(String),
+    /// `DesktopConfig::permission_timeout` was zero or above
+    /// [`MAX_PERMISSION_TIMEOUT`].
+    #[error("Invalid permission timeout: {0}")]
+    InvalidPermissionTimeout(String),
 }
 
 /// Build a fully-wired desktop [`DesktopRuntime`] from a deterministic
@@ -6665,6 +6669,7 @@ pub use configuration::DesktopMcpServices;
 pub use configuration::DesktopRequestIdentity;
 pub use configuration::DesktopSessionComposition;
 pub use configuration::DesktopSessionResumeSnapshot;
+pub use configuration::MAX_PERMISSION_TIMEOUT;
 pub use credentials::api_service_from_stack;
 use credentials::aws_auth_refresher;
 pub use credentials::build_api_service;

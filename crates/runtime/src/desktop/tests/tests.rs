@@ -7441,6 +7441,148 @@ async fn build_default_uses_adapter_gate() {
     let _ = task.await.unwrap();
 }
 
+/// A default config keeps the shipped timeouts: the 300 s permission window
+/// and whatever `askUserQuestionTimeout` the settings load supplies.
+#[test]
+fn default_config_keeps_permission_and_ask_user_question_timeouts() {
+    use super::assembly::resolve_ask_user_question_timeout;
+    let cfg = DesktopConfig::default();
+    assert_eq!(cfg.permission_timeout, None);
+    assert_eq!(cfg.ask_user_question_timeout_override, None);
+    assert_eq!(
+        cfg.resolved_permission_timeout().expect("default is valid"),
+        client::adapter::DEFAULT_PERMISSION_TIMEOUT
+    );
+    assert_eq!(
+        client::adapter::DEFAULT_PERMISSION_TIMEOUT,
+        std::time::Duration::from_secs(300)
+    );
+    // No override: the loaded setting (or its absence, i.e. `never`) passes through.
+    assert_eq!(
+        resolve_ask_user_question_timeout(cfg.ask_user_question_timeout_override, None),
+        None
+    );
+    assert_eq!(
+        resolve_ask_user_question_timeout(
+            cfg.ask_user_question_timeout_override,
+            Some("5m".to_string())
+        ),
+        Some("5m".to_string())
+    );
+}
+
+/// The host's AskUserQuestion override wins over the loaded setting, and
+/// `Never` stays expressible.
+#[test]
+fn ask_user_question_override_wins_over_loaded_setting() {
+    use super::assembly::resolve_ask_user_question_timeout;
+    use tool_ui::ask_user_question::AskUserQuestionTimeout;
+    assert_eq!(
+        resolve_ask_user_question_timeout(
+            Some(AskUserQuestionTimeout::Never),
+            Some("60s".to_string())
+        ),
+        Some("never".to_string())
+    );
+    assert_eq!(
+        resolve_ask_user_question_timeout(Some(AskUserQuestionTimeout::M10), None),
+        Some("10m".to_string())
+    );
+    // The override string round-trips through the tool's own settings parser.
+    assert_eq!(
+        AskUserQuestionTimeout::parse_or_default(
+            resolve_ask_user_question_timeout(
+                Some(AskUserQuestionTimeout::M5),
+                Some("never".to_string())
+            )
+            .as_deref()
+        ),
+        AskUserQuestionTimeout::M5
+    );
+}
+
+/// Zero and absurdly long permission timeouts are rejected at the boundary;
+/// both `build` and the config helper report `InvalidPermissionTimeout`.
+#[tokio::test]
+async fn invalid_permission_timeout_is_rejected() {
+    let mut cfg = DesktopConfig::default();
+    cfg.permission_timeout = Some(std::time::Duration::ZERO);
+    assert!(matches!(
+        cfg.resolved_permission_timeout(),
+        Err(super::BuildError::InvalidPermissionTimeout(_))
+    ));
+    cfg.permission_timeout =
+        Some(super::MAX_PERMISSION_TIMEOUT + std::time::Duration::from_secs(1));
+    assert!(matches!(
+        cfg.resolved_permission_timeout(),
+        Err(super::BuildError::InvalidPermissionTimeout(_))
+    ));
+    cfg.permission_timeout = Some(super::MAX_PERMISSION_TIMEOUT);
+    assert_eq!(
+        cfg.resolved_permission_timeout().unwrap(),
+        super::MAX_PERMISSION_TIMEOUT
+    );
+
+    let (_tmp, mut cfg) = test_config(false);
+    cfg.permission_timeout = Some(std::time::Duration::ZERO);
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
+        Arc::new(orchestrator::test_support::MockOutputStream::new());
+    let sink: Arc<dyn client::adapter::PermissionRequestSink> =
+        Arc::new(RecordingPermissionSink::default());
+    let err = build(cfg, output, sink)
+        .await
+        .err()
+        .expect("a zero permission timeout must fail the build");
+    assert!(matches!(
+        err,
+        super::BuildError::InvalidPermissionTimeout(_)
+    ));
+}
+
+/// A configured `permission_timeout` reaches the gate `build()` binds: an
+/// unanswered prompt resolves `Deny` once the (short) window elapses.
+#[tokio::test]
+async fn configured_permission_timeout_reaches_adapter_gate() {
+    use permission::gate::{PermissionDecision, PermissionGate};
+    let (_tmp, mut cfg) = test_config(false);
+    cfg.permission_timeout = Some(std::time::Duration::from_millis(50));
+    let output: Arc<dyn lingxi_core::host::OutputStream> =
+        Arc::new(orchestrator::test_support::MockOutputStream::new());
+    let sink = Arc::new(RecordingPermissionSink::default());
+    let perm_sink: Arc<dyn client::adapter::PermissionRequestSink> = sink.clone();
+
+    let rt = build(cfg, output, perm_sink).await.expect("build() failed");
+    let gate = rt
+        .permission_gate
+        .clone()
+        .expect("adapter build must surface a gate handle");
+
+    // Nobody resolves the request; only the configured window can end the wait.
+    // Were the 300 s default still in force, the outer guard would trip first.
+    let decision = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        gate.check(
+            "Bash",
+            &Utf16JsonProjection::from_serde_value(&serde_json::json!({"command": "ls"}))
+                .expect("generated permission input"),
+        ),
+    )
+    .await
+    .expect("the configured 50ms window must end the wait well before the guard");
+    match decision {
+        PermissionDecision::Deny { reason } => {
+            let text = reason.string_at("").expect("reason source string");
+            assert!(text.contains("timed out"), "got: {text}");
+        }
+        PermissionDecision::Allow => panic!("expected Deny on timeout"),
+    }
+    assert_eq!(
+        sink.count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the prompt still reached the client before expiring"
+    );
+}
+
 /// T11: the build-time coordinator-activation flag defaults to `false`, so a
 /// default-constructed `DesktopConfig` is NOT a coordinator session.
 /// Additive guardrail: default sessions must be byte-identical, mode off.

@@ -17,6 +17,9 @@ pub(super) struct DesktopSideChatFactory {
     pub context: BuiltinToolContext,
     pub commands: Arc<RwLock<CommandRegistry>>,
     pub availability: std::collections::BTreeMap<String, bool>,
+    /// Same per-request window as the main session's gate: the same client
+    /// answers this side chat's prompts.
+    pub permission_timeout: std::time::Duration,
 }
 #[async_trait]
 impl SideChatFactory for DesktopSideChatFactory {
@@ -39,8 +42,11 @@ impl SideChatFactory for DesktopSideChatFactory {
             Box::pin(async move { Some(id) })
         }));
         let adapter = Arc::new(ProviderApiAdapter::new(api.clone()));
-        let permission_gate =
-            Arc::new(AdapterPermissionGate::new(permission_sink).with_event_sink(sink.clone()));
+        let permission_gate = Arc::new(
+            AdapterPermissionGate::new(permission_sink)
+                .with_timeout(self.permission_timeout)
+                .with_event_sink(sink.clone()),
+        );
         permission_gate.set_session_id(Some(id.to_string()));
         let mut ctx = self.context.clone();
         ctx.side_chat = true;

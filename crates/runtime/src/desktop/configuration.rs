@@ -339,6 +339,18 @@ pub struct DesktopConfig {
     /// an Apps page). Registers the `LocalApp` tool and the `local-app`
     /// skill; CLI and headless hosts leave it off.
     pub local_apps: bool,
+    /// How long a parked permission prompt waits for the attached client before
+    /// it resolves `Deny` (fail-closed). `None` keeps
+    /// [`client::adapter::DEFAULT_PERMISSION_TIMEOUT`] (300 s). A remote viewer
+    /// that answers over a slow link sets a longer window. `build` rejects zero
+    /// and anything above [`MAX_PERMISSION_TIMEOUT`].
+    pub permission_timeout: Option<std::time::Duration>,
+    /// Host override for the `askUserQuestionTimeout` setting. `Some` wins over
+    /// the user/`--settings`/managed value, so the host decides how long an
+    /// AskUserQuestion waits (`Never` blocks until answered); `None` keeps the
+    /// loaded setting (default `never`).
+    pub ask_user_question_timeout_override:
+        Option<tool_ui::ask_user_question::AskUserQuestionTimeout>,
     /// API base URL (default `https://api.anthropic.com`); env override
     /// `LINGXI_API_BASE_URL` is resolved by the host *before* it fills this.
     pub api_base: String,
@@ -1004,6 +1016,11 @@ impl std::fmt::Debug for DesktopConfig {
             .field("mod_render_surface", &self.mod_render_surface)
             .field("inline_visualization", &self.inline_visualization)
             .field("local_apps", &self.local_apps)
+            .field("permission_timeout", &self.permission_timeout)
+            .field(
+                "ask_user_question_timeout_override",
+                &self.ask_user_question_timeout_override,
+            )
             .field(
                 "native_settings_agent_context",
                 &self.native_settings_agent_context,
@@ -1195,6 +1212,8 @@ impl Default for DesktopConfig {
             inline_visualization: false,
             native_settings_agent_context: lingxi_core::host::NativeSettingsAgentContext::Main,
             local_apps: false,
+            permission_timeout: None,
+            ask_user_question_timeout_override: None,
             api_base: "https://api.anthropic.com".to_string(),
             api_key: String::new(),
             api_key_source: llm_runtime::CredentialSource::Configured,
@@ -1294,7 +1313,35 @@ impl Default for DesktopConfig {
     }
 }
 
+/// Upper bound for [`DesktopConfig::permission_timeout`]. A parked prompt that
+/// outlives a day is a vanished client, not a slow one; the cap also keeps a
+/// mistyped flag from becoming an effectively infinite wait.
+pub const MAX_PERMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+
 impl DesktopConfig {
+    /// The per-request permission timeout the desktop gates run with: the
+    /// configured [`Self::permission_timeout`], else
+    /// [`client::adapter::DEFAULT_PERMISSION_TIMEOUT`]. A zero timeout would
+    /// deny every prompt before the client could see it, and one above
+    /// [`MAX_PERMISSION_TIMEOUT`] is almost certainly a unit mistake, so both
+    /// are rejected rather than silently clamped.
+    pub fn resolved_permission_timeout(&self) -> Result<std::time::Duration, super::BuildError> {
+        match self.permission_timeout {
+            None => Ok(client::adapter::DEFAULT_PERMISSION_TIMEOUT),
+            Some(timeout) if timeout.is_zero() => Err(super::BuildError::InvalidPermissionTimeout(
+                "must be greater than zero".to_string(),
+            )),
+            Some(timeout) if timeout > MAX_PERMISSION_TIMEOUT => {
+                Err(super::BuildError::InvalidPermissionTimeout(format!(
+                    "{}s exceeds the {}s maximum",
+                    timeout.as_secs(),
+                    MAX_PERMISSION_TIMEOUT.as_secs()
+                )))
+            }
+            Some(timeout) => Ok(timeout),
+        }
+    }
+
     /// Resolve the session composition for prompt/system-request semantics.
     ///
     /// The shared CLI base config starts headless and is promoted to
