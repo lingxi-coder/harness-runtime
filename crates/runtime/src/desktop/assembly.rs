@@ -5036,11 +5036,10 @@ pub async fn build_with_credential_stack(
         crate::inline_visualization::register_tool(&mut tools_inner, ctx, store);
     }
     if let Some(ctx) = local_app_tool_ctx {
-        let store = crate::local_apps::shared_store(ctx.fs.clone(), &cfg.lingxi_home);
         let visualizations = cfg
             .inline_visualization
             .then(|| crate::inline_visualization::shared_store(ctx.fs.clone(), &cfg.lingxi_home));
-        crate::local_apps::register_tool(&mut tools_inner, ctx, store, visualizations);
+        tools_inner.register_builtin(Arc::new(tool_ui::desktop_local_app::DesktopLocalAppTool::new(ctx, cfg.lingxi_home.clone(), visualizations)));
     }
     // Workflow tool (desktop-only — it fans out subagents). Registered here,
     // after `register_desktop_tools`, because its launcher needs `task_registry`
@@ -6310,10 +6309,9 @@ pub async fn build_with_credential_stack(
         );
     }
     if cfg.local_apps {
-        crate::local_apps::register_skill(
+        crate::local_apps::register_desktop_skill(
             &mut reg,
             &[local_app::TOOL_NAME.to_string(), "Bash".to_string()],
-            "Bash",
         );
     }
     command_api::builtins::list_agents::register(

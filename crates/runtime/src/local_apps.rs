@@ -71,6 +71,32 @@ pub fn register_skill(
     available_tool_names: &[String],
     shell_tool: &str,
 ) {
+    register_skill_text(
+        registry,
+        available_tool_names,
+        &local_app::skill::skill_markdown(
+            available_tool_names
+                .iter()
+                .any(|name| name == shell_tool)
+                .then_some(shell_tool),
+        ),
+    );
+}
+
+/// Desktop projects use a different workflow and capability contract.
+pub fn register_desktop_skill(registry: &mut CommandRegistry, available_tool_names: &[String]) {
+    register_skill_text(
+        registry,
+        available_tool_names,
+        include_str!("../assets/desktop-local-app.md"),
+    );
+}
+
+fn register_skill_text(
+    registry: &mut CommandRegistry,
+    available_tool_names: &[String],
+    markdown: &str,
+) {
     registry.unregister_loaded_from(SKILL_LOADED_FROM);
     if !available_tool_names
         .iter()
@@ -78,14 +104,9 @@ pub fn register_skill(
     {
         return;
     }
-    let shell = available_tool_names
-        .iter()
-        .any(|name| name == shell_tool)
-        .then_some(shell_tool);
-    let markdown = local_app::skill::skill_markdown(shell);
     let skill_root = PathBuf::from(SKILL_LOADED_FROM).join(local_app::skill::SKILL_NAME);
     let parsed = command_api::parse_skill_command_markdown(
-        &markdown,
+        markdown,
         skill_root.join("SKILL.md"),
         skill_root,
         CommandSource::Bundled,

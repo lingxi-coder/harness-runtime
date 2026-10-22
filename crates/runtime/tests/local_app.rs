@@ -48,6 +48,7 @@ async fn assert_assembled_tool_saves_current_visualization(
     orchestrator: &orchestrator::ConversationOrchestrator,
     fs: Arc<dyn FileSystem>,
     config_home: &Path,
+    desktop: bool,
 ) {
     let session = orchestrator.current_session_id().await;
     let visualizations =
@@ -72,6 +73,54 @@ async fn assert_assembled_tool_saves_current_visualization(
     )])
     .expect("visualization reference is valid LocalApp input");
 
+    let desktop_request = if desktop {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let token = "a".repeat(64);
+        std::fs::write(
+            config_home.join("desktop-local-app-host.json"),
+            serde_json::json!({"port":port,"token":token}).to_string(),
+        )
+        .unwrap();
+        Some(tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = Vec::new();
+            let (header_end, length) = loop {
+                let mut chunk = [0u8; 4096];
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                buffer.extend_from_slice(&chunk[..n]);
+                if let Some(end) = buffer.windows(4).position(|v| v == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&buffer[..end]).to_ascii_lowercase();
+                    assert!(header.starts_with("post /local-app "));
+                    assert!(header.contains(&format!("authorization: bearer {token}")));
+                    let length = header
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    break (end + 4, length);
+                }
+            };
+            while buffer.len() < header_end + length {
+                let mut chunk = [0u8; 4096];
+                let n = stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                buffer.extend_from_slice(&chunk[..n]);
+            }
+            let input: serde_json::Value =
+                serde_json::from_slice(&buffer[header_end..header_end + length]).unwrap();
+            let body = r#"{"action":"publish","id":"a00000000000000000000","revision":1,"name":"Assembled visualization"}"#;
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            input
+        }))
+    } else {
+        None
+    };
+
     // Exercise the assembled tool through the same dispatcher path as a host
     // tool request, including the real schema, validation, and permission gates.
     let result = orchestrator
@@ -91,6 +140,21 @@ async fn assert_assembled_tool_saves_current_visualization(
                 .unwrap_or_else(|error| format!("<projection serialization failed: {error}>"))
         ),
         _ => panic!("LocalApp dispatch should return a tool result"),
+    }
+
+    if let Some(request) = desktop_request {
+        let request = tokio::time::timeout(std::time::Duration::from_secs(10), request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(request["action"], "publish");
+        assert_eq!(request["name"], "Assembled visualization");
+        assert!(request["html"]
+            .as_str()
+            .unwrap()
+            .contains(VISUALIZATION_FRAGMENT));
+        assert!(request["source_session"]["sessionId"].is_string());
+        return;
     }
 
     let host_runtime = tokio::runtime::Handle::current();
@@ -256,8 +320,13 @@ async fn desktop_assembly_passes_shared_visualizations_to_local_app() {
         .any(|name| name == "LocalApp"));
 
     let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(cwd));
-    assert_assembled_tool_saves_current_visualization(&runtime.orchestrator, fs, &config_home)
-        .await;
+    assert_assembled_tool_saves_current_visualization(
+        &runtime.orchestrator,
+        fs,
+        &config_home,
+        true,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -282,6 +351,11 @@ async fn mobile_assembly_passes_shared_visualizations_to_local_app() {
     .await
     .expect("mobile runtime should assemble with local apps and visualizations");
 
-    assert_assembled_tool_saves_current_visualization(&runtime.orchestrator, fs, &config_home)
-        .await;
+    assert_assembled_tool_saves_current_visualization(
+        &runtime.orchestrator,
+        fs,
+        &config_home,
+        false,
+    )
+    .await;
 }
