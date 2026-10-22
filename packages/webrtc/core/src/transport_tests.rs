@@ -1,3 +1,5 @@
+#[path = "transport_data_only_tests.rs"]
+mod data_only;
 #[path = "transport_network_tests.rs"]
 mod network;
 

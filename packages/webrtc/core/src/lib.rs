@@ -12,4 +12,4 @@ mod video_track;
 pub use video_track::VideoSource;
 
 mod config;
-pub use config::{IceConfig, IceServer, SessionConfig};
+pub use config::{IceConfig, IceServer, MdnsMode, SessionConfig};

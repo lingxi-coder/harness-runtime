@@ -23,6 +23,7 @@ use webrtc::peer_connection::PeerConnectionBuilder;
 use webrtc::peer_connection::PeerConnectionEventHandler;
 use webrtc::peer_connection::RTCIceCandidateInit;
 use webrtc::peer_connection::RTCIceGatheringState;
+use webrtc::peer_connection::RTCPeerConnectionState;
 use webrtc::peer_connection::RTCSessionDescription;
 
 const WAIT: Duration = Duration::from_secs(/*secs*/ 15);
@@ -37,6 +38,7 @@ struct Events(
     Arc<Notify>,
     Option<tokio::sync::mpsc::Sender<Arc<dyn DataChannel>>>,
     AtomicBool,
+    watch::Sender<RTCPeerConnectionState>,
 );
 
 // The upstream trait requires async-trait's boxed-future ABI.
@@ -77,6 +79,19 @@ impl PeerConnectionEventHandler for Events {
             }
         })
     }
+
+    fn on_connection_state_change<'a, 'async_trait>(
+        &'a self,
+        state: RTCPeerConnectionState,
+    ) -> BoxFuture<'async_trait, ()>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            self.3.send_replace(state);
+        })
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -87,7 +102,7 @@ pub enum AnswerOutcome {
 
 pub struct Transport {
     pub(crate) incoming: crate::incoming::Incoming,
-    pub(crate) audio: crate::audio_track::AudioTrack,
+    pub(crate) audio: Option<crate::audio_track::AudioTrack>,
     connection: Arc<dyn PeerConnection>,
     gathered: Arc<Notify>,
     observer: JoinHandle<()>,
@@ -96,6 +111,10 @@ pub struct Transport {
     answerer: bool,
     messages: tokio::sync::mpsc::Receiver<webrtc::data_channel::RTCDataChannelMessage>,
     closed: bool,
+    gather_timeout: Option<Duration>,
+    data_only: bool,
+    overflowed: Arc<AtomicBool>,
+    state: watch::Receiver<RTCPeerConnectionState>,
     video_incoming: Option<crate::incoming::Incoming>,
     camera: Option<crate::video_track::VideoTrack>,
     screen: Option<crate::video_track::VideoTrack>,
@@ -115,49 +134,51 @@ impl Transport {
 
     /// Bind explicit UDP endpoints (e.g. a Docker-published port). TCP remains ephemeral.
     pub async fn with_bind_addresses(addresses: Vec<String>) -> Result<Self> {
-        Self::build(
-            Arc::new(crate::transport_runtime::VoiceRuntime::default()),
-            addresses,
-            false,
-            false,
-            crate::IceConfig::default(),
-        )
+        Self::with_config(crate::SessionConfig {
+            bind_addresses: addresses,
+            ..Default::default()
+        })
         .await
     }
 
     #[cfg(test)]
     async fn with_runtime(runtime: Arc<dyn webrtc::runtime::Runtime>) -> Result<Self> {
-        Self::build(
-            runtime,
-            vec!["0.0.0.0:0".into(), "[::]:0".into()],
-            false,
-            false,
-            crate::IceConfig::default(),
-        )
-        .await
+        Self::build(runtime, crate::SessionConfig::default()).await
     }
 
     /// Configure STUN/TURN and role before creating sockets or negotiating.
     pub async fn with_config(config: crate::SessionConfig) -> Result<Self> {
         Self::build(
             Arc::new(crate::transport_runtime::VoiceRuntime::default()),
-            config.bind_addresses,
-            config.video,
-            config.answerer,
-            config.ice,
+            config,
         )
         .await
     }
 
     async fn build(
         runtime: Arc<dyn webrtc::runtime::Runtime>,
-        addresses: Vec<String>,
-        video: bool,
-        answerer: bool,
-        ice: crate::IceConfig,
+        config: crate::SessionConfig,
     ) -> Result<Self> {
+        config.validate()?;
+        let crate::SessionConfig {
+            bind_addresses: addresses,
+            video,
+            answerer,
+            ice,
+            data_only,
+            sctp_send_buffer,
+            sctp_receive_buffer,
+            receive_queue,
+            gather_timeout,
+            mdns,
+        } = config;
         let configuration = ice.configuration()?;
-        let (mut media, audio) = crate::audio_track::AudioTrack::new()?;
+        let (mut media, audio) = if data_only {
+            (webrtc::peer_connection::MediaEngine::default(), None)
+        } else {
+            let (media, audio) = crate::audio_track::AudioTrack::new()?;
+            (media, Some(audio))
+        };
         let (incoming, ingress, video_incoming) = if video {
             let (audio, ingress, video) = crate::incoming::Incoming::with_video();
             (audio, ingress, Some(video))
@@ -190,6 +211,16 @@ impl Transport {
             .map_err(|_| "invalid voice ICE attempt budget")?;
         let mut settings = webrtc::peer_connection::SettingEngine::default();
         settings.set_ice_connection_attempts(Some(check_interval), Some(attempts));
+        // Joining the mDNS group can be refused (e.g. iOS without the multicast
+        // entitlement); a data-only peer then connects without resolving `.local` names.
+        let query_mdns = mdns == crate::MdnsMode::QueryOnly
+            && (!data_only || rtc::mdns::MulticastSocket::new().into_std().is_ok());
+        settings.set_multicast_dns_mode(if query_mdns {
+            rtc::ice::mdns::MulticastDnsMode::QueryOnly
+        } else {
+            rtc::ice::mdns::MulticastDnsMode::Disabled
+        });
+        let (state_tx, state) = watch::channel(RTCPeerConnectionState::New);
         let connection: Arc<dyn PeerConnection> = Arc::new(
             PeerConnectionBuilder::new()
                 .with_configuration(configuration)
@@ -201,16 +232,19 @@ impl Transport {
                     gathered.clone(),
                     answerer.then_some(accepted_tx),
                     AtomicBool::new(false),
+                    state_tx,
                 )))
                 .with_udp_addrs(addresses)
                 .with_tcp_addrs(vec!["0.0.0.0:0".into(), "[::]:0".into()])
-                .with_data_channel_send_buffer_limit(/*bytes*/ 64 * 1024)
-                .with_sctp_receive_buffer_size(/*size*/ 64 * 1024)
+                .with_data_channel_send_buffer_limit(sctp_send_buffer)
+                .with_sctp_receive_buffer_size(sctp_receive_buffer)
                 .build()
                 .await
                 .map_err(|_| "failed to create voice peer")?,
         );
-        if connection.add_track(audio.track.clone()).await.is_err() {
+        if let Some(audio) = &audio
+            && connection.add_track(audio.track.clone()).await.is_err()
+        {
             let _ = timeout(Duration::from_secs(/*secs*/ 2), connection.close()).await;
             return Err("failed to attach voice track");
         }
@@ -235,7 +269,10 @@ impl Transport {
             let _ = channel.set(created);
         }
         let (sender, ready) = watch::channel(false);
-        let (message_tx, messages) = tokio::sync::mpsc::channel(32);
+        let (message_tx, messages) = tokio::sync::mpsc::channel(receive_queue);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let overflow_flag = overflowed.clone();
+        let mut peer_state = state.clone();
         let channel_slot = channel.clone();
         let observer = tokio::spawn(async move {
             let observed = if let Some(channel) = channel_slot.get() {
@@ -247,7 +284,28 @@ impl Transport {
                 let _ = channel_slot.set(channel.clone());
                 channel
             };
-            while let Some(event) = observed.poll().await {
+            loop {
+                // A data-only peer also ends when the connection itself fails or closes,
+                // since the channel may never report it. Voice behaviour is unchanged.
+                let event = tokio::select! {
+                    event = observed.poll() => event,
+                    _ = async {
+                        if data_only {
+                            let _ = peer_state
+                                .wait_for(|s| {
+                                    matches!(
+                                        s,
+                                        RTCPeerConnectionState::Failed
+                                            | RTCPeerConnectionState::Closed
+                                    )
+                                })
+                                .await;
+                        } else {
+                            std::future::pending::<()>().await;
+                        }
+                    } => None,
+                };
+                let Some(event) = event else { break };
                 match event {
                     DataChannelEvent::OnOpen => {
                         sender.send_replace(true);
@@ -258,6 +316,11 @@ impl Transport {
                     DataChannelEvent::OnMessage(message) => {
                         if message_tx.try_send(message).is_err() {
                             // Closing is observable; never silently lose an Agent message.
+                            // The upstream driver also drops events once its own 256-event
+                            // queue fills, so this loop must keep draining it: awaiting
+                            // here would turn backpressure into silent loss. Senders pace
+                            // themselves with protocol acknowledgements.
+                            overflow_flag.store(true, Ordering::Release);
                             let _ = observed.close().await;
                             break;
                         }
@@ -279,6 +342,10 @@ impl Transport {
             answerer,
             messages,
             closed: false,
+            gather_timeout,
+            data_only,
+            overflowed,
+            state,
             video_incoming,
             camera,
             screen,
@@ -299,7 +366,7 @@ impl Transport {
                 .set_local_description(offer)
                 .await
                 .map_err(|_| "failed to set voice offer")?;
-            self.gathered.notified().await;
+            self.wait_gathered().await;
             self.connection
                 .local_description()
                 .await
@@ -308,6 +375,17 @@ impl Transport {
         })
         .await
         .map_err(|_| "timed out gathering voice candidates")?
+    }
+
+    /// Waits for ICE gathering. With a configured bound, a timeout is not an error:
+    /// the non-trickle SDP carries whatever candidates were gathered so far.
+    async fn wait_gathered(&self) {
+        match self.gather_timeout {
+            Some(bound) => {
+                let _ = timeout(bound, self.gathered.notified()).await;
+            }
+            None => self.gathered.notified().await,
+        }
     }
 
     pub async fn apply_answer(&self, sdp: String) -> Result<AnswerOutcome> {
@@ -392,13 +470,11 @@ impl Transport {
 
     /// Answering role uses the same transport and packet admission as the host.
     pub async fn new_answerer(video: bool) -> Result<Self> {
-        Self::build(
-            Arc::new(crate::transport_runtime::VoiceRuntime::default()),
-            vec!["0.0.0.0:0".into(), "[::]:0".into()],
+        Self::with_config(crate::SessionConfig {
             video,
-            true,
-            crate::IceConfig::default(),
-        )
+            answerer: true,
+            ..Default::default()
+        })
         .await
     }
 
@@ -453,7 +529,7 @@ impl Transport {
                 .set_local_description(answer)
                 .await
                 .map_err(|_| "failed to set answer")?;
-            self.gathered.notified().await;
+            self.wait_gathered().await;
             self.connection
                 .local_description()
                 .await
@@ -476,19 +552,42 @@ impl Transport {
         !self.closed && *self.ready.borrow()
     }
 
+    /// Channel readiness: `true` once `lingxi-agent` is open, `false` after it closes,
+    /// errors, overflows its receive queue or (data-only) the connection fails.
+    pub fn subscribe_ready(&self) -> watch::Receiver<bool> {
+        self.ready.clone()
+    }
+
+    /// Peer-connection state (new, connecting, connected, disconnected, failed, closed).
+    pub fn subscribe_connection_state(&self) -> watch::Receiver<RTCPeerConnectionState> {
+        self.state.clone()
+    }
+
+    /// True when the channel was closed because the consumer let the receive queue fill.
+    pub fn receive_overflowed(&self) -> bool {
+        self.overflowed.load(Ordering::Acquire)
+    }
+
     /// Sends a host-encoded 20 ms Opus frame using the shared RTP source clock.
     pub async fn send_opus(&mut self, bytes: Vec<u8>, at: std::time::Instant) -> Result<()> {
         if self.closed {
             return Err("peer closed");
         }
         self.audio
+            .as_mut()
+            .ok_or("audio not enabled")?
             .send(crate::audio_track::EncodedAudio { data: bytes, at })
             .await
     }
 
     /// Send a synthetic silence packet only when the RTP source clock is due.
     pub async fn send_opus_if_due(&mut self, bytes: Vec<u8>, at: std::time::Instant) -> Result<()> {
-        if self.audio.end.is_some_and(|end| at < end) {
+        if self
+            .audio
+            .as_ref()
+            .and_then(|audio| audio.end)
+            .is_some_and(|end| at < end)
+        {
             return Ok(());
         }
         self.send_opus(bytes, at).await
@@ -501,23 +600,18 @@ impl Transport {
 
     /// Enable independent camera and screen tracks before negotiation.
     pub async fn new_with_video() -> Result<Self> {
-        Self::build(
-            Arc::new(crate::transport_runtime::VoiceRuntime::default()),
-            vec!["0.0.0.0:0".into(), "[::]:0".into()],
-            true,
-            false,
-            crate::IceConfig::default(),
-        )
+        Self::with_config(crate::SessionConfig {
+            video: true,
+            ..Default::default()
+        })
         .await
     }
     pub async fn with_bind_addresses_and_video(addresses: Vec<String>) -> Result<Self> {
-        Self::build(
-            Arc::new(crate::transport_runtime::VoiceRuntime::default()),
-            addresses,
-            true,
-            false,
-            crate::IceConfig::default(),
-        )
+        Self::with_config(crate::SessionConfig {
+            bind_addresses: addresses,
+            video: true,
+            ..Default::default()
+        })
         .await
     }
     /// Native renderers identify camera/screen from negotiated track metadata,
@@ -609,6 +703,20 @@ impl Transport {
             return Ok(());
         }
         self.closed = true;
+        if self.data_only {
+            // The pinned stack sends no close notification when the connection is torn
+            // down, so the remote would only notice after ICE fails (~30 s). Resetting the
+            // SCTP stream first lets it see the channel close promptly.
+            if let Some(channel) = self.channel.get()
+                && channel.close().await.is_ok()
+            {
+                let _ = timeout(
+                    Duration::from_millis(/*millis*/ 500),
+                    self.ready.clone().wait_for(|ready| !*ready),
+                )
+                .await;
+            }
+        }
         self.messages.close();
         self.observer.abort();
         let _ = (&mut self.observer).await;

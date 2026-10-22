@@ -1,4 +1,5 @@
 //! Host-supplied ICE configuration; credentials are never included in Debug.
+use std::time::Duration;
 use webrtc::peer_connection::{
     RTCConfiguration, RTCConfigurationBuilder, RTCIceServer, RTCIceTransportPolicy,
 };
@@ -22,12 +23,46 @@ pub struct IceConfig {
     /// Require relayed local candidates; failed TURN never falls back to host ICE.
     pub relay_only: bool,
 }
+/// Whether remote mDNS (`<uuid>.local`) host candidates are resolved.
+/// Browsers hide LAN addresses behind mDNS names, so same-LAN direct paths to a
+/// Chromium peer need `QueryOnly`. Our own candidates are never published as mDNS names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MdnsMode {
+    /// Resolve remote `.local` candidates; local host candidates keep their IPs.
+    /// This is the pinned upstream default and the existing voice behaviour.
+    #[default]
+    QueryOnly,
+    /// Discard remote `.local` candidates.
+    Disabled,
+}
+
+pub(crate) const DEFAULT_SCTP_BUFFER: usize = 64 * 1024;
+pub(crate) const DEFAULT_RECEIVE_QUEUE: usize = 32;
+const MIN_SCTP_BUFFER: usize = 16 * 1024;
+const MAX_SCTP_BUFFER: usize = 16 * 1024 * 1024;
+const MAX_RECEIVE_QUEUE: usize = 65_536;
+
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
     pub bind_addresses: Vec<String>,
     pub video: bool,
     pub answerer: bool,
     pub ice: IceConfig,
+    /// Negotiate only the `lingxi-agent` DataChannel: no audio or video track, no
+    /// media codecs in the SDP. Incompatible with `video`; audio/video calls fail.
+    pub data_only: bool,
+    /// Bytes of outbound DataChannel data in flight before `send_bytes` waits (16 KiB..16 MiB).
+    pub sctp_send_buffer: usize,
+    /// SCTP receive window in bytes (16 KiB..16 MiB). Keep it at least one fragment.
+    pub sctp_receive_buffer: u32,
+    /// Messages queued between the network and `receive()`. If a consumer lets this
+    /// fill, the channel is closed (never silently dropped); see `receive_overflowed`.
+    pub receive_queue: usize,
+    /// `None`: `offer`/`answer` fail if gathering is incomplete after 15 s (voice behaviour).
+    /// `Some(d)`: wait at most `d` for gathering, then return the SDP with the candidates
+    /// gathered so far (non-trickle), so an unreachable STUN server cannot stall pairing.
+    pub gather_timeout: Option<Duration>,
+    pub mdns: MdnsMode,
 }
 impl Default for SessionConfig {
     fn default() -> Self {
@@ -36,7 +71,50 @@ impl Default for SessionConfig {
             video: false,
             answerer: false,
             ice: IceConfig::default(),
+            data_only: false,
+            sctp_send_buffer: DEFAULT_SCTP_BUFFER,
+            sctp_receive_buffer: DEFAULT_SCTP_BUFFER as u32,
+            receive_queue: DEFAULT_RECEIVE_QUEUE,
+            gather_timeout: None,
+            mdns: MdnsMode::default(),
         }
+    }
+}
+impl SessionConfig {
+    /// Offerer-side defaults for a Remote Control viewer: DataChannel only, a
+    /// 3 s bounded gathering wait, 1 MiB buffers and a 1024-message receive queue.
+    /// Set `answerer` for the accepting side; `ice.servers` takes the STUN list.
+    pub fn data_only(ice: IceConfig) -> Self {
+        Self {
+            data_only: true,
+            ice,
+            sctp_send_buffer: 1024 * 1024,
+            sctp_receive_buffer: 1024 * 1024,
+            receive_queue: 1024,
+            gather_timeout: Some(Duration::from_secs(3)),
+            ..Default::default()
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.data_only && self.video {
+            return Err("data-only sessions cannot carry video");
+        }
+        if !(MIN_SCTP_BUFFER..=MAX_SCTP_BUFFER).contains(&self.sctp_send_buffer)
+            || !(MIN_SCTP_BUFFER..=MAX_SCTP_BUFFER).contains(&(self.sctp_receive_buffer as usize))
+        {
+            return Err("SCTP buffer size out of range");
+        }
+        if !(1..=MAX_RECEIVE_QUEUE).contains(&self.receive_queue) {
+            return Err("receive queue size out of range");
+        }
+        if self
+            .gather_timeout
+            .is_some_and(|d| d.is_zero() || d > Duration::from_secs(15))
+        {
+            return Err("gather timeout out of range");
+        }
+        self.ice.validate()
     }
 }
 impl IceConfig {

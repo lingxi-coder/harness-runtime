@@ -109,3 +109,11 @@ for host-supplied relay configuration. Credentials belong to the existing host
 owner. UDP STUN/TURN is currently supported; TCP/TLS is explicitly rejected.
 The separate loopback-only Coturn fixture and ignored transport acceptance test
 are documented in DEVICE_VALIDATION.md. Native device probes accept explicit ICE configuration; defaults use direct ICE.
+
+Data-only mode (`SessionConfig::data_only(ice)`) negotiates only the `lingxi-agent`
+DataChannel: no audio/video tracks or codecs in the SDP, configurable SCTP buffers
+and receive queue, a bounded non-trickle gathering wait (default 3 s, returns the
+candidates gathered so far), remote mDNS `.local` candidate resolution
+(`MdnsMode::QueryOnly`, also the voice default) and a prompt channel-close signal
+on `close()`. The receive queue closes the channel on overflow
+(`receive_overflowed()`); the pinned driver cannot back-pressure receives.
