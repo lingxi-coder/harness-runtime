@@ -1650,8 +1650,8 @@ pub struct NativeSandboxHostFacts {
 
 pub use native_policy_attachments::{
     NativeBashFirstSessionAssignment, NativePolicyHostFacts, NativeProactivityLevel,
-    NativeProactivityResponse, NativeProactivitySnapshot, NativeProactivityState,
-    NativeThinkingResumptionHostFacts,
+    NativeProactivityRemountState, NativeProactivityResponse, NativeProactivitySnapshot,
+    NativeProactivityState, NativeThinkingResumptionHostFacts,
 };
 
 pub struct ConversationOrchestrator {

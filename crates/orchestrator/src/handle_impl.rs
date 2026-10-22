@@ -6228,6 +6228,10 @@ mod tests {
             None,
             None,
             lingxi_core::host::ResumeRuntimeSnapshot {
+                transcript_path: None,
+                working_directory: None,
+                worktree_session: None,
+                transcript_metadata: None,
                 api_error_message_ids: Vec::new(),
                 current_usage: Some(lingxi_core::host::CurrentUsageSnapshot {
                     input_tokens: 100,

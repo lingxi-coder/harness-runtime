@@ -35,7 +35,8 @@ pub enum NativeBashFirstSessionAssignment {
 }
 
 /// Current Native proactivity level accepted by `set_proactivity_level`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NativeProactivityLevel {
     Ask,
     #[default]
@@ -95,7 +96,7 @@ impl NativeProactivityGates {
 }
 
 /// Snapshot of the session's Native selector and level state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NativeProactivitySnapshot {
     pub opted_in: bool,
     pub selector_gate: bool,
@@ -103,6 +104,14 @@ pub struct NativeProactivitySnapshot {
     pub attachments_enabled: bool,
     pub level: NativeProactivityLevel,
     pub permission_baseline_mode: Option<String>,
+}
+
+/// Ephemeral host carrier for replacing an idle runtime of the same session.
+/// This is not transcript metadata and must not be persisted as a resume default.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NativeProactivityRemountState {
+    pub snapshot: NativeProactivitySnapshot,
+    pub session_metadata: lingxi_core::host::NativeProactivitySessionMetadata,
 }
 
 /// Public response body for a successful `set_proactivity_level` request.
@@ -240,6 +249,43 @@ impl NativeProactivityState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .session_metadata
             .clone()
+    }
+
+    #[must_use]
+    pub fn remount_state(&self) -> NativeProactivityRemountState {
+        let inner = self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        NativeProactivityRemountState {
+            snapshot: inner.snapshot.clone(),
+            session_metadata: inner.session_metadata.clone(),
+        }
+    }
+
+    /// Preserve live session choices and permission baseline without executing
+    /// initialize/level transitions. Target-runtime gates remain authoritative.
+    pub fn restore_remount_state(
+        &self,
+        state: NativeProactivityRemountState,
+        gates: NativeProactivityGates,
+    ) -> NativeProactivitySnapshot {
+        let mut snapshot = state.snapshot;
+        snapshot.attachments_enabled = gates.attachments_enabled;
+        snapshot.selector_gate =
+            snapshot.opted_in && gates.selector_feature_enabled && !gates.disabled_by_environment;
+        snapshot.selector_gate_ever_on |= snapshot.selector_gate;
+        {
+            let mut inner = self
+                .inner
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            inner.gates = gates;
+            inner.snapshot = snapshot.clone();
+            inner.session_metadata = state.session_metadata;
+        }
+        self.publish(snapshot.clone());
+        snapshot
     }
 
     /// Restore from an explicit Native worker-state carrier. The external
@@ -1020,6 +1066,21 @@ impl ConversationOrchestrator {
             .refresh_gates(NativeProactivityGates::current(self.config.bare))
     }
 
+    #[must_use]
+    pub fn native_proactivity_remount_state(&self) -> NativeProactivityRemountState {
+        let _ = self.current_native_proactivity_snapshot();
+        self.native_proactivity_state.remount_state()
+    }
+
+    /// Host-only continuity for the same UUID across an idle runtime remount.
+    pub fn restore_native_proactivity_remount_state(
+        &self,
+        state: NativeProactivityRemountState,
+    ) -> NativeProactivitySnapshot {
+        self.native_proactivity_state
+            .restore_remount_state(state, NativeProactivityGates::current(self.config.bare))
+    }
+
     /// Whether the current Host gates allow a client to request explicit
     /// session opt-in, independent of the current opted-in selector state.
     #[must_use]
@@ -1230,6 +1291,54 @@ impl ConversationOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remount_retains_exact_session_choices_and_metadata_with_live_target_gates() {
+        let gates = NativeProactivityGates {
+            attachments_enabled: true,
+            selector_feature_enabled: true,
+            disabled_by_environment: false,
+        };
+        for (choice, opt_out) in [
+            (None, false),
+            (Some(false), false),
+            (Some(true), false),
+            (Some(true), true),
+        ] {
+            let original = NativeProactivityState::default();
+            original.refresh_gates(gates);
+            original.apply_initialize_opt_in(choice, false);
+            if choice == Some(true) {
+                original.commit_level(NativeProactivityLevel::Proactive, "default");
+                if opt_out {
+                    original.apply_initialize_opt_in(Some(false), false);
+                }
+            }
+            let saved = original.remount_state();
+            let encoded = serde_json::to_string(&saved).unwrap();
+            let replacement = NativeProactivityState::default();
+            replacement.restore_remount_state(serde_json::from_str(&encoded).unwrap(), gates);
+            assert_eq!(replacement.remount_state(), saved);
+            let disabled = NativeProactivityGates {
+                disabled_by_environment: true,
+                ..gates
+            };
+            replacement.restore_remount_state(saved.clone(), disabled);
+            let actual = replacement.remount_state();
+            assert!(!actual.snapshot.selector_gate);
+            assert_eq!(actual.snapshot.opted_in, saved.snapshot.opted_in);
+            assert_eq!(actual.snapshot.level, saved.snapshot.level);
+            assert_eq!(
+                actual.snapshot.permission_baseline_mode,
+                saved.snapshot.permission_baseline_mode
+            );
+            assert_eq!(actual.session_metadata, saved.session_metadata);
+            assert_eq!(
+                actual.snapshot.selector_gate_ever_on,
+                saved.snapshot.selector_gate_ever_on
+            );
+        }
+    }
 
     fn json(source: &str) -> Source {
         Source::parse(source).unwrap()

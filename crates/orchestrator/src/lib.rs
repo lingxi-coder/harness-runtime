@@ -114,8 +114,8 @@ pub use config::{
     QUERY_SOURCE_SDK,
 };
 pub use conversation::{
-    realtime_history, skill_prompt_inputs, PendingPromptIdentity, QueuedPromptInput,
-    RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits,
+    realtime_history, skill_prompt_inputs, NativeProactivityRemountState, PendingPromptIdentity,
+    QueuedPromptInput, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits,
     ScheduledLoopFire,
 };
 pub use conversation::{
