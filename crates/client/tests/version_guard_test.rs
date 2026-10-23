@@ -480,6 +480,14 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::CompactionCompleted.bytes_saved", "u64");
     put("ClientEvent::CompactionCompleted.summary", "ClientTextDto");
 
+    put("ClientEvent::WorkspaceChanged", "workspace_changed");
+    put("ClientEvent::WorkspaceChanged.state", "WorkspaceStateDto");
+    put("WorkspaceStateDto.session_id", "String");
+    put("WorkspaceStateDto.cwd", "String");
+    put("WorkspaceStateDto.project_root", "String");
+    put("WorkspaceStateDto.additional_directories", "Vec<String>");
+    put("WorkspaceStateDto.transcript_path", "String");
+
     put("ClientEvent::SessionStarted", "session_started");
     put("ClientEvent::SessionStarted.session_id", "String");
 
@@ -2015,6 +2023,26 @@ fn current_contract_index() -> ContractIndex {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn workspace_event_retains_the_complete_directory_and_session_generation() {
+    use client::protocol::{events::ClientEvent, listings::WorkspaceStateDto};
+    let event = ClientEvent::WorkspaceChanged {
+        state: WorkspaceStateDto {
+            session_id: "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa".into(),
+            cwd: "/home/lingxi/lingxi/projects/项目 B".into(),
+            project_root: "/home/lingxi/lingxi/projects/项目 A".into(),
+            additional_directories: vec!["/home/lingxi/linked".into()],
+            transcript_path: "/home/lingxi/.lingxi/projects/b/session.jsonl".into(),
+        },
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["type"],
+        "workspace_changed"
+    );
+    assert_eq!(serde_json::from_str::<ClientEvent>(&json).unwrap(), event);
+}
+
+#[test]
 fn exact_client_text_keeps_the_protocol_json_string_shape() {
     let text = client::protocol::text::ClientTextDto::from_code_units(vec![b't' as u16, 0xd800]);
     let encoded = serde_json::to_string(&text).unwrap();
@@ -2377,6 +2405,15 @@ fn contract_index_covers_every_dto() {
         recommendation_source: None,
     };
     let _ev: Vec<ClientEvent> = vec![
+        ClientEvent::WorkspaceChanged {
+            state: client::protocol::listings::WorkspaceStateDto {
+                session_id: String::new(),
+                cwd: String::new(),
+                project_root: String::new(),
+                additional_directories: Vec::new(),
+                transcript_path: String::new(),
+            },
+        },
         ClientEvent::Error {
             kind: ErrorKindDto::Internal,
             message: String::new().into(),
