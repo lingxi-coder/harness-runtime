@@ -1029,7 +1029,10 @@ impl ComputerTool {
     /// empty allowlist, an unresolvable frontmost app, and an ungranted or
     /// under-tiered app are all denied, not silently allowed — a transient
     /// "can't tell what's frontmost" is not the same as "nothing to check".
-    async fn enforce_tier(&self, action: &str) -> Result<(), ToolError> {
+    async fn enforce_tier(
+        &self,
+        action: &str,
+    ) -> Result<Option<lingxi_core::host::computer_control::AppInfo>, ToolError> {
         let required = match action {
             "right_click" | "middle_click" | "mouse_click" | "type" | "key" | "hold_key"
             | "key_down" | "key_up" => Some(AppTier::Full),
@@ -1040,10 +1043,10 @@ impl ComputerTool {
             _ => None,
         };
         let Some(required) = required else {
-            return Ok(());
+            return Ok(None);
         };
         let Some(cc) = self.ctx.computer_control.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
         {
             // Scoped so the guard drops before the `.await` below — held
@@ -1087,7 +1090,7 @@ impl ComputerTool {
                 tier.as_str(),
                 required.as_str()
             ).into())),
-            Some(_) => Ok(()),
+            Some(_) => Ok(Some(front)),
         }
     }
 
@@ -1129,27 +1132,28 @@ impl ComputerTool {
         } else {
             action
         };
-        self.enforce_tier(
-            if !modifiers.is_empty()
-                || has_held_keys
-                    && matches!(
-                        action,
-                        "mouse_move"
-                            | "left_click"
-                            | "double_click"
-                            | "triple_click"
-                            | "scroll"
-                            | "left_click_drag"
-                            | "left_mouse_down"
-                            | "left_mouse_up"
-                    )
-            {
-                "key"
-            } else {
-                tier_action
-            },
-        )
-        .await?;
+        let application = self
+            .enforce_tier(
+                if !modifiers.is_empty()
+                    || has_held_keys
+                        && matches!(
+                            action,
+                            "mouse_move"
+                                | "left_click"
+                                | "double_click"
+                                | "triple_click"
+                                | "scroll"
+                                | "left_click_drag"
+                                | "left_mouse_down"
+                                | "left_mouse_up"
+                        )
+                {
+                    "key"
+                } else {
+                    tier_action
+                },
+            )
+            .await?;
 
         let cc = self.ctx.computer_control.as_ref().ok_or_else(|| {
             ToolError::Internal("computer-control not available on this platform".into())
@@ -1163,6 +1167,17 @@ impl ComputerTool {
         self.validate_host_parameters(action, input).await?;
         self.enforce_cumulative_shortcuts(&modifiers)?;
         self.validate_geometry(input, ctx).await?;
+        let application = if application.is_none() && matches!(action, "screenshot" | "zoom") {
+            // Observation attribution is best effort; icon metadata must not
+            // prevent or indefinitely delay a successful capture.
+            tokio::time::timeout(std::time::Duration::from_millis(200), cc.frontmost_app())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten()
+        } else {
+            application
+        };
         if changes_desktop(action) {
             self.mark_input_changed(ctx).await?;
         }
@@ -1190,7 +1205,18 @@ impl ComputerTool {
                 .backend_mouse_dirty = false;
         }
         let release = self.release_keys(&added).await;
-        result.and_then(|value| release.map(|()| value))
+        result.and_then(|mut value| {
+            release?;
+            // Retain the identity checked for this action. A transcript must
+            // never substitute whichever application is frontmost when read.
+            if let Some(application) = application {
+                value["application"] = json!({
+                    "bundle_id": application.bundle_id,
+                    "name": application.display_name,
+                });
+            }
+            Ok(value)
+        })
     }
 
     fn require_grant_flag(
@@ -1878,10 +1904,11 @@ impl ComputerTool {
                         .into(),
                     ));
                 }
-                cc.open_application(resolved)
+                cc.open_application(resolved.clone())
                     .await
                     .map_err(|e| map_err(&e))?;
-                Ok(json!({ "ok": true, "opened": name }))
+                Ok(json!({ "ok": true, "opened": name,
+                    "application": { "bundle_id": resolved, "name": name } }))
             }
             other => Err(ToolError::InvalidInput(
                 format!("unknown action: {other}").into(),
@@ -2489,6 +2516,10 @@ mod integration_tests {
 
     #[async_trait]
     impl ComputerControl for MockCc {
+        async fn open_application(&self, bundle_id: String) -> Result<(), ComputerError> {
+            assert!(self.installed.iter().any(|app| app.bundle_id == bundle_id));
+            Ok(())
+        }
         async fn screenshot(&self) -> Result<Screenshot, ComputerError> {
             if self.screenshot_ok {
                 Ok(Screenshot {
@@ -2716,6 +2747,12 @@ mod integration_tests {
         .await
         .unwrap();
         assert_eq!(test_data(&result.data)["ok"], true);
+        assert_eq!(
+            test_data(&result.data)["application"],
+            json!({
+                "bundle_id": "com.granted.app", "name": "Granted"
+            })
+        );
     }
 
     #[tokio::test]
@@ -2757,6 +2794,51 @@ mod integration_tests {
             err.to_string(),
             "permission denied: \"com.foo.bar\" is not granted for this session. Call request_access first."
         );
+    }
+
+    #[tokio::test]
+    async fn opened_application_records_resolved_bundle_identity() {
+        let mock = MockCc {
+            installed: vec![app("com.apple.TextEdit", "TextEdit")],
+            ..MockCc::default()
+        };
+        let tool = tool_with(mock);
+        call(
+            &tool,
+            json!({"action": "request_access", "apps": ["TextEdit"]}),
+        )
+        .await
+        .unwrap();
+        let result = call(
+            &tool,
+            json!({"action": "open_application", "bundle_id": "TextEdit"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            test_data(&result.data)["application"],
+            json!({
+                "bundle_id": "com.apple.TextEdit", "name": "TextEdit"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_application_identity_is_a_snapshot_and_optional() {
+        let mock = MockCc {
+            screenshot_ok: true,
+            ..MockCc::default()
+        };
+        *mock.frontmost.lock().unwrap() = Ok(Some(app("com.apple.TextEdit", "TextEdit")));
+        let (tool, cc) = tool_with_shared_cc(mock);
+        let result = call(&tool, json!({"action": "screenshot"})).await.unwrap();
+        *cc.frontmost.lock().unwrap() = Err(());
+        assert_eq!(
+            test_data(&result.data)["application"]["bundle_id"],
+            "com.apple.TextEdit"
+        );
+        let unknown = call(&tool, json!({"action": "screenshot"})).await.unwrap();
+        assert!(test_data(&unknown.data).get("application").is_none());
     }
 
     #[tokio::test]
