@@ -278,3 +278,71 @@ async fn stun_list_is_configured_for_a_data_only_offerer() {
     assert!(offer.contains("a=candidate:") && !offer.contains("m=audio"));
     viewer.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn extracted_receivers_drain_concurrently_with_backpressured_sends() {
+    timeout(Duration::from_secs(60), async {
+        let config = |answerer| SessionConfig {
+            receive_queue: 4,
+            sctp_send_buffer: FRAGMENT,
+            sctp_receive_buffer: FRAGMENT as u32,
+            ..data_only(answerer)
+        };
+        let (mut viewer, mut desktop) = pair(config(false), config(true)).await;
+        let mut incoming_viewer = viewer.take_data_receiver().unwrap();
+        let mut incoming_desktop = desktop.take_data_receiver().unwrap();
+        assert!(viewer.take_data_receiver().is_none());
+        assert!(viewer.receive().await.is_none());
+        assert!(viewer.try_receive().is_none());
+        let send_viewer = async {
+            for i in 0..128 {
+                viewer.send_bytes(&fragment(1, i)).await.unwrap();
+            }
+        };
+        let send_desktop = async {
+            for i in 0..128 {
+                desktop.send_bytes(&fragment(2, i)).await.unwrap();
+            }
+        };
+        let receive_viewer = async {
+            for i in 0..128 {
+                assert_eq!(
+                    incoming_viewer.recv().await.unwrap().data.as_ref(),
+                    fragment(2, i).as_slice()
+                );
+            }
+        };
+        let receive_desktop = async {
+            for i in 0..128 {
+                assert_eq!(
+                    incoming_desktop.recv().await.unwrap().data.as_ref(),
+                    fragment(1, i).as_slice()
+                );
+            }
+        };
+        tokio::join!(send_viewer, send_desktop, receive_viewer, receive_desktop);
+        assert!(!viewer.receive_overflowed() && !desktop.receive_overflowed());
+        viewer.close().await.unwrap();
+        assert!(incoming_viewer.recv().await.is_none());
+        assert!(incoming_desktop.recv().await.is_none());
+        desktop.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn dropping_extracted_receiver_closes_without_reporting_overflow() {
+    timeout(Duration::from_secs(30), async {
+        let (mut viewer, mut desktop) = pair(data_only(false), data_only(true)).await;
+        drop(desktop.take_data_receiver().unwrap());
+        let mut ready = desktop.subscribe_ready();
+        viewer.send_bytes(&fragment(1, 0)).await.unwrap();
+        ready.wait_for(|ready| !*ready).await.unwrap();
+        assert!(!desktop.receive_overflowed());
+        desktop.close().await.unwrap();
+        viewer.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}

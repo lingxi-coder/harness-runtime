@@ -109,7 +109,7 @@ pub struct Transport {
     pub(crate) ready: watch::Receiver<bool>,
     channel: Arc<OnceLock<Arc<dyn DataChannel>>>,
     answerer: bool,
-    messages: tokio::sync::mpsc::Receiver<webrtc::data_channel::RTCDataChannelMessage>,
+    messages: Option<tokio::sync::mpsc::Receiver<webrtc::data_channel::RTCDataChannelMessage>>,
     closed: bool,
     gather_timeout: Option<Duration>,
     data_only: bool,
@@ -314,13 +314,16 @@ impl Transport {
                     | DataChannelEvent::OnClosing
                     | DataChannelEvent::OnClose => break,
                     DataChannelEvent::OnMessage(message) => {
-                        if message_tx.try_send(message).is_err() {
+                        if let Err(error) = message_tx.try_send(message) {
                             // Closing is observable; never silently lose an Agent message.
                             // The upstream driver also drops events once its own 256-event
                             // queue fills, so this loop must keep draining it: awaiting
                             // here would turn backpressure into silent loss. Senders pace
                             // themselves with protocol acknowledgements.
-                            overflow_flag.store(true, Ordering::Release);
+                            overflow_flag.store(
+                                matches!(error, tokio::sync::mpsc::error::TrySendError::Full(_)),
+                                Ordering::Release,
+                            );
                             let _ = observed.close().await;
                             break;
                         }
@@ -340,7 +343,7 @@ impl Transport {
             ready,
             channel,
             answerer,
-            messages,
+            messages: Some(messages),
             closed: false,
             gather_timeout,
             data_only,
@@ -461,11 +464,24 @@ impl Transport {
 
     /// Receives the exact message bytes and whether the sender used text framing.
     pub async fn receive(&mut self) -> Option<webrtc::data_channel::RTCDataChannelMessage> {
-        self.messages.recv().await
+        match self.messages.as_mut() {
+            Some(messages) => messages.recv().await,
+            None => None,
+        }
     }
 
     pub fn try_receive(&mut self) -> Option<webrtc::data_channel::RTCDataChannelMessage> {
-        self.messages.try_recv().ok()
+        self.messages.as_mut()?.try_recv().ok()
+    }
+
+    /// Move the DataChannel receiver to a separately polled ingress loop.
+    /// This allows receiving while `send_bytes` waits for SCTP backpressure.
+    /// Can be taken only once; afterwards `receive` and `try_receive` return None.
+    /// Closing or dropping the session ends this receiver after queued messages.
+    pub fn take_data_receiver(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::Receiver<webrtc::data_channel::RTCDataChannelMessage>> {
+        self.messages.take()
     }
 
     /// Answering role uses the same transport and packet admission as the host.
@@ -717,7 +733,9 @@ impl Transport {
                 .await;
             }
         }
-        self.messages.close();
+        if let Some(messages) = self.messages.as_mut() {
+            messages.close();
+        }
         self.observer.abort();
         let _ = (&mut self.observer).await;
         timeout(Duration::from_secs(/*secs*/ 2), self.connection.close())
