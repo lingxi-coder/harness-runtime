@@ -261,6 +261,9 @@ fn transcript_cwd_from_path(path: &Path, loaded: &LoadedTranscript) -> Option<St
             return Some(relocated.clone());
         }
     }
+    if let Some(cwd) = session_id.and_then(|id| loaded.mobile_empty_session_cwds.get(id)) {
+        return Some(cwd.clone());
+    }
     loaded
         .messages_in_order
         .first()
@@ -279,7 +282,15 @@ pub fn transcript_workspace_path(path: &Path, loaded: &LoadedTranscript) -> Opti
             return Some(relocated.clone());
         }
     }
-    let cwd = loaded.messages_in_order.first()?.cwd.as_str();
+    let cwd = session_id
+        .and_then(|id| loaded.mobile_empty_session_cwds.get(id))
+        .map(String::as_str)
+        .or_else(|| {
+            loaded
+                .messages_in_order
+                .first()
+                .map(|message| message.cwd.as_str())
+        })?;
     if cwd.is_empty() || !Path::new(cwd).is_absolute() {
         return None;
     }

@@ -203,6 +203,7 @@ pub fn lower_session_metadata(meta: &SessionMetadata) -> SessionRowDto {
             session::jsonl::SessionMode::Code => SessionModeDto::Code,
         },
         path: meta.path.to_string_lossy().into_owned(),
+        workspace_path: meta.workspace_path.clone(),
     }
 }
 

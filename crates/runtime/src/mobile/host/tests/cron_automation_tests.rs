@@ -624,7 +624,7 @@ async fn scheduled_empty_anchor_is_replayable_before_first_prompt() {
     );
     let writer = session::jsonl::writer::JsonlWriter::new(path, fs.clone());
     writer
-        .append_mobile_empty_session(&id.to_string(), "Scheduled task")
+        .append_mobile_empty_session(&id.to_string(), "Scheduled task", &cwd.to_string_lossy())
         .await
         .unwrap();
     writer
@@ -666,7 +666,11 @@ async fn scheduled_existing_session_uses_its_persisted_mode() {
         let path = session::jsonl::session_path(&home, &cwd.to_string_lossy(), &id.to_string());
         let writer = session::jsonl::JsonlWriter::new(path, fs.clone());
         writer
-            .append_mobile_empty_session(&id.to_string(), "Existing session")
+            .append_mobile_empty_session(
+                &id.to_string(),
+                "Existing session",
+                &cwd.to_string_lossy(),
+            )
             .await
             .unwrap();
         writer.append_session_mode(mode.as_str()).await.unwrap();

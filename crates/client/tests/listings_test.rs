@@ -40,11 +40,16 @@ fn session_list_round_trips() {
             message_count: 42,
             mode: SessionModeDto::Code,
             path: "/Users/x/.lingxi/projects/p/0b3e2f10.jsonl".to_string(),
+            workspace_path: Some("/home/lingxi/project".into()),
         }],
     };
     let json = serde_json::to_value(&ev).expect("serialize SessionList");
     assert_eq!(json["type"], "session_list");
     assert_eq!(json["sessions"][0]["message_count"], 42);
+    assert_eq!(
+        json["sessions"][0]["workspace_path"],
+        "/home/lingxi/project"
+    );
     let back: ClientEvent = serde_json::from_value(json).expect("deserialize SessionList");
     assert_eq!(back, ev);
 }
@@ -60,6 +65,7 @@ fn session_row_carries_path() {
         message_count: 1,
         mode: SessionModeDto::Chat,
         path: "/abs/path/to/s.jsonl".to_string(),
+        workspace_path: None,
     };
     let json = serde_json::to_value(&row).expect("serialize SessionRowDto");
     assert!(

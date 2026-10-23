@@ -1902,6 +1902,7 @@ fn current_contract_index() -> ContractIndex {
     put("SessionRowDto.modified_rfc3339", "String");
     put("SessionRowDto.message_count", "u32");
     put("SessionRowDto.path", "String");
+    put("SessionRowDto.workspace_path", "Option<String>");
 
     put("McpServerDto.name", "String");
     put("McpServerDto.status", "McpStatusDto");
@@ -3050,6 +3051,7 @@ fn contract_index_covers_every_dto() {
             message_count: 0,
             mode: client::protocol::listings::SessionModeDto::Code,
             path: String::new(),
+            workspace_path: None,
         },
         McpServerDto {
             name: String::new(),

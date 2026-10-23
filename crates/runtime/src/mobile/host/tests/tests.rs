@@ -6124,7 +6124,7 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
         first
             .inner()
             .session_writer
-            .append_mobile_empty_session(&session_id, "cold Bash no-response")
+            .append_mobile_empty_session(&session_id, "cold Bash no-response", &first.session_cwd())
             .await
             .expect("anchor the session before restart");
         first
@@ -6295,7 +6295,7 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
             first
                 .inner
                 .session_writer
-                .append_mobile_empty_session(&session_id, "cold prompt replay")
+                .append_mobile_empty_session(&session_id, "cold prompt replay", &first.session_cwd())
                 .await
                 .expect("anchor the session before restart");
             first
@@ -6584,7 +6584,7 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
         engine_for_work
             .inner
             .session_writer
-            .append_mobile_empty_session(&session_id, "uncorrelated image prompt")
+            .append_mobile_empty_session(&session_id, "uncorrelated image prompt", &engine_for_work.session_cwd())
             .await
             .expect("anchor the session transcript");
         engine_for_work
@@ -7602,7 +7602,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             first
                 .inner()
                 .session_writer
-                .append_mobile_empty_session(&session_id, "skill cold replay")
+                .append_mobile_empty_session(&session_id, "skill cold replay", &first.session_cwd())
                 .await
                 .expect("anchor the session before restart");
             first
@@ -11599,7 +11599,7 @@ fn mobile_transcript_authority_follows_real_new_and_resume_session_activation() 
         handle
             .inner
             .session_writer
-            .append_mobile_empty_session(&original.as_uuid().to_string(), "original conversation")
+            .append_mobile_empty_session(&original.as_uuid().to_string(), "original conversation", &handle.session_cwd())
             .await
             .unwrap();
         handle

@@ -363,88 +363,7 @@ impl MobileEngineHandle {
         Ok(())
     }
 
-    pub(super) async fn emit_workspace_state(&self) {
-        self.event_sink
-            .emit(ClientEvent::WorkspaceChanged {
-                state: self.workspace_state_snapshot(),
-            })
-            .await;
-    }
-}
-
-#[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
-impl MobileEngineHandle {
-    /// Read one complete directory/session generation, after any active
-    /// identity transition has published its writer and cwd together.
-    pub async fn workspace_state(&self) -> WorkspaceStateDto {
-        let _transition = self.loop_transition.lock().await;
-        self.workspace_state_snapshot()
-    }
-
-    pub async fn change_workspace(
-        &self,
-        path: String,
-        expected_session_id: String,
-    ) -> Result<(), ClientError> {
-        let _transition = self.loop_transition.lock().await;
-        self.check_workspace_owner(&expected_session_id)?;
-        self.change_workspace_inner(&path).await
-    }
-
-    pub async fn add_workspace_directory(
-        &self,
-        path: String,
-        expected_session_id: String,
-    ) -> Result<(), ClientError> {
-        let _transition = self.loop_transition.lock().await;
-        self.check_workspace_owner(&expected_session_id)?;
-        self.add_workspace_inner(&path).await
-    }
-
-    /// Resume the exact source selected in a Current/Repository/All catalog.
-    pub async fn resume_workspace_session(
-        &self,
-        session_id: String,
-        transcript_path: String,
-    ) -> Result<(), ClientError> {
-        let _transition = self.loop_transition.lock().await;
-        let path = self
-            .fs
-            .translate_model_path(&transcript_path, false)
-            .map_err(|error| ClientError::Rejected {
-                message: error.to_string(),
-            })?
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(&transcript_path));
-        let path = path.canonicalize().map_err(|error| ClientError::Rejected {
-            message: format!("session source unavailable: {error}"),
-        })?;
-        let catalog = self
-            .lingxi_home
-            .join("projects")
-            .canonicalize()
-            .map_err(|error| ClientError::Rejected {
-                message: error.to_string(),
-            })?;
-        let relative = path
-            .strip_prefix(catalog)
-            .map_err(|_| ClientError::Rejected {
-                message: "selected transcript is outside the session catalog".into(),
-            })?;
-        let id = session_id.strip_prefix("sess:").unwrap_or(&session_id);
-        if relative.components().count() != 2
-            || path.extension().and_then(|value| value.to_str()) != Some("jsonl")
-            || path.file_stem().and_then(|value| value.to_str()) != Some(id)
-        {
-            return Err(ClientError::Rejected {
-                message: "selected transcript does not match the requested session UUID".into(),
-            });
-        }
-        self.resume_session_impl(session_id, None, None, Some(path))
-            .await
-    }
-
-    pub async fn workspace_sessions(
+    pub(super) async fn workspace_sessions_inner(
         &self,
         scope: MobileSessionDiscoveryScope,
         limit: u32,
@@ -532,6 +451,96 @@ impl MobileEngineHandle {
                 lowered
             })
             .collect())
+    }
+
+    pub(super) async fn emit_workspace_state(&self) {
+        self.event_sink
+            .emit(ClientEvent::WorkspaceChanged {
+                state: self.workspace_state_snapshot(),
+            })
+            .await;
+    }
+}
+
+#[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
+impl MobileEngineHandle {
+    /// Read one complete directory/session generation, after any active
+    /// identity transition has published its writer and cwd together.
+    pub async fn workspace_state(&self) -> WorkspaceStateDto {
+        let _transition = self.loop_transition.lock().await;
+        self.workspace_state_snapshot()
+    }
+
+    pub async fn change_workspace(
+        &self,
+        path: String,
+        expected_session_id: String,
+    ) -> Result<(), ClientError> {
+        let _transition = self.loop_transition.lock().await;
+        self.check_workspace_owner(&expected_session_id)?;
+        self.change_workspace_inner(&path).await
+    }
+
+    pub async fn add_workspace_directory(
+        &self,
+        path: String,
+        expected_session_id: String,
+    ) -> Result<(), ClientError> {
+        let _transition = self.loop_transition.lock().await;
+        self.check_workspace_owner(&expected_session_id)?;
+        self.add_workspace_inner(&path).await
+    }
+
+    /// Resume the exact source selected in a Current/Repository/All catalog.
+    pub async fn resume_workspace_session(
+        &self,
+        session_id: String,
+        transcript_path: String,
+    ) -> Result<(), ClientError> {
+        let _transition = self.loop_transition.lock().await;
+        let path = self
+            .fs
+            .translate_model_path(&transcript_path, false)
+            .map_err(|error| ClientError::Rejected {
+                message: error.to_string(),
+            })?
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(&transcript_path));
+        let path = path.canonicalize().map_err(|error| ClientError::Rejected {
+            message: format!("session source unavailable: {error}"),
+        })?;
+        let catalog = self
+            .lingxi_home
+            .join("projects")
+            .canonicalize()
+            .map_err(|error| ClientError::Rejected {
+                message: error.to_string(),
+            })?;
+        let relative = path
+            .strip_prefix(catalog)
+            .map_err(|_| ClientError::Rejected {
+                message: "selected transcript is outside the session catalog".into(),
+            })?;
+        let id = session_id.strip_prefix("sess:").unwrap_or(&session_id);
+        if relative.components().count() != 2
+            || path.extension().and_then(|value| value.to_str()) != Some("jsonl")
+            || path.file_stem().and_then(|value| value.to_str()) != Some(id)
+        {
+            return Err(ClientError::Rejected {
+                message: "selected transcript does not match the requested session UUID".into(),
+            });
+        }
+        self.resume_session_impl(session_id, None, None, Some(path))
+            .await
+    }
+
+    pub async fn workspace_sessions(
+        &self,
+        scope: MobileSessionDiscoveryScope,
+        limit: u32,
+    ) -> Result<Vec<SessionRowDto>, ClientError> {
+        let _transition = self.loop_transition.lock().await;
+        self.workspace_sessions_inner(scope, limit).await
     }
 }
 
@@ -836,6 +845,128 @@ mod tests {
         });
     }
     #[test]
+    fn empty_session_restores_its_exact_directory_from_another_workspace() {
+        let (_temp, directories, cfg, platform) = fixture();
+        let handle = new_engine_with_streaming(
+            cfg,
+            platform,
+            Arc::new(FakeListener::default()),
+            Arc::new(CollectingPermissionSink::default()),
+            None,
+        )
+        .unwrap();
+        handle.runtime().block_on(async {
+            let id = uuid::Uuid::new_v4();
+            let b = format!("{}/b", directories.projects_guest_path);
+            handle
+                .persist_mobile_empty_session_anchor(id, &b, "Empty in B")
+                .await
+                .unwrap();
+            let path = session::jsonl::session_path(&handle.lingxi_home, &b, &id.to_string());
+            let rows = handle
+                .workspace_sessions(MobileSessionDiscoveryScope::All, 100)
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.iter()
+                    .find(|row| row.uuid == id.to_string())
+                    .unwrap()
+                    .workspace_path
+                    .as_deref(),
+                Some(b.as_str())
+            );
+            handle
+                .resume_workspace_session(id.to_string(), path.display().to_string())
+                .await
+                .unwrap();
+            let state = handle.workspace_state().await;
+            assert_eq!(state.cwd, b);
+            assert_eq!(state.project_root, b);
+            assert_eq!(state.session_id, id.to_string());
+        });
+    }
+
+    #[test]
+    fn moving_an_empty_session_preserves_its_original_root_after_cold_resume() {
+        let (_temp, directories, cfg, platform) = fixture();
+        let handle = new_engine_with_streaming(
+            cfg.clone(),
+            platform.clone(),
+            Arc::new(FakeListener::default()),
+            Arc::new(CollectingPermissionSink::default()),
+            None,
+        )
+        .unwrap();
+        let (id, path, original, b) = handle.runtime().block_on(async {
+            handle
+                .submit(client::protocol::commands::ClientCommand::NewSession {
+                    cwd: None,
+                    model: None,
+                })
+                .await
+                .unwrap();
+            let before = handle.workspace_state().await;
+            let b = format!("{}/b", directories.projects_guest_path);
+            handle
+                .change_workspace(b.clone(), before.session_id.clone())
+                .await
+                .unwrap();
+            let moved = handle.workspace_state().await;
+            (
+                before.session_id,
+                moved.transcript_path,
+                before.project_root,
+                b,
+            )
+        });
+        drop(handle);
+        let handle = new_engine_with_streaming(
+            cfg,
+            platform,
+            Arc::new(FakeListener::default()),
+            Arc::new(CollectingPermissionSink::default()),
+            None,
+        )
+        .unwrap();
+        handle.runtime().block_on(async {
+            handle
+                .resume_workspace_session(id.clone(), path.clone())
+                .await
+                .unwrap();
+            let restored = handle.workspace_state().await;
+            assert_eq!(restored.session_id, id);
+            assert_eq!(restored.transcript_path, path);
+            assert_eq!(restored.cwd, b);
+            assert_eq!(restored.project_root, original);
+        });
+    }
+
+    #[test]
+    fn resume_rejects_missing_and_escaping_recorded_workspaces_before_mutating_owner() {
+        let (_temp, directories, cfg, platform) = fixture();
+        let handle = new_engine_with_streaming(
+            cfg,
+            platform,
+            Arc::new(FakeListener::default()),
+            Arc::new(CollectingPermissionSink::default()),
+            None,
+        )
+        .unwrap();
+        let before = handle.workspace_state_snapshot();
+        handle.runtime().block_on(async {
+            for cwd in [format!("{}/missing", directories.projects_guest_path), "/root".into()] {
+                let id = uuid::Uuid::new_v4().to_string();
+                let path = session::jsonl::session_path(&handle.lingxi_home, &cwd, &id);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let message = serde_json::json!({"type":"user","sessionId":id,"uuid":uuid::Uuid::new_v4().to_string(),"parentUuid":null,"cwd":cwd,"isSidechain":false,"timestamp":"2026-10-22T12:00:00.000Z","message":{"role":"user","content":[{"type":"text","text":"must retain recorded cwd"}]}});
+                std::fs::write(&path, format!("{message}\n")).unwrap();
+                assert!(handle.resume_workspace_session(id, path.display().to_string()).await.is_err());
+                assert_eq!(handle.workspace_state_snapshot(), before);
+            }
+        });
+    }
+
+    #[test]
     fn workspace_snapshot_waits_for_the_identity_transition_to_finish() {
         let (_temp, _directories, cfg, platform) = fixture();
         let handle = new_engine_with_streaming(
@@ -852,6 +983,12 @@ mod tests {
             assert!(tokio::time::timeout(
                 std::time::Duration::from_millis(10),
                 handle.workspace_state()
+            )
+            .await
+            .is_err());
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                handle.workspace_sessions(MobileSessionDiscoveryScope::Current, 100)
             )
             .await
             .is_err());

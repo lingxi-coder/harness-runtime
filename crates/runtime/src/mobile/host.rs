@@ -3759,7 +3759,7 @@ impl MobileEngineHandle {
                 })?;
             self.inner
                 .session_writer
-                .append_mobile_empty_session(session_id, "新对话")
+                .append_mobile_empty_session(session_id, "新对话", &self.session_cwd())
                 .await
                 .map_err(|error| ClientError::Internal {
                     message: format!("persist session permission anchor failed: {error}"),
@@ -3792,30 +3792,6 @@ impl MobileEngineHandle {
         Ok(())
     }
 
-    async fn has_mobile_empty_session_anchor(&self, session_id: uuid::Uuid, cwd: &str) -> bool {
-        let path = session::jsonl::session_path(&self.lingxi_home, cwd, &session_id.to_string());
-        let Some(path) = path.to_str() else {
-            return false;
-        };
-        let Ok(file) = self.fs.read_file(path, None, None).await else {
-            return false;
-        };
-        let expected_session_id = session_id.to_string();
-        file.content.lines().any(|line| {
-            serde_json::from_str::<serde_json::Value>(line)
-                .ok()
-                .is_some_and(|value| {
-                    value.get("type").and_then(serde_json::Value::as_str) == Some("custom-title")
-                        && value.get("sessionId").and_then(serde_json::Value::as_str)
-                            == Some(expected_session_id.as_str())
-                        && value
-                            .get("mobileEmptySession")
-                            .and_then(serde_json::Value::as_u64)
-                            == Some(1)
-                })
-        })
-    }
-
     async fn persist_mobile_empty_session_anchor(
         &self,
         session_id: uuid::Uuid,
@@ -3828,6 +3804,7 @@ impl MobileEngineHandle {
             .append_mobile_empty_session(
                 &session_id.to_string(),
                 if title.is_empty() { "新对话" } else { title },
+                cwd,
             )
             .await
             .map_err(|error| ClientError::Internal {
@@ -3902,6 +3879,25 @@ impl MobileEngineHandle {
                 }
             }
         }
+        // Resolve a recorded directory before changing any active-session state.
+        // A missing or escaping workspace is a failed restore, never permission
+        // to run the recovered conversation in the previous session's cwd.
+        let restored_directory = captured
+            .as_ref()
+            .ok()
+            .and_then(|(path, _, loaded)| {
+                session::jsonl::loader::transcript_workspace_path(path, loaded)
+            })
+            .map(|hint| self.workspace_target(&hint).map(|(logical, _)| logical))
+            .transpose()?;
+        let captured_empty_source = captured
+            .as_ref()
+            .ok()
+            .filter(|(_, _, loaded)| {
+                loaded.messages_in_order.is_empty()
+                    && loaded.mobile_empty_sessions.contains(&uuid.to_string())
+            })
+            .map(|(path, _, _)| path.clone());
         let recorded_permission_mode = captured
             .as_ref()
             .ok()
@@ -3920,19 +3916,20 @@ impl MobileEngineHandle {
         let replay_result = captured
             .map_err(orchestrator::resume::ResumeError::from)
             .and_then(|(path, source, loaded)| {
-                let directory = session::jsonl::loader::transcript_workspace_path(&path, &loaded)
-                    .and_then(|hint| {
-                        self.workspace_target(&hint)
-                            .ok()
-                            .map(|(logical, _)| logical)
-                    });
                 restored_project_root = loaded
-                    .messages_in_order
-                    .first()
-                    .map(|message| std::path::PathBuf::from(&message.cwd));
+                    .mobile_empty_session_cwds
+                    .get(&uuid.to_string())
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| {
+                        loaded
+                            .messages_in_order
+                            .first()
+                            .map(|message| std::path::PathBuf::from(&message.cwd))
+                    })
+                    .or_else(|| restored_directory.clone());
                 let mut replayed =
                     orchestrator::resume::replay_captured_session(path, source, loaded, uuid)?;
-                replayed.working_directory = directory;
+                replayed.working_directory = restored_directory.clone();
                 Ok(replayed)
             });
         if effective_session_mode != self.inner.session_mode {
@@ -4053,7 +4050,11 @@ impl MobileEngineHandle {
                         session::jsonl::LoaderError::SessionNotFound { .. }
                     )
                 );
-                let has_anchor = is_empty && self.has_mobile_empty_session_anchor(uuid, &cwd).await;
+                let cwd = restored_directory
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .unwrap_or(cwd);
+                let has_anchor = is_empty && captured_empty_source.is_some();
                 let may_bootstrap = empty_bootstrap_title.is_some() && (is_empty || is_missing);
                 if !has_anchor && !may_bootstrap {
                     return Err(ClientError::Rejected {
@@ -4088,7 +4089,11 @@ impl MobileEngineHandle {
                         None,
                         None,
                         self.resume_runtime_with_model_preference(
-                            lingxi_core::host::ResumeRuntimeSnapshot::default(),
+                            lingxi_core::host::ResumeRuntimeSnapshot {
+                                transcript_path: captured_empty_source,
+                                working_directory: restored_directory,
+                                ..Default::default()
+                            },
                         )
                         .await,
                     )
@@ -4101,6 +4106,13 @@ impl MobileEngineHandle {
                         message: format!("resume empty session failed: {resume_error}"),
                     });
                 }
+                let root = restored_project_root
+                    .filter(|root| {
+                        self.inner.mobile_linux.is_none()
+                            || root.starts_with(mobile_linux_api::guest_paths::HOME)
+                    })
+                    .unwrap_or_else(|| std::path::PathBuf::from(&cwd));
+                self.inner.session_cwd.restore_project_root(root);
                 self.restore_preferred_reasoning_selection().await;
                 self.restore_preferred_fast_mode().await;
                 handle
@@ -7089,7 +7101,11 @@ impl MobileEngineHandle {
                     .await?;
                 self.inner
                     .session_writer
-                    .append_mobile_empty_session(&new_session_id.as_uuid().to_string(), "新对话")
+                    .append_mobile_empty_session(
+                        &new_session_id.as_uuid().to_string(),
+                        "新对话",
+                        &self.session_cwd(),
+                    )
                     .await
                     .map_err(|error| ClientError::Internal {
                         message: format!("new session anchor failed: {error}"),
@@ -7828,7 +7844,7 @@ impl MobileEngineHandle {
     /// a reply.
     async fn emit_session_list(&self, limit: usize) {
         match self
-            .workspace_sessions(
+            .workspace_sessions_inner(
                 MobileSessionDiscoveryScope::Repository,
                 limit.min(u32::MAX as usize) as u32,
             )

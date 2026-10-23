@@ -85,6 +85,9 @@ pub struct SessionRowDto {
     /// Absolute path to the `.jsonl` file — mapped directly from
     /// `SessionMetadata.path` so a client can request a re-load.
     pub path: String,
+    /// Exact logical workspace hint recovered by the session loader. Never
+    /// reconstruct this from the lossy sanitized transcript bucket name.
+    pub workspace_path: Option<String>,
 }
 
 /// Session-owned logical directory state. On mobile these are Linux guest

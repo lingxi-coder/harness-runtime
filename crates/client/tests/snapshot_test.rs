@@ -618,6 +618,18 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/workspace_changed.json",
+            ClientEvent::WorkspaceChanged {
+                state: client::protocol::listings::WorkspaceStateDto {
+                    session_id: "33333333-3333-4333-8333-333333333333".into(),
+                    cwd: "/home/lingxi/lingxi/projects/current".into(),
+                    project_root: "/home/lingxi/lingxi/projects/original".into(),
+                    additional_directories: vec!["/home/lingxi/shared".into()],
+                    transcript_path: "/home/lingxi/.lingxi/projects/current/33333333-3333-4333-8333-333333333333.jsonl".into(),
+                },
+            },
+        ),
+        (
             "event/session_list.json",
             ClientEvent::SessionList {
                 sessions: vec![SessionRowDto {
@@ -627,6 +639,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     message_count: 17,
                     mode: SessionModeDto::Code,
                     path: "/home/dev/.lingxi/sessions/33333333.jsonl".to_string(),
+            workspace_path: None,
                 }],
             },
         ),

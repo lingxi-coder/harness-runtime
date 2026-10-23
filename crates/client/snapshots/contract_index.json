@@ -918,6 +918,7 @@
   "SessionRowDto.path": "String",
   "SessionRowDto.title": "String",
   "SessionRowDto.uuid": "String",
+  "SessionRowDto.workspace_path": "Option<String>",
   "SkillAdminCommandDto.action": "String",
   "SkillAdminCommandDto.operation_id": "Option<u64>",
   "SkillAdminCommandDto.payload_json": "Option<String>",

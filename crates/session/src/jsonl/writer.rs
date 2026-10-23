@@ -2620,12 +2620,14 @@ impl JsonlWriter {
         &self,
         session_id: &str,
         title: &str,
+        cwd: &str,
     ) -> Result<(), WriterError> {
         let value = serde_json::json!({
             "type": "custom-title",
             "customTitle": title,
             "sessionId": session_id,
             "mobileEmptySession": 1,
+            "cwd": cwd,
         });
         self.append_side_record(&value).await
     }
@@ -5992,7 +5994,7 @@ mod tests {
         let writer = JsonlWriter::new(session_path.clone(), fs);
 
         writer
-            .append_mobile_empty_session(session_id, "新对话")
+            .append_mobile_empty_session(session_id, "新对话", "/home/lingxi/lingxi")
             .await
             .expect("append mobile empty-session anchor");
 
@@ -6003,6 +6005,7 @@ mod tests {
         assert_eq!(value["customTitle"], "新对话");
         assert_eq!(value["sessionId"], session_id);
         assert_eq!(value["mobileEmptySession"], 1);
+        assert_eq!(value["cwd"], "/home/lingxi/lingxi");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

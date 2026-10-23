@@ -480,6 +480,8 @@ pub struct LoadedTranscript {
     /// Latest non-empty `relocatedCwd` per session, used by `/branch` and
     /// resume-time cwd recovery. Empty writes do not clear the previous value.
     pub relocated_cwds: HashMap<String, String>,
+    /// Original cwd recorded atomically by a mobile empty-session anchor.
+    pub mobile_empty_session_cwds: HashMap<String, String>,
     /// Whether the transcript contains any `history-suppression` record.
     /// A transcript file belongs to one session, matching `createFork`'s
     /// source scan, which deliberately does not filter this record by id.
@@ -808,6 +810,10 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
                 out.custom_titles.insert(sid.to_string(), title.to_string());
                 if value.get("mobileEmptySession").and_then(Value::as_u64) == Some(1) {
                     out.mobile_empty_sessions.insert(sid.to_string());
+                    if let Some(cwd) = value.get("cwd").and_then(Value::as_str) {
+                        out.mobile_empty_session_cwds
+                            .insert(sid.to_string(), cwd.to_string());
+                    }
                 } else {
                     out.mobile_empty_sessions.remove(sid);
                 }

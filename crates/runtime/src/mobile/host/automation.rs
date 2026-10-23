@@ -474,6 +474,7 @@ impl MobileTurnFirer {
                     automation
                         .and_then(|a| a.name.as_deref())
                         .unwrap_or("Scheduled task"),
+                    &cwd,
                 )
                 .await
                 .map_err(|error| format!("persist scheduled session anchor: {error}"))?;
