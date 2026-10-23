@@ -11,6 +11,7 @@ use crate::{
     persistence::{
         CostDurabilityGate, CostDurabilityTurn, CostHydration, CostHydrator, CostMutationId,
         CostMutationSource, CostPersistAck, CostPersistError, CostPersistRequest, CostPersistence,
+        CostStateVector,
     },
     pricing::{PricingCatalog, PricingResolution},
     usage::Usage,
@@ -394,6 +395,46 @@ impl std::fmt::Debug for PreparedCostSession {
 }
 
 impl CostSessionScope {
+    /// Explicit user retry after a disk-full interruption. The original
+    /// session, tracker, mutation identities and observed usage stay intact.
+    pub async fn recover_disk_full(&self) -> Result<(), CostPersistError> {
+        let authority = self.tracker.selected_entry();
+        let Some(reason) = authority.durability_gate.frozen_reason() else {
+            return Ok(());
+        };
+        if !crate::persistence::is_disk_full(&reason) {
+            return Err(CostPersistError::Frozen(reason));
+        }
+        // A frozen fence still waits for all previously registered owners.
+        let _ = authority.durability_gate.drain_registered().await;
+        let slots = authority
+            .response_settlements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for slot in &slots {
+            let _ = slot.wait().await;
+        }
+        let expected = CostStateVector::from(&*authority.state.read().await);
+        let persistence = authority.persistence.as_ref().ok_or_else(|| {
+            CostPersistError::Rejected("session has no persistence authority".into())
+        })?;
+        let acknowledgments = persistence
+            .recover_disk_full(authority.session_id, expected)
+            .await?;
+        for ack in acknowledgments {
+            if let Some(slot) = slots
+                .iter()
+                .find(|slot| slot.mutation_id == ack.mutation_id)
+            {
+                slot.complete(Ok(Some(ack)));
+            }
+        }
+        Ok(())
+    }
+
     /// Observe model safety events against the session authority pinned by
     /// this delayed-work scope, even if the active session later changes.
     pub fn model_safety_observer(&self) -> lingxi_core::host::model_safety::ModelSafetyObserver {

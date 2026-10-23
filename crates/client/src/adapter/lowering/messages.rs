@@ -575,6 +575,10 @@ mod identity_projection_tests {
         let first = state.history[0].id();
         let last = lingxi_core::types::MessageId::new();
         let replayed = orchestrator::ReplayedSession {
+            transcript_path: Default::default(),
+            working_directory: None,
+            worktree_session: None,
+            transcript_metadata: Vec::new(),
             display_history: vec![
                 state.history[0].clone(),
                 ConversationMessage::user_meta(

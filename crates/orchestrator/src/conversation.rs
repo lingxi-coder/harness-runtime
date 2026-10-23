@@ -2097,6 +2097,8 @@ mod wiring_impl;
 mod output_accounting_impl;
 #[path = "conversation/runtime.rs"]
 mod runtime_impl;
+#[path = "conversation/storage_recovery.rs"]
+mod storage_recovery;
 
 #[path = "conversation/headless_mcp.rs"]
 mod headless_mcp;

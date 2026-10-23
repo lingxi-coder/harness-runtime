@@ -356,6 +356,7 @@ fn side_chat_variants_are_appended_after_the_protocol_25_prefix() {
         "SideChatSubmitted".into(),
         "SideChatEnded".into(),
         "SideChatError".into(),
+        "SessionStorageState".into(),
     ]));
 }
 

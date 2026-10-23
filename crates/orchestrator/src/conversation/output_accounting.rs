@@ -331,6 +331,10 @@ impl ConversationOrchestrator {
     /// every call site in both turn loops. So this reports; it does not gate.
     pub(crate) async fn note_cost_settlement_failure(&self, error: &impl std::fmt::Display) {
         tracing::error!(%error, "cost settlement failed after the provider response");
+        if cost::persistence::is_disk_full(&error.to_string()) {
+            self.pause_for_disk_full().await;
+            return;
+        }
         self.output
             .emit_system_notice(
                 &format!(
@@ -399,6 +403,7 @@ restart, which rebuilds a damaged ledger."
     pub(crate) async fn capture_main_output(
         &self,
     ) -> Result<Option<MainOutputObservation>, OrchestratorError> {
+        self.check_storage_pause().await?;
         let Some(provider) = &self.model_runtime.output_scopes else {
             return Ok(None);
         };

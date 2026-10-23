@@ -990,6 +990,7 @@ impl ConversationOrchestrator {
         &self,
         prompt: &Utf16JsonProjection,
     ) -> Result<ConversationOutcome, OrchestratorError> {
+        self.recover_session_storage().await?;
         self.prompt_runtime.begin_native_query();
         // 0. Build the system prompt for THIS turn.
         // claude-code `nre` precedence: `--system-prompt` (override) wins; else
@@ -3084,6 +3085,11 @@ impl ConversationOrchestrator {
         row_token: Option<String>,
         projected_content: Option<ProjectedUserContent>,
     ) -> Result<ConversationOutcome, OrchestratorError> {
+        if in_human_turn {
+            self.recover_session_storage().await?;
+        } else {
+            self.check_storage_pause().await?;
+        }
         // Each call admits one fresh query, including a metadata re-wake. The
         // StreamingTurnDriver retains these IDs through internal retries and
         // tool continuations without re-entering this wrapper.

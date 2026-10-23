@@ -467,6 +467,8 @@
   "ClientEvent::SessionResumed.session_id": "String",
   "ClientEvent::SessionStarted": "session_started",
   "ClientEvent::SessionStarted.session_id": "String",
+  "ClientEvent::SessionStorageState": "session_storage_state",
+  "ClientEvent::SessionStorageState.disk_full": "bool",
   "ClientEvent::SettingsSnapshot": "settings_snapshot",
   "ClientEvent::SettingsSnapshot.active_json": "Option<String>",
   "ClientEvent::SettingsSnapshot.effective_json": "String",

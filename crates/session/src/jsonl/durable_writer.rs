@@ -104,6 +104,8 @@ pub struct DurableTranscriptWriter {
     #[cfg(test)]
     fail_next_append_sync: std::sync::Arc<std::sync::atomic::AtomicBool>,
     #[cfg(test)]
+    fail_next_append_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(test)]
     duplicate_scans: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Counts `fsync` calls made by this writer, so a regression can assert
     /// which appends pay for durability and which do not.
@@ -307,6 +309,42 @@ impl<R: Read> Read for MetadataReader<'_, R> {
 }
 
 impl DurableTranscriptWriter {
+    /// A failed write_all may leave half a JSON row. Roll back only bytes from
+    /// this locked append so retrying cannot turn a full disk into lost history.
+    fn append_complete_line(
+        &self,
+        file: &mut std::fs::File,
+        line: &[u8],
+    ) -> Result<(), TranscriptWriterError> {
+        let before = file
+            .metadata()
+            .map_err(|error| FsError::Io(error.to_string()))?
+            .len();
+        #[cfg(test)]
+        let fail = self
+            .fail_next_append_write
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        #[cfg(not(test))]
+        let fail = false;
+        let result = if fail {
+            file.write_all(&line[..line.len() / 2])
+                .and_then(|()| Err(std::io::Error::from_raw_os_error(28)))
+        } else {
+            file.write_all(line)
+        };
+        if let Err(error) = result {
+            file.set_len(before)
+                .and_then(|()| file.sync_all())
+                .map_err(|rollback| {
+                    FsError::Io(format!(
+                        "{error}; restoring the incomplete transcript append failed: {rollback}"
+                    ))
+                })?;
+            return Err(FsError::Io(error.to_string()).into());
+        }
+        Ok(())
+    }
+
     /// Open a pre-created session-state directory and capture its identity.
     pub fn open(root: impl Into<PathBuf>) -> Result<Self, TranscriptWriterError> {
         let root = root.into();
@@ -325,6 +363,8 @@ impl DurableTranscriptWriter {
             fail_next_existing_sync: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             fail_next_append_sync: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(test)]
+            fail_next_append_write: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             #[cfg(test)]
             syncs: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             #[cfg(test)]
@@ -588,8 +628,7 @@ impl DurableTranscriptWriter {
             transcript_relative,
             Some(transcript_identity),
         )?;
-        file.write_all(&line)
-            .map_err(|error| FsError::Io(error.to_string()))?;
+        self.append_complete_line(&mut file, &line)?;
         #[cfg(test)]
         if self
             .fail_next_append_sync
@@ -941,8 +980,7 @@ impl DurableTranscriptTransaction<'_> {
             transcript_relative,
             Some(transcript_identity),
         )?;
-        file.write_all(&line)
-            .map_err(|error| FsError::Io(error.to_string()))?;
+        self.writer.append_complete_line(&mut file, &line)?;
         if !file_present {
             #[cfg(test)]
             self.writer
@@ -1263,6 +1301,53 @@ fn transcript_line_has_uuid(line: &[u8], expected_uuid: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disk_full_partial_append_preserves_committed_history_and_allows_retry() {
+        for once in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
+            let path = Path::new("history.jsonl");
+            writer
+                .append_json_once(
+                    path,
+                    "saved",
+                    source_payload(serde_json::json!({"uuid":"saved", "message":"history"})),
+                )
+                .unwrap();
+            let before = std::fs::read(dir.path().join(path)).unwrap();
+            let pending = source_payload(
+                serde_json::json!({"uuid":"pending", "message":"retain this complete result"}),
+            );
+            writer
+                .fail_next_append_write
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let append = || {
+                if once {
+                    writer
+                        .append_json_once(path, "pending", pending.clone())
+                        .map(|_| ())
+                } else {
+                    writer.with_transaction(|tx| {
+                        tx.append_raw_json_at(dir.path(), &writer.identity, path, pending.clone())
+                    })
+                }
+            };
+            assert!(append().is_err());
+            assert_eq!(std::fs::read(dir.path().join(path)).unwrap(), before);
+            append().unwrap();
+            let after = std::fs::read(dir.path().join(path)).unwrap();
+            assert!(after.starts_with(&before));
+            let rows = std::str::from_utf8(&after)
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>();
+            assert_eq!(rows.len(), 2);
+            for row in rows {
+                serde_json::from_str::<serde_json::Value>(row).unwrap();
+            }
+        }
+    }
     use serde_json::json;
 
     fn source_payload(value: Value) -> Utf16JsonProjection {

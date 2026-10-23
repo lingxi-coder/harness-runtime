@@ -4250,6 +4250,9 @@ pub trait OutputStream: Send + Sync {
     /// transcript/status surface remain source-compatible.
     async fn emit_system_notice(&self, _body: &Utf16JsonProjection, _is_error: bool) {}
 
+    /// Session-scoped storage pause; clients keep it visible until recovery.
+    async fn emit_session_storage_state(&self, _disk_full: bool) {}
+
     /// Emit provider status, native terminal reason, and provider stop reason
     /// without asking the sink to infer any value from rendered error text.
     async fn emit_terminal_api_error(

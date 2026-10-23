@@ -227,6 +227,10 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
             },
         ),
         (
+            "event/session_storage_state.json",
+            ClientEvent::SessionStorageState { disk_full: true },
+        ),
+        (
             "event/ui_log.json",
             ClientEvent::UiLog {
                 plugin: "review".to_string(),

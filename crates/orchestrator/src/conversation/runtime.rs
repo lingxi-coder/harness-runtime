@@ -83,8 +83,12 @@ pub(crate) struct TranscriptStore {
     /// Optional on-disk JSONL persistence (M5-07). `None` for in-memory
     /// tests; `Some` when the CLI binary wires `~/.lingxi/projects/.../<uuid>.jsonl`.
     pub(crate) jsonl_writer: Option<Arc<JsonlWriter>>,
-    /// Cached UUID of the last persisted JSONL entry — used to populate
-    /// `parentUuid` on the next append. Reset to `None` for fresh sessions.
+    pub(crate) storage_pauses:
+        Mutex<std::collections::HashMap<String, super::storage_recovery::StoragePause>>,
+    pub(crate) storage_append_lock: Mutex<()>,
+    /// Logical JSONL tip, including rows retained during a disk-full pause.
+    /// Used for `parentUuid`; writer acknowledgments alone prove durability.
+    /// Reset to `None` for fresh sessions.
     pub(crate) last_jsonl_uuid: Arc<Mutex<Option<String>>>,
     /// `tool_use_id` → claude's message-level `toolDenialKind`, recorded when a
     /// tool is denied and consumed when its `tool_result` user line is
@@ -238,6 +242,8 @@ impl TranscriptStore {
         Self {
             thinking_recovery: std::sync::RwLock::new(Default::default()),
             jsonl_writer: None,
+            storage_pauses: Mutex::new(std::collections::HashMap::new()),
+            storage_append_lock: Mutex::new(()),
             last_jsonl_uuid: Arc::new(Mutex::new(None)),
             tool_denial_kinds: Mutex::new(std::collections::HashMap::new()),
             permission_denials: std::sync::Arc::new(Mutex::new(Vec::new())),

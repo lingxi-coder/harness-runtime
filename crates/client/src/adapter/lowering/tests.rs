@@ -145,6 +145,7 @@ mod regressions {
             created: UNIX_EPOCH + Duration::from_secs(1_609_459_200),
             message_count: 7,
             path: PathBuf::from("/home/u/.lingxi/sessions/abc.jsonl"),
+            workspace_path: None,
             pr_number: None,
             custom_or_ai_title: Some("First chat".to_string()),
             resume_model: None,

@@ -751,6 +751,12 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
+    async fn emit_session_storage_state(&self, disk_full: bool) {
+        self.sink
+            .emit(ClientEvent::SessionStorageState { disk_full })
+            .await;
+    }
+
     async fn emit_mod_log(&self, plugin: &str, text: &Utf16JsonProjection) {
         self.sink
             .emit(ClientEvent::UiLog {
@@ -1719,6 +1725,21 @@ mod tests {
                 message: "Conversation changes could not be saved.".into(),
                 is_error: true,
             }]
+        );
+    }
+
+    #[tokio::test]
+    async fn storage_pause_and_recovery_cross_the_adapter_boundary() {
+        let sink = MockSink::arc();
+        let stream = AdapterOutputStream::new(sink.clone());
+        stream.emit_session_storage_state(true).await;
+        stream.emit_session_storage_state(false).await;
+        assert_eq!(
+            sink.events().await,
+            vec![
+                ClientEvent::SessionStorageState { disk_full: true },
+                ClientEvent::SessionStorageState { disk_full: false },
+            ]
         );
     }
 

@@ -851,6 +851,10 @@ define_client_event! {
         side_id: Option<String>,
         message: String,
     },
+    /// Appended to keep the existing UniFFI enum ordinals stable.
+    SessionStorageState {
+        disk_full: bool,
+    },
 }
 
 impl From<ClientEventWire> for ClientEvent {
@@ -943,6 +947,9 @@ impl From<ClientEventWire> for ClientEvent {
             },
             ClientEventWire::SystemNotice { message, is_error } => {
                 Self::SystemNotice { message, is_error }
+            }
+            ClientEventWire::SessionStorageState { disk_full } => {
+                Self::SessionStorageState { disk_full }
             }
             ClientEventWire::AskUserQuestion { request } => Self::AskUserQuestion { request },
             ClientEventWire::AskUserQuestionResolved { request_id } => {

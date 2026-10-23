@@ -32,6 +32,7 @@ mod attempts;
 mod resume;
 mod retention;
 pub use resume::capture_resume_cost;
+mod storage_recovery;
 mod tool_execution;
 use attempts::AttemptProjection;
 use lingxi_core::host::{
@@ -1545,7 +1546,7 @@ impl CoordinatorState {
         let outcome = if let Some(cached) = cached {
             self.resolve_cached_result(&cached, &record)
         } else {
-            let outcome = self.persist_request_inner(&request, &record);
+            let outcome = self.persist_request_inner(&request, &record, false);
             let retained_record = outcome.is_err().then_some(record);
             self.results
                 .lock()
@@ -1631,6 +1632,7 @@ impl CoordinatorState {
         &self,
         request: &CostPersistRequest,
         record: &CostMutationRecord,
+        recovering: bool,
     ) -> CostPersistResult {
         if request.session_id != self.session_id {
             return Err(CostPersistError::Rejected(
@@ -1673,7 +1675,7 @@ impl CoordinatorState {
                 "cost mutation revision is not the next durable revision".into(),
             ));
         }
-        if let Some(reason) = self.durability_gate.frozen_reason() {
+        if let Some(reason) = self.durability_gate.frozen_reason().filter(|_| !recovering) {
             return Err(CostPersistError::Frozen(reason));
         }
         let event = match encode_session_event(&SessionEvent::Cost(record.clone())) {
@@ -2477,6 +2479,27 @@ fn fold_cost_entry(
 
 #[async_trait]
 impl CostPersistence for SessionStateCoordinator {
+    async fn recover_disk_full(
+        &self,
+        session_id: SessionId,
+        expected: CostStateVector,
+    ) -> Result<Vec<CostPersistAck>, CostPersistError> {
+        if session_id != self.state.session_id || expected.session_id != session_id {
+            return Err(CostPersistError::Rejected(
+                "storage recovery session mismatch".into(),
+            ));
+        }
+        let pin = self.retention_pin()?;
+        self.flush().await?;
+        let state = self.state.clone();
+        tokio::task::spawn_blocking(move || {
+            let _pin = pin;
+            state.recover_disk_full(expected)
+        })
+        .await
+        .map_err(|error| CostPersistError::Storage(error.to_string()))?
+    }
+
     async fn acquire_attempt_permit(
         &self,
         session_id: SessionId,

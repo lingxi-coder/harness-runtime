@@ -363,6 +363,8 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::SystemNotice", "system_notice");
     put("ClientEvent::SystemNotice.message", "String");
     put("ClientEvent::SystemNotice.is_error", "bool");
+    put("ClientEvent::SessionStorageState", "session_storage_state");
+    put("ClientEvent::SessionStorageState.disk_full", "bool");
     put("ClientEvent::UiLog", "ui_log");
     put("ClientEvent::UiLog.plugin", "String");
     put("ClientEvent::UiLog.text", "ClientTextDto");

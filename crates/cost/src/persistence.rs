@@ -241,6 +241,16 @@ pub enum CostPersistError {
     Storage(String),
 }
 
+/// Storage backends retain OS errors as text at the host boundary.
+#[must_use]
+pub fn is_disk_full(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("no space left on device")
+        || error.contains("enospc")
+        || error.contains("os error 28")
+        || error.contains("disk full")
+}
+
 /// Result sent to the mutation owner. The mutation id remains stable on every
 /// retry, including a failed durable acknowledgment.
 pub type CostPersistResult = Result<CostPersistAck, CostPersistError>;
@@ -353,6 +363,18 @@ impl CostPersistPermit {
 /// desktop supplies the WAL/snapshot coordinator without a dependency cycle.
 #[async_trait]
 pub trait CostPersistence: Send + Sync {
+    /// Retry retained writes under the original session authority. Implementors
+    /// must validate the WAL and the caller's complete vector before thawing.
+    async fn recover_disk_full(
+        &self,
+        _session_id: SessionId,
+        _expected: CostStateVector,
+    ) -> Result<Vec<CostPersistAck>, CostPersistError> {
+        Err(CostPersistError::Rejected(
+            "this persistence authority cannot recover a storage interruption".into(),
+        ))
+    }
+
     /// Reserve bounded queue capacity before state/reservation locks.
     async fn acquire_permit(
         &self,

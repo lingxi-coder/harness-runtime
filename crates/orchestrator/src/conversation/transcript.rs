@@ -1613,11 +1613,13 @@ impl ConversationOrchestrator {
                 row.message = source_object([("role", "user".into()), ("content", text)]);
             }
         }
-        writer.append(&row).await.map_err(|error| {
-            lingxi_core::host::HandleError::ActionFailed(format!(
-                "could not persist scheduled fire: {error}"
-            ))
-        })?;
+        self.append_transcript_row(&writer, &row)
+            .await
+            .map_err(|error| {
+                lingxi_core::host::HandleError::ActionFailed(format!(
+                    "could not persist scheduled fire: {error}"
+                ))
+            })?;
         *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid);
         Ok(())
     }
@@ -3530,15 +3532,17 @@ impl ConversationOrchestrator {
     /// payload and must not receive paths, session ids, or backend details.
     pub(super) async fn record_transcript_append_failure(
         &self,
-        _session_id: &str,
+        session_id: &str,
         operation: &'static str,
         error: &(impl std::fmt::Display + ?Sized),
     ) {
-        // CC 2.1.218 logs + emits telemetry on a transcript-append failure but
-        // shows NO user-visible notice — the port's `TRANSCRIPT_PERSISTENCE_WARNING`
-        // system notice was an invented surface. Keep the log + telemetry only.
+        // Ordinary append failures remain diagnostic. A full disk also pauses
+        // this session so pending history can be saved before work continues.
         tracing::error!(error = %error, operation, "jsonl writer append failed");
         telemetry::emit_session_persistence_failed();
+        if cost::persistence::is_disk_full(&error.to_string()) {
+            self.mark_storage_paused(session_id.to_string()).await;
+        }
     }
 
     /// Persist ONE hook-run `attachment` transcript line.
@@ -3734,7 +3738,7 @@ impl ConversationOrchestrator {
             logical_parent_uuid: None,
             extra,
         };
-        match writer.append(&row).await {
+        match self.append_transcript_row(&writer, &row).await {
             Ok(()) => {
                 #[cfg(test)]
                 crate::request_context::pause_after_first_ingress_append_for_test().await;
@@ -3808,7 +3812,7 @@ impl ConversationOrchestrator {
             extra,
         };
         let line_uuid = jmsg.uuid.clone();
-        match writer.append(&jmsg).await {
+        match self.append_transcript_row(&writer, &jmsg).await {
             Ok(()) => {
                 #[cfg(test)]
                 crate::request_context::pause_after_first_ingress_append_for_test().await;
@@ -3885,7 +3889,7 @@ impl ConversationOrchestrator {
             logical_parent_uuid: None,
             extra,
         };
-        match writer.append(&row).await {
+        match self.append_transcript_row(&writer, &row).await {
             Ok(()) => {
                 *self.transcript.last_jsonl_uuid.lock().await = Some(row.uuid.clone());
                 telemetry::emit_session_appended(&session_id, &row.uuid);
@@ -4589,8 +4593,7 @@ impl ConversationOrchestrator {
         }
         let uuid_for_chain = jmsg.uuid.clone();
         let append_result = if pending_prompt_id.is_some() {
-            writer
-                .append_pending_prompt_message_once(&jmsg)
+            self.append_pending_transcript_row(writer, &jmsg)
                 .await
                 .map(|(outcome, last_uuid)| {
                     (
@@ -4600,8 +4603,7 @@ impl ConversationOrchestrator {
                 })
                 .map_err(|error| error.to_string())
         } else {
-            writer
-                .append(&jmsg)
+            self.append_transcript_row(writer, &jmsg)
                 .await
                 .map(|()| (Some(uuid_for_chain.clone()), true))
                 .map_err(|error| error.to_string())
@@ -5028,7 +5030,7 @@ impl ConversationOrchestrator {
                         .expect("generated transcript metadata is valid JSON"),
                     )
                     .expect("extra metadata is an object");
-                match writer.append(&jmsg).await {
+                match self.append_transcript_row(&writer, &jmsg).await {
                     Ok(()) => {
                         *self.transcript.last_jsonl_uuid.lock().await =
                             Some(line_uuid_for_commit.clone());
@@ -5276,7 +5278,7 @@ impl ConversationOrchestrator {
             // during session.append cannot leave this row with a stale parent.
             let parent_uuid = self.transcript.last_jsonl_uuid.lock().await.clone();
             jmsg_for_write.parent_uuid.clone_from(&parent_uuid);
-            let result = match writer.append(&jmsg_for_write).await {
+            let result = match self.append_transcript_row(&writer, &jmsg_for_write).await {
                 Ok(()) => {
                     *self.transcript.last_jsonl_uuid.lock().await = Some(row_uuid.clone());
                     telemetry::emit_session_appended(&session_id_for_write, &row_uuid);
@@ -5469,7 +5471,7 @@ impl ConversationOrchestrator {
             let parent_uuid = self.transcript.last_jsonl_uuid.lock().await.clone();
             let mut jmsg = jmsg;
             jmsg.parent_uuid.clone_from(&parent_uuid);
-            let persisted = match writer.append(&jmsg).await {
+            let persisted = match self.append_transcript_row(&writer, &jmsg).await {
                 Ok(()) => {
                     *self.transcript.last_jsonl_uuid.lock().await =
                         Some(line_uuid_for_write.clone());
