@@ -59,7 +59,11 @@ mod skill_loader;
 #[cfg(feature = "mobile")]
 mod device_skills;
 #[cfg(feature = "mobile")]
-pub mod local_app_host;
+mod local_app_tools;
+#[cfg(feature = "mobile")]
+pub mod linux_maintenance;
+#[cfg(feature = "mobile")]
+pub mod unified_local_apps;
 #[cfg(feature = "mobile")]
 pub mod visualization_host;
 // v3 Phase 1: workflow-on-mobile composition pieces (launcher + deferred

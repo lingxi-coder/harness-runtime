@@ -6403,9 +6403,10 @@ pub async fn build_with_credential_stack(
         );
     }
     if cfg.local_apps {
-        crate::local_apps::register_desktop_skill(
+        crate::local_apps::register_skill(
             &mut reg,
             &[local_app::TOOL_NAME.to_string(), "Bash".to_string()],
+            "Bash",
         );
     }
     command_api::builtins::list_agents::register(

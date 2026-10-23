@@ -1,0 +1,739 @@
+use super::*;
+use serde_json::{json, Value};
+use std::{collections::BTreeMap, fs, path::Path};
+fn manifest() -> Value {
+    json!({"schema":2,"name":"Test app","entry":{"type":"static","path":"index.html"},"targets":[{"platform":"ios","environment":"web"},{"platform":"android","environment":"web"},{"platform":"macos","environment":"web"}],"package":{"files":["index.html"],"dependencyLocks":[]}})
+}
+fn source(path: &Path, value: &Value) {
+    fs::create_dir_all(path).unwrap();
+    fs::write(path.join("lingxi-app.json"), value.to_string()).unwrap();
+    fs::write(path.join("index.html"), "<!doctype html><html>one</html>").unwrap();
+}
+fn setup() -> (tempfile::TempDir, AppLibrary, PublishRequest) {
+    let dir = tempfile::tempdir().unwrap();
+    let lib = AppLibrary::open(dir.path().join("config")).unwrap();
+    let src = dir.path().join("project");
+    source(&src, &manifest());
+    let request = PublishRequest {
+        app_id: None,
+        expected_revision: 0,
+        source_path: src.to_string_lossy().into(),
+        authoring: Some(AuthoringRef {
+            source_directory: "/root/.lingxi/.apps/test".into(),
+            source_session_id: Some("session1".into()),
+            project_id: None,
+        }),
+        market_origin: None,
+    };
+    (dir, lib, request)
+}
+
+#[test]
+fn exclusive_runtime_owner_recovers_only_after_previous_owner_releases() {
+    let (_root, library, request) = setup();
+    let owner = library.acquire_runtime_lease().unwrap();
+    let published = library.publish(request).unwrap();
+    let mut run = library
+        .prepare_run(&published.record.app_id, 1)
+        .unwrap()
+        .run;
+    run.phase = RunPhase::Running;
+    library.update_run(run.clone()).unwrap();
+    let reader = AppLibrary::open(_root.path().join("config")).unwrap();
+    assert!(matches!(
+        reader.acquire_runtime_lease(),
+        Err(AppError::Busy(_))
+    ));
+    assert_eq!(
+        reader.runs(&run.app_id).unwrap()[0].phase,
+        RunPhase::Running
+    );
+    drop(owner);
+    let recovered = reader.acquire_runtime_lease().unwrap();
+    assert_eq!(recovered.recovered_runs, 1);
+    assert_eq!(
+        reader.runs(&run.app_id).unwrap()[0].phase,
+        RunPhase::Interrupted
+    );
+}
+#[test]
+fn strict_manifest_requires_schema_targets_known_capabilities() {
+    for mutate in [0, 1, 2, 3, 4] {
+        let mut m = manifest();
+        match mutate {
+            0 => m["schema"] = json!(1),
+            1 => m["targets"] = json!([]),
+            2 => m["capabilities"] = json!(["unrestricted-root"]),
+            3 => m["unknownField"] = json!(true),
+            _ => m["entry"]["path"] = json!("../escape"),
+        };
+        assert!(Manifest::parse(&m.to_string()).is_err(), "{m}");
+    }
+}
+#[test]
+fn agent_requirements_are_not_runtime_grants() {
+    let mut m = manifest();
+    m["capabilities"] = json!(["agent"]);
+    m["agent"] = json!({"tools":["Read","mcp__calendar"]});
+    assert!(Manifest::parse(&m.to_string()).is_ok());
+    m["agent"]["model"] = json!("gpt");
+    assert!(Manifest::parse(&m.to_string()).is_err());
+}
+#[test]
+fn target_matching_checks_version_abi_architecture_channel() {
+    let mut m = manifest();
+    m["targets"] = json!([{"platform":"ios","environment":"mobile-linux","architecture":"aarch64","runtimeVersion":"1.2.0","runtimeAbi":"ish-arm64-v1","channels":["development"],"capabilities":["process"]}]);
+    m["capabilities"] = json!(["process"]);
+    let m = Manifest::parse(&m.to_string()).unwrap();
+    let mut host:Target=serde_json::from_value(json!({"platform":"ios","environment":"mobile-linux","architecture":"aarch64","runtimeVersion":"1.3.0","runtimeAbi":"ish-arm64-v1","channels":["development"],"capabilities":["process"]})).unwrap();
+    assert!(m.compatible_with(&host).unwrap());
+    host.runtime_version = Some("1.1.0".into());
+    assert!(!m.compatible_with(&host).unwrap());
+    host.runtime_version = Some("2.0.0".into());
+    host.runtime_abi = Some("different".into());
+    assert!(!m.compatible_with(&host).unwrap());
+    host.runtime_abi = Some("ish-arm64-v1".into());
+    host.channels = vec!["app-store".into()];
+    assert!(!m.compatible_with(&host).unwrap());
+}
+#[test]
+fn rejects_dependency_cycles_and_unknown_process() {
+    let mut m = manifest();
+    m["processes"] = json!([{"name":"a","command":"a","dependsOn":["b"]},{"name":"b","command":"b","dependsOn":["a"]}]);
+    assert!(Manifest::parse(&m.to_string()).is_err());
+    m["processes"] = json!([]);
+    m["entry"] = json!({"type":"server","process":"missing"});
+    assert!(Manifest::parse(&m.to_string()).is_err());
+}
+
+#[test]
+fn execution_steps_require_host_process_support_even_without_explicit_capability() {
+    let mut value = manifest();
+    value["install"] = json!([{"command":"prepare application"}]);
+    let release = Manifest::parse(&value.to_string()).unwrap();
+    let mut host: Target = serde_json::from_value(json!({"platform":"ios","environment":"web","channels":["store"],"capabilities":[]})).unwrap();
+    assert!(!release.compatible_with(&host).unwrap());
+    host.capabilities.push("process".into());
+    assert!(release.compatible_with(&host).unwrap());
+}
+#[test]
+fn publication_snapshot_outlives_source_and_session() {
+    let (_dir, lib, req) = setup();
+    let result = lib.publish(req.clone()).unwrap();
+    fs::remove_dir_all(req.source_path).unwrap();
+    assert_eq!(lib.list().unwrap().len(), 1);
+    assert!(lib.verify_release(&result.record.app_id, 1).is_ok());
+    let resolution = lib
+        .prepare_authoring(&result.record.app_id, &BTreeMap::new(), false)
+        .unwrap();
+    assert_eq!(resolution.action, "sourceMissing");
+}
+#[test]
+fn staged_update_and_failed_publish_leave_active_revision_and_data() {
+    let (_dir, lib, mut req) = setup();
+    let first = lib.publish(req.clone()).unwrap();
+    let app = &first.record.app_id;
+    fs::write(lib.data_path(app).unwrap().join("user.txt"), "private").unwrap();
+    req.app_id = Some(app.clone());
+    req.expected_revision = 1;
+    fs::write(
+        Path::new(&req.source_path).join("index.html"),
+        "<!doctype html>two",
+    )
+    .unwrap();
+    let second = lib.publish(req.clone()).unwrap();
+    assert_eq!(second.record.latest_revision, 2);
+    assert_eq!(second.record.current_revision, 1);
+    assert_ne!(second.release.digest, first.release.digest);
+    req.expected_revision = 2;
+    fs::remove_file(Path::new(&req.source_path).join("index.html")).unwrap();
+    assert!(lib.publish(req).is_err());
+    assert_eq!(lib.get(app).unwrap().latest_revision, 2);
+    assert_eq!(
+        fs::read_to_string(lib.data_path(app).unwrap().join("user.txt")).unwrap(),
+        "private"
+    );
+    assert!(lib.activate_release(app, 2).is_ok());
+}
+#[test]
+fn competing_publishers_cannot_silently_overwrite() {
+    let (_dir, lib, mut req) = setup();
+    let first = lib.publish(req.clone()).unwrap();
+    req.app_id = Some(first.record.app_id);
+    req.expected_revision = 1;
+    let other = AppLibrary::open(lib.root().parent().unwrap().parent().unwrap()).unwrap();
+    let clone = req.clone();
+    let one = std::thread::spawn(move || other.publish(clone));
+    let two = lib.publish(req);
+    let one = one.join().unwrap();
+    assert_eq!(usize::from(one.is_ok()) + usize::from(two.is_ok()), 1);
+    assert!(matches!(
+        one.err().or(two.err()),
+        Some(AppError::Conflict {
+            expected: 1,
+            actual: 2
+        })
+    ));
+}
+#[test]
+fn execution_consent_applies_before_any_preparation_and_exact_content() {
+    let (_dir, lib, mut req) = setup();
+    let mut m = manifest();
+    m["install"] = json!([{"command":"npm ci"}]);
+    source(Path::new(&req.source_path), &m);
+    let first = lib.publish(req.clone()).unwrap();
+    let app = &first.record.app_id;
+    assert!(matches!(
+        lib.prepare_run(app, 1),
+        Err(AppError::ConsentRequired(_))
+    ));
+    assert!(lib.runs(app).unwrap().is_empty());
+    lib.grant_execution(app, &first.release.digest).unwrap();
+    let prep = lib.prepare_run(app, 1).unwrap();
+    assert!(Path::new(&prep.work_path).join("index.html").exists());
+    req.app_id = Some(app.clone());
+    req.expected_revision = 1;
+    fs::write(Path::new(&req.source_path).join("index.html"), "changed").unwrap();
+    lib.publish(req).unwrap();
+    assert!(matches!(
+        lib.prepare_run(app, 2),
+        Err(AppError::ConsentRequired(_))
+    ));
+    lib.revoke_execution(app).unwrap();
+    assert!(matches!(
+        lib.require_execution_grant(app, 1),
+        Err(AppError::ConsentRequired(_))
+    ));
+}
+#[test]
+fn release_tampering_is_rejected_before_run() {
+    let (_dir, lib, req) = setup();
+    let first = lib.publish(req).unwrap();
+    fs::write(
+        lib.source_path(&first.record.app_id, 1)
+            .unwrap()
+            .join("index.html"),
+        "tampered",
+    )
+    .unwrap();
+    assert!(lib.prepare_run(&first.record.app_id, 1).is_err());
+}
+#[test]
+fn separate_runs_and_data_do_not_modify_release() {
+    let (_dir, lib, req) = setup();
+    let first = lib.publish(req).unwrap();
+    let a = lib.prepare_run(&first.record.app_id, 1).unwrap();
+    let b = lib.prepare_run(&first.record.app_id, 1).unwrap();
+    assert_ne!(a.work_path, b.work_path);
+    assert_eq!(a.data_path, b.data_path);
+    fs::write(Path::new(&a.work_path).join("index.html"), "mutable").unwrap();
+    assert!(lib.verify_release(&first.record.app_id, 1).is_ok());
+    let mut stopped = a.run.clone();
+    stopped.phase = RunPhase::Stopped;
+    lib.update_run(stopped.clone()).unwrap();
+    stopped.phase = RunPhase::Running;
+    assert!(lib.update_run(stopped).is_err());
+    assert!(lib.remove(&first.record.app_id).is_err());
+}
+#[test]
+fn schema_changes_need_an_explicit_migration_transaction_before_preparation_or_activation() {
+    let (_dir, lib, mut req) = setup();
+    let first = lib.publish(req.clone()).unwrap();
+    let data = lib.data_path(&first.record.app_id).unwrap();
+    fs::write(data.join("database"), "schema1-data").unwrap();
+    let mut m = manifest();
+    m["dataSchema"] = json!({"version":2,"compatibleFrom":1});
+    source(Path::new(&req.source_path), &m);
+    req.app_id = Some(first.record.app_id.clone());
+    req.expected_revision = 1;
+    lib.publish(req).unwrap();
+    for error in [
+        lib.activate_release(&first.record.app_id, 2).unwrap_err(),
+        lib.prepare_run(&first.record.app_id, 2).unwrap_err(),
+    ] {
+        assert!(matches!(
+            error,
+            AppError::DataMigrationRequired {
+                current: 1,
+                target: 2
+            }
+        ));
+        assert_eq!(error.code(), "dataMigrationRequired");
+    }
+    assert!(lib.runs(&first.record.app_id).unwrap().is_empty());
+    assert_eq!(lib.get(&first.record.app_id).unwrap().current_revision, 1);
+    assert_eq!(
+        fs::read_to_string(data.join("database")).unwrap(),
+        "schema1-data"
+    );
+}
+#[test]
+fn schema_downgrade_is_blocked_and_initial_schema_can_be_newer() {
+    let (_dir, lib, mut req) = setup();
+    let mut m = manifest();
+    m["dataSchema"] = json!({"version":2,"compatibleFrom":1});
+    source(Path::new(&req.source_path), &m);
+    let first = lib.publish(req.clone()).unwrap();
+    assert!(lib.prepare_run(&first.record.app_id, 1).is_ok());
+    source(Path::new(&req.source_path), &manifest());
+    req.app_id = Some(first.record.app_id.clone());
+    req.expected_revision = 1;
+    lib.publish(req).unwrap();
+    assert!(matches!(
+        lib.activate_release(&first.record.app_id, 2),
+        Err(AppError::DataMigrationRequired {
+            current: 2,
+            target: 1
+        })
+    ));
+}
+#[test]
+fn continued_development_only_reuses_recorded_matching_session() {
+    let (_dir, lib, req) = setup();
+    let first = lib.publish(req).unwrap();
+    let mut dirs = BTreeMap::new();
+    dirs.insert(
+        "other-active-session".into(),
+        "/root/.lingxi/.apps/test".into(),
+    );
+    dirs.insert("session1".into(), "/root/elsewhere".into());
+    assert_eq!(
+        lib.prepare_authoring(&first.record.app_id, &dirs, true)
+            .unwrap()
+            .action,
+        "createSession"
+    );
+    dirs.insert("session1".into(), "/root/.lingxi/.apps/test".into());
+    assert_eq!(
+        lib.prepare_authoring(&first.record.app_id, &dirs, true)
+            .unwrap()
+            .session_id,
+        Some("session1".into())
+    );
+}
+#[test]
+fn public_export_is_only_explicit_sources_and_keeps_digest() {
+    let (dir, lib, req) = setup();
+    fs::write(Path::new(&req.source_path).join(".env"), "secret").unwrap();
+    let first = lib.publish(req).unwrap();
+    let dest = dir.path().join("export");
+    lib.export(&first.record.app_id, 1, &dest).unwrap();
+    assert!(!dest.join(".env").exists());
+    assert!(!dest.join("record.json").exists());
+    let imported = lib
+        .publish(PublishRequest {
+            app_id: None,
+            expected_revision: 0,
+            source_path: dest.to_string_lossy().into(),
+            authoring: None,
+            market_origin: None,
+        })
+        .unwrap();
+    assert_ne!(first.record.app_id, imported.record.app_id);
+    assert_eq!(first.release.digest, imported.release.digest);
+    assert!(imported.record.execution_grants.is_empty());
+}
+#[test]
+fn public_export_without_allowlist_and_secret_allowlist_fail() {
+    let (dir, lib, req) = setup();
+    let mut m = manifest();
+    m.as_object_mut().unwrap().remove("package");
+    source(Path::new(&req.source_path), &m);
+    let first = lib.publish(req.clone()).unwrap();
+    assert!(lib
+        .export(&first.record.app_id, 1, &dir.path().join("export"))
+        .is_err());
+    m["package"] = json!({"files":["index.html",".env"]});
+    source(Path::new(&req.source_path), &m);
+    fs::write(Path::new(&req.source_path).join(".env"), "secret").unwrap();
+    assert!(lib.publish(req).is_err());
+}
+#[cfg(unix)]
+#[test]
+fn source_symlink_and_traversal_rejected() {
+    let (dir, lib, req) = setup();
+    let secret = dir.path().join("secret");
+    fs::write(&secret, "secret").unwrap();
+    fs::remove_file(Path::new(&req.source_path).join("index.html")).unwrap();
+    std::os::unix::fs::symlink(secret, Path::new(&req.source_path).join("index.html")).unwrap();
+    assert!(lib.publish(req).is_err());
+    for bad in ["../x", "/x", "a/../x", "a\\x", "a//x", "a/./x"] {
+        assert!(relative_path(bad).is_err());
+    }
+}
+#[test]
+fn tombstone_preserves_data_and_releases() {
+    let (_dir, lib, req) = setup();
+    let first = lib.publish(req).unwrap();
+    let data = lib.data_path(&first.record.app_id).unwrap();
+    fs::write(data.join("private"), "keep").unwrap();
+    let source = lib.source_path(&first.record.app_id, 1).unwrap();
+    assert!(lib.remove(&first.record.app_id).unwrap().removed);
+    assert!(lib.list().unwrap().is_empty());
+    assert!(source.join("index.html").exists());
+    assert_eq!(fs::read_to_string(data.join("private")).unwrap(), "keep");
+}
+#[test]
+fn json_contract_and_unknown_operations_fail_closed() {
+    let (_dir, lib, req) = setup();
+    let mut value = serde_json::to_value(req).unwrap();
+    value["op"] = json!("publish");
+    let result = lib.request_json(&value.to_string()).unwrap();
+    assert!(result["record"]["appId"].is_string());
+    assert!(result["release"]["digest"].is_string());
+    assert!(lib.request_json(r#"{"op":"start","appId":"app"}"#).is_err());
+    assert!(lib
+        .request_json(r#"{"op":"list","ignored":"field"}"#)
+        .is_err());
+}
+#[test]
+fn legacy_import_preserves_old_assets_and_has_new_identity() {
+    let (dir, lib, _req) = setup();
+    let legacy = dir.path().join("config/local-apps");
+    fs::create_dir_all(legacy.join("old1")).unwrap();
+    let html = "<!doctype html><html>legacy</html>";
+    fs::write(legacy.join("old1/1.html"), html).unwrap();
+    fs::write(legacy.join("index.json"),json!({"schema":1,"apps":{"old1":{"name":"Legacy","summary":"Old","revisions":[{"rev":1}]}}}).to_string()).unwrap();
+    assert_eq!(lib.legacy_entries().unwrap().len(), 1);
+    let imported = lib
+        .import_legacy("old1", &dir.path().join("imported-source"), None)
+        .unwrap();
+    assert_ne!(imported.record.app_id, "old1");
+    assert_eq!(
+        fs::read_to_string(legacy.join("old1/1.html")).unwrap(),
+        html
+    );
+    assert_eq!(lib.legacy_archives().unwrap().len(), 2);
+}
+
+#[test]
+fn restoring_source_creates_a_new_directory_and_rebinds_only_explicitly() {
+    let (dir, lib, req) = setup();
+    let published = lib.publish(req.clone()).unwrap();
+    let authoring = AuthoringRef {
+        source_directory: "/root/.lingxi/.apps/restored".into(),
+        source_session_id: Some("replacement".into()),
+        project_id: None,
+    };
+    let restored = lib
+        .restore_authoring(
+            &published.record.app_id,
+            1,
+            &dir.path().join("restored"),
+            authoring.clone(),
+        )
+        .unwrap();
+    assert_eq!(restored.authoring, Some(authoring));
+    assert_eq!(restored.latest_revision, 1);
+    assert!(lib
+        .restore_authoring(
+            &published.record.app_id,
+            1,
+            Path::new(&req.source_path),
+            restored.authoring.unwrap()
+        )
+        .is_err());
+}
+#[test]
+fn remix_requires_a_license_and_creates_an_independent_identity() {
+    let (dir, lib, mut req) = setup();
+    let first = lib.publish(req.clone()).unwrap();
+    let authoring = AuthoringRef {
+        source_directory: "/root/.lingxi/.apps/remix".into(),
+        source_session_id: None,
+        project_id: None,
+    };
+    assert!(lib
+        .remix(
+            &first.record.app_id,
+            1,
+            &dir.path().join("not-allowed"),
+            authoring.clone(),
+            None
+        )
+        .is_err());
+    assert!(!dir.path().join("not-allowed").exists());
+    let mut m = manifest();
+    m["remix"] = json!({"allowed":true,"license":"MIT"});
+    source(Path::new(&req.source_path), &m);
+    req.app_id = Some(first.record.app_id.clone());
+    req.expected_revision = 1;
+    lib.publish(req).unwrap();
+    let remixed = lib
+        .remix(
+            &first.record.app_id,
+            2,
+            &dir.path().join("remix"),
+            authoring,
+            Some("My copy".into()),
+        )
+        .unwrap();
+    assert_ne!(remixed.record.app_id, first.record.app_id);
+    assert_eq!(remixed.record.name, "My copy");
+    assert!(remixed.record.execution_grants.is_empty());
+    assert_eq!(lib.get(&first.record.app_id).unwrap().current_revision, 1);
+}
+#[test]
+fn market_metadata_changes_only_with_activated_release() {
+    let (_dir, lib, mut req) = setup();
+    let origin = MarketOrigin {
+        app_id: "market-app".into(),
+        release_id: "v1".into(),
+        digest: "a".repeat(64),
+        remixed_from: None,
+    };
+    req.market_origin = Some(origin.clone());
+    let first = lib.publish(req.clone()).unwrap();
+    req.app_id = Some(first.record.app_id.clone());
+    req.expected_revision = 1;
+    req.market_origin.as_mut().unwrap().release_id = "v2".into();
+    let second = lib.publish(req).unwrap();
+    assert_eq!(second.record.market_origin.unwrap().release_id, "v1");
+    assert_eq!(second.release.market_origin.unwrap().release_id, "v2");
+    assert_eq!(
+        lib.activate_release(&first.record.app_id, 2)
+            .unwrap()
+            .market_origin
+            .unwrap()
+            .release_id,
+        "v2"
+    );
+}
+#[test]
+fn removed_installation_origin_is_never_reused() {
+    let (_dir, lib, req) = setup();
+    let first = lib.publish(req.clone()).unwrap();
+    lib.remove(&first.record.app_id).unwrap();
+    let second = lib.publish(req).unwrap();
+    assert_ne!(first.record.origin_port, second.record.origin_port);
+}
+#[cfg(unix)]
+#[test]
+fn executable_mode_is_preserved_and_bound_to_digest() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, lib, req) = setup();
+    let mut m = manifest();
+    m["package"]["files"] = json!(["index.html", "install.sh"]);
+    m["install"] = json!([{"command":"./install.sh"}]);
+    source(Path::new(&req.source_path), &m);
+    let script = Path::new(&req.source_path).join("install.sh");
+    fs::write(&script, "#!/bin/sh\nprintf ready").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o744)).unwrap();
+    let first = lib.publish(req).unwrap();
+    assert!(
+        first
+            .release
+            .files
+            .iter()
+            .find(|f| f.path == "install.sh")
+            .unwrap()
+            .executable
+    );
+    lib.grant_execution(&first.record.app_id, &first.release.digest)
+        .unwrap();
+    let run = lib.prepare_run(&first.record.app_id, 1).unwrap();
+    assert_ne!(
+        fs::metadata(Path::new(&run.work_path).join("install.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o100,
+        0
+    );
+    let export = dir.path().join("export");
+    lib.export(&first.record.app_id, 1, &export).unwrap();
+    assert_ne!(
+        fs::metadata(export.join("install.sh"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o100,
+        0
+    );
+    fs::set_permissions(
+        lib.source_path(&first.record.app_id, 1)
+            .unwrap()
+            .join("install.sh"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .unwrap();
+    assert!(lib.verify_release(&first.record.app_id, 1).is_err());
+}
+#[test]
+fn interrupted_publication_can_retry_without_overwriting_archived_bytes() {
+    let (_dir, lib, mut req) = setup();
+    let first = lib.publish(req.clone()).unwrap();
+    let releases = lib
+        .source_path(&first.record.app_id, 1)
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    fs::create_dir_all(releases.join("2")).unwrap();
+    fs::write(releases.join("2/unindexed-source"), "keep orphan").unwrap();
+    req.app_id = Some(first.record.app_id.clone());
+    req.expected_revision = 1;
+    assert_eq!(lib.publish(req).unwrap().record.latest_revision, 2);
+    assert!(fs::read_dir(lib.root().join("transactions"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|e| e.path().join("unindexed-source").exists()));
+}
+#[test]
+fn public_export_rejects_credentials_embedded_in_process_environment() {
+    let (dir, lib, req) = setup();
+    let mut m = manifest();
+    m["install"] = json!([{"command":"python setup.py","env":{"OPENAI_API_KEY":"do-not-upload"}}]);
+    source(Path::new(&req.source_path), &m);
+    let local = lib.publish(req).unwrap();
+    assert!(lib
+        .export(&local.record.app_id, 1, &dir.path().join("export"))
+        .is_err());
+    assert!(!dir.path().join("export").exists());
+}
+#[test]
+fn explicit_process_capability_requires_digest_consent_but_agent_does_not() {
+    let (_dir, lib, req) = setup();
+    let mut m = manifest();
+    m["capabilities"] = json!(["process"]);
+    source(Path::new(&req.source_path), &m);
+    let process = lib.publish(req.clone()).unwrap();
+    assert!(process.release.manifest.requires_execution());
+    assert!(matches!(
+        lib.prepare_run(&process.record.app_id, 1),
+        Err(AppError::ConsentRequired(_))
+    ));
+    lib.grant_execution(&process.record.app_id, &process.release.digest)
+        .unwrap();
+    assert!(lib.prepare_run(&process.record.app_id, 1).is_ok());
+    m["capabilities"] = json!(["agent"]);
+    m["agent"] = json!({"tools":["Read"]});
+    source(Path::new(&req.source_path), &m);
+    let agent = lib.publish(req).unwrap();
+    assert!(!agent.release.manifest.requires_execution());
+    assert!(lib.prepare_run(&agent.record.app_id, 1).is_ok());
+}
+
+#[test]
+fn preparation_data_is_separate_from_live_data_and_other_runs() {
+    let (_dir, lib, req) = setup();
+    let first = lib.publish(req).unwrap();
+    let one = lib.prepare_run(&first.record.app_id, 1).unwrap();
+    let two = lib.prepare_run(&first.record.app_id, 1).unwrap();
+    assert_ne!(one.preparation_data_path, one.data_path);
+    assert_ne!(one.preparation_data_path, two.preparation_data_path);
+    fs::write(
+        Path::new(&one.preparation_data_path).join("database"),
+        "candidate",
+    )
+    .unwrap();
+    assert!(!Path::new(&one.data_path).join("database").exists());
+    assert!(!Path::new(&two.preparation_data_path)
+        .join("database")
+        .exists());
+}
+#[test]
+fn desktop_legacy_sources_are_listed_and_imported_without_data_profiles_or_grants() {
+    let (dir, lib, _) = setup();
+    let old_id = "a12345678901234567890";
+    let old = dir.path().join("config/local-apps/desktop").join(old_id);
+    let revision = old.join("revisions/3");
+    fs::create_dir_all(&revision).unwrap();
+    fs::create_dir_all(old.join("data")).unwrap();
+    fs::write(old.join("data/private.db"), "old data").unwrap();
+    fs::write(old.join("browser-profile"), "old browser reference").unwrap();
+    fs::write(old.join("app.json"),json!({"id":old_id,"name":"Desktop old","summary":"Archive","revision":3,"grants":["process"],"sourceSession":{"sessionId":"old-session"}}).to_string()).unwrap();
+    let mut m = manifest();
+    m["schema"] = json!(1);
+    m.as_object_mut().unwrap().remove("targets");
+    m.as_object_mut().unwrap().remove("package");
+    fs::write(revision.join(MANIFEST_FILE), m.to_string()).unwrap();
+    fs::write(revision.join("index.html"), "<!doctype html>old desktop").unwrap();
+    let rows = lib.legacy_entries().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].legacy_id, format!("desktop:{old_id}"));
+    assert_eq!(rows[0].status, "preservedNotMigrated");
+    let imported = lib
+        .import_legacy(
+            &rows[0].legacy_id,
+            &dir.path().join("restored-desktop"),
+            None,
+        )
+        .unwrap();
+    assert_ne!(imported.record.app_id, old_id);
+    assert_eq!(imported.release.manifest.schema, 2);
+    assert!(imported.record.execution_grants.is_empty());
+    assert!(imported.record.authoring.is_none());
+    assert!(
+        fs::read_dir(lib.data_path(&imported.record.app_id).unwrap())
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    assert_eq!(
+        fs::read_to_string(old.join("data/private.db")).unwrap(),
+        "old data"
+    );
+    assert_eq!(
+        fs::read_to_string(old.join("browser-profile")).unwrap(),
+        "old browser reference"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(revision.join(MANIFEST_FILE)).unwrap()).unwrap()
+            ["schema"],
+        1
+    );
+}
+#[test]
+fn desktop_service_import_changes_relative_entry_to_url_and_requires_fresh_execution_consent() {
+    let (dir, lib, _) = setup();
+    let old_id = "a11223344556677889900";
+    let old = dir.path().join("config/local-apps/desktop").join(old_id);
+    let revision = old.join("revisions/1");
+    fs::create_dir_all(&revision).unwrap();
+    fs::write(
+        old.join("app.json"),
+        json!({"id":old_id,"name":"Old service","revision":1}).to_string(),
+    )
+    .unwrap();
+    fs::write(revision.join(MANIFEST_FILE),json!({"schema":1,"name":"Old service","entry":{"type":"server","process":"api","path":"ui"},"processes":[{"name":"api","command":"node server.js"}],"capabilities":["process"]}).to_string()).unwrap();
+    fs::write(revision.join("server.js"), "require('http')").unwrap();
+    let imported = lib
+        .import_legacy(
+            &format!("desktop:{old_id}"),
+            &dir.path().join("restored-service"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        imported.release.manifest.entry,
+        Entry::Server {
+            process: "api".into(),
+            path: Some("/ui".into())
+        }
+    );
+    assert!(imported
+        .release
+        .manifest
+        .targets
+        .iter()
+        .all(|t| t.environment == "native" && t.platform == std::env::consts::OS));
+    assert!(matches!(
+        lib.prepare_run(&imported.record.app_id, 1),
+        Err(AppError::ConsentRequired(_))
+    ));
+}
+#[test]
+fn service_names_cannot_alias_the_same_port_environment_variable() {
+    for names in [
+        ["api-one", "api_one"],
+        ["api.one", "API_ONE"],
+        ["Api", "api"],
+    ] {
+        let mut m = manifest();
+        m["processes"] = json!([{"name":names[0],"command":"node one.js"},{"name":names[1],"command":"node two.js"}]);
+        assert!(Manifest::parse(&m.to_string()).is_err());
+    }
+}

@@ -94,6 +94,7 @@ desktop = [
     "dep:platform-windows",
 ]
 mobile = [
+    "dep:httparse",
     "engine",
     "dep:configuration-admin",
     "dep:migrations",
@@ -205,6 +206,7 @@ futures = { workspace = true, optional = true }
 futures-core = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 hooks = { path = "../hooks", optional = true }
+httparse = { version = "1.10", optional = true }
 jsonrpc = { path = "../jsonrpc", optional = true }
 lsp = { path = "../lsp", optional = true }
 lsp-types = { version = "0.95", optional = true }

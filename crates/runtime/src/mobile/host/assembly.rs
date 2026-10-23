@@ -2348,11 +2348,23 @@ pub(super) async fn build_mobile_inner_with_ask(
         crate::inline_visualization::register_tool(&mut tools, tool_ctx.clone(), store);
     }
     if cfg.local_apps {
-        let store = crate::local_apps::shared_store(tool_ctx.fs.clone(), &cfg.lingxi_home);
         let visualizations = cfg.inline_visualization.then(|| {
             crate::inline_visualization::shared_store(tool_ctx.fs.clone(), &cfg.lingxi_home)
         });
-        crate::local_apps::register_tool(&mut tools, tool_ctx.clone(), store, visualizations);
+        let app_service = crate::mobile::unified_local_apps::MobileLocalAppServiceHandle::new(
+            cfg.lingxi_home.clone(),
+            mobile_linux.clone(),
+            if cfg!(target_os = "ios") { "ios" } else { "android" }.into(),
+        ).map_err(|error| MobileBuildError::Orchestrator(error.to_string()))?;
+        let app_host = Arc::new(crate::mobile::local_app_tools::MobileProjectAppHost {
+            service: app_service,
+            config_home: cfg.lingxi_home.clone(),
+        });
+        tools.register_builtin(Arc::new(
+            tool_ui::desktop_local_app::DesktopLocalAppTool::new(
+                tool_ctx.clone(), cfg.lingxi_home.clone(), visualizations,
+            ).with_host(app_host),
+        ));
     }
     crate::mobile::apply_mobile_session_tool_policy(&mut tools, cfg.session_mode);
     let device_skill_tools = tools
