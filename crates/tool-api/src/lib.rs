@@ -36,6 +36,7 @@ pub mod read_file_state;
 pub mod registry;
 pub mod sandbox_runner;
 pub mod session_cwd;
+pub mod session_tool_policy;
 pub mod todo_tools_gate;
 pub mod tool_invoker_impl;
 pub mod tool_result_media;
@@ -71,6 +72,7 @@ pub use read_file_state::{ReadFileEntry, ReadFileStateMap};
 pub use registry::ToolRegistry;
 pub use sandbox_runner::{default_sandbox_runner, LegacyWrapRunner, SandboxRunner};
 pub use session_cwd::SessionCwd;
+pub use session_tool_policy::{McpToolIdentity, SessionToolGrantLease, SessionToolPolicy};
 pub use todo_tools_gate::todo_tools_enabled;
 pub use tool_invoker_impl::RegistryToolInvoker;
 pub use tool_search_view::{

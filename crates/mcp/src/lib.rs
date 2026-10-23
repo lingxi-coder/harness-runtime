@@ -81,6 +81,7 @@ pub mod env_expansion;
 pub mod headers_helper;
 pub mod hook_dispatch;
 pub mod identity;
+pub mod tool_identity;
 pub mod inbound;
 pub mod initialize_params;
 pub mod json_config;

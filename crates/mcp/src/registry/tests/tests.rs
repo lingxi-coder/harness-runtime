@@ -11279,3 +11279,167 @@ async fn aborted_background_connects_release_their_inflight_slots() {
         "an aborted dial never connects"
     );
 }
+
+#[tokio::test]
+async fn app_tool_identity_is_stable_and_changes_with_config_or_definition() {
+    let mock = Arc::new(BridgeMock::new(&["lookup/a"]));
+    let registry = McpRegistry::with_raw_conn(mock.clone(), mock.clone());
+    let mut original = cfg("server/a");
+    if let McpTransportSpec::Stdio { env, .. } = &mut original.spec {
+        env.insert("Z".into(), "last".into());
+        env.insert("A".into(), "first".into());
+    }
+    registry.connect(original.clone()).await.unwrap();
+    let tool = match registry.connections.read().await.get("server/a").unwrap() {
+        McpConnectionState::Connected { tools, .. } => tools[0].clone(),
+        _ => panic!("connected"),
+    };
+    let identity = crate::tool_identity::McpToolIdentity::from_config_tool(&original, &tool);
+    let mut same = original.clone();
+    if let McpTransportSpec::Stdio { env, .. } = &mut same.spec {
+        *env = [
+            ("A".to_string(), "first".to_string()),
+            ("Z".to_string(), "last".to_string()),
+        ]
+        .into_iter()
+        .collect();
+    }
+    assert_eq!(
+        identity,
+        crate::tool_identity::McpToolIdentity::from_config_tool(&same, &tool)
+    );
+    let mut revised = same.clone();
+    revised.timeout_ms = Some(1000);
+    let revised = crate::tool_identity::McpToolIdentity::from_config_tool(&revised, &tool);
+    assert_eq!(identity.server_config_id, revised.server_config_id);
+    assert_ne!(identity.config_revision, revised.config_revision);
+    same.name = "server_a".into();
+    let collision = crate::tool_identity::McpToolIdentity::from_config_tool(&same, &tool);
+    assert_ne!(identity.server_config_id, collision.server_config_id);
+    let mut changed_tool = tool.clone();
+    changed_tool.description = "changed behavior".into();
+    assert_ne!(
+        identity.definition_fingerprint,
+        crate::tool_identity::McpToolIdentity::from_config_tool(&original, &changed_tool)
+            .definition_fingerprint
+    );
+}
+
+#[tokio::test]
+async fn app_guard_rejects_changed_definition_before_rpc() {
+    let transport = Arc::new(DirectInProcessMock::new());
+    let registry = McpRegistry::new(transport.clone());
+    let config = McpServerConfig {
+        spec: McpTransportSpec::InProcess {
+            registry_key: "in_process_demo".into(),
+        },
+        ..cfg("in_process_demo")
+    };
+    registry.connect(config).await.unwrap();
+    let identity = registry.tool_identity_catalog().await.remove(0);
+    let guard: crate::tool_identity::McpToolDispatchGuard =
+        Arc::new(move |actual| actual == &identity);
+    let input = source_json(&serde_json::json!({}));
+    registry
+        .call_tool_with_auth_retry_guarded(
+            "in_process_demo",
+            "mcp__in_process_demo__list",
+            input.clone(),
+            None,
+            None,
+            Some(guard.clone()),
+        )
+        .await
+        .unwrap();
+    match registry
+        .connections
+        .write()
+        .await
+        .get_mut("in_process_demo")
+        .unwrap()
+    {
+        McpConnectionState::Connected { tools, .. } => tools[0].description = "changed".into(),
+        _ => panic!("connected"),
+    }
+    let result = registry
+        .call_tool_with_auth_retry_guarded(
+            "in_process_demo",
+            "mcp__in_process_demo__list",
+            input,
+            None,
+            None,
+            Some(guard),
+        )
+        .await;
+    assert!(result.unwrap_err().to_string().contains("revoked"));
+    assert_eq!(
+        transport.calls.lock().unwrap().len(),
+        1,
+        "changed definition must never reach transport"
+    );
+}
+
+#[tokio::test]
+async fn app_guard_is_rechecked_after_authentication_reconnect() {
+    let mock = Arc::new(BridgeMock::with_drivable_calls(&["alpha"]));
+    let registry = McpRegistry::with_raw_conn(mock.clone(), mock.clone());
+    registry
+        .connect(http_cfg("srv", "https://mcp.example.com/v1"))
+        .await
+        .unwrap();
+    let first_id = registry
+        .clients
+        .read()
+        .await
+        .get("srv")
+        .unwrap()
+        .connection_id
+        .unwrap();
+    let (first_tx, mut first_rx) = mock.take_tool_call_peer(first_id).unwrap();
+    let responder = tokio::spawn(async move {
+        let frame = first_rx.recv().await.expect("initial RPC");
+        let request: Value = serde_json::from_slice(&frame).unwrap();
+        assert_eq!(request["method"], "tools/call");
+        let mut response = serde_json::to_vec(&serde_json::json!({"jsonrpc":"2.0", "id": request["id"], "error": {"code":-32000,"message":"MCP_HTTP_STATUS=401;WWW_AUTHENTICATE=Bearer realm=\"mcp\""}})).unwrap();
+        response.push(b'\n');
+        first_tx.send(Bytes::from(response)).await.unwrap();
+    });
+    let identity = registry.tool_identity_catalog().await.remove(0);
+    let checks = Arc::new(AtomicUsize::new(0));
+    let captured = checks.clone();
+    let guard: crate::tool_identity::McpToolDispatchGuard = Arc::new(move |actual| {
+        // Initial boundary, pre-RPC, pre-reconnect are authorized. Simulate the
+        // host withdrawing authority during reconnect: fourth check must fail.
+        actual == &identity && captured.fetch_add(1, Ordering::SeqCst) < 3
+    });
+    let result = registry
+        .call_tool_with_auth_retry_guarded(
+            "srv",
+            "mcp__srv__alpha",
+            source_json(&serde_json::json!({})),
+            None,
+            None,
+            Some(guard),
+        )
+        .await;
+    responder.await.unwrap();
+    assert!(result.unwrap_err().to_string().contains("revoked"));
+    assert_eq!(checks.load(Ordering::SeqCst), 4);
+    assert_eq!(mock.connect_calls.load(Ordering::SeqCst), 2);
+    let second_id = registry
+        .clients
+        .read()
+        .await
+        .get("srv")
+        .unwrap()
+        .connection_id
+        .unwrap();
+    assert_ne!(first_id, second_id);
+    let (_second_tx, mut second_rx) = mock.take_tool_call_peer(second_id).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), second_rx.recv())
+            .await
+            .is_err(),
+        "revoked retry must never emit a second RPC"
+    );
+}

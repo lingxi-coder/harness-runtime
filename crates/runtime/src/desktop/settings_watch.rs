@@ -177,6 +177,7 @@ impl NativeSettingsRefresher for orchestrator::ConversationOrchestrator {
 /// also owns credentials and injected secrets.
 #[derive(Clone)]
 pub struct MainModelSelectionRefresh {
+    app_invocation: Option<super::app_invocation::AppInvocationProfile>,
     default_model: String,
     default_model_explicit: bool,
     default_model_env_pinned: bool,
@@ -197,6 +198,7 @@ impl MainModelSelectionRefresh {
         model_catalog: &[lingxi_core::host::ModelListing],
     ) -> Self {
         Self {
+            app_invocation: config.app_invocation.clone(),
             default_model: config.default_model.clone(),
             default_model_explicit: config.default_model_explicit,
             default_model_env_pinned: config.default_model_env_pinned,
@@ -211,6 +213,7 @@ impl MainModelSelectionRefresh {
 
     fn settings_config(&self) -> super::DesktopConfig {
         let mut config = super::DesktopConfig::default();
+        config.app_invocation.clone_from(&self.app_invocation);
         config.default_model.clone_from(&self.default_model);
         config.default_model_explicit = self.default_model_explicit;
         config.default_model_env_pinned = self.default_model_env_pinned;

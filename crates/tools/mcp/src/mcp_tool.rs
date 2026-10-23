@@ -867,6 +867,9 @@ pub struct MCPTool {
     bound_server_key: Option<String>,
     /// Optional server role propagated from MCP configuration metadata.
     mcp_role: Option<String>,
+    /// Actual host config and discovered definition; never derived from aliases.
+    capability_identity: Option<tool_api::McpToolIdentity>,
+    session_tool_lease: std::sync::RwLock<Option<tool_api::SessionToolGrantLease>>,
 }
 
 /// Inspect a configured MCP server's auth/transport surface.
@@ -905,6 +908,8 @@ impl MCPTool {
             organization_max_permission: None,
             bound_server_key: None,
             mcp_role: None,
+            capability_identity: None,
+            session_tool_lease: std::sync::RwLock::new(None),
         }
     }
 
@@ -950,7 +955,40 @@ impl MCPTool {
             organization_max_permission: None,
             bound_server_key: None,
             mcp_role: None,
+            capability_identity: None,
+            session_tool_lease: std::sync::RwLock::new(None),
         }
+    }
+
+    /// Bind immutable host discovery provenance to this executable handle.
+    #[must_use]
+    pub fn with_capability_identity(mut self, identity: tool_api::McpToolIdentity) -> Self {
+        self.capability_identity = Some(identity);
+        self
+    }
+
+    fn dispatch_guard(
+        &self,
+    ) -> Result<Option<mcp::tool_identity::McpToolDispatchGuard>, ToolError> {
+        let lease = self
+            .session_tool_lease
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(lease) = lease else {
+            return Ok(None);
+        };
+        let identity = self.capability_identity.clone().ok_or_else(|| {
+            ToolError::InvalidInput("MCP tool has no host capability identity".into())
+        })?;
+        if !lease.allows_mcp(&identity) {
+            return Err(ToolError::InvalidInput(
+                "MCP tool capability was not granted or was revoked".into(),
+            ));
+        }
+        Ok(Some(Arc::new(move |current| {
+            current == &identity && lease.allows_mcp(current)
+        })))
     }
 
     /// Attach a resolved MCP permission ceiling without changing the existing
@@ -1480,6 +1518,17 @@ async fn process_mcp_call_result(
 
 #[async_trait]
 impl Tool for MCPTool {
+    fn mcp_tool_identity(&self) -> Option<&tool_api::McpToolIdentity> {
+        self.capability_identity.as_ref()
+    }
+
+    fn bind_session_tool_lease(&self, lease: tool_api::SessionToolGrantLease) {
+        *self
+            .session_tool_lease
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(lease);
+    }
+
     fn name(&self) -> &str {
         // Per-tool wire entry → the `mcp__<server>__<tool>` FQN; generic
         // dispatcher → the constant `MCP` (client.ts:1768 `name = fqn`).
@@ -1872,10 +1921,15 @@ impl Tool for MCPTool {
         // generic-dispatcher `full_name`). For valid-identifier tool names the
         // raw and normalized forms are identical, so this is a no-op except for
         // tool names containing characters outside `[a-zA-Z0-9_-]`.
-        let tool = registry
-            .resolve_wire_tool_name(&server, &full_name, self.bound_server_key.as_deref())
-            .await
-            .unwrap_or(tool);
+        let tool = if let Some(identity) = &self.capability_identity {
+            identity.raw_tool_name.clone()
+        } else {
+            registry
+                .resolve_wire_tool_name(&server, &full_name, self.bound_server_key.as_deref())
+                .await
+                .unwrap_or(tool)
+        };
+        let dispatch_guard = self.dispatch_guard()?;
         // Reconstruct the raw-tool FQN so the client's `mcp__<server>__` prefix
         // strip (`call_tool_with_meta`) recovers the RAW wire name. The server
         // segment is unchanged (server normalization is identical); only the
@@ -1951,12 +2005,13 @@ impl Tool for MCPTool {
         };
         let Some(task_registry) = bg_registry else {
             let res = registry
-                .call_tool_with_auth_retry(
+                .call_tool_with_auth_retry_guarded(
                     &dispatch_key,
                     &dispatch_full_name,
                     arguments,
                     tool_use_id_str.as_deref(),
                     on_progress,
+                    dispatch_guard,
                 )
                 .await;
             return process_mcp_call_result(
@@ -2012,12 +2067,13 @@ impl Tool for MCPTool {
             let cancel = cancel.clone();
             let parent_cancel = parent_cancel.clone();
             tokio::spawn(async move {
-                let call_fut = registry.call_tool_with_auth_retry(
+                let call_fut = registry.call_tool_with_auth_retry_guarded(
                     &call_server,
                     &dispatch_full_name,
                     arguments,
                     tool_use_id_str.as_deref(),
                     on_progress,
+                    dispatch_guard,
                 );
                 tokio::pin!(call_fut);
                 // Fires on the mcp_task cancel token (`TaskStop`, once
@@ -3510,6 +3566,10 @@ pub async fn build_registered_mcp_tools(
                     )
                     .with_output_schema_parser_handle(
                         registry.output_schema_parser_handle(table_key, &dto.full_name),
+                    )
+                    .with_bound_server_key(table_key.clone())
+                    .with_capability_identity(
+                        tool_api::McpToolIdentity::from_config_tool(config, dto),
                     );
                     let tool = if let Some(ceiling) =
                         configured_permission_ceiling(config, &dto.tool_name)
@@ -6235,6 +6295,69 @@ mod resource_tool_gating_tests {
             always_load: None,
             requires_user_interaction: false,
         }
+    }
+
+    #[tokio::test]
+    async fn app_grant_builder_preserves_raw_identity_and_held_guard_revocation() {
+        let registry = Arc::new(McpRegistry::new(Arc::new(NeverDialled)));
+        let server_config = config("server/a");
+        let mut definition = dto("server/a", "lookup/a");
+        definition.full_name = "mcp__server_a__lookup_a".into();
+        let identity = tool_api::McpToolIdentity::from_config_tool(&server_config, &definition);
+        registry.connections.write().await.insert(
+            "server/a".into(),
+            McpConnectionState::Connected {
+                config: server_config,
+                connection_id: lingxi_core::types::McpConnectionId::new(),
+                capabilities: caps(false),
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                tools: vec![definition.clone()],
+                resources: vec![],
+                resource_templates: vec![],
+                prompts: vec![],
+                connected_at: std::time::SystemTime::now(),
+            },
+        );
+        let mut ctx = tool_api::test_support::ctx_for_file_tools(
+            tool_api::test_support::make_dummy_fs(),
+            Arc::new(telemetry::AnalyticsBus::new()),
+            vec![std::path::PathBuf::from("/tmp")],
+        );
+        ctx.mcp_registry = Some(registry.clone());
+        let built = build_registered_mcp_tools(&registry, ctx.clone()).await;
+        assert_eq!(built[0].1[0].mcp_tool_identity(), Some(&identity));
+        let tool = MCPTool::new_for_tool(
+            ctx,
+            definition.full_name,
+            definition.description,
+            definition.input_schema,
+            None,
+            None,
+            None,
+            false,
+            false,
+        )
+        .with_bound_server_key("server/a".into())
+        .with_capability_identity(identity.clone());
+        let lease = tool_api::SessionToolGrantLease::new(tool_api::SessionToolPolicy {
+            builtin_tools: Default::default(),
+            mcp_tools: std::collections::HashSet::from([identity.clone()]),
+        });
+        tool.bind_session_tool_lease(lease.clone());
+        let held_guard = tool.dispatch_guard().unwrap().unwrap();
+        assert!(held_guard(&identity));
+        let mut updated = identity.clone();
+        updated.config_revision = "replacement".into();
+        assert!(!held_guard(&updated));
+        lease.revoke();
+        assert!(
+            !held_guard(&identity),
+            "an RPC retry captured before revoke must lose authority"
+        );
+        assert!(tool.dispatch_guard().is_err());
     }
 
     #[tokio::test]

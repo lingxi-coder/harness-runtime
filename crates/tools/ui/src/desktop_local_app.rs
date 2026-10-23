@@ -24,14 +24,14 @@ use tool_api::util::path_validation::{canonicalize_and_validate, resolve_against
 use tool_api::BuiltinToolContext;
 use visualization::{VisualizationId, VisualizationRef};
 
-const PROMPT: &str = "Create and manage desktop Local Apps. Load the local-app skill first. Desktop supports multi-file projects, frameworks, network, workers, local Node/Python backends and application-scoped native capabilities. Use Bash to install missing runtimes and dependencies, including Node, Python, Vite and TypeScript. Publish through this tool so the application appears in Apps and opens in its own window; a file path or a development server alone is not delivery. Use bundle_path for a directory with lingxi-app.json, or html/file_path for a simple document. Use start, status and logs to verify the registered app, and stop to stop its owned processes. Never pass private host transport fields.";
+const PROMPT: &str = "Create and manage desktop Local Apps. Load the local-app skill first. Desktop supports multi-file projects, frameworks, network, workers, local Node/Python backends and application-scoped native capabilities. Use Bash to install missing runtimes and dependencies, including Node, Python, Vite and TypeScript. Publish through this tool so the application appears in Apps and opens in its own window; a file path or a development server alone is not delivery. Use bundle_path for a directory with lingxi-app.json, or html/file_path for a simple document. Use start, status and logs to verify the registered app, and stop to stop its owned processes. Use agent_catalog to discover exact host tool IDs before declaring agent.tools; discovery does not grant access. Never pass private host transport fields.";
 // Matches the desktop host's transport budget, not mobile document limits.
 const MAX_HOST_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 static SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     generated_builtin_schema(&json!({
       "type":"object", "additionalProperties":false,
       "properties": {
-        "action":{"type":"string","enum":["publish","list","read","start","stop","status","logs"]},
+        "action":{"type":"string","enum":["publish","list","read","start","stop","status","logs","agent_catalog"]},
         "id":{"type":"string","pattern":"^a[a-f0-9]{20}$"},
         "name":{"type":"string","maxLength":60}, "summary":{"type":"string","maxLength":160},
         "html":{"type":"string"}, "file_path":{"type":"string"},
@@ -415,7 +415,7 @@ impl Tool for DesktopLocalAppTool {
     fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
         matches!(
             input.string_at("/action"),
-            Some("list" | "read" | "status" | "logs")
+            Some("list" | "read" | "status" | "logs" | "agent_catalog")
         )
     }
     fn is_concurrency_safe(&self, _: &Utf16JsonProjection) -> bool {
@@ -490,7 +490,18 @@ impl Tool for DesktopLocalAppTool {
             }
         }
         let action = value["action"].as_str().unwrap_or("publish");
-        if !["publish", "list", "read", "start", "stop", "status", "logs"].contains(&action) {
+        if ![
+            "publish",
+            "list",
+            "read",
+            "start",
+            "stop",
+            "status",
+            "logs",
+            "agent_catalog",
+        ]
+        .contains(&action)
+        {
             return Err(ValidationError("Unknown LocalApp action".into()));
         }
         if action == "publish"
@@ -505,7 +516,8 @@ impl Tool for DesktopLocalAppTool {
                     .into(),
             ));
         }
-        if action != "publish" && action != "list" && value["id"].as_str().is_none() {
+        if !["publish", "list", "agent_catalog"].contains(&action) && value["id"].as_str().is_none()
+        {
             return Err(ValidationError(
                 "This action needs the application id".into(),
             ));
@@ -642,6 +654,28 @@ mod tests {
         let mut ctx = fresh_ctx();
         ctx.tool_use_id = Some(lingxi_core::types::ToolUseId::new());
         ctx
+    }
+
+    #[tokio::test]
+    async fn app_agent_catalog_is_read_only_and_does_not_require_an_existing_app() {
+        let root = tempfile::tempdir().unwrap();
+        let tool = tool(
+            root.path(),
+            Arc::new(ReadGate {
+                deny: false,
+                replace: None,
+            }),
+        );
+        let input = generated_builtin_schema(&json!({"action":"agent_catalog"}));
+        assert!(tool.is_read_only(&input));
+        tool.validate_input(&input, &call_context()).await.unwrap();
+        assert!(tool
+            .validate_input(
+                &generated_builtin_schema(&json!({"action":"agent_settings"})),
+                &call_context()
+            )
+            .await
+            .is_err());
     }
 
     #[tokio::test]

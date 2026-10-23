@@ -84,6 +84,7 @@ pub struct ToolRegistry {
     /// MCP/LSP/plugin refresh cannot re-introduce a tool hidden by the session
     /// profile.
     session_allowlist: Option<std::collections::HashSet<String>>,
+    session_tool_lease: Option<crate::SessionToolGrantLease>,
     /// The session's canonical main-loop model id (claude-code `J$e()`).
     /// Behind a lock because `/model` moves it mid-session while the registry
     /// is already shared as an `Arc`, and because the Tool Search refreshers
@@ -137,6 +138,7 @@ impl ToolRegistry {
             required_builtins: std::collections::HashSet::new(),
             builtin_catalog: None,
             session_allowlist: None,
+            session_tool_lease: None,
             main_loop_model: RwLock::new(None),
             bash_precommit_skills_provider: RwLock::new(None),
             bash_precommit_session_generation: std::sync::atomic::AtomicU64::new(0),
@@ -238,23 +240,78 @@ impl ToolRegistry {
         self.refresh_tool_search_view();
     }
 
+    /// Freeze and enforce the host-approved application capability set. The
+    /// legacy builtin-only allowlist remains an independent, tightening gate.
+    pub fn set_session_tool_policy(&mut self, lease: crate::SessionToolGrantLease) {
+        if let Some(previous) = &self.session_tool_lease {
+            previous.revoke();
+        }
+        for (_, tools) in self
+            .mcp_tools
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+        {
+            for tool in tools {
+                tool.bind_session_tool_lease(lease.clone());
+            }
+        }
+        self.session_tool_lease = Some(lease);
+        self.refresh_tool_search_view();
+    }
+
+    /// Recheck captured handles after an asynchronous approval and immediately
+    /// before execution. A same-named replacement or unregistered supplied tool
+    /// cannot inherit a registered tool's authority.
+    pub fn check_session_tool_access(&self, tool: &dyn Tool) -> Result<(), crate::ToolError> {
+        if self.session_tool_lease.is_none() && self.session_allowlist.is_none() {
+            return Ok(());
+        }
+        let allowed = self
+            .find_by_name(tool.name())
+            .is_some_and(|current| std::ptr::eq::<dyn Tool>(current.as_ref(), tool));
+        if allowed {
+            Ok(())
+        } else {
+            Err(crate::ToolError::InvalidInput(
+                "Tool capability is unavailable or has been revoked for this invocation".into(),
+            ))
+        }
+    }
+
+    fn session_allows_mcp(&self, tool: &dyn Tool) -> bool {
+        self.session_allowlist.is_none()
+            && self.session_tool_lease.as_ref().is_none_or(|lease| {
+                tool.mcp_tool_identity()
+                    .is_some_and(|identity| lease.allows_mcp(identity))
+            })
+    }
+
     fn session_allows(&self, name: &str) -> bool {
         self.session_allowlist
             .as_ref()
             .is_none_or(|allowed| allowed.contains(name))
+            && self
+                .session_tool_lease
+                .as_ref()
+                .is_none_or(|lease| lease.allows_builtin(name))
     }
 
     fn session_allows_dynamic(&self, name: &str) -> bool {
-        self.session_allowlist.is_none() && self.session_allows(name)
+        self.session_allowlist.is_none()
+            && self.session_tool_lease.is_none()
+            && self.session_allows(name)
     }
 
     /// Whether an explicit empty tool selection disables Mod registration.
     #[must_use]
     pub fn mod_registration_disabled(&self) -> bool {
-        self.builtin_filter
-            .as_ref()
-            .and_then(|filter| filter.explicit_allowlist.as_ref())
-            .is_some_and(std::collections::HashSet::is_empty)
+        self.session_tool_lease.is_some()
+            || self
+                .builtin_filter
+                .as_ref()
+                .and_then(|filter| filter.explicit_allowlist.as_ref())
+                .is_some_and(std::collections::HashSet::is_empty)
             || self
                 .session_allowlist
                 .as_ref()
@@ -318,6 +375,7 @@ impl ToolRegistry {
                 search_hint: t.search_hint(),
             })
             .collect();
+        self.refresh_tool_search_policy();
         self.tool_search_view.set_entries(entries);
     }
 
@@ -352,7 +410,27 @@ impl ToolRegistry {
                 search_hint: tool.search_hint(),
             })
             .collect();
+        self.refresh_tool_search_policy();
         self.tool_search_view.set_entries(entries);
+    }
+
+    fn refresh_tool_search_policy(&self) {
+        let Some(lease) = &self.session_tool_lease else {
+            return;
+        };
+        let lease = lease.clone();
+        let identities: std::collections::HashMap<String, Option<crate::McpToolIdentity>> = self
+            .available_tools(&ToolStaticContext::default())
+            .iter()
+            .map(|tool| (tool.name().to_string(), tool.mcp_tool_identity().cloned()))
+            .collect();
+        self.tool_search_view
+            .set_entry_filter(Arc::new(move |name| {
+                identities.get(name).is_some_and(|identity| match identity {
+                    Some(identity) => lease.allows_mcp(identity),
+                    None => lease.allows_builtin(name),
+                })
+            }));
     }
 
     /// Register a builtin tool. Insertion order is preserved.
@@ -443,7 +521,7 @@ impl ToolRegistry {
         for (_id, ts) in mcp_tools.iter() {
             dynamic.extend(
                 ts.iter()
-                    .filter(|tool| self.session_allows_dynamic(tool.name()))
+                    .filter(|tool| self.session_allows_mcp(tool.as_ref()))
                     .cloned(),
             );
         }
@@ -471,6 +549,15 @@ impl ToolRegistry {
                     .filter(|tool| self.session_allows_dynamic(tool.name()))
                     .cloned(),
             );
+        }
+        // Two granted raw tools can still share one normalized model name.
+        // An isolated invocation must not choose either target arbitrarily.
+        if self.session_tool_lease.is_some() {
+            let mut counts = std::collections::HashMap::<String, usize>::new();
+            for tool in &dynamic {
+                *counts.entry(tool.name().to_owned()).or_default() += 1;
+            }
+            dynamic.retain(|tool| counts.get(tool.name()) == Some(&1));
         }
         dynamic.sort_by(|a, b| locale_cmp(a.name(), b.name()));
 
@@ -544,14 +631,17 @@ impl ToolRegistry {
                 .mcp_tools
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(tool) = mcp_tools
+            let mut matching = mcp_tools
                 .iter()
                 .flat_map(|(_id, tools)| tools.iter())
-                .find(|t| {
-                    self.session_allows_dynamic(t.name())
+                .filter(|t| {
+                    self.session_allows_mcp(t.as_ref())
                         && (t.name() == name || t.aliases().contains(&name))
-                })
-            {
+                });
+            if let Some(tool) = matching.next() {
+                if self.session_tool_lease.is_some() && matching.next().is_some() {
+                    return None;
+                }
                 return Some(tool.clone());
             }
         }
@@ -583,6 +673,11 @@ impl ToolRegistry {
     /// (preserving its insertion position), matching the prior `HashMap::insert`
     /// upsert semantics.
     pub fn register_mcp_tools(&self, conn_id: McpConnectionId, tools: Vec<Arc<dyn Tool>>) {
+        if let Some(lease) = &self.session_tool_lease {
+            for tool in &tools {
+                tool.bind_session_tool_lease(lease.clone());
+            }
+        }
         let mut mcp_tools = self
             .mcp_tools
             .write()
@@ -592,6 +687,8 @@ impl ToolRegistry {
         } else {
             mcp_tools.push((conn_id, tools));
         }
+        drop(mcp_tools);
+        self.refresh_tool_search_view();
     }
 
     /// Drop every tool sourced from the given MCP connection.
@@ -600,12 +697,20 @@ impl ToolRegistry {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|(id, _)| *id != conn_id);
+        self.refresh_tool_search_view();
     }
 
     /// Atomically replace the entire MCP partition set from a rebuilt shared
     /// session snapshot, then refresh the deferred-search view against that
     /// new partition set.
     pub fn replace_mcp_tools(&self, tools: Vec<(McpConnectionId, Vec<Arc<dyn Tool>>)>) {
+        if let Some(lease) = &self.session_tool_lease {
+            for (_, tools) in &tools {
+                for tool in tools {
+                    tool.bind_session_tool_lease(lease.clone());
+                }
+            }
+        }
         *self
             .mcp_tools
             .write()
@@ -697,6 +802,14 @@ impl ToolRegistry {
     /// order; the assembler re-sorts alphabetically for byte stability.
     #[must_use]
     pub fn all_names(&self) -> Vec<String> {
+        if self.session_tool_lease.is_some() {
+            // Application policies also reject ambiguous normalized MCP names.
+            return self
+                .available_tools(&ToolStaticContext::default())
+                .iter()
+                .map(|tool| tool.name().to_owned())
+                .collect();
+        }
         let mut names = self
             .builtin
             .iter()
@@ -709,7 +822,7 @@ impl ToolRegistry {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .iter()
                 .flat_map(|(_id, tools)| tools.iter())
-                .filter(|tool| self.session_allows_dynamic(tool.name()))
+                .filter(|tool| self.session_allows_mcp(tool.as_ref()))
                 .map(|t| t.name().to_string()),
         );
         names.extend(
@@ -940,6 +1053,220 @@ mod tests {
                 subagent_hooks_fired: false,
             })
         }
+    }
+
+    struct ProvenanceTool {
+        name: &'static str,
+        identity: crate::McpToolIdentity,
+    }
+
+    #[async_trait]
+    impl Tool for ProvenanceTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn mcp_tool_identity(&self) -> Option<&crate::McpToolIdentity> {
+            Some(&self.identity)
+        }
+        fn should_defer(&self) -> bool {
+            true
+        }
+        fn input_schema(&self) -> &Utf16JsonProjection {
+            static SCHEMA: once_cell::sync::Lazy<Utf16JsonProjection> =
+                once_cell::sync::Lazy::new(|| {
+                    source_schema_fixture(serde_json::json!({"type": "object"}))
+                });
+            &SCHEMA
+        }
+        fn input_repair_metadata(&self) -> crate::tool_trait::ToolInputRepairMetadata {
+            builtin_input_repair_metadata()
+        }
+        fn is_enabled(&self, _ctx: &ToolStaticContext) -> bool {
+            true
+        }
+        fn max_result_size_chars(&self) -> usize {
+            1024
+        }
+        fn is_concurrency_safe(&self, _input: &Utf16JsonProjection) -> bool {
+            true
+        }
+        fn is_read_only(&self, _input: &Utf16JsonProjection) -> bool {
+            true
+        }
+        async fn check_permissions(
+            &self,
+            _input: &Utf16JsonProjection,
+            _ctx: &ToolUseContext,
+        ) -> PermissionResult {
+            PermissionResult::Allow {
+                reason: PermissionDecisionReason::Other {
+                    reason: "test".into(),
+                },
+                updated_input: None,
+                update_destination: None,
+                metadata: PermissionMetadata::default(),
+            }
+        }
+        async fn description(
+            &self,
+            _input: &Utf16JsonProjection,
+            _opts: &DescriptionOptions,
+        ) -> String {
+            self.name.into()
+        }
+        async fn prompt(&self, _opts: &PromptOptions) -> Utf16JsonProjection {
+            "".into()
+        }
+        async fn call(
+            &self,
+            _input: Utf16JsonProjection,
+            _ctx: ToolUseContext,
+            _tx: crate::progress::ToolProgressSender,
+        ) -> Result<ToolCallResult, ToolError> {
+            Ok(ToolCallResult {
+                data: json!({"ok": true}),
+                model_content: None,
+                new_messages: vec![],
+                context_modifier: None,
+                is_error: false,
+                mcp_meta: None,
+                subagent_hooks_fired: false,
+            })
+        }
+    }
+
+    #[test]
+    fn app_policy_filters_mcp_alias_collisions_refresh_and_live_revocation() {
+        use crate::{McpToolIdentity, SessionToolGrantLease, SessionToolPolicy};
+        use std::collections::HashSet;
+        let identity = McpToolIdentity {
+            server_config_id: "slot-a".into(),
+            config_revision: "revision-a".into(),
+            raw_tool_name: "lookup/a".into(),
+            definition_fingerprint: "definition-a".into(),
+        };
+        let granted: Arc<dyn Tool> = Arc::new(ProvenanceTool {
+            name: "mcp__srv__lookup_a",
+            identity: identity.clone(),
+        });
+        let mut collision = identity.clone();
+        collision.raw_tool_name = "lookup_a".into();
+        let collision: Arc<dyn Tool> = Arc::new(ProvenanceTool {
+            name: "mcp__srv__lookup_a",
+            identity: collision,
+        });
+        let mut r = ToolRegistry::new();
+        r.set_deferral(Arc::new(crate::DeferralState::new(
+            crate::ToolSearchMode::Enabled,
+            false,
+        )));
+        r.register_builtin(Arc::new(NamedTool("Read")));
+        r.register_builtin(Arc::new(NamedTool("Write")));
+        r.register_mcp_tools(McpConnectionId::new(), vec![collision, granted.clone()]);
+        let lease = SessionToolGrantLease::new(SessionToolPolicy {
+            builtin_tools: HashSet::from(["Read".to_owned()]),
+            mcp_tools: HashSet::from([identity.clone()]),
+        });
+        r.set_session_tool_policy(lease.clone());
+        assert_eq!(r.all_names(), vec!["Read", "mcp__srv__lookup_a"]);
+        assert!(Arc::ptr_eq(
+            &r.find_by_name("mcp__srv__lookup_a").unwrap(),
+            &granted
+        ));
+        assert_eq!(r.tool_search_view().entries().len(), 1);
+        assert!(r.check_session_tool_access(granted.as_ref()).is_ok());
+        // Another object with the same identity/name is not a registered handle.
+        let supplied = ProvenanceTool {
+            name: "mcp__srv__lookup_a",
+            identity: identity.clone(),
+        };
+        assert!(r.check_session_tool_access(&supplied).is_err());
+        let mut changed = identity;
+        changed.definition_fingerprint = "definition-b".into();
+        r.replace_mcp_tools(vec![(
+            McpConnectionId::new(),
+            vec![Arc::new(ProvenanceTool {
+                name: "mcp__srv__lookup_a",
+                identity: changed,
+            })],
+        )]);
+        assert!(r.find_by_name("mcp__srv__lookup_a").is_none());
+        assert!(r.tool_search_view().is_empty());
+        assert!(r.check_session_tool_access(granted.as_ref()).is_err());
+        r.replace_mcp_tools(vec![(McpConnectionId::new(), vec![granted.clone()])]);
+        let captured_view = r.tool_search_view();
+        assert_eq!(captured_view.entries().len(), 1);
+        lease.revoke();
+        // No refresh call is needed to withdraw a materialized search view.
+        assert!(captured_view.is_empty());
+        assert!(r.available_tools(&ToolStaticContext::default()).is_empty());
+        assert!(r.all_names().is_empty());
+        assert!(r.check_session_tool_access(granted.as_ref()).is_err());
+    }
+
+    #[test]
+    fn app_policy_rejects_two_granted_raw_names_with_same_model_name() {
+        let identity = crate::McpToolIdentity {
+            server_config_id: "slot".into(),
+            config_revision: "v1".into(),
+            raw_tool_name: "read/a".into(),
+            definition_fingerprint: "first".into(),
+        };
+        let mut second = identity.clone();
+        second.raw_tool_name = "read_a".into();
+        second.definition_fingerprint = "second".into();
+        let mut registry = ToolRegistry::new();
+        registry.register_mcp_tools(
+            McpConnectionId::new(),
+            vec![
+                Arc::new(ProvenanceTool {
+                    name: "mcp__srv__read_a",
+                    identity: identity.clone(),
+                }),
+                Arc::new(ProvenanceTool {
+                    name: "mcp__srv__read_a",
+                    identity: second.clone(),
+                }),
+            ],
+        );
+        registry.set_session_tool_policy(crate::SessionToolGrantLease::new(
+            crate::SessionToolPolicy {
+                builtin_tools: Default::default(),
+                mcp_tools: std::collections::HashSet::from([identity, second]),
+            },
+        ));
+        assert!(registry
+            .available_tools(&ToolStaticContext::default())
+            .is_empty());
+        assert!(registry.find_by_name("mcp__srv__read_a").is_none());
+        assert!(registry.all_names().is_empty());
+    }
+
+    #[test]
+    fn legacy_allowlist_remains_builtin_only_with_mcp_policy() {
+        let mut r = ToolRegistry::new();
+        let identity = crate::McpToolIdentity {
+            server_config_id: "slot".into(),
+            config_revision: "v1".into(),
+            raw_tool_name: "read".into(),
+            definition_fingerprint: "v1".into(),
+        };
+        r.register_mcp_tools(
+            McpConnectionId::new(),
+            vec![Arc::new(ProvenanceTool {
+                name: "mcp__srv__read",
+                identity: identity.clone(),
+            })],
+        );
+        r.set_session_tool_policy(crate::SessionToolGrantLease::new(
+            crate::SessionToolPolicy {
+                builtin_tools: Default::default(),
+                mcp_tools: std::collections::HashSet::from([identity]),
+            },
+        ));
+        assert!(r.find_by_name("mcp__srv__read").is_some());
+        r.set_session_tool_allowlist(&["mcp__srv__read".into()]);
+        assert!(r.find_by_name("mcp__srv__read").is_none());
     }
 
     /// `available_tools` emits builtins in claude-code's `localeCompare` order
