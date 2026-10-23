@@ -9,7 +9,10 @@ use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, OnceLock,
+    },
 };
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -70,6 +73,9 @@ pub(super) struct ActiveRun {
     pub cancel: CancellationToken,
     pub handles: AsyncMutex<Vec<mobile_linux_api::LinuxProcessHandle>>,
     pub gateway: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
+    pub listener: AsyncMutex<Option<Arc<tokio::net::TcpListener>>>,
+    pub committed: AtomicBool,
+    pub cleanup_complete: AtomicBool,
     pub log_task: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
     pub url: Mutex<String>,
     pub output: Mutex<BTreeMap<String, String>>,
@@ -539,7 +545,7 @@ impl MobileLocalAppServiceHandle {
         let drop_guard = operation.clone().drop_guard();
         let preparing = operation.clone();
         let preparation = tokio::task::spawn_blocking(move || {
-            let mut preparation = library.prepare_run(&id, revision)?;
+            let mut preparation = library.prepare_run_with_options(&id, revision, rebuild)?;
             if preparing.is_cancelled() {
                 preparation.run.phase = RunPhase::Stopped;
                 library.update_run(preparation.run.clone())?;
@@ -553,6 +559,9 @@ impl MobileLocalAppServiceHandle {
             cancel: CancellationToken::new(),
             handles: AsyncMutex::new(Vec::new()),
             gateway: AsyncMutex::new(None),
+            listener: AsyncMutex::new(None),
+            committed: AtomicBool::new(false),
+            cleanup_complete: AtomicBool::new(false),
             log_task: AsyncMutex::new(None),
             url: Mutex::new(String::new()),
             output: Mutex::new(BTreeMap::new()),
@@ -568,7 +577,12 @@ impl MobileLocalAppServiceHandle {
         let owned_app_id = app_id.to_owned();
         EXECUTOR.get().expect("app executor").spawn(async move {
             tokio::select! { _ = operation.cancelled() => {}, _ = owned_run.cancel.cancelled() => return }
-            if owner.stop_owned(&owned_app_id, owned_run.clone(), RunPhase::Stopped, true).await.is_err() { return; }
+            let lifecycle = owned_run.lifecycle.lock().await;
+            // The final durable switch is cancellation-resistant. A dropped
+            // waiter cannot undo a commit that completed while it waited here.
+            if owned_run.committed.load(Ordering::Acquire) { return; }
+            if owner.stop_owned_locked(&owned_app_id, owned_run.clone(), RunPhase::Stopped, true).await.is_err() && !owned_run.cleanup_complete.load(Ordering::Acquire) { return; }
+            drop(lifecycle);
             let mut active = owner.active.lock().await;
             if active.get(&owned_app_id).is_some_and(|current| Arc::ptr_eq(current,&owned_run)) {
                 if let Some(previous) = owned_run.previous.lock().unwrap().take() { active.insert(owned_app_id,previous); }
@@ -594,10 +608,12 @@ impl MobileLocalAppServiceHandle {
                     .stop_owned(app_id, run.clone(), RunPhase::Failed, true)
                     .await;
                 if let Err(cleanup) = cleanup {
-                    return Err(ServiceError::new(
-                        "stopFailed",
-                        format!("{error}; cleanup: {cleanup}"),
-                    ));
+                    if !run.cleanup_complete.load(Ordering::Acquire) {
+                        return Err(ServiceError::new(
+                            "stopFailed",
+                            format!("{error}; cleanup: {cleanup}"),
+                        ));
+                    }
                 }
                 let mut failed = run.record.lock().unwrap().clone();
                 failed.phase = RunPhase::Failed;
@@ -623,17 +639,90 @@ impl MobileLocalAppServiceHandle {
 
     async fn stop(&self, app_id: &str, phase: RunPhase) -> Result<Value, ServiceError> {
         let run = self.active.lock().await.get(app_id).cloned();
-        let Some(run) = run else {
-            return Ok(json!({"appId":app_id,"stopped":true}));
-        };
-        run.cancel.cancel();
-        let previous = run.previous.lock().unwrap().clone();
-        if let Some(previous) = previous {
-            self.stop_owned(app_id, previous, phase.clone(), false)
-                .await?;
-            run.previous.lock().unwrap().take();
+        self.stop_registered_chain(app_id, phase, run).await
+    }
+
+    async fn stop_registered_chain(
+        &self,
+        app_id: &str,
+        phase: RunPhase,
+        mut next: Option<Arc<ActiveRun>>,
+    ) -> Result<Value, ServiceError> {
+        let mut result = json!({"appId":app_id,"stopped":true});
+        let mut errors = Vec::new();
+        while let Some(run) = next {
+            run.cancel.cancel();
+            match self
+                .stop_chain(app_id, run.clone(), phase.clone(), false)
+                .await
+            {
+                Ok(value) => result = value,
+                Err(error) => errors.push(error.to_string()),
+            }
+            next = self.active.lock().await.get(app_id).cloned();
+            if next
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &run))
+            {
+                // A failed cleanup retains its owner for an explicit retry.
+                return Err(ServiceError::new("stopFailed", errors.join("; ")));
+            }
+            // A cancellation watcher may have restored the previous run after
+            // Stop took its snapshot. Recheck under the app transition lock.
         }
-        self.stop_owned(app_id, run, phase, false).await
+        if errors.is_empty() {
+            Ok(result)
+        } else {
+            Err(ServiceError::new("stopFailed", errors.join("; ")))
+        }
+    }
+
+    async fn stop_chain(
+        &self,
+        app_id: &str,
+        run: Arc<ActiveRun>,
+        phase: RunPhase,
+        keep_registration: bool,
+    ) -> Result<Value, ServiceError> {
+        let mut chain = Vec::new();
+        let mut next = Some(run.clone());
+        while let Some(owned) = next {
+            owned.cancel.cancel();
+            next = owned.previous.lock().unwrap().clone();
+            chain.push(owned);
+        }
+        let mut result = json!({"appId":app_id,"stopped":true});
+        let mut errors = Vec::new();
+        for owned in chain.iter().rev() {
+            match self
+                .stop_owned(app_id, owned.clone(), phase.clone(), true)
+                .await
+            {
+                Ok(value) => result = value,
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+        if !errors.is_empty() {
+            // Keep the complete ownership chain registered for a later retry,
+            // but never let an old cleanup error leave the current run alive.
+            let mut record = run.record.lock().unwrap();
+            record.phase = RunPhase::Stopping;
+            record.error = Some(errors.join("; "));
+            return Err(ServiceError::new("stopFailed", errors.join("; ")));
+        }
+        for owned in &chain {
+            owned.previous.lock().unwrap().take();
+        }
+        if !keep_registration {
+            let mut active = self.active.lock().await;
+            if active
+                .get(app_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &run))
+            {
+                active.remove(app_id);
+            }
+        }
+        Ok(result)
     }
 
     async fn stop_owned(
@@ -645,6 +734,20 @@ impl MobileLocalAppServiceHandle {
     ) -> Result<Value, ServiceError> {
         run.cancel.cancel();
         let _lifecycle = run.lifecycle.lock().await;
+        self.stop_owned_locked(app_id, run.clone(), phase, keep_registration)
+            .await
+    }
+
+    /// Caller holds this run's lifecycle lock. Kept separate for the dropped
+    /// waiter, which must check the commit flag under that same lock.
+    async fn stop_owned_locked(
+        &self,
+        app_id: &str,
+        run: Arc<ActiveRun>,
+        phase: RunPhase,
+        keep_registration: bool,
+    ) -> Result<Value, ServiceError> {
+        run.cancel.cancel();
         let mut stopping = run.record.lock().unwrap().clone();
         stopping.phase = RunPhase::Stopping;
         stopping.services.clear();
@@ -654,6 +757,8 @@ impl MobileLocalAppServiceHandle {
         if let Some(task) = run.gateway.lock().await.take() {
             let _ = task.await;
         }
+        // Do not retain the fixed port through monitor/watcher Arc references.
+        run.listener.lock().await.take();
         if let Some(task) = run.log_task.lock().await.take() {
             let _ = task.await;
         }
@@ -683,6 +788,7 @@ impl MobileLocalAppServiceHandle {
         }
         drop(handles);
         run.execution_lease.lock().unwrap().take();
+        run.cleanup_complete.store(true, Ordering::Release);
         let mut record = run.record.lock().unwrap().clone();
         record.phase = phase;
         record.updated_at_ms = now_ms();

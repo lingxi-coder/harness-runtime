@@ -1,6 +1,7 @@
 //! A controllable SDK boundary verifies ownership/cancellation independently of
 //! device execution. These tests do not claim a physical Linux runtime passed.
 use super::*;
+use local_app::v2::Step;
 use mobile_linux_api::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -11,6 +12,7 @@ struct ControlledRuntime {
     spawning: tokio::sync::Notify,
     release_spawn: tokio::sync::Notify,
     fail_first_kill: AtomicBool,
+    fail_handle: Mutex<Option<String>>,
     reached: tokio::sync::Notify,
     kills: Mutex<Vec<String>>,
     maintenance_calls: AtomicUsize,
@@ -34,6 +36,7 @@ impl ControlledRuntime {
             spawning: tokio::sync::Notify::new(),
             release_spawn: tokio::sync::Notify::new(),
             fail_first_kill: AtomicBool::new(true),
+            fail_handle: Mutex::new(None),
             reached: tokio::sync::Notify::new(),
             kills: Mutex::new(Vec::new()),
             maintenance_calls: AtomicUsize::new(0),
@@ -95,9 +98,10 @@ impl MobileLinuxRuntime for ControlledRuntime {
         })
     }
     async fn kill(&self, handle: &LinuxProcessHandle) -> Result<(), MobileLinuxError> {
-        assert_eq!(handle.id, "only-owned-task");
         self.kills.lock().unwrap().push(handle.id.clone());
-        if self.fail_first_kill.swap(false, Ordering::SeqCst) {
+        if self.fail_handle.lock().unwrap().as_ref() == Some(&handle.id)
+            || self.fail_first_kill.swap(false, Ordering::SeqCst)
+        {
             Err(MobileLinuxError::Io("injected first reap failure".into()))
         } else {
             Ok(())
@@ -217,6 +221,148 @@ async fn failed_start_retains_process_owner_when_reap_fails_and_stop_can_retry()
         .await
         .unwrap()["run"]
         .is_null());
+}
+
+#[tokio::test]
+async fn prepared_assets_receive_a_stable_base_while_services_receive_the_current_epoch() {
+    let (_root, service, _runtime, id) = setup(false).await;
+    let first = service.library.prepare_run(&id, 1).unwrap();
+    let step = Step {
+        command: "build".into(),
+        cwd: None,
+        env: Default::default(),
+        venv: None,
+        python: None,
+    };
+    let build = service
+        .command(&first, &step, None, &Default::default())
+        .unwrap();
+    assert_eq!(build.env["LOCAL_APP_BASE_PATH"], "/");
+    let second = service.library.prepare_run(&id, 1).unwrap();
+    let next_build = service
+        .command(&second, &step, None, &Default::default())
+        .unwrap();
+    assert_eq!(
+        build.env["LOCAL_APP_BASE_PATH"],
+        next_build.env["LOCAL_APP_BASE_PATH"]
+    );
+    let process = service
+        .command(&second, &step, Some(12345), &Default::default())
+        .unwrap();
+    assert_eq!(
+        process.env["LOCAL_APP_BASE_PATH"],
+        format!("/__run/{}/", second.run.run_id)
+    );
+}
+
+async fn static_chain() -> (
+    tempfile::TempDir,
+    Arc<MobileLocalAppServiceHandle>,
+    Arc<ControlledRuntime>,
+    String,
+    Arc<ActiveRun>,
+    Arc<ActiveRun>,
+) {
+    let (root, service, runtime, id) = setup(false).await;
+    runtime.fail_first_kill.store(false, Ordering::SeqCst);
+    let source = root.path().join("source");
+    std::fs::write(source.join("lingxi-app.json"), json!({"schema":2,"name":"chain","entry":{"type":"static","path":"index.html"},"targets":[{"platform":"ios","environment":"web"}]}).to_string()).unwrap();
+    service
+        .request_value(json!({"op":"publish","appId":id,"expectedRevision":1,"sourcePath":source}))
+        .await
+        .unwrap();
+    service
+        .request_value(json!({"op":"start","appId":id,"revision":2}))
+        .await
+        .unwrap();
+    let old = service.active.lock().await[&id].clone();
+    service
+        .request_value(json!({"op":"stop","appId":id}))
+        .await
+        .unwrap();
+    service
+        .request_value(json!({"op":"start","appId":id,"revision":2}))
+        .await
+        .unwrap();
+    let current = service.active.lock().await[&id].clone();
+    *current.previous.lock().unwrap() = Some(old.clone());
+    (root, service, runtime, id, old, current)
+}
+
+#[tokio::test]
+async fn old_cleanup_failure_does_not_skip_current_cleanup_and_retains_retry_owner() {
+    let (_root, service, runtime, id, old, current) = static_chain().await;
+    old.handles.lock().await.push(LinuxProcessHandle {
+        id: "old".into(),
+        enforcement: Default::default(),
+    });
+    current.handles.lock().await.push(LinuxProcessHandle {
+        id: "current".into(),
+        enforcement: Default::default(),
+    });
+    *runtime.fail_handle.lock().unwrap() = Some("old".into());
+    assert_eq!(
+        service
+            .request_value(json!({"op":"stop","appId":id}))
+            .await
+            .unwrap_err()
+            .code,
+        "stopFailed"
+    );
+    assert!(runtime.kills.lock().unwrap().contains(&"current".into()));
+    assert!(current.handles.lock().await.is_empty());
+    assert!(service.active.lock().await.contains_key(&id));
+    assert!(current.previous.lock().unwrap().is_some());
+    *runtime.fail_handle.lock().unwrap() = None;
+    service
+        .request_value(json!({"op":"stop","appId":id}))
+        .await
+        .unwrap();
+    assert!(!service.active.lock().await.contains_key(&id));
+}
+
+#[tokio::test]
+async fn service_failure_retains_failed_old_cleanup_for_later_stop() {
+    let (_root, service, runtime, id, old, current) = static_chain().await;
+    old.handles.lock().await.push(LinuxProcessHandle {
+        id: "old".into(),
+        enforcement: Default::default(),
+    });
+    current.handles.lock().await.push(LinuxProcessHandle {
+        id: "current".into(),
+        enforcement: Default::default(),
+    });
+    current.service_tasks.lock().unwrap().push("current".into());
+    *runtime.fail_handle.lock().unwrap() = Some("old".into());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        service.clone().monitor_processes(current.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(runtime.kills.lock().unwrap().contains(&"current".into()));
+    assert!(service.active.lock().await.contains_key(&id));
+    *runtime.fail_handle.lock().unwrap() = None;
+    service
+        .request_value(json!({"op":"stop","appId":id}))
+        .await
+        .unwrap();
+    assert!(!service.active.lock().await.contains_key(&id));
+}
+
+#[tokio::test]
+async fn stop_rechecks_a_previous_owner_restored_after_its_initial_snapshot() {
+    let (_root, service, _runtime, id, old, candidate) = static_chain().await;
+    // Deterministically interleave the cancellation watcher's restoration after
+    // Stop takes candidate and before it snapshots the candidate's chain.
+    candidate.previous.lock().unwrap().take();
+    service.active.lock().await.insert(id.clone(), old.clone());
+    service
+        .stop_registered_chain(&id, RunPhase::Stopped, Some(candidate))
+        .await
+        .unwrap();
+    assert!(old.cancel.is_cancelled());
+    assert!(!service.active.lock().await.contains_key(&id));
 }
 
 #[tokio::test]

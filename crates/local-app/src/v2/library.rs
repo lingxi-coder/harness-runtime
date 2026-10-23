@@ -777,6 +777,14 @@ impl AppLibrary {
         Ok(())
     }
     pub fn prepare_run(&self, app_id: &str, revision: u64) -> Result<RunPreparation, AppError> {
+        self.prepare_run_with_options(app_id, revision, false)
+    }
+    pub fn prepare_run_with_options(
+        &self,
+        app_id: &str,
+        revision: u64,
+        rebuild: bool,
+    ) -> Result<RunPreparation, AppError> {
         let _lock = self.lock()?;
         let record = self.get(app_id)?;
         let release = self.verify_release(app_id, revision)?;
@@ -810,11 +818,43 @@ impl AppLibrary {
         };
         let source = self.source_path(app_id, revision)?;
         let run_path = self.run_path(app_id, &run.run_id)?;
-        let work = run_path.join("work");
+        let cached = self
+            .app_path(app_id)?
+            .join("environments")
+            .join(format!("{revision}.json"));
+        let mut work_run_id = run.run_id.clone();
+        let mut environment_prepared = false;
+        if !rebuild && cached.exists() {
+            let saved: serde_json::Value = read_json(&cached)?;
+            if saved["releaseDigest"].as_str() != Some(&release.digest) {
+                return Err(AppError::Invalid(
+                    "prepared environment release mismatch; repair required".into(),
+                ));
+            }
+            let previous = saved["sourceRunId"]
+                .as_str()
+                .ok_or_else(|| AppError::Invalid("invalid prepared environment".into()))?;
+            valid_id(previous)?;
+            let previous_work = self.run_path(app_id, previous)?.join("work");
+            if previous_work.is_dir() {
+                if fs::symlink_metadata(&previous_work)?
+                    .file_type()
+                    .is_symlink()
+                    || previous_work.canonicalize()? != previous_work
+                {
+                    return Err(AppError::Invalid(
+                        "prepared environment path changed; repair required".into(),
+                    ));
+                }
+                work_run_id = previous.into();
+                environment_prepared = true;
+            }
+        }
+        let work = self.run_path(app_id, &work_run_id)?.join("work");
         let preparation_data = run_path.join("preparation-data");
         ensure_directory(&work)?;
         ensure_directory(&preparation_data)?;
-        for f in &release.files {
+        for f in release.files.iter().filter(|_| !environment_prepared) {
             atomic_bytes(
                 &work.join(&f.path),
                 &bytes(&checked_file(&source, &f.path)?)?,
@@ -822,6 +862,10 @@ impl AppLibrary {
             apply_executable(&work.join(&f.path), f.executable)?;
         }
         atomic_json(&run_path.join("run.json"), &run)?;
+        atomic_json(
+            &run_path.join("environment-work.json"),
+            &serde_json::json!({"sourceRunId":work_run_id}),
+        )?;
         Ok(RunPreparation {
             record,
             release,
@@ -830,6 +874,7 @@ impl AppLibrary {
             work_path: work.to_string_lossy().into(),
             data_path: self.data_path(app_id)?.to_string_lossy().into(),
             preparation_data_path: preparation_data.to_string_lossy().into(),
+            environment_prepared,
         })
     }
     fn run_path(&self, app_id: &str, run_id: &str) -> Result<PathBuf, AppError> {
@@ -896,7 +941,28 @@ impl AppLibrary {
             self.require_execution_grant(&run.app_id, run.revision)?;
         }
         run.updated_at_ms = now();
-        atomic_json(&path, &run)
+        atomic_json(&path, &run)?;
+        if run.phase == RunPhase::Running {
+            let work: serde_json::Value = read_json(&path.with_file_name("environment-work.json"))?;
+            let source = work["sourceRunId"]
+                .as_str()
+                .ok_or_else(|| AppError::Invalid("invalid environment owner".into()))?;
+            valid_id(source)?;
+            let directory = self.run_path(&run.app_id, source)?.join("work");
+            if !directory.is_dir() || directory.canonicalize()? != directory {
+                return Err(AppError::Invalid(
+                    "prepared environment is unavailable".into(),
+                ));
+            }
+            atomic_json(
+                &self
+                    .app_path(&run.app_id)?
+                    .join("environments")
+                    .join(format!("{}.json", run.revision)),
+                &serde_json::json!({"sourceRunId":source,"releaseDigest":run.release_digest}),
+            )?;
+        }
+        Ok(())
     }
     pub fn append_log(&self, app_id: &str, run_id: &str, text: &str) -> Result<(), AppError> {
         let _lock = self.lock()?;
@@ -1315,7 +1381,6 @@ impl AppLibrary {
         name: Option<String>,
     ) -> Result<PublishResult, AppError> {
         validate_authoring(&authoring)?;
-        let record = self.get(app_id)?;
         let mut release = self.verify_release(app_id, revision)?;
         if !release
             .manifest
@@ -1333,7 +1398,7 @@ impl AppLibrary {
         }
         self.copy_source(app_id, revision, source_path)?;
         atomic_json(&source_path.join(MANIFEST_FILE), &release.manifest)?;
-        let origin = record.market_origin.map(|mut origin| {
+        let origin = release.market_origin.map(|mut origin| {
             origin.remixed_from = Some(origin.app_id.clone());
             origin
         });
@@ -1370,9 +1435,14 @@ impl AppLibrary {
             ActivateRelease { app_id, revision } => {
                 serde_json::to_value(self.activate_release(&app_id, revision)?)?
             }
-            PrepareRun { app_id, revision } => serde_json::to_value(self.prepare_run(
+            PrepareRun {
+                app_id,
+                revision,
+                rebuild,
+            } => serde_json::to_value(self.prepare_run_with_options(
                 &app_id,
                 revision.unwrap_or(self.get(&app_id)?.current_revision),
+                rebuild,
             )?)?,
             UpdateRun { run } => {
                 self.update_run(run)?;

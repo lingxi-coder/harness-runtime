@@ -130,6 +130,7 @@ pub struct RunPreparation {
     pub data_path: String,
     /// Scratch data for install/build/venv steps. Only service processes receive dataPath.
     pub preparation_data_path: String,
+    pub environment_prepared: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -214,6 +215,8 @@ pub enum LibraryRequest {
         app_id: String,
         #[serde(default)]
         revision: Option<u64>,
+        #[serde(default)]
+        rebuild: bool,
     },
     UpdateRun {
         run: AppRun,

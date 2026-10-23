@@ -111,7 +111,10 @@ fn execution_steps_require_host_process_support_even_without_explicit_capability
     let mut value = manifest();
     value["install"] = json!([{"command":"prepare application"}]);
     let release = Manifest::parse(&value.to_string()).unwrap();
-    let mut host: Target = serde_json::from_value(json!({"platform":"ios","environment":"web","channels":["store"],"capabilities":[]})).unwrap();
+    let mut host: Target = serde_json::from_value(
+        json!({"platform":"ios","environment":"web","channels":["store"],"capabilities":[]}),
+    )
+    .unwrap();
     assert!(!release.compatible_with(&host).unwrap());
     host.capabilities.push("process".into());
     assert!(release.compatible_with(&host).unwrap());
@@ -498,6 +501,80 @@ fn market_metadata_changes_only_with_activated_release() {
             .release_id,
         "v2"
     );
+}
+
+#[test]
+fn prepared_environment_is_reused_but_repair_gets_an_independent_workspace() {
+    let (_dir, library, request) = setup();
+    let app = library.publish(request).unwrap().record.app_id;
+    let first = library.prepare_run(&app, 1).unwrap();
+    assert!(!first.environment_prepared);
+    fs::write(
+        Path::new(&first.work_path).join("dependency-installed"),
+        "offline ready",
+    )
+    .unwrap();
+    let mut ready = first.run.clone();
+    ready.phase = RunPhase::Running;
+    library.update_run(ready).unwrap();
+    let resumed = library.prepare_run(&app, 1).unwrap();
+    assert!(resumed.environment_prepared);
+    assert_ne!(first.run.run_id, resumed.run.run_id);
+    assert_eq!(first.work_path, resumed.work_path);
+    assert_eq!(
+        fs::read_to_string(Path::new(&resumed.work_path).join("dependency-installed")).unwrap(),
+        "offline ready"
+    );
+    let repair = library.prepare_run_with_options(&app, 1, true).unwrap();
+    assert!(!repair.environment_prepared);
+    assert_ne!(repair.work_path, first.work_path);
+    assert!(!Path::new(&repair.work_path)
+        .join("dependency-installed")
+        .exists());
+}
+
+#[test]
+fn remix_records_the_selected_release_origin_even_before_activation() {
+    let (dir, library, mut request) = setup();
+    let mut value = manifest();
+    value["remix"] = json!({"allowed":true,"license":"MIT"});
+    source(Path::new(&request.source_path), &value);
+    request.market_origin = Some(MarketOrigin {
+        app_id: "market-app".into(),
+        release_id: "v1".into(),
+        digest: "a".repeat(64),
+        remixed_from: None,
+    });
+    let first = library.publish(request.clone()).unwrap();
+    request.app_id = Some(first.record.app_id.clone());
+    request.expected_revision = 1;
+    request.market_origin.as_mut().unwrap().release_id = "v2".into();
+    library.publish(request).unwrap();
+    assert_eq!(
+        library
+            .get(&first.record.app_id)
+            .unwrap()
+            .market_origin
+            .unwrap()
+            .release_id,
+        "v1"
+    );
+    let copied = library
+        .remix(
+            &first.record.app_id,
+            2,
+            &dir.path().join("copy"),
+            AuthoringRef {
+                source_directory: "/home/lingxi/.lingxi/.apps/copied".into(),
+                source_session_id: None,
+                project_id: None,
+            },
+            None,
+        )
+        .unwrap();
+    let origin = copied.record.market_origin.unwrap();
+    assert_eq!(origin.release_id, "v2");
+    assert_eq!(origin.remixed_from.as_deref(), Some("market-app"));
 }
 #[test]
 fn removed_installation_origin_is_never_reused() {

@@ -4,6 +4,7 @@ use mobile_linux_api::{
     LinuxCommandRequest, MobileLinuxEventKind, MobileLinuxTaskStatus, NetworkPolicy, ResourceLimits,
 };
 use serde_json::{json, Value};
+use std::sync::atomic::Ordering;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -31,7 +32,7 @@ impl MobileLocalAppServiceHandle {
         let listener = if replacing_run {
             None
         } else {
-            Some(
+            Some(Arc::new(
                 TcpListener::bind((
                     std::net::Ipv4Addr::LOCALHOST,
                     preparation.record.origin_port,
@@ -43,7 +44,7 @@ impl MobileLocalAppServiceHandle {
                         format!("{}: {e}", preparation.record.origin_port),
                     )
                 })?,
-            )
+            ))
         };
         let mut ports = BTreeMap::new();
         if manifest.requires_execution() {
@@ -76,7 +77,12 @@ impl MobileLocalAppServiceHandle {
             *run.log_task.lock().await = Some(tokio::spawn(async move {
                 owner.collect_logs(logging).await;
             }));
-            for step in manifest.install.iter().chain(&manifest.build) {
+            for step in manifest
+                .install
+                .iter()
+                .chain(&manifest.build)
+                .filter(|_| !preparation.environment_prepared)
+            {
                 self.step(preparation, &run, step, None, &ports).await?;
             }
             let mut started = BTreeSet::new();
@@ -133,7 +139,6 @@ impl MobileLocalAppServiceHandle {
                 "application startup cancelled",
             ));
         }
-        let _lifecycle = run.lifecycle.lock().await;
         if run.cancel.is_cancelled() {
             return Err(ServiceError::new(
                 "cancelled",
@@ -161,36 +166,22 @@ impl MobileLocalAppServiceHandle {
             ),
         };
         let previous = run.previous.lock().unwrap().clone();
-        if let Some(previous) = previous {
-            self.stop_owned(
-                &preparation.record.app_id,
-                previous,
-                RunPhase::Stopped,
-                false,
-            )
-            .await?;
-            run.previous.lock().unwrap().take();
-        }
         let listener = match listener {
             Some(listener) => listener,
-            None => TcpListener::bind((
-                std::net::Ipv4Addr::LOCALHOST,
-                preparation.record.origin_port,
-            ))
-            .await
-            .map_err(|e| {
-                ServiceError::new(
-                    "originPortUnavailable",
-                    format!("{}: {e}", preparation.record.origin_port),
-                )
-            })?,
+            None => previous
+                .as_ref()
+                .expect("replacement owner")
+                .listener
+                .lock()
+                .await
+                .clone()
+                .ok_or_else(|| {
+                    ServiceError::new(
+                        "originPortUnavailable",
+                        "previous application gateway is unavailable",
+                    )
+                })?,
         };
-        if run.cancel.is_cancelled() {
-            return Err(ServiceError::new(
-                "cancelled",
-                "application switch cancelled",
-            ));
-        }
         let url = format!("{origin}{prefix}{entry}");
         let route = gateway::Route {
             run_id: run_id.clone(),
@@ -202,8 +193,6 @@ impl MobileLocalAppServiceHandle {
             capabilities: manifest.capabilities.clone(),
             cancel: run.cancel.clone(),
         };
-        *run.gateway.lock().await = Some(gateway::spawn(listener, route));
-        *run.url.lock().unwrap() = url.clone();
         let mut record = run.record.lock().unwrap().clone();
         record.phase = RunPhase::Running;
         record.services = ports
@@ -214,28 +203,70 @@ impl MobileLocalAppServiceHandle {
             })
             .collect();
         record.updated_at_ms = now_ms();
-        *run.record.lock().unwrap() = record.clone();
-        let library = self.library.clone();
-        let saved = record.clone();
-        let app_id = record.app_id.clone();
-        let revision = record.revision;
-        tokio::task::spawn_blocking(move || {
-            library.update_run(saved)?;
-            library.activate_release(&app_id, revision)
+        let owner = self.clone();
+        let monitor = !manifest.processes.is_empty();
+        // Once the durable switch begins, its owner finishes the route handoff
+        // even if the UI/tool stops waiting. Explicit Stop still cancels the run.
+        tokio::spawn(async move {
+            let _lifecycle = run.lifecycle.lock().await;
+            if run.cancel.is_cancelled() {
+                return Err(ServiceError::new(
+                    "cancelled",
+                    "application switch cancelled",
+                ));
+            }
+            let library = owner.library.clone();
+            let saved = record.clone();
+            let app_id = record.app_id.clone();
+            let revision = record.revision;
+            tokio::task::spawn_blocking(move || {
+                library.update_run(saved)?;
+                library.activate_release(&app_id, revision)
+            })
+            .await
+            .map_err(super::join_error)??;
+            run.committed.store(true, Ordering::Release);
+            *run.listener.lock().await = Some(listener.clone());
+            if let Some(previous) = &previous {
+                previous.cancel.cancel();
+                if let Some(task) = previous.gateway.lock().await.take() {
+                    let _ = task.await;
+                }
+                previous.listener.lock().await.take();
+            }
+            *run.gateway.lock().await = Some(gateway::spawn(listener, route));
+            *run.url.lock().unwrap() = url.clone();
+            *run.record.lock().unwrap() = record.clone();
+            if let Some(previous) = previous {
+                match owner
+                    .stop_chain(&record.app_id, previous, RunPhase::Stopped, true)
+                    .await
+                {
+                    Ok(_) => {
+                        run.previous.lock().unwrap().take();
+                    }
+                    Err(error) => {
+                        let warning = format!("Previous application cleanup needs retry: {error}");
+                        record.error = Some(warning.clone());
+                        *run.record.lock().unwrap() = record.clone();
+                        run.output.lock().unwrap().insert("host".into(), warning);
+                    }
+                }
+            }
+            if monitor {
+                let monitoring_owner = owner.clone();
+                let monitoring = run.clone();
+                tokio::spawn(async move {
+                    monitoring_owner.monitor_processes(monitoring).await;
+                });
+            }
+            Ok(json!({"run":record,"url":url,"origin":origin}))
         })
         .await
-        .map_err(super::join_error)??;
-        if !manifest.processes.is_empty() {
-            let owner = self.clone();
-            let monitoring = run.clone();
-            tokio::spawn(async move {
-                owner.monitor_processes(monitoring).await;
-            });
-        }
-        Ok(json!({"run":record,"url":url,"origin":origin}))
+        .map_err(super::join_error)?
     }
 
-    fn command(
+    pub(super) fn command(
         &self,
         preparation: &RunPreparation,
         step: &Step,
@@ -267,7 +298,13 @@ impl MobileLocalAppServiceHandle {
         env.insert("LOCAL_APP_DATA_DIR".into(), guest_data);
         env.insert(
             "LOCAL_APP_BASE_PATH".into(),
-            format!("/__run/{}/", preparation.run.run_id),
+            // Prepared assets outlive a run epoch. Root-absolute asset requests
+            // are admitted only with the gateway's current document Referer.
+            if port.is_some() {
+                format!("/__run/{}/", preparation.run.run_id)
+            } else {
+                "/".into()
+            },
         );
         env.insert("HOST".into(), "127.0.0.1".into());
         env.insert(
@@ -530,7 +567,7 @@ impl MobileLocalAppServiceHandle {
             tokio::select! {_=run.cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_millis(100))=>{}}
         }
     }
-    async fn monitor_processes(self: Arc<Self>, run: Arc<ActiveRun>) {
+    pub(super) async fn monitor_processes(self: Arc<Self>, run: Arc<ActiveRun>) {
         let Ok(runtime) = self.runtime() else {
             return;
         };
@@ -569,7 +606,7 @@ impl MobileLocalAppServiceHandle {
             if let Some(error) = failure {
                 let mut record = run.record.lock().unwrap().clone();
                 if self
-                    .stop_owned(&record.app_id, run.clone(), RunPhase::Failed, false)
+                    .stop_chain(&record.app_id, run.clone(), RunPhase::Failed, false)
                     .await
                     .is_err()
                 {

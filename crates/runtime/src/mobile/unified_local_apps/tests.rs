@@ -101,6 +101,75 @@ async fn port_conflict_preserves_origin_and_release() {
         .await
         .unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn activation_write_failure_keeps_previous_listener_run_and_release() {
+    use std::os::unix::fs::PermissionsExt;
+    struct Restore(PathBuf, std::fs::Permissions);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, self.1.clone());
+        }
+    }
+    let (dir, service) = service();
+    let published = publish(&service, dir.path(), "commit-failure").await;
+    let id = published["record"]["appId"].as_str().unwrap();
+    let port = published["record"]["originPort"].as_u64().unwrap() as u16;
+    let first = service
+        .request_value(json!({"op":"start","appId":id}))
+        .await
+        .unwrap();
+    let old = first["run"]["runId"].as_str().unwrap();
+    std::fs::write(dir.path().join("commit-failure/index.html"), "replacement").unwrap();
+    service.request_value(json!({"op":"publish","appId":id,"expectedRevision":1,"sourcePath":dir.path().join("commit-failure")})).await.unwrap();
+    let app = service.library.root().join("apps").join(id);
+    let restore = Restore(app.clone(), std::fs::metadata(&app).unwrap().permissions());
+    // run/preparation subdirectories remain writable; the final atomic
+    // record.json rename fails, modeling a commit-stage storage failure.
+    std::fs::set_permissions(&app, std::fs::Permissions::from_mode(0o500)).unwrap();
+    assert!(service
+        .request_value(json!({"op":"start","appId":id,"revision":2}))
+        .await
+        .is_err());
+    drop(restore);
+    assert_eq!(
+        service
+            .request_value(json!({"op":"get","appId":id}))
+            .await
+            .unwrap()["currentRevision"],
+        1
+    );
+    assert_eq!(
+        service
+            .request_value(json!({"op":"status","appId":id}))
+            .await
+            .unwrap()["run"]["runId"],
+        old
+    );
+    assert!(get(port, &format!("/__run/{old}/"))
+        .await
+        .ends_with("hello independent app"));
+    assert!(TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+        .await
+        .is_err());
+    let second = service
+        .request_value(json!({"op":"start","appId":id,"revision":2}))
+        .await
+        .unwrap();
+    assert_ne!(second["run"]["runId"], first["run"]["runId"]);
+    assert!(get(port, &format!("/__run/{old}/"))
+        .await
+        .starts_with("HTTP/1.1 410"));
+    service
+        .request_value(json!({"op":"stop","appId":id}))
+        .await
+        .unwrap();
+    // Watchers can retain ActiveRun Arc values; none may retain the listener.
+    assert!(TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
+        .await
+        .is_ok());
+}
 #[tokio::test]
 async fn execution_release_requires_consent_before_runtime_is_used() {
     let (dir, service) = service();

@@ -27,7 +27,11 @@ pub(super) struct Route {
     pub cancel: CancellationToken,
 }
 
-pub(super) fn spawn(listener: TcpListener, route: Route) -> tokio::task::JoinHandle<()> {
+pub(super) fn spawn(
+    listener: impl Into<Arc<TcpListener>>,
+    route: Route,
+) -> tokio::task::JoinHandle<()> {
+    let listener = listener.into();
     tokio::spawn(async move {
         let route = Arc::new(route);
         let permits = Arc::new(Semaphore::new(32));
