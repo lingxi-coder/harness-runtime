@@ -215,10 +215,6 @@ define_client_event! {
 
     SessionEnded,
 
-    WorkspaceChanged {
-        state: crate::protocol::listings::WorkspaceStateDto,
-    },
-
     SessionResumed {
         session_id: String,
         mode: SessionModeDto,
@@ -858,6 +854,10 @@ define_client_event! {
     /// Appended to keep the existing UniFFI enum ordinals stable.
     SessionStorageState {
         disk_full: bool,
+    },
+
+    WorkspaceChanged {
+        state: crate::protocol::listings::WorkspaceStateDto,
     },
 }
 
