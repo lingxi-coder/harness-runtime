@@ -38,9 +38,12 @@ pub struct MobileConfig {
     /// only fails at `run_turn` with a 401, so slash-command dispatch still
     /// works with no key configured (mirrors the desktop config contract).
     pub api_key: String,
-    /// Working directory the orchestrator + tool context are rooted at. On a
-    /// device this is the app-sandbox container root.
+    /// Native backing directory used for configuration/bootstrap I/O. Device
+    /// sessions require a directory inside the Linux runtime user's home.
     pub cwd: std::path::PathBuf,
+    /// Stable Linux cwd used for session and transcript identity. `cwd` is
+    /// its native backing directory for configuration/bootstrap I/O.
+    pub logical_cwd: Option<std::path::PathBuf>,
     /// The `~/.claude`-equivalent root the settings / agents loaders walk. On a
     /// device this is inside the app sandbox.
     pub lingxi_home: std::path::PathBuf,
@@ -137,6 +140,7 @@ impl std::fmt::Debug for MobileConfig {
                     .map(|_| "<provided>"),
             )
             .field("cwd", &self.cwd)
+            .field("logical_cwd", &self.logical_cwd)
             .field("lingxi_home", &self.lingxi_home)
             .field("default_model", &self.default_model)
             .field("session_mode", &self.session_mode.as_str())
@@ -188,6 +192,7 @@ impl Default for MobileConfig {
             projects_session_startup_url: None,
             api_key: String::new(),
             cwd: std::path::PathBuf::from("."),
+            logical_cwd: None,
             lingxi_home: std::path::PathBuf::new(),
             default_model: crate::mobile::MobileEngineConfig::default().default_model,
             session_mode: session::jsonl::SessionMode::Code,

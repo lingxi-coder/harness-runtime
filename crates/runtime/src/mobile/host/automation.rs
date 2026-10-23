@@ -348,7 +348,12 @@ impl MobileTurnFirer {
         {
             return Err("paused: Select a conversation".into());
         }
-        let cwd = canonical_cwd_string(&self.cfg.cwd);
+        let cwd = self
+            .cfg
+            .logical_cwd
+            .as_ref()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| canonical_cwd_string(&self.cfg.cwd));
         let target_uuid = target
             .map(|id| uuid::Uuid::parse_str(id.strip_prefix("sess:").unwrap_or(id)))
             .transpose()
@@ -375,7 +380,8 @@ impl MobileTurnFirer {
                 .collect();
             for reader in handles {
                 let handle: Arc<dyn OrchestratorHandle> = reader.inner.orchestrator.clone();
-                if reader.session_cwd == cwd && handle.current_session_id().await.as_uuid() == uuid
+                if reader.session_cwd() == cwd
+                    && handle.current_session_id().await.as_uuid() == uuid
                 {
                     if reader.active_cancel.lock().await.is_some() {
                         return Err("busy: Conversation has an active turn".into());
@@ -555,6 +561,7 @@ pub(super) async fn cron_replay_session(
                 &error,
                 orchestrator::resume::ResumeError::Loader(
                     session::jsonl::LoaderError::EmptyDirectory
+                        | session::jsonl::LoaderError::SessionNotFound { .. }
                 )
             ) {
                 let path = session::jsonl::session_path(home, cwd, &session_id.to_string());

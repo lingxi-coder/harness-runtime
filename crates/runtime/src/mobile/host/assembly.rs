@@ -326,7 +326,11 @@ pub(super) async fn build_mobile_inner_with_ask(
     streaming_override: Option<Arc<dyn StreamingApiClient>>,
     ask_user_question_tx: Option<tokio::sync::mpsc::Sender<tool_ui::AskUserQuestionExchange>>,
 ) -> Result<MobileRuntime, MobileBuildError> {
+    let mut cfg = cfg;
+    cfg.lingxi_home = std::path::PathBuf::from(super::canonical_cwd_string(&cfg.lingxi_home));
+    cfg.cwd = std::path::PathBuf::from(super::canonical_cwd_string(&cfg.cwd));
     let cwd = cfg.cwd.clone();
+    let logical_cwd = cfg.logical_cwd.clone().unwrap_or_else(|| cwd.clone());
     let _catalog_refresh = cfg.startup_catalog.as_ref().map(|source| source.prefetch());
     settings_commands::prepare_mobile_mcp_storage(&cfg.lingxi_home).map_err(|error| {
         MobileBuildError::Orchestrator(format!("MCP settings migration: {error}"))
@@ -466,7 +470,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             })?;
     let transcript_path = orchestrator::transcript_paths::main_transcript_path(
         &cfg.lingxi_home,
-        &cwd.to_string_lossy(),
+        &logical_cwd.to_string_lossy(),
         &main_session_uuid,
     );
     let session_writer = Arc::new(
@@ -474,7 +478,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             .with_durable_lock(transcript_authority),
     );
     session_writer
-        .activate_session_target(main_session_id, transcript_path, cwd.clone())
+        .activate_session_target(main_session_id, transcript_path, logical_cwd.clone())
         .map_err(|error| {
             MobileBuildError::Orchestrator(format!("transcript activation: {error}"))
         })?;
@@ -1094,6 +1098,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         [mount] => Some(*mount),
         _ => None,
     };
+    let live_session_cwd = Arc::new(std::sync::OnceLock::<Arc<tool_api::SessionCwd>>::new());
     let permission_cwd = match workspace_mounts.as_slice() {
         [mount] => {
             // BOTH sides must be canonicalized or the containment tests below
@@ -1307,7 +1312,11 @@ pub(super) async fn build_mobile_inner_with_ask(
         // so HOME comes from the env (absent on a sandboxed device ⇒ `None`).
         let roots = permission::FsRoots {
             cwd: permission_cwd.clone(),
-            home: std::env::var_os("HOME").map(std::path::PathBuf::from),
+            home: if mobile_linux.is_some() {
+                cfg.lingxi_home.parent().map(std::path::Path::to_path_buf)
+            } else {
+                std::env::var_os("HOME").map(std::path::PathBuf::from)
+            },
             lingxi_home: cfg.lingxi_home.clone(),
         };
         requested_permission_mode = mode.wire_str().to_string();
@@ -1359,6 +1368,21 @@ pub(super) async fn build_mobile_inner_with_ask(
         // when a mobile-linux runtime is selected; otherwise the trait default
         // returns `Ok(None)` and the gate is byte-identical to desktop.
         let mut gate = permission::PolicyPermissionGate::new(policy, adapter_gate.clone());
+        let live_cwd = live_session_cwd.clone();
+        let root_fs = fs.clone();
+        let boot_cwd = permission_cwd.clone();
+        gate = gate.with_cwd_provider(Arc::new(move || {
+            let cwd = live_cwd
+                .get()
+                .map(|cell| cell.cwd())
+                .unwrap_or_else(|| boot_cwd.clone());
+            root_fs
+                .translate_model_path(&cwd.to_string_lossy(), false)
+                .ok()
+                .flatten()
+                .map(std::path::PathBuf::from)
+                .unwrap_or(cwd)
+        }));
         if mobile_linux.is_some() {
             gate = gate
                 .with_path_translator(Arc::new(permission::FileSystemPathTranslator(fs.clone())));
@@ -1570,7 +1594,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // pass translation and then die at `canonicalize_and_validate`
     // containment. Legacy/unavailable runtimes serve an empty table, so this
     // adds nothing off mobile-linux.
-    let mut trusted_dirs = vec![cwd.clone()];
+    let mut trusted_dirs = vec![cwd.clone(), logical_cwd.clone()];
     trusted_dirs.extend(mobile_linux_mounts.iter().map(|m| m.host_path.clone()));
     // PathAtlas S3: the MODEL-VISIBLE cwd is the guest workspace when one is
     // mounted — the same coordinate the shell already uses, so file tools and
@@ -1578,8 +1602,10 @@ pub(super) async fn build_mobile_inner_with_ask(
     // it and come back through translate_model_path onto the host twin. The
     // engine-internal cwd (`cwd` — transcripts, .lingxi, memory files) stays
     // host.
-    let model_cwd = workspace_mount
-        .map(|mount| std::path::PathBuf::from(&mount.guest_path))
+    let model_cwd = cfg
+        .logical_cwd
+        .clone()
+        .or_else(|| workspace_mount.map(|mount| std::path::PathBuf::from(&mount.guest_path)))
         .unwrap_or_else(|| cwd.clone());
     // DIAGNOSTIC (permission coordinate audit): the model names files in
     // `model_cwd` (GUEST) while `PermissionPolicy`'s `FsRoots.cwd` was built
@@ -1617,6 +1643,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         );
     }
     let session_cwd = SessionCwd::new(model_cwd, trusted_dirs);
+    let _ = live_session_cwd.set(session_cwd.clone());
     let gated_shell_ctx = gate_mobile_shell_ctx(
         cfg.mobile_shell().cloned(),
         mobile_linux_capability.as_ref(),
@@ -1787,24 +1814,36 @@ pub(super) async fn build_mobile_inner_with_ask(
     let subagent_hook_session_id = main_session_id;
     let main_subagents_dir = orchestrator::transcript_paths::subagents_dir(
         &cfg.lingxi_home,
-        &cwd.to_string_lossy(),
+        &logical_cwd.to_string_lossy(),
         &main_session_uuid,
     );
 
     let workflow_checkpoints = Arc::new(
         crate::mobile::workflow_support::MobileWorkflowCheckpointStore::new(
             cfg.lingxi_home.clone(),
-            cwd.clone(),
-        ),
+            logical_cwd.clone(),
+        )
+        .with_cwd_provider({
+            let cwd = session_cwd.clone();
+            let owner = active_session_uuid.clone();
+            Arc::new(move |session: &str| {
+                (owner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_str()
+                    == session)
+                    .then(|| cwd.cwd())
+            })
+        }),
     );
     let subagent_transcript_home = cfg.lingxi_home.clone();
-    let subagent_transcript_cwd = cwd.to_string_lossy().into_owned();
+    let subagent_transcript_cwd = session_cwd.clone();
     let subagent_active_session = active_session_uuid.clone();
     let subagents_dir_provider = Arc::new(move || {
         let session_uuid = subagent_active_session.lock().ok()?.clone();
         Some(orchestrator::transcript_paths::subagents_dir(
             &subagent_transcript_home,
-            &subagent_transcript_cwd,
+            &subagent_transcript_cwd.cwd().to_string_lossy(),
             &session_uuid,
         ))
     });
@@ -1815,7 +1854,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     );
     let parked_agent_store = Arc::new(crate::parked_agent_restore::SessionParkedAgentStore::new(
         cfg.lingxi_home.clone(),
-        cwd.to_string_lossy().into_owned(),
+        logical_cwd.to_string_lossy().into_owned(),
         subagents_dir_provider.clone(),
     ));
     let session_agent_observer = Arc::new(MobileSessionAgentObserver::new(
@@ -2566,8 +2605,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         perms,
         output,
         memory,
-        // `cwd` is reused below by the batch-8 registration, so clone here.
-        cwd.clone(),
+        logical_cwd.clone(),
     )
     .with_mod_settings_reader(Arc::new(
         super::settings_commands::MobileModSettingsReader::new(
@@ -2644,7 +2682,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // tool-facing cwd source (mobile mirror of desktop's
     // `.with_session_cwd(session_cwd)`; inert today — see the binding note
     // above).
-    .with_session_cwd(session_cwd);
+    .with_session_cwd(session_cwd.clone());
     // Keep the mobile request adapter and orchestrator on the same persisted
     // device preference. The adapter reads this flag when building the next
     // provider request; the handle exposes it to native controls.
@@ -2936,6 +2974,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         device_skill_tools.clone(),
         workflow_tool.clone(),
         workflow_command_snapshot.clone(),
+        Vec::new(),
     )));
     // `/list-agents` reads this mobile session's live task and name stores.
     // Mobile is a local app-private host, so use its explicit local-default
@@ -3085,6 +3124,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             device_skill_tools.clone(),
             workflow_tool.clone(),
             workflow_command_snapshot.clone(),
+            Vec::new(),
         );
         if let Some(parsed) = parse_slash_command(&"/reload-skills".into()) {
             let _ = handler.handle(&parsed).await;
@@ -3128,7 +3168,21 @@ pub(super) async fn build_mobile_inner_with_ask(
         context: side_chat_context,
         commands: shared_command_registry.clone(),
     });
+    let workspace_catalog = super::workspace_commands::MobileWorkspaceCatalog {
+        registry: shared_command_registry.clone(),
+        agents: plugin_agent_catalog.clone(),
+        config_home: cfg.lingxi_home.clone(),
+        home: cfg.lingxi_home.parent().unwrap_or(&cfg.cwd).to_path_buf(),
+        device_skill_tools: device_skill_tools.clone(),
+        workflow_tool: workflow_tool.clone(),
+        workflow_commands: workflow_command_snapshot.clone(),
+    };
+    workspace_catalog
+        .reload(&cwd, &[])
+        .await
+        .map_err(MobileBuildError::Orchestrator)?;
     Ok(MobileRuntime {
+        session_cwd,
         provider_catalog,
         plugin_archive_session,
         side_chat_factory,
@@ -3142,6 +3196,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         wakeup_scheduler,
         dispatcher,
         slash_registry: shared_command_registry,
+        workspace_catalog,
         #[cfg(test)]
         wired_skill_listing_provider,
         #[cfg(test)]
@@ -3264,6 +3319,9 @@ fn build_mobile_engine_on_worker(
     permission_sink: Arc<dyn PermissionRequestSink>,
     streaming_override: Option<Arc<dyn StreamingApiClient>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
+    let mut cfg = cfg;
+    cfg.lingxi_home = std::path::PathBuf::from(super::canonical_cwd_string(&cfg.lingxi_home));
+    cfg.cwd = std::path::PathBuf::from(super::canonical_cwd_string(&cfg.cwd));
     // The handle OWNS its runtime (§0.5). A multi-thread runtime so a streaming
     // turn spawned by F3-05 runs concurrently with the FFI read path.
     //
@@ -3286,7 +3344,6 @@ fn build_mobile_engine_on_worker(
     // `platform` are moved into `build_mobile_inner`. `submit(ListSessions)`
     // reads the on-disk catalog with these (the SAME `fs` the tools use).
     let lingxi_home = cfg.lingxi_home.clone();
-    let session_cwd = cfg.cwd.to_string_lossy().into_owned();
     let fs = platform.filesystem();
     // Capture the build recipe + platform BEFORE they move into
     // `build_mobile_inner`, so the cron firing path can rebuild a fresh throwaway
@@ -3432,7 +3489,7 @@ fn build_mobile_engine_on_worker(
         let session_writer = inner.session_writer.clone();
         let durable_turns = durable_turns.clone();
         let lingxi_home = lingxi_home.clone();
-        let session_cwd = session_cwd.clone();
+        let session_cwd = inner.session_cwd.clone();
         let message_output = inner.message_output.clone();
         let sink = event_sink.clone();
         let active_cancel = active_cancel.clone();
@@ -3673,7 +3730,7 @@ fn build_mobile_engine_on_worker(
                         if let Err(error) = super::ensure_mobile_session_identity(
                             &session_writer,
                             &lingxi_home,
-                            &session_cwd,
+                            &session_cwd.cwd().to_string_lossy(),
                             &turn.session_id,
                         )
                         .await
@@ -3954,7 +4011,7 @@ fn build_mobile_engine_on_worker(
     };
     let settings_paths = ::configuration_admin::settings_bridge::SettingsPaths {
         lingxi_home: lingxi_home.clone(),
-        project_dir: std::path::PathBuf::from(&session_cwd),
+        project_dir: firer_cfg.cwd.clone(),
     };
     let settings = Some(::configuration_admin::settings_bridge::SettingsContext {
         plugin_archive_session: inner.plugin_archive_session.clone(),
@@ -3992,7 +4049,6 @@ fn build_mobile_engine_on_worker(
         skill_count,
         lingxi_home,
         settings_write_lock,
-        session_cwd,
         session_lifecycle_tx,
         fs,
         firer_cfg,

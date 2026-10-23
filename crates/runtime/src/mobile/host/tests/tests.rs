@@ -375,6 +375,10 @@ fn replayed_session_from_jsonl(raw: &str) -> orchestrator::ReplayedSession {
     let state = orchestrator::state_from_messages(uuid::Uuid::new_v4(), &messages);
     let runtime_metadata = orchestrator::runtime_metadata_from_messages(&messages);
     orchestrator::ReplayedSession {
+        transcript_path: std::path::PathBuf::new(),
+        working_directory: None,
+        worktree_session: None,
+        transcript_metadata: Vec::new(),
         display_history: state.history.clone(),
         display_timestamps: Default::default(),
         state,
@@ -425,7 +429,14 @@ fn mobile_provider_catalog_matches_engine_presets_without_secrets() {
             }))
     {
         assert_eq!(entry.profile_id, provider.profile_name);
-        assert_eq!(entry.display_name, provider.profile_name);
+        assert_eq!(
+            entry.display_name,
+            provider
+                .wire_profile
+                .as_ref()
+                .and_then(|profile| profile.info.display_name.clone())
+                .unwrap_or_else(|| provider.profile_name.clone())
+        );
         assert_eq!(entry.base_url, provider.base_url);
         assert_eq!(entry.protocol, format!("{:?}", provider.protocol));
         assert_eq!(entry.auth, format!("{:?}", provider.auth));
@@ -4480,7 +4491,7 @@ fn submit_lists_and_loads_nested_workflow_agents() {
         let session_id = handle.inner.orchestrator.current_session_id().await;
         let subagents_dir = orchestrator::transcript_paths::subagents_dir(
             &handle.lingxi_home,
-            &handle.session_cwd,
+            &handle.session_cwd(),
             &session_id.as_uuid().to_string(),
         );
         let dir = subagents_dir.join("workflows").join("wf_nested");
@@ -4805,7 +4816,7 @@ fn mobile_human_message_reconstructs_stopped_agent_with_original_identity_and_hi
         let session_id = handle.inner.orchestrator.current_session_id().await;
         let dir = orchestrator::transcript_paths::subagents_dir(
             &handle.lingxi_home,
-            &handle.session_cwd,
+            &handle.session_cwd(),
             &session_id.as_uuid().to_string(),
         );
         tokio::fs::create_dir_all(&dir).await.unwrap();
@@ -7805,10 +7816,10 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
                 "mobile-review"
             ));
             let transcript_path =
-                session::jsonl::session_path(&first.lingxi_home, &first.session_cwd, &session_id);
+                session::jsonl::session_path(&first.lingxi_home, &first.session_cwd(), &session_id);
             assert_user_prompt_expansion_wire_input(
                 &hook_commands[0],
-                std::path::Path::new(&first.session_cwd),
+                std::path::Path::new(&first.session_cwd()),
                 &session_id,
                 &transcript_path,
                 &first
@@ -8090,7 +8101,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             "cold LocalSkill resume also suppresses total_tokens"
         );
         let resumed_transcript_path =
-            session::jsonl::session_path(&resumed.lingxi_home, &resumed.session_cwd, &session_id);
+            session::jsonl::session_path(&resumed.lingxi_home, &resumed.session_cwd(), &session_id);
         let resumed_transcript = std::fs::read_to_string(resumed_transcript_path)
             .expect("read resumed skill transcript rows");
         assert_eq!(
@@ -8214,10 +8225,10 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
         let hook_commands = hook_process.captured_commands();
         assert_eq!(hook_commands.len(), 2, "a new turn fires UPE once");
         let transcript_path =
-            session::jsonl::session_path(&resumed.lingxi_home, &resumed.session_cwd, &session_id);
+            session::jsonl::session_path(&resumed.lingxi_home, &resumed.session_cwd(), &session_id);
         assert_user_prompt_expansion_wire_input(
             &hook_commands[1],
-            std::path::Path::new(&resumed.session_cwd),
+            std::path::Path::new(&resumed.session_cwd()),
             &session_id,
             &transcript_path,
             &resumed
@@ -10529,7 +10540,7 @@ fn submit_new_session_emits_session_started() {
         );
 
         let path =
-            session::jsonl::session_path(&handle.lingxi_home, &handle.session_cwd, &after_uuid);
+            session::jsonl::session_path(&handle.lingxi_home, &handle.session_cwd(), &after_uuid);
         let raw = std::fs::read_to_string(path).expect("new session anchor exists");
         let records = raw
             .lines()
@@ -10867,7 +10878,8 @@ fn resume_empty_session_bootstraps_legacy_project_index_uuid() {
                 .to_string(),
             expected,
         );
-        let path = session::jsonl::session_path(&handle.lingxi_home, &handle.session_cwd, expected);
+        let path =
+            session::jsonl::session_path(&handle.lingxi_home, &handle.session_cwd(), expected);
         let raw = std::fs::read_to_string(path).expect("migration anchor exists");
         assert!(raw.contains("\"mobileEmptySession\":1"));
         assert!(raw.contains("旧空会话"));
@@ -11398,47 +11410,35 @@ impl lingxi_core::host::FileSystem for FlakyAppendFs {
     }
 }
 
-/// v3 Phase 4: a cross-workspace `NewSession`/`ResumeSession` cwd is
-/// REJECTED (the old behavior silently ignored it — a client could
-/// believe a workspace switch happened). A matching cwd still works.
+/// New sessions may choose another directory; invalid paths leave the owner intact.
 #[test]
-fn new_session_rejects_a_foreign_cwd() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (handle, _listener) = build_submit_handle(tmp.path());
+fn new_session_accepts_another_existing_directory_and_rejects_missing_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle(tmp.path());
+    let before = handle.runtime().block_on(handle.workspace_state());
+    let other = tmp.path().join("another-worktree");
+    std::fs::create_dir_all(&other).unwrap();
     handle.runtime().block_on(async {
-        let err = handle
+        assert!(handle
             .submit(ClientCommand::NewSession {
-                cwd: Some("/somewhere/else".into()),
-                model: None,
+                cwd: Some(tmp.path().join("missing").display().to_string()),
+                model: None
             })
             .await
-            .expect_err("a foreign cwd must be rejected");
-        assert!(
-            matches!(err, ClientError::Rejected { ref message }
-                    if message.contains("does not match this source's cwd")),
-            "{err:?}"
-        );
-        let err = handle
-            .submit(ClientCommand::ResumeSession {
-                session_id: uuid::Uuid::new_v4().to_string(),
-                cwd: Some("/somewhere/else".into()),
-            })
-            .await
-            .expect_err("resume with a foreign cwd must be rejected");
-        assert!(
-            matches!(err, ClientError::Rejected { ref message }
-                    if message.contains("does not match this source's cwd")),
-            "{err:?}"
-        );
-        // The matching cwd is still honored.
+            .is_err());
+        assert_eq!(handle.workspace_state().await, before);
         handle
             .submit(ClientCommand::NewSession {
-                cwd: Some(tmp.path().to_string_lossy().to_string()),
+                cwd: Some(other.display().to_string()),
                 model: None,
             })
             .await
-            .expect("the source's own cwd is honored");
+            .unwrap();
     });
+    let after = handle.runtime().block_on(handle.workspace_state());
+    assert_ne!(after.session_id, before.session_id);
+    assert_eq!(Path::new(&after.cwd), other.canonicalize().unwrap());
+    assert_eq!(after.project_root, after.cwd);
 }
 
 #[cfg(unix)]
@@ -11579,7 +11579,7 @@ fn mobile_handback_admission_wakes_a_real_model_turn_with_peer_meta_and_stable_i
         assert_eq!(handle.inner.orchestrator.current_session_id().await, scope.session_id, "peer /clear is not a slash command");
         assert!(!handle.inner.orchestrator.has_pending_main_reports(scope).await);
         let transcript = tokio::fs::read_to_string(orchestrator::transcript_paths::main_transcript_path(
-            &handle.lingxi_home, &handle.session_cwd, &scope.session_id.as_uuid().to_string(),
+            &handle.lingxi_home, &handle.session_cwd(), &scope.session_id.as_uuid().to_string(),
         )).await.unwrap();
         assert!(transcript.contains("reporter") && transcript.contains("peer"), "typed report provenance must persist with its model-visible row");
     });

@@ -74,6 +74,8 @@ pub use provider_services::{
     ProviderConnectionTestDto,
 };
 use restoration::{canonical_cwd_string, lower_session_mode};
+mod workspace_commands;
+pub use workspace_commands::MobileSessionDiscoveryScope;
 
 #[cfg(test)]
 use lingxi_core::host::{Clock, FileSystem};
@@ -290,6 +292,7 @@ pub struct MobileRuntime {
     /// must not maintain a second slash-command table beside the live engine
     /// registry.
     pub slash_registry: Arc<RwLock<command_api::CommandRegistry>>,
+    workspace_catalog: workspace_commands::MobileWorkspaceCatalog,
     /// D1 (P-1.5 review): the VERY handle `build_mobile` passed to
     /// `.with_skill_listing(...)`, retained so a test can interrogate the
     /// per-turn skill listing the orchestrator actually reads.
@@ -395,6 +398,8 @@ pub struct MobileRuntime {
     /// session, so the command path retargets this writer to the new UUID before
     /// another turn can begin.
     pub session_writer: Arc<session::jsonl::writer::JsonlWriter>,
+    /// Shared logical workspace identity; never an OS container path.
+    pub session_cwd: Arc<tool_api::SessionCwd>,
     /// Whether the wired secure-storage backend can actually PERSIST credentials
     /// (i.e. is a real OS Keychain/Keystore, `is_encrypted() == true`). Mobile
     /// currently wires the non-persisting `PlainTextSecureStorage` stub, so this
@@ -760,6 +765,7 @@ fn mobile_reload_skills_handler(
     device_skill_tools: Vec<String>,
     workflow_tool: Arc<tool_workflow::WorkflowTool>,
     workflow_command_snapshot: Arc<crate::workflow_catalog::WorkflowCommandSnapshot>,
+    additional_roots: Vec<std::path::PathBuf>,
 ) -> command_api::builtins::reload_skills::ReloadSkillsHandler {
     let workflow_finalizer = workflow_command_snapshot.locked_post_reload_finalizer(workflow_tool);
     command_api::builtins::reload_skills::ReloadSkillsHandler::with_all_roots(
@@ -768,8 +774,17 @@ fn mobile_reload_skills_handler(
         lingxi_home,
         None,
         home,
-        Vec::new(),
+        additional_roots
+            .iter()
+            .map(|root| root.join(branding::DOT_DIR).join("skills"))
+            .collect(),
         false,
+    )
+    .with_additional_command_dirs(
+        additional_roots
+            .iter()
+            .map(|root| root.join(branding::DOT_DIR).join("commands"))
+            .collect(),
     )
     .with_locked_post_reload_finalizer(
         true,
@@ -1169,7 +1184,6 @@ pub struct MobileEngineHandle {
     settings_write_lock: Arc<Mutex<()>>,
     /// The session enumerator's `cwd` key (its sanitized form selects the project
     /// subdir under `lingxi_home/projects/`). Captured from the `MobileConfig`.
-    session_cwd: String,
     /// Lifecycle watermark used by the child-agent pump. Session switches
     /// publish this only after their SessionStarted/SessionResumed (or
     /// SessionEnded for ClearSession) event has entered the shared sink.
@@ -1232,11 +1246,18 @@ impl MobileRuntime {
                 state.reset();
             }
         }
-        let path = orchestrator::transcript_paths::main_transcript_path(
-            home,
-            cwd,
-            &session_id.as_uuid().to_string(),
-        );
+        let active = self.session_writer.active_path();
+        let path = if active.file_stem().and_then(|value| value.to_str())
+            == Some(&session_id.as_uuid().to_string())
+        {
+            active
+        } else {
+            orchestrator::transcript_paths::main_transcript_path(
+                home,
+                cwd,
+                &session_id.as_uuid().to_string(),
+            )
+        };
         // The owned orchestrator switch has already prepared and installed this
         // session's durable lock. Publish the same target to host consumers;
         // retargeting only the display path would leave durable appends behind.
@@ -3328,6 +3349,11 @@ impl ClientEventListener for TurnLifecycleListener {
 }
 
 impl MobileEngineHandle {
+    /// The same live logical cwd used by file tools, Bash and the orchestrator.
+    fn session_cwd(&self) -> String {
+        self.inner.session_cwd.cwd().to_string_lossy().into_owned()
+    }
+
     async fn emit_controls_snapshot(&self) {
         let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
         let Some(controls) = handle.conversation_controls().await else {
@@ -3372,12 +3398,13 @@ impl MobileEngineHandle {
     }
 
     /// Return a credential-free view over this handle's validated cron store.
-    pub async fn cron_store(&self) -> Arc<MobileCronStoreHandle> {
-        Arc::new(MobileCronStoreHandle::new(
-            self.firer_cfg.cwd.clone(),
+    pub async fn cron_store(&self) -> Result<Arc<MobileCronStoreHandle>, ClientError> {
+        let cfg = self.current_mobile_config()?;
+        Ok(Arc::new(MobileCronStoreHandle::new(
+            cfg.cwd,
             self.firer_platform.filesystem(),
             self.firer_platform.clock(),
-        ))
+        )))
     }
 
     async fn fire_automation_task(
@@ -3386,12 +3413,13 @@ impl MobileEngineHandle {
         scheduled_at: Option<u64>,
         manual_at: Option<u64>,
     ) -> Option<FiredCronJobDto> {
+        let cfg = self.current_mobile_config().ok()?;
         let firer = MobileTurnFirer {
-            cfg: self.firer_cfg.clone(),
+            cfg: cfg.clone(),
             platform: self.firer_platform.clone(),
         };
         let fs = self.firer_platform.filesystem();
-        let cwd = self.firer_cfg.cwd.clone();
+        let cwd = cfg.cwd.clone();
         let clock = self.firer_platform.clock();
         let claim_fs = fs.clone();
         let claim_cwd = cwd.clone();
@@ -3539,7 +3567,7 @@ impl MobileEngineHandle {
         ensure_mobile_session_identity(
             &self.inner.session_writer,
             &self.lingxi_home,
-            &self.session_cwd,
+            &self.session_cwd(),
             session_id,
         )
         .await
@@ -3553,17 +3581,12 @@ impl MobileEngineHandle {
         self.inner
             .retarget_session_context(&self.lingxi_home, session_id, cwd)
             .await;
-        let transcript_path = orchestrator::transcript_paths::main_transcript_path(
-            &self.lingxi_home,
-            cwd,
-            &session_id.as_uuid().to_string(),
-        );
-        if self.inner.session_writer.active_path() != transcript_path {
+        let transcript_path = self.inner.session_writer.active_path();
+        if transcript_path.file_stem().and_then(|name| name.to_str())
+            != Some(&session_id.as_uuid().to_string())
+        {
             return Err(ClientError::Internal {
-                message: format!(
-                    "session transcript identity import failed: writer did not activate {}",
-                    transcript_path.display()
-                ),
+                message: "session transcript identity does not match the active UUID".into(),
             });
         }
         session_identity_snapshot_for_path(&self.inner.session_writer, &transcript_path)
@@ -3572,6 +3595,14 @@ impl MobileEngineHandle {
                 message: format!("session transcript identity import failed: {error}"),
             })?;
         if let Some(scheduler) = &self.session_cron {
+            scheduler
+                .set_tasks_file(cron::tasks_file::session_scheduled_tasks_path(
+                    &self.current_mobile_config()?.cwd,
+                ))
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: error.to_string(),
+                })?;
             if let Err(error) = scheduler
                 .set_session_id(session_id.as_uuid().to_string())
                 .await
@@ -3579,6 +3610,8 @@ impl MobileEngineHandle {
                 tracing::warn!(%error, "mobile: could not restart session cron");
             }
         }
+        self.reload_workspace_catalog(None).await?;
+        self.reload_configured_mcp().await;
         let session_uuid = session_id.as_uuid().to_string();
         rebuild_mobile_prompt_dispatch_cache(
             &self.message_queue,
@@ -3605,35 +3638,8 @@ impl MobileEngineHandle {
                 tracing::warn!(%agent_id, %error, "mobile parked agent restore failed");
             }
         }
+        self.emit_workspace_state().await;
         Ok(())
-    }
-
-    async fn recorded_permission_mode(&self, session_id: uuid::Uuid, cwd: &str) -> Option<String> {
-        let path = session::jsonl::session_path(&self.lingxi_home, cwd, &session_id.to_string());
-        let routed = session::jsonl::JsonlReader::new(path, self.fs.clone())
-            .read_routed()
-            .await
-            .ok()?;
-        routed
-            .permission_modes
-            .get(&session_id.to_string())
-            .cloned()
-    }
-
-    async fn recorded_session_mode(
-        &self,
-        session_id: uuid::Uuid,
-        cwd: &str,
-    ) -> Option<session::jsonl::SessionMode> {
-        let path = session::jsonl::session_path(&self.lingxi_home, cwd, &session_id.to_string());
-        let routed = session::jsonl::JsonlReader::new(path, self.fs.clone())
-            .read_routed()
-            .await
-            .ok()?;
-        routed
-            .session_modes
-            .get(&session_id.to_string())
-            .and_then(|value| session::jsonl::SessionMode::from_str(value))
     }
 
     async fn restore_preferred_permission_mode(
@@ -3840,6 +3846,7 @@ impl MobileEngineHandle {
         session_id: String,
         cwd: Option<String>,
         empty_bootstrap_title: Option<String>,
+        selected_path: Option<std::path::PathBuf>,
     ) -> Result<(), ClientError> {
         if self.active_cancel.lock().await.is_some() {
             return Err(ClientError::Rejected {
@@ -3858,13 +3865,76 @@ impl MobileEngineHandle {
         // literal `""` must not become the project-dir key here either).
         let cwd = match cwd.as_deref().filter(|c| !c.is_empty()) {
             Some(requested) => canonical_cwd_string(std::path::Path::new(requested)),
-            None => self.session_cwd.clone(),
+            None => self.session_cwd().clone(),
         };
-        let recorded_permission_mode = self.recorded_permission_mode(uuid, &cwd).await;
-        let effective_session_mode = self
-            .recorded_session_mode(uuid, &cwd)
-            .await
+        // Capture exactly one source for history, directory, permissions and
+        // mode. Picker resume never resolves its UUID a second time.
+        let mut captured = match selected_path.as_deref() {
+            Some(path) => {
+                session::jsonl::load_routed_session_from_path_with_source(
+                    path,
+                    uuid,
+                    self.fs.clone(),
+                )
+                .await
+            }
+            None => {
+                session::jsonl::load_routed_session_with_source(
+                    &self.lingxi_home,
+                    &cwd,
+                    uuid,
+                    self.fs.clone(),
+                )
+                .await
+            }
+        };
+        // CLI discovery deliberately omits empty files. A current mobile/cron
+        // anchor is an explicit durable owner, so admit only that exact typed
+        // record and leave ordinary missing/corrupt transcripts rejected.
+        if captured.is_err() {
+            let path = selected_path.clone().unwrap_or_else(|| {
+                session::jsonl::session_path(&self.lingxi_home, &cwd, &uuid.to_string())
+            });
+            if let Ok(file) = self.fs.read_file(&path.to_string_lossy(), None, None).await {
+                let loaded = session::jsonl::route_lines(&file.content);
+                if loaded.mobile_empty_sessions.contains(&uuid.to_string()) {
+                    captured = Ok((path, file.content, loaded));
+                }
+            }
+        }
+        let recorded_permission_mode = captured
+            .as_ref()
+            .ok()
+            .and_then(|(_, _, loaded)| loaded.permission_modes.get(&uuid.to_string()).cloned());
+        let effective_session_mode = captured
+            .as_ref()
+            .ok()
+            .and_then(|(_, _, loaded)| {
+                loaded
+                    .session_modes
+                    .get(&uuid.to_string())
+                    .and_then(|value| session::jsonl::SessionMode::from_str(value))
+            })
             .unwrap_or(session::jsonl::SessionMode::Code);
+        let mut restored_project_root = None;
+        let replay_result = captured
+            .map_err(orchestrator::resume::ResumeError::from)
+            .and_then(|(path, source, loaded)| {
+                let directory = session::jsonl::loader::transcript_workspace_path(&path, &loaded)
+                    .and_then(|hint| {
+                        self.workspace_target(&hint)
+                            .ok()
+                            .map(|(logical, _)| logical)
+                    });
+                restored_project_root = loaded
+                    .messages_in_order
+                    .first()
+                    .map(|message| std::path::PathBuf::from(&message.cwd));
+                let mut replayed =
+                    orchestrator::resume::replay_captured_session(path, source, loaded, uuid)?;
+                replayed.working_directory = directory;
+                Ok(replayed)
+            });
         if effective_session_mode != self.inner.session_mode {
             return Err(ClientError::Rejected {
                 message: format!(
@@ -3875,9 +3945,7 @@ impl MobileEngineHandle {
             });
         }
 
-        match orchestrator::replay_session_state(&self.lingxi_home, &cwd, uuid, self.fs.clone())
-            .await
-        {
+        match replay_result {
             Ok(replayed) => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
                 let resume_plan_mode = replayed.state.plan_mode;
@@ -3923,6 +3991,14 @@ impl MobileEngineHandle {
                         message: format!("resume_session failed: {error}"),
                     });
                 }
+                if let Some(root) = restored_project_root {
+                    if self.inner.mobile_linux.is_none()
+                        || root.starts_with(mobile_linux_api::guest_paths::HOME)
+                    {
+                        self.inner.session_cwd.restore_project_root(root);
+                    }
+                }
+                let cwd = self.session_cwd();
                 self.restore_preferred_reasoning_selection().await;
                 self.restore_preferred_fast_mode().await;
                 {
@@ -4446,6 +4522,43 @@ impl MobileEngineHandle {
                 .await;
         }
         let raw_source = raw.into_projection();
+        // Workspace commands are explicit host navigation. They must never be
+        // queued as model turns or accepted while another turn owns the session.
+        if let Some(parsed) = command_api::parse_slash_command(&raw_source) {
+            let name = parsed.name.string_at("").unwrap_or("");
+            if matches!(name, "cd" | "add-dir") {
+                let result = match parsed.raw_args_utf8().filter(|input| !input.is_empty()) {
+                    Some(input) if name == "cd" => self.change_workspace_inner(input).await,
+                    Some(input) => self.add_workspace_inner(input).await,
+                    None => Err(ClientError::Rejected {
+                        message: format!("Usage: /{name} <path>"),
+                    }),
+                };
+                let (display, is_error) = match result {
+                    Ok(()) => (
+                        format!(
+                            "{} {}",
+                            if name == "cd" {
+                                "Moved to"
+                            } else {
+                                "Added directory to"
+                            },
+                            self.session_cwd()
+                        ),
+                        false,
+                    ),
+                    Err(error) => (error.to_string(), true),
+                };
+                self.event_sink
+                    .emit(ClientEvent::SlashCommandResult {
+                        turn_id: client_turn_id,
+                        display: display.into(),
+                        is_error,
+                    })
+                    .await;
+                return Ok(());
+            }
+        }
         self.inner.dispatcher.refresh_command_snapshot().await;
         if self.inner.session_mode == session::jsonl::SessionMode::Chat {
             let allowed = if let Some(parsed) = command_api::parse_slash_command(&raw_source) {
@@ -5813,11 +5926,11 @@ impl MobileEngineHandle {
             }
         }
         let gate = mobile_cron_session_gate(
-            &self.session_cwd,
+            &self.session_cwd(),
             session_id.strip_prefix("sess:").unwrap_or(&session_id),
         );
         let _scheduled_guard = gate.lock().await;
-        self.resume_session_impl(session_id, None, Some(title))
+        self.resume_session_impl(session_id, None, Some(title), None)
             .await
     }
 
@@ -5965,7 +6078,7 @@ impl MobileEngineHandle {
                 .to_string(),
             _ => current_id.clone(),
         };
-        let gate = mobile_cron_session_gate(&self.session_cwd, &gate_id);
+        let gate = mobile_cron_session_gate(&self.session_cwd(), &gate_id);
         let _scheduled_guard = gate.lock().await;
         // Only reload while idle. `resume_session_impl` hard-rejects with a turn
         // in flight, and this block runs before the command `match` — so failing
@@ -5977,7 +6090,7 @@ impl MobileEngineHandle {
                 .scheduled_reload
                 .swap(false, std::sync::atomic::Ordering::AcqRel)
         {
-            if let Err(error) = self.resume_session_impl(current_id, None, None).await {
+            if let Err(error) = self.resume_session_impl(current_id, None, None, None).await {
                 self.scheduled_reload
                     .store(true, std::sync::atomic::Ordering::Release);
                 return Err(error);
@@ -6805,8 +6918,11 @@ impl MobileEngineHandle {
                     .map_err(|e| ClientError::Internal {
                         message: format!("clear_session failed: {e}"),
                     })?;
-                self.retarget_session_writer(handle.current_session_id().await, &self.session_cwd)
-                    .await?;
+                self.retarget_session_writer(
+                    handle.current_session_id().await,
+                    &self.session_cwd(),
+                )
+                .await?;
                 self.event_sink.emit(ClientEvent::SessionEnded).await;
                 let _ = self
                     .session_lifecycle_tx
@@ -6854,7 +6970,7 @@ impl MobileEngineHandle {
                     })?;
                 let result = session::branch::create_branch(
                     &self.lingxi_home,
-                    &self.session_cwd,
+                    &self.session_cwd(),
                     source_uuid,
                     None,
                     self.fs.clone(),
@@ -6865,7 +6981,7 @@ impl MobileEngineHandle {
                 })?;
                 let fork_path = session::jsonl::session_path(
                     &self.lingxi_home,
-                    &self.session_cwd,
+                    &self.session_cwd(),
                     &result.new_session_id.to_string(),
                 );
                 let writer = session::jsonl::JsonlWriter::new(fork_path, self.fs.clone());
@@ -6895,31 +7011,14 @@ impl MobileEngineHandle {
             // and resets the in-memory history + JSONL parent chain; we then read
             // the new id back and confirm with `SessionStarted`. An optional
             // `model` override is applied via `switch_model` (the only New-session
-            // knob the live orchestrator can honor); a `cwd` override is NOT
-            // honored — the orchestrator is rooted at construction, so a true cwd
-            // re-root would need a fresh build (DEFERRED, out of scope here).
+            // knob is validated before mutation). A cwd override moves only
+            // the new draft through the shared owned directory transition.
             ClientCommand::NewSession { cwd, model } => {
-                // v3 Phase 4: a non-empty cwd must NAME this source's cwd —
-                // the orchestrator is rooted at construction, so a cross-cwd
-                // new-session cannot be honored in place (the old behavior
-                // silently ignored it, which let clients believe a workspace
-                // switch happened). Switching cwd means rebuilding the source.
-                if let Some(requested) = cwd.as_deref().filter(|c| !c.is_empty()) {
-                    // Compare CANONICAL spellings: a client may say `/var/…`
-                    // where this source was rooted at `/private/var/…` (the
-                    // same directory through the platform symlink).
-                    let requested_canon = canonical_cwd_string(std::path::Path::new(requested));
-                    let source_canon =
-                        canonical_cwd_string(std::path::Path::new(&self.session_cwd));
-                    if requested_canon != source_canon {
-                        return Err(ClientError::Rejected {
-                            message: format!(
-                                "NewSession cwd {requested:?} does not match this source's cwd {:?}; rebuild the source to switch workspaces",
-                                self.session_cwd
-                            ),
-                        });
-                    }
-                }
+                let requested_workspace = cwd
+                    .as_deref()
+                    .filter(|path| !path.is_empty())
+                    .map(|path| self.workspace_target(path))
+                    .transpose()?;
                 // Reject mid-turn (same contract as `ClearSession`): a new session
                 // must not race an in-flight turn.
                 let mid_turn = self.active_cancel.lock().await.is_some();
@@ -6978,8 +7077,15 @@ impl MobileEngineHandle {
                     .map_err(|error| ClientError::Internal {
                         message: error.to_string(),
                     })?;
+                if let Some((logical, _)) = requested_workspace {
+                    self.change_workspace_inner(&logical.to_string_lossy())
+                        .await?;
+                }
+                self.inner
+                    .session_cwd
+                    .restore_project_root(self.inner.session_cwd.cwd());
                 let new_session_id = handle.current_session_id().await;
-                self.retarget_session_writer(new_session_id, &self.session_cwd)
+                self.retarget_session_writer(new_session_id, &self.session_cwd())
                     .await?;
                 self.inner
                     .session_writer
@@ -7031,27 +7137,7 @@ impl MobileEngineHandle {
             // sessions are honestly `Rejected`, so we never emit a FALSE
             // `SessionResumed`.
             ClientCommand::ResumeSession { session_id, cwd } => {
-                // v3 Phase 4: same contract as NewSession — a non-empty cwd
-                // that names another workspace is rejected instead of being
-                // silently coerced onto this source's catalog (which would
-                // resume the WRONG project's session or fail confusingly).
-                if let Some(requested) = cwd.as_deref().filter(|c| !c.is_empty()) {
-                    // Compare CANONICAL spellings: a client may say `/var/…`
-                    // where this source was rooted at `/private/var/…` (the
-                    // same directory through the platform symlink).
-                    let requested_canon = canonical_cwd_string(std::path::Path::new(requested));
-                    let source_canon =
-                        canonical_cwd_string(std::path::Path::new(&self.session_cwd));
-                    if requested_canon != source_canon {
-                        return Err(ClientError::Rejected {
-                            message: format!(
-                                "ResumeSession cwd {requested:?} does not match this source's cwd {:?}; rebuild the source to switch workspaces",
-                                self.session_cwd
-                            ),
-                        });
-                    }
-                }
-                self.resume_session_impl(session_id, cwd, None).await
+                self.resume_session_impl(session_id, cwd, None, None).await
             }
             // ── Background tasks (v3 Phase 1: workflow-on-mobile) ───────────
             //
@@ -7741,28 +7827,27 @@ impl MobileEngineHandle {
     /// failure is logged and also yields an empty list so the client always gets
     /// a reply.
     async fn emit_session_list(&self, limit: usize) {
-        use session::jsonl::list_recent_sessions;
-        let sessions = match list_recent_sessions(
-            &self.lingxi_home,
-            &self.session_cwd,
-            limit,
-            self.fs.clone(),
-        )
-        .await
+        match self
+            .workspace_sessions(
+                MobileSessionDiscoveryScope::Repository,
+                limit.min(u32::MAX as usize) as u32,
+            )
+            .await
         {
-            Ok(rows) => rows
-                .iter()
-                .map(client::adapter::lowering::lower_session_metadata)
-                .collect(),
-            Err(session::jsonl::LoaderError::EmptyDirectory) => Vec::new(),
-            Err(e) => {
-                tracing::debug!(error = %e, "engine-mobile: list_recent_sessions failed; replying empty");
-                Vec::new()
+            Ok(sessions) => {
+                self.event_sink
+                    .emit(ClientEvent::SessionList { sessions })
+                    .await
             }
-        };
-        self.event_sink
-            .emit(ClientEvent::SessionList { sessions })
-            .await;
+            Err(error) => {
+                self.event_sink
+                    .emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Internal,
+                        message: format!("session catalog: {error}").into(),
+                    })
+                    .await
+            }
+        }
     }
 
     /// The catalog rows this connection can actually route to.
@@ -7890,7 +7975,7 @@ impl MobileEngineHandle {
         let session_id = self.inner.orchestrator.current_session_id().await;
         let dir = orchestrator::transcript_paths::subagents_dir(
             &self.lingxi_home,
-            &self.session_cwd,
+            &self.session_cwd(),
             &session_id.as_uuid().to_string(),
         );
         (session_id, dir)
@@ -8119,7 +8204,7 @@ impl MobileEngineHandle {
             let uuid = session_id.as_uuid();
             let replayed = orchestrator::replay_session_state(
                 &self.lingxi_home,
-                &self.session_cwd,
+                &self.session_cwd(),
                 uuid,
                 self.fs.clone(),
             )
@@ -8129,7 +8214,7 @@ impl MobileEngineHandle {
             })?;
             let path = orchestrator::transcript_paths::main_transcript_path(
                 &self.lingxi_home,
-                &self.session_cwd,
+                &self.session_cwd(),
                 &uuid.to_string(),
             );
             if self.inner.session_writer.active_path() != path {
@@ -8325,7 +8410,7 @@ impl MobileEngineHandle {
         if before.session_id != after.session_id {
             self.retarget_session_writer(
                 self.inner.orchestrator.current_session_id().await,
-                &self.session_cwd,
+                &self.session_cwd(),
             )
             .await?;
             self.event_sink.emit(ClientEvent::SessionEnded).await;
@@ -8510,7 +8595,10 @@ impl MobileEngineHandle {
         if self.inner.session_mode == session::jsonl::SessionMode::Chat {
             return;
         }
-        let cwd = std::path::PathBuf::from(&self.session_cwd);
+        let Ok(cfg) = self.current_mobile_config() else {
+            return;
+        };
+        let cwd = cfg.cwd;
         let configured = mobile_mcp_preflight(
             mcp::load_mcp_servers(
                 &cwd.join(".mcp.json"),
@@ -8705,8 +8793,10 @@ impl MobileEngineHandle {
         task_id: String,
         scheduled_at_ms: u64,
     ) -> Option<FiredCronJobDto> {
+        let _transition = self.loop_transition.lock().await;
+        let cfg = self.current_mobile_config().ok()?;
         let fs = self.firer_platform.filesystem();
-        let existing = read_cron_tasks(fs.as_ref(), &self.firer_cfg.cwd)
+        let existing = read_cron_tasks(fs.as_ref(), &cfg.cwd)
             .await
             .tasks
             .into_iter()
@@ -8722,10 +8812,10 @@ impl MobileEngineHandle {
                 .await;
         }
         let _process_guard = cron::lock_cron_file().await;
-        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &self.firer_cfg.cwd)
+        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cfg.cwd)
             .await
             .ok()?;
-        let mut document = read_cron_tasks(fs.as_ref(), &self.firer_cfg.cwd).await;
+        let mut document = read_cron_tasks(fs.as_ref(), &cfg.cwd).await;
         let now = self.firer_platform.clock().now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -8746,7 +8836,7 @@ impl MobileEngineHandle {
         }
 
         let firer = MobileTurnFirer {
-            cfg: self.firer_cfg.clone(),
+            cfg: cfg.clone(),
             platform: self.firer_platform.clone(),
         };
         let fired = fired_cron_dto(&task, firer.fire(&task.id, &task.prompt).await);
@@ -8754,7 +8844,7 @@ impl MobileEngineHandle {
             finalize_cron_occurrence(&mut document, &task.id, now_ms);
             let _ = cron::tasks_file::write_automation_tasks_body(
                 fs.as_ref(),
-                &self.firer_cfg.cwd,
+                &cfg.cwd,
                 &cron::serialize_tasks(&document),
             )
             .await;
@@ -8764,14 +8854,18 @@ impl MobileEngineHandle {
 
     /// Mark a retry-exhausted occurrence complete without running it again.
     pub async fn acknowledge_cron_occurrence(&self, task_id: String, scheduled_at_ms: u64) -> bool {
+        let _transition = self.loop_transition.lock().await;
+        let cfg = match self.current_mobile_config() {
+            Ok(cfg) => cfg,
+            Err(_) => return false,
+        };
         let fs = self.firer_platform.filesystem();
         let _process_guard = cron::lock_cron_file().await;
-        let Ok(_file_guard) =
-            cron::tasks_file::lock_automation_tasks(fs.as_ref(), &self.firer_cfg.cwd).await
+        let Ok(_file_guard) = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cfg.cwd).await
         else {
             return false;
         };
-        let mut document = read_cron_tasks(fs.as_ref(), &self.firer_cfg.cwd).await;
+        let mut document = read_cron_tasks(fs.as_ref(), &cfg.cwd).await;
         let now = self.firer_platform.clock().now();
         let now_ms = now
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -8790,7 +8884,7 @@ impl MobileEngineHandle {
         finalize_cron_occurrence(&mut document, &task_id, now_ms);
         cron::tasks_file::write_automation_tasks_body(
             fs.as_ref(),
-            &self.firer_cfg.cwd,
+            &cfg.cwd,
             &cron::serialize_tasks(&document),
         )
         .await
@@ -8804,8 +8898,10 @@ impl MobileEngineHandle {
         task_id: String,
         scheduled_at_ms: u64,
     ) -> Option<FiredCronJobDto> {
+        let _transition = self.loop_transition.lock().await;
+        let cfg = self.current_mobile_config().ok()?;
         let fs = self.firer_platform.filesystem();
-        let task = read_cron_tasks(fs.as_ref(), &self.firer_cfg.cwd)
+        let task = read_cron_tasks(fs.as_ref(), &cfg.cwd)
             .await
             .tasks
             .into_iter()
@@ -8822,8 +8918,10 @@ impl MobileEngineHandle {
 
     /// Execute a task immediately without moving its recurring/one-shot anchor.
     pub async fn run_cron_task_now(&self, task_id: String) -> Option<FiredCronJobDto> {
+        let _transition = self.loop_transition.lock().await;
+        let cfg = self.current_mobile_config().ok()?;
         let fs = self.firer_platform.filesystem();
-        let existing = read_cron_tasks(fs.as_ref(), &self.firer_cfg.cwd)
+        let existing = read_cron_tasks(fs.as_ref(), &cfg.cwd)
             .await
             .tasks
             .into_iter()
@@ -8837,16 +8935,16 @@ impl MobileEngineHandle {
             return self.fire_automation_task(task_id, None, None).await;
         }
         let _process_guard = cron::lock_cron_file().await;
-        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &self.firer_cfg.cwd)
+        let _file_guard = cron::tasks_file::lock_automation_tasks(fs.as_ref(), &cfg.cwd)
             .await
             .ok()?;
-        let task = read_cron_tasks(fs.as_ref(), &self.firer_cfg.cwd)
+        let task = read_cron_tasks(fs.as_ref(), &cfg.cwd)
             .await
             .tasks
             .into_iter()
             .find(|task| task.id == task_id)?;
         let firer = MobileTurnFirer {
-            cfg: self.firer_cfg.clone(),
+            cfg: cfg.clone(),
             platform: self.firer_platform.clone(),
         };
         if !cron_task_active(&task) {

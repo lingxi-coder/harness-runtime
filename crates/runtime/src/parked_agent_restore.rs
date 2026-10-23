@@ -165,9 +165,18 @@ impl ParkedAgentStore for SessionParkedAgentStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&agent_id)
             .cloned();
-        let Some(subagents_dir) = directory else {
+        let Some(mut subagents_dir) = directory else {
             return;
         };
+        // A directory move relocates this conversation's sidecars. A late
+        // completion for a different conversation keeps its original owner.
+        if let Some(current) = (self.fallback)() {
+            if current.parent().and_then(|path| path.file_name())
+                == subagents_dir.parent().and_then(|path| path.file_name())
+            {
+                subagents_dir = current;
+            }
+        }
         self.directories
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

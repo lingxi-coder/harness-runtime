@@ -280,6 +280,7 @@ platform-ios = { path = "../platforms/ios", optional = true }
 platform-android = { path = "../platforms/android", optional = true }
 
 [dev-dependencies]
+mobile-linux-android.workspace = true
 # Native replay fixtures verify their bytes in desktop-only test builds too.
 sha2 = "0.10"
 # Shared host-side filesystem fixtures also run with only the mobile feature.

@@ -1362,7 +1362,7 @@ async fn enrich_candidates(
                 return Err(LoaderError::Io {
                     arg: "session catalog".to_string(),
                     source: std::io::Error::other(error),
-                })
+                });
             }
         }
     }
@@ -2025,13 +2025,34 @@ pub async fn list_recent_sessions_in_scope_with_diagnostics(
     } else {
         Vec::new()
     };
+    list_recent_sessions_in_scope_with_worktrees(
+        lingxi_home,
+        cwd,
+        scope,
+        limit,
+        fs,
+        &worktree_paths,
+    )
+    .await
+}
+
+/// Enumerate using worktree roots resolved in the host's execution environment.
+/// Mobile supplies Linux guest roots instead of running a native Git process.
+pub async fn list_recent_sessions_in_scope_with_worktrees(
+    lingxi_home: &Path,
+    cwd: &str,
+    scope: SessionDiscoveryScope,
+    limit: usize,
+    fs: Arc<dyn FileSystem>,
+    worktree_paths: &[String],
+) -> Result<SessionCatalog, LoaderError> {
     list_recent_sessions_inner_with_diagnostics(
         lingxi_home,
         cwd,
         scope,
         limit,
         &fs,
-        &worktree_paths,
+        worktree_paths,
         None,
     )
     .await
@@ -2651,7 +2672,7 @@ async fn read_cli_transcript_source(
                 return Err(LoaderError::Io {
                     arg: path.display().to_string(),
                     source: std::io::Error::other(error.to_string()),
-                })
+                });
             }
         }
     } else {
@@ -2661,13 +2682,13 @@ async fn read_cli_transcript_source(
                 if error.kind() == std::io::ErrorKind::NotFound
                     || error.raw_os_error() == Some(libc::ENOTDIR) =>
             {
-                return Ok(None)
+                return Ok(None);
             }
             Err(source) => {
                 return Err(LoaderError::Io {
                     arg: path.display().to_string(),
                     source,
-                })
+                });
             }
         }
     };
