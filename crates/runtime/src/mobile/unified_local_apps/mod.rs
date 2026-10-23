@@ -7,7 +7,7 @@ use local_app::v2::{AppError, AppLibrary, AppRun, RunPhase, RuntimeLease, Target
 use mobile_linux_api::MobileLinuxRuntime;
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -77,6 +77,8 @@ pub(super) struct ActiveRun {
     pub committed: AtomicBool,
     pub cleanup_complete: AtomicBool,
     pub log_task: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
+    pub log_stop: CancellationToken,
+    pub log_task_ids: Mutex<BTreeSet<String>>,
     pub url: Mutex<String>,
     pub output: Mutex<BTreeMap<String, String>>,
     pub service_tasks: Mutex<Vec<String>>,
@@ -563,6 +565,8 @@ impl MobileLocalAppServiceHandle {
             committed: AtomicBool::new(false),
             cleanup_complete: AtomicBool::new(false),
             log_task: AsyncMutex::new(None),
+            log_stop: CancellationToken::new(),
+            log_task_ids: Mutex::new(BTreeSet::new()),
             url: Mutex::new(String::new()),
             output: Mutex::new(BTreeMap::new()),
             service_tasks: Mutex::new(Vec::new()),
@@ -759,9 +763,6 @@ impl MobileLocalAppServiceHandle {
         }
         // Do not retain the fixed port through monitor/watcher Arc references.
         run.listener.lock().await.take();
-        if let Some(task) = run.log_task.lock().await.take() {
-            let _ = task.await;
-        }
         let mut handles = run.handles.lock().await;
         if !handles.is_empty() {
             let runtime = self.runtime()?;
@@ -787,6 +788,13 @@ impl MobileLocalAppServiceHandle {
             }
         }
         drop(handles);
+        // Process cancellation precedes its final stderr/exit events. Keep the
+        // logger and every registered task identity until reaping completes;
+        // a failed reap retains both for the explicit cleanup retry.
+        run.log_stop.cancel();
+        if let Some(task) = run.log_task.lock().await.take() {
+            let _ = task.await;
+        }
         run.execution_lease.lock().unwrap().take();
         run.cleanup_complete.store(true, Ordering::Release);
         let mut record = run.record.lock().unwrap().clone();

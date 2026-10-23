@@ -22,6 +22,8 @@ struct ControlledRuntime {
     maintaining: tokio::sync::Notify,
     finish_maintenance: tokio::sync::Notify,
     tasks: Mutex<Vec<MobileLinuxTaskSnapshot>>,
+    emit_reap_diagnostics: AtomicBool,
+    events: Mutex<Vec<MobileLinuxEvent>>,
 }
 impl ControlledRuntime {
     fn new(blocked: bool) -> Self {
@@ -48,6 +50,8 @@ impl ControlledRuntime {
             maintaining: tokio::sync::Notify::new(),
             finish_maintenance: tokio::sync::Notify::new(),
             tasks: Mutex::new(Vec::new()),
+            emit_reap_diagnostics: AtomicBool::new(false),
+            events: Mutex::new(Vec::new()),
         }
     }
 }
@@ -108,8 +112,44 @@ impl MobileLinuxRuntime for ControlledRuntime {
         {
             Err(MobileLinuxError::Io("injected first reap failure".into()))
         } else {
+            if self.emit_reap_diagnostics.swap(false, Ordering::SeqCst) {
+                let mut events = self.events.lock().unwrap();
+                // Output is emitted at reap, after any ordinary polling and
+                // beyond one SDK batch of unrelated app events.
+                for sequence in 1..=513 {
+                    events.push(MobileLinuxEvent {
+                        sequence,
+                        task_id: Some("another-app-task".into()),
+                        kind: MobileLinuxEventKind::StderrChunk {
+                            chunk: b"private foreign output".to_vec(),
+                        },
+                    });
+                }
+                events.push(MobileLinuxEvent {
+                    sequence: 514,
+                    task_id: Some(handle.id.clone()),
+                    kind: MobileLinuxEventKind::StderrChunk {
+                        chunk: b"ENOSPC: candidate diagnostic emitted during reap".to_vec(),
+                    },
+                });
+            }
             Ok(())
         }
+    }
+    async fn read_events(
+        &self,
+        after: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<MobileLinuxEvent>, MobileLinuxError> {
+        Ok(self
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.sequence > after.unwrap_or(0))
+            .take(limit.min(MAX_MOBILE_LINUX_EVENT_BATCH))
+            .cloned()
+            .collect())
     }
     async fn task_status(
         &self,
@@ -232,6 +272,49 @@ async fn failed_start_retains_process_owner_when_reap_fails_and_stop_can_retry()
         .await
         .unwrap()["run"]
         .is_null());
+}
+
+#[tokio::test]
+async fn failed_preparation_flushes_owned_reap_diagnostics_across_event_batches() {
+    let (_root, service, runtime, id) = setup(false).await;
+    runtime.fail_first_kill.store(false, Ordering::SeqCst);
+    runtime.emit_reap_diagnostics.store(true, Ordering::SeqCst);
+    let failure = service
+        .request_value(json!({"op":"start","appId":id}))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, "preparationFailed");
+    assert_reap_diagnostics(&service, &id).await;
+}
+
+#[tokio::test]
+async fn failed_reap_keeps_logger_until_explicit_stop_retry_finishes() {
+    let (_root, service, runtime, id) = setup(false).await;
+    runtime.emit_reap_diagnostics.store(true, Ordering::SeqCst);
+    let failure = service
+        .request_value(json!({"op":"start","appId":id}))
+        .await
+        .unwrap_err();
+    assert_eq!(failure.code, "stopFailed");
+    service
+        .request_value(json!({"op":"stop","appId":id}))
+        .await
+        .unwrap();
+    assert_reap_diagnostics(&service, &id).await;
+}
+
+async fn assert_reap_diagnostics(service: &Arc<MobileLocalAppServiceHandle>, id: &str) {
+    let run = service.library.runs(id).unwrap().pop().unwrap();
+    let logs = service
+        .request_value(json!({"op":"logs","appId":id,"runId":run.run_id}))
+        .await
+        .unwrap()
+        .to_string();
+    assert!(
+        logs.contains("ENOSPC: candidate diagnostic emitted during reap"),
+        "{logs}"
+    );
+    assert!(!logs.contains("private foreign output"), "{logs}");
 }
 
 #[tokio::test]

@@ -407,6 +407,7 @@ impl MobileLocalAppServiceHandle {
                     ));
                 }
                 let handle = runtime.spawn_background(request).await?;
+                run.log_task_ids.lock().unwrap().insert(handle.id.clone());
                 handles.push(handle.clone());
                 Ok(handle)
             })
@@ -526,10 +527,13 @@ impl MobileLocalAppServiceHandle {
             return;
         };
         let mut cursor = None;
+        let mut final_batches = 0;
         loop {
+            let finishing = run.log_stop.is_cancelled();
             let handles = run.handles.lock().await;
-            let ids: BTreeSet<_> = handles.iter().map(|h| h.id.clone()).collect();
+            let ids = run.log_task_ids.lock().unwrap().clone();
             let events = runtime.read_events(cursor, 512).await;
+            let batch_len = events.as_ref().map_or(0, Vec::len);
             drop(handles);
             if let Ok(events) = events {
                 for event in events {
@@ -564,7 +568,17 @@ impl MobileLocalAppServiceHandle {
                     .await;
                 }
             }
-            tokio::select! {_=run.cancel.cancelled()=>break,_=tokio::time::sleep(Duration::from_millis(100))=>{}}
+            if finishing {
+                final_batches += 1;
+                // Drain multiple SDK batches after the last process is reaped.
+                // A different app flooding the shared journal must not keep
+                // this app's Stop alive indefinitely.
+                if batch_len < 512 || final_batches >= 16 {
+                    break;
+                }
+                continue;
+            }
+            tokio::select! {_=run.log_stop.cancelled()=>{},_=tokio::time::sleep(Duration::from_millis(100))=>{}}
         }
     }
     pub(super) async fn monitor_processes(self: Arc<Self>, run: Arc<ActiveRun>) {
