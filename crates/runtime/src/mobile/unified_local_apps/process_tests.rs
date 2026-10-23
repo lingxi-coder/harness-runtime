@@ -16,6 +16,8 @@ struct ControlledRuntime {
     reached: tokio::sync::Notify,
     kills: Mutex<Vec<String>>,
     maintenance_calls: AtomicUsize,
+    verify_ready: AtomicBool,
+    verify_failure: AtomicBool,
     delay_maintenance: AtomicBool,
     maintaining: tokio::sync::Notify,
     finish_maintenance: tokio::sync::Notify,
@@ -40,6 +42,8 @@ impl ControlledRuntime {
             reached: tokio::sync::Notify::new(),
             kills: Mutex::new(Vec::new()),
             maintenance_calls: AtomicUsize::new(0),
+            verify_ready: AtomicBool::new(false),
+            verify_failure: AtomicBool::new(false),
             delay_maintenance: AtomicBool::new(false),
             maintaining: tokio::sync::Notify::new(),
             finish_maintenance: tokio::sync::Notify::new(),
@@ -142,7 +146,14 @@ impl MobileLinuxRuntime for ControlledRuntime {
         self.base.rootfs_status().await
     }
     async fn verify_rootfs(&self) -> Result<RootfsStatus, MobileLinuxError> {
-        self.base.verify_rootfs().await
+        if self.verify_failure.load(Ordering::SeqCst) {
+            return Err(MobileLinuxError::Io("missing rootfs manifest".into()));
+        }
+        let mut status = self.base.verify_rootfs().await?;
+        if self.verify_ready.load(Ordering::SeqCst) {
+            status.state = RootfsState::Ready;
+        }
+        Ok(status)
     }
     async fn repair_rootfs(&self) -> Result<RootfsStatus, MobileLinuxError> {
         self.maintenance_calls.fetch_add(1, Ordering::SeqCst);
@@ -649,4 +660,106 @@ async fn abandoned_native_spawn_retains_maintenance_gate_until_reap_retry_succee
         runtime.kills.lock().unwrap().as_slice(),
         &["only-owned-task", "only-owned-task"]
     );
+}
+
+#[tokio::test]
+async fn native_rootfs_staging_and_activation_share_cancel_resistant_maintenance() {
+    let (_root, service, runtime, id) = setup(false).await;
+    let shared = service.runtime().unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let finish = Arc::new(tokio::sync::Notify::new());
+    let preparing = entered.clone();
+    let completing = finish.clone();
+    let maintaining = shared.clone();
+    let owner = tokio::spawn(async move {
+        super::super::linux_maintenance::repair_rootfs_with_preparation(
+            maintaining,
+            move || async move {
+                preparing.notify_one();
+                completing.notified().await;
+                Ok(())
+            },
+        )
+        .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(3), entered.notified())
+        .await
+        .unwrap();
+    owner.abort();
+    let _ = owner.await;
+    assert!(service
+        .request_value(json!({"op":"start","appId":id}))
+        .await
+        .unwrap_err()
+        .message
+        .contains("runtimeBusy"));
+    assert!(shared
+        .repair_rootfs()
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("runtimeBusy"));
+    assert_eq!(runtime.maintenance_calls.load(Ordering::SeqCst), 0);
+    finish.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            if runtime.maintenance_calls.load(Ordering::SeqCst) == 1
+                && shared.verify_rootfs().await.is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn failed_native_staging_preserves_runtime_and_releases_maintenance() {
+    let (_root, service, runtime, _id) = setup(false).await;
+    let shared = service.runtime().unwrap();
+    let error =
+        super::super::linux_maintenance::repair_rootfs_with_preparation(shared.clone(), || async {
+            Err(MobileLinuxError::Io("injected staging disk full".into()))
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("disk full"));
+    assert_eq!(runtime.maintenance_calls.load(Ordering::SeqCst), 0);
+    shared.verify_rootfs().await.unwrap();
+}
+
+#[tokio::test]
+async fn native_repair_skips_staging_only_after_successful_full_verification() {
+    let (_root, service, runtime, _id) = setup(false).await;
+    runtime.verify_ready.store(true, Ordering::SeqCst);
+    super::super::linux_maintenance::repair_rootfs_with_preparation(
+        service.runtime().unwrap(),
+        || async {
+            panic!("verified healthy rootfs must retain installed environment without restaging")
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(runtime.maintenance_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn native_repair_restages_when_manifest_verification_fails() {
+    let (_root, service, runtime, _id) = setup(false).await;
+    runtime.verify_failure.store(true, Ordering::SeqCst);
+    let staged = Arc::new(AtomicBool::new(false));
+    let prepared = staged.clone();
+    super::super::linux_maintenance::repair_rootfs_with_preparation(
+        service.runtime().unwrap(),
+        move || async move {
+            prepared.store(true, Ordering::SeqCst);
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert!(staged.load(Ordering::SeqCst));
+    assert_eq!(runtime.maintenance_calls.load(Ordering::SeqCst), 1);
 }

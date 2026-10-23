@@ -9,7 +9,7 @@ use std::{
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 static GATES: LazyLock<Mutex<HashMap<PathBuf, Weak<Gate>>>> = LazyLock::new(Mutex::default);
-type RuntimeRegistration = (Weak<dyn MobileLinuxRuntime>, Weak<Gate>);
+type RuntimeRegistration = (Weak<dyn MobileLinuxRuntime>, Weak<CoordinatedRuntime>);
 static WRAPPERS: LazyLock<Mutex<Vec<RuntimeRegistration>>> = LazyLock::new(Mutex::default);
 static EXECUTOR: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
@@ -55,11 +55,12 @@ pub fn app_execution_lease(
     run_id: &str,
 ) -> Result<Option<AppExecutionLease>, MobileLinuxError> {
     let registrations = WRAPPERS.lock().unwrap();
-    let gate = registrations.iter().find_map(|(registered, gate)| {
+    let gate = registrations.iter().find_map(|(registered, wrapper)| {
         registered
             .upgrade()
             .filter(|value| Arc::ptr_eq(value, runtime))
-            .and_then(|_| gate.upgrade())
+            .and_then(|_| wrapper.upgrade())
+            .map(|wrapper| wrapper.gate.clone())
     });
     drop(registrations);
     let Some(gate) = gate else {
@@ -104,14 +105,62 @@ pub fn coordinate_runtime(
         gate
     });
     drop(gates);
-    let wrapper: Arc<dyn MobileLinuxRuntime> = Arc::new(CoordinatedRuntime {
+    let coordinated = Arc::new(CoordinatedRuntime {
         inner: runtime,
-        gate: gate.clone(),
+        gate,
     });
+    let wrapper: Arc<dyn MobileLinuxRuntime> = coordinated.clone();
     let mut wrappers = WRAPPERS.lock().unwrap();
     wrappers.retain(|(runtime, _)| runtime.strong_count() > 0);
-    wrappers.push((Arc::downgrade(&wrapper), Arc::downgrade(&gate)));
+    wrappers.push((Arc::downgrade(&wrapper), Arc::downgrade(&coordinated)));
     wrapper
+}
+
+/// Keep host archive staging and SDK activation in one global maintenance
+/// operation. The independent owner retains the lease if a native UI caller
+/// disappears while its foreign staging callback is still writing files.
+pub async fn repair_rootfs_with_preparation<F, Fut>(
+    runtime: Arc<dyn MobileLinuxRuntime>,
+    prepare: F,
+) -> Result<RootfsStatus, MobileLinuxError>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), MobileLinuxError>> + Send + 'static,
+{
+    let wrapper = WRAPPERS
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|(registered, wrapper)| {
+            registered
+                .upgrade()
+                .filter(|value| Arc::ptr_eq(value, &runtime))
+                .and_then(|_| wrapper.upgrade())
+        })
+        .ok_or_else(|| {
+            MobileLinuxError::InvalidRequest(
+                "runtime is not coordinated for native rootfs maintenance".into(),
+            )
+        })?;
+    EXECUTOR
+        .spawn(async move {
+            let _write = wrapper.maintain().await?;
+            // status() may fall back to shell presence if its manifest is
+            // missing. Only full verification can skip immutable restaging.
+            if matches!(
+                wrapper.inner.verify_rootfs().await,
+                Ok(RootfsStatus {
+                    state: RootfsState::Ready,
+                    ..
+                })
+            ) {
+                return wrapper.inner.repair_rootfs().await;
+            }
+            prepare().await?;
+            wrapper.inner.repair_rootfs().await
+        })
+        .await
+        .map_err(join_error)?
 }
 
 struct CoordinatedRuntime {
