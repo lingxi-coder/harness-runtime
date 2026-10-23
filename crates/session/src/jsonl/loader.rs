@@ -261,6 +261,9 @@ fn transcript_cwd_from_path(path: &Path, loaded: &LoadedTranscript) -> Option<St
             return Some(relocated.clone());
         }
     }
+    if let Some(cwd) = session_id.and_then(|id| loaded.mobile_empty_session_cwds.get(id)) {
+        return Some(cwd.clone());
+    }
     loaded
         .messages_in_order
         .first()
@@ -279,7 +282,15 @@ pub fn transcript_workspace_path(path: &Path, loaded: &LoadedTranscript) -> Opti
             return Some(relocated.clone());
         }
     }
-    let cwd = loaded.messages_in_order.first()?.cwd.as_str();
+    let cwd = session_id
+        .and_then(|id| loaded.mobile_empty_session_cwds.get(id))
+        .map(String::as_str)
+        .or_else(|| {
+            loaded
+                .messages_in_order
+                .first()
+                .map(|message| message.cwd.as_str())
+        })?;
     if cwd.is_empty() || !Path::new(cwd).is_absolute() {
         return None;
     }
@@ -1362,7 +1373,7 @@ async fn enrich_candidates(
                 return Err(LoaderError::Io {
                     arg: "session catalog".to_string(),
                     source: std::io::Error::other(error),
-                })
+                });
             }
         }
     }
@@ -2025,13 +2036,34 @@ pub async fn list_recent_sessions_in_scope_with_diagnostics(
     } else {
         Vec::new()
     };
+    list_recent_sessions_in_scope_with_worktrees(
+        lingxi_home,
+        cwd,
+        scope,
+        limit,
+        fs,
+        &worktree_paths,
+    )
+    .await
+}
+
+/// Enumerate using worktree roots resolved in the host's execution environment.
+/// Mobile supplies Linux guest roots instead of running a native Git process.
+pub async fn list_recent_sessions_in_scope_with_worktrees(
+    lingxi_home: &Path,
+    cwd: &str,
+    scope: SessionDiscoveryScope,
+    limit: usize,
+    fs: Arc<dyn FileSystem>,
+    worktree_paths: &[String],
+) -> Result<SessionCatalog, LoaderError> {
     list_recent_sessions_inner_with_diagnostics(
         lingxi_home,
         cwd,
         scope,
         limit,
         &fs,
-        &worktree_paths,
+        worktree_paths,
         None,
     )
     .await
@@ -2651,7 +2683,7 @@ async fn read_cli_transcript_source(
                 return Err(LoaderError::Io {
                     arg: path.display().to_string(),
                     source: std::io::Error::other(error.to_string()),
-                })
+                });
             }
         }
     } else {
@@ -2661,13 +2693,13 @@ async fn read_cli_transcript_source(
                 if error.kind() == std::io::ErrorKind::NotFound
                     || error.raw_os_error() == Some(libc::ENOTDIR) =>
             {
-                return Ok(None)
+                return Ok(None);
             }
             Err(source) => {
                 return Err(LoaderError::Io {
                     arg: path.display().to_string(),
                     source,
-                })
+                });
             }
         }
     };

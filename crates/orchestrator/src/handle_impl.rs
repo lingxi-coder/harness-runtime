@@ -1255,7 +1255,7 @@ impl ConversationOrchestrator {
                 cwd,
                 mut trusted_dirs,
             } => {
-                if !cwd.is_dir() {
+                if !self.prompt_probe_cwd(&cwd).is_dir() {
                     return Err(HandleError::ActionFailed(
                         "change_working_directory: target directory disappeared before admission"
                             .into(),
@@ -1529,7 +1529,7 @@ impl ConversationOrchestrator {
         let resumed_cwd = runtime
             .working_directory
             .as_ref()
-            .filter(|path| path.is_dir())
+            .filter(|path| self.prompt_probe_cwd(path).is_dir())
             .cloned();
         let resumed_worktree = runtime
             .worktree_session
@@ -1949,7 +1949,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         cwd: std::path::PathBuf,
         trusted_dirs: Vec<std::path::PathBuf>,
     ) -> Result<(), HandleError> {
-        if !cwd.is_absolute() || !cwd.is_dir() {
+        if !cwd.is_absolute() || !self.prompt_probe_cwd(&cwd).is_dir() {
             return Err(HandleError::ActionFailed(
                 "change_working_directory: target is not an absolute directory".into(),
             ));

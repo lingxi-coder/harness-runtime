@@ -7,7 +7,8 @@
       "modified_rfc3339": "2026-06-02T12:00:00Z",
       "message_count": 17,
       "mode": "code",
-      "path": "/home/dev/.lingxi/sessions/33333333.jsonl"
+      "path": "/home/dev/.lingxi/sessions/33333333.jsonl",
+      "workspace_path": null
     }
   ]
 }

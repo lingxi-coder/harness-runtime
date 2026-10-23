@@ -94,6 +94,7 @@ impl Sandbox for FakeProcessAdmittingSandbox {
 /// stubbed http/process/sandbox/worktree, no device capabilities) so the shared
 /// session host is built and driven on CI without a device.
 pub struct HostFakePlatform {
+    mobile_linux: Option<Arc<dyn mobile_linux_api::MobileLinuxRuntime>>,
     fs: Arc<dyn FileSystem>,
     http: Arc<dyn HttpTransport>,
     clock: Arc<dyn Clock>,
@@ -111,6 +112,7 @@ impl HostFakePlatform {
             PosixClock, PosixFileSystem, PosixHttp, PosixProcess, PosixSandbox, PosixWorktree,
         };
         Self {
+            mobile_linux: None,
             fs: Arc::new(PosixFileSystem::new(root)),
             http: Arc::new(PosixHttp::new()),
             clock: Arc::new(PosixClock::new()),
@@ -119,6 +121,20 @@ impl HostFakePlatform {
             worktree: Arc::new(PosixWorktree::new()),
             secure_storage: None,
         }
+    }
+
+    /// Exercise the production guest filesystem mapping without running Linux.
+    #[must_use]
+    pub fn with_mobile_linux(
+        mut self,
+        runtime: Arc<dyn mobile_linux_api::MobileLinuxRuntime>,
+    ) -> Self {
+        self.fs = Arc::new(platform_common::guest_fs::GuestPathFileSystem::new(
+            self.fs,
+            runtime.clone(),
+        ));
+        self.mobile_linux = Some(runtime);
+        self
     }
 
     /// Replace the stub process runner for a test that needs to observe a
@@ -149,6 +165,9 @@ impl HostFakePlatform {
 }
 
 impl Platform for HostFakePlatform {
+    fn mobile_linux(&self) -> Option<Arc<dyn mobile_linux_api::MobileLinuxRuntime>> {
+        self.mobile_linux.clone()
+    }
     fn filesystem(&self) -> Arc<dyn FileSystem> {
         self.fs.clone()
     }
@@ -244,6 +263,8 @@ impl PermissionRequestSink for CollectingPermissionSink {
 /// the frozen defaults — the off-device build recipe the host tests share.
 #[must_use]
 pub fn test_config(cwd: &std::path::Path) -> MobileConfig {
+    let canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let cwd = canonical.as_path();
     MobileConfig {
         cwd: cwd.to_path_buf(),
         lingxi_home: cwd.join(branding::DOT_DIR),

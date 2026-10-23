@@ -215,6 +215,10 @@ define_client_event! {
 
     SessionEnded,
 
+    WorkspaceChanged {
+        state: crate::protocol::listings::WorkspaceStateDto,
+    },
+
     SessionResumed {
         session_id: String,
         mode: SessionModeDto,
@@ -1043,6 +1047,7 @@ impl From<ClientEventWire> for ClientEvent {
                 Self::SessionStarted { session_id, mode }
             }
             ClientEventWire::SessionEnded => Self::SessionEnded,
+            ClientEventWire::WorkspaceChanged { state } => Self::WorkspaceChanged { state },
             ClientEventWire::SessionResumed {
                 session_id,
                 mode,

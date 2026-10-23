@@ -1,0 +1,12 @@
+{
+  "type": "workspace_changed",
+  "state": {
+    "session_id": "33333333-3333-4333-8333-333333333333",
+    "cwd": "/home/lingxi/lingxi/projects/current",
+    "project_root": "/home/lingxi/lingxi/projects/original",
+    "additional_directories": [
+      "/home/lingxi/shared"
+    ],
+    "transcript_path": "/home/lingxi/.lingxi/projects/current/33333333-3333-4333-8333-333333333333.jsonl"
+  }
+}

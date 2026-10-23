@@ -85,6 +85,26 @@ pub struct SessionRowDto {
     /// Absolute path to the `.jsonl` file — mapped directly from
     /// `SessionMetadata.path` so a client can request a re-load.
     pub path: String,
+    /// Exact logical workspace hint recovered by the session loader. Never
+    /// reconstruct this from the lossy sanitized transcript bucket name.
+    pub workspace_path: Option<String>,
+}
+
+/// Session-owned logical directory state. On mobile these are Linux guest
+/// paths, independent of the native app container and mount identifiers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct WorkspaceStateDto {
+    /// Conversation identity, unchanged by directory moves.
+    pub session_id: String,
+    /// Current logical working directory.
+    pub cwd: String,
+    /// Original directory of this conversation.
+    pub project_root: String,
+    /// Explicit directories linked to this conversation.
+    pub additional_directories: Vec<String>,
+    /// Exact active source for subsequent resume.
+    pub transcript_path: String,
 }
 
 // ── Models ───────────────────────────────────────────────────────────────────

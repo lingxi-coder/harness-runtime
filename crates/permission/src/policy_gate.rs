@@ -737,6 +737,7 @@ impl LivePermissionState {
 
 /// Enforcing gate over a [`PermissionPolicy`] (see module docs).
 pub struct PolicyPermissionGate {
+    cwd_provider: Option<Arc<dyn Fn() -> PathBuf + Send + Sync>>,
     /// The loaded rule policy. `authorize` reads its allow/deny/ask buckets.
     policy: Arc<PermissionPolicy>,
     /// Prompt transport consulted only when `authorize` returns `Ask` for a
@@ -968,6 +969,7 @@ impl PolicyPermissionGate {
         let active_auto_mode =
             policy.mode == PermissionMode::Auto && !auto_mode_disabled_from_settings;
         Self {
+            cwd_provider: None,
             live_state: std::sync::RwLock::new(LivePermissionState::from_policy(&policy)),
             bypass_permissions_confirmed: std::sync::atomic::AtomicBool::new(
                 policy.bypass_permissions_available,
@@ -1023,6 +1025,13 @@ impl PolicyPermissionGate {
         &self,
     ) -> Arc<std::sync::OnceLock<Arc<dyn crate::classifier::LoopPermissionClassifier>>> {
         self.loop_classifier.clone()
+    }
+
+    /// Read the live native cwd when a host supports user-owned directory moves.
+    #[must_use]
+    pub fn with_cwd_provider(mut self, provider: Arc<dyn Fn() -> PathBuf + Send + Sync>) -> Self {
+        self.cwd_provider = Some(provider);
+        self
     }
 
     /// Install the guest→host translator (mobile only). Without it the gate is
@@ -1880,6 +1889,18 @@ impl PolicyPermissionGate {
         Self::merge_ordered_command_deny_rules(deny_rules, &[], &specs, &[]);
     }
 
+    /// Live Cd rules and their filesystem coordinates, including session grants.
+    /// Hosts resolve guest/native path spellings before applying the shared matcher.
+    pub fn directory_permission_snapshot(
+        &self,
+    ) -> (Vec<crate::PermissionRule>, Option<crate::FsRoots>) {
+        let policy = self.live_policy();
+        let mut rules: Vec<_> = policy.deny_rules.into_values().flatten().collect();
+        rules.extend(policy.allow_rules.into_values().flatten());
+        rules.sort_by_key(|rule| std::cmp::Reverse(rule.source.priority()));
+        (rules, policy.roots)
+    }
+
     fn live_policy(&self) -> PermissionPolicy {
         let live = self
             .live_state
@@ -1888,7 +1909,8 @@ impl PolicyPermissionGate {
             .clone();
         let mut deny_rules = live.deny_rules;
         self.fold_command_input_denies(&mut deny_rules);
-        self.policy
+        let mut policy = self
+            .policy
             .clone_with_live_state(
                 live.allow_rules,
                 deny_rules,
@@ -1896,7 +1918,11 @@ impl PolicyPermissionGate {
                 live.additional_working_dirs,
             )
             .with_tool_aliases(live.tool_aliases)
-            .expect("live toolAliases were validated before publication")
+            .expect("live toolAliases were validated before publication");
+        if let (Some(provider), Some(roots)) = (&self.cwd_provider, policy.roots.as_mut()) {
+            roots.cwd = provider();
+        }
+        policy
     }
 
     /// Map a 3-valued [`PermissionResult`] onto the 2-valued

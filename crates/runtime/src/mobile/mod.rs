@@ -44,7 +44,11 @@ use tool_ui::ask_user_question::AskUserQuestionResolver;
 #[cfg(feature = "mobile")]
 mod audio_service;
 #[cfg(feature = "mobile")]
+mod directories;
+#[cfg(feature = "mobile")]
 mod host;
+#[cfg(feature = "mobile")]
+pub use directories::{mobile_user_directories, MobileUserDirectories};
 
 // Audit fix (#14): the disk-backed Skill loader the FFI host wires so the mobile
 // Skill tool resolves on-disk `.lingxi/commands` / `.lingxi/skills` under the
@@ -85,7 +89,7 @@ pub use host::{
     parse_mobile_provider_config_json, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto,
     FiredCronJobDto, MobileBuildError, MobileConfig, MobileCronStoreHandle, MobileEngineError,
     MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto, MobileRuntime,
-    ProviderCatalogEntryDto, ProviderConnectionTestDto,
+    MobileSessionDiscoveryScope, ProviderCatalogEntryDto, ProviderConnectionTestDto,
 };
 #[cfg(feature = "mobile")]
 pub use session::jsonl::SessionMode as MobileSessionMode;

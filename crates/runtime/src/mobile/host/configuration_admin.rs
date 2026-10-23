@@ -127,39 +127,45 @@ fn source_object(fields: Vec<(String, Utf16JsonProjection)>) -> Utf16JsonProject
 }
 
 impl MobileEngineHandle {
-    fn skills_admin_context(&self) -> skills_admin::SkillsAdminContext {
-        skills_admin::SkillsAdminContext {
-            cwd: self.session_cwd.clone().into(),
+    fn skills_admin_context(&self) -> Result<skills_admin::SkillsAdminContext, String> {
+        Ok(skills_admin::SkillsAdminContext {
+            cwd: self
+                .current_mobile_config()
+                .map_err(|error| error.to_string())?
+                .cwd,
             lingxi_home: self.lingxi_home.clone(),
-        }
+        })
     }
 
     pub(super) async fn emit_skill_catalog(&self, sink: &dyn ClientEventSink) {
-        let result = skills_admin::catalog_json(&self.skills_admin_context()).and_then(|raw| {
-            let mut catalog =
-                Utf16JsonProjection::parse(&raw).map_err(|error| error.to_string())?;
-            let entry_count = catalog
-                .array_len("/entries")
-                .ok_or("skill catalog entries missing")?;
-            let mut entries = Vec::with_capacity(entry_count);
-            // The shared disk catalog includes Desktop builtins. Replace only that
-            // synthetic source; retain all real user/project/managed entries.
-            for index in 0..entry_count {
-                let entry = catalog
-                    .subprojection(&format!("/entries/{index}"))
-                    .map_err(|error| error.to_string())?;
-                if entry.string_at("/source") != Some("bundled") {
-                    entries.push(entry);
+        let result = self
+            .skills_admin_context()
+            .and_then(|context| skills_admin::catalog_json(&context))
+            .and_then(|raw| {
+                let mut catalog =
+                    Utf16JsonProjection::parse(&raw).map_err(|error| error.to_string())?;
+                let entry_count = catalog
+                    .array_len("/entries")
+                    .ok_or("skill catalog entries missing")?;
+                let mut entries = Vec::with_capacity(entry_count);
+                // The shared disk catalog includes Desktop builtins. Replace only that
+                // synthetic source; retain all real user/project/managed entries.
+                for index in 0..entry_count {
+                    let entry = catalog
+                        .subprojection(&format!("/entries/{index}"))
+                        .map_err(|error| error.to_string())?;
+                    if entry.string_at("/source") != Some("bundled") {
+                        entries.push(entry);
+                    }
                 }
-            }
-            catalog
-                .set_field(
-                    "entries",
-                    Utf16JsonProjection::array(entries).map_err(|error| error.to_string())?,
-                )
-                .map_err(|error| error.to_string())?;
-            Ok(catalog)
-        });
+                catalog
+                    .set_field(
+                        "entries",
+                        Utf16JsonProjection::array(entries).map_err(|error| error.to_string())?,
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(catalog)
+            });
         match result {
             Ok(mut catalog) => {
                 let registry = self.inner.slash_registry.read().await;
@@ -285,7 +291,8 @@ impl MobileEngineHandle {
                     }
                 })
         } else {
-            skills_admin::document_json(target, &self.skills_admin_context())
+            self.skills_admin_context()
+                .and_then(|context| skills_admin::document_json(target, &context))
         };
         match result {
             Ok(document_json) => {
@@ -316,7 +323,8 @@ impl MobileEngineHandle {
                 started(sink, Domain::Skill, id).await;
                 let result = {
                     let _guard = self.settings_write_lock.lock().await;
-                    skills_admin::handle(command, &self.skills_admin_context())
+                    self.skills_admin_context()
+                        .and_then(|context| skills_admin::handle(command, &context))
                 };
                 match result {
                     Ok(skills_admin::SkillAdminOutcome::Changed { document_json, .. }) => {
@@ -347,7 +355,8 @@ impl MobileEngineHandle {
     }
 
     pub(super) async fn emit_mcp_configuration_snapshot(&self, sink: &dyn ClientEventSink) {
-        let Some(settings) = self.settings.as_ref() else {
+        let current_settings = self.current_settings();
+        let Some(settings) = current_settings.as_ref() else {
             config_admin::emit_error(sink, "Settings context is unavailable.").await;
             return;
         };
@@ -382,7 +391,14 @@ impl MobileEngineHandle {
             };
             runtime.push(json!({"name":server.name,"status":status,"transport":server.transport,"source":source,"writable":writable}));
         }
-        match mcp_admin::snapshot_json(settings, &self.mobile_mcp_paths(), runtime) {
+        let paths = match self.mobile_mcp_paths() {
+            Ok(paths) => paths,
+            Err(message) => {
+                config_admin::emit_error(sink, message).await;
+                return;
+            }
+        };
+        match mcp_admin::snapshot_json(settings, &paths, runtime) {
             Ok(snapshot_json) => {
                 sink.emit(ClientEvent::McpConfigurationSnapshot { snapshot_json })
                     .await
@@ -418,18 +434,21 @@ impl MobileEngineHandle {
                 return;
             }
         };
+        let paths = match self.mobile_mcp_paths() {
+            Ok(paths) => paths,
+            Err(message) => {
+                config_admin::emit_error(sink, message).await;
+                return;
+            }
+        };
         started(sink, Domain::Mcp, id).await;
         let result = {
             let _guard = self.settings_write_lock.lock().await;
             match command.action.as_str() {
-                "save_server" => {
-                    mcp_admin::save_server_entry(&self.mobile_mcp_paths(), revision, payload)
-                }
-                "remove_server" => {
-                    mcp_admin::remove_server_entry(&self.mobile_mcp_paths(), revision, payload)
-                }
+                "save_server" => mcp_admin::save_server_entry(&paths, revision, payload),
+                "remove_server" => mcp_admin::remove_server_entry(&paths, revision, payload),
                 _ => self
-                    .settings
+                    .current_settings()
                     .as_ref()
                     .ok_or_else(|| "Settings context is unavailable.".to_string())
                     .and_then(|settings| {
@@ -455,7 +474,8 @@ impl MobileEngineHandle {
     }
 
     pub(super) async fn emit_plugin_catalog(&self, sink: &dyn ClientEventSink) {
-        let Some(settings) = self.settings.as_ref() else {
+        let current_settings = self.current_settings();
+        let Some(settings) = current_settings.as_ref() else {
             config_admin::emit_error(sink, "Settings context is unavailable.").await;
             return;
         };
@@ -484,7 +504,8 @@ impl MobileEngineHandle {
             protocol_error(sink, "Plugin payload_json is required.").await;
             return;
         };
-        let Some(settings) = self.settings.as_ref() else {
+        let current_settings = self.current_settings();
+        let Some(settings) = current_settings.as_ref() else {
             config_admin::emit_error(sink, "Settings context is unavailable.").await;
             return;
         };
@@ -553,7 +574,8 @@ impl MobileEngineHandle {
     }
 
     pub(super) async fn emit_hook_document(&self, scope: Option<&str>, sink: &dyn ClientEventSink) {
-        let Some(settings) = self.settings.as_ref() else {
+        let current_settings = self.current_settings();
+        let Some(settings) = current_settings.as_ref() else {
             config_admin::emit_error(sink, "Settings context is unavailable.").await;
             return;
         };
@@ -598,7 +620,10 @@ impl MobileEngineHandle {
             let _guard = self.settings_write_lock.lock().await;
             match command.action.as_str() {
                 "validate_document" => hook_admin::validate_document(payload),
-                "save_document" => match (self.settings.as_ref(), command.revision.as_deref()) {
+                "save_document" => match (
+                    self.current_settings().as_ref(),
+                    command.revision.as_deref(),
+                ) {
                     (Some(settings), Some(revision))
                         if !settings.managed.contains_property("hooks") =>
                     {

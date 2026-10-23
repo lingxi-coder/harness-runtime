@@ -2505,6 +2505,7 @@ dependencies = [
  "mcp-wire",
  "memory",
  "migrations",
+ "mobile-linux-android",
  "mobile-linux-api",
  "msgqueue",
  "nix 0.27.1",
@@ -3952,7 +3953,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-android"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=3beed75f7988a6a63db6428086bd4492ddf02277#3beed75f7988a6a63db6428086bd4492ddf02277"
 dependencies = [
  "async-trait",
  "mobile-linux-api",
@@ -3966,7 +3967,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-api"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=3beed75f7988a6a63db6428086bd4492ddf02277#3beed75f7988a6a63db6428086bd4492ddf02277"
 dependencies = [
  "async-trait",
  "serde",
@@ -3976,7 +3977,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-core"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=3beed75f7988a6a63db6428086bd4492ddf02277#3beed75f7988a6a63db6428086bd4492ddf02277"
 dependencies = [
  "mobile-linux-api",
  "serde",
@@ -5174,7 +5175,7 @@ dependencies = [
 [[package]]
 name = "platform-pty"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=6b033d41a2b6b736fda1e8f996f55a4b20bd885d#6b033d41a2b6b736fda1e8f996f55a4b20bd885d"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=3beed75f7988a6a63db6428086bd4492ddf02277#3beed75f7988a6a63db6428086bd4492ddf02277"
 dependencies = [
  "anyhow",
  "filedescriptor",

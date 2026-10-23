@@ -61,7 +61,8 @@ impl hooks::mods::ModSettingsReader for MobileModSettingsReader {
 
 impl MobileEngineHandle {
     pub(super) async fn emit_settings_snapshot(&self, sink: &dyn ClientEventSink) {
-        let Some(context) = self.settings.as_ref() else {
+        let current_settings = self.current_settings();
+        let Some(context) = current_settings.as_ref() else {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
                 message: "settings listing unavailable: this connection was built without a \
@@ -121,7 +122,8 @@ impl MobileEngineHandle {
         patch_json: &str,
         sink: &dyn ClientEventSink,
     ) {
-        let Some(context) = self.settings.as_ref() else {
+        let current_settings = self.current_settings();
+        let Some(context) = current_settings.as_ref() else {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
                 message: "settings update unavailable: this connection was built without a \
@@ -180,7 +182,8 @@ impl MobileEngineHandle {
         &self,
         sink: &dyn ClientEventSink,
     ) -> Option<permission::PermissionPaths> {
-        let Some(context) = self.settings.as_ref() else {
+        let current_settings = self.current_settings();
+        let Some(context) = current_settings.as_ref() else {
             sink.emit(ClientEvent::Error {
                 kind: ErrorKindDto::Internal,
                 message: "permission update unavailable: this connection was built without a \
@@ -374,11 +377,16 @@ impl MobileEngineHandle {
         }
     }
 
-    pub(super) fn mobile_mcp_paths(&self) -> ::configuration_admin::mcp_bridge::McpPaths {
-        ::configuration_admin::mcp_bridge::McpPaths {
-            project_dir: std::path::PathBuf::from(&self.session_cwd),
+    pub(super) fn mobile_mcp_paths(
+        &self,
+    ) -> Result<::configuration_admin::mcp_bridge::McpPaths, String> {
+        Ok(::configuration_admin::mcp_bridge::McpPaths {
+            project_dir: self
+                .current_mobile_config()
+                .map_err(|error| error.to_string())?
+                .cwd,
             global_config_path: self.lingxi_home.join("mcp-config.json"),
-        }
+        })
     }
 
     pub(super) async fn apply_mobile_mcp_write(
@@ -387,6 +395,18 @@ impl MobileEngineHandle {
         name: &str,
         config: Option<&str>,
     ) {
+        let paths = match self.mobile_mcp_paths() {
+            Ok(paths) => paths,
+            Err(message) => {
+                self.connection_sink
+                    .emit(ClientEvent::Error {
+                        kind: ErrorKindDto::Rejected,
+                        message: message.into(),
+                    })
+                    .await;
+                return;
+            }
+        };
         let result = match config {
             Some(raw) => serde_json::from_str::<serde_json::Value>(raw)
                 .map_err(|error| error.to_string())
@@ -398,17 +418,13 @@ impl MobileEngineHandle {
                 })
                 .and_then(|value| {
                     ::configuration_admin::mcp_bridge::upsert_server(
-                        &self.mobile_mcp_paths(),
+                        &paths,
                         scope,
                         name,
                         serde_json::Value::Object(value),
                     )
                 }),
-            None => ::configuration_admin::mcp_bridge::remove_server(
-                &self.mobile_mcp_paths(),
-                scope,
-                name,
-            ),
+            None => ::configuration_admin::mcp_bridge::remove_server(&paths, scope, name),
         };
         match result {
             Ok(()) => self.emit_listing(ProtocolListingKind::Mcp).await,

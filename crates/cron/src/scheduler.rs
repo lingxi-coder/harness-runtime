@@ -580,7 +580,7 @@ pub struct CronScheduler {
     /// The single project tasks file
     /// (`<project_root>/.lingxi/scheduled_tasks.json`) the scheduler loads from
     /// and writes `lastFiredAt` back to. 1:1 with claude-code `cronTasks.ts`.
-    tasks_file: PathBuf,
+    tasks_file: StdMutex<PathBuf>,
     /// Auto-expiry age for RECURRING jobs; `None` disables expiry (unlimited).
     /// Defaults to seven days for Claude-compatible recurring jobs.
     recurring_max_age: Option<Duration>,
@@ -765,7 +765,7 @@ impl CronScheduler {
             fs,
             clock,
             runtime,
-            tasks_file,
+            tasks_file: StdMutex::new(tasks_file),
             fallback_identity,
             project_leader: AtomicBool::new(false),
             session_id: StdMutex::new(None),
@@ -775,6 +775,44 @@ impl CronScheduler {
             recurring_max_age: Some(DEFAULT_RECURRING_MAX_AGE),
             tick_handle: Mutex::new(None),
         }
+    }
+
+    fn current_tasks_file(&self) -> PathBuf {
+        self.tasks_file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Rebind durable project jobs after a directory change, joining the old
+    /// scheduler before releasing its lease. In-memory jobs belong to the same
+    /// conversation and survive this directory-only transition.
+    pub async fn set_tasks_file(
+        self: &Arc<Self>,
+        path: PathBuf,
+    ) -> Result<(), lingxi_core::host::RuntimeError> {
+        if self.current_tasks_file() == path {
+            return Ok(());
+        }
+        let session_tasks = self
+            .session_tasks
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.stop().await?;
+        *self
+            .tasks_file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
+        for task in session_tasks {
+            self.register_tool_job(task, false)
+                .await
+                .map_err(|error| lingxi_core::host::RuntimeError::Internal(error.to_string()))?;
+        }
+        self.load_persisted().await;
+        self.clone().start().await
     }
 
     #[cfg(test)]
@@ -843,7 +881,8 @@ impl CronScheduler {
     }
 
     async fn refresh_project_leader(&self) {
-        let Some(root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file) else {
+        let tasks_file = self.current_tasks_file();
+        let Some(root) = crate::tasks_file::project_root_from_tasks_path(&tasks_file) else {
             return;
         };
         let leader = crate::lock::acquire_scheduler_lease(
@@ -870,10 +909,11 @@ impl CronScheduler {
     }
 
     async fn refresh_creator_process(&self) {
+        let tasks_file = self.current_tasks_file();
         let Some(session_id) = self.current_session_id() else {
             return;
         };
-        let Some(root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file) else {
+        let Some(root) = crate::tasks_file::project_root_from_tasks_path(&tasks_file) else {
             return;
         };
         let _process_guard = crate::lock_cron_file().await;
@@ -917,14 +957,15 @@ impl CronScheduler {
     /// skipped with a warning. Call once after construction, before
     /// [`Self::start`].
     pub async fn load_persisted(&self) {
+        let tasks_file = self.current_tasks_file();
         if !self.session_cron_enabled {
             return;
         }
         self.refresh_creator_process().await;
         self.refresh_project_leader().await;
-        let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file)
+        let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&tasks_file)
         else {
-            tracing::error!(path = %self.tasks_file.display(), "cron: invalid tasks-file path");
+            tracing::error!(path = %tasks_file.display(), "cron: invalid tasks-file path");
             return;
         };
         let Ok(body) = crate::tasks_file::read_tasks_body(self.fs.as_ref(), project_root).await
@@ -938,7 +979,7 @@ impl CronScheduler {
                 // as empty, but scheduler startup must not silently reinterpret
                 // corrupt durable state as an empty valid task document.
                 tracing::warn!(
-                    path = %self.tasks_file.display(),
+                    path = %tasks_file.display(),
                     "cron tasks file has invalid authoritative state: {error}; skipping"
                 );
                 return;
@@ -1262,11 +1303,10 @@ impl CronScheduler {
     /// Spawn the tick loop on the configured [`RuntimeSpawner`]. Safe to call
     /// repeatedly; an already-owned loop is never replaced or orphaned.
     pub async fn start(self: Arc<Self>) -> Result<(), lingxi_core::host::RuntimeError> {
+        let tasks_file = self.current_tasks_file();
         // PARITY `Y()` → `ie(dir)`: keep the scheduler's runtime files out of
         // `git status` before the first lock/tick.
-        if let Some(project_root) =
-            crate::tasks_file::project_root_from_tasks_path(&self.tasks_file)
-        {
+        if let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&tasks_file) {
             crate::tasks_file::ensure_runtime_files_excluded(project_root);
         }
         let mut tick_handle = self.tick_handle.lock().await;
@@ -1451,7 +1491,8 @@ impl CronScheduler {
     /// exclusive lock that the cron tools and the desktop UI have to queue
     /// behind to write.
     async fn refresh_durable_tasks(&self) {
-        let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file)
+        let tasks_file = self.current_tasks_file();
+        let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&tasks_file)
         else {
             return;
         };
@@ -1645,10 +1686,11 @@ impl CronScheduler {
     }
 
     async fn dispatch_automations(&self) {
+        let tasks_file = self.current_tasks_file();
         let Some(firer) = self.automation_firer.read().await.clone() else {
             return;
         };
-        let Some(root) = crate::project_root_from_tasks_path(&self.tasks_file) else {
+        let Some(root) = crate::project_root_from_tasks_path(&tasks_file) else {
             return;
         };
         // Stop takes this lock before cancelling the tick, so every successful
@@ -1785,13 +1827,14 @@ impl CronScheduler {
     }
 
     async fn tick(&self) {
+        let tasks_file = self.current_tasks_file();
         self.dispatch_automations().await;
         if !self.session_cron_enabled {
             return;
         }
         let pending = std::mem::take(&mut *self.pending_missed.lock().await);
         if !pending.is_empty() {
-            if let Some(root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file) {
+            if let Some(root) = crate::tasks_file::project_root_from_tasks_path(&tasks_file) {
                 self.surface_missed_one_shots(root, pending).await;
             }
         }
@@ -1810,6 +1853,7 @@ impl CronScheduler {
     /// barrier remains available if this waiter is cancelled or cancellation
     /// fails; concurrent start/stop calls cannot bypass it.
     pub async fn stop(&self) -> Result<(), lingxi_core::host::RuntimeError> {
+        let tasks_file = self.current_tasks_file();
         let mut tick_handle = self.tick_handle.lock().await;
         let mut flights =
             tokio::time::timeout(TICK_DESTRUCTION_BUDGET, self.automation_runs.lock())
@@ -1861,7 +1905,7 @@ impl CronScheduler {
                     }
                 }
             }
-            if let Some(root) = crate::project_root_from_tasks_path(&self.tasks_file) {
+            if let Some(root) = crate::project_root_from_tasks_path(&tasks_file) {
                 self.settle_automation_flight(root, flight)
                     .await
                     .map_err(|error| {
@@ -1878,7 +1922,7 @@ impl CronScheduler {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&key);
-        if let Some(root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file) {
+        if let Some(root) = crate::tasks_file::project_root_from_tasks_path(&tasks_file) {
             crate::lock::release_scheduler_lease(self.fs.as_ref(), root, &self.lease_identity())
                 .await;
         }
@@ -1901,9 +1945,10 @@ impl CronScheduler {
         id: &str,
         now: SystemTime,
     ) -> Option<ClaimedCronJob> {
+        let tasks_file = self.current_tasks_file();
         let local = { self.tasks.read().await.get(id).cloned()? };
 
-        let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&self.tasks_file)
+        let Some(project_root) = crate::tasks_file::project_root_from_tasks_path(&tasks_file)
         else {
             return self.claim_in_memory_due_job(id, now).await;
         };
@@ -4321,6 +4366,47 @@ mod scheduler_tick_tests {
             Ok(())
         }
     }
+    #[tokio::test]
+    async fn directory_rebind_joins_old_tick_and_preserves_session_owned_jobs() {
+        let fs = MemFs::with(TASKS_PATH, "{\"tasks\":[]}");
+        let scheduler = Arc::new(
+            CronScheduler::new(
+                registry(fs.clone()),
+                fs.clone(),
+                FixedClock::at_secs(NOW),
+                Arc::new(AutomationTestRuntime::default()),
+                PathBuf::from(TASKS_PATH),
+            )
+            .with_session_id("owner".into()),
+        );
+        let task = SessionCronTask {
+            id: "session-job".into(),
+            cron: "0 9 * * *".into(),
+            prompt: "Still mine".into(),
+            created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(NOW),
+            last_fired_at: None,
+            recurring: true,
+            owner: None,
+        };
+        scheduler
+            .register_tool_job(task.clone(), false)
+            .await
+            .unwrap();
+        scheduler.clone().start().await.unwrap();
+        scheduler
+            .set_tasks_file(PathBuf::from("/other/.claude/scheduled_tasks.json"))
+            .await
+            .unwrap();
+        assert_eq!(scheduler.current_session_id().as_deref(), Some("owner"));
+        assert_eq!(
+            scheduler.current_tasks_file(),
+            PathBuf::from("/other/.claude/scheduled_tasks.json")
+        );
+        assert_eq!(scheduler.session_jobs().await, vec![task]);
+        scheduler.stop().await.unwrap();
+        assert!(scheduler.tick_handle.lock().await.is_none());
+    }
+
     struct AutomationClock(AtomicUsize);
     impl Clock for AutomationClock {
         fn now(&self) -> SystemTime {

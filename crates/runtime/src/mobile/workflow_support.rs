@@ -64,6 +64,8 @@ struct WorkflowAdoptFile {
 pub(crate) struct MobileWorkflowCheckpointStore {
     lingxi_home: std::path::PathBuf,
     cwd: std::path::PathBuf,
+    cwd_provider: Option<Arc<dyn Fn(&str) -> Option<std::path::PathBuf> + Send + Sync>>,
+    session_directories: std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>,
     lock: std::sync::Mutex<()>,
     task_runs: std::sync::Mutex<std::collections::HashMap<String, (String, String)>>,
     pending_events: std::sync::Mutex<std::collections::HashMap<String, Vec<PendingWorkflowEvent>>>,
@@ -74,16 +76,44 @@ impl MobileWorkflowCheckpointStore {
         Self {
             lingxi_home,
             cwd,
+            cwd_provider: None,
+            session_directories: Default::default(),
             lock: std::sync::Mutex::new(()),
             task_runs: std::sync::Mutex::new(std::collections::HashMap::new()),
             pending_events: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
+    pub(crate) fn with_cwd_provider(
+        mut self,
+        provider: Arc<dyn Fn(&str) -> Option<std::path::PathBuf> + Send + Sync>,
+    ) -> Self {
+        self.cwd_provider = Some(provider);
+        self
+    }
+
     fn session_dir(&self, session_uuid: &str) -> std::path::PathBuf {
+        let mut directories = self
+            .session_directories
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cwd = if let Some(cwd) = self
+            .cwd_provider
+            .as_ref()
+            .and_then(|provider| provider(session_uuid))
+        {
+            directories.insert(session_uuid.to_owned(), cwd.clone());
+            cwd
+        } else {
+            directories
+                .entry(session_uuid.to_owned())
+                .or_insert_with(|| self.cwd.clone())
+                .clone()
+        };
+        drop(directories);
         orchestrator::transcript_paths::subagents_dir(
             &self.lingxi_home,
-            &self.cwd.to_string_lossy(),
+            &cwd.to_string_lossy(),
             session_uuid,
         )
         .parent()
@@ -1174,6 +1204,28 @@ mod run_id_tests {
     use tool_workflow::is_valid_run_id;
 
     use crate::mobile::test_support::FakeListener;
+
+    #[test]
+    fn checkpoint_directory_follows_its_owner_without_stealing_a_previous_session() {
+        let current = Arc::new(std::sync::Mutex::new((
+            "a".to_owned(),
+            std::path::PathBuf::from("/home/lingxi/one"),
+        )));
+        let provider = current.clone();
+        let store =
+            super::MobileWorkflowCheckpointStore::new("/config".into(), "/home/lingxi/one".into())
+                .with_cwd_provider(Arc::new(move |session| {
+                    let current = provider.lock().unwrap();
+                    (current.0 == session).then(|| current.1.clone())
+                }));
+        let initial = store.path("a");
+        current.lock().unwrap().1 = "/home/lingxi/two".into();
+        let moved = store.path("a");
+        assert_ne!(moved, initial);
+        *current.lock().unwrap() = ("b".into(), "/home/lingxi/three".into());
+        assert_eq!(store.path("a"), moved);
+        assert_ne!(store.path("b"), moved);
+    }
 
     #[tokio::test]
     async fn checkpoint_round_trip_adopts_a_paused_workflow() {
