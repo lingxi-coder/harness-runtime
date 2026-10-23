@@ -136,10 +136,8 @@ impl AndroidPlatform {
                 && !mount.read_only
         });
         let sandbox_result = if mount_is_configured
-            && workspace_root_is_allowed(
-                &workspace_root,
-                inputs.mobile_linux_managed_root.as_deref(),
-            ) {
+            && workspace_root_is_allowed(&mounts[0], inputs.mobile_linux_managed_root.as_deref())
+        {
             MobileLinuxSandbox::new(inputs.mobile_linux.clone(), mounts)
         } else {
             Err(SandboxError::Unavailable(
@@ -217,10 +215,8 @@ fn sanitize_workspace_id(input: &str) -> String {
     }
 }
 
-fn workspace_root_is_allowed(
-    workspace_root: &std::path::Path,
-    managed_root: Option<&std::path::Path>,
-) -> bool {
+fn workspace_root_is_allowed(mount: &MountSpec, managed_root: Option<&std::path::Path>) -> bool {
+    let workspace_root = &mount.host_path;
     let text = workspace_root.to_string_lossy().to_ascii_lowercase();
     if text.contains("/.lingxi")
         || text.contains("keystore")
@@ -231,7 +227,18 @@ fn workspace_root_is_allowed(
         return false;
     }
     if let Some(managed_root) = managed_root {
-        if workspace_root.starts_with(managed_root) || managed_root.starts_with(workspace_root) {
+        // The runtime user home lives under managed_root. Permit only its exact
+        // guest/host workspace twin, using the same canonical policy as the SDK.
+        if mobile_linux_core::is_persistent_user_workspace(managed_root, mount) {
+            return true;
+        }
+        let workspace_root = workspace_root
+            .canonicalize()
+            .unwrap_or_else(|_| workspace_root.clone());
+        let managed_root = managed_root
+            .canonicalize()
+            .unwrap_or_else(|_| managed_root.to_path_buf());
+        if workspace_root.starts_with(&managed_root) || managed_root.starts_with(&workspace_root) {
             return false;
         }
     }
@@ -427,16 +434,78 @@ mod tests {
         assert!(!capability.available);
     }
 
+    #[test]
+    fn persistent_workspace_exception_rejects_mismatched_and_protected_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let managed = temp.path().join("runtime");
+        let guest = mobile_linux_api::guest_paths::workspace("projects");
+        let workspace =
+            mobile_linux_api::guest_paths::workspace_host_path(&managed, &guest).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mount = default_mobile_linux_mounts(&workspace, "projects").remove(0);
+        assert!(workspace_root_is_allowed(&mount, Some(&managed)));
+        let mut mismatched = mount.clone();
+        mismatched.guest_path = mobile_linux_api::guest_paths::workspace("other");
+        assert!(!workspace_root_is_allowed(&mismatched, Some(&managed)));
+        for protected in [
+            managed.clone(),
+            temp.path().to_path_buf(),
+            managed.join("alpine-rootfs"),
+            managed.join("persistent/lingxi/.lingxi"),
+        ] {
+            std::fs::create_dir_all(&protected).unwrap();
+            let protected_mount = default_mobile_linux_mounts(&protected, "projects").remove(0);
+            assert!(
+                !workspace_root_is_allowed(&protected_mount, Some(&managed)),
+                "{}",
+                protected.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_workspace_exception_rejects_symlink_escape() {
+        let temp = tempfile::tempdir().unwrap();
+        let managed = temp.path().join("runtime");
+        let guest = mobile_linux_api::guest_paths::workspace("projects");
+        let workspace =
+            mobile_linux_api::guest_paths::workspace_host_path(&managed, &guest).unwrap();
+        std::fs::create_dir_all(workspace.parent().unwrap()).unwrap();
+        let rootfs = managed.join("alpine-rootfs");
+        std::fs::create_dir_all(&rootfs).unwrap();
+        std::os::unix::fs::symlink(&rootfs, &workspace).unwrap();
+        let mount = default_mobile_linux_mounts(&workspace, "projects").remove(0);
+        assert!(!workspace_root_is_allowed(&mount, Some(&managed)));
+    }
+
     #[tokio::test]
     async fn configured_proot_mount_is_shared_by_agent_shell_and_file_tools() {
+        verify_configured_workspace(false).await;
+    }
+
+    #[tokio::test]
+    async fn persistent_user_workspace_is_shared_by_agent_shell_and_file_tools() {
+        verify_configured_workspace(true).await;
+    }
+
+    async fn verify_configured_workspace(persistent: bool) {
         use lingxi_core::host::{ProcessCommand, SandboxPolicy};
         use mobile_linux_api::NetworkPolicy;
 
         let temp = tempfile::tempdir().expect("app sandbox");
-        let workspace = temp.path().join("workspaces/default");
+        let managed_root = temp.path().join("mobile-linux/android-proot");
+        let workspace = if persistent {
+            mobile_linux_api::guest_paths::workspace_host_path(
+                &managed_root,
+                &mobile_linux_api::guest_paths::workspace("default"),
+            )
+            .expect("persistent workspace")
+        } else {
+            temp.path().join("workspaces/default")
+        };
         std::fs::create_dir_all(&workspace).expect("workspace");
         let workspace = std::fs::canonicalize(workspace).expect("canonical workspace");
-        let managed_root = temp.path().join("mobile-linux/android-proot");
         let runtime: Arc<dyn MobileLinuxRuntime> =
             Arc::new(AndroidProotRuntime::new(AndroidProotRuntimeConfig {
                 managed_root: managed_root.clone(),

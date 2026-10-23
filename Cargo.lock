@@ -5037,6 +5037,7 @@ dependencies = [
  "http-client",
  "mobile-linux-android",
  "mobile-linux-api",
+ "mobile-linux-core",
  "platform-common",
  "platform-posix-minimal",
  "tempfile",
