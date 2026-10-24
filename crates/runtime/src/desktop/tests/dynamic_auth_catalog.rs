@@ -1,7 +1,11 @@
 use super::*;
 
 fn assembled(api_base: &str, api_key: bool, oauth: bool) -> provider_config::Assembled {
-    provider_config::assemble(provider_config::AssembleInputs {
+    provider_config::assemble(assembly_inputs(api_base, api_key, oauth))
+}
+
+fn assembly_inputs(api_base: &str, api_key: bool, oauth: bool) -> provider_config::AssembleInputs {
+    provider_config::AssembleInputs {
         official_catalog: None,
         anthropic_api_base: api_base.to_string(),
         anthropic_models: Vec::new(),
@@ -9,7 +13,7 @@ fn assembled(api_base: &str, api_key: bool, oauth: bool) -> provider_config::Ass
         anthropic_has_oauth: oauth,
         user_providers: Default::default(),
         routing: None,
-    })
+    }
 }
 
 fn refresher(
@@ -31,7 +35,7 @@ fn refresher(
                 matches!(
                     source.profile_name.as_str(),
                     "anthropic" | "anthropic-chat" | "deepseek"
-                )
+                ) || source.profile_name.starts_with("anthropic#")
             })
             .cloned()
             .collect(),
@@ -274,4 +278,150 @@ async fn fusion_managed_generic_delete_ignores_environment_fallback() {
     refresher.refresh().await;
     assert!(!available(&refresher, "deepseek"));
     std::env::remove_var(VARIABLE);
+}
+
+async fn exercise_independent_profile_and_global_key(
+    config: &provider_config::Assembled,
+    independent_profile: &str,
+    independent_credential: &str,
+) {
+    let credentials = fusion_test_credentials_with_stored_anthropic_key();
+    credentials.use_host_managed_provider_keys();
+    credentials
+        .set_provider_key_ephemeral(independent_credential, "independent-key")
+        .await;
+    let refresher = refresher(config, credentials.clone(), false, false, false);
+    refresher.refresh().await;
+    assert!(available(&refresher, independent_profile));
+    assert!(!available(&refresher, "anthropic-chat"));
+    if independent_profile == "anthropic" {
+        assert_eq!(
+            refresher.credential_route_accepts_hot_write("anthropic-oauth"),
+            None
+        );
+        let epoch = refresher.current_mutation_epoch();
+        assert!(
+            refresher
+                .mark_credential_established("anthropic-oauth")
+                .await
+        );
+        refresher.mark_credential_removed("anthropic-oauth").await;
+        assert_eq!(refresher.current_mutation_epoch(), epoch);
+        assert!(available(&refresher, independent_profile));
+        assert!(!available(&refresher, "anthropic-chat"));
+    }
+
+    for global_id in ["anthropic", "anthropic-api-key"] {
+        credentials
+            .set_provider_key_ephemeral(global_id, "first-global-key")
+            .await;
+        assert!(
+            refresher.mark_credential_established(global_id).await,
+            "the compatibility route loads the global key without a restart"
+        );
+        assert!(available(&refresher, independent_profile));
+        assert!(available(&refresher, "anthropic-chat"));
+        credentials
+            .set_provider_key_ephemeral(global_id, "rotated-global-key")
+            .await;
+        assert!(refresher.refresh_after_credential_write(global_id).await);
+        assert!(available(&refresher, independent_profile));
+        assert!(available(&refresher, "anthropic-chat"));
+
+        credentials.suppress_provider_key_ephemeral(global_id).await;
+        refresher.mark_credential_removed(global_id).await;
+        assert!(available(&refresher, independent_profile));
+        assert!(!available(&refresher, "anthropic-chat"));
+        refresher.refresh().await;
+        assert!(available(&refresher, independent_profile));
+        assert!(!available(&refresher, "anthropic-chat"));
+        assert!(
+            !credentials
+                .has_provider_key("anthropic-api-key")
+                .await
+                .unwrap(),
+            "the native global slot remains suppressed after unrelated probes"
+        );
+        assert_eq!(
+            credentials
+                .get_provider_key(independent_credential)
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "independent-key"
+        );
+    }
+
+    credentials
+        .set_provider_key_ephemeral("anthropic", "last-global-key")
+        .await;
+    assert!(refresher.refresh_after_credential_write("anthropic").await);
+    credentials
+        .suppress_provider_key_ephemeral(independent_credential)
+        .await;
+    refresher
+        .mark_credential_removed(independent_credential)
+        .await;
+    assert!(!available(&refresher, independent_profile));
+    assert!(available(&refresher, "anthropic-chat"));
+    refresher.refresh().await;
+    assert!(!available(&refresher, independent_profile));
+    assert!(available(&refresher, "anthropic-chat"));
+    credentials
+        .set_provider_key_ephemeral("anthropic", "another-global-key")
+        .await;
+    assert!(refresher.refresh_after_credential_write("anthropic").await);
+    assert!(!available(&refresher, independent_profile));
+    assert!(available(&refresher, "anthropic-chat"));
+}
+
+#[tokio::test]
+async fn fusion_real_bedrock_override_preserves_independent_canonical_credential() {
+    let mut inputs = assembly_inputs("https://api.anthropic.com", false, false);
+    inputs.user_providers.insert(
+        "anthropic".to_string(),
+        serde_json::json!({
+            "type": "bedrock-claude", "region": "us-east-1", "models": ["custom-claude"]
+        }),
+    );
+    let config = provider_config::assemble(inputs);
+    let canonical = config
+        .credential_sources
+        .iter()
+        .find(|source| source.profile_name == "anthropic")
+        .unwrap();
+    assert_eq!(
+        canonical.provider_id,
+        llm_runtime::ProviderId::BedrockClaude
+    );
+    assert_eq!(canonical.credential_id, "bedrock_sigv4");
+    assert!(
+        !super::super::fusion_services::anthropic_dynamic_auth_profile(
+            &config.client_config.providers
+        )
+    );
+    exercise_independent_profile_and_global_key(&config, "anthropic", "bedrock_sigv4").await;
+}
+
+#[tokio::test]
+async fn fusion_real_credential_ids_profile_is_independent_of_global_key_mutations() {
+    let mut inputs = assembly_inputs("https://api.anthropic.com", false, false);
+    inputs.user_providers.insert(
+        "anthropic".to_string(),
+        serde_json::json!({
+            "type": "anthropic", "baseUrl": "https://gateway.example",
+            "credentialIds": ["gateway-key"], "models": ["custom-claude"]
+        }),
+    );
+    let config = provider_config::assemble(inputs);
+    assert!(config
+        .credential_sources
+        .iter()
+        .any(|source| source.profile_name == "anthropic"
+            && source.credential_id == "anthropic-api-key"));
+    assert!(config.credential_sources.iter().any(
+        |source| source.profile_name == "anthropic#0" && source.credential_id == "gateway-key"
+    ));
+    exercise_independent_profile_and_global_key(&config, "anthropic#0", "gateway-key").await;
 }

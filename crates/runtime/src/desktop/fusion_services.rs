@@ -417,35 +417,30 @@ impl FusionCatalogRefresher {
             // cold API-key profile can adopt its first key without rebuilding
             // ModelRuntime. Canonical request-local selection also permits a
             // key on a route whose boot source happened to select OAuth.
-            "anthropic" | "anthropic-api-key" => self
-                .credential_sources
-                .iter()
-                .any(|source| source.profile_name == "anthropic")
-                .then(|| {
-                    self.anthropic_dynamic_auth
-                        || self.credential_sources.iter().any(|source| {
-                            source.profile_name == "anthropic"
-                                && matches!(
-                                    source.credential_id.as_str(),
-                                    "anthropic" | "anthropic-api-key"
-                                )
-                        })
-                }),
+            "anthropic" | "anthropic-api-key" => {
+                if self.anthropic_dynamic_auth
+                    || self
+                        .credential_sources
+                        .iter()
+                        .any(Self::source_uses_anthropic_api_key)
+                {
+                    Some(true)
+                } else {
+                    self.canonical_anthropic_uses_global_credentials()
+                        .then_some(false)
+                }
+            }
             // OAuth delegates are installed in MultiCredentialProvider only at
             // boot. Canonical dynamic routes carry that proof separately from
             // the selected boot source, so an API-key winner does not hide an
             // installed delegate. Cold API-only routes still require restart.
-            "anthropic-oauth" => self
-                .credential_sources
-                .iter()
-                .any(|source| source.profile_name == "anthropic")
-                .then(|| {
-                    (self.anthropic_dynamic_auth && self.anthropic_oauth_delegate_slot)
-                        || self.credential_sources.iter().any(|source| {
-                            source.profile_name == "anthropic"
-                                && source.credential_id == "anthropic-oauth"
-                        })
-                }),
+            "anthropic-oauth" => self.canonical_anthropic_uses_global_credentials().then(|| {
+                (self.anthropic_dynamic_auth && self.anthropic_oauth_delegate_slot)
+                    || self.credential_sources.iter().any(|source| {
+                        source.profile_name == "anthropic"
+                            && source.credential_id == "anthropic-oauth"
+                    })
+            }),
             // The ChatGPT preset exists even on a cold boot, so its source
             // alone does not prove MultiCredentialProvider received a live
             // delegate. The flag is deliberately conservative: after a
@@ -536,7 +531,9 @@ impl FusionCatalogRefresher {
         match credential_id {
             // Apply the resolved route's auth policy, including a credential
             // whose id differs from the source selected during boot.
-            "anthropic" | "anthropic-api-key" | "anthropic-oauth" => {
+            "anthropic" | "anthropic-api-key" | "anthropic-oauth"
+                if self.canonical_anthropic_uses_global_credentials() =>
+            {
                 guard.insert("anthropic".to_string(), self.anthropic_route_available());
             }
             "chatgpt" | "openai-chatgpt" => {
@@ -625,7 +622,9 @@ impl FusionCatalogRefresher {
         // Only the verified canonical route can fall back between API key and
         // OAuth; compatibility and custom profiles keep their explicit auth.
         match credential_id {
-            "anthropic" | "anthropic-api-key" | "anthropic-oauth" => {
+            "anthropic" | "anthropic-api-key" | "anthropic-oauth"
+                if self.canonical_anthropic_uses_global_credentials() =>
+            {
                 guard.insert("anthropic".to_string(), self.anthropic_route_available());
             }
             // ChatGPT gets no per-route OR because there is nothing to OR
@@ -686,13 +685,28 @@ impl FusionCatalogRefresher {
     }
 
     fn source_matches_credential(source: &provider_config::CredentialSource, id: &str) -> bool {
-        source.credential_id == id
-            || source.profile_name == id
-            || (matches!(id, "anthropic" | "anthropic-api-key")
-                && matches!(
-                    source.credential_id.as_str(),
-                    "anthropic" | "anthropic-api-key"
-                ))
+        if matches!(id, "anthropic" | "anthropic-api-key") {
+            return Self::source_uses_anthropic_api_key(source);
+        }
+        source.credential_id == id || source.profile_name == id
+    }
+
+    fn source_uses_anthropic_api_key(source: &provider_config::CredentialSource) -> bool {
+        matches!(
+            source.credential_id.as_str(),
+            "anthropic" | "anthropic-api-key"
+        )
+    }
+
+    /// A user may replace the profile named `anthropic` with an independent
+    /// credential id. Global account/key notifications must leave it alone.
+    fn canonical_anthropic_uses_global_credentials(&self) -> bool {
+        self.anthropic_dynamic_auth
+            || self.credential_sources.iter().any(|source| {
+                source.profile_name == "anthropic"
+                    && (Self::source_uses_anthropic_api_key(source)
+                        || source.credential_id == "anthropic-oauth")
+            })
     }
 
     /// `!isolated && the variable exists` — the ambient half of
