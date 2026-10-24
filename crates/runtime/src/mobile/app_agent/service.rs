@@ -122,7 +122,18 @@ impl OutputStream for Control {
     ) {
     }
     async fn emit_end_turn(&self, _: &str, _: &CostSnapshot) {}
-    async fn emit_terminal_api_error(&self, _: Option<u16>, _: &str, _: &str) {
+    async fn emit_terminal_api_error(&self, status: Option<u16>, kind: &str, _: &str) {
+        // Native-only diagnostics: never log provider bodies, prompts or keys,
+        // and never expose another host channel through the page result.
+        let kind: String = kind
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+            .take(64)
+            .collect();
+        eprintln!(
+            "[local-app-agent] model request failed run={} status={status:?} kind={kind}",
+            self.id
+        );
         self.model_failed.store(true, Ordering::Release);
     }
 }

@@ -376,6 +376,10 @@ impl AppAgentFactory {
             model: model.model_id.clone(),
             max_turns: admission.task.limits.max_turns,
             structured_output_enabled: structured_output.is_some(),
+            // The native host owns live permission/question channels. The
+            // headless defaults reject them before reaching those channels.
+            interactive_session: true,
+            interactive_permissions: true,
             ..OrchestratorConfig::default()
         };
         // A task owns its accounting session. Reading snapshot_cost without a
