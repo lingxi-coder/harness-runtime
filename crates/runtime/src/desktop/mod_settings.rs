@@ -239,7 +239,7 @@ impl ModSettingsReader for DesktopModSettingsReader {
                 }
                 fold(&mut raw, &flag)?;
                 fold(&mut raw, &managed_view(&managed)?)?;
-                let env: BTreeMap<String, String> = std::env::vars().collect();
+                let env = super::settings_environment_for_config(&self.cfg);
                 let (env_settings, _) = lingxi_core::settings::env_parser::parse_env(&env)
                     .map_err(|error| ModError::Hook(error.to_string()))?;
                 let env_source = settings_source(&env_settings)?;

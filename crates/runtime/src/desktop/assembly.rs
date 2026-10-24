@@ -747,10 +747,11 @@ pub(super) fn resolve_ask_user_question_timeout(
 }
 
 pub async fn build(
-    cfg: DesktopConfig,
+    mut cfg: DesktopConfig,
     output: Arc<dyn OutputStream>,
     permission_sink: Arc<dyn PermissionRequestSink>,
 ) -> Result<DesktopRuntime, BuildError> {
+    super::app_invocation::enforce_app_config(&mut cfg)?;
     // Reject malformed embedding options before opening credential storage.
     let _ = permission::PermissionPolicy::new(cfg.permission_mode)
         .with_tool_aliases(cfg.tool_aliases.clone())
@@ -888,6 +889,7 @@ pub async fn build_with_credential_stack(
     permission_sink: Arc<dyn PermissionRequestSink>,
     shared: SharedCredentialStack,
 ) -> Result<DesktopRuntime, BuildError> {
+    super::app_invocation::enforce_app_config(&mut cfg)?;
     let fallback_permission_policy = permission::PermissionPolicy::new(cfg.permission_mode)
         .with_tool_aliases(cfg.tool_aliases.clone())
         .map_err(BuildError::InvalidToolAliases)?;
@@ -1089,7 +1091,9 @@ pub async fn build_with_credential_stack(
     > = proxy_auth_helper
         .as_ref()
         .map(|helper| -> Arc<dyn lingxi_llm_client::transport::ProxyAuthHelper> { helper.clone() });
-    let vision_delegation_enabled = if cfg.restricted {
+    let vision_delegation_enabled = if cfg.app_invocation.is_some() {
+        false
+    } else if cfg.restricted {
         effective_settings
             .settings
             .vision_delegation_enabled
@@ -1102,7 +1106,9 @@ pub async fn build_with_credential_stack(
     // session-file entries (todos/statsig/logs older than the retention period),
     // so it is flag-gated and default-OFF: a no-op unless `LINGXI_RETENTION_SWEEP`
     // is truthy. Runs once at boot on a blocking pool so it never delays startup.
-    tokio::task::spawn_blocking(memory::retention::run_startup_retention_sweep);
+    if cfg.app_invocation.is_none() {
+        tokio::task::spawn_blocking(memory::retention::run_startup_retention_sweep);
+    }
 
     // FIX A/B/C: mint the boot-canonical MAIN session id ONCE and derive the
     // session's transcript path + subagents dir from `(lingxi_home, cwd, id)`.
@@ -1433,7 +1439,9 @@ pub async fn build_with_credential_stack(
     // `--json-schema` structured output: FORCE the `StructuredOutput` tool so the
     // model returns its final result through it (1:1 with claude-code). Untouched
     // for every normal turn (`json_schema` is `None`).
-    let service_built = if cfg.json_schema.is_some() {
+    // App tasks may use approved business tools before submitting their final
+    // structured result. The shared turn-loop still enforces valid capture.
+    let service_built = if cfg.json_schema.is_some() && cfg.app_invocation.is_none() {
         service_built.with_forced_tool_choice(llm_runtime::ToolChoice::Tool {
             name: orchestrator::structured_output::STRUCTURED_OUTPUT_TOOL_NAME.to_string(),
         })
@@ -1473,13 +1481,14 @@ pub async fn build_with_credential_stack(
     // The bridge persists the structured effort choice in the same user
     // settings file used by `/effort`. Seed it before the first turn; an
     // explicit CLI effort remains higher priority and is left untouched.
-    let persisted_reasoning_selection = if cfg.initial_effort.is_none() {
-        command_api::builtins::effort::load_reasoning_default_selection_at(
-            &cfg.lingxi_home.join("settings.json"),
-        )
-    } else {
-        None
-    };
+    let persisted_reasoning_selection =
+        if cfg.initial_effort.is_none() && cfg.app_invocation.is_none() {
+            command_api::builtins::effort::load_reasoning_default_selection_at(
+                &cfg.lingxi_home.join("settings.json"),
+            )
+        } else {
+            None
+        };
     let mut orch_cfg = OrchestratorConfig::default();
     orch_cfg.bare = cfg.customization_gates.bare;
     orch_cfg.model_catalog_restriction =
@@ -1641,10 +1650,14 @@ pub async fn build_with_credential_stack(
     // project style overrides a user one and both override the builtins. A
     // `settings.outputStyle` naming a disk style now activates it
     // (`outputstyles::resolve_output_style`); absent dirs ⇒ builtin-only.
-    orch_cfg.output_style_dirs = vec![
-        cfg.lingxi_home.join("output-styles"),
-        cfg.cwd.join(branding::DOT_DIR).join("output-styles"),
-    ];
+    orch_cfg.output_style_dirs = if cfg.app_invocation.is_some() {
+        Vec::new()
+    } else {
+        vec![
+            cfg.lingxi_home.join("output-styles"),
+            cfg.cwd.join(branding::DOT_DIR).join("output-styles"),
+        ]
+    };
     // CLI `--system-prompt` / `--system-prompt-file`: override the assembled
     // system prompt for the session. `None` keeps the memory-hierarchy prompt
     // assembled from LINGXI.md files (byte-identical to the pre-field state).
@@ -2275,7 +2288,9 @@ pub async fn build_with_credential_stack(
     // become the only servers.)
     for c in &cfg.cli_mcp_servers {
         let mut cli_config = c.clone();
-        cli_config.metadata.cli_owned = true;
+        if cfg.app_invocation.is_none() {
+            cli_config.metadata.cli_owned = true;
+        }
         if let Some(existing) = mcp_configs.iter_mut().find(|x| x.name == c.name) {
             *existing = cli_config;
         } else {
@@ -2338,6 +2353,18 @@ pub async fn build_with_credential_stack(
         &mut mcp_configs,
         &effective_mcp_policy,
     );
+    if cfg.app_invocation.is_some() {
+        // Managed policy may restrict selected servers but cannot silently add
+        // an ungranted server to an app task. Preserve exact config provenance.
+        mcp_configs.retain(|server| {
+            cfg.cli_mcp_servers.iter().any(|selected| {
+                match (serde_json::to_value(selected), serde_json::to_value(server)) {
+                    (Ok(selected), Ok(server)) => selected == server,
+                    _ => false,
+                }
+            })
+        });
+    }
     if strict_plugin_only_mcp {
         // The strict slot accepts plugin and policy-controlled sources only.
         // Plugin servers materialize later through PluginManager; preserve
@@ -4004,7 +4031,8 @@ pub async fn build_with_credential_stack(
     //        Gated by the `CLAUDE_CODE_DISABLE_CRON` local kill-switch
     //        (claude-code `prompt.ts:34/38` — the env override that wins over the
     //        GrowthBook fleet flag, which itself defaults on).
-    let cron_scheduler = if !cron_native::is_child_runtime()
+    let cron_scheduler = if cfg.app_invocation.is_none()
+        && !cron_native::is_child_runtime()
         && cron_scheduler_enabled(std::env::var("CLAUDE_CODE_DISABLE_CRON").ok().as_deref())
     {
         if cfg.enable_automation_scheduler && cfg.host_workspace_trusted == Some(true) {
@@ -4078,7 +4106,7 @@ pub async fn build_with_credential_stack(
 
     // Share task delivery and cancellation with the implicit team service.
     let spawn_seam: Arc<dyn lingxi_core::host::team_spawn::TeamSpawnSeam> =
-        if lingxi_core::host::env::agent_swarms_enabled() {
+        if cfg.app_invocation.is_none() && lingxi_core::host::env::agent_swarms_enabled() {
             let executable = std::env::current_exe()
                 .ok()
                 .filter(|path| {
@@ -4120,7 +4148,7 @@ pub async fn build_with_credential_stack(
         .set_teammate_departure_cleanup(Arc::downgrade(&departure_owner))
         .await;
 
-    if lingxi_core::host::env::agent_swarms_enabled() {
+    if cfg.app_invocation.is_none() && lingxi_core::host::env::agent_swarms_enabled() {
         task_registry
             .set_external_teammate_controller(Arc::downgrade(&spawn_seam))
             .await;
@@ -4198,7 +4226,7 @@ pub async fn build_with_credential_stack(
             tiers.push(managed_policy);
         }
         let refs: Vec<&str> = tiers.iter().map(String::as_str).collect();
-        let raw_env = std::env::vars().collect::<std::collections::BTreeMap<_, _>>();
+        let raw_env = super::settings_environment_for_config(&cfg);
         let (include_user, include_project) = if cfg.restricted {
             (false, false)
         } else {
@@ -4358,19 +4386,20 @@ pub async fn build_with_credential_stack(
     // after `task_registry` exists — so NO deferred cell is needed; the
     // one-shot / teammate / workflow handlers keep the raw spawner captured
     // earlier (they only use the sync `spawn`, which the decorator delegates).
-    let teammate_spawner = if lingxi_core::host::env::agent_swarms_enabled() {
-        let spawner = Arc::new(coordinator::ImplicitTeammateSpawner::new(
-            coordinator.clone(),
-            spawn_seam.clone(),
-            Arc::new(PosixRuntime::new()),
-            output.clone(),
-            main_session_id.to_string(),
-        ));
-        spawner.initialize().await;
-        Some(spawner)
-    } else {
-        None
-    };
+    let teammate_spawner =
+        if cfg.app_invocation.is_none() && lingxi_core::host::env::agent_swarms_enabled() {
+            let spawner = Arc::new(coordinator::ImplicitTeammateSpawner::new(
+                coordinator.clone(),
+                spawn_seam.clone(),
+                Arc::new(PosixRuntime::new()),
+                output.clone(),
+                main_session_id.to_string(),
+            ));
+            spawner.initialize().await;
+            Some(spawner)
+        } else {
+            None
+        };
     let subagent_spawner: Arc<dyn lingxi_core::host::subagent_spawn::SubagentSpawner> =
         Arc::new(background_agent::BackgroundAgentSpawner {
             mod_hooks: Some(hook_registry.clone()),
@@ -4712,8 +4741,8 @@ pub async fn build_with_credential_stack(
         cfg.diagnostics.as_deref(),
     )
     .await?;
-    let coordinator_wiring = (lingxi_core::host::env::agent_swarms_enabled()
-        || cfg.session_started_as_coordinator)
+    let coordinator_wiring = (cfg.app_invocation.is_none()
+        && (lingxi_core::host::env::agent_swarms_enabled() || cfg.session_started_as_coordinator))
         .then(|| CoordinatorWiring {
             team: coordinator.clone(),
             spawn_seam: spawn_seam.clone(),
@@ -5281,6 +5310,9 @@ pub async fn build_with_credential_stack(
     if cfg.restricted || cfg.restricted_tools.is_some() {
         tools_inner.set_restricted_builtin_filter(cfg.restricted_tools.as_deref());
     }
+    if let Some(lease) = cfg.session_tool_grant_lease.clone() {
+        tools_inner.set_session_tool_policy(lease);
+    }
 
     // Tool Search (2.1.207): now that the registry is fully assembled (builtins
     // + workflow + MCP + structured-output + end-conversation), publish the
@@ -5727,12 +5759,16 @@ pub async fn build_with_credential_stack(
     ))
     .await
     .with_dynamic_workflows_gate(dynamic_workflows_gate)
-    .with_instruction_user_email_provider(instruction_identity.clone())
     .with_mod_surface_roster(mod_surface_roster.clone())
     .with_native_sandbox_host_facts_provider(sandbox_host_facts_provider)
     .with_native_policy_host_facts_provider(native_policy_host_facts_provider)
     .with_native_tool_pool_refresh_callback_available(native_tool_pool_refresh_callback_available)
     .with_native_settings_agent_context(cfg.native_settings_agent_context);
+    let orch_builder = if cfg.app_invocation.is_none() {
+        orch_builder.with_instruction_user_email_provider(instruction_identity.clone())
+    } else {
+        orch_builder
+    };
     let orch_builder = orch_builder.with_workflow_size_guideline(workflow_size_guideline_state);
     let orch_builder = orch_builder.with_idle_compaction_enabled(cfg.idle_compaction_enabled);
     // Gap #5: wire the production JSONL writer (constructed just above) so the
@@ -5882,12 +5918,6 @@ pub async fn build_with_credential_stack(
                     as Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
                 project_root: watch_cwd.clone(),
             }))
-            // Finding #73: supply the V2 task list to the per-turn `task_reminder`
-            // (the default variant when tasks are enabled). Reads the file-backed
-            // `TodoStore` for the active list each turn, resolving the list id via the
-            // same env/team precedence the `Task*` tools use. V1 (`todo_reminder`)
-            // needs no provider; it reads `session.todos` directly.
-            .with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()))
             // P1-06: hand the orchestrator the SAME `readFileState` map the file tools'
             // `BuiltinToolContext` share (created just above), so a tool's
             // `readFileState.set` feeds the post-compact file restore + staleness /
@@ -5895,6 +5925,13 @@ pub async fn build_with_credential_stack(
             .with_read_state_map(read_state_map)
     });
     let orch_builder = *orch_builder;
+    // A normal session may load persisted todos. An app task has no authority
+    // to inherit the user's ambient task-list selection through environment.
+    let orch_builder = if cfg.app_invocation.is_none() {
+        orch_builder.with_todo_reminder_tasks(Arc::new(orchestrator::TodoStoreReminderTasks::new()))
+    } else {
+        orch_builder
+    };
 
     // MEM-1 ACTIVATION. The composition-root presence of the prefetch IS the
     // gate (`memory_prefetch.is_some()`), and that presence is now decided by
@@ -5908,13 +5945,17 @@ pub async fn build_with_credential_stack(
     //
     // Memory selection follows the live session's model and profile; turn it
     // off with `autoMemoryEnabled:false` or `*_DISABLE_AUTO_MEMORY` / `*_SIMPLE`.
-    let (memory_prefetch_on, session_memory_on) = resolve_memory_feature_gates(
-        memory::auto_memory_enabled(
-            &memory::AutoMemoryEnv::from_process_env(),
-            effective_settings.settings.auto_memory_enabled,
-        ),
-        is_env_truthy("LINGXI_SESSION_MEMORY"),
-    );
+    let (memory_prefetch_on, session_memory_on) = if cfg.app_invocation.is_some() {
+        (false, false)
+    } else {
+        resolve_memory_feature_gates(
+            memory::auto_memory_enabled(
+                &memory::AutoMemoryEnv::from_process_env(),
+                effective_settings.settings.auto_memory_enabled,
+            ),
+            is_env_truthy("LINGXI_SESSION_MEMORY"),
+        )
+    };
     let orch_builder = match (memory_prefetch_on, dirs::home_dir()) {
         (true, Some(home)) => {
             orch_builder.with_memory_prefetch(orchestrator::prompt::build_memdir_prefetch(
@@ -5967,9 +6008,10 @@ pub async fn build_with_credential_stack(
     // trigger discovery — the binary's native lexical index; AKI/Haiku backends
     // are out of scope). Unset/false ⇒ no prefetch ⇒ everything inert and the
     // locked fixtures byte-identical.
-    let skill_search_on = telemetry::flag_bool("EXPERIMENTAL_SKILL_SEARCH", false)
-        || is_env_truthy("CLAUDE_CODE_EXPERIMENTAL_SKILL_SEARCH")
-        || is_env_truthy("LINGXI_SKILL_SEARCH");
+    let skill_search_on = cfg.app_invocation.is_none()
+        && (telemetry::flag_bool("EXPERIMENTAL_SKILL_SEARCH", false)
+            || is_env_truthy("CLAUDE_CODE_EXPERIMENTAL_SKILL_SEARCH")
+            || is_env_truthy("LINGXI_SKILL_SEARCH"));
     let orch_builder = if skill_search_on {
         let source: Arc<dyn skill::SkillCandidateSource> = Arc::new(
             skill::RegistryCandidateSource::new(Arc::new(desktop_skill_registry())),

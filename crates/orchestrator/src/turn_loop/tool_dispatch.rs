@@ -6839,7 +6839,15 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     // Keep the call future in this inner scope. When cancellation wins,
                     // leaving the scope drops the non-cooperative future (and its
                     // progress sender) before we await the progress consumer below.
-                    let tool_call = tool_handle.call(effective_input.clone(), ctx, progress_tx);
+                    // A permission prompt may have parked this Arc while the
+                    // owning app revoked its grant. Recheck live authority at
+                    // physical dispatch, after all approvals and input hooks.
+                    let tool_call = async {
+                        orch.tools.check_session_tool_access(tool_handle.as_ref())?;
+                        tool_handle
+                            .call(effective_input.clone(), ctx, progress_tx)
+                            .await
+                    };
                     tokio::pin!(tool_call);
                     let outcome = match (interrupt_behavior, dispatch_cancel) {
                         (tool_api::tool_trait::InterruptBehavior::Cancel, Some(cancel)) => {

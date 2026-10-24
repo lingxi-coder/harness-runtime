@@ -41,6 +41,15 @@ pub trait Tool: Send + Sync {
     /// Canonical tool name (e.g. `"Read"`, `"Bash"`).
     fn name(&self) -> &str;
 
+    /// Host-derived MCP provenance, never reconstructed from an FQN or alias.
+    fn mcp_tool_identity(&self) -> Option<&crate::McpToolIdentity> {
+        None
+    }
+
+    /// Bind a restricted invocation lease to transport-backed tools.
+    /// Ordinary builtin dispatch is checked by the registry and invoker.
+    fn bind_session_tool_lease(&self, _lease: crate::SessionToolGrantLease) {}
+
     /// Alternate names the dispatcher should accept for this tool.
     ///
     /// Defaults to no aliases.

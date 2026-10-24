@@ -272,6 +272,9 @@ impl RegistryToolInvoker {
         let tool = supplied
             .or_else(|| self.registry.find_by_name(name))
             .ok_or_else(|| ToolInvokerError::NotFound(name.to_string()))?;
+        self.registry
+            .check_session_tool_access(tool.as_ref())
+            .map_err(|error| ToolInvokerError::Internal(error.model_facing_message()))?;
 
         // BASH-18 `coerceInput` (claude-code 2.1.238 BIN off **294282716**): the
         // tool's own pre-validation normalization of the model's raw arguments.
@@ -634,6 +637,9 @@ impl RegistryToolInvoker {
         // modifiers to this snapshot only after the tool-result batch settles.
         let context_state = ToolInvocationContextState::new(Arc::new(tool_use_ctx.clone()));
 
+        self.registry
+            .check_session_tool_access(tool.as_ref())
+            .map_err(|error| ToolInvokerError::Internal(error.model_facing_message()))?;
         let result = tool
             .call(input, tool_use_ctx, progress_tx)
             .await
@@ -1876,6 +1882,39 @@ mod tests {
             self.seen.lock().unwrap().push(name.to_string());
             self.decision.clone()
         }
+    }
+
+    struct RevokingGate(crate::SessionToolGrantLease);
+    #[async_trait]
+    impl Gate for RevokingGate {
+        async fn check(&self, _name: &str, _input: &Utf16JsonProjection) -> GateDecision {
+            // Simulate an approval completing after its app was revoked.
+            self.0.revoke();
+            GateDecision::Allow
+        }
+    }
+
+    #[tokio::test]
+    async fn app_tool_grant_revoked_during_approval_never_enters_body() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(ToolPermissionProbe {
+            result: allow_for_tests(),
+            is_mcp: false,
+            calls: calls.clone(),
+        }));
+        let lease = crate::SessionToolGrantLease::new(crate::SessionToolPolicy {
+            builtin_tools: std::collections::HashSet::from(["ToolPermissionProbe".into()]),
+            mcp_tools: Default::default(),
+        });
+        registry.set_session_tool_policy(lease.clone());
+        let invoker =
+            RegistryToolInvoker::new(Arc::new(registry)).with_gate(Arc::new(RevokingGate(lease)));
+        let result = invoker
+            .invoke("ToolPermissionProbe", json!({}), no_ctx())
+            .await;
+        assert!(result.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     fn no_ctx() -> SubagentInvocationContext {

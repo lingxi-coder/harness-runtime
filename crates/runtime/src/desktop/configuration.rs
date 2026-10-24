@@ -258,6 +258,11 @@ pub trait DesktopDiagnosticSink: Send + Sync {
 /// ```
 #[derive(Clone)]
 pub struct DesktopConfig {
+    /// Trusted, isolated Local App invocation. Hosts construct this through
+    /// [`super::app_invocation::prepare_app_config`], never from renderer config.
+    pub app_invocation: Option<super::app_invocation::AppInvocationProfile>,
+    /// Frozen tool grants for this invocation. Clones share permanent revocation.
+    pub session_tool_grant_lease: Option<tool_api::SessionToolGrantLease>,
     /// Host-scoped official catalog delivery; absent in deterministic embedders.
     pub startup_catalog: Option<provider_config::startup_catalog::StartupCatalog>,
     /// Host-owned Git root-marker cache shared by cloned configs and every
@@ -977,6 +982,17 @@ impl std::fmt::Debug for DesktopConfig {
         // only as presence/count markers so `{cfg:?}` remains safe for host
         // diagnostics. Trait objects use the same presence-only convention.
         f.debug_struct("DesktopConfig")
+            .field(
+                "app_invocation",
+                &self.app_invocation.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "session_tool_grant_lease",
+                &self
+                    .session_tool_grant_lease
+                    .as_ref()
+                    .map(|_| "<configured>"),
+            )
             .field("host_git_root_cache", &"<host-owned cache>")
             .field(
                 "managed_policy_snapshot_cache_initialized",
@@ -1186,6 +1202,8 @@ impl std::fmt::Debug for DesktopConfig {
 impl Default for DesktopConfig {
     fn default() -> Self {
         Self {
+            app_invocation: None,
+            session_tool_grant_lease: None,
             startup_catalog: None,
             host_git_root_cache: Arc::new(tool_api::HostGitRootCache::new()),
             managed_policy_snapshot_cache:

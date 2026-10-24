@@ -25,6 +25,7 @@
 
 pub mod agent_restore;
 mod agent_skill_loader;
+pub mod app_invocation;
 pub mod auto_mode_propose;
 mod sdk;
 pub use sdk::build_harness;
@@ -2800,8 +2801,11 @@ impl DesktopRuntime {
         &self,
         effects: &hooks::response::AggregateHookResult,
     ) -> Option<command_api::CommandResult> {
-        prompt_directories::reload_skills_after_session_start(&self.shared_command_registry, effects)
-            .await
+        prompt_directories::reload_skills_after_session_start(
+            &self.shared_command_registry,
+            effects,
+        )
+        .await
     }
 
     /// Original session launch root used by hooks. A host remounting this
@@ -3166,6 +3170,9 @@ fn new_live_sandbox_runner_with_permission_gate(
 /// without changing every call site.
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// A Local App invocation failed its host-owned isolation contract.
+    #[error("invalid app invocation: {0}")]
+    AppInvocation(#[from] app_invocation::AppInvocationError),
     /// Settings layers could not be composed without discarding a source error.
     #[error("settings load failed: {0}")]
     Settings(#[from] lingxi_core::settings::SettingsError),
@@ -3755,7 +3762,7 @@ pub fn resolve_provider_region(
     } else {
         Vec::new()
     };
-    let env: BTreeMap<String, String> = std::env::vars().collect();
+    let env = settings_environment_for_config(cfg);
     let (include_user, include_project) = if cfg.restricted {
         (false, false)
     } else {
@@ -3811,7 +3818,7 @@ fn load_effective_settings_for_config_with_defaults(
     } else {
         cfg.setting_source_scope
     };
-    let env = std::env::vars().collect::<BTreeMap<_, _>>();
+    let env = settings_environment_for_config(cfg);
     load_effective_settings_with_inputs(
         cfg,
         managed_snapshot,
@@ -3823,6 +3830,16 @@ fn load_effective_settings_for_config_with_defaults(
         &env,
         defaults,
     )
+}
+
+/// App invocations accept host-selected provider inputs and managed policy, not
+/// ambient model/prompt/settings overrides inherited by the desktop process.
+fn settings_environment_for_config(cfg: &DesktopConfig) -> BTreeMap<String, String> {
+    if cfg.app_invocation.is_some() {
+        BTreeMap::new()
+    } else {
+        std::env::vars().collect()
+    }
 }
 
 fn load_effective_settings_with_inputs(
@@ -5143,14 +5160,19 @@ impl lingxi_core::host::RepoRootReloader for DesktopRepoRootReloader {
                 &additional_skill_dirs,
                 &additional_skill_dirs
                     .iter()
-                    .filter_map(|directory| directory.parent().map(|parent| parent.join("commands")))
+                    .filter_map(|directory| {
+                        directory.parent().map(|parent| parent.join("commands"))
+                    })
                     .collect::<Vec<_>>(),
             );
             match parse_slash_command(&"/reload-skills".into()) {
                 Some(parsed) => match handler.handle(&parsed).await {
                     CommandResult::Done { .. } => {
                         outcome.skills_reloaded = true;
-                        self.registry.write().await.register_builtin_handler(Arc::new(handler));
+                        self.registry
+                            .write()
+                            .await
+                            .register_builtin_handler(Arc::new(handler));
                     }
                     _ => outcome
                         .errors

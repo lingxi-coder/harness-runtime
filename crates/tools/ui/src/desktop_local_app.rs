@@ -26,14 +26,14 @@ use tool_api::util::path_validation::{
 use tool_api::BuiltinToolContext;
 use visualization::{VisualizationId, VisualizationRef};
 
-const PROMPT: &str = "Create and manage Local Apps. Load the local-app skill first. Publish a multi-file project with schema-2 lingxi-app.json using bundle_path, or a simple document using html/file_path. Apps have independent versions and data and survive their authoring conversation. Read the latest revision and pass expectedRevision when updating; never silently overwrite concurrent work. Node/Python services run only after the user authorizes the exact release in the native Apps page, including install/build scripts. Keep dependencies inside the app environment, never change the shared Linux toolchain. Host and guest architectures and supported capabilities determine compatibility. Local publication does not upload to a market. Use start/status/logs to verify and stop for the app's own processes. Never pass private host transport, source-session or permission fields.";
+const PROMPT: &str = "Create and manage Local Apps. Load the local-app skill first. Publish a multi-file project with schema-2 lingxi-app.json using bundle_path, or a simple document using html/file_path. Apps have independent versions and data and survive their authoring conversation. Read the latest revision and pass expectedRevision when updating; never silently overwrite concurrent work. Node/Python services run only after the user authorizes the exact release in the native Apps page, including install/build scripts. Keep dependencies inside the app environment, never change the shared Linux toolchain. Host and guest architectures and supported capabilities determine compatibility. Local publication does not upload to a market. Use start/status/logs to verify and stop for the app's own processes. Use agent_catalog to discover exact host model and tool IDs; discovery does not grant access. Never pass private host transport, source-session or permission fields.";
 // Matches the desktop host's transport budget, not mobile document limits.
 const MAX_HOST_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 static SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     generated_builtin_schema(&json!({
       "type":"object", "additionalProperties":false,
       "properties": {
-        "action":{"type":"string","enum":["publish","list","read","start","stop","status","logs"]},
+        "action":{"type":"string","enum":["publish","list","read","start","stop","status","logs","agent_catalog"]},
         "id":{"type":"string","pattern":"^a[a-f0-9]{32}$"},
         "expectedRevision":{"type":"integer","minimum":0,"description":"Required latest revision when updating an existing application; zero for a new app."},
         "name":{"type":"string","maxLength":60}, "summary":{"type":"string","maxLength":160},
@@ -532,7 +532,18 @@ impl Tool for DesktopLocalAppTool {
                 "Updating an application requires expectedRevision from its latest record".into(),
             ));
         }
-        if !["publish", "list", "read", "start", "stop", "status", "logs"].contains(&action) {
+        if ![
+            "publish",
+            "list",
+            "read",
+            "start",
+            "stop",
+            "status",
+            "logs",
+            "agent_catalog",
+        ]
+        .contains(&action)
+        {
             return Err(ValidationError("Unknown LocalApp action".into()));
         }
         if action == "publish"
