@@ -320,7 +320,25 @@ impl AppAgentFactory {
         tool_file::register_all(&mut tools, context.clone());
         tool_shell_mobile::register_all(&mut tools, context.clone());
         tool_web::register_all(&mut tools, context.clone(), None);
-        tool_meta::register_all(&mut tools, context.clone());
+        // Native deferred definitions and tool_reference results belong to the
+        // Anthropic protocol family. In other codecs expose only the lease's
+        // authorized tools inline; never advertise an unsupported discovery hop.
+        let protocol = self
+            .api
+            .protocol_for_model(&model.model_id, Some(&model.provider_id))
+            .ok();
+        if app_supports_deferred_tool_search(protocol) {
+            tool_meta::register_all(&mut tools, context.clone());
+        } else {
+            let deferral = Arc::new(tool_api::DeferralState::disabled());
+            tools.set_deferral(deferral.clone());
+            tools.register_builtin(Arc::new(tool_meta::ConfigTool::new(context.clone())));
+            tools.register_builtin(Arc::new(tool_meta::ToolSearchTool::with_view_and_deferral(
+                context.clone(),
+                tools.tool_search_view(),
+                deferral,
+            )));
+        }
         let resolver = Arc::new(tool_ui::ask_user_question::TuiBridgeResolver::new(
             tool_ui::ask_user_question::AskUserQuestionTimeout::parse_or_default(None),
             questions,
@@ -426,5 +444,41 @@ impl AppAgentFactory {
             structured_output,
             cleanup_failed,
         })
+    }
+}
+
+fn app_supports_deferred_tool_search(protocol: Option<llm_runtime::ProtocolFamily>) -> bool {
+    use llm_runtime::ProtocolFamily::*;
+    matches!(
+        protocol,
+        Some(AnthropicMessages | VertexClaude | BedrockClaude | FoundryClaude)
+    )
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+    #[test]
+    fn app_discovery_is_bound_to_the_selected_wire_protocol() {
+        use llm_runtime::ProtocolFamily::*;
+        for protocol in [
+            AnthropicMessages,
+            VertexClaude,
+            BedrockClaude,
+            FoundryClaude,
+        ] {
+            assert!(app_supports_deferred_tool_search(Some(protocol)));
+        }
+        for protocol in [
+            OpenAiChat,
+            OpenAiResponses,
+            GeminiGenerateContent,
+            GeminiInteractions,
+            VertexGemini,
+            AzureOpenAi,
+        ] {
+            assert!(!app_supports_deferred_tool_search(Some(protocol)));
+        }
+        assert!(!app_supports_deferred_tool_search(None));
     }
 }
