@@ -31,7 +31,6 @@ struct Control {
     owner: Owner,
     id: String,
     cancel: CancellationToken,
-    owner_cancel: CancellationToken,
     finished: AtomicBool,
     done: Notify,
     lease: Mutex<Option<SessionToolGrantLease>>,
@@ -226,7 +225,6 @@ impl AppAgentHost {
                         owner: owner.clone(),
                         id: id.clone(),
                         cancel: owner_cancel.child_token(),
-                        owner_cancel,
                         finished: AtomicBool::new(false),
                         done: Notify::new(),
                         lease: Mutex::new(None),
@@ -339,7 +337,7 @@ impl AppAgentHost {
             cwd,
             control.clone(),
             control.clone(),
-            control.owner_cancel.clone(),
+            control.cancel.clone(),
             question_tx,
         );
         let session = tokio::select! {biased;_=control.cancel.cancelled()=>return Err("cancelled".into()),result=building=>result?};

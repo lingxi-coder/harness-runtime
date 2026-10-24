@@ -247,12 +247,19 @@ impl AppAgentFactory {
                 .insert(STRUCTURED_OUTPUT_TOOL_NAME.into());
         }
         let config_home = self.config_home.clone();
+        let task_cancel = owner_cancel.clone();
         let lease = SessionToolGrantLease::new(policy)
             .with_owner_cancellation(owner_cancel)
             .with_live_mcp_guard(Arc::new(move |identity| {
-                Self::configured_servers_at(&config_home).is_ok_and(|servers| {
+                let valid = Self::configured_servers_at(&config_home).is_ok_and(|servers| {
                     servers.iter().any(|server| identity.matches_config(server))
-                })
+                });
+                // Wake pending native approvals as well as rejecting the RPC.
+                // This is the task child token, never the app invocation root.
+                if !valid {
+                    task_cancel.cancel();
+                }
+                valid
             }));
         let session_id = SessionId::new();
         let mut context = self.context.clone();

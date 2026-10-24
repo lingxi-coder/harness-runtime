@@ -337,3 +337,16 @@ fn unsupported_image_model_result_explains_the_remedy() {
     assert_eq!(error.code, "model_vision_unsupported");
     assert!(error.message.contains("image-capable model"));
 }
+
+#[test]
+fn object_key_order_does_not_create_a_request_conflict() {
+    let (_dir, store) = store();
+    let mut first = input();
+    first.output_schema = Some(serde_json::from_str(r#"{"type":"object","properties":{"food":{"type":"string"},"grams":{"minimum":0,"type":"number"}}}"#).unwrap());
+    let accepted = store.admit(&owner(), &first, &[]).unwrap();
+    let mut retry = input();
+    retry.output_schema = Some(serde_json::from_str(r#"{"properties":{"grams":{"type":"number","minimum":0},"food":{"type":"string"}},"type":"object"}"#).unwrap());
+    let repeated = store.admit(&owner(), &retry, &[]).unwrap();
+    assert!(!repeated.start);
+    assert_eq!(repeated.task.run_id, accepted.task.run_id);
+}

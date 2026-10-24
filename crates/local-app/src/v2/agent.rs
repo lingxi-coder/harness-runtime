@@ -204,7 +204,27 @@ fn now() -> u64 {
         .as_millis() as u64
 }
 fn digest(input: &Input) -> Result<String, AppError> {
-    Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(input)?)))
+    // The product enables serde_json/preserve_order. A schema reconstructed
+    // after reload can have another object-key order without changing input.
+    fn canonical(value: Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let sorted: BTreeMap<_, _> = map
+                    .into_iter()
+                    .map(|(key, value)| (key, canonical(value)))
+                    .collect();
+                Value::Object(sorted.into_iter().collect())
+            }
+            Value::Array(values) => Value::Array(values.into_iter().map(canonical).collect()),
+            other => other,
+        }
+    }
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&canonical(serde_json::to_value(
+            input
+        )?))?)
+    ))
 }
 /// Stable page-facing errors; storage details and raw OS errors stay in the host.
 pub fn admission_error_code(error: &AppError) -> &'static str {
