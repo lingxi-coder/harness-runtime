@@ -230,6 +230,28 @@ pub(super) fn fusion_route_flag(initial: bool) -> Arc<std::sync::atomic::AtomicB
     Arc::new(std::sync::atomic::AtomicBool::new(initial))
 }
 
+/// Only the resolved first-party Messages profile selects its authentication
+/// per request. A source id alone cannot prove the endpoint or wire protocol.
+pub(super) fn anthropic_dynamic_auth_profile(profiles: &[llm_runtime::ProviderProfile]) -> bool {
+    profiles.iter().any(|profile| {
+        if !matches!(
+            profile.auth,
+            llm_runtime::AuthStrategy::ApiKey | llm_runtime::AuthStrategy::OAuthBearer
+        ) {
+            return false;
+        }
+        let credential_id = match &profile.credential {
+            llm_runtime::CredentialConfig::Static { id }
+            | llm_runtime::CredentialConfig::HostManaged { id } => id,
+            _ => return false,
+        };
+        llm_runtime::CredentialScope::new(profile.provider_id.clone(), &profile.profile_name)
+            .with_credential_id(credential_id)
+            .with_route(&profile.base_url, profile.protocol)
+            .selects_anthropic_auth()
+    })
+}
+
 /// Handle a credential-write path (`/connect` completion, a finished
 /// `/login`) calls after persisting a new credential, so Fusion's catalog
 /// filter (`FusionCatalogModelSource`) sees it within the same process —
@@ -256,13 +278,17 @@ pub struct FusionCatalogRefresher {
     /// (`anthropic-api-key` / `anthropic-oauth` / `openai-chatgpt`).
     ///
     /// These cells are shared by every clone so a successful write or delete
-    /// cannot be undone by a later detached probe. They describe whether the
-    /// credential for the route is currently present; `credential_sources`
-    /// separately records which fixed authentication route the client was
-    /// assembled with. In particular, storing an API key cannot hot-switch a
-    /// client assembled for OAuth (or vice versa).
+    /// cannot be undone by a later detached probe. They describe credential
+    /// presence; the capabilities below determine which credentials the
+    /// resolved route can actually use.
     pub(super) anthropic_has_api_key: Arc<std::sync::atomic::AtomicBool>,
     pub(super) anthropic_has_oauth: Arc<std::sync::atomic::AtomicBool>,
+    /// Proven from the assembled provider, profile, origin and protocol by
+    /// the same predicate ModelRuntime uses for request-local auth selection.
+    pub(super) anthropic_dynamic_auth: bool,
+    /// A delegate installed in MultiCredentialProvider survives logout. A
+    /// fresh OAuth login can reuse it, but a cold API-only graph cannot.
+    pub(super) anthropic_oauth_delegate_slot: bool,
     pub(super) openai_chatgpt_available: Arc<std::sync::atomic::AtomicBool>,
     /// Whether ChatGPT is served from a host's session
     /// (`SharedCredentialStack::openai_host_session`). That session stays the
@@ -310,6 +336,8 @@ impl FusionCatalogRefresher {
                 .collect(),
             anthropic_has_api_key: fusion_route_flag(false),
             anthropic_has_oauth: fusion_route_flag(false),
+            anthropic_dynamic_auth: false,
+            anthropic_oauth_delegate_slot: false,
             openai_chatgpt_available: fusion_route_flag(false),
             openai_chatgpt_session_slot: false,
             isolated: true,
@@ -387,34 +415,36 @@ impl FusionCatalogRefresher {
         match credential_id {
             // API-key routes resolve CredentialManager on every request, so a
             // cold API-key profile can adopt its first key without rebuilding
-            // ModelRuntime. The assembled source is the proof that this
-            // runtime actually chose that auth strategy.
+            // ModelRuntime. Canonical request-local selection also permits a
+            // key on a route whose boot source happened to select OAuth.
             "anthropic" | "anthropic-api-key" => self
                 .credential_sources
                 .iter()
                 .any(|source| source.profile_name == "anthropic")
                 .then(|| {
-                    self.credential_sources.iter().any(|source| {
-                        source.profile_name == "anthropic"
-                            && matches!(
-                                source.credential_id.as_str(),
-                                "anthropic" | "anthropic-api-key"
-                            )
-                    })
+                    self.anthropic_dynamic_auth
+                        || self.credential_sources.iter().any(|source| {
+                            source.profile_name == "anthropic"
+                                && matches!(
+                                    source.credential_id.as_str(),
+                                    "anthropic" | "anthropic-api-key"
+                                )
+                        })
                 }),
             // OAuth delegates are installed in MultiCredentialProvider only at
-            // boot. An OAuth source proves that the delegate exists and can be
-            // used again after logout/login; an API-key source cannot adopt a
-            // newly persisted OAuth session without restart.
+            // boot. Canonical dynamic routes carry that proof separately from
+            // the selected boot source, so an API-key winner does not hide an
+            // installed delegate. Cold API-only routes still require restart.
             "anthropic-oauth" => self
                 .credential_sources
                 .iter()
                 .any(|source| source.profile_name == "anthropic")
                 .then(|| {
-                    self.credential_sources.iter().any(|source| {
-                        source.profile_name == "anthropic"
-                            && source.credential_id == "anthropic-oauth"
-                    })
+                    (self.anthropic_dynamic_auth && self.anthropic_oauth_delegate_slot)
+                        || self.credential_sources.iter().any(|source| {
+                            source.profile_name == "anthropic"
+                                && source.credential_id == "anthropic-oauth"
+                        })
                 }),
             // The ChatGPT preset exists even on a cold boot, so its source
             // alone does not prove MultiCredentialProvider received a live
@@ -494,16 +524,18 @@ impl FusionCatalogRefresher {
         // credential_id covers the keychain-profile constructor and the
         // provider-config source shape without doing any keychain I/O.
         if compatibility == Some(true) {
-            for source in self.credential_sources.iter().filter(|source| {
-                source.credential_id == credential_id || source.profile_name == credential_id
-            }) {
+            for source in self
+                .credential_sources
+                .iter()
+                .filter(|source| Self::source_matches_credential(source, credential_id))
+            {
                 guard.insert(source.profile_name.clone(), true);
             }
         }
 
         match credential_id {
-            // Same alias grouping as the removal arm. The helper gates live
-            // credential flags by the single auth protocol this client wired.
+            // Apply the resolved route's auth policy, including a credential
+            // whose id differs from the source selected during boot.
             "anthropic" | "anthropic-api-key" | "anthropic-oauth" => {
                 guard.insert("anthropic".to_string(), self.anthropic_route_available());
             }
@@ -525,9 +557,9 @@ impl FusionCatalogRefresher {
 
     /// Publish a known credential removal without consulting storage.
     ///
-    /// Generic profiles are re-derived from unaffected sources and ambient
+    /// Generic profiles are re-derived from unaffected sources and permitted
     /// environment variables; special routes use their live presence flags
-    /// gated by the fixed protocol recorded in `credential_sources`. The epoch
+    /// gated by their resolved auth capabilities. The epoch
     /// is advanced after the map update so an older detached probe cannot
     /// resurrect the removed route.
     pub async fn mark_credential_removed(&self, credential_id: &str) {
@@ -540,13 +572,20 @@ impl FusionCatalogRefresher {
         {
             return;
         }
+        // This reads only the process-local override map, never keychain.
+        // A host-managed deletion must not revive an ambient environment key
+        // that the request resolver deliberately suppresses.
+        let api_key_suppressed = self
+            .credentials
+            .provider_key_is_suppressed(credential_id)
+            .await;
         // Treat the availability lock as the mutation boundary, just like
         // `publish_credential_established`: the delete's epoch, route flags
         // and map publication must be ordered as one mutation.  In-flight
         // probes check this epoch while holding the same lock before they
         // publish, so a late refresh cannot resurrect this delete.
         let Ok(mut guard) = self.availability.write() else {
-            self.note_route_credential_removed(credential_id);
+            self.note_route_credential_removed(credential_id, api_key_suppressed);
             self.next_mutation_epoch();
             return;
         };
@@ -555,14 +594,12 @@ impl FusionCatalogRefresher {
         //     special-cased rows from these same flags — sees the removal.
         //     Without this the next unrelated credential write republishes
         //     the boot value and resurrects the entry the delete cleared.
-        self.note_route_credential_removed(credential_id);
+        self.note_route_credential_removed(credential_id, api_key_suppressed);
 
         let affected: std::collections::BTreeSet<String> = self
             .credential_sources
             .iter()
-            .filter(|source| {
-                source.credential_id == credential_id || source.profile_name == credential_id
-            })
+            .filter(|source| Self::source_matches_credential(source, credential_id))
             .map(|source| source.profile_name.clone())
             .collect();
         let rederived: Vec<(String, bool)> = affected
@@ -572,7 +609,9 @@ impl FusionCatalogRefresher {
                     .credential_sources
                     .iter()
                     .filter(|source| source.profile_name == profile)
-                    .any(|source| self.route_survives_removal(source, credential_id));
+                    .any(|source| {
+                        self.route_survives_removal(source, credential_id, api_key_suppressed)
+                    });
                 (profile, available)
             })
             .collect();
@@ -582,10 +621,9 @@ impl FusionCatalogRefresher {
         }
         // Normalize the special aliases after the generic source pass. The
         // route flags record credential presence, while
-        // `anthropic_route_available` additionally gates them by the one auth
-        // protocol `assemble` wired into this client. Thus both Anthropic
-        // credentials may exist without an OAuth logout falling back to an
-        // API-key route the live client does not have.
+        // `anthropic_route_available` applies the resolved route's policy.
+        // Only the verified canonical route can fall back between API key and
+        // OAuth; compatibility and custom profiles keep their explicit auth.
         match credential_id {
             "anthropic" | "anthropic-api-key" | "anthropic-oauth" => {
                 guard.insert("anthropic".to_string(), self.anthropic_route_available());
@@ -624,6 +662,7 @@ impl FusionCatalogRefresher {
         &self,
         source: &provider_config::CredentialSource,
         removed: &str,
+        api_key_suppressed: bool,
     ) -> bool {
         match source.credential_id.as_str() {
             "anthropic-api-key" => self
@@ -635,15 +674,25 @@ impl FusionCatalogRefresher {
             "openai-chatgpt" => self
                 .openai_chatgpt_available
                 .load(std::sync::atomic::Ordering::Relaxed),
-            _ if source.credential_id == removed || source.profile_name == removed => {
+            _ if Self::source_matches_credential(source, removed) => {
                 // `keychain_has || env_set` with `keychain_has` now false.
-                self.env_var_still_set(source.env_var.as_deref())
+                !api_key_suppressed && self.env_var_still_set(source.env_var.as_deref())
             }
             // A different credential id backs this profile as well and the
             // caller asserted nothing about it — assuming it is gone too is
             // exactly the over-clearing this rework exists to remove.
             _ => true,
         }
+    }
+
+    fn source_matches_credential(source: &provider_config::CredentialSource, id: &str) -> bool {
+        source.credential_id == id
+            || source.profile_name == id
+            || (matches!(id, "anthropic" | "anthropic-api-key")
+                && matches!(
+                    source.credential_id.as_str(),
+                    "anthropic" | "anthropic-api-key"
+                ))
     }
 
     /// `!isolated && the variable exists` — the ambient half of
@@ -666,11 +715,19 @@ impl FusionCatalogRefresher {
 
     /// Whether the already-built Anthropic route has a live credential.
     ///
-    /// `assemble` selects one auth protocol even when both credentials exist.
-    /// Gate each presence flag by that selected source so logging out of an
-    /// OAuth-built client cannot fall back to an unwired API key (or vice
-    /// versa) and leave Fusion falsely ready.
+    /// The canonical first-party route can select either installed auth source
+    /// per request. Other routes retain the explicit boot policy so an account
+    /// OAuth session cannot make a custom endpoint or compatibility route ready.
     pub(super) fn anthropic_route_available(&self) -> bool {
+        if self.anthropic_dynamic_auth {
+            return self
+                .anthropic_has_api_key
+                .load(std::sync::atomic::Ordering::Relaxed)
+                || (self.anthropic_oauth_delegate_slot
+                    && self
+                        .anthropic_has_oauth
+                        .load(std::sync::atomic::Ordering::Relaxed));
+        }
         let api_key_route = self.credential_sources.iter().any(|source| {
             source.profile_name == "anthropic"
                 && matches!(
@@ -730,10 +787,14 @@ impl FusionCatalogRefresher {
     /// [`Self::route_survives_removal`] applies to a generic profile, at the
     /// variable `provider_config::assemble` records for the Anthropic
     /// API-key source.
-    pub(super) fn note_route_credential_removed(&self, credential_id: &str) {
+    pub(super) fn note_route_credential_removed(
+        &self,
+        credential_id: &str,
+        api_key_suppressed: bool,
+    ) {
         match credential_id {
             "anthropic" | "anthropic-api-key" => self.anthropic_has_api_key.store(
-                self.env_var_still_set(Some("ANTHROPIC_API_KEY")),
+                !api_key_suppressed && self.env_var_still_set(Some("ANTHROPIC_API_KEY")),
                 std::sync::atomic::Ordering::Relaxed,
             ),
             "anthropic-oauth" => self
@@ -840,7 +901,7 @@ impl FusionCatalogRefresher {
             .map(|id| {
                 self.credential_sources
                     .iter()
-                    .filter(|source| source.credential_id == id || source.profile_name == id)
+                    .filter(|source| Self::source_matches_credential(source, id))
                     .map(|source| source.profile_name.clone())
                     .collect()
             })
@@ -912,9 +973,16 @@ impl FusionCatalogRefresher {
             for profile in forced {
                 guard.insert(profile, true);
             }
-            guard
-                .entry("anthropic".to_string())
-                .or_insert(self.anthropic_route_available());
+            if self.anthropic_dynamic_auth {
+                // Boot's source can name either credential. Keep the canonical
+                // row in sync with request-local selection after every probe;
+                // compatibility profiles retain their API-key-only verdict.
+                guard.insert("anthropic".to_string(), self.anthropic_route_available());
+            } else {
+                guard
+                    .entry("anthropic".to_string())
+                    .or_insert(self.anthropic_route_available());
+            }
         }
     }
 }

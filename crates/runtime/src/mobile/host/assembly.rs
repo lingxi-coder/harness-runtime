@@ -493,7 +493,12 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Build the shared credential manager and provider-specific OAuth handles
     // before assembling the client. This lets a native Keychain session restore
     // into the live provider graph on every engine boot.
-    let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
+    // Every retained engine, including Cron and settings-only hosts, resolves
+    // the native store for each request. A manager-local TTL would otherwise
+    // keep another engine's acknowledged key rotation/deletion stale for 5 min.
+    let credentials = Arc::new(
+        CredentialManager::new(storage, clock.clone(), http.clone()).without_api_key_cache(),
+    );
     let llm_transport: Arc<dyn Transport> = Arc::new(
         platform_common::provider_transport()
             .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,

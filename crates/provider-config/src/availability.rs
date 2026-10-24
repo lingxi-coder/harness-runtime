@@ -52,9 +52,13 @@ pub async fn compute_availability_with_isolation(
     let mut out = Vec::with_capacity(sources.len());
     for source in sources {
         let available = match source.credential_id.as_str() {
-            "anthropic-api-key" => anthropic_has_api_key,
+            // Host-managed API keys do not own either OAuth session. In
+            // particular, an empty API-key override map on a cold sidecar
+            // must not hide a host's live ChatGPT/Anthropic OAuth delegate.
             "anthropic-oauth" => anthropic_has_oauth,
             "openai-chatgpt" => openai_chatgpt_available,
+            id if credentials.provider_key_is_suppressed(id).await => false,
+            "anthropic-api-key" => anthropic_has_api_key,
             id => {
                 // Availability needs presence, not secret bytes. On macOS the
                 // attribute-only query avoids decrypting every provider key
@@ -230,6 +234,68 @@ mod tests {
     }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn host_managed_api_keys_do_not_suppress_oauth_availability() {
+        let credentials = manager();
+        credentials.use_host_managed_provider_keys();
+        let sources = [
+            src("anthropic-api-key", None),
+            src("deepseek", None),
+            src("anthropic-oauth", None),
+            src("openai-chatgpt", None),
+        ];
+        let rows = compute_availability(&credentials, &sources, true, true, true).await;
+        let actual: Vec<bool> = rows.iter().map(|row| row.available).collect();
+        assert_eq!(actual, [false, false, true, true]);
+
+        credentials
+            .set_provider_key_ephemeral("anthropic", "key")
+            .await;
+        let rows = compute_availability(&credentials, &sources, true, true, true).await;
+        assert!(rows[0].available);
+        credentials
+            .suppress_provider_key_ephemeral("anthropic")
+            .await;
+        let rows = compute_availability(&credentials, &sources, true, true, true).await;
+        assert!(!rows[0].available);
+        assert!(rows[2].available && rows[3].available);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn host_deletion_suppresses_stale_flags_and_environment_availability() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let variable = "HOST_DELETED_AVAILABILITY_REGRESSION_KEY";
+        let previous = std::env::var_os(variable);
+        std::env::set_var(variable, "environment-key");
+        let credentials = manager();
+        credentials
+            .suppress_provider_key_ephemeral("anthropic")
+            .await;
+        credentials
+            .suppress_provider_key_ephemeral("host-test")
+            .await;
+        let sources = [
+            src("anthropic-api-key", None),
+            src("host-test", Some(variable)),
+        ];
+        let unavailable = compute_availability(&credentials, &sources, true, false, false).await;
+        assert!(unavailable.iter().all(|entry| !entry.available));
+
+        credentials
+            .set_provider_key_ephemeral("anthropic", "replacement")
+            .await;
+        credentials
+            .set_provider_key_ephemeral("host-test", "replacement")
+            .await;
+        let available = compute_availability(&credentials, &sources, true, false, false).await;
+        assert!(available.iter().all(|entry| entry.available));
+        match previous {
+            Some(value) => std::env::set_var(variable, value),
+            None => std::env::remove_var(variable),
+        }
+    }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // serialize env-var mutation across async tests
