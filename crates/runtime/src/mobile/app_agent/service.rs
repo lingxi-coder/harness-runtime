@@ -38,6 +38,7 @@ struct Control {
     store: Arc<AgentStore>,
     text: AsyncMutex<String>,
     model_failed: AtomicBool,
+    model_failure: Mutex<Option<String>>,
     timed_out: AtomicBool,
     usage: AsyncMutex<Option<Value>>,
 }
@@ -143,6 +144,9 @@ impl OutputStream for Control {
             "[local-app-agent] model request failed run={} status={status:?} kind={kind}",
             self.id
         );
+        if let Ok(mut failure) = self.model_failure.lock() {
+            *failure = Some(format!("model_request_{}_{}", status.unwrap_or(0), kind));
+        }
         self.model_failed.store(true, Ordering::Release);
     }
 }
@@ -252,6 +256,7 @@ impl AppAgentHost {
                         store: self.store.clone(),
                         text: AsyncMutex::new(String::new()),
                         model_failed: AtomicBool::new(false),
+                        model_failure: Mutex::new(None),
                         timed_out: AtomicBool::new(false),
                         usage: AsyncMutex::new(None),
                     });
@@ -447,7 +452,12 @@ impl AppAgentHost {
             return Err("tool_cleanup_incomplete".into());
         }
         if control.model_failed.load(Ordering::Acquire) {
-            return Err("model_execution_failed".into());
+            return Err(control
+                .model_failure
+                .lock()
+                .ok()
+                .and_then(|v| v.clone())
+                .unwrap_or_else(|| "model_execution_failed".into()));
         }
         if control.cancel.is_cancelled() {
             return Err("cancelled".into());
@@ -456,6 +466,21 @@ impl AppAgentHost {
             Ok(orchestrator::conversation::TurnOutcome::EndTurn) => {}
             Ok(orchestrator::conversation::TurnOutcome::MaxTurns) => {
                 return Err("turn_limit_exceeded".into())
+            }
+            Err(error) => {
+                // Preserve the failure class without provider bodies, tool arguments,
+                // model text, paths or credentials in the app-visible result.
+                use orchestrator::error::OrchestratorError;
+                let code = match error {
+                    OrchestratorError::PermissionAbort { .. } => "tool_permission_aborted",
+                    OrchestratorError::StreamingProtocol(_) => "model_stream_protocol_failed",
+                    OrchestratorError::StreamEndedWithoutStop => "model_stream_incomplete",
+                    OrchestratorError::Internal(_) => "agent_internal_error",
+                    OrchestratorError::ApiCall(_) => "model_api_failed",
+                    OrchestratorError::Streaming(_) => "model_stream_failed",
+                    _ => "model_execution_failed",
+                };
+                return Err(code.into());
             }
             _ => return Err("model_execution_failed".into()),
         }
