@@ -3,7 +3,7 @@
 use std::{
     collections::BTreeMap,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Weak},
     time::Duration,
 };
 use tokio::{
@@ -14,9 +14,21 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const MAX_HEAD: usize = 32 * 1024;
+// Bound upload/JSON memory across all running apps, not only per connection.
+static AGENT_REQUESTS: Semaphore = Semaphore::const_new(2);
+
+#[derive(Clone)]
+pub(super) struct BrowserHost {
+    pub owner: Weak<super::MobileLocalAppServiceHandle>,
+    pub app_id: String,
+    pub name: String,
+    pub revision: u64,
+    pub platform: String,
+}
 
 #[derive(Clone)]
 pub(super) struct Route {
+    pub host: Option<BrowserHost>,
     pub run_id: String,
     pub root: PathBuf,
     pub entry: String,
@@ -143,7 +155,9 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
                 String::new()
             };
             let relative = target.trim_start_matches('/');
-            let target = if relative.is_empty() || relative.starts_with('?') {
+            let target = if relative == "__local_app_sdk.js" {
+                relative.to_owned()
+            } else if relative.is_empty() || relative.starts_with('?') {
                 format!("{}{relative}", route.entry)
             } else {
                 format!("{static_base}{relative}")
@@ -185,6 +199,127 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
         .any(|h| !h.value.eq_ignore_ascii_case(b"chunked"))
     {
         return error(&mut socket, 400, "unsupported transfer encoding").await;
+    }
+    // Reserved routes are handled before any user application service. The
+    // caller cannot select an app, run, model, permission mode or host operation.
+    if relative == "__local_app_sdk.js" || relative == "__host/sdk.js" {
+        if method != "GET" && method != "HEAD" {
+            return error(&mut socket, 405, "SDK accepts GET and HEAD").await;
+        }
+        let Some(host) = &route.host else {
+            return error(&mut socket, 503, "application host unavailable").await;
+        };
+        let config = serde_json::json!({"appId":host.app_id,"name":host.name,"revision":host.revision,"hostPlatform":host.platform,"runId":route.run_id,"capabilities":route.capabilities,"services":route.services.keys().collect::<Vec<_>>()});
+        let script = include_str!("browser_sdk.js")
+            .replace("__LINGXI_APP_CONFIGURATION__", &config.to_string());
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}\r\n", script.len(), security_headers(route)).as_bytes()).await?;
+        if method == "GET" {
+            socket.write_all(script.as_bytes()).await?;
+        }
+        return Ok(());
+    }
+    if relative.starts_with("__host/") {
+        if relative != "__host/agent" {
+            return error(&mut socket, 404, "unknown host operation").await;
+        }
+        if method != "POST" {
+            return error(&mut socket, 405, "Agent accepts POST").await;
+        }
+        // A run URL alone is not enough for cross-site writes. Require all
+        // browser-controlled origin/referrer metadata and a non-simple header.
+        let exact_header = |name: &str, value: &[u8]| {
+            let values: Vec<_> = request
+                .headers
+                .iter()
+                .filter(|h| h.name.eq_ignore_ascii_case(name))
+                .collect();
+            values.len() == 1 && values[0].value == value
+        };
+        let referrer = format!("{expected_origin}{prefix}");
+        let referrers: Vec<_> = request
+            .headers
+            .iter()
+            .filter(|h| h.name.eq_ignore_ascii_case("referer"))
+            .collect();
+        if !exact_header("origin", expected_origin.as_bytes())
+            || !exact_header("x-lingxi-app-request", b"1")
+            || !exact_header("content-type", b"application/json")
+            || referrers.len() != 1
+            || !std::str::from_utf8(referrers[0].value).is_ok_and(|v| v.starts_with(&referrer))
+        {
+            return error(&mut socket, 403, "invalid application caller").await;
+        }
+        if !transfers.is_empty() || lengths.len() != 1 {
+            return error(&mut socket, 400, "Agent requires a fixed content length").await;
+        }
+        let length: usize = match std::str::from_utf8(lengths[0].value)
+            .ok()
+            .and_then(|v| v.parse().ok())
+        {
+            Some(length) if length <= 24 * 1024 * 1024 => length,
+            _ => return error(&mut socket, 413, "Agent request too large").await,
+        };
+        let Ok(_upload_permit) = AGENT_REQUESTS.try_acquire() else {
+            return error(&mut socket, 429, "application host is busy; retry later").await;
+        };
+        let mut body = bytes[head_end..].to_vec();
+        if body.len() > length {
+            return error(&mut socket, 400, "invalid request body").await;
+        }
+        let read = tokio::time::timeout(Duration::from_secs(30), async {
+            while body.len() < length {
+                let mut chunk = [0_u8; 8192];
+                let remaining = (length - body.len()).min(chunk.len());
+                let count = socket.read(&mut chunk[..remaining]).await?;
+                if count == 0 {
+                    return Err(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+                }
+                body.extend_from_slice(&chunk[..count]);
+            }
+            Ok::<_, std::io::Error>(())
+        })
+        .await;
+        if !matches!(read, Ok(Ok(()))) {
+            return error(&mut socket, 408, "incomplete Agent request").await;
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct PageRequest {
+            method: String,
+            args: serde_json::Value,
+        }
+        let input: PageRequest = match serde_json::from_slice(&body) {
+            Ok(input) => input,
+            Err(_) => return error(&mut socket, 400, "invalid Agent request").await,
+        };
+        if !matches!(
+            input.method.as_str(),
+            "agent.run" | "agent.get" | "agent.cancel"
+        ) {
+            return error(
+                &mut socket,
+                403,
+                "host operation is not available to applications",
+            )
+            .await;
+        }
+        let Some((host, owner)) = route
+            .host
+            .as_ref()
+            .and_then(|host| host.owner.upgrade().map(|owner| (host, owner)))
+        else {
+            return error(&mut socket, 503, "application host unavailable").await;
+        };
+        let result = owner
+            .agent_page_json(
+                host.app_id.clone(),
+                route.run_id.clone(),
+                input.method,
+                input.args.to_string(),
+            )
+            .await;
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n", result.len()).as_bytes()).await?;
+        return socket.write_all(result.as_bytes()).await;
     }
     let named_service = relative.starts_with("__service/");
     let (service, upstream_path) = if let Some(service_route) = relative.strip_prefix("__service/")
@@ -321,7 +456,7 @@ fn security_headers(route: &Route) -> String {
     } else {
         "()"
     };
-    format!("Content-Security-Policy: sandbox allow-scripts allow-forms allow-modals allow-downloads allow-same-origin; default-src 'self' data: blob:{remote_scripts}; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:{remote_scripts}; style-src 'self' 'unsafe-inline'{remote_scripts}; connect-src 'self' ws://127.0.0.1:{}{remote_sources}; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'\r\nPermissions-Policy: camera={camera}, microphone={microphone}, geolocation=()\r\nReferrer-Policy: same-origin\r\nX-Frame-Options: DENY\r\n", route.port)
+    format!("Content-Security-Policy: sandbox allow-scripts allow-forms allow-modals allow-downloads allow-same-origin allow-top-navigation-to-custom-protocols; default-src 'self' data: blob:{remote_scripts}; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:{remote_scripts}; style-src 'self' 'unsafe-inline'{remote_scripts}; connect-src 'self' ws://127.0.0.1:{}{remote_sources}; worker-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'\r\nPermissions-Policy: camera={camera}, microphone={microphone}, geolocation=()\r\nReferrer-Policy: same-origin\r\nX-Frame-Options: DENY\r\n", route.port)
 }
 
 async fn forward_response<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(
@@ -474,6 +609,7 @@ mod tests {
         let task = spawn(
             listener,
             Route {
+                host: None,
                 run_id: "current".into(),
                 root: temp.path().into(),
                 entry: "index.html".into(),
@@ -528,6 +664,7 @@ mod tests {
         let task = spawn(
             listener,
             Route {
+                host: None,
                 run_id: "epoch".into(),
                 root: PathBuf::new(),
                 entry: String::new(),
@@ -588,6 +725,7 @@ mod stream_tests {
         let task = spawn(
             listener,
             Route {
+                host: None,
                 run_id: "ws".into(),
                 root: PathBuf::new(),
                 entry: String::new(),
@@ -641,6 +779,7 @@ mod stream_tests {
         let task = spawn(
             listener,
             Route {
+                host: None,
                 run_id: "sse".into(),
                 root: PathBuf::new(),
                 entry: String::new(),
@@ -703,6 +842,7 @@ mod admission_tests {
         let task = spawn(
             listener,
             Route {
+                host: None,
                 run_id: "scope".into(),
                 root: root.path().into(),
                 entry: "index.html".into(),
@@ -763,6 +903,7 @@ mod absolute_path_tests {
         let task = spawn(
             listener,
             Route {
+                host: None,
                 run_id: "current".into(),
                 root: root.path().into(),
                 entry: "dist/index.html".into(),

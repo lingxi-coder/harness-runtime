@@ -350,3 +350,35 @@ fn object_key_order_does_not_create_a_request_conflict() {
     assert!(!repeated.start);
     assert_eq!(repeated.task.run_id, accepted.task.run_id);
 }
+
+#[test]
+fn native_interaction_phases_are_durable_sequenced_and_cleared_on_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = AgentStore::open(dir.path()).unwrap();
+    store.configure(owner(), Some(settings())).unwrap();
+    let run = store.admit(&owner(), &input(), &[]).unwrap().task;
+    store
+        .set_phase(&owner(), &run.run_id, Some("waiting_for_answer"))
+        .unwrap();
+    let pending = store.get(&owner(), &run.run_id).unwrap();
+    assert_eq!(pending.phase.as_deref(), Some("waiting_for_answer"));
+    assert!(pending.sequence > run.sequence);
+    store
+        .set_phase(&owner(), &run.run_id, Some("waiting_for_answer"))
+        .unwrap();
+    assert_eq!(
+        store.get(&owner(), &run.run_id).unwrap().sequence,
+        pending.sequence
+    );
+    assert!(store
+        .set_phase(&owner(), &run.run_id, Some("approve_any_tool"))
+        .is_err());
+    let finished = store
+        .update(&owner(), &run.run_id, State::Cancelled, None, None, None)
+        .unwrap();
+    assert!(finished.phase.is_none());
+    store
+        .set_phase(&owner(), &run.run_id, Some("waiting_for_permission"))
+        .unwrap();
+    assert!(store.get(&owner(), &run.run_id).unwrap().phase.is_none());
+}

@@ -184,6 +184,13 @@ impl MobileLocalAppServiceHandle {
         };
         let url = format!("{origin}{prefix}{entry}");
         let route = gateway::Route {
+            host: Some(gateway::BrowserHost {
+                owner: Arc::downgrade(self),
+                app_id: preparation.record.app_id.clone(),
+                name: preparation.record.name.clone(),
+                revision: preparation.release.revision,
+                platform: self.target.lock().unwrap().platform.clone(),
+            }),
             run_id: run_id.clone(),
             root: PathBuf::from(&preparation.work_path),
             entry,

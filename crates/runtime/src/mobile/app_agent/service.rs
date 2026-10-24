@@ -35,6 +35,7 @@ struct Control {
     done: Notify,
     lease: Mutex<Option<SessionToolGrantLease>>,
     interaction: AsyncMutex<Option<(String, Value, Reply)>>,
+    store: Arc<AgentStore>,
     text: AsyncMutex<String>,
     model_failed: AtomicBool,
     timed_out: AtomicBool,
@@ -79,6 +80,13 @@ impl PermissionGate for Control {
             if slot.is_some() {
                 return deny();
             }
+            if self
+                .store
+                .set_phase(&self.owner, &self.id, Some("waiting_for_permission"))
+                .is_err()
+            {
+                return deny();
+            }
             *slot = Some((
                 id.clone(),
                 json!({"type":"permission","requestId":id,"runId":self.id,"appId":self.owner.app_id,"toolName":name,"input":input}),
@@ -91,6 +99,7 @@ impl PermissionGate for Control {
         if slot.as_ref().is_some_and(|(current, _, _)| current == &id) {
             slot.take();
         }
+        let _ = self.store.set_phase(&self.owner, &self.id, None);
         if allow && !self.cancel.is_cancelled() {
             PermissionDecision::Allow
         } else {
@@ -240,6 +249,7 @@ impl AppAgentHost {
                         done: Notify::new(),
                         lease: Mutex::new(None),
                         interaction: AsyncMutex::new(None),
+                        store: self.store.clone(),
                         text: AsyncMutex::new(String::new()),
                         model_failed: AtomicBool::new(false),
                         timed_out: AtomicBool::new(false),
@@ -401,7 +411,16 @@ impl AppAgentHost {
                 }
                 let questions:Vec<_>=exchange.questions.iter().map(|q|json!({"question":q.question.string_at("").unwrap_or(""),"header":q.header.string_at("").unwrap_or(""),"multiSelect":q.multi_select,"options":q.options.iter().map(|o|json!({"label":o.label.string_at("").unwrap_or(""),"description":o.description.string_at("").unwrap_or("")})).collect::<Vec<_>>()})).collect();
                 let mut slot = question_control.interaction.lock().await;
-                if slot.is_none() {
+                if slot.is_none()
+                    && question_control
+                        .store
+                        .set_phase(
+                            &question_control.owner,
+                            &question_control.id,
+                            Some("waiting_for_answer"),
+                        )
+                        .is_ok()
+                {
                     *slot = Some((
                         id.clone(),
                         json!({"type":"question","requestId":id,"runId":question_control.id,"appId":question_control.owner.app_id,"questions":questions}),
@@ -672,6 +691,9 @@ impl AppAgentHost {
                     return Err("request_not_found".into());
                 }
                 let (_, _, reply) = slot.take().ok_or("request_not_found")?;
+                self.store
+                    .set_phase(&c.owner, run, None)
+                    .map_err(|_| "agent_storage_unavailable")?;
                 match reply {
                     Reply::Permission(tx) => {
                         let _ = tx.send(request["approved"] == true);

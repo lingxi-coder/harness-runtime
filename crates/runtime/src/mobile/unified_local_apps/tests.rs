@@ -464,3 +464,76 @@ async fn data_schema_change_does_not_prepare_or_replace_the_live_application() {
         .await
         .unwrap();
 }
+
+#[tokio::test]
+async fn external_browser_sdk_and_agent_route_bind_caller_to_the_current_epoch() {
+    let (dir, service) = service();
+    let published = publish(&service, dir.path(), "browser").await;
+    let id = published["record"]["appId"].as_str().unwrap();
+    let port = published["record"]["originPort"].as_u64().unwrap() as u16;
+    let launch = service
+        .request_value(json!({"op":"start","appId":id}))
+        .await
+        .unwrap();
+    let epoch = launch["run"]["runId"].as_str().unwrap();
+    let sdk = get(port, &format!("/__run/{epoch}/__host/sdk.js")).await;
+    assert!(sdk.starts_with("HTTP/1.1 200"));
+    assert!(sdk.contains(id));
+    assert!(!sdk.contains("__LINGXI_APP_CONFIGURATION__"));
+    assert!(sdk.contains("revision:config.revision"));
+    async fn post(
+        port: u16,
+        epoch: &str,
+        origin: bool,
+        referer_epoch: &str,
+        method: &str,
+        extra: &str,
+    ) -> String {
+        let body = format!(r#"{{"method":"{method}","args":{{}}{extra}}}"#);
+        let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        let origin = if origin {
+            format!("Origin: http://127.0.0.1:{port}\r\n")
+        } else {
+            String::new()
+        };
+        socket.write_all(format!("POST /__run/{epoch}/__host/agent HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{origin}Referer: http://127.0.0.1:{port}/__run/{referer_epoch}/index.html\r\nContent-Type: application/json\r\nX-LingXi-App-Request: 1\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        socket.read_to_end(&mut out).await.unwrap();
+        String::from_utf8(out).unwrap()
+    }
+    assert!(post(port, epoch, false, epoch, "agent.run", "")
+        .await
+        .starts_with("HTTP/1.1 403"));
+    assert!(post(port, epoch, true, "stale", "agent.run", "")
+        .await
+        .starts_with("HTTP/1.1 403"));
+    assert!(post(port, epoch, true, epoch, "answer", "")
+        .await
+        .starts_with("HTTP/1.1 403"));
+    assert!(post(
+        port,
+        epoch,
+        true,
+        epoch,
+        "agent.run",
+        r#", "appId":"other""#
+    )
+    .await
+    .starts_with("HTTP/1.1 400"));
+    let no_model = post(port, epoch, true, epoch, "agent.run", "").await;
+    assert!(no_model.starts_with("HTTP/1.1 200"));
+    assert!(no_model.contains("agent_model_host_not_ready"));
+    service
+        .request_value(json!({"op":"restart","appId":id}))
+        .await
+        .unwrap();
+    assert!(post(port, epoch, true, epoch, "agent.run", "")
+        .await
+        .starts_with("HTTP/1.1 410"));
+    service
+        .request_value(json!({"op":"stop","appId":id}))
+        .await
+        .unwrap();
+}

@@ -135,6 +135,8 @@ pub struct Task {
     pub request_id: String,
     pub state: State,
     pub sequence: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     pub model: Model,
@@ -281,6 +283,7 @@ impl AgentStore {
         for record in ledger.runs.values_mut() {
             if !record.task.state.terminal() {
                 record.task.state = State::Interrupted;
+                record.task.phase = None;
                 record.task.error = Some(TaskError {
                     code: "host_restarted".into(),
                     message:
@@ -487,6 +490,7 @@ impl AgentStore {
                 request_id: input.request_id.clone(),
                 state: State::Queued,
                 sequence: 1,
+                phase: None,
                 created_at: timestamp,
                 updated_at: timestamp,
                 model: grant.settings.model.clone(),
@@ -560,6 +564,27 @@ impl AgentStore {
             Ok(())
         })
     }
+    /// Publish a trusted execution phase without revealing approval inputs.
+    /// Its sequence is durable, so a reconnected browser can observe a pending
+    /// native question or permission request without gaining an answer API.
+    pub fn set_phase(&self, owner: &Owner, id: &str, phase: Option<&str>) -> Result<(), AppError> {
+        if phase.is_some_and(|p| !matches!(p, "waiting_for_permission" | "waiting_for_answer")) {
+            return Err(invalid("invalid Agent phase"));
+        }
+        self.change(|ledger| {
+            let record = ledger
+                .runs
+                .get_mut(id)
+                .filter(|r| r.owner == *owner)
+                .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
+            if !record.task.state.terminal() && record.task.phase.as_deref() != phase {
+                record.task.phase = phase.map(String::from);
+                record.task.sequence += 1;
+                record.task.updated_at = now();
+            }
+            Ok(())
+        })
+    }
     /// Host executor only; terminal states are immutable. Cancellation is only
     /// finalized after the foreground/tool executor has stopped and reaped.
     pub fn update(
@@ -607,6 +632,7 @@ impl AgentStore {
                 (state, result, error)
             };
             record.task.state = state;
+            record.task.phase = None;
             record.task.sequence += 1;
             record.task.updated_at = now();
             record.task.result = result;
