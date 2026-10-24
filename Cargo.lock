@@ -3967,7 +3967,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-android"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=4b88e8937032c1412b6df4e93b1f22f3013127f6#4b88e8937032c1412b6df4e93b1f22f3013127f6"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=d257bc6ee30f40467ae3fff91d3ba4478371108f#d257bc6ee30f40467ae3fff91d3ba4478371108f"
 dependencies = [
  "async-trait",
  "mobile-linux-api",
@@ -3981,7 +3981,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-api"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=4b88e8937032c1412b6df4e93b1f22f3013127f6#4b88e8937032c1412b6df4e93b1f22f3013127f6"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=d257bc6ee30f40467ae3fff91d3ba4478371108f#d257bc6ee30f40467ae3fff91d3ba4478371108f"
 dependencies = [
  "async-trait",
  "serde",
@@ -3991,7 +3991,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-core"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=4b88e8937032c1412b6df4e93b1f22f3013127f6#4b88e8937032c1412b6df4e93b1f22f3013127f6"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=d257bc6ee30f40467ae3fff91d3ba4478371108f#d257bc6ee30f40467ae3fff91d3ba4478371108f"
 dependencies = [
  "mobile-linux-api",
  "serde",
@@ -5190,7 +5190,7 @@ dependencies = [
 [[package]]
 name = "platform-pty"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=4b88e8937032c1412b6df4e93b1f22f3013127f6#4b88e8937032c1412b6df4e93b1f22f3013127f6"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=d257bc6ee30f40467ae3fff91d3ba4478371108f#d257bc6ee30f40467ae3fff91d3ba4478371108f"
 dependencies = [
  "anyhow",
  "filedescriptor",
