@@ -2119,6 +2119,30 @@ impl McpRegistry {
             .collect()
     }
 
+    /// Human-readable labels paired with exact identities for trusted grant UI.
+    /// No endpoint, header, environment or credential configuration is returned.
+    pub async fn tool_identity_labels(
+        &self,
+    ) -> Vec<(crate::tool_identity::McpToolIdentity, String)> {
+        self.connections
+            .read()
+            .await
+            .values()
+            .flat_map(|state| match state {
+                McpConnectionState::Connected { config, tools, .. }
+                | McpConnectionState::Cached { config, tools, .. } => tools
+                    .iter()
+                    .map(|tool| {
+                        (
+                            crate::tool_identity::McpToolIdentity::from_config_tool(config, tool),
+                            format!("{} · {}", config.name, tool.tool_name),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
     async fn verify_tool_dispatch_guard(
         &self,
         server: &str,

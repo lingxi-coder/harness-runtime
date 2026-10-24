@@ -2145,6 +2145,39 @@ impl PermissionPolicy {
         policy
     }
 
+    /// A Local App receives managed policy and global user restrictions,
+    /// without the creating chat's grants, project context, extra directories,
+    /// bypass mode or remembered session decisions.
+    #[must_use]
+    pub fn fork_app_invocation(&self, roots: FsRoots) -> Self {
+        let managed = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed);
+        let rules = [&self.allow_rules, &self.deny_rules, &self.ask_rules]
+            .into_iter()
+            .flat_map(|rules| rules.get(&managed).into_iter().flatten().cloned())
+            .chain(
+                [&self.deny_rules, &self.ask_rules]
+                    .into_iter()
+                    .flat_map(|rules| {
+                        rules
+                            .get(&PermissionRuleSource::Settings(
+                                lingxi_core::types::SettingsScope::User,
+                            ))
+                            .into_iter()
+                            .flatten()
+                            .cloned()
+                    }),
+            );
+        // Starting from a new policy also drops plan-file carve-outs, transient
+        // read allowances, command clamps and interactive session state.
+        let mut policy = Self::from_rules_confined(PermissionMode::Default, rules, false);
+        policy.mode = PermissionMode::Default;
+        policy.roots = Some(roots);
+        policy.bypass_permissions_available = false;
+        policy.restricted = true;
+        policy.denial_tracking = Mutex::new(DenialTrackingState::default());
+        policy
+    }
+
     /// Clone this policy, replacing only the live-mutable rule/working-dir
     /// state a host `updatedPermissions` payload can change mid-session.
     ///
@@ -5994,5 +6027,42 @@ mod restricted_policy_test {
                 ..
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod app_invocation_policy_tests {
+    use super::*;
+    use crate::PermissionRuleValue;
+    #[test]
+    fn app_fork_preserves_managed_rules_but_drops_chat_authority() {
+        let rule = |name: &str, source, behavior| PermissionRule {
+            value: PermissionRuleValue::from_rule_string(name),
+            source,
+            behavior,
+        };
+        let managed = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::Managed);
+        let user = PermissionRuleSource::Settings(lingxi_core::types::SettingsScope::User);
+        let parent = PermissionPolicy::from_rules(
+            PermissionMode::BypassPermissions,
+            [
+                rule("WebSearch", managed.clone(), PermissionBehavior::Deny),
+                rule("Read", user.clone(), PermissionBehavior::Allow),
+                rule("WebFetch", user.clone(), PermissionBehavior::Deny),
+            ],
+        );
+        let child = parent.fork_app_invocation(FsRoots {
+            cwd: PathBuf::from("/private/app-task"),
+            home: None,
+            lingxi_home: PathBuf::from("/private/app-config"),
+        });
+        assert_eq!(child.mode, PermissionMode::Default);
+        assert!(child.restricted);
+        assert!(!child.bypass_permissions_available);
+        assert!(!child.allow_rules.contains_key(&user));
+        assert_eq!(child.deny_rules.get(&managed).unwrap().len(), 1);
+        assert_eq!(child.deny_rules.get(&user).unwrap().len(), 1);
+        assert_eq!(parent.mode, PermissionMode::BypassPermissions);
+        assert_eq!(parent.allow_rules.get(&user).unwrap().len(), 1);
     }
 }

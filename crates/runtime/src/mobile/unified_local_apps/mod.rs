@@ -71,6 +71,7 @@ static EXECUTOR_INIT: Mutex<()> = Mutex::new(());
 pub(super) struct ActiveRun {
     pub record: Mutex<AppRun>,
     pub cancel: CancellationToken,
+    pub agent_access: Mutex<CancellationToken>,
     pub handles: AsyncMutex<Vec<mobile_linux_api::LinuxProcessHandle>>,
     pub gateway: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
     pub listener: AsyncMutex<Option<Arc<tokio::net::TcpListener>>>,
@@ -94,6 +95,7 @@ struct AppOperation {
 
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct MobileLocalAppServiceHandle {
+    agent: Mutex<Option<Result<Arc<super::app_agent::AppAgentHost>, String>>>,
     pub(super) library: Arc<AppLibrary>,
     _runtime_owner: RuntimeLease,
     pub(super) config_home: PathBuf,
@@ -104,6 +106,61 @@ pub struct MobileLocalAppServiceHandle {
 }
 
 impl MobileLocalAppServiceHandle {
+    pub(crate) async fn agent_invocation_token(
+        &self,
+        app: &str,
+        invocation: &str,
+    ) -> Result<CancellationToken, String> {
+        let active = self.active.lock().await;
+        let candidate = active.get(app).ok_or("app_not_running")?;
+        let previous = candidate
+            .previous
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|previous| {
+                previous.record.lock().unwrap().phase == RunPhase::Running
+                    && !previous.cancel.is_cancelled()
+            });
+        let run = previous.as_ref().unwrap_or(candidate);
+        let record = run.record.lock().unwrap();
+        if record.run_id != invocation || record.phase != RunPhase::Running {
+            return Err("stale_app_invocation".into());
+        }
+        let token = run.agent_access.lock().unwrap().clone();
+        if token.is_cancelled() {
+            return Err("app_invocation_closed".into());
+        }
+        Ok(token)
+    }
+    pub(crate) async fn attach_agent_factory(
+        self: &Arc<Self>,
+        factory: Arc<super::app_agent::AppAgentFactory>,
+    ) -> Result<(), String> {
+        // Native model-host creation is serialized. Revoke and reap the old
+        // executor before loading the durable ledger into its replacement.
+        let previous = self
+            .agent
+            .lock()
+            .map_err(|_| "agent_host_unavailable")?
+            .clone();
+        if let Some(Ok(previous)) = previous {
+            previous.stop_all().await?;
+        }
+        let mut slot = self.agent.lock().map_err(|_| "agent_host_unavailable")?;
+        let replacement = super::app_agent::AppAgentHost::new(self, factory, &self.config_home);
+        let result = replacement.as_ref().map(|_| ()).map_err(Clone::clone);
+        *slot = Some(replacement);
+        result
+    }
+    fn agent_host(&self) -> Result<Arc<super::app_agent::AppAgentHost>, String> {
+        self.agent
+            .lock()
+            .map_err(|_| "agent_host_unavailable")?
+            .as_ref()
+            .ok_or_else(|| "agent_model_host_not_ready".into())
+            .and_then(Clone::clone)
+    }
     /// Constructors for different session hosts reuse the same app owner. A
     /// later native runtime handle can fill the lazy slot without booting it.
     pub fn new(
@@ -153,6 +210,7 @@ impl MobileLocalAppServiceHandle {
             .acquire_runtime_lease()
             .map_err(|e| fail(e.to_string()))?;
         let service = Arc::new(Self {
+            agent: Mutex::new(None),
             library,
             _runtime_owner: runtime_owner,
             config_home: config_home.clone(),
@@ -556,9 +614,11 @@ impl MobileLocalAppServiceHandle {
         })
         .await
         .map_err(join_error)??;
+        let cancellation = CancellationToken::new();
         let run = Arc::new(ActiveRun {
             record: Mutex::new(preparation.run.clone()),
-            cancel: CancellationToken::new(),
+            agent_access: Mutex::new(cancellation.child_token()),
+            cancel: cancellation,
             handles: AsyncMutex::new(Vec::new()),
             gateway: AsyncMutex::new(None),
             listener: AsyncMutex::new(None),
@@ -589,7 +649,7 @@ impl MobileLocalAppServiceHandle {
             drop(lifecycle);
             let mut active = owner.active.lock().await;
             if active.get(&owned_app_id).is_some_and(|current| Arc::ptr_eq(current,&owned_run)) {
-                if let Some(previous) = owned_run.previous.lock().unwrap().take() { active.insert(owned_app_id,previous); }
+                if let Some(previous) = owned_run.previous.lock().unwrap().take() { *previous.agent_access.lock().unwrap()=previous.cancel.child_token(); active.insert(owned_app_id,previous); }
                 else { active.remove(&owned_app_id); }
             }
         });
@@ -631,6 +691,7 @@ impl MobileLocalAppServiceHandle {
                     .is_some_and(|current| Arc::ptr_eq(current, &run))
                 {
                     if let Some(previous) = run.previous.lock().unwrap().take() {
+                        *previous.agent_access.lock().unwrap() = previous.cancel.child_token();
                         active.insert(app_id.into(), previous);
                     } else {
                         active.remove(app_id);
@@ -752,6 +813,13 @@ impl MobileLocalAppServiceHandle {
         keep_registration: bool,
     ) -> Result<Value, ServiceError> {
         run.cancel.cancel();
+        let invocation = run.record.lock().unwrap().run_id.clone();
+        if let Ok(agent) = self.agent_host() {
+            agent
+                .stop_invocation(app_id, &invocation)
+                .await
+                .map_err(|message| ServiceError::new("agentCleanupIncomplete", message))?;
+        }
         let mut stopping = run.record.lock().unwrap().clone();
         stopping.phase = RunPhase::Stopping;
         stopping.services.clear();
@@ -820,6 +888,74 @@ impl MobileLocalAppServiceHandle {
 
 #[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
 impl MobileLocalAppServiceHandle {
+    /// Narrow page ABI. Native code must derive identity from its verified
+    /// current main frame, origin and launch; never forward page-owned IDs.
+    pub async fn agent_page_json(
+        self: Arc<Self>,
+        app_id: String,
+        invocation_id: String,
+        method: String,
+        arguments: String,
+    ) -> String {
+        let host = match self.agent_host() {
+            Ok(host) => host,
+            Err(error) => return agent_envelope(Err(error)),
+        };
+        if arguments.len() > 116 * 1024 * 1024 {
+            return agent_envelope(Err("agent_input_too_large".into()));
+        }
+        let args = match serde_json::from_str(&arguments) {
+            Ok(args) => args,
+            Err(_) => return agent_envelope(Err("invalid_agent_input".into())),
+        };
+        let result = EXECUTOR
+            .get()
+            .expect("app executor")
+            .spawn(async move { host.page(&app_id, &invocation_id, &method, args).await })
+            .await;
+        agent_envelope(result.unwrap_or_else(|_| Err("agent_host_unavailable".into())))
+    }
+    /// Trusted native UI only. The page SDK has no route to this method.
+    pub async fn agent_host_json(self: Arc<Self>, request: String) -> String {
+        let host = match self.agent_host() {
+            Ok(host) => host,
+            Err(error) => return agent_envelope(Err(error)),
+        };
+        if request.len() > 512 * 1024 {
+            return agent_envelope(Err("agent_input_too_large".into()));
+        }
+        let request = match serde_json::from_str(&request) {
+            Ok(request) => request,
+            Err(_) => return agent_envelope(Err("invalid_agent_input".into())),
+        };
+        let result = EXECUTOR
+            .get()
+            .expect("app executor")
+            .spawn(async move { host.host(request).await })
+            .await;
+        agent_envelope(result.unwrap_or_else(|_| Err("agent_host_unavailable".into())))
+    }
+    /// Invoked after a real page closes, not when it reloads or opens a picker.
+    pub async fn agent_page_closed(
+        self: Arc<Self>,
+        app_id: String,
+        invocation_id: String,
+    ) -> String {
+        let host = match self.agent_host() {
+            Ok(host) => host,
+            Err(error) => return agent_envelope(Err(error)),
+        };
+        let result = EXECUTOR
+            .get()
+            .expect("app executor")
+            .spawn(async move {
+                host.close_page(&app_id, &invocation_id)
+                    .await
+                    .map(|_| Value::Null)
+            })
+            .await;
+        agent_envelope(result.unwrap_or_else(|_| Err("agent_host_unavailable".into())))
+    }
     /// A stable JSON ABI keeps native bindings independent of evolving release
     /// structs. Invalid operations always produce an explicit error envelope.
     pub async fn request_json(self: Arc<Self>, request: String) -> String {
@@ -833,6 +969,26 @@ impl MobileLocalAppServiceHandle {
             Err(error) => {
                 json!({"ok":false,"error":{"code":error.code,"message":error.message}}).to_string()
             }
+        }
+    }
+}
+fn agent_envelope(result: Result<Value, String>) -> String {
+    match result {
+        Ok(value) => json!({"ok":true,"value":value}).to_string(),
+        Err(code) => {
+            let message = match code.as_str() {
+                "agent_model_host_not_ready" | "agent_host_unavailable" => "The application model service is unavailable. Check model settings and retry.",
+                "model_unavailable" => "Select an available model in this application's Agent settings.",
+                "agent_not_declared" => "This application has not declared the Agent capability.",
+                "tool_catalog_changed" => "The tool configuration changed. Review and authorize the current tools again.",
+                "background_not_supported" => "Background Agent execution is not supported by this mobile host.",
+                "agent_input_too_large" => "The request is too large. Reduce the image size or prompt length.",
+                "agent_storage_unavailable" => "Agent task storage is unavailable. Existing task data has been preserved.",
+                "app_invocation_closed" | "stale_app_invocation" => "This application run has closed. Reopen the application and retry.",
+                "invalid_agent_input" => "The Agent request is invalid.",
+                _ => "The Agent request could not be completed. Check the error code and application settings.",
+            };
+            json!({"ok":false,"error":{"code":code,"message":message}}).to_string()
         }
     }
 }

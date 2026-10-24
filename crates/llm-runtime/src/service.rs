@@ -3610,6 +3610,16 @@ impl ApiService {
         child
     }
 
+    /// Fork an app task without inheriting a conversation's fallback models.
+    /// The host has authorized one provider/model; failure must stay explicit.
+    #[must_use]
+    pub fn fork_app_invocation(&self) -> Self {
+        let mut child = self.fork_independent();
+        child.fallback_models.clear();
+        child.fallback_overrides.clear();
+        child
+    }
+
     /// Attach the AWS auth-refresh driver (2.1.198 `awsAuthRefresh` flow).
     /// Builder-style; the default is `None` (no refresh, errors stay terminal).
     #[must_use]

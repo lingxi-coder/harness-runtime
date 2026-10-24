@@ -216,6 +216,18 @@ impl MobileLocalAppServiceHandle {
                 ));
             }
             let library = owner.library.clone();
+            // Freeze old-page admissions and synchronously revoke captured
+            // tool handles before the release/data switch can commit.
+            if let Some(previous) = &previous {
+                previous.agent_access.lock().unwrap().cancel();
+                if let Ok(agent) = owner.agent_host() {
+                    let previous_id = previous.record.lock().unwrap().run_id.clone();
+                    agent
+                        .stop_invocation(&record.app_id, &previous_id)
+                        .await
+                        .map_err(|message| ServiceError::new("agentCleanupIncomplete", message))?;
+                }
+            }
             let saved = record.clone();
             let app_id = record.app_id.clone();
             let revision = record.revision;

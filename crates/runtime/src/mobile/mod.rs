@@ -41,6 +41,8 @@ use tool_ui::ask_user_question::AskUserQuestionResolver;
 // `build_mobile(MobileConfig, Platform, listener, sink) -> MobileRuntime`. It
 // The mobile profile owns runtime wiring and adapter sinks independently of
 // foreign bindings. Both native packagers consume this same host implementation.
+/// Host-owned independent Local App Agent execution.
+pub mod app_agent;
 #[cfg(feature = "mobile")]
 mod audio_service;
 #[cfg(feature = "mobile")]
@@ -59,9 +61,9 @@ mod skill_loader;
 #[cfg(feature = "mobile")]
 mod device_skills;
 #[cfg(feature = "mobile")]
-mod local_app_tools;
-#[cfg(feature = "mobile")]
 pub mod linux_maintenance;
+#[cfg(feature = "mobile")]
+mod local_app_tools;
 #[cfg(feature = "mobile")]
 pub mod unified_local_apps;
 #[cfg(feature = "mobile")]

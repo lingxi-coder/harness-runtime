@@ -48,6 +48,12 @@ impl ProjectLocalAppHost for MobileProjectAppHost {
     async fn request(&self, input: Value) -> Result<Value, String> {
         let app_id = input["id"].as_str();
         match input["action"].as_str().unwrap_or("publish") {
+            "agent_catalog" => {
+                let response = self.service.clone().agent_host_json(json!({"op":"catalog"}).to_string()).await;
+                let value: Value = serde_json::from_str(&response).map_err(|_| "Invalid Agent catalog response")?;
+                if value["ok"] == true { Ok(value["value"].clone()) }
+                else { Err("Open Local App Agent settings to initialize the native model catalog, then retry.".into()) }
+            }
             "list" => self.dispatch(json!({"op":"list"})).await,
             "read" => {
                 let app_id = app_id.ok_or("Application id is required")?;

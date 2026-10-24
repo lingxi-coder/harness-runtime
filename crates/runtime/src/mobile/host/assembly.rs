@@ -327,6 +327,21 @@ pub(super) async fn build_mobile_inner_with_ask(
     ask_user_question_tx: Option<tokio::sync::mpsc::Sender<tool_ui::AskUserQuestionExchange>>,
 ) -> Result<MobileRuntime, MobileBuildError> {
     let mut cfg = cfg;
+    if cfg.app_agent_host {
+        cfg.cwd = cfg.lingxi_home.join("local-apps/v2/agent/host");
+        std::fs::create_dir_all(&cfg.cwd).map_err(|_| {
+            MobileBuildError::Orchestrator("app model host storage unavailable".into())
+        })?;
+        cfg.logical_cwd = None;
+        cfg.memory_provider = None;
+        cfg.session_skill_allowlist = Some(Vec::new());
+        cfg.workspace_trusted = false;
+        cfg.inline_visualization = false;
+        cfg.idle_compaction_enabled = false;
+        cfg.projects_session_startup_url = None;
+        cfg.vision_delegation_enabled = false;
+    }
+
     cfg.lingxi_home = std::path::PathBuf::from(super::canonical_cwd_string(&cfg.lingxi_home));
     cfg.cwd = std::path::PathBuf::from(super::canonical_cwd_string(&cfg.cwd));
     let cwd = cfg.cwd.clone();
@@ -382,14 +397,18 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Keep iOS/Android MCP discovery on the same parser and precedence rules
     // as desktop. The app-private settings file is the mobile equivalent of
     // the user global config; `.mcp.json` remains project-scoped.
-    let configured_mcp = mobile_mcp_preflight(
-        mcp::load_mcp_servers(
-            &cwd.join(".mcp.json"),
-            &cfg.lingxi_home.join("mcp-config.json"),
-            &cwd,
-        ),
-        oauth_supported,
-    );
+    let configured_mcp = if cfg.app_agent_host {
+        Vec::new()
+    } else {
+        mobile_mcp_preflight(
+            mcp::load_mcp_servers(
+                &cwd.join(".mcp.json"),
+                &cfg.lingxi_home.join("mcp-config.json"),
+                &cwd,
+            ),
+            oauth_supported,
+        )
+    };
     // Keep the config-side policy declarations while startup connections are
     // driven through the guarded, nonblocking mobile reconciliation path.
     let configured_mcp_policy_rules: Vec<permission::PermissionRule> = configured_mcp
@@ -477,11 +496,13 @@ pub(super) async fn build_mobile_inner_with_ask(
         session::jsonl::writer::JsonlWriter::new(transcript_path.clone(), fs.clone())
             .with_durable_lock(transcript_authority),
     );
-    session_writer
-        .activate_session_target(main_session_id, transcript_path, logical_cwd.clone())
-        .map_err(|error| {
-            MobileBuildError::Orchestrator(format!("transcript activation: {error}"))
-        })?;
+    if !cfg.app_agent_host {
+        session_writer
+            .activate_session_target(main_session_id, transcript_path, logical_cwd.clone())
+            .map_err(|error| {
+                MobileBuildError::Orchestrator(format!("transcript activation: {error}"))
+            })?;
+    }
     let mobile_linux = platform.mobile_linux();
     let mobile_linux_capability = match mobile_linux.as_ref() {
         Some(runtime) => Some(runtime.probe_capability().await),
@@ -1453,6 +1474,9 @@ pub(super) async fn build_mobile_inner_with_ask(
                 }
             }
         };
+    if cfg.app_agent_host {
+        settings_sources.clear();
+    }
     for (path, source) in settings_sources {
         if let Ok(raw) = tokio::fs::read_to_string(&path).await {
             match hooks::parse_hooks_from_settings_json(&raw, source) {
@@ -1780,12 +1804,14 @@ pub(super) async fn build_mobile_inner_with_ask(
             ),
         };
     plugin_lsp_registry.set_activation_mode(typescript_lsp_mode);
-    plugin_lsp_registry
-        .register_plugin_servers(
-            crate::mobile::mobile_lsp::global_typescript_lsp_plugin_id(),
-            vec![crate::mobile::mobile_lsp::global_typescript_lsp_config()],
-        )
-        .await;
+    if !cfg.app_agent_host {
+        plugin_lsp_registry
+            .register_plugin_servers(
+                crate::mobile::mobile_lsp::global_typescript_lsp_plugin_id(),
+                vec![crate::mobile::mobile_lsp::global_typescript_lsp_config()],
+            )
+            .await;
+    }
     let mobile_lsp_workspace_leases = Arc::new(
         crate::mobile::mobile_lsp::MobileWorkspaceLspLeaseManager::new(
             plugin_lsp_registry.clone(),
@@ -2354,16 +2380,25 @@ pub(super) async fn build_mobile_inner_with_ask(
         let app_service = crate::mobile::unified_local_apps::MobileLocalAppServiceHandle::new(
             cfg.lingxi_home.clone(),
             mobile_linux.clone(),
-            if cfg!(target_os = "ios") { "ios" } else { "android" }.into(),
-        ).map_err(|error| MobileBuildError::Orchestrator(error.to_string()))?;
+            if cfg!(target_os = "ios") {
+                "ios"
+            } else {
+                "android"
+            }
+            .into(),
+        )
+        .map_err(|error| MobileBuildError::Orchestrator(error.to_string()))?;
         let app_host = Arc::new(crate::mobile::local_app_tools::MobileProjectAppHost {
             service: app_service,
             config_home: cfg.lingxi_home.clone(),
         });
         tools.register_builtin(Arc::new(
             tool_ui::desktop_local_app::DesktopLocalAppTool::new(
-                tool_ctx.clone(), cfg.lingxi_home.clone(), visualizations,
-            ).with_host(app_host),
+                tool_ctx.clone(),
+                cfg.lingxi_home.clone(),
+                visualizations,
+            )
+            .with_host(app_host),
         ));
     }
     crate::mobile::apply_mobile_session_tool_policy(&mut tools, cfg.session_mode);
@@ -2523,10 +2558,11 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Disable with `autoMemoryEnabled:false` or the `*_DISABLE_AUTO_MEMORY` /
     // `*_SIMPLE` env killswitches. A failed provider call makes the side query
     // fail → empty surfaced set (never breaks a turn).
-    let memdir_prefetch = if memory::auto_memory_enabled(
-        &memory::AutoMemoryEnv::from_process_env(),
-        provider_settings.auto_memory_enabled,
-    ) {
+    let memdir_prefetch = if !cfg.app_agent_host
+        && memory::auto_memory_enabled(
+            &memory::AutoMemoryEnv::from_process_env(),
+            provider_settings.auto_memory_enabled,
+        ) {
         // `cfg.lingxi_home` is the device config dir; the helper re-appends
         // the config-home segment, so pass its PARENT as `home`.
         let home = cfg
@@ -2637,7 +2673,6 @@ pub(super) async fn build_mobile_inner_with_ask(
     .with_instruction_user_email_provider(instruction_identity.clone())
     .with_workflow_size_guideline(workflow_size_guideline_state)
     .with_session_id(main_session_id)
-    .with_jsonl_writer(session_writer.clone())
     // P0.2: attach the SAME `HookRegistry` the executor reads so `list_hooks`
     // reports the loaded settings hooks (the executor fires against it; this
     // exposes it for inspection — mobile sibling of desktop's
@@ -2742,6 +2777,9 @@ pub(super) async fn build_mobile_inner_with_ask(
         .with_mcp_registry(mcp_registry.clone())
         .with_task_registry(task_registry.clone())
         .with_mod_agent_name_registry(subagent_spawner_arc.agent_name_registry());
+    if !cfg.app_agent_host {
+        orch_inner = orch_inner.with_jsonl_writer(session_writer.clone());
+    }
     // P0.1 (gated): attach the memdir prefetch when enabled above.
     if let Some(prefetch) = memdir_prefetch {
         orch_inner = orch_inner.with_memory_prefetch(prefetch);
@@ -2944,15 +2982,17 @@ pub(super) async fn build_mobile_inner_with_ask(
     reg.register_builtin_handler(Arc::new(
         command_api::builtins::VersionHandler::with_build_info(cfg.build_info),
     ));
-    crate::mobile::skill_loader::load_mobile_disk_commands_into_registry(
-        &mut reg,
-        &cwd,
-        &cfg.lingxi_home,
-        &cwd,
-    )
-    .await;
-    crate::mobile::register_mobile_bundled_prompt_commands(&mut reg);
-    crate::mobile::device_skills::register_mobile_device_skills(&mut reg, &device_skill_tools);
+    if !cfg.app_agent_host {
+        crate::mobile::skill_loader::load_mobile_disk_commands_into_registry(
+            &mut reg,
+            &cwd,
+            &cfg.lingxi_home,
+            &cwd,
+        )
+        .await;
+        crate::mobile::register_mobile_bundled_prompt_commands(&mut reg);
+        crate::mobile::device_skills::register_mobile_device_skills(&mut reg, &device_skill_tools);
+    }
     // `/workflows`: mobile cannot open the TUI picker, so bind the shared
     // command handler to the same live registry that powers workflow tools and
     // return the picker's snapshot as a structured command-output result.
@@ -3016,15 +3056,17 @@ pub(super) async fn build_mobile_inner_with_ask(
         orch.project_root(),
         plugin_archive_session.clone(),
     );
-    for (id, manifest, install_dir) in plugin::discover_effective_plugins(
-        &cfg.lingxi_home.join("plugins"),
-        &enabled_plugins,
-        &plugin_discovery_context,
-    )
-    .await
-    {
-        if let Err(error) = plugin_manager.enable(&id, manifest, install_dir).await {
-            tracing::warn!(%error,"installed mobile plugin could not be loaded");
+    if !cfg.app_agent_host {
+        for (id, manifest, install_dir) in plugin::discover_effective_plugins(
+            &cfg.lingxi_home.join("plugins"),
+            &enabled_plugins,
+            &plugin_discovery_context,
+        )
+        .await
+        {
+            if let Err(error) = plugin_manager.enable(&id, manifest, install_dir).await {
+                tracing::warn!(%error,"installed mobile plugin could not be loaded");
+            }
         }
     }
     workflow_command_snapshot.refresh().await;
@@ -3126,23 +3168,25 @@ pub(super) async fn build_mobile_inner_with_ask(
     //     when no matching hook is registered (the common case). No matching
     //     `SessionEnd` is fired here: like desktop, `build_mobile` returns the
     //     runtime and the FFI host drops it with no hook-capable teardown seam.
-    let session_start = orch.fire_session_start("startup").await;
-    if session_start.reload_skills {
-        let handler = mobile_reload_skills_handler(
-            shared_command_registry.clone(),
-            cwd.clone(),
-            cfg.lingxi_home.clone(),
-            cwd.clone(),
-            device_skill_tools.clone(),
-            workflow_tool.clone(),
-            workflow_command_snapshot.clone(),
-            Vec::new(),
-        );
-        if let Some(parsed) = parse_slash_command(&"/reload-skills".into()) {
-            let _ = handler.handle(&parsed).await;
+    if !cfg.app_agent_host {
+        let session_start = orch.fire_session_start("startup").await;
+        if session_start.reload_skills {
+            let handler = mobile_reload_skills_handler(
+                shared_command_registry.clone(),
+                cwd.clone(),
+                cfg.lingxi_home.clone(),
+                cwd.clone(),
+                device_skill_tools.clone(),
+                workflow_tool.clone(),
+                workflow_command_snapshot.clone(),
+                Vec::new(),
+            );
+            if let Some(parsed) = parse_slash_command(&"/reload-skills".into()) {
+                let _ = handler.handle(&parsed).await;
+            }
         }
+        orch.fire_instructions_loaded().await;
     }
-    orch.fire_instructions_loaded().await;
     if interactive_launch {
         if let Some(preference) = permission_preference::load(&cfg.lingxi_home) {
             match permission_policy_gate
@@ -3175,6 +3219,30 @@ pub(super) async fn build_mobile_inner_with_ask(
         })
         .await;
 
+    let app_agent_factory = Arc::new(crate::mobile::app_agent::AppAgentFactory {
+        config_home: cfg.lingxi_home.clone(),
+        api: api_service.clone(),
+        context: side_chat_context.clone(),
+        model_resolution: model_resolution_context_provider.clone(),
+        host_hooks: hook_registry.clone(),
+    });
+    if cfg.local_apps && cfg.app_agent_host {
+        let service = crate::mobile::unified_local_apps::MobileLocalAppServiceHandle::new(
+            cfg.lingxi_home.clone(),
+            mobile_linux.clone(),
+            if cfg!(target_os = "ios") {
+                "ios"
+            } else {
+                "android"
+            }
+            .into(),
+        )
+        .map_err(|error| MobileBuildError::Orchestrator(error.to_string()))?;
+        service
+            .attach_agent_factory(app_agent_factory.clone())
+            .await
+            .map_err(MobileBuildError::Orchestrator)?;
+    }
     let side_chat_factory = Arc::new(super::side_chat::MobileSideChatFactory {
         api: api_service,
         context: side_chat_context,
@@ -3198,6 +3266,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         provider_catalog,
         plugin_archive_session,
         side_chat_factory,
+        app_agent_factory,
         provider_region,
         settings_active: mod_settings_active,
         settings_managed: mod_settings_managed,
@@ -3332,6 +3401,10 @@ fn build_mobile_engine_on_worker(
     streaming_override: Option<Arc<dyn StreamingApiClient>>,
 ) -> Result<Arc<MobileEngineHandle>, MobileEngineError> {
     let mut cfg = cfg;
+    let app_agent_host = cfg.app_agent_host;
+    if app_agent_host {
+        cfg.cwd = cfg.lingxi_home.join("local-apps/v2/agent/host");
+    }
     cfg.lingxi_home = std::path::PathBuf::from(super::canonical_cwd_string(&cfg.lingxi_home));
     cfg.cwd = std::path::PathBuf::from(super::canonical_cwd_string(&cfg.cwd));
     // The handle OWNS its runtime (§0.5). A multi-thread runtime so a streaming
@@ -3405,19 +3478,21 @@ fn build_mobile_engine_on_worker(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    runtime
-        .block_on(rebuild_mobile_prompt_dispatch_cache(
-            &message_queue,
-            &durable_turns,
-            &initial_session_uuid,
-        ))
-        .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
-    inner.main_report_waker.bind_queue(message_queue.clone());
-    runtime.block_on(async {
-        if let Err(error) = inner.orchestrator.recover_main_reports().await {
-            tracing::warn!(%error, "could not recover admitted mobile subagent reports");
-        }
-    });
+    if !app_agent_host {
+        runtime
+            .block_on(rebuild_mobile_prompt_dispatch_cache(
+                &message_queue,
+                &durable_turns,
+                &initial_session_uuid,
+            ))
+            .map_err(|error| MobileEngineError::Internal(error.to_string()))?;
+        inner.main_report_waker.bind_queue(message_queue.clone());
+        runtime.block_on(async {
+            if let Err(error) = inner.orchestrator.recover_main_reports().await {
+                tracing::warn!(%error, "could not recover admitted mobile subagent reports");
+            }
+        });
+    }
     let loop_transition = Arc::new(Mutex::new(()));
     let loop_state = Arc::new(tool_cron::LoopRuntime::default());
     let loop_delivery = Arc::new(MobileWakeupDelivery {
@@ -3433,7 +3508,7 @@ fn build_mobile_engine_on_worker(
             loop_state.clone(),
             loop_delivery.clone(),
         ));
-    let session_cron = if tool_cron::cron_tools_enabled() {
+    let session_cron = if !app_agent_host && tool_cron::cron_tools_enabled() {
         let scheduler = Arc::new(
             cron::CronScheduler::new(
                 inner.task_registry.clone(),
@@ -3512,6 +3587,7 @@ fn build_mobile_engine_on_worker(
         let queued_slash_handle = queued_slash_handle.clone();
         runtime
             .spawn(async move {
+                if app_agent_host { return; }
                 loop {
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     let turn_busy = active_cancel.lock().await.is_some();
@@ -4067,7 +4143,7 @@ fn build_mobile_engine_on_worker(
         firer_platform,
     });
     let _ = queued_slash_handle.set(Arc::downgrade(&handle));
-    {
+    if !app_agent_host {
         // This runs on every scope switch / reconnect within one process, not
         // just at process start, so drop the handles whose engine is already
         // gone before appending. Without this the vector grows for the app's
@@ -4079,7 +4155,9 @@ fn build_mobile_engine_on_worker(
         handles.retain(|existing| existing.strong_count() > 0);
         handles.push(Arc::downgrade(&handle));
     }
-    handle.runtime().block_on(handle.emit_controls_snapshot());
-    handle.runtime().block_on(handle.emit_typescript_lsp_mode());
+    if !app_agent_host {
+        handle.runtime().block_on(handle.emit_controls_snapshot());
+        handle.runtime().block_on(handle.emit_typescript_lsp_mode());
+    }
     Ok(handle)
 }

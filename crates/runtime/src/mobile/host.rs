@@ -270,6 +270,8 @@ pub struct MobileRuntime {
     pub(crate) plugin_archive_session: Arc<plugin::PluginArchiveSession>,
     /// Ready services used to create RAM-only lightweight conversations.
     pub side_chat_factory: Arc<dyn crate::side_chat::SideChatFactory>,
+    /// Independent Local App tasks over ready native host services.
+    pub app_agent_factory: Arc<super::app_agent::AppAgentFactory>,
     /// Product region captured with the running model client.
     pub provider_region: llm_runtime::Region,
     /// Shared settings baseline used by both the Mod reader and the public
@@ -8996,7 +8998,6 @@ impl MobileEngineHandle {
         )
         .map(Arc::new)
     }
-
 }
 #[cfg(test)]
 #[path = "host/tests/tests.rs"]

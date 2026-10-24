@@ -51,6 +51,22 @@ fn config_fingerprint(config: &McpServerConfig) -> String {
 }
 
 impl McpToolIdentity {
+    /// Recheck the original host slot and revision against current policy/config.
+    #[must_use]
+    pub fn matches_config(&self, config: &McpServerConfig) -> bool {
+        !config.disabled
+            && self.server_config_id == fingerprint(&(&config.scope, &config.name))
+            && self.config_revision == config_fingerprint(config)
+    }
+
+    /// Opaque connection selector for trusted host UI. Any configuration
+    /// change invalidates it without exposing transport secrets.
+    pub fn server_catalog_id(config: &McpServerConfig) -> String {
+        format!(
+            "server:{}",
+            fingerprint(&(&config.scope, &config.name, config_fingerprint(config)))
+        )
+    }
     /// Mint from trusted loaded configuration and the actual discovery result.
     /// Never accept an identity reconstructed from a display FQN.
     #[must_use]

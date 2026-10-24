@@ -1,5 +1,7 @@
 //! Schema-2 app library, independent of accounts and conversation lifetime.
 //! Filesystem calls are synchronous: async hosts must use their blocking executor.
+/// Host-owned Agent task records shared by native platforms.
+pub mod agent;
 mod library;
 mod manifest;
 mod model;

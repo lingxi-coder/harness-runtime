@@ -95,6 +95,7 @@ desktop = [
 ]
 mobile = [
     "dep:httparse",
+    "dep:jsonschema",
     "engine",
     "dep:configuration-admin",
     "dep:migrations",
@@ -180,6 +181,7 @@ collaboration = [
 ]
 
 [dependencies]
+jsonschema = { version = "=0.46.10", default-features = false, optional = true }
 audio-runtime = { path = "../audio-runtime" }
 chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }
 
