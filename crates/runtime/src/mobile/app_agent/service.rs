@@ -110,6 +110,11 @@ impl PermissionGate for Control {
 }
 #[async_trait::async_trait]
 impl OutputStream for Control {
+    fn note_model_error_kind(&self, kind: &'static str) {
+        if let Ok(mut failure) = self.model_failure.lock() {
+            *failure = Some(format!("model_{kind}"));
+        }
+    }
     async fn emit_text(&self, text: &Utf16JsonProjection) {
         if let Some(text) = text.string_at("") {
             let mut output = self.text.lock().await;
@@ -132,7 +137,7 @@ impl OutputStream for Control {
     ) {
     }
     async fn emit_end_turn(&self, _: &str, _: &CostSnapshot) {}
-    async fn emit_terminal_api_error(&self, status: Option<u16>, kind: &str, _: &str) {
+    async fn emit_terminal_api_error(&self, status: Option<u16>, kind: &str, stop_reason: &str) {
         // Native-only diagnostics: never log provider bodies, prompts or keys,
         // and never expose another host channel through the page result.
         let kind: String = kind
@@ -145,7 +150,13 @@ impl OutputStream for Control {
             self.id
         );
         if let Ok(mut failure) = self.model_failure.lock() {
-            *failure = Some(format!("model_request_{}_{}", status.unwrap_or(0), kind));
+            if failure.is_none() {
+                *failure = Some(if stop_reason == "refusal" {
+                    "model_refused".into()
+                } else {
+                    format!("model_request_{}_{}", status.unwrap_or(0), kind)
+                });
+            }
         }
         self.model_failed.store(true, Ordering::Release);
     }

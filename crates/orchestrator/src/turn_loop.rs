@@ -57,6 +57,7 @@ where
 pub(crate) mod api_recovery;
 mod batch_hooks;
 mod error_reporting;
+pub(crate) use error_reporting::model_error_kind;
 mod mod_batched_step;
 mod mod_fs_ancestors;
 mod mod_session_messages;
@@ -887,6 +888,8 @@ async fn execute_one_turn_with_recovery_tracked_impl(
                 }
                 _ => None,
             };
+            orch.output
+                .note_model_error_kind(error_reporting::model_error_kind(&e));
             let assistant_id = surface_model_error(orch, content, env, provider_status).await;
             orch.mark_mod_turn_error();
             // SLASH-04: this arm is the oracle's `api_error` reason (see the

@@ -1156,3 +1156,42 @@ mod source_error_tests {
         );
     }
 }
+
+/// Machine-readable category survives graceful model-error presentation.
+pub(crate) fn model_error_kind(error: &OrchestratorError) -> &'static str {
+    match error {
+        OrchestratorError::ApiCall(inner) | OrchestratorError::Streaming(inner) => match inner
+            .classification_source()
+        {
+            LlmError::InvalidRequest { .. } => "invalid_request",
+            LlmError::MalformedToolInput { .. } => "malformed_tool_input",
+            LlmError::UnsupportedCapability { .. } => "unsupported_capability",
+            LlmError::Transport { .. } | LlmError::TransportTimeout { .. } => "transport_error",
+            LlmError::Authentication { .. } | LlmError::OAuthRefreshDead => "authentication_failed",
+            LlmError::PermissionDenied { .. } => "permission_denied",
+            LlmError::StreamInterrupted { .. } => "stream_interrupted",
+            LlmError::RequestDispatchRejected { .. } => "dispatch_rejected",
+            _ => "provider_error",
+        },
+        OrchestratorError::StreamingProtocol(_) => "stream_protocol_error",
+        OrchestratorError::StreamEndedWithoutStop => "stream_incomplete",
+        OrchestratorError::Internal(_) => "internal_error",
+        OrchestratorError::PermissionAbort { .. } => "tool_permission_aborted",
+        _ => "execution_failed",
+    }
+}
+
+#[cfg(test)]
+mod model_error_kind_regression {
+    use super::*;
+
+    #[test]
+    fn typed_category_does_not_include_provider_text() {
+        let error = OrchestratorError::ApiCall(LlmError::InvalidRequest {
+            message: "private provider body, argument and credential".into(),
+        });
+        assert_eq!(model_error_kind(&error), "invalid_request");
+        let error = OrchestratorError::Internal("private path and request".into());
+        assert_eq!(model_error_kind(&error), "internal_error");
+    }
+}

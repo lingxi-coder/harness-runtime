@@ -1438,6 +1438,8 @@ impl StreamingTurnDriver<'_> {
                             }
                             _ => None,
                         };
+                        orch.output
+                            .note_model_error_kind(crate::turn_loop::model_error_kind(&error));
                         let message_id =
                             crate::turn_loop::surface_model_error(orch, text, env, provider_status)
                                 .await;
@@ -1695,6 +1697,10 @@ impl StreamingTurnDriver<'_> {
                 // surface — so the classifier sees the inner `LlmError`.
                 let env = classify_api_error(&OrchestratorError::Streaming(other.clone()));
                 let error_text = orch.model_error_source(&other).await;
+                orch.output
+                    .note_model_error_kind(crate::turn_loop::model_error_kind(
+                        &OrchestratorError::Streaming(other.clone()),
+                    ));
                 let id = crate::turn_loop::surface_model_error(
                     orch,
                     error_text,
@@ -2903,6 +2909,7 @@ impl StreamingTurnDriver<'_> {
                         };
                         let error_text =
                             crate::turn_loop::orchestrator_error_text_source(&other, &model);
+                        orch.output.note_model_error_kind(crate::turn_loop::model_error_kind(&other));
                         let id =
                             crate::turn_loop::surface_model_error(orch, error_text, env, provider_status).await;
                         crate::server_fallback::flush_pending_notice(orch).await;
