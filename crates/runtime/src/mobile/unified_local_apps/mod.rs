@@ -943,6 +943,11 @@ impl MobileLocalAppServiceHandle {
     ) -> String {
         let host = match self.agent_host() {
             Ok(host) => host,
+            // Closing an ordinary page or a never-used Agent must not boot a
+            // model host or fail the native WebView teardown.
+            Err(error) if error == "agent_model_host_not_ready" => {
+                return agent_envelope(Ok(Value::Null));
+            }
             Err(error) => return agent_envelope(Err(error)),
         };
         let result = EXECUTOR

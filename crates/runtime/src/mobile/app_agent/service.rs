@@ -511,16 +511,10 @@ impl AppAgentHost {
         Ok(())
     }
     pub async fn close_page(&self, app: &str, invocation: &str) -> Result<(), String> {
-        let (owner, _) = self.owner(app, invocation).await?;
-        if !self
-            .store
-            .settings(&owner)
-            .map_err(|_| "agent_storage_unavailable")?
-            .is_some_and(|s| s.background)
-        {
-            self.stop_app(app).await;
-        }
-        Ok(())
+        // Mobile does not grant background execution. A delayed close belongs
+        // to its captured invocation even if a newer run is already current.
+        // Never let an old page cancel a replacement run's tasks.
+        self.stop_invocation(app, invocation).await
     }
     /// Trusted native settings/interaction UI only; never exposed by SDK invoke.
     pub async fn host(self: &Arc<Self>, request: Value) -> Result<Value, String> {
