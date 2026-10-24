@@ -389,6 +389,13 @@ impl AppAgentFactory {
                 Arc::new(orchestrator::test_support::StaticMemoryProvider::empty()),
                 cwd,
             )
+            // A fresh side chat starts without a profile. Admit only this
+            // host-authorized qualified route before selecting its profile;
+            // otherwise the side-chat guard rejects every profiled model.
+            .with_side_chat_model_refs(vec![lingxi_core::host::qualified_model_ref(
+                &model.model_id,
+                Some(&model.provider_id),
+            )])
             .with_session_id(session_id)
             .with_session_cwd(context.session_cwd.clone())
             .with_read_state_map(context.read_file_state.clone())
