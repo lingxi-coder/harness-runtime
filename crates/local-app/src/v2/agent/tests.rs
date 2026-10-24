@@ -13,6 +13,7 @@ fn settings() -> Settings {
             model_id: "vision".into(),
         },
         tools: BTreeMap::new(),
+        skills: vec![],
         background: false,
         max_turns: 20,
         timeout_ms: 600_000,
@@ -22,12 +23,14 @@ fn input() -> Input {
     Input {
         request_id: "request-1".into(),
         prompt: "private photo description".into(),
-        images: vec![Image {
-            media_type: "image/jpeg".into(),
-            base64: "PRIVATE_IMAGE_BYTES".into(),
+        attachments: vec![Attachment {
+            name: "photo.txt".into(),
+            media_type: "text/plain".into(),
+            base64: "cHJpdmF0ZQ==".into(),
         }],
         output_schema: None,
         tools: vec![],
+        skills: vec![],
         max_turns: None,
         timeout_ms: None,
     }
@@ -51,13 +54,72 @@ fn deduplication_does_not_admit_another_task() {
     changed.prompt = "changed".into();
     assert!(s.admit(&owner(), &changed, &[]).is_err());
 }
+
+#[test]
+fn consumed_wake_retry_is_idempotent_and_chat_scoped() {
+    let (_dir, store) = store();
+    let chat_id = uuid::Uuid::new_v4().to_string();
+    let first = store
+        .admit_scoped(&owner(), &input(), &[], &[], Some(&chat_id), true)
+        .unwrap();
+    let retry = store
+        .admit_scoped(&owner(), &input(), &[], &[], Some(&chat_id), false)
+        .unwrap();
+    assert!(first.start);
+    assert!(!retry.start);
+    assert_eq!(retry.task.run_id, first.task.run_id);
+
+    let other_chat = uuid::Uuid::new_v4().to_string();
+    let conflict = store.admit_scoped(&owner(), &input(), &[], &[], Some(&other_chat), false);
+    assert_eq!(
+        admission_error_code(&conflict.err().unwrap()),
+        "request_conflict"
+    );
+}
+
+#[test]
+fn previous_settings_without_skills_migrate_to_an_empty_approved_set() {
+    let value = serde_json::json!({
+        "model": {"providerId":"provider","modelId":"vision"},
+        "tools": {},
+        "background": false,
+        "maxTurns": 20,
+        "timeoutMs": 600000
+    });
+    let settings: Settings = serde_json::from_value(value).unwrap();
+    assert!(settings.skills.is_empty());
+}
+
+#[test]
+fn previous_task_results_load_without_losing_text_or_structured_output() {
+    let text: TaskResult = serde_json::from_value(serde_json::json!({"text":"done"})).unwrap();
+    assert_eq!(text.text, "done");
+    let structured: TaskResult = serde_json::from_value(serde_json::json!({
+        "output": {"ok": true},
+        "usage": {"inputTokens": 2}
+    }))
+    .unwrap();
+    assert_eq!(structured.text, "");
+    assert_eq!(structured.output, Some(serde_json::json!({"ok": true})));
+}
+
+#[test]
+fn normalized_attachment_input_is_bounded_and_path_free() {
+    let mut request = input();
+    assert!(validate_input(&request).is_ok());
+    request.attachments[0].name = "../outside.txt".into();
+    assert!(validate_input(&request).is_err());
+    request.attachments[0].name = "valid.txt".into();
+    request.attachments[0].base64 = "not base64".into();
+    assert!(validate_input(&request).is_err());
+}
 #[test]
 fn ledger_never_persists_inputs() {
     let (dir, s) = store();
     s.admit(&owner(), &input(), &[]).unwrap();
     let disk = fs::read_to_string(dir.path().join("agent-tasks.json")).unwrap();
     assert!(!disk.contains("private photo"));
-    assert!(!disk.contains("PRIVATE_IMAGE_BYTES"));
+    assert!(!disk.contains("cHJpdmF0ZQ=="));
 }
 #[test]
 fn restart_interrupts_without_replay() {
@@ -71,7 +133,7 @@ fn restart_interrupts_without_replay() {
     assert_eq!(b.task.run_id, a.task.run_id);
 }
 #[test]
-fn cross_app_release_and_invocation_are_not_readable() {
+fn reads_are_app_release_scoped_while_execution_leases_are_invocation_scoped() {
     let (_dir, s) = store();
     let a = s.admit(&owner(), &input(), &[]).unwrap();
     for o in [
@@ -88,7 +150,13 @@ fn cross_app_release_and_invocation_are_not_readable() {
             ..owner()
         },
     ] {
-        assert!(s.get(&o, &a.task.run_id).is_err());
+        if o.app_id == owner().app_id && o.release_digest == owner().release_digest {
+            assert_eq!(s.get(&o, &a.task.run_id).unwrap().run_id, a.task.run_id);
+            assert_eq!(s.list(&o, None, 10).unwrap().len(), 1);
+        } else {
+            assert!(s.get(&o, &a.task.run_id).is_err());
+            assert!(s.list(&o, None, 10).unwrap().is_empty());
+        }
         assert!(!s.lease_valid(&o, &a.task.run_id));
     }
 }
@@ -162,7 +230,13 @@ fn limits_cannot_expand_host_settings() {
 fn terminal_result_is_immutable() {
     let (_dir, s) = store();
     let a = s.admit(&owner(), &input(), &[]).unwrap();
-    let result = serde_json::json!({"output":{"food":"apple"}});
+    let result = TaskResult {
+        text: String::new(),
+        output: Some(serde_json::json!({"food":"apple"})),
+        attachments: vec![],
+        chat_id: None,
+        message_id: None,
+    };
     let t = s
         .update(
             &owner(),
@@ -216,7 +290,13 @@ fn terminal_result_survives_a_new_page_invocation_without_reexecution() {
             &owner(),
             &admitted.task.run_id,
             State::Succeeded,
-            Some(serde_json::json!({"text":"done"})),
+            Some(TaskResult {
+                text: "done".into(),
+                output: None,
+                attachments: vec![],
+                chat_id: None,
+                message_id: None,
+            }),
             None,
             None,
         )
@@ -244,7 +324,13 @@ fn revocation_wins_a_racing_success_commit() {
             &owner(),
             &admitted.task.run_id,
             State::Succeeded,
-            Some(serde_json::json!({"text":"late"})),
+            Some(TaskResult {
+                text: "late".into(),
+                output: None,
+                attachments: vec![],
+                chat_id: None,
+                message_id: None,
+            }),
             None,
             None,
         )
@@ -273,7 +359,13 @@ fn cancellation_intent_blocks_late_success_without_releasing_concurrency() {
             &owner(),
             &admitted.task.run_id,
             State::Succeeded,
-            Some(serde_json::json!({"text":"late"})),
+            Some(TaskResult {
+                text: "late".into(),
+                output: None,
+                attachments: vec![],
+                chat_id: None,
+                message_id: None,
+            }),
             None,
             None,
         )
@@ -335,7 +427,7 @@ fn unsupported_image_model_result_explains_the_remedy() {
         .unwrap();
     let error = task.error.unwrap();
     assert_eq!(error.code, "model_vision_unsupported");
-    assert!(error.message.contains("image-capable model"));
+    assert!(error.message.contains("compatible model"));
 }
 
 #[test]
@@ -370,9 +462,11 @@ fn native_interaction_phases_are_durable_sequenced_and_cleared_on_terminal() {
         store.get(&owner(), &run.run_id).unwrap().sequence,
         pending.sequence
     );
-    assert!(store
-        .set_phase(&owner(), &run.run_id, Some("approve_any_tool"))
-        .is_err());
+    assert!(
+        store
+            .set_phase(&owner(), &run.run_id, Some("approve_any_tool"))
+            .is_err()
+    );
     let finished = store
         .update(&owner(), &run.run_id, State::Cancelled, None, None, None)
         .unwrap();

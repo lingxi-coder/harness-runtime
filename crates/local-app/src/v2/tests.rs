@@ -1,6 +1,17 @@
 use super::*;
 use serde_json::{json, Value};
 use std::{collections::BTreeMap, fs, path::Path};
+fn authoring(source_directory: &str) -> AuthoringRef {
+    AuthoringRef {
+        source_directory: source_directory.into(),
+        workspace_id: Some(uuid::Uuid::new_v4().to_string()),
+        project_ref: Some(ProjectRef::MobileProject {
+            project_id: uuid::Uuid::new_v4().to_string(),
+        }),
+        authoring_session_id: Some(uuid::Uuid::new_v4().to_string()),
+        app_id: None,
+    }
+}
 fn manifest() -> Value {
     json!({"schema":2,"name":"Test app","entry":{"type":"static","path":"index.html"},"targets":[{"platform":"ios","environment":"web"},{"platform":"android","environment":"web"},{"platform":"macos","environment":"web"}],"package":{"files":["index.html"],"dependencyLocks":[]}})
 }
@@ -18,11 +29,7 @@ fn setup() -> (tempfile::TempDir, AppLibrary, PublishRequest) {
         app_id: None,
         expected_revision: 0,
         source_path: src.to_string_lossy().into(),
-        authoring: Some(AuthoringRef {
-            source_directory: "/root/.lingxi/.apps/test".into(),
-            source_session_id: Some("session1".into()),
-            project_id: None,
-        }),
+        authoring: Some(authoring("/root/.lingxi/.apps/test")),
         market_origin: None,
     };
     (dir, lib, request)
@@ -294,24 +301,234 @@ fn schema_downgrade_is_blocked_and_initial_schema_can_be_newer() {
 fn continued_development_only_reuses_recorded_matching_session() {
     let (_dir, lib, req) = setup();
     let first = lib.publish(req).unwrap();
+    let binding = first.record.authoring.clone().unwrap();
+    let session_id = binding.authoring_session_id.clone().unwrap();
+    let context = AuthoringSessionContext {
+        workspace_id: binding.workspace_id.clone().unwrap(),
+        source_directory: binding.source_directory.clone(),
+        project_ref: binding.project_ref.clone().unwrap(),
+        mode: "code".into(),
+    };
     let mut dirs = BTreeMap::new();
+    dirs.insert("other-active-session".into(), context.clone());
     dirs.insert(
-        "other-active-session".into(),
-        "/root/.lingxi/.apps/test".into(),
+        session_id.clone(),
+        AuthoringSessionContext {
+            source_directory: "/root/elsewhere".into(),
+            ..context.clone()
+        },
     );
-    dirs.insert("session1".into(), "/root/elsewhere".into());
     assert_eq!(
         lib.prepare_authoring(&first.record.app_id, &dirs, true)
             .unwrap()
             .action,
         "createSession"
     );
-    dirs.insert("session1".into(), "/root/.lingxi/.apps/test".into());
+    dirs.insert(
+        session_id.clone(),
+        AuthoringSessionContext {
+            mode: "chat".into(),
+            ..context.clone()
+        },
+    );
     assert_eq!(
         lib.prepare_authoring(&first.record.app_id, &dirs, true)
             .unwrap()
-            .session_id,
-        Some("session1".into())
+            .action,
+        "createSession"
+    );
+    dirs.insert(session_id.clone(), context);
+    let prepared = lib
+        .prepare_authoring(&first.record.app_id, &dirs, true)
+        .unwrap();
+    assert_eq!(prepared.action, "resumeSession");
+    assert_eq!(
+        prepared.authoring_session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+}
+
+#[test]
+fn older_authoring_metadata_requires_an_explicit_rebind() {
+    let (_dir, lib, mut req) = setup();
+    let old: AuthoringRef = serde_json::from_value(json!({
+        "sourceDirectory":"/root/.lingxi/.apps/test",
+        "sourceSessionId":"old-session",
+        "projectId":"old-project"
+    }))
+    .unwrap();
+    req.authoring = Some(old);
+    let record = lib.publish(req).unwrap().record;
+
+    let prepared = lib
+        .prepare_authoring(&record.app_id, &BTreeMap::new(), true)
+        .unwrap();
+    assert_eq!(prepared.action, "rebindRequired");
+    assert_eq!(prepared.source_directory, "/root/.lingxi/.apps/test");
+    assert!(prepared.authoring_session_id.is_none());
+}
+
+#[test]
+fn authoring_binding_requires_owner_project_and_real_session_identity() {
+    let (_dir, lib, req) = setup();
+    let first = lib.publish(req).unwrap();
+    let mut wrong_owner = authoring("/root/.lingxi/.apps/other");
+    wrong_owner.app_id = Some("a00000000000000000000000000000000".into());
+    assert!(lib
+        .bind_authoring(&first.record.app_id, wrong_owner)
+        .is_err());
+
+    let mut invalid_project = authoring("/root/.lingxi/.apps/other");
+    invalid_project.project_ref = Some(ProjectRef::MobileProject {
+        project_id: "not-a-uuid".into(),
+    });
+    assert!(lib
+        .bind_authoring(&first.record.app_id, invalid_project)
+        .is_err());
+
+    let mut invalid_session = authoring("/root/.lingxi/.apps/other");
+    invalid_session.authoring_session_id = Some("not-a-session-uuid".into());
+    assert!(lib
+        .bind_authoring(&first.record.app_id, invalid_session)
+        .is_err());
+}
+
+#[test]
+fn pending_authoring_requires_a_complete_ownerless_canonical_binding() {
+    let (_dir, lib, _req) = setup();
+    let source = "/home/user/.lingxi/.apps/notes-1234abcd";
+    let mut incomplete = authoring(source);
+    incomplete.authoring_session_id = None;
+    assert!(lib.register_pending_authoring(incomplete).is_err());
+
+    let mut already_owned = authoring(source);
+    already_owned.app_id = Some("a00000000000000000000000000000000".into());
+    assert!(lib.register_pending_authoring(already_owned).is_err());
+
+    let mut noncanonical = authoring("/home/user/.lingxi/.apps/../outside");
+    assert!(lib
+        .register_pending_authoring(noncanonical.clone())
+        .is_err());
+    noncanonical.source_directory = source.into();
+    let saved = lib
+        .register_pending_authoring(noncanonical.clone())
+        .unwrap();
+    assert_eq!(saved, noncanonical);
+}
+
+#[test]
+fn registered_binding_is_consumed_by_first_publish_and_modify_resumes_same_code_session() {
+    let (_dir, lib, mut req) = setup();
+    let source_directory = "/home/user/.lingxi/.apps/notes-1234abcd";
+    let binding = authoring(source_directory);
+    let session_id = binding.authoring_session_id.clone().unwrap();
+    lib.register_pending_authoring(binding.clone()).unwrap();
+    req.authoring = None;
+
+    let first = lib
+        .publish_with_pending_authoring(req.clone(), source_directory)
+        .unwrap();
+    let saved = first.record.authoring.as_ref().unwrap();
+    assert_eq!(saved.source_directory, source_directory);
+    assert_eq!(saved.app_id.as_deref(), Some(first.record.app_id.as_str()));
+    assert_eq!(saved.workspace_id, binding.workspace_id);
+    assert_eq!(saved.project_ref, binding.project_ref);
+    assert_eq!(
+        saved.authoring_session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(
+        fs::read_dir(lib.root().join("pending-authoring"))
+            .unwrap()
+            .count(),
+        0
+    );
+
+    let context = AuthoringSessionContext {
+        workspace_id: binding.workspace_id.clone().unwrap(),
+        source_directory: source_directory.into(),
+        project_ref: binding.project_ref.clone().unwrap(),
+        mode: "code".into(),
+    };
+    let mut sessions = BTreeMap::new();
+    sessions.insert(session_id.clone(), context);
+    let prepared = lib
+        .prepare_authoring(&first.record.app_id, &sessions, true)
+        .unwrap();
+    assert_eq!(prepared.action, "resumeSession");
+    assert_eq!(
+        prepared.authoring_session_id.as_deref(),
+        Some(session_id.as_str())
+    );
+    assert!(lib.register_pending_authoring(binding).is_err());
+
+    req.app_id = Some(first.record.app_id.clone());
+    req.expected_revision = 1;
+    let modified = lib.publish(req).unwrap();
+    assert_eq!(modified.record.authoring, first.record.authoring);
+}
+
+#[test]
+fn failed_first_publish_keeps_registered_authoring_for_retry() {
+    let (_dir, lib, mut req) = setup();
+    let source_directory = "/home/user/.lingxi/.apps/retry-1234abcd";
+    lib.register_pending_authoring(authoring(source_directory))
+        .unwrap();
+    req.authoring = None;
+    let manifest_path = Path::new(&req.source_path).join("lingxi-app.json");
+    let valid_manifest = fs::read(&manifest_path).unwrap();
+    fs::write(&manifest_path, "{\"schema\":99}").unwrap();
+    assert!(lib
+        .publish_with_pending_authoring(req.clone(), source_directory)
+        .is_err());
+
+    fs::write(&manifest_path, valid_manifest).unwrap();
+    let retried = lib
+        .publish_with_pending_authoring(req, source_directory)
+        .unwrap();
+    assert_eq!(
+        retried.record.authoring.unwrap().source_directory,
+        source_directory
+    );
+}
+
+#[test]
+fn project_refs_use_platform_tagged_wire_values() {
+    let project_id = uuid::Uuid::new_v4().to_string();
+    assert_eq!(
+        serde_json::to_value(ProjectRef::MobileProject {
+            project_id: project_id.clone()
+        })
+        .unwrap(),
+        json!({"kind":"mobileProject","projectId":project_id})
+    );
+    assert_eq!(
+        serde_json::to_value(ProjectRef::DesktopPath {
+            path: "/workspace/app".into()
+        })
+        .unwrap(),
+        json!({"kind":"desktopPath","path":"/workspace/app"})
+    );
+}
+
+#[test]
+fn desktop_project_identity_can_contain_a_distinct_authoring_source_root() {
+    let (_dir, lib, req) = setup();
+    let published = lib.publish(req).unwrap();
+    let mut binding = authoring("/workspace/project/local-app");
+    binding.project_ref = Some(ProjectRef::DesktopPath {
+        path: "/workspace/project".into(),
+    });
+    let updated = lib
+        .bind_authoring(&published.record.app_id, binding)
+        .unwrap();
+    let bound = updated.authoring.unwrap();
+    assert_eq!(bound.source_directory, "/workspace/project/local-app");
+    assert_eq!(
+        bound.project_ref,
+        Some(ProjectRef::DesktopPath {
+            path: "/workspace/project".into()
+        })
     );
 }
 #[test]
@@ -413,11 +630,7 @@ fn legacy_import_preserves_old_assets_and_has_new_identity() {
 fn restoring_source_creates_a_new_directory_and_rebinds_only_explicitly() {
     let (dir, lib, req) = setup();
     let published = lib.publish(req.clone()).unwrap();
-    let authoring = AuthoringRef {
-        source_directory: "/root/.lingxi/.apps/restored".into(),
-        source_session_id: Some("replacement".into()),
-        project_id: None,
-    };
+    let authoring = authoring("/root/.lingxi/.apps/restored");
     let restored = lib
         .restore_authoring(
             &published.record.app_id,
@@ -426,14 +639,19 @@ fn restoring_source_creates_a_new_directory_and_rebinds_only_explicitly() {
             authoring.clone(),
         )
         .unwrap();
-    assert_eq!(restored.authoring, Some(authoring));
+    let stored = restored.authoring.unwrap();
+    assert_eq!(stored.source_directory, authoring.source_directory);
+    assert_eq!(stored.workspace_id, authoring.workspace_id);
+    assert_eq!(stored.project_ref, authoring.project_ref);
+    assert_eq!(stored.authoring_session_id, authoring.authoring_session_id);
+    assert_eq!(stored.app_id.as_deref(), Some(restored.app_id.as_str()));
     assert_eq!(restored.latest_revision, 1);
     assert!(lib
         .restore_authoring(
             &published.record.app_id,
             1,
             Path::new(&req.source_path),
-            restored.authoring.unwrap()
+            stored
         )
         .is_err());
 }
@@ -441,11 +659,7 @@ fn restoring_source_creates_a_new_directory_and_rebinds_only_explicitly() {
 fn remix_requires_a_license_and_creates_an_independent_identity() {
     let (dir, lib, mut req) = setup();
     let first = lib.publish(req.clone()).unwrap();
-    let authoring = AuthoringRef {
-        source_directory: "/root/.lingxi/.apps/remix".into(),
-        source_session_id: None,
-        project_id: None,
-    };
+    let authoring = authoring("/root/.lingxi/.apps/remix");
     assert!(lib
         .remix(
             &first.record.app_id,
@@ -564,11 +778,7 @@ fn remix_records_the_selected_release_origin_even_before_activation() {
             &first.record.app_id,
             2,
             &dir.path().join("copy"),
-            AuthoringRef {
-                source_directory: "/home/lingxi/.lingxi/.apps/copied".into(),
-                source_session_id: None,
-                project_id: None,
-            },
+            authoring("/home/mobile-user/.lingxi/.apps/copied"),
             None,
         )
         .unwrap();

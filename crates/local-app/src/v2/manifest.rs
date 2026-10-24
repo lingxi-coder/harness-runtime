@@ -141,6 +141,16 @@ pub struct PackageFiles {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentRequirements {
     pub tools: Vec<String>,
+    /// Release-local Skill instructions the native Agent may load. Each ID is
+    /// stable within the immutable release and points to a packaged file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<AgentSkill>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentSkill {
+    pub id: String,
+    pub path: String,
 }
 
 pub fn relative_path(value: &str) -> Result<(), AppError> {
@@ -314,6 +324,29 @@ impl Manifest {
                     "agent requirements need agent capability and nonempty tools".into(),
                 ));
             }
+            let mut skills = BTreeSet::new();
+            for skill in &agent.skills {
+                if !token(&skill.id)
+                    || !skills.insert(&skill.id)
+                    || skill.path != format!("skills/{}/SKILL.md", skill.id)
+                {
+                    return Err(AppError::Invalid(
+                        "Agent Skills require unique IDs and a packaged skills/<id>/SKILL.md path"
+                            .into(),
+                    ));
+                }
+                relative_path(&skill.path)?;
+                if self
+                    .package
+                    .as_ref()
+                    .is_some_and(|package| !package.files.contains(&skill.path))
+                {
+                    return Err(AppError::Invalid(
+                        "declared Agent Skill instructions must be included in package.files"
+                            .into(),
+                    ));
+                }
+            }
         }
         for step in self.install.iter().chain(&self.build) {
             check_step(
@@ -438,7 +471,7 @@ impl Target {
                 return Err(AppError::Invalid(format!(
                     "unknown platform {}",
                     self.platform
-                )))
+                )));
             }
         };
         if !environments.contains(&self.environment.as_str()) {

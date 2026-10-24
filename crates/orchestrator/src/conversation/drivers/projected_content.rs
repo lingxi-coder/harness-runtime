@@ -61,11 +61,13 @@ pub(super) fn queued_human_rendered(
     let rendered_content = if content.string_units("").is_some() {
         text
     } else {
-        let mut blocks = vec![Utf16JsonProjection::object(vec![
-            ("type".into(), "text".into()),
-            ("text".into(), text),
-        ])
-        .map_err(invalid_content)?];
+        let mut blocks = vec![
+            Utf16JsonProjection::object(vec![
+                ("type".into(), "text".into()),
+                ("text".into(), text),
+            ])
+            .map_err(invalid_content)?,
+        ];
         let count = content
             .array_len("")
             .ok_or_else(|| invalid_content("projected content must be a string or array"))?;
@@ -256,11 +258,11 @@ fn invalid_content(error: impl std::fmt::Display) -> OrchestratorError {
 mod tests {
     use super::*;
     use crate::test_support::{
-        content_block_start_text, content_block_stop, message_delta_stop, message_start,
-        message_stop, noop_hook_executor, text_delta, MockApiClient, MockOutputStream,
-        MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
+        MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
+        StaticMemoryProvider, content_block_start_text, content_block_stop, message_delta_stop,
+        message_start, message_stop, noop_hook_executor, text_delta,
     };
-    use lingxi_core::types::{ConversationMessage, MessageId};
+    use lingxi_core::types::{ConversationMessage, MessageId, SessionId};
     use serde_json::Value;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
@@ -296,9 +298,11 @@ mod tests {
         else {
             panic!("lost exact queued text")
         };
-        assert!(utf16_code_units
-            .windows(3)
-            .any(|units| units == [0xd800, 10, b'l' as u16]));
+        assert!(
+            utf16_code_units
+                .windows(3)
+                .any(|units| units == [0xd800, 10, b'l' as u16])
+        );
         assert!(utf16_code_units.contains(&0xdfff));
         let rendered = queued_human_rendered(&content).unwrap();
         let exact = rendered
@@ -492,6 +496,150 @@ mod tests {
         let metrics = orch.completed_turn_metrics().expect("error owner metrics");
         assert_eq!(metrics.num_turns, 1);
         assert_eq!(metrics.stop_reason.as_deref(), Some("model_error"));
+    }
+
+    #[tokio::test]
+    async fn externally_persisted_chat_user_rows_are_not_appended_twice() {
+        let root = tempfile::tempdir().unwrap();
+        let session_id = SessionId::new();
+        let path = root.path().join(format!("{}.jsonl", session_id.as_uuid()));
+        let stream = Arc::new(MockStreamingApiClient::with_turns(vec![
+            crate::scripted![
+                message_start("assistant-one", "claude-sonnet-5"),
+                content_block_start_text(0),
+                text_delta(0, "first answer"),
+                content_block_stop(0),
+                message_delta_stop("end_turn"),
+                message_stop(),
+            ],
+            crate::scripted![
+                message_start("assistant-two", "claude-sonnet-5"),
+                content_block_start_text(0),
+                text_delta(0, "second answer"),
+                content_block_stop(0),
+                message_delta_stop("end_turn"),
+                message_stop(),
+            ],
+        ]));
+        let writer = Arc::new(session::JsonlWriter::new(
+            path.clone(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(
+                root.path().to_path_buf(),
+            )),
+        ));
+        let orch = crate::ConversationOrchestrator::into_shared(
+            crate::ConversationOrchestrator::new_with_streaming(
+                crate::OrchestratorConfig::default(),
+                Arc::new(MockApiClient::new(Vec::new())),
+                stream,
+                Arc::new(tool_api::registry::ToolRegistry::new()),
+                noop_hook_executor(),
+                Arc::new(NoOpPermissionGate),
+                Arc::new(MockOutputStream::new()),
+                Arc::new(StaticMemoryProvider::empty()),
+                root.path().to_path_buf(),
+            )
+            .with_jsonl_writer(writer)
+            .with_session_id(session_id),
+        );
+
+        let first_id = MessageId::new();
+        let first = Utf16JsonProjection::from_serde_value(&serde_json::json!([
+            {"type":"text","text":"first prompt"}
+        ]))
+        .unwrap();
+        orch.append_external_history_message(ConversationMessage::user(
+            first_id,
+            "first prompt".into(),
+        ))
+        .await;
+        assert_eq!(count_user_rows(&path, first_id), 1);
+        orch.run_turn_streaming_with_cancel_projected_content(
+            &first,
+            CancellationToken::new(),
+            Some(first_id),
+        )
+        .await
+        .unwrap();
+
+        let second_id = MessageId::new();
+        let second = Utf16JsonProjection::from_serde_value(&serde_json::json!([
+            {"type":"text","text":"second prompt"}
+        ]))
+        .unwrap();
+        orch.append_external_history_message(ConversationMessage::user(
+            second_id,
+            "second prompt".into(),
+        ))
+        .await;
+        assert_eq!(count_user_rows(&path, first_id), 1);
+        assert_eq!(count_user_rows(&path, second_id), 1);
+        orch.run_turn_streaming_with_cancel_projected_content(
+            &second,
+            CancellationToken::new(),
+            Some(second_id),
+        )
+        .await
+        .unwrap();
+
+        // A failed provider request must leave the already-persisted user row
+        // intact without sending a second copy through the ordinary turn path.
+        let third_id = MessageId::new();
+        let third = Utf16JsonProjection::from_serde_value(&serde_json::json!([
+            {"type":"text","text":"provider failure prompt"}
+        ]))
+        .unwrap();
+        orch.append_external_history_message(ConversationMessage::user(
+            third_id,
+            "provider failure prompt".into(),
+        ))
+        .await;
+        assert_eq!(count_user_rows(&path, third_id), 1);
+        assert_eq!(
+            orch.run_turn_streaming_with_cancel_projected_content(
+                &third,
+                CancellationToken::new(),
+                Some(third_id),
+            )
+            .await
+            .unwrap(),
+            crate::TurnOutcome::EndTurn
+        );
+
+        assert_eq!(count_user_rows(&path, first_id), 1);
+        assert_eq!(count_user_rows(&path, second_id), 1);
+        assert_eq!(count_user_rows(&path, third_id), 1);
+        let replayed = crate::resume::replay_session_state_from_path(
+            &path,
+            session_id.as_uuid(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(
+                root.path().to_path_buf(),
+            )),
+        )
+        .await
+        .unwrap();
+        for id in [first_id, second_id, third_id] {
+            assert_eq!(
+                replayed
+                    .display_history
+                    .iter()
+                    .filter(|row| {
+                        row.id() == id && row.role() == lingxi_core::types::MessageRole::User
+                    })
+                    .count(),
+                1,
+                "cold replay should retain one user row for {id}"
+            );
+        }
+    }
+
+    fn count_user_rows(path: &std::path::Path, id: MessageId) -> usize {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|row| row["type"] == "user" && row["uuid"] == id.as_uuid().to_string())
+            .count()
     }
 
     #[tokio::test]

@@ -3,6 +3,7 @@
 mod lifecycle;
 mod schema;
 mod service;
+mod stateless;
 use lingxi_core::{
     host::permission_gate::PermissionGate,
     host::{OrchestratorHandle, OutputStream},
@@ -36,6 +37,12 @@ pub struct AppAgentSession {
     pub lease: SessionToolGrantLease,
     pub structured_output: Option<StructuredOutputSlot>,
     pub cleanup_failed: Arc<std::sync::atomic::AtomicBool>,
+}
+/// Private Harness identity and replay state for one persistent App Chat turn.
+pub struct AppAgentChatResume {
+    pub session_id: SessionId,
+    pub transcript_path: PathBuf,
+    pub replayed: Option<orchestrator::resume::ReplayedSession>,
 }
 const BUILTINS: &[&str] = &[
     "Read",
@@ -157,6 +164,8 @@ impl AppAgentFactory {
         permissions: Arc<dyn PermissionGate>,
         owner_cancel: tokio_util::sync::CancellationToken,
         questions: tokio::sync::mpsc::Sender<tool_api::ask_user_question::AskUserQuestionExchange>,
+        chat: Option<AppAgentChatResume>,
+        skill_prompt: Option<String>,
     ) -> Result<AppAgentSession, String> {
         owner.validate().map_err(|_| "invalid_owner")?;
         if !admission.start || !cwd.is_absolute() {
@@ -173,7 +182,10 @@ impl AppAgentFactory {
                     && m.request_model == model.model_id
             })
             .ok_or("model_unavailable")?;
-        if !input.images.is_empty() && !listing.capabilities.vision {
+        if input.attachments.iter().any(|file| {
+            file.media_type.starts_with("image/") || file.media_type == "application/pdf"
+        }) && !listing.capabilities.vision
+        {
             return Err("model_vision_unsupported".into());
         }
         if (input.output_schema.is_some() || !admission.tools.is_empty())
@@ -205,6 +217,9 @@ impl AppAgentFactory {
             match grant {
                 ToolGrant::Builtin { name } => {
                     if !BUILTINS.contains(&name.as_str()) {
+                        return Err("unsupported_app_tool".into());
+                    }
+                    if name == "Shell" && self.context.mobile_shell.is_none() {
                         return Err("unsupported_app_tool".into());
                     }
                     policy.builtin_tools.insert(name.clone());
@@ -262,7 +277,10 @@ impl AppAgentFactory {
                 }
                 valid
             }));
-        let session_id = SessionId::new();
+        let session_id = chat
+            .as_ref()
+            .map(|chat| chat.session_id)
+            .unwrap_or_else(SessionId::new);
         let mut context = self.context.clone();
         let cleanup_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         context.side_chat_cleanup_failed = Some(cleanup_failed.clone());
@@ -313,7 +331,7 @@ impl AppAgentFactory {
         context.mobile_git = None;
         context.mobile_git_secret = None;
         let api = Arc::new(self.api.fork_app_invocation());
-        let adapter = Arc::new(ProviderApiAdapter::new(api));
+        let adapter = Arc::new(ProviderApiAdapter::new(api.clone()));
         context.hosted_search = Some(adapter.clone());
         context.mcp_token_counter = Some(adapter.clone());
         let mut tools = ToolRegistry::new();
@@ -390,7 +408,7 @@ impl AppAgentFactory {
             )
             .with_policy_disable_all_hooks(false),
         );
-        let config = OrchestratorConfig {
+        let mut config = OrchestratorConfig {
             model: model.model_id.clone(),
             max_turns: admission.task.limits.max_turns,
             structured_output_enabled: structured_output.is_some(),
@@ -400,6 +418,7 @@ impl AppAgentFactory {
             interactive_permissions: true,
             ..OrchestratorConfig::default()
         };
+        config.append_system_prompt = skill_prompt.map(Utf16JsonProjection::from);
         // A task owns its accounting session. Reading snapshot_cost without a
         // tracker returns the orchestrator's zero-shaped placeholder, even
         // after real provider requests have completed.
@@ -410,34 +429,68 @@ impl AppAgentFactory {
             self.pricing.clone(),
             cost_tx,
         ));
-        let orch = ConversationOrchestrator::into_shared(
-            ConversationOrchestrator::new_side_chat(
-                config,
-                adapter.clone(),
-                adapter,
-                Arc::new(tools),
-                hooks,
-                gate,
-                output,
-                Arc::new(orchestrator::test_support::StaticMemoryProvider::empty()),
-                cwd,
-            )
-            // A fresh side chat starts without a profile. Admit only this
-            // host-authorized qualified route before selecting its profile;
-            // otherwise the side-chat guard rejects every profiled model.
-            .with_side_chat_model_refs(vec![lingxi_core::host::qualified_model_ref(
-                &model.model_id,
-                Some(&model.provider_id),
-            )])
-            .with_session_id(session_id)
-            .with_cost_tracker(cost_tracker)
-            .with_session_cwd(context.session_cwd.clone())
-            .with_read_state_map(context.read_file_state.clone())
-            .with_model_resolution_context_provider(self.model_resolution.clone()),
-        );
+        let mut builder = ConversationOrchestrator::new_side_chat(
+            config,
+            adapter.clone(),
+            adapter,
+            Arc::new(tools),
+            hooks,
+            gate,
+            output,
+            Arc::new(orchestrator::test_support::StaticMemoryProvider::empty()),
+            cwd,
+        )
+        // A fresh side chat starts without a profile. Admit only this
+        // host-authorized qualified route before selecting its profile;
+        // otherwise the side-chat guard rejects every profiled model.
+        .with_side_chat_model_refs(vec![lingxi_core::host::qualified_model_ref(
+            &model.model_id,
+            Some(&model.provider_id),
+        )])
+        .with_session_id(session_id)
+        .with_cost_tracker(cost_tracker)
+        .with_session_cwd(context.session_cwd.clone())
+        .with_read_state_map(context.read_file_state.clone())
+        .with_model_resolution_context_provider(self.model_resolution.clone());
+        if let Some(chat) = &chat {
+            let writer = Arc::new(session::jsonl::writer::JsonlWriter::new(
+                chat.transcript_path.clone(),
+                context.fs.clone(),
+            ));
+            let (compactor, cache_slot) =
+                crate::side_chat::composition::compaction(api.clone(), &model.model_id);
+            builder = builder
+                .with_jsonl_writer(writer)
+                .with_compaction(compactor)
+                .with_cache_safe_slot(cache_slot);
+        }
+        let orch = ConversationOrchestrator::into_shared(builder);
         orch.switch_model(&model.model_id, Some(&model.provider_id))
             .await
             .map_err(|_| "model_unavailable")?;
+        if let Some(replayed) = chat.and_then(|chat| chat.replayed) {
+            let mut runtime = replayed.handle_runtime_snapshot();
+            runtime.model = model.model_id.clone();
+            runtime.model_profile = Some(model.provider_id.clone());
+            let active_goal = replayed.state.active_goal.clone().map(|goal| {
+                lingxi_core::host::ActiveGoalSnapshot {
+                    condition: goal.condition,
+                    set_at: goal.set_at,
+                    last_reason: goal.last_reason,
+                    iterations: goal.iterations,
+                    tokens_at_start: goal.tokens_at_start,
+                }
+            });
+            orch.resume_session(
+                session_id,
+                replayed.state.history.clone(),
+                replayed.last_message_uuid.map(|uuid| uuid.to_string()),
+                active_goal,
+                runtime,
+            )
+            .await
+            .map_err(|_| "chat_resume_failed")?;
+        }
         Ok(AppAgentSession {
             orchestrator: orch,
             lease,

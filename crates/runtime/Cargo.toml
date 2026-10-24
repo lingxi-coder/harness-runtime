@@ -30,6 +30,7 @@ engine = [
 ]
 desktop = [
     "engine",
+    "dep:sha2",
     "dep:base64",
     "dep:msgqueue",
     "tokio/io-util",
@@ -95,6 +96,7 @@ desktop = [
 ]
 mobile = [
     "dep:httparse",
+    "dep:tempfile",
     "dep:jsonschema",
     "engine",
     "dep:configuration-admin",
@@ -239,6 +241,7 @@ sidequery = { path = "../sidequery", optional = true }
 skill = { path = "../skill", optional = true }
 tasks = { path = "../tasks", optional = true }
 telemetry = { path = "../telemetry", optional = true }
+tempfile = { version = "3", optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, optional = true }
 tokio-stream = { workspace = true, optional = true }

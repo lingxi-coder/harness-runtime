@@ -1,6 +1,7 @@
 //! A controllable SDK boundary verifies ownership/cancellation independently of
 //! device execution. These tests do not claim a physical Linux runtime passed.
 use super::*;
+use branding::LINGXI_RUNTIME_PROFILE;
 use local_app::v2::Step;
 use mobile_linux_api::*;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -91,11 +92,21 @@ impl MobileLinuxRuntime for ControlledRuntime {
             request.env["LOCAL_APP_DATA_DIR"].ends_with("/preparation-data"),
             "install/build must not receive the live data directory"
         );
-        assert!(request
-            .cwd
-            .as_ref()
-            .unwrap()
-            .starts_with("/home/lingxi/.lingxi/local-apps/"));
+        let expected_cwd_prefix = format!(
+            "{}/",
+            LINGXI_RUNTIME_PROFILE
+                .config_guest_path()
+                .join("local-apps")
+                .display()
+        );
+        assert!(
+            request
+                .cwd
+                .as_ref()
+                .expect("controlled process request has a cwd")
+                .starts_with(&expected_cwd_prefix),
+            "local app cwd must stay under the selected profile's guest config directory"
+        );
         if self.delay_spawn.load(Ordering::SeqCst) {
             self.spawning.notify_one();
             self.release_spawn.notified().await;
@@ -223,8 +234,12 @@ async fn setup(
 ) {
     let root = tempfile::tempdir().unwrap();
     let runtime = Arc::new(ControlledRuntime::new(blocked));
+    let profile = LINGXI_RUNTIME_PROFILE;
     let service = MobileLocalAppServiceHandle::new(
-        root.path().join("user/.lingxi"),
+        root.path()
+            .join("persistent")
+            .join(profile.linux_user)
+            .join(profile.config_dir_name),
         Some(super::super::linux_maintenance::coordinate_runtime(
             &root.path().join("linux"),
             runtime.clone(),
@@ -709,9 +724,20 @@ async fn abandoned_native_spawn_retains_maintenance_gate_until_reap_retry_succee
     runtime.delay_spawn.store(true, Ordering::SeqCst);
     let shared = service.runtime().unwrap();
     let spawning = shared.clone();
+    let profile = LINGXI_RUNTIME_PROFILE;
+    let guest_cwd = profile
+        .config_guest_path()
+        .join("local-apps/owned/work")
+        .display()
+        .to_string();
+    let guest_data_dir = profile
+        .guest_home()
+        .join("preparation-data")
+        .display()
+        .to_string();
     let request: LinuxCommandRequest = serde_json::from_value(json!({
-        "command":"controlled install","args":[],"cwd":"/home/lingxi/.lingxi/local-apps/owned/work",
-        "env":{"LOCAL_APP_RUN_ID":"owned-run","LOCAL_APP_DATA_DIR":"/home/lingxi/preparation-data"},
+        "command":"controlled install","args":[],"cwd":guest_cwd,
+        "env":{"LOCAL_APP_RUN_ID":"owned-run","LOCAL_APP_DATA_DIR":guest_data_dir},
         "stdin":null,"timeout_ms":1000,"network":"Allowed","mounts":[],
     }))
     .unwrap();
@@ -738,7 +764,22 @@ async fn abandoned_native_spawn_retains_maintenance_gate_until_reap_retry_succee
     })
     .await
     .unwrap();
-    shared.repair_rootfs().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            match shared.repair_rootfs().await {
+                Ok(status) => break Ok(status),
+                Err(MobileLinuxError::InvalidRequest(message))
+                    if message.starts_with("runtimeBusy:") =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                Err(error) => break Err(error),
+            }
+        }
+    })
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(
         runtime.kills.lock().unwrap().as_slice(),
         &["only-owned-task", "only-owned-task"]

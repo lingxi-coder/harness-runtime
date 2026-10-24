@@ -44,6 +44,8 @@ use std::sync::Arc;
 /// The native capabilities are supplied by the Swift layer (via `UniFFI` in P12);
 /// `app_sandbox_root` is the container directory the filesystem is confined to.
 pub struct IosPlatformInputs {
+    /// Authoritative Linux account and guest-path profile.
+    pub brand_profile: mobile_linux_api::BrandRuntimeProfile,
     /// The app's writable sandbox container root.
     pub app_sandbox_root: PathBuf,
     /// Native camera (Swift impl).
@@ -79,7 +81,7 @@ pub struct IosPlatformInputs {
     /// Explicit host workspace root exposed to the guest when mobile-linux mode
     /// is selected. Legacy mode ignores it.
     pub workspace_host_path: Option<PathBuf>,
-    /// Stable guest workspace id used to produce `/home/lingxi/lingxi/<id>`.
+    /// Stable workspace identifier appended under the selected brand workspace root.
     pub stable_workspace_id: Option<String>,
 }
 
@@ -120,6 +122,7 @@ impl IosPlatform {
         let workspace_mounts = build_mobile_linux_mounts(
             inputs.workspace_host_path.clone(),
             inputs.stable_workspace_id.clone(),
+            &inputs.brand_profile,
         );
         let runtime = inputs.mobile_linux.clone();
         let (process, sandbox, effective_runtime): (
@@ -191,13 +194,17 @@ impl IosPlatform {
 fn build_mobile_linux_mounts(
     workspace_host_path: Option<PathBuf>,
     stable_workspace_id: Option<String>,
+    profile: &mobile_linux_api::BrandRuntimeProfile,
 ) -> Vec<MountSpec> {
     let guest_workspace_id = stable_workspace_id.unwrap_or_else(|| "default".to_string());
     workspace_host_path
         .map(|host_path| {
             vec![MountSpec {
                 host_path,
-                guest_path: mobile_linux_api::guest_paths::workspace(&guest_workspace_id),
+                guest_path: mobile_linux_api::guest_paths::workspace_for_profile(
+                    profile,
+                    &guest_workspace_id,
+                ),
                 read_only: false,
                 purpose: MountPurpose::Workspace,
             }]
@@ -334,6 +341,7 @@ mod tests {
         mobile_linux: Option<Arc<dyn MobileLinuxRuntime>>,
     ) -> IosPlatformInputs {
         IosPlatformInputs {
+            brand_profile: mobile_linux_api::BrandRuntimeProfile::default(),
             app_sandbox_root: root.to_path_buf(),
             camera: Arc::new(StubCamera),
             audio: Arc::new(StubAudio),
@@ -351,6 +359,22 @@ mod tests {
             workspace_host_path: Some(root.join("workspace")),
             stable_workspace_id: Some("abc".to_string()),
         }
+    }
+
+    #[test]
+    fn workspace_mount_uses_selected_brand_profile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace_host_path = temp.path().join("persistent/atlas_guest/atlas/projects");
+        let profile = mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
+        let mounts = build_mobile_linux_mounts(
+            Some(workspace_host_path.clone()),
+            Some("projects".into()),
+            &profile,
+        );
+
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].host_path, workspace_host_path);
+        assert_eq!(mounts[0].guest_path, "/home/atlas_guest/atlas/projects");
     }
 
     /// The assembly seam this pins: selecting mobile-linux mode must wrap the

@@ -4,14 +4,20 @@
 //! storage roots, credentials and grants are resolved by the trusted host; the
 //! app supplies only input and may request limits lower than its host grant.
 
-use super::{CustomizationGates, DesktopConfig, DesktopSessionComposition};
+use super::{
+    CustomizationGates, DesktopConfig, DesktopSessionComposition, DesktopSessionResumeSnapshot,
+};
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tool_api::{SessionToolGrantLease, SessionToolPolicy};
 
 /// Default maximum number of model iterations in an application task.
 pub const DEFAULT_MAX_TURNS: u32 = 20;
 /// Default wall-clock task limit. The host runner also bounds startup/shutdown.
 pub const DEFAULT_TIMEOUT_MS: u64 = 600_000;
+pub const MAX_MAX_TURNS: u32 = 100;
+pub const MAX_TIMEOUT_MS: u64 = 3_600_000;
 
 /// Built-ins with no unscoped child execution, extension installation or account
 /// administration. Other tools can be added only after they propagate app scope.
@@ -39,12 +45,30 @@ pub struct AppInvocationIdentity {
     pub invocation_id: String,
 }
 
+/// Host-created identity for a persistent App Chat. The transcript lives only
+/// in this App-owned directory; callers must never copy a creator transcript
+/// into it or use the creator session ID.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppChatProfile {
+    pub chat_id: String,
+    pub session_id: String,
+    pub session_directory: PathBuf,
+}
+
 /// Trusted host-approved capability snapshot for exactly one task.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AppInvocationProfile {
     pub identity: AppInvocationIdentity,
     pub tool_policy: SessionToolPolicy,
+    /// Present only when the native host is starting a turn in an App-owned
+    /// persistent Harness session. One-shot tasks leave this unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_chat: Option<AppChatProfile>,
+    /// Verified instructions returned by app_agent_skills::materialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_instructions: Option<String>,
     #[serde(default = "default_max_turns")]
     pub max_turns: u32,
     #[serde(default = "default_timeout_ms")]
@@ -65,6 +89,8 @@ impl AppInvocationProfile {
         Self {
             identity,
             tool_policy,
+            app_chat: None,
+            skill_instructions: None,
             max_turns: DEFAULT_MAX_TURNS,
             timeout_ms: DEFAULT_TIMEOUT_MS,
         }
@@ -80,8 +106,37 @@ impl AppInvocationProfile {
                 return Err(AppInvocationError::InvalidIdentity);
             }
         }
-        if self.max_turns == 0 || self.timeout_ms == 0 {
+        if self.max_turns == 0
+            || self.max_turns > MAX_MAX_TURNS
+            || self.timeout_ms == 0
+            || self.timeout_ms > MAX_TIMEOUT_MS
+        {
             return Err(AppInvocationError::InvalidLimits);
+        }
+        if self
+            .skill_instructions
+            .as_ref()
+            .is_some_and(|instructions| {
+                instructions.is_empty()
+                    || instructions.len() > 1024 * 1024
+                    || instructions.contains('\0')
+            })
+        {
+            return Err(AppInvocationError::InvalidSkills);
+        }
+        if let Some(chat) = self.app_chat.as_ref() {
+            if uuid::Uuid::parse_str(&chat.chat_id).is_err()
+                || lingxi_core::types::SessionId::parse_prefixed(&chat.session_id).is_none()
+                || !chat.session_directory.is_absolute()
+                || chat.session_directory.components().any(|part| {
+                    matches!(
+                        part,
+                        std::path::Component::ParentDir | std::path::Component::CurDir
+                    )
+                })
+            {
+                return Err(AppInvocationError::InvalidChat);
+            }
         }
         for tool in &self.tool_policy.builtin_tools {
             if !APP_AGENT_BUILTIN_TOOLS.contains(&tool.as_str()) {
@@ -107,6 +162,10 @@ pub enum AppInvocationError {
     InvalidDirectories,
     #[error("app invocations require an explicit configured model")]
     MissingModel,
+    #[error("App Chat requires a host-owned UUID and an isolated app chat directory")]
+    InvalidChat,
+    #[error("App Skills must be unique, bounded, and host-copied into the isolated workspace")]
+    InvalidSkills,
 }
 
 /// Prepare a fresh application runtime from host-owned provider and storage
@@ -124,6 +183,195 @@ pub fn prepare_app_config(
     config.session_tool_grant_lease = None;
     enforce_app_config(&mut config)?;
     Ok(config)
+}
+
+/// Build the deliberately stateless request shape used by a plain App task.
+/// No history, tool declarations or engine system prompt can be inherited.
+#[must_use]
+pub fn side_query_request(
+    model: String,
+    profile: Option<String>,
+    messages: Vec<lingxi_core::types::ConversationMessage>,
+    output_format: Option<serde_json::Value>,
+) -> sidequery::SideQueryRequest {
+    sidequery::SideQueryRequest {
+        model_attempt: None,
+        api_attempts_left: None,
+        model,
+        model_source: None,
+        profile,
+        system_prompt: None,
+        typed_attachment_ids: Default::default(),
+        task_deliveries: Default::default(),
+        native_prompt_context: None,
+        system_prompt_input: None,
+        enable_prompt_caching: false,
+        messages,
+        tools: Vec::new(),
+        tool_choice: None,
+        output_format,
+        max_tokens: None,
+        max_retries: 2,
+        temperature: None,
+        thinking: None,
+        effort: None,
+        stop_sequences: Vec::new(),
+        query_source: sidequery::QuerySource::Custom("local_app_agent".into()),
+        skip_system_prompt_prefix: true,
+    }
+}
+
+/// Build the strict JSON Schema request used by isolated one-shot App Agent
+/// calls. Keeping this constructor beside the SideQuery adapter avoids a
+/// direct sidequery dependency in the bridge protocol crate.
+#[must_use]
+pub fn strict_side_query_request(
+    model: String,
+    profile: Option<String>,
+    messages: Vec<lingxi_core::types::ConversationMessage>,
+    schema: serde_json::Value,
+) -> sidequery::StrictStructuredQueryRequest {
+    sidequery::StrictStructuredQueryRequest {
+        model_attempt: None,
+        model,
+        profile,
+        system_prompt: None,
+        messages,
+        schema,
+        max_tokens: Some(8192),
+        temperature: None,
+        query_source: sidequery::QuerySource::Custom("local_app_agent".into()),
+        skip_system_prompt_prefix: true,
+    }
+}
+
+/// Execute a one-shot App query through the configured Desktop provider stack.
+/// The supplied stack is the host-seeded stack from the private bridge; the
+/// operation creates no Harness session, transcript, tools, hooks or memory.
+pub async fn run_side_query(
+    config: DesktopConfig,
+    shared: super::SharedCredentialStack,
+    request: sidequery::SideQueryRequest,
+) -> Result<sidequery::SideQueryResponse, &'static str> {
+    run_side_query_accounted(config, shared, request)
+        .await
+        .map_err(|error| error.code)
+}
+
+/// Bounded failure information for the private Desktop App Agent adapter.
+/// Provider diagnostics are intentionally excluded while partial usage remains
+/// available for the durable task record.
+#[derive(Debug)]
+pub struct AppSideQueryFailure {
+    pub code: &'static str,
+    pub usage: Option<cost::Usage>,
+    pub turns: Option<u32>,
+}
+
+pub async fn run_side_query_accounted(
+    config: DesktopConfig,
+    shared: super::SharedCredentialStack,
+    request: sidequery::SideQueryRequest,
+) -> Result<sidequery::SideQueryResponse, AppSideQueryFailure> {
+    if !request.tools.is_empty() {
+        return Err(AppSideQueryFailure {
+            code: "unsupported_tool_request",
+            usage: None,
+            turns: None,
+        });
+    }
+    let stack = super::credentials::resolve_llm_stack_with_credentials(&config, shared, None)
+        .await
+        .map_err(|_| AppSideQueryFailure {
+            code: "runtime_initialization_failed",
+            usage: None,
+            turns: None,
+        })?;
+    let service = Arc::new(
+        super::api_service_from_stack(&config, &config.cwd, stack).map_err(|_| {
+            AppSideQueryFailure {
+                code: "runtime_initialization_failed",
+                usage: None,
+                turns: None,
+            }
+        })?,
+    );
+    let client = sidequery::ProviderSideQueryClient::from_service(service);
+    sidequery::SideQueryClient::query(&client, request)
+        .await
+        .map_err(app_side_query_failure)
+}
+
+/// Strict structured-output form of [`run_side_query`]. Provider response
+/// format is enforced and decoded as JSON Schema before returning to the host.
+pub async fn run_side_query_json_schema(
+    config: DesktopConfig,
+    shared: super::SharedCredentialStack,
+    request: sidequery::StrictStructuredQueryRequest,
+) -> Result<sidequery::StrictStructuredQueryResponse, &'static str> {
+    run_side_query_json_schema_accounted(config, shared, request)
+        .await
+        .map_err(|error| error.code)
+}
+
+pub async fn run_side_query_json_schema_accounted(
+    config: DesktopConfig,
+    shared: super::SharedCredentialStack,
+    request: sidequery::StrictStructuredQueryRequest,
+) -> Result<sidequery::StrictStructuredQueryResponse, AppSideQueryFailure> {
+    let stack = super::credentials::resolve_llm_stack_with_credentials(&config, shared, None)
+        .await
+        .map_err(|_| AppSideQueryFailure {
+            code: "runtime_initialization_failed",
+            usage: None,
+            turns: None,
+        })?;
+    let service = Arc::new(
+        super::api_service_from_stack(&config, &config.cwd, stack).map_err(|_| {
+            AppSideQueryFailure {
+                code: "runtime_initialization_failed",
+                usage: None,
+                turns: None,
+            }
+        })?,
+    );
+    let client = sidequery::ProviderSideQueryClient::from_service(service);
+    sidequery::SideQueryClient::query_json_schema(&client, request)
+        .await
+        .map_err(app_side_query_failure)
+}
+
+fn app_side_query_failure(error: sidequery::SideQueryError) -> AppSideQueryFailure {
+    match error {
+        sidequery::SideQueryError::StructuredOutputUnsupported => AppSideQueryFailure {
+            code: "model_structured_output_unsupported",
+            usage: None,
+            turns: None,
+        },
+        sidequery::SideQueryError::Partial {
+            source,
+            usage,
+            api_calls,
+            ..
+        } => {
+            let code = match *source {
+                sidequery::SideQueryError::StructuredOutputUnsupported => {
+                    "model_structured_output_unsupported"
+                }
+                _ => "model_execution_failed",
+            };
+            AppSideQueryFailure {
+                code,
+                usage: Some(usage),
+                turns: Some(api_calls),
+            }
+        }
+        _ => AppSideQueryFailure {
+            code: "model_execution_failed",
+            usage: None,
+            turns: None,
+        },
+    }
 }
 
 pub(super) fn enforce_app_config(config: &mut DesktopConfig) -> Result<(), AppInvocationError> {
@@ -179,6 +427,7 @@ pub(super) fn enforce_app_config(config: &mut DesktopConfig) -> Result<(), AppIn
     config.session_id_override = None;
     config.parent_session_id = None;
     config.session_persistence = false;
+    config.idle_compaction_enabled = false;
     config.defer_session_start = false;
     config.initial_prompt_directories.clear();
     config.add_dir.clear();
@@ -211,6 +460,67 @@ pub(super) fn enforce_app_config(config: &mut DesktopConfig) -> Result<(), AppIn
     config.recent_models.clear();
     config.max_turns = Some(profile.max_turns);
     config.max_structured_output_retries = config.max_structured_output_retries.clamp(1, 5);
+    if let Some(chat) = profile.app_chat.as_ref() {
+        apply_app_chat(config, &profile.identity, chat)?;
+    }
+    if let Some(instructions) = profile.skill_instructions.as_ref() {
+        config.append_system_prompt = Some(instructions.clone().into());
+    }
+    Ok(())
+}
+
+fn apply_app_chat(
+    config: &mut DesktopConfig,
+    identity: &AppInvocationIdentity,
+    chat: &AppChatProfile,
+) -> Result<(), AppInvocationError> {
+    // This exact tree is also used by Local App v2 durable chat metadata.
+    // Lexical equality prevents a wire caller from redirecting the transcript
+    // into the creator workspace or another application's storage.
+    let expected = config
+        .lingxi_home
+        .join("local-apps/v2/apps")
+        .join(&identity.app_id)
+        .join("agent/chats")
+        .join(&chat.chat_id);
+    if chat.session_directory != expected {
+        return Err(AppInvocationError::InvalidChat);
+    }
+    let directory = std::fs::symlink_metadata(&chat.session_directory)
+        .map_err(|_| AppInvocationError::InvalidChat)?;
+    if directory.file_type().is_symlink() || !directory.is_dir() {
+        return Err(AppInvocationError::InvalidChat);
+    }
+    let session_id = lingxi_core::types::SessionId::parse_prefixed(&chat.session_id)
+        .ok_or(AppInvocationError::InvalidChat)?;
+    let session_id = session_id.as_uuid().to_string();
+    let transcript = chat.session_directory.join(format!("{session_id}.jsonl"));
+    let snapshot = match std::fs::symlink_metadata(&transcript) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() > 128 * 1024 * 1024
+            {
+                return Err(AppInvocationError::InvalidChat);
+            }
+            let content = std::fs::read_to_string(&transcript)
+                .map_err(|_| AppInvocationError::InvalidChat)?;
+            (!content.is_empty()).then(|| DesktopSessionResumeSnapshot {
+                source_session_id: session_id.clone(),
+                content: Arc::from(content),
+            })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err(AppInvocationError::InvalidChat),
+    };
+    config.cwd = chat.session_directory.clone();
+    config.session_id_override = Some(session_id);
+    config.session_transcript_path = Some(transcript);
+    config.session_resume_snapshot = snapshot;
+    config.session_resume_cost = None;
+    config.session_writer_lease = None;
+    config.session_persistence = true;
+    config.idle_compaction_enabled = true;
     Ok(())
 }
 
@@ -244,7 +554,7 @@ mod tests {
         let mut config = config();
         config.session_id_override = Some("creating-chat".into());
         config.session_resume_cost = Some(cost::CostState::default());
-        config.session_resume_snapshot = Some(super::super::DesktopSessionResumeSnapshot {
+        config.session_resume_snapshot = Some(DesktopSessionResumeSnapshot {
             source_session_id: "old".into(),
             content: Arc::from("private history"),
         });
@@ -287,11 +597,13 @@ mod tests {
         assert!(!lease.allows_builtin("Bash"));
         lease.revoke();
         enforce_app_config(&mut config).unwrap();
-        assert!(config
-            .session_tool_grant_lease
-            .as_ref()
-            .unwrap()
-            .is_revoked());
+        assert!(
+            config
+                .session_tool_grant_lease
+                .as_ref()
+                .unwrap()
+                .is_revoked()
+        );
     }
 
     #[test]
@@ -344,6 +656,69 @@ mod tests {
         assert!(super::super::settings_environment_for_config(&config).is_empty());
     }
 
+    #[test]
+    fn app_chat_pins_only_its_own_transcript_and_enables_the_normal_writer() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("config");
+        let chat_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let chat_directory = home
+            .join("local-apps/v2/apps/food/agent/chats")
+            .join(&chat_id);
+        std::fs::create_dir_all(&chat_directory).unwrap();
+        let transcript = chat_directory.join(format!("{session_id}.jsonl"));
+        std::fs::write(&transcript, "app-owned chat transcript\n").unwrap();
+        let mut config = config();
+        config.lingxi_home = home;
+        config.session_id_override = Some("creator-session-must-not-survive".into());
+        config.session_transcript_path = Some(directory.path().join("creator.jsonl"));
+        config.session_persistence = false;
+        config.idle_compaction_enabled = false;
+        let mut profile = profile();
+        profile.app_chat = Some(AppChatProfile {
+            chat_id,
+            session_id: session_id.clone(),
+            session_directory: chat_directory.clone(),
+        });
+
+        let prepared = prepare_app_config(config, profile).unwrap();
+        assert_eq!(prepared.cwd, chat_directory);
+        assert_eq!(
+            prepared.session_id_override.as_deref(),
+            Some(session_id.as_str())
+        );
+        assert_eq!(
+            prepared.session_transcript_path.as_deref(),
+            Some(transcript.as_path())
+        );
+        assert!(prepared.session_persistence && prepared.idle_compaction_enabled);
+        let snapshot = prepared.session_resume_snapshot.unwrap();
+        assert_eq!(snapshot.source_session_id, session_id);
+        assert_eq!(&*snapshot.content, "app-owned chat transcript\n");
+    }
+
+    #[test]
+    fn app_chat_rejects_paths_outside_its_app_owned_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("config");
+        let chat_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let chat_directory = directory.path().join("creator-workspace");
+        std::fs::create_dir_all(&chat_directory).unwrap();
+        let mut config = config();
+        config.lingxi_home = home;
+        let mut profile = profile();
+        profile.app_chat = Some(AppChatProfile {
+            chat_id,
+            session_id,
+            session_directory: chat_directory,
+        });
+        assert!(matches!(
+            prepare_app_config(config, profile),
+            Err(AppInvocationError::InvalidChat)
+        ));
+    }
+
     struct SilentPermissions;
 
     #[async_trait::async_trait]
@@ -388,20 +763,24 @@ mod tests {
             runtime.orchestrator.tool_names(),
             vec!["StructuredOutput".to_string()]
         );
-        assert!(runtime
-            .structured_output_slot
-            .as_ref()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .is_none());
+        assert!(
+            runtime
+                .structured_output_slot
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .is_none()
+        );
         assert!(runtime.plugin_runtime.is_none());
         assert!(!runtime.coordinator_mode.is_enabled());
-        assert!(runtime
-            .orchestrator
-            .conversation_transcript()
-            .await
-            .is_empty());
+        assert!(
+            runtime
+                .orchestrator
+                .conversation_transcript()
+                .await
+                .is_empty()
+        );
         assert_eq!(runtime.orchestrator.snapshot_cost().await.api_calls, 0);
         let context = runtime
             .orchestrator

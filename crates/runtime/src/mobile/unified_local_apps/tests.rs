@@ -10,6 +10,136 @@ fn service() -> (tempfile::TempDir, Arc<MobileLocalAppServiceHandle>) {
     let service = MobileLocalAppServiceHandle::new(home, None, "ios".into()).unwrap();
     (dir, service)
 }
+
+#[tokio::test]
+async fn trusted_authoring_registration_binds_first_publish_and_prepares_the_same_code_session() {
+    let (_dir, service) = service();
+    let created = service
+        .request_value(json!({"op":"createAuthoring","name":"First publish"}))
+        .await
+        .unwrap();
+    let source_directory = created["sourceDirectory"].as_str().unwrap().to_owned();
+    let source_path = created["sourcePath"].as_str().unwrap().to_owned();
+    let workspace_id = uuid::Uuid::new_v4().to_string();
+    let project_id = uuid::Uuid::new_v4().to_string();
+    let session_id = uuid::Uuid::new_v4().to_string();
+
+    let incomplete = json!({
+        "op":"registerAuthoring",
+        "authoring": {
+            "sourceDirectory":source_directory,
+            "workspaceId":workspace_id,
+            "projectRef":{"kind":"mobileProject","projectId":project_id}
+        }
+    });
+    let rejected: Value = serde_json::from_str(
+        &service
+            .clone()
+            .agent_host_json(incomplete.to_string())
+            .await,
+    )
+    .unwrap();
+    assert_eq!(rejected["ok"], false);
+
+    let outside = service
+        .config_home
+        .parent()
+        .unwrap()
+        .join(".atlas/.apps/foreign-source");
+    std::fs::create_dir_all(&outside).unwrap();
+    let outside_guest = service.guest_path(&outside).unwrap();
+    let bad_source = json!({
+        "op":"registerAuthoring",
+        "authoring": {
+            "sourceDirectory":outside_guest,
+            "workspaceId":workspace_id,
+            "projectRef":{"kind":"mobileProject","projectId":project_id},
+            "authoringSessionId":session_id
+        }
+    });
+    let rejected: Value = serde_json::from_str(
+        &service
+            .clone()
+            .agent_host_json(bad_source.to_string())
+            .await,
+    )
+    .unwrap();
+    assert_eq!(rejected["ok"], false);
+
+    let rejected_publish = service
+        .request_value(json!({
+            "op":"publish",
+            "sourcePath":source_path,
+            "expectedRevision":0,
+            "authoring":{
+                "sourceDirectory":source_directory,
+                "workspaceId":workspace_id,
+                "projectRef":{"kind":"mobileProject","projectId":project_id},
+                "authoringSessionId":session_id
+            }
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(rejected_publish.code, "invalidRequest");
+
+    let binding = json!({
+        "sourceDirectory":source_directory,
+        "workspaceId":workspace_id,
+        "projectRef":{"kind":"mobileProject","projectId":project_id},
+        "authoringSessionId":session_id
+    });
+    let registered: Value = serde_json::from_str(
+        &service
+            .clone()
+            .agent_host_json(json!({"op":"registerAuthoring","authoring":binding}).to_string())
+            .await,
+    )
+    .unwrap();
+    assert_eq!(registered["ok"], true);
+    assert_eq!(registered["value"]["sourceDirectory"], source_directory);
+    assert_eq!(registered["value"]["workspaceId"], workspace_id);
+    assert_eq!(registered["value"]["authoringSessionId"], session_id);
+    assert!(registered["value"].get("appId").is_none());
+    assert!(service.agent.lock().unwrap().is_none());
+
+    let published = service
+        .request_value(json!({
+            "op":"publish",
+            "expectedRevision":0,
+            "sourcePath":source_path
+        }))
+        .await
+        .unwrap();
+    let app_id = published["record"]["appId"].as_str().unwrap();
+    assert_eq!(published["record"]["authoring"]["appId"], app_id);
+    assert_eq!(
+        published["record"]["authoring"]["sourceDirectory"],
+        source_directory
+    );
+
+    let mut session_bindings = serde_json::Map::new();
+    session_bindings.insert(
+        session_id.clone(),
+        json!({
+            "workspaceId":workspace_id,
+            "sourceDirectory":source_directory,
+            "projectRef":{"kind":"mobileProject","projectId":project_id},
+            "mode":"code"
+        }),
+    );
+    let prepared = service
+        .request_value(json!({
+            "op":"prepareAuthoring",
+            "appId":app_id,
+            "sessionBindings":session_bindings
+        }))
+        .await
+        .unwrap();
+    assert_eq!(prepared["action"], "resumeSession");
+    assert_eq!(prepared["authoringSessionId"], session_id);
+    assert_eq!(prepared["authoring"]["appId"], app_id);
+}
+
 async fn publish(service: &Arc<MobileLocalAppServiceHandle>, dir: &Path, name: &str) -> Value {
     let source = dir.join(name);
     std::fs::create_dir(&source).unwrap();
@@ -480,7 +610,42 @@ async fn external_browser_sdk_and_agent_route_bind_caller_to_the_current_epoch()
     assert!(sdk.starts_with("HTTP/1.1 200"));
     assert!(sdk.contains(id));
     assert!(!sdk.contains("__LINGXI_APP_CONFIGURATION__"));
-    assert!(sdk.contains("revision:config.revision"));
+    assert!(sdk.contains("revision: config.revision"));
+    assert!(sdk.contains("agent.tasks.start"));
+    assert!(sdk.contains("agent.chats.history"));
+    assert!(sdk.contains("__lingxi_ready"));
+    assert!(sdk.contains("getAll('__lingxi_ready')"));
+    assert!(sdk.contains("readyIds.length !== 1"));
+    assert!(sdk.contains("usage.costUsd !== undefined"));
+    assert!(sdk.contains("invalid_host_response"));
+    assert!(sdk.contains("reply.chatId !== id"));
+    assert!(!sdk.contains("inputTokens: 0"));
+    assert!(!sdk.contains("message.text === reply.text"));
+    assert!(sdk.contains("pendingTtlMs = 24 * 60 * 60 * 1000"));
+    assert!(sdk.contains("acceptedTtlMs = 7 * 24 * 60 * 60 * 1000"));
+    assert!(sdk.contains("maxPendingRecords = 32"));
+    assert!(sdk.contains("maxPendingStorageBytes = 100 * 1024 * 1024"));
+    assert!(sdk.contains("state: 'rejected'"));
+    assert!(sdk.contains("recordExpired"));
+    assert!(sdk.contains("navigator.serviceWorker.register"));
+    assert!(sdk.contains("scope: `${location.origin}/`"));
+    let recovery = get(port, &format!("/__run/{epoch}/__host/recovery-sw.js")).await;
+    assert!(recovery.starts_with("HTTP/1.1 200 OK"));
+    assert!(recovery.contains("Service-Worker-Allowed: /"));
+    assert!(recovery.contains(&format!("\"appId\":\"{id}\"")));
+    assert!(recovery.contains("request.method !== 'GET' || request.mode !== 'navigate'"));
+    assert!(recovery.contains("__lingxi-offline-recovery"));
+    assert!(recovery.contains("review:'agent'"));
+    assert!(recovery.contains("cache.put(recoveryUrl"));
+    assert!(recovery.contains("indexedDB.open('lingxi-local-app-agent-'"));
+    assert!(recovery.contains("record.requestId"));
+    assert!(recovery.contains("Saved pending requests expire after 24 hours"));
+    assert!(recovery.contains("accepted request receipts expire after 7 days"));
+    assert!(recovery.contains("expired record(s) were deleted"));
+    assert!(!recovery.contains("record.prompt"));
+    assert!(!recovery.contains("record.files"));
+    assert!(!recovery.contains("cache.put(request"));
+    assert!(!recovery.contains("caches.match(request)"), "the worker must not cache arbitrary pages or Agent responses");
     async fn post(
         port: u16,
         epoch: &str,
@@ -489,7 +654,14 @@ async fn external_browser_sdk_and_agent_route_bind_caller_to_the_current_epoch()
         method: &str,
         extra: &str,
     ) -> String {
-        let body = format!(r#"{{"method":"{method}","args":{{}}{extra}}}"#);
+        let args = if method == "agent.tasks.start" {
+            r#""args":{"input":{"requestId":"gateway-test-request","prompt":"test"}}"#
+        } else {
+            r#""args":{}"#
+        };
+        let metadata = format!(r#"{{"method":"{method}",{args}{extra}}}"#);
+        let boundary = "gateway-test-boundary";
+        let body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"request\"\r\nContent-Type: application/json\r\n\r\n{metadata}\r\n--{boundary}--\r\n");
         let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
             .await
             .unwrap();
@@ -498,15 +670,30 @@ async fn external_browser_sdk_and_agent_route_bind_caller_to_the_current_epoch()
         } else {
             String::new()
         };
-        socket.write_all(format!("POST /__run/{epoch}/__host/agent HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{origin}Referer: http://127.0.0.1:{port}/__run/{referer_epoch}/index.html\r\nContent-Type: application/json\r\nX-LingXi-App-Request: 1\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        socket.write_all(format!("POST /__run/{epoch}/__host/agent HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{origin}Referer: http://127.0.0.1:{port}/__run/{referer_epoch}/index.html\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nX-LingXi-App-Request: 1\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         let mut out = Vec::new();
         socket.read_to_end(&mut out).await.unwrap();
         String::from_utf8(out).unwrap()
     }
-    assert!(post(port, epoch, false, epoch, "agent.run", "")
+    async fn framing_response(port: u16, epoch: &str, framing: &str) -> String {
+        let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        socket.write_all(format!("POST /__run/{epoch}/__host/agent HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nReferer: http://127.0.0.1:{port}/__run/{epoch}/index.html\r\nContent-Type: multipart/form-data; boundary=agent-boundary\r\nX-LingXi-App-Request: 1\r\n{framing}\r\n\r\n").as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        socket.read_to_end(&mut out).await.unwrap();
+        String::from_utf8(out).unwrap()
+    }
+    assert!(framing_response(port, epoch, "Transfer-Encoding: chunked\r\n")
+        .await
+        .starts_with("HTTP/1.1 400"));
+    assert!(framing_response(port, epoch, &format!("Content-Length: {}\r\n", 52 * 1024 * 1024 + 1))
+        .await
+        .starts_with("HTTP/1.1 413"));
+    assert!(post(port, epoch, false, epoch, "agent.tasks.start", "")
         .await
         .starts_with("HTTP/1.1 403"));
-    assert!(post(port, epoch, true, "stale", "agent.run", "")
+    assert!(post(port, epoch, true, "stale", "agent.tasks.start", "")
         .await
         .starts_with("HTTP/1.1 403"));
     assert!(post(port, epoch, true, epoch, "answer", "")
@@ -517,19 +704,19 @@ async fn external_browser_sdk_and_agent_route_bind_caller_to_the_current_epoch()
         epoch,
         true,
         epoch,
-        "agent.run",
+        "agent.tasks.start",
         r#", "appId":"other""#
     )
     .await
     .starts_with("HTTP/1.1 400"));
-    let no_model = post(port, epoch, true, epoch, "agent.run", "").await;
+    let no_model = post(port, epoch, true, epoch, "agent.tasks.start", "").await;
     assert!(no_model.starts_with("HTTP/1.1 200"));
     assert!(no_model.contains("agent_model_host_not_ready"));
     service
         .request_value(json!({"op":"restart","appId":id}))
         .await
         .unwrap();
-    assert!(post(port, epoch, true, epoch, "agent.run", "")
+    assert!(post(port, epoch, true, epoch, "agent.tasks.start", "")
         .await
         .starts_with("HTTP/1.1 410"));
     service

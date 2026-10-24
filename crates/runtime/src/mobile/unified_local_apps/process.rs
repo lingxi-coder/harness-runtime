@@ -23,6 +23,14 @@ impl MobileLocalAppServiceHandle {
         run: Arc<ActiveRun>,
     ) -> Result<Value, ServiceError> {
         let manifest = &preparation.release.manifest;
+        let spool_dir =
+            gateway::prepare_agent_spool_dir(self.library.root(), &preparation.record.app_id)
+                .map_err(|error| {
+                    ServiceError::new(
+                        "agentSpoolUnavailable",
+                        format!("could not prepare private Agent upload storage: {error}"),
+                    )
+                })?;
         let origin = format!("http://127.0.0.1:{}", preparation.record.origin_port);
         let run_id = preparation.run.run_id.clone();
         let prefix = format!("/__run/{run_id}/");
@@ -193,6 +201,7 @@ impl MobileLocalAppServiceHandle {
             }),
             run_id: run_id.clone(),
             root: PathBuf::from(&preparation.work_path),
+            spool_dir,
             entry,
             entry_service,
             services: ports.clone(),
@@ -228,9 +237,8 @@ impl MobileLocalAppServiceHandle {
             if let Some(previous) = &previous {
                 previous.agent_access.lock().unwrap().cancel();
                 if let Ok(agent) = owner.agent_host() {
-                    let previous_id = previous.record.lock().unwrap().run_id.clone();
                     agent
-                        .stop_invocation(&record.app_id, &previous_id)
+                        .stop_app(&record.app_id)
                         .await
                         .map_err(|message| ServiceError::new("agentCleanupIncomplete", message))?;
                 }

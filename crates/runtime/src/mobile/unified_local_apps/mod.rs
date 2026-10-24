@@ -3,7 +3,9 @@
 mod gateway;
 mod process;
 
-use local_app::v2::{AppError, AppLibrary, AppRun, RunPhase, RuntimeLease, Target};
+use local_app::v2::{
+    AppError, AppLibrary, AppRun, AuthoringRef, PublishRequest, RunPhase, RuntimeLease, Target,
+};
 use mobile_linux_api::MobileLinuxRuntime;
 use serde_json::{json, Value};
 use std::{
@@ -360,14 +362,97 @@ impl MobileLocalAppServiceHandle {
                 "use start to prepare and activate a release",
             )),
             "publish" | "import" => {
+                let is_publish = op == "publish";
                 let mut request = request;
-                if let Some(source) = request.get("sourcePath").and_then(Value::as_str) {
-                    request["sourcePath"] = json!(self.host_path(source)?.to_string_lossy());
+                if is_publish
+                    && request
+                        .get("authoring")
+                        .is_some_and(|authoring| !authoring.is_null())
+                {
+                    return Err(ServiceError::new(
+                        "invalidRequest",
+                        "publish authoring must be registered by the trusted native host",
+                    ));
+                }
+                let source = required(&request, "sourcePath")?.to_owned();
+                let host_source = self.host_path(&source)?;
+                request["sourcePath"] = json!(host_source.to_string_lossy());
+                if is_publish && request.get("appId").and_then(Value::as_str).is_none() {
+                    if let Some(source_directory) =
+                        self.canonical_owned_authoring_source(&host_source)?
+                    {
+                        let mut publish_request = request;
+                        publish_request
+                            .as_object_mut()
+                            .expect("request was checked as an object")
+                            .remove("op");
+                        let publish_request: PublishRequest =
+                            serde_json::from_value(publish_request)?;
+                        let library = self.library.clone();
+                        let published = tokio::task::spawn_blocking(move || {
+                            library
+                                .publish_with_pending_authoring(publish_request, &source_directory)
+                        })
+                        .await
+                        .map_err(join_error)??;
+                        return Ok(serde_json::to_value(published)?);
+                    }
                 }
                 self.library_request(request).await
             }
             _ => self.library_request(request).await,
         }
+    }
+
+    /// Publish a staged copy while resolving authoring identity only from the
+    /// tool host's separately injected, validated original source path.
+    pub(super) async fn publish_from_trusted_source(
+        self: &Arc<Self>,
+        staged_source_path: &str,
+        original_source_path: Option<&str>,
+        app_id: Option<&str>,
+        expected_revision: u64,
+    ) -> Result<Value, ServiceError> {
+        if let Some(app_id) = app_id {
+            return self
+                .request_value(json!({
+                    "op":"publish",
+                    "appId":app_id,
+                    "expectedRevision":expected_revision,
+                    "sourcePath":staged_source_path
+                }))
+                .await;
+        }
+        let pending_source_directory = if let Some(original_source_path) = original_source_path {
+            let host_source = self.host_path(original_source_path)?;
+            self.canonical_owned_authoring_source(&host_source)?
+        } else {
+            None
+        };
+        let Some(source_directory) = pending_source_directory else {
+            return self
+                .request_value(json!({
+                    "op":"publish",
+                    "expectedRevision":expected_revision,
+                    "sourcePath":staged_source_path
+                }))
+                .await;
+        };
+        let staged_path = self.host_path(staged_source_path)?;
+        let request = PublishRequest {
+            app_id: None,
+            expected_revision,
+            source_path: staged_path.to_string_lossy().into_owned(),
+            authoring: None,
+            market_origin: None,
+        };
+        let library = self.library.clone();
+        let published = tokio::task::spawn_blocking(move || {
+            library.publish_with_pending_authoring(request, &source_directory)
+        })
+        .await
+        .map_err(join_error)??;
+        Ok(serde_json::to_value(published)?)
     }
 
     async fn transition(self: &Arc<Self>, request: Value) -> Result<Value, ServiceError> {
@@ -463,7 +548,7 @@ impl MobileLocalAppServiceHandle {
                 "expected an absolute contained source path",
             ));
         }
-        if let Ok(suffix) = path.strip_prefix(mobile_linux_api::guest_paths::HOME) {
+        if let Ok(suffix) = path.strip_prefix(self.guest_home_path()?) {
             return Ok(self
                 .config_home
                 .parent()
@@ -472,13 +557,33 @@ impl MobileLocalAppServiceHandle {
         }
         Ok(path.to_path_buf())
     }
+    fn guest_home_path(&self) -> Result<PathBuf, ServiceError> {
+        let linux_home = self
+            .config_home
+            .parent()
+            .ok_or_else(|| ServiceError::new("invalidPath", "missing Linux user home"))?;
+        let linux_user = linux_home
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| {
+                !value.is_empty()
+                    && *value != "."
+                    && *value != ".."
+                    && value
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+            .ok_or_else(|| ServiceError::new("invalidPath", "invalid Linux user directory"))?;
+        Ok(Path::new("/home").join(linux_user))
+    }
     pub(super) fn guest_path(&self, path: &Path) -> Result<String, ServiceError> {
         let home = self
             .config_home
             .parent()
             .ok_or_else(|| ServiceError::new("invalidPath", "missing user home"))?;
         if let Ok(suffix) = path.strip_prefix(home) {
-            return Ok(Path::new(mobile_linux_api::guest_paths::HOME)
+            return Ok(self
+                .guest_home_path()?
                 .join(suffix)
                 .to_string_lossy()
                 .into_owned());
@@ -498,6 +603,42 @@ impl MobileLocalAppServiceHandle {
             "sourceUnavailable",
             "source directory is not mapped into the Linux user space",
         ))
+    }
+    fn canonical_owned_authoring_source(
+        &self,
+        host_source: &Path,
+    ) -> Result<Option<String>, ServiceError> {
+        let apps_root = self.config_home.join(".apps");
+        let apps_metadata = match std::fs::symlink_metadata(&apps_root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if apps_metadata.file_type().is_symlink() || !apps_metadata.is_dir() {
+            return Err(ServiceError::new(
+                "invalidPath",
+                "the configured application source root is not a real directory",
+            ));
+        }
+        let source_metadata = std::fs::symlink_metadata(host_source)?;
+        if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+            return Err(ServiceError::new(
+                "invalidPath",
+                "authoring source must be a real directory",
+            ));
+        }
+        let apps_root = std::fs::canonicalize(apps_root)?;
+        let host_source = std::fs::canonicalize(host_source)?;
+        let Ok(relative) = host_source.strip_prefix(&apps_root) else {
+            return Ok(None);
+        };
+        if relative.components().count() != 1 || host_source == apps_root {
+            return Err(ServiceError::new(
+                "invalidPath",
+                "authoring source must be a canonical direct child of this brand's application source root",
+            ));
+        }
+        Ok(Some(self.guest_path(&host_source)?))
     }
     async fn create_authoring(&self, name: &str) -> Result<Value, ServiceError> {
         if name.trim().is_empty() || name.chars().count() > 80 {
@@ -541,6 +682,131 @@ impl MobileLocalAppServiceHandle {
             Ok(())
         }).await.map_err(join_error)??;
         Ok(json!({"sourceDirectory":source_directory,"sourcePath":directory.to_string_lossy()}))
+    }
+
+    async fn register_authoring(&self, request: Value) -> Result<Value, ServiceError> {
+        let request_object = request
+            .as_object()
+            .ok_or_else(|| ServiceError::new("invalidRequest", "request must be an object"))?;
+        if request_object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "op" | "authoring"))
+        {
+            return Err(ServiceError::new(
+                "invalidRequest",
+                "unknown registerAuthoring field",
+            ));
+        }
+        let authoring_value = request
+            .get("authoring")
+            .filter(|value| value.is_object())
+            .ok_or_else(|| ServiceError::new("invalidRequest", "authoring must be an object"))?;
+        let authoring_object = authoring_value.as_object().unwrap();
+        if authoring_object.keys().any(|key| {
+            !matches!(
+                key.as_str(),
+                "sourceDirectory" | "workspaceId" | "projectRef" | "authoringSessionId" | "appId"
+            )
+        }) {
+            return Err(ServiceError::new(
+                "invalidRequest",
+                "unknown authoring binding field",
+            ));
+        }
+        if let Some(project_ref) = authoring_value.get("projectRef") {
+            let project_object = project_ref.as_object().ok_or_else(|| {
+                ServiceError::new("invalidRequest", "projectRef must be an object")
+            })?;
+            let kind = project_ref.get("kind").and_then(Value::as_str);
+            let valid_fields = match kind {
+                Some("mobileProject") => &["kind", "projectId"][..],
+                Some("desktopPath") => &["kind", "path"][..],
+                _ => {
+                    return Err(ServiceError::new(
+                        "invalidRequest",
+                        "projectRef kind is unsupported",
+                    ));
+                }
+            };
+            if project_object
+                .keys()
+                .any(|key| !valid_fields.contains(&key.as_str()))
+            {
+                return Err(ServiceError::new(
+                    "invalidRequest",
+                    "projectRef contains an unknown field",
+                ));
+            }
+        }
+        if authoring_value
+            .get("appId")
+            .is_some_and(|app_id| !app_id.is_null())
+        {
+            return Err(ServiceError::new(
+                "invalidRequest",
+                "registerAuthoring cannot bind an application id before publish",
+            ));
+        }
+        let authoring: AuthoringRef = serde_json::from_value(authoring_value.clone())?;
+        self.validate_registered_authoring_source(&authoring)?;
+        let library = self.library.clone();
+        let saved =
+            tokio::task::spawn_blocking(move || library.register_pending_authoring(authoring))
+                .await
+                .map_err(join_error)??;
+        Ok(serde_json::to_value(saved)?)
+    }
+
+    fn validate_registered_authoring_source(
+        &self,
+        authoring: &AuthoringRef,
+    ) -> Result<(), ServiceError> {
+        let source_path = self.host_path(&authoring.source_directory)?;
+        let apps_root = self.config_home.join(".apps");
+        let apps_metadata = std::fs::symlink_metadata(&apps_root).map_err(|error| {
+            ServiceError::new(
+                "invalidPath",
+                format!("application source root is unavailable: {error}"),
+            )
+        })?;
+        if apps_metadata.file_type().is_symlink() || !apps_metadata.is_dir() {
+            return Err(ServiceError::new(
+                "invalidPath",
+                "the configured application source root is not a real directory",
+            ));
+        }
+        let source_metadata = std::fs::symlink_metadata(&source_path).map_err(|error| {
+            ServiceError::new(
+                "invalidPath",
+                format!("authoring source is unavailable: {error}"),
+            )
+        })?;
+        if source_metadata.file_type().is_symlink() || !source_metadata.is_dir() {
+            return Err(ServiceError::new(
+                "invalidPath",
+                "authoring source must be a real directory",
+            ));
+        }
+        let canonical_root = std::fs::canonicalize(apps_root)?;
+        let canonical_source = std::fs::canonicalize(source_path)?;
+        let relative = canonical_source
+            .strip_prefix(&canonical_root)
+            .map_err(|_| {
+                ServiceError::new(
+                    "invalidPath",
+                    "authoring source must belong to this brand's application source root",
+                )
+            })?;
+        if relative.components().count() != 1
+            || canonical_source == canonical_root
+            || self.guest_path(&canonical_source)? != authoring.source_directory
+        {
+            return Err(ServiceError::new(
+                "invalidPath",
+                "authoring source must be a canonical direct child of this brand's application source root",
+            ));
+        }
+        Ok(())
     }
 
     async fn start(
@@ -813,10 +1079,9 @@ impl MobileLocalAppServiceHandle {
         keep_registration: bool,
     ) -> Result<Value, ServiceError> {
         run.cancel.cancel();
-        let invocation = run.record.lock().unwrap().run_id.clone();
         if let Ok(agent) = self.agent_host() {
             agent
-                .stop_invocation(app_id, &invocation)
+                .stop_app(app_id)
                 .await
                 .map_err(|message| ServiceError::new("agentCleanupIncomplete", message))?;
         }
@@ -917,16 +1182,27 @@ impl MobileLocalAppServiceHandle {
     }
     /// Trusted native UI only. The page SDK has no route to this method.
     pub async fn agent_host_json(self: Arc<Self>, request: String) -> String {
+        // Trusted iOS `startNative` carries the same bounded attachment bytes
+        // as the page upload path (50 MiB decoded, about 67 MiB base64).
+        if request.len() > 80 * 1024 * 1024 {
+            return agent_envelope(Err("agent_input_too_large".into()));
+        }
+        let request: Value = match serde_json::from_str(&request) {
+            Ok(request) => request,
+            Err(_) => return agent_envelope(Err("invalid_agent_input".into())),
+        };
+        if request.get("op").and_then(Value::as_str) == Some("registerAuthoring") {
+            return match self.register_authoring(request).await {
+                Ok(value) => json!({"ok":true,"value":value}).to_string(),
+                Err(error) => {
+                    json!({"ok":false,"error":{"code":error.code,"message":error.message}})
+                        .to_string()
+                }
+            };
+        }
         let host = match self.agent_host() {
             Ok(host) => host,
             Err(error) => return agent_envelope(Err(error)),
-        };
-        if request.len() > 512 * 1024 {
-            return agent_envelope(Err("agent_input_too_large".into()));
-        }
-        let request = match serde_json::from_str(&request) {
-            Ok(request) => request,
-            Err(_) => return agent_envelope(Err("invalid_agent_input".into())),
         };
         let result = EXECUTOR
             .get()

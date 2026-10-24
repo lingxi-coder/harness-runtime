@@ -245,19 +245,102 @@ fn enumerate(root: &Path, dir: &Path, result: &mut Vec<String>) -> Result<(), Ap
 fn digest(manifest: &Manifest, files: &[ReleaseFile]) -> Result<String, AppError> {
     Ok(hash(&serde_json::to_vec(&(manifest, files))?))
 }
-fn validate_authoring(authoring: &AuthoringRef) -> Result<(), AppError> {
-    if !authoring.source_directory.starts_with('/')
-        || authoring.source_directory.contains(['\0', '\\'])
-        || authoring
-            .source_directory
-            .split('/')
-            .any(|p| p == ".." || p == ".")
+fn validate_authoring_source(authoring: &AuthoringRef) -> Result<(), AppError> {
+    validate_canonical_absolute_path(&authoring.source_directory, "authoring sourceDirectory")
+}
+
+fn validate_canonical_absolute_path(path: &str, label: &str) -> Result<(), AppError> {
+    if !path.starts_with('/')
+        || path.contains(['\0', '\\'])
+        || path.split('/').any(|part| part == ".." || part == ".")
+    {
+        return Err(AppError::Invalid(format!(
+            "{label} must be an absolute canonical guest or host path"
+        )));
+    }
+    Ok(())
+}
+
+fn valid_uuid(value: &str) -> bool {
+    Uuid::parse_str(value).is_ok_and(|parsed| parsed.to_string() == value)
+}
+
+fn authoring_binding_complete(authoring: &AuthoringRef) -> bool {
+    authoring
+        .workspace_id
+        .as_deref()
+        .is_some_and(|value| !value.is_empty())
+        && authoring.project_ref.is_some()
+        && authoring
+            .authoring_session_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+}
+
+fn validate_authoring_binding(authoring: &AuthoringRef) -> Result<(), AppError> {
+    validate_authoring_source(authoring)?;
+    let workspace_id = authoring.workspace_id.as_deref().ok_or_else(|| {
+        AppError::Invalid("authoring workspaceId is required before binding".into())
+    })?;
+    if !valid_uuid(workspace_id) {
+        return Err(AppError::Invalid(
+            "authoring workspaceId must be a canonical UUID".into(),
+        ));
+    }
+    match authoring.project_ref.as_ref().ok_or_else(|| {
+        AppError::Invalid("authoring projectRef is required before binding".into())
+    })? {
+        ProjectRef::DesktopPath { path } => {
+            // The desktop project identity can be an existing project root
+            // that contains the app source directory; both are independently
+            // supplied and verified by the desktop host adapter.
+            if !path.starts_with('/')
+                || path.contains(['\0', '\\'])
+                || path.split('/').any(|part| part == "." || part == "..")
+            {
+                return Err(AppError::Invalid(
+                    "desktop projectRef.path must be an absolute canonical path".into(),
+                ));
+            }
+        }
+        ProjectRef::MobileProject { project_id } => {
+            if !valid_uuid(project_id) {
+                return Err(AppError::Invalid(
+                    "mobile projectRef.projectId must be a canonical UUID".into(),
+                ));
+            }
+        }
+    }
+    let session_id = authoring.authoring_session_id.as_deref().ok_or_else(|| {
+        AppError::Invalid("authoring authoringSessionId is required before binding".into())
+    })?;
+    if !valid_uuid(session_id) {
+        return Err(AppError::Invalid(
+            "authoring authoringSessionId must be a canonical engine UUID".into(),
+        ));
+    }
+    if let Some(app_id) = authoring.app_id.as_deref() {
+        valid_id(app_id)?;
+    }
+    Ok(())
+}
+
+fn validate_authoring_owner(authoring: &AuthoringRef, app_id: &str) -> Result<(), AppError> {
+    if authoring
+        .app_id
+        .as_deref()
+        .is_some_and(|owner| owner != app_id)
     {
         return Err(AppError::Invalid(
-            "authoring sourceDirectory must be an absolute canonical guest or host path".into(),
+            "authoring appId does not match its owning application".into(),
         ));
     }
     Ok(())
+}
+
+fn authoring_with_owner(mut authoring: AuthoringRef, app_id: &str) -> AuthoringRef {
+    authoring.app_id = Some(app_id.to_owned());
+    authoring
 }
 fn upgrade_desktop_manifest(mut value: serde_json::Value) -> Result<Manifest, AppError> {
     match value.get("schema").and_then(serde_json::Value::as_u64) {
@@ -313,6 +396,7 @@ impl AppLibrary {
         ensure_directory(&root)?;
         ensure_directory(&root.join("apps"))?;
         ensure_directory(&root.join("transactions"))?;
+        ensure_directory(&root.join("pending-authoring"))?;
         Ok(Self { config_home, root })
     }
     pub fn root(&self) -> &Path {
@@ -436,6 +520,44 @@ impl AppLibrary {
     fn save(&self, record: &AppRecord) -> Result<(), AppError> {
         atomic_json(&self.record_path(&record.app_id)?, record)
     }
+    fn pending_authoring_path(&self, source_directory: &str) -> PathBuf {
+        self.root
+            .join("pending-authoring")
+            .join(format!("{}.json", hash(source_directory.as_bytes())))
+    }
+    fn source_is_bound(&self, source_directory: &str) -> Result<bool, AppError> {
+        Ok(self.list()?.iter().any(|record| {
+            record
+                .authoring
+                .as_ref()
+                .is_some_and(|authoring| authoring.source_directory == source_directory)
+        }))
+    }
+    /// Persist the native Project/Code Session binding before its first publish.
+    /// The pending row is keyed by the canonical source identity and is only
+    /// consumed after an initial App record commits successfully.
+    pub fn register_pending_authoring(
+        &self,
+        authoring: AuthoringRef,
+    ) -> Result<AuthoringRef, AppError> {
+        if authoring.app_id.is_some() {
+            return Err(AppError::Invalid(
+                "pending authoring cannot already belong to an application".into(),
+            ));
+        }
+        validate_authoring_binding(&authoring)?;
+        let _lock = self.lock()?;
+        if self.source_is_bound(&authoring.source_directory)? {
+            return Err(AppError::Invalid(
+                "authoring source is already bound to a published application".into(),
+            ));
+        }
+        atomic_json(
+            &self.pending_authoring_path(&authoring.source_directory),
+            &authoring,
+        )?;
+        Ok(authoring)
+    }
     pub fn source_path(&self, app_id: &str, revision: u64) -> Result<PathBuf, AppError> {
         if revision == 0 {
             return Err(AppError::Invalid("revision must be positive".into()));
@@ -485,10 +607,61 @@ impl AppLibrary {
         })
     }
     pub fn publish(&self, request: PublishRequest) -> Result<PublishResult, AppError> {
+        self.publish_inner(request, None)
+    }
+
+    /// Initial mobile publication may adopt only a native-registered binding
+    /// for the exact canonical guest source directory supplied by the host.
+    pub fn publish_with_pending_authoring(
+        &self,
+        request: PublishRequest,
+        source_directory: &str,
+    ) -> Result<PublishResult, AppError> {
+        validate_canonical_absolute_path(source_directory, "pending sourceDirectory")?;
+        if request.app_id.is_some() || request.authoring.is_some() {
+            return Err(AppError::Invalid(
+                "pending authoring is only valid for an unbound initial publication".into(),
+            ));
+        }
+        self.publish_inner(request, Some(source_directory))
+    }
+
+    fn publish_inner(
+        &self,
+        request: PublishRequest,
+        pending_source_directory: Option<&str>,
+    ) -> Result<PublishResult, AppError> {
         if let Some(a) = &request.authoring {
-            validate_authoring(a)?;
+            validate_authoring_source(a)?;
+            if authoring_binding_complete(a) {
+                validate_authoring_binding(a)?;
+            }
         }
         let _lock = self.lock()?;
+        let pending_authoring = if let Some(source_directory) = pending_source_directory {
+            if self.source_is_bound(source_directory)? {
+                return Err(AppError::Invalid(
+                    "authoring source is already bound to a published application".into(),
+                ));
+            }
+            let path = self.pending_authoring_path(source_directory);
+            if path.exists() {
+                let authoring: AuthoringRef = read_json(&path)?;
+                if authoring.app_id.is_some() || authoring.source_directory != source_directory {
+                    return Err(AppError::Invalid(
+                        "pending authoring identity does not match the published source".into(),
+                    ));
+                }
+                validate_authoring_binding(&authoring)?;
+                Some((path, authoring))
+            } else {
+                return Err(AppError::Invalid(
+                    "no trusted authoring registration exists for this source directory".into(),
+                ));
+            }
+        } else {
+            None
+        };
         let mut record = if let Some(app_id) = &request.app_id {
             let record = self.get(app_id)?;
             if record.latest_revision != request.expected_revision {
@@ -535,7 +708,7 @@ impl AppLibrary {
                 summary: String::new(),
                 current_revision: 1,
                 latest_revision: 0,
-                authoring: request.authoring.clone(),
+                authoring: None,
                 market_origin: request.market_origin.clone(),
                 origin_port,
                 data_schema_version: 1,
@@ -669,8 +842,15 @@ impl AppLibrary {
         record.name = manifest.name.clone();
         record.summary = manifest.summary.clone();
         record.updated_at_ms = now();
-        if record.authoring.is_none() {
-            record.authoring = request.authoring;
+        if let Some(authoring) = request.authoring.or_else(|| {
+            pending_authoring
+                .as_ref()
+                .map(|(_, authoring)| authoring.clone())
+        }) {
+            validate_authoring_owner(&authoring, &record.app_id)?;
+            if record.authoring.is_none() || record.latest_revision == 1 {
+                record.authoring = Some(authoring_with_owner(authoring, &record.app_id));
+            }
         }
         if record.market_origin.is_none() {
             record.market_origin = request.market_origin;
@@ -679,6 +859,17 @@ impl AppLibrary {
             record.data_schema_version = manifest.schema_version();
         }
         self.save(&record)?;
+        if let Some((path, _)) = pending_authoring {
+            // The record is already committed. A stale pending file is safe:
+            // source_is_bound prevents it from being adopted or overwritten.
+            if fs::remove_file(&path).is_ok() {
+                if let Some(parent) = path.parent() {
+                    if let Ok(directory) = File::open(parent) {
+                        let _ = directory.sync_all();
+                    }
+                }
+            }
+        }
         Ok(PublishResult { record, release })
     }
     pub fn verify_release(&self, app_id: &str, revision: u64) -> Result<AppRelease, AppError> {
@@ -1022,10 +1213,21 @@ impl AppLibrary {
         app_id: &str,
         authoring: AuthoringRef,
     ) -> Result<AppRecord, AppError> {
-        validate_authoring(&authoring)?;
+        validate_authoring_binding(&authoring)?;
+        validate_authoring_owner(&authoring, app_id)?;
+        self.store_authoring_pointer(app_id, authoring)
+    }
+
+    fn store_authoring_pointer(
+        &self,
+        app_id: &str,
+        authoring: AuthoringRef,
+    ) -> Result<AppRecord, AppError> {
+        validate_authoring_source(&authoring)?;
+        validate_authoring_owner(&authoring, app_id)?;
         let _lock = self.lock()?;
         let mut record = self.get(app_id)?;
-        record.authoring = Some(authoring);
+        record.authoring = Some(authoring_with_owner(authoring, app_id));
         record.updated_at_ms = now();
         self.save(&record)?;
         Ok(record)
@@ -1034,7 +1236,7 @@ impl AppLibrary {
     pub fn prepare_authoring(
         &self,
         app_id: &str,
-        session_directories: &BTreeMap<String, String>,
+        session_bindings: &BTreeMap<String, AuthoringSessionContext>,
         source_exists: bool,
     ) -> Result<AuthoringResolution, AppError> {
         let record = self.get(app_id)?;
@@ -1042,19 +1244,42 @@ impl AppLibrary {
             return Ok(AuthoringResolution {
                 action: "sourceMissing".into(),
                 source_directory: String::new(),
-                session_id: None,
+                authoring: None,
+                authoring_session_id: None,
             });
         };
         if !source_exists {
             return Ok(AuthoringResolution {
                 action: "sourceMissing".into(),
-                source_directory: authoring.source_directory,
-                session_id: None,
+                source_directory: authoring.source_directory.clone(),
+                authoring: Some(authoring),
+                authoring_session_id: None,
             });
         }
+        validate_authoring_source(&authoring)?;
+        if !authoring_binding_complete(&authoring)
+            || authoring.app_id.as_deref() != Some(record.app_id.as_str())
+        {
+            return Ok(AuthoringResolution {
+                action: "rebindRequired".into(),
+                source_directory: authoring.source_directory.clone(),
+                authoring: Some(authoring),
+                authoring_session_id: None,
+            });
+        }
+        validate_authoring_binding(&authoring)?;
         let session_id = authoring
-            .source_session_id
-            .filter(|id| session_directories.get(id) == Some(&authoring.source_directory));
+            .authoring_session_id
+            .as_ref()
+            .filter(|id| {
+                session_bindings.get(*id).is_some_and(|context| {
+                    context.workspace_id == authoring.workspace_id.as_deref().unwrap_or_default()
+                        && context.source_directory == authoring.source_directory
+                        && authoring.project_ref.as_ref() == Some(&context.project_ref)
+                        && context.mode == "code"
+                })
+            })
+            .cloned();
         Ok(AuthoringResolution {
             action: if session_id.is_some() {
                 "resumeSession"
@@ -1062,8 +1287,9 @@ impl AppLibrary {
                 "createSession"
             }
             .into(),
-            source_directory: authoring.source_directory,
-            session_id,
+            source_directory: authoring.source_directory.clone(),
+            authoring: Some(authoring),
+            authoring_session_id: session_id,
         })
     }
     pub fn export(
@@ -1297,7 +1523,10 @@ impl AppLibrary {
             ));
         }
         if let Some(a) = &authoring {
-            validate_authoring(a)?;
+            validate_authoring_source(a)?;
+            if authoring_binding_complete(a) {
+                validate_authoring_binding(a)?;
+            }
         }
         if legacy_id.starts_with("desktop:") {
             return self.import_legacy_desktop(&entry, source_path, authoring);
@@ -1357,7 +1586,10 @@ impl AppLibrary {
         source_path: &Path,
         authoring: AuthoringRef,
     ) -> Result<AppRecord, AppError> {
-        validate_authoring(&authoring)?;
+        validate_authoring_source(&authoring)?;
+        if authoring_binding_complete(&authoring) {
+            validate_authoring_binding(&authoring)?;
+        }
         let record = self.get(app_id)?;
         if record.authoring.is_none()
             && record
@@ -1370,7 +1602,11 @@ impl AppLibrary {
             ));
         }
         self.copy_source(app_id, revision, source_path)?;
-        self.bind_authoring(app_id, authoring)
+        if authoring_binding_complete(&authoring) {
+            self.bind_authoring(app_id, authoring)
+        } else {
+            self.store_authoring_pointer(app_id, authoring)
+        }
     }
     pub fn remix(
         &self,
@@ -1380,7 +1616,10 @@ impl AppLibrary {
         authoring: AuthoringRef,
         name: Option<String>,
     ) -> Result<PublishResult, AppError> {
-        validate_authoring(&authoring)?;
+        validate_authoring_source(&authoring)?;
+        if authoring_binding_complete(&authoring) {
+            validate_authoring_binding(&authoring)?;
+        }
         let mut release = self.verify_release(app_id, revision)?;
         if !release
             .manifest
@@ -1484,11 +1723,11 @@ impl AppLibrary {
             })?)?,
             PrepareAuthoring {
                 app_id,
-                session_directories,
+                session_bindings,
                 source_exists,
             } => serde_json::to_value(self.prepare_authoring(
                 &app_id,
-                &session_directories,
+                &session_bindings,
                 source_exists,
             )?)?,
             BindAuthoring { app_id, authoring } => {

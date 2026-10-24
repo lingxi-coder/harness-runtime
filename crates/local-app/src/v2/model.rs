@@ -4,13 +4,37 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum ProjectRef {
+    DesktopPath { path: String },
+    MobileProject { project_id: String },
+}
+
+/// Stable host binding for a mutable authoring workspace. Optional binding
+/// fields let schema-2 records from before this contract load so the host can
+/// offer an explicit rebind; they are never accepted by `bindAuthoring`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AuthoringRef {
     pub source_directory: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_session_id: Option<String>,
+    pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<String>,
+    pub project_ref: Option<ProjectRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoring_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthoringSessionContext {
+    pub workspace_id: String,
+    pub source_directory: String,
+    pub project_ref: ProjectRef,
+    /// The engine's persisted session mode (`code` is required for authoring).
+    pub mode: String,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -143,11 +167,14 @@ pub struct AppLayout {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthoringResolution {
-    /// `resumeSession`, `createSession`, or `sourceMissing`. This is a routing decision, not a session mutation.
+    /// `resumeSession`, `createSession`, `sourceMissing`, or `rebindRequired`.
+    /// This is a routing decision, not a session mutation.
     pub action: String,
     pub source_directory: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authoring: Option<AuthoringRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub authoring_session_id: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -266,8 +293,8 @@ pub enum LibraryRequest {
     PrepareAuthoring {
         #[serde(rename = "appId")]
         app_id: String,
-        #[serde(rename = "sessionDirectories", default)]
-        session_directories: BTreeMap<String, String>,
+        #[serde(rename = "sessionBindings", default)]
+        session_bindings: BTreeMap<String, AuthoringSessionContext>,
         #[serde(rename = "sourceExists")]
         source_exists: bool,
     },

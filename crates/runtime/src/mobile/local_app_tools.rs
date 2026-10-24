@@ -2,10 +2,7 @@
 use super::unified_local_apps::MobileLocalAppServiceHandle;
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{path::PathBuf, sync::Arc};
 use tool_ui::desktop_local_app::ProjectLocalAppHost;
 
 pub(crate) struct MobileProjectAppHost {
@@ -29,19 +26,6 @@ impl MobileProjectAppHost {
             .request_for_tool(request)
             .await
             .map_err(|error| format!("{}: {}", error.code, error.message))
-    }
-
-    fn guest_source(&self, source: &str) -> Result<String, String> {
-        let home = self.config_home.parent().ok_or("Missing Linux user home")?;
-        let source = std::fs::canonicalize(source).map_err(|error| error.to_string())?;
-        let home = std::fs::canonicalize(home).map_err(|error| error.to_string())?;
-        let relative = source
-            .strip_prefix(home)
-            .map_err(|_| "Application source must be in the Linux user home")?;
-        Ok(Path::new(mobile_linux_api::guest_paths::HOME)
-            .join(relative)
-            .to_string_lossy()
-            .into_owned())
     }
 }
 
@@ -101,14 +85,113 @@ impl ProjectLocalAppHost for MobileProjectAppHost {
                     temporary = Some(guard);
                     path.to_string_lossy().into_owned()
                 } else { return Err("A staged project or HTML document is required".into()); };
-                let authoring = if app_id.is_none() {
-                    input["source_path"].as_str().map(|source|self.guest_source(source).map(|directory|json!({"sourceDirectory":directory,"sourceSessionId":input["source_session"]["sessionId"]}))).transpose()?
-                } else { None };
-                let result = self.dispatch(json!({"op":"publish","appId":app_id,"expectedRevision":input["expectedRevision"].as_u64().unwrap_or(0),"sourcePath":source,"authoring":authoring})).await?;
+                let result = self
+                    .service
+                    .clone()
+                    .publish_from_trusted_source(
+                        &source,
+                        input["source_path"].as_str(),
+                        app_id,
+                        input["expectedRevision"].as_u64().unwrap_or(0),
+                    )
+                    .await
+                    .map_err(|error| format!("{}: {}", error.code, error.message))?;
                 drop(temporary);
                 Ok(json!({"action":"publish","id":result["record"]["appId"],"name":result["record"]["name"],"summary":result["record"]["summary"],"revision":result["release"]["revision"],"record":result["record"],"release":result["release"]}))
             }
             _ => Err("Unknown Local App action; consent and administration are native-only".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tool_ui::desktop_local_app::ProjectLocalAppHost;
+
+    #[tokio::test]
+    async fn staged_publish_uses_trusted_original_source_for_pending_authoring_lookup() {
+        let root = tempfile::tempdir().unwrap();
+        let config_home = root.path().join("persistent/mobile-user/.atlas");
+        let service =
+            MobileLocalAppServiceHandle::new(config_home.clone(), None, "android".into()).unwrap();
+        let config_home = service.config_home.clone();
+        let original_source = config_home.join(".apps/first-app-1234abcd");
+        std::fs::create_dir_all(&original_source).unwrap();
+        std::fs::write(
+            original_source.join("lingxi-app.json"),
+            r#"{"schema":2,"name":"Staged app","entry":{"type":"static","path":"index.html"},"targets":[{"platform":"android","environment":"web"}],"package":{"files":["index.html"],"dependencyLocks":[]}}"#,
+        )
+        .unwrap();
+        std::fs::write(original_source.join("index.html"), "staged bytes").unwrap();
+        let staged_source = root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("local-app-imports/staged-app");
+        std::fs::create_dir_all(&staged_source).unwrap();
+        std::fs::copy(
+            &original_source.join("lingxi-app.json"),
+            staged_source.join("lingxi-app.json"),
+        )
+        .unwrap();
+        std::fs::copy(
+            &original_source.join("index.html"),
+            staged_source.join("index.html"),
+        )
+        .unwrap();
+        std::fs::write(
+            original_source.join("index.html"),
+            "source changed after staging",
+        )
+        .unwrap();
+
+        let source_directory = service.guest_path(&original_source).unwrap();
+        let authoring = json!({
+            "sourceDirectory":source_directory,
+            "workspaceId":uuid::Uuid::new_v4().to_string(),
+            "projectRef":{"kind":"mobileProject","projectId":uuid::Uuid::new_v4().to_string()},
+            "authoringSessionId":uuid::Uuid::new_v4().to_string()
+        });
+        let registered: serde_json::Value = serde_json::from_str(
+            &service
+                .clone()
+                .agent_host_json(
+                    json!({"op":"registerAuthoring","authoring":authoring}).to_string(),
+                )
+                .await,
+        )
+        .unwrap();
+        assert_eq!(registered["ok"], true);
+
+        let host = MobileProjectAppHost {
+            service: service.clone(),
+            config_home,
+            catalog: Arc::new(std::sync::OnceLock::new()),
+        };
+        let result = host
+            .request(json!({
+                "action":"publish",
+                "staged_path":staged_source,
+                "source_path":original_source,
+                "expectedRevision":0
+            }))
+            .await
+            .unwrap();
+        let app_id = result["id"].as_str().unwrap();
+        assert_eq!(result["record"]["authoring"]["appId"], app_id);
+        assert_eq!(
+            result["record"]["authoring"]["sourceDirectory"],
+            source_directory
+        );
+        let release = service.library.release(app_id, 1).unwrap();
+        let index = service
+            .library
+            .source_path(app_id, 1)
+            .unwrap()
+            .join("index.html");
+        assert_eq!(std::fs::read_to_string(index).unwrap(), "staged bytes");
+        assert!(release.files.iter().any(|file| file.path == "index.html"));
     }
 }
