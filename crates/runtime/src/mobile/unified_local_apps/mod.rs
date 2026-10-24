@@ -977,16 +977,30 @@ fn agent_envelope(result: Result<Value, String>) -> String {
         Ok(value) => json!({"ok":true,"value":value}).to_string(),
         Err(code) => {
             let message = match code.as_str() {
-                "agent_model_host_not_ready" | "agent_host_unavailable" => "The application model service is unavailable. Check model settings and retry.",
-                "model_unavailable" => "Select an available model in this application's Agent settings.",
+                "agent_model_host_not_ready" | "agent_host_unavailable" => {
+                    "The application model service is unavailable. Check model settings and retry."
+                }
+                "model_unavailable" => {
+                    "Select an available model in this application's Agent settings."
+                }
                 "agent_not_declared" => "This application has not declared the Agent capability.",
-                "tool_catalog_changed" => "The tool configuration changed. Review and authorize the current tools again.",
-                "background_not_supported" => "Background Agent execution is not supported by this mobile host.",
-                "agent_input_too_large" => "The request is too large. Reduce the image size or prompt length.",
-                "agent_storage_unavailable" => "Agent task storage is unavailable. Existing task data has been preserved.",
-                "app_invocation_closed" | "stale_app_invocation" => "This application run has closed. Reopen the application and retry.",
+                "tool_catalog_changed" => {
+                    "The tool configuration changed. Review and authorize the current tools again."
+                }
+                "background_not_supported" => {
+                    "Background Agent execution is not supported by this mobile host."
+                }
+                "agent_input_too_large" => {
+                    "The request is too large. Reduce the image size or prompt length."
+                }
+                "agent_storage_unavailable" => {
+                    "Agent task storage is unavailable. Existing task data has been preserved."
+                }
+                "app_invocation_closed" | "stale_app_invocation" => {
+                    "This application run has closed. Reopen the application and retry."
+                }
                 "invalid_agent_input" => "The Agent request is invalid.",
-                _ => "The Agent request could not be completed. Check the error code and application settings.",
+                _ => local_app::v2::agent::error_message(&code),
             };
             json!({"ok":false,"error":{"code":code,"message":message}}).to_string()
         }

@@ -11,6 +11,8 @@ use tool_ui::desktop_local_app::ProjectLocalAppHost;
 pub(crate) struct MobileProjectAppHost {
     pub service: Arc<MobileLocalAppServiceHandle>,
     pub config_home: PathBuf,
+    /// Metadata only; this factory is never bound as the application's executor.
+    pub catalog: Arc<std::sync::OnceLock<std::sync::Weak<super::app_agent::AppAgentFactory>>>,
 }
 
 struct ImportDirectory(PathBuf);
@@ -49,10 +51,16 @@ impl ProjectLocalAppHost for MobileProjectAppHost {
         let app_id = input["id"].as_str();
         match input["action"].as_str().unwrap_or("publish") {
             "agent_catalog" => {
-                let response = self.service.clone().agent_host_json(json!({"op":"catalog"}).to_string()).await;
-                let value: Value = serde_json::from_str(&response).map_err(|_| "Invalid Agent catalog response")?;
-                if value["ok"] == true { Ok(value["value"].clone()) }
-                else { Err("Open Local App Agent settings to initialize the native model catalog, then retry.".into()) }
+                let factory = self.catalog.get().and_then(std::sync::Weak::upgrade).ok_or("Host tool catalog is not ready")?;
+                let catalog = factory.catalog().await?;
+                let tools = catalog["tools"].as_object().ok_or("Invalid host tool catalog")?
+                    .iter().map(|(id, grant)| {
+                        let mut value = grant.clone();
+                        value["id"] = json!(id);
+                        value["label"] = catalog["labels"][id].as_str().map(|label| json!(label)).unwrap_or_else(|| json!(id));
+                        value
+                    }).collect::<Vec<_>>();
+                Ok(json!({"models":catalog["models"],"tools":tools}))
             }
             "list" => self.dispatch(json!({"op":"list"})).await,
             "read" => {

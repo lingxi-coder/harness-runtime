@@ -219,7 +219,7 @@ impl AppAgentHost {
                 let admitted = self
                     .store
                     .admit(&owner, &input, &declared)
-                    .map_err(|e| e.to_string())?;
+                    .map_err(|e| local_app::v2::agent::admission_error_code(&e).to_owned())?;
                 let id = admitted.task.run_id.clone();
                 if admitted.start {
                     let control = Arc::new(Control {
@@ -691,79 +691,7 @@ impl AppAgentHost {
         }
     }
     async fn catalog(&self) -> Result<Value, String> {
-        use sha2::Digest;
-        let mut models = Vec::new();
-        for m in self
-            .factory
-            .api
-            .model_listings()
-            .into_iter()
-            .filter(|m| !m.hidden)
-        {
-            let ready = self
-                .factory
-                .api
-                .credential_source(&m.request_model, Some(&m.profile_name))
-                .await
-                .is_ok_and(|s| {
-                    !matches!(
-                        s,
-                        llm_runtime::CredentialSource::None
-                            | llm_runtime::CredentialSource::Unknown
-                    )
-                });
-            models.push(json!({"providerId":m.profile_name,"modelId":m.request_model,"label":m.display_model,"canSelect":ready,"supportsImages":m.capabilities.vision,"supportsStructuredOutput":m.capabilities.tools}));
-        }
-        let mut tools: BTreeMap<String, ToolGrant> = BUILTINS
-            .iter()
-            .map(|name| {
-                (
-                    format!("builtin:{name}"),
-                    ToolGrant::Builtin {
-                        name: (*name).into(),
-                    },
-                )
-            })
-            .collect();
-        if self.factory.context.mobile_shell.is_none() {
-            tools.remove("builtin:Shell");
-        }
-        let mut labels: BTreeMap<String, String> = tools
-            .keys()
-            .map(|id| (id.clone(), id.trim_start_matches("builtin:").to_string()))
-            .collect();
-        let configured = self.factory.configured_servers()?;
-        if let Some(registry) = &self.factory.context.mcp_registry {
-            for (identity, label) in registry.tool_identity_labels().await {
-                if !configured
-                    .iter()
-                    .any(|server| identity.matches_config(server))
-                {
-                    continue;
-                }
-                let id = format!(
-                    "mcp:{:x}",
-                    sha2::Sha256::digest(
-                        serde_json::to_vec(&identity).map_err(|_| "invalid_tool")?
-                    )
-                );
-                labels.insert(id.clone(), label);
-                tools.insert(
-                    id,
-                    ToolGrant::Mcp {
-                        server_config_id: identity.server_config_id,
-                        config_revision: identity.config_revision,
-                        raw_tool_name: identity.raw_tool_name,
-                        definition_digest: identity.definition_fingerprint,
-                    },
-                );
-            }
-        }
-        let servers=self.factory.configured_servers()?.into_iter().map(|server| {
-            let available=matches!(server.spec,lingxi_core::host::McpTransportSpec::Http{..}|lingxi_core::host::McpTransportSpec::Sse{..});
-            json!({"id":mcp::tool_identity::McpToolIdentity::server_catalog_id(&server),"name":server.name,"available":available})
-        }).collect::<Vec<_>>();
-        Ok(json!({"models":models,"tools":tools,"labels":labels,"servers":servers}))
+        self.factory.catalog().await
     }
 }
 fn only_run_id(args: &Value) -> Result<&str, String> {

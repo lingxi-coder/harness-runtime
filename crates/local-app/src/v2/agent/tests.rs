@@ -282,3 +282,58 @@ fn cancellation_intent_blocks_late_success_without_releasing_concurrency() {
     assert!(task.result.is_none());
     assert!(store.admit(&owner(), &next, &[]).unwrap().start);
 }
+
+#[test]
+fn admission_failures_expose_stable_authorization_codes() {
+    let (_dir, store) = store();
+    let mut request = input();
+    request.tools.push("builtin:Read".into());
+    assert_eq!(
+        admission_error_code(
+            &store
+                .admit(&owner(), &request, &["builtin:Read".into()])
+                .err()
+                .unwrap()
+        ),
+        "tool_not_authorized"
+    );
+    store.configure(owner(), None).unwrap();
+    assert_eq!(
+        admission_error_code(&store.admit(&owner(), &input(), &[]).err().unwrap()),
+        "agent_not_authorized"
+    );
+}
+#[test]
+fn busy_and_request_conflicts_have_distinct_codes() {
+    let (_dir, store) = store();
+    store.admit(&owner(), &input(), &[]).unwrap();
+    let mut changed = input();
+    changed.prompt = "different".into();
+    assert_eq!(
+        admission_error_code(&store.admit(&owner(), &changed, &[]).err().unwrap()),
+        "request_conflict"
+    );
+    changed.request_id = "another".into();
+    assert_eq!(
+        admission_error_code(&store.admit(&owner(), &changed, &[]).err().unwrap()),
+        "busy"
+    );
+}
+#[test]
+fn unsupported_image_model_result_explains_the_remedy() {
+    let (_dir, store) = store();
+    let task = store.admit(&owner(), &input(), &[]).unwrap().task;
+    let task = store
+        .update(
+            &owner(),
+            &task.run_id,
+            State::Failed,
+            None,
+            None,
+            Some("model_vision_unsupported".into()),
+        )
+        .unwrap();
+    let error = task.error.unwrap();
+    assert_eq!(error.code, "model_vision_unsupported");
+    assert!(error.message.contains("image-capable model"));
+}

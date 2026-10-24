@@ -2295,6 +2295,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // bodies identically to desktop. Mobile reports `sandbox_available:false`, so
     // `should_use_sandbox` short-circuits to `NoSandbox` and the expansion runs
     // via the plain `ProcessRunner` — consistent with mobile's own Bash tool.
+    let app_agent_catalog = Arc::new(std::sync::OnceLock::new());
     let side_chat_context = tool_ctx.clone();
     let shell_expansion_provider = tool_skill::build_prompt_shell_provider(&tool_ctx);
     let ask_resolver = ask_user_question_tx.map(|tx| {
@@ -2391,6 +2392,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         let app_host = Arc::new(crate::mobile::local_app_tools::MobileProjectAppHost {
             service: app_service,
             config_home: cfg.lingxi_home.clone(),
+            catalog: app_agent_catalog.clone(),
         });
         tools.register_builtin(Arc::new(
             tool_ui::desktop_local_app::DesktopLocalAppTool::new(
@@ -3226,6 +3228,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         model_resolution: model_resolution_context_provider.clone(),
         host_hooks: hook_registry.clone(),
     });
+    let _ = app_agent_catalog.set(Arc::downgrade(&app_agent_factory));
     if cfg.local_apps && cfg.app_agent_host {
         let service = crate::mobile::unified_local_apps::MobileLocalAppServiceHandle::new(
             cfg.lingxi_home.clone(),

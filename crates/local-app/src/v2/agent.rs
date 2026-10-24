@@ -206,6 +206,49 @@ fn now() -> u64 {
 fn digest(input: &Input) -> Result<String, AppError> {
     Ok(format!("{:x}", Sha256::digest(serde_json::to_vec(input)?)))
 }
+/// Stable page-facing errors; storage details and raw OS errors stay in the host.
+pub fn admission_error_code(error: &AppError) -> &'static str {
+    match error {
+        AppError::Busy(_) => "busy",
+        AppError::Invalid(message) => match message.as_str() {
+            "Agent is not authorized for this release" => "agent_not_authorized",
+            "tool is not declared and granted" => "tool_not_authorized",
+            "requestId conflicts with an earlier request" => "request_conflict",
+            "requestId belongs to an earlier invocation" => "stale_request",
+            "requested limits exceed host limits" => "limits_exceeded",
+            "Agent storage unavailable" | "Agent grant generation exhausted" => {
+                "agent_storage_unavailable"
+            }
+            _ => "invalid_agent_input",
+        },
+        _ => "agent_storage_unavailable",
+    }
+}
+
+/// Public task failures provide actionable text without provider/credential details.
+pub fn error_message(code: &str) -> &'static str {
+    match code {
+        "agent_not_authorized" => "Enable Agent access and select a model in this application's native settings.",
+        "tool_not_authorized" => "The requested tool must be declared by the application and approved in native Agent settings.",
+        "busy" => "This application already has an active Agent task. Wait for it or cancel it first.",
+        "request_conflict" => "This request ID was already used with different input. Retry the original input or use a new request ID.",
+        "stale_request" => "This request belongs to an earlier application invocation and cannot be started again.",
+        "limits_exceeded" => "Requested task limits exceed the limits selected in native Agent settings.",
+        "invalid_agent_input" => "The Agent request is invalid. Check its prompt, images, schema and limits.",
+        "model_unavailable" | "model_credentials_unavailable" => "Configure an available model in this application's native Agent settings.",
+        "model_vision_unsupported" => "The selected model does not support images. Select an image-capable model in native Agent settings.",
+        "model_tools_unsupported" => "The selected model does not support the tools required for this task or structured result.",
+        "invalid_images" => "The image could not be decoded or exceeds the image limits. Choose a smaller valid image.",
+        "invalid_output_schema" | "unsupported_schema_dialect" => "The result schema must be a valid Draft-7 object with local references only.",
+        "timeout_exceeded" => "The Agent task reached its time limit and was stopped.",
+        "cancelled" | "authorization_revoked" => "The Agent task was cancelled or its authorization was revoked.",
+        "mcp_definition_changed" => "The MCP configuration or tool definition changed. Review and authorize the current tool again.",
+        "tool_cleanup_incomplete" => "A tool has not finished stopping. The host is retaining the task's resources until cleanup completes.",
+        "agent_storage_unavailable" | "task_storage_failed" => "Agent task storage is unavailable. Existing task data has been preserved.",
+        _ => "The Agent task could not complete. Review the host status before retrying.",
+    }
+}
+
 impl AgentStore {
     pub fn open(root: &Path) -> Result<Self, AppError> {
         fs::create_dir_all(root)?;
@@ -549,10 +592,8 @@ impl AgentStore {
             record.task.result = result;
             record.task.usage = usage;
             record.task.error = error.map(|code| TaskError {
+                message: error_message(&code).into(),
                 code,
-                message:
-                    "The Agent task could not complete. Review the host status before retrying."
-                        .into(),
             });
             Ok(record.task.clone())
         })
