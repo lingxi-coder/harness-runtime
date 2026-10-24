@@ -441,7 +441,7 @@ impl AppAgentHost {
             .transpose()
             .map_err(|_| "invalid_output")?;
         let cost = session.orchestrator.snapshot_cost().await;
-        let usage = json!({"inputTokens":cost.input_tokens,"outputTokens":cost.output_tokens,"costUsd":cost.total_usd,"turns":cost.api_calls});
+        let usage = usage_value(&cost);
         let result = if let Some(output) = output {
             json!({"output":output})
         } else {
@@ -694,7 +694,7 @@ fn only_run_id(args: &Value) -> Result<&str, String> {
 }
 
 fn usage_value(cost: &CostSnapshot) -> Value {
-    json!({"inputTokens":cost.input_tokens,"outputTokens":cost.output_tokens,"costUsd":cost.total_usd,"turns":cost.api_calls})
+    json!({"inputTokens":cost.input_tokens,"outputTokens":cost.output_tokens,"costUsd":cost.total_usd,"costEstimated":!cost.unknown_models,"turns":cost.api_calls})
 }
 fn image_signature(bytes: &[u8], mime: &str) -> bool {
     match mime {

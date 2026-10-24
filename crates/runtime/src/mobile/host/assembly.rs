@@ -813,12 +813,13 @@ pub(super) async fn build_mobile_inner_with_ask(
     // tracker keeps the accounting path 1:1 with desktop. Bind it to the
     // same boot session id as the orchestrator; clear/resume then switch the
     // active projection while late Fusion views retain their origin.
+    let app_agent_pricing = Arc::new(assembled.pricing);
     let cost_tracker = {
         let (cost_persist_tx, mut cost_persist_rx) = tokio::sync::mpsc::channel(64);
         tokio::spawn(async move { while cost_persist_rx.recv().await.is_some() {} });
         Arc::new(cost::CostTracker::new(
             main_session_id,
-            Arc::new(assembled.pricing),
+            app_agent_pricing.clone(),
             cost_persist_tx,
         ))
     };
@@ -3227,6 +3228,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         context: side_chat_context.clone(),
         model_resolution: model_resolution_context_provider.clone(),
         host_hooks: hook_registry.clone(),
+        pricing: app_agent_pricing,
     });
     let _ = app_agent_catalog.set(Arc::downgrade(&app_agent_factory));
     if cfg.local_apps && cfg.app_agent_host {

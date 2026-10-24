@@ -29,6 +29,7 @@ pub struct AppAgentFactory {
     pub(crate) context: BuiltinToolContext,
     pub(crate) model_resolution: Arc<dyn agent::model_resolution::ModelResolutionContextProvider>,
     pub(crate) host_hooks: Arc<tokio::sync::RwLock<hooks::HookRegistry>>,
+    pub(crate) pricing: Arc<cost::PricingCatalog>,
 }
 pub struct AppAgentSession {
     pub orchestrator: Arc<ConversationOrchestrator>,
@@ -377,6 +378,16 @@ impl AppAgentFactory {
             structured_output_enabled: structured_output.is_some(),
             ..OrchestratorConfig::default()
         };
+        // A task owns its accounting session. Reading snapshot_cost without a
+        // tracker returns the orchestrator's zero-shaped placeholder, even
+        // after real provider requests have completed.
+        let (cost_tx, mut cost_rx) = tokio::sync::mpsc::channel(8);
+        tokio::spawn(async move { while cost_rx.recv().await.is_some() {} });
+        let cost_tracker = Arc::new(cost::CostTracker::new(
+            session_id,
+            self.pricing.clone(),
+            cost_tx,
+        ));
         let orch = ConversationOrchestrator::into_shared(
             ConversationOrchestrator::new_side_chat(
                 config,
@@ -397,6 +408,7 @@ impl AppAgentFactory {
                 Some(&model.provider_id),
             )])
             .with_session_id(session_id)
+            .with_cost_tracker(cost_tracker)
             .with_session_cwd(context.session_cwd.clone())
             .with_read_state_map(context.read_file_state.clone())
             .with_model_resolution_context_provider(self.model_resolution.clone()),
