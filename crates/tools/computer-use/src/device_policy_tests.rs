@@ -713,7 +713,7 @@ impl PolicyRaceBackend {
 }
 #[async_trait]
 impl lingxi_core::host::computer_control::ComputerControl for PolicyRaceBackend {
-    async fn query_os_permissions(&self) -> Option<(bool, bool)> {
+    async fn query_os_permissions(&self) -> Result<Option<(bool, bool)>, ComputerError> {
         tokio::task::yield_now().await;
         let call = self.query_calls.fetch_add(1, Ordering::SeqCst);
         if call >= self.query_hook_after.load(Ordering::SeqCst) {
@@ -1244,6 +1244,7 @@ async fn os_query_after_approval_cannot_commit_a_stale_or_cancelled_grant() {
         let backend = Arc::new(PolicyRaceBackend::new());
         backend.inner.set_os_permissions(Some((true, true)));
         let tool = race_tool(backend.clone(), &file);
+        backend.query_hook_after.store(1, Ordering::SeqCst);
         let mut context = ctx();
         let cancel = tokio_util::sync::CancellationToken::new();
         context.cancel = Some(cancel.clone());
@@ -1291,4 +1292,67 @@ async fn final_os_query_cannot_return_a_native_frame_after_policy_revocation() {
         .unwrap()
         .is_none());
     assert!(tool.runtime.lock().unwrap().frames.is_empty());
+}
+
+#[tokio::test]
+async fn unavailable_os_query_blocks_this_operation_without_latching_a_false_revocation() {
+    let backend = Arc::new(RecordingBackend::default());
+    backend.set_os_permissions(Some((true, true)));
+    let tool = make_tool(backend.clone());
+    let context = ctx();
+    invoke(&tool, json!({"action":"screenshot"}), context.clone())
+        .await
+        .unwrap();
+    invoke(
+        &tool,
+        json!({"action":"key_down","text":"a"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    backend.set_os_query_error(true);
+    let error = invoke(
+        &tool,
+        json!({"action":"type","text":"blocked"}),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("Could not verify macOS Accessibility"));
+    assert!(!tool.os_permissions_revoked.load(Ordering::SeqCst));
+    assert!(!tool.state.lock().unwrap().allowed_apps.is_empty());
+    assert!(tool.runtime.lock().unwrap().frames.is_empty());
+    assert!(tool.runtime.lock().unwrap().held_keys.is_empty());
+    assert!(backend.events().iter().any(|event| event == "up:a"));
+    assert!(!backend.events().iter().any(|event| event == "type:blocked"));
+    backend.set_os_query_error(false);
+    invoke(
+        &tool,
+        json!({"action":"type","text":"retry after service recovery"}),
+        context,
+    )
+    .await
+    .unwrap();
+    assert!(backend
+        .events()
+        .iter()
+        .any(|event| event == "type:retry after service recovery"));
+}
+
+#[tokio::test]
+async fn unavailable_os_query_does_not_open_a_misleading_tcc_or_application_approval_panel() {
+    let backend = Arc::new(RecordingBackend::default());
+    backend.set_os_permissions(Some((true, true)));
+    backend.set_os_query_error(true);
+    let mut tool = make_tool(backend);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    tool.access_resolver = Arc::new(TuiBridgeResolver::new(sender));
+    let error = grant(&tool).await.unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("Could not verify macOS Accessibility"));
+    assert!(receiver.try_recv().is_err());
+    assert!(!tool.os_permissions_revoked.load(Ordering::SeqCst));
 }

@@ -338,7 +338,8 @@ pub trait ComputerControl: Send + Sync {
     /// Query live permission state without prompting. Effects use this separate
     /// seam so a revoked grant cannot cause repeated OS prompts. `None` means
     /// this backend cannot inspect permissions; its native effect still gates use.
-    async fn query_os_permissions(&self) -> Option<(bool, bool)> {
-        None
+    /// Errors represent an unavailable query, not a confirmed revocation.
+    async fn query_os_permissions(&self) -> Result<Option<(bool, bool)>, ComputerError> {
+        Ok(None)
     }
 }

@@ -25,6 +25,7 @@ pub(super) struct RecordingBackend {
     policy_on_click: Mutex<Option<(std::path::PathBuf, Value)>>,
     captures: Mutex<Vec<Vec<String>>>,
     os_permissions: Mutex<Option<(bool, bool)>>,
+    os_query_error: std::sync::atomic::AtomicBool,
     locked: std::sync::atomic::AtomicBool,
     target_after_display_size: Mutex<Option<Option<AppInfo>>>,
     target_after_geometry: Mutex<Option<Option<AppInfo>>>,
@@ -53,6 +54,9 @@ impl RecordingBackend {
     pub(super) fn set_os_permissions(&self, value: Option<(bool, bool)>) {
         *self.os_permissions.lock().unwrap() = value;
     }
+    pub(super) fn set_os_query_error(&self, value: bool) {
+        self.os_query_error.store(value, Ordering::SeqCst);
+    }
     pub(super) fn set_locked(&self, locked: bool) {
         self.locked.store(locked, Ordering::SeqCst);
     }
@@ -79,8 +83,13 @@ impl ComputerControl for RecordingBackend {
     async fn check_os_permissions(&self) -> Option<(bool, bool)> {
         *self.os_permissions.lock().unwrap()
     }
-    async fn query_os_permissions(&self) -> Option<(bool, bool)> {
-        *self.os_permissions.lock().unwrap()
+    async fn query_os_permissions(&self) -> Result<Option<(bool, bool)>, ComputerError> {
+        if self.os_query_error.load(Ordering::SeqCst) {
+            return Err(ComputerError::PermissionDenied(
+                "Could not verify macOS Accessibility access. Retry.".into(),
+            ));
+        }
+        Ok(*self.os_permissions.lock().unwrap())
     }
     fn supports_target_application(&self) -> bool {
         self.target_checks.load(Ordering::SeqCst)

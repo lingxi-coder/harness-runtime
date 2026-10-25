@@ -25,19 +25,44 @@ impl ComputerTool {
         self.release_owned_inputs(ctx).await
     }
 
+    pub(crate) async fn read_os_permissions(
+        &self,
+        ctx: &ToolUseContext,
+    ) -> Result<Option<(bool, bool)>, ToolError> {
+        if let Some(backend) = &self.ctx.computer_control {
+            match backend.query_os_permissions().await {
+                Ok(state) => return Ok(state),
+                Err(error) => {
+                    // A busy or unavailable AX service blocks this operation,
+                    // but is not evidence that the user revoked permission.
+                    {
+                        let mut runtime = self
+                            .runtime
+                            .lock()
+                            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+                        runtime.frames.clear();
+                        runtime.snapshots.clear();
+                        runtime.pending_observations.clear();
+                    }
+                    self.release_owned_inputs(ctx).await?;
+                    return Err(super::map_err(&error));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     pub(crate) async fn check_current_os_permissions(
         &self,
         ctx: &ToolUseContext,
     ) -> Result<(), ToolError> {
-        if let Some(backend) = &self.ctx.computer_control {
-            if backend
-                .query_os_permissions()
-                .await
-                .is_some_and(|(accessibility, recording)| !accessibility || !recording)
-            {
-                self.revoke_os_permissions(ctx).await?;
-                return Err(ToolError::PermissionDenied("macOS Accessibility / Screen Recording access was revoked. Restore it in System Settings, then call request_access again.".into()));
-            }
+        if self
+            .read_os_permissions(ctx)
+            .await?
+            .is_some_and(|(accessibility, recording)| !accessibility || !recording)
+        {
+            self.revoke_os_permissions(ctx).await?;
+            return Err(ToolError::PermissionDenied("macOS Accessibility / Screen Recording access was revoked. Restore it in System Settings, then call request_access again.".into()));
         }
         Ok(())
     }

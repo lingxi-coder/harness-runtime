@@ -792,15 +792,22 @@ impl ComputerTool {
             .get_property("reason")
             .and_then(exact_string)
             .ok_or_else(|| ToolError::InvalidInput("reason is required".into()))?;
-        let tcc_state = match self.ctx.computer_control.as_ref() {
-            Some(cc) => cc.check_os_permissions().await.and_then(|(acc, rec)| {
+        let prompted_os_permissions = match self.ctx.computer_control.as_ref() {
+            Some(cc) => cc.check_os_permissions().await,
+            None => None,
+        };
+        let tcc_state = self
+            .read_os_permissions(ctx)
+            .await?
+            .or(prompted_os_permissions)
+            .and_then(|(acc, rec)| {
                 (!acc || !rec).then_some(permission::computer_access::TccState {
                     accessibility: acc,
                     screen_recording: rec,
                 })
-            }),
-            None => None,
-        };
+            });
+        self.check_cancel(ctx)?;
+        self.check_policy_revision(revision.as_deref())?;
         if let Some(tcc_state) = tcc_state {
             self.revoke_os_permissions(ctx).await?;
             let request = permission::computer_access::ComputerAccessRequest {
@@ -820,11 +827,14 @@ impl ComputerTool {
             }
             self.check_cancel(ctx)?;
             self.check_policy_revision(revision.as_deref())?;
-            let granted = if let Some(cc) = &self.ctx.computer_control {
-                cc.check_os_permissions().await == Some((true, true))
+            let prompted = if let Some(cc) = &self.ctx.computer_control {
+                cc.check_os_permissions().await
             } else {
-                false
+                None
             };
+            let granted = self.read_os_permissions(ctx).await?.or(prompted) == Some((true, true));
+            self.check_cancel(ctx)?;
+            self.check_policy_revision(revision.as_deref())?;
             if !granted {
                 return Err(ToolError::PermissionDenied("macOS Accessibility / Screen Recording permissions are still not granted. Grant them in System Settings before retrying.".into()));
             }
