@@ -7,6 +7,8 @@ include!("../reasoning_preference_tests.rs");
 mod bash_precommit_wiring_tests;
 #[path = "device_tools_tests.rs"]
 mod device_tools_tests;
+#[path = "prompt_suggestion_tests.rs"]
+mod prompt_suggestion_tests;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
