@@ -46,10 +46,10 @@
     "bytes": 94359
   },
   "artifacts": {
-    "dist/browser.entry.js": "cb79148ac149b821906aa853c244034db8213970b2808883ab36e475777dd72c",
-    "dist/browser.global.js": "43d3f19701b53e7754260240b1804a0b6ecbfd7c9b3a89da239b0396fbf43581",
-    "dist/browser.source.js": "ebf5b23f35b05cf7d4f21e1478c8838dd55d9c0e0465608d628a8b2a9bb504e0",
-    "dist/client.bundle.js": "c179c239271b5e41adc61a358561b87cb566c08b5409f344716caef75098021c",
+    "dist/browser.entry.js": "e5be4af2b4d4786110062c77ca8ad4d84be9d817d8fee22cb3ce59fe55049127",
+    "dist/browser.global.js": "61ad0825f37989b902aa6efd8f4440c01fa1c137b358061d38f4d2fb6daeb73a",
+    "dist/browser.source.js": "b207d7a316ee9cd2c0fdea2a7135cbd16a2f6147ad8ea9fe9f9010a10a8609dc",
+    "dist/client.bundle.js": "fdc48ceeade2fe77eed3376230e86edd5a20545be830891562f0678dabbefc24",
     "dist/licenses/AG-UI-MIT.txt": "06dcddbb6908a0c6dd4a9e8ec822eea41d5a460a53089fecccc8a68049e99241",
     "dist/licenses/README.md": "cbc669e18e9d0817b7a13a6f3c6d728bda44609bea5fa391b18983d828c45548",
     "dist/licenses/THIRD-PARTY-NOTICES.md": "babfc6edb622d2a12e08b66b77e8eea707d0049f18767d7d7c562a6eddbcac9a",

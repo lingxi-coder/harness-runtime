@@ -5,6 +5,7 @@ import {validateEvent, validateRunAgentInput} from './validators.js';
 
 export const LOCAL_APP_EXTENSION_KEY = 'com.lingxi.localApp';
 export const AG_UI_PROTOCOL_VERSION = '1.0';
+const MAX_EVENT_PAGE_EVENTS = 128;
 
 function isRecord(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -165,9 +166,12 @@ function delay(ms, signal, setTimer) {
 }
 
 function validateEventPage(page, previousSequence) {
-  preflightJson(page, {maxBytes: 8 * 1024 * 1024, maxDepth: 64, maxNodes: 100_000, maxArrayItems: 128, maxObjectProperties: 10_000, maxStringBytes: 8 * 1024 * 1024});
+  preflightJson(page, {maxBytes: 8 * 1024 * 1024, maxDepth: 64, maxNodes: 100_000, maxArrayItems: 10_000, maxObjectProperties: 10_000, maxStringBytes: 8 * 1024 * 1024});
   if (!isRecord(page) || !Array.isArray(page.events) || !Number.isSafeInteger(page.sequence) || page.sequence < 0) {
     throw new TypeError('The host returned an invalid AG-UI event page.');
+  }
+  if (page.events.length > MAX_EVENT_PAGE_EVENTS) {
+    throw new TypeError('The host returned an AG-UI event page with more than ' + MAX_EVENT_PAGE_EVENTS + ' events.');
   }
   if (previousSequence !== undefined && page.sequence < previousSequence) {
     throw new TypeError('The host returned a regressing AG-UI event cursor.');

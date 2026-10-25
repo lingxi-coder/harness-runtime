@@ -83,6 +83,10 @@ pub struct IosPlatformInputs {
     pub workspace_host_path: Option<PathBuf>,
     /// Stable workspace identifier appended under the selected brand workspace root.
     pub stable_workspace_id: Option<String>,
+    /// Exact project-authorized host directories to expose beside the primary
+    /// workspace mount. These are validated by the iOS FFI adapter and remain
+    /// separate External mounts; callers cannot replace the primary workspace.
+    pub additional_workspace_mounts: Vec<MountSpec>,
 }
 
 /// The iOS [`Platform`].
@@ -119,9 +123,14 @@ impl IosPlatform {
             .mobile_linux
             .as_ref()
             .is_some_and(|runtime| matches!(runtime.mode(), MobileLinuxRuntimeMode::MobileLinux));
-        let workspace_mounts = build_mobile_linux_mounts(
+        let primary_workspace_mounts = build_mobile_linux_mounts(
             inputs.workspace_host_path.clone(),
             inputs.stable_workspace_id.clone(),
+            &inputs.brand_profile,
+        );
+        let workspace_mounts = append_additional_workspace_mounts(
+            primary_workspace_mounts,
+            inputs.additional_workspace_mounts,
             &inputs.brand_profile,
         );
         let runtime = inputs.mobile_linux.clone();
@@ -132,7 +141,10 @@ impl IosPlatform {
         ) = if mobile_linux_selected {
             let runtime = runtime.expect("mobile-linux runtime must exist when selected");
             let (runtime, sandbox): (Arc<dyn MobileLinuxRuntime>, Arc<dyn Sandbox>) =
-                match MobileLinuxSandbox::new(runtime.clone(), workspace_mounts) {
+                match workspace_mounts.and_then(|mounts| {
+                    MobileLinuxSandbox::new(runtime.clone(), mounts)
+                        .map_err(|error| format!("invalid mobile-linux workspace mounts: {error}"))
+                }) {
                     Ok(sandbox) => (runtime, Arc::new(sandbox)),
                     Err(error) => {
                         let unavailable: Arc<dyn MobileLinuxRuntime> =
@@ -141,7 +153,7 @@ impl IosPlatform {
                                 MobileLinuxRuntimeMode::MobileLinux,
                                 "ios",
                                 "arm64",
-                                format!("invalid mobile-linux workspace mount: {error}"),
+                                error,
                             ));
                         let sandbox = MobileLinuxSandbox::new(unavailable.clone(), Vec::new())
                             .expect("empty mobile-linux mount set must be valid");
@@ -210,6 +222,198 @@ fn build_mobile_linux_mounts(
             }]
         })
         .unwrap_or_default()
+}
+
+/// Append only exact External grants after validating that none can replace,
+/// shadow, or overlap the single primary Workspace mount. The iOS FFI adapter
+/// performs the native-home and protected-config checks before constructing
+/// these values; this second boundary keeps accidental broader mount specs
+/// from changing the platform's trust roots.
+fn append_additional_workspace_mounts(
+    mut primary: Vec<MountSpec>,
+    additional: Vec<MountSpec>,
+    profile: &mobile_linux_api::BrandRuntimeProfile,
+) -> Result<Vec<MountSpec>, String> {
+    if primary.is_empty() && !additional.is_empty() {
+        return Err("additional project mounts require the primary workspace mount".into());
+    }
+    if primary
+        .iter()
+        .filter(|mount| matches!(mount.purpose, MountPurpose::Workspace))
+        .count()
+        != primary.len()
+        || primary.len() > 1
+    {
+        return Err("expected at most one primary workspace mount".into());
+    }
+
+    let (primary_host, primary_guest, home_host) = if additional.is_empty() {
+        (None, None, None)
+    } else {
+        let mount = primary.first().ok_or_else(|| {
+            "additional project mounts require the primary workspace mount".to_string()
+        })?;
+        let expected_guest =
+            mobile_linux_api::guest_paths::workspace_for_profile(profile, "projects");
+        if mount.guest_path != expected_guest {
+            return Err("primary workspace mount does not match the selected brand profile".into());
+        }
+        let canonical_primary = std::fs::canonicalize(&mount.host_path)
+            .map_err(|error| format!("resolve primary workspace mount: {error}"))?;
+        let home = canonical_primary
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or_else(|| "primary workspace mount has no user-home parent".to_string())?
+            .to_path_buf();
+        let expected_primary = home.join(&profile.brand_id).join("projects");
+        if canonical_primary != expected_primary {
+            return Err(
+                "primary workspace host path does not match the selected brand home".into(),
+            );
+        }
+        (Some(canonical_primary), Some(expected_guest), Some(home))
+    };
+    let guest_home = profile.guest_home();
+    let config_guest = profile.config_guest_path();
+    let apps_guest = profile.apps_guest_path();
+    let primary_guest_path = primary_guest
+        .as_deref()
+        .map(|path| std::path::Path::new(path));
+
+    for mount in additional {
+        if mount.purpose != MountPurpose::External {
+            return Err("additional project mounts must use External purpose".into());
+        }
+        if !mount.host_path.is_absolute()
+            || !is_normalized_absolute_path(&mount.host_path)
+            || !is_normalized_absolute_guest_path(&mount.guest_path)
+            || mount.host_path.components().any(|part| {
+                matches!(
+                    part,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            })
+        {
+            return Err("additional project mount paths must be absolute and normalized".into());
+        }
+        let guest = std::path::Path::new(&mount.guest_path);
+        let relative = guest
+            .strip_prefix(&guest_home)
+            .map_err(|_| "additional project mount is outside the selected brand home")?;
+        if relative.as_os_str().is_empty() {
+            return Err("additional project mount may not expose the whole user home".into());
+        }
+        let is_local_app_source = guest.starts_with(&apps_guest) && guest != apps_guest;
+        if guest == apps_guest || apps_guest.starts_with(guest) {
+            return Err(
+                "additional project mount may not expose the Local App root or its parent".into(),
+            );
+        }
+        if paths_overlap(&mount.guest_path, &config_guest.to_string_lossy()) && !is_local_app_source
+        {
+            return Err("additional project mount overlaps the protected brand config tree".into());
+        }
+        if primary_guest_path
+            .is_some_and(|primary| paths_overlap(&mount.guest_path, &primary.to_string_lossy()))
+        {
+            return Err("additional project mount overlaps the primary workspace".into());
+        }
+        let expected_host = canonical_directory_without_symlinks(
+            home_host
+                .as_deref()
+                .expect("home is resolved for additional mounts"),
+            relative,
+        )?;
+        if mount.host_path != expected_host {
+            return Err(
+                "additional project host and guest paths do not map to the selected brand home"
+                    .into(),
+            );
+        }
+        if primary_host.as_ref().is_some_and(|primary| {
+            paths_overlap(
+                &primary.to_string_lossy(),
+                &mount.host_path.to_string_lossy(),
+            )
+        }) {
+            return Err("additional project mount overlaps the primary workspace".into());
+        }
+        if primary
+            .iter()
+            .filter(|existing| matches!(existing.purpose, MountPurpose::External))
+            .any(|existing| {
+                paths_overlap(&existing.guest_path, &mount.guest_path)
+                    || paths_overlap(
+                        &existing.host_path.to_string_lossy(),
+                        &mount.host_path.to_string_lossy(),
+                    )
+            })
+        {
+            return Err("additional project mounts overlap each other".into());
+        }
+        primary.push(mount);
+    }
+    Ok(primary)
+}
+
+fn is_normalized_absolute_path(path: &std::path::Path) -> bool {
+    path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
+}
+
+fn is_normalized_absolute_guest_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() > 1
+        && !path.ends_with('/')
+        && !path.contains('\0')
+        && path
+            .split('/')
+            .skip(1)
+            .all(|component| !component.is_empty() && component != "." && component != "..")
+        && is_normalized_absolute_path(std::path::Path::new(path))
+}
+
+fn canonical_directory_without_symlinks(
+    root: &std::path::Path,
+    relative: &std::path::Path,
+) -> Result<PathBuf, String> {
+    let root = std::fs::canonicalize(root)
+        .map_err(|error| format!("resolve selected user home: {error}"))?;
+    let mut path = root.clone();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err("additional project mount contains a non-normal guest path".into());
+        };
+        path.push(component);
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|error| format!("resolve additional project mount: {error}"))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(
+                "additional project mount must be a real directory without symlinks".into(),
+            );
+        }
+    }
+    let canonical = std::fs::canonicalize(&path)
+        .map_err(|error| format!("resolve canonical additional project mount: {error}"))?;
+    if !canonical.starts_with(&root) {
+        return Err("additional project mount escaped the selected user home".into());
+    }
+    Ok(canonical)
+}
+
+fn paths_overlap(left: &str, right: &str) -> bool {
+    left == right
+        || left
+            .strip_prefix(right)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+        || right
+            .strip_prefix(left)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 impl Platform for IosPlatform {
@@ -358,6 +562,7 @@ mod tests {
             mobile_linux,
             workspace_host_path: Some(root.join("workspace")),
             stable_workspace_id: Some("abc".to_string()),
+            additional_workspace_mounts: Vec::new(),
         }
     }
 
@@ -375,6 +580,159 @@ mod tests {
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0].host_path, workspace_host_path);
         assert_eq!(mounts[0].guest_path, "/home/atlas_guest/atlas/projects");
+    }
+
+    fn mount_fixture(
+        root: &std::path::Path,
+        profile: &mobile_linux_api::BrandRuntimeProfile,
+    ) -> (PathBuf, PathBuf) {
+        let home = root.join("persistent").join(&profile.linux_user);
+        let primary_host = home.join(&profile.brand_id).join("projects");
+        let app_host = home
+            .join(&profile.config_dir_name)
+            .join(".apps")
+            .join("calorie-a1b2c3d4");
+        std::fs::create_dir_all(&primary_host).expect("create primary workspace");
+        std::fs::create_dir_all(&app_host).expect("create Local App source");
+        (primary_host, app_host)
+    }
+
+    fn external_mount(host_path: PathBuf, guest_path: impl Into<String>) -> MountSpec {
+        MountSpec {
+            host_path,
+            guest_path: guest_path.into(),
+            read_only: false,
+            purpose: MountPurpose::External,
+        }
+    }
+
+    #[test]
+    fn exact_external_project_mount_preserves_one_workspace_and_brand_mapping() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profile = mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
+        let (primary_host, app_host) = mount_fixture(temp.path(), &profile);
+        let app_host = app_host.canonicalize().expect("canonical app source");
+        let primary = build_mobile_linux_mounts(
+            Some(primary_host.clone()),
+            Some("projects".into()),
+            &profile,
+        );
+        let app_guest = "/home/atlas_guest/.atlas/.apps/calorie-a1b2c3d4";
+        let mounts = append_additional_workspace_mounts(
+            primary,
+            vec![external_mount(app_host.clone(), app_guest)],
+            &profile,
+        )
+        .unwrap();
+
+        assert_eq!(
+            mounts
+                .iter()
+                .filter(|mount| matches!(mount.purpose, MountPurpose::Workspace))
+                .count(),
+            1
+        );
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0].host_path, primary_host);
+        assert_eq!(mounts[1].host_path, app_host);
+        assert_eq!(mounts[1].guest_path, app_guest);
+        assert_eq!(mounts[1].purpose, MountPurpose::External);
+
+        let wrong_profile =
+            mobile_linux_api::BrandRuntimeProfile::new("other", "other_guest", ".other");
+        assert!(append_additional_workspace_mounts(
+            build_mobile_linux_mounts(
+                Some(mounts[0].host_path.clone()),
+                Some("projects".into()),
+                &wrong_profile,
+            ),
+            vec![external_mount(app_host, app_guest)],
+            &wrong_profile,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn additional_mounts_reject_unmapped_private_and_symlink_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profile = mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
+        let (primary_host, app_host) = mount_fixture(temp.path(), &profile);
+        let home = temp.path().join("persistent/atlas_guest");
+        let primary = build_mobile_linux_mounts(
+            Some(primary_host.clone()),
+            Some("projects".into()),
+            &profile,
+        );
+        let guest_home = "/home/atlas_guest";
+        let apps_guest = "/home/atlas_guest/.atlas/.apps";
+        let cases = [
+            external_mount(temp.path().join("outside"), "/tmp/outside"),
+            external_mount(home.clone(), guest_home),
+            external_mount(home.join(".atlas/.apps"), apps_guest),
+            external_mount(
+                home.join(".atlas/private"),
+                "/home/atlas_guest/.atlas/private",
+            ),
+            external_mount(
+                primary_host.join("subdir"),
+                "/home/atlas_guest/atlas/projects/subdir",
+            ),
+            external_mount(
+                app_host.join(".."),
+                "/home/atlas_guest/.atlas/.apps/../calorie-a1b2c3d4",
+            ),
+        ];
+        for invalid in cases {
+            assert!(
+                append_additional_workspace_mounts(primary.clone(), vec![invalid], &profile)
+                    .is_err(),
+                "invalid mount should be rejected"
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            let alias = home.join(".atlas/.apps/alias");
+            std::os::unix::fs::symlink(&app_host, &alias).expect("create app alias symlink");
+            assert!(append_additional_workspace_mounts(
+                primary,
+                vec![external_mount(alias, format!("{apps_guest}/alias"))],
+                &profile,
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn additional_mounts_reject_duplicate_and_nested_sources() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profile = mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
+        let (primary_host, app_host) = mount_fixture(temp.path(), &profile);
+        let parent = app_host.parent().unwrap().join("team");
+        let nested = parent.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested project sources");
+        let parent = parent.canonicalize().expect("canonical parent source");
+        let nested = nested.canonicalize().expect("canonical nested source");
+        let primary =
+            build_mobile_linux_mounts(Some(primary_host), Some("projects".into()), &profile);
+        let parent_guest = "/home/atlas_guest/.atlas/.apps/team";
+        let nested_guest = "/home/atlas_guest/.atlas/.apps/team/nested";
+        let app = external_mount(parent.clone(), parent_guest);
+        assert!(append_additional_workspace_mounts(
+            primary.clone(),
+            vec![app.clone(), app],
+            &profile,
+        )
+        .is_err());
+        assert!(append_additional_workspace_mounts(
+            primary,
+            vec![
+                external_mount(parent, parent_guest),
+                external_mount(nested, nested_guest)
+            ],
+            &profile,
+        )
+        .is_err());
     }
 
     /// The assembly seam this pins: selecting mobile-linux mode must wrap the

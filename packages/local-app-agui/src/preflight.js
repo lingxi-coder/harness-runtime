@@ -13,7 +13,7 @@ export const EVENT_PAGE_PREFLIGHT_LIMITS = Object.freeze({
   maxBytes: 8 * MiB,
   maxDepth: 64,
   maxNodes: 100_000,
-  maxArrayItems: 128,
+  maxArrayItems: 10_000,
   maxObjectProperties: 10_000,
   maxStringBytes: 8 * MiB,
 });

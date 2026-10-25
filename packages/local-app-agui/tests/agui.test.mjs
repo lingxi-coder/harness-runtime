@@ -173,6 +173,41 @@ test('the shared client is the official AbstractAgent and resolves only after st
   assert.equal(transport.starts[0].input.forwardedProps['com.lingxi.localApp'].version, 1);
 });
 
+test('event pages cap event count separately from bounded nested structured results', async () => {
+  const input = runInput();
+  const structuredResult = Array.from({length: 200}, (_, index) => ({index}));
+  const validEvents = [
+    started(input.threadId, input.runId),
+    {type: 'TEXT_MESSAGE_START', messageId: 'assistant-large-result', role: 'assistant'},
+    {type: 'TEXT_MESSAGE_CONTENT', messageId: 'assistant-large-result', delta: 'validated'},
+    {type: 'TEXT_MESSAGE_END', messageId: 'assistant-large-result'},
+    finished(input.threadId, input.runId, {type: 'success'}, structuredResult),
+  ];
+  const validTransport = transportFor([{events: validEvents, sequence: validEvents.length}], {state: 'succeeded'});
+  const validClient = createLocalAppAgent({transport: validTransport, threadId: input.threadId, pollIntervalMs: 10});
+  const result = await validClient.runInput(input);
+  assert.deepEqual(result.result, structuredResult);
+  assert.equal(result.newMessages.length, 1);
+
+  const oversizedInput = runInput({threadId: 'oversized-thread', runId: 'oversized-run'});
+  const oversizedEvents = [
+    started(oversizedInput.threadId, oversizedInput.runId),
+    ...Array.from({length: 127}, () => ({
+      type: 'TEXT_MESSAGE_CONTENT', messageId: 'assistant-long-stream', delta: 'chunk',
+    })),
+    finished(oversizedInput.threadId, oversizedInput.runId, {type: 'success'}, structuredResult),
+  ];
+  assert.equal(oversizedEvents.length, 129);
+  const oversizedTransport = transportFor([{events: oversizedEvents, sequence: oversizedEvents.length}], {state: 'succeeded'});
+  const oversizedClient = createLocalAppAgent({
+    transport: oversizedTransport, threadId: oversizedInput.threadId, pollIntervalMs: 10,
+  });
+  await assert.rejects(oversizedClient.runInput(oversizedInput), /more than 128 events/);
+  assert.equal(oversizedTransport.starts.length, 1);
+  assert.deepEqual(oversizedClient.messages.map(message => message.role), ['user'],
+    'an oversized page containing RUN_FINISHED must not produce a false successful result');
+});
+
 test('cold connectAgent is read-only and replays an existing run with no initial messages', async () => {
   const threadId = 'existing-thread';
   const runId = 'existing-run';
