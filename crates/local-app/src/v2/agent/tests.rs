@@ -197,6 +197,113 @@ fn reads_are_app_release_scoped_while_execution_leases_are_invocation_scoped() {
         assert!(!s.lease_valid(&o, &a.task.run_id));
     }
 }
+
+#[test]
+fn task_list_pages_keep_public_request_cursors_and_app_release_scope() {
+    let (_dir, store) = store();
+    let owner = owner();
+    let mut expected = Vec::new();
+    for index in 0..5 {
+        let mut request = input();
+        request.request_id = format!("page-request-{index}");
+        let admission = store.admit(&owner, &request, &[]).unwrap();
+        expected.push(admission.task.clone());
+        store
+            .update(
+                &owner,
+                &admission.task.run_id,
+                State::Succeeded,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+    }
+
+    for other_owner in [
+        Owner {
+            app_id: format!("a{}", "3".repeat(32)),
+            ..owner.clone()
+        },
+        Owner {
+            release_digest: "4".repeat(64),
+            ..owner.clone()
+        },
+    ] {
+        store
+            .configure(other_owner.clone(), Some(settings()))
+            .unwrap();
+        let mut request = input();
+        request.request_id = format!("other-{}", other_owner.app_id);
+        store.admit(&other_owner, &request, &[]).unwrap();
+    }
+
+    let all = store.list(&owner, None, 100).unwrap();
+    assert_eq!(all.len(), expected.len());
+    let first = store.list_page(&owner, None, 2).unwrap();
+    assert_eq!(
+        first
+            .tasks
+            .iter()
+            .map(|task| task.run_id.as_str())
+            .collect::<Vec<_>>(),
+        all[..2]
+            .iter()
+            .map(|task| task.run_id.as_str())
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        first.next_cursor.as_deref(),
+        Some(all[1].request_id.as_str())
+    );
+
+    let second = store
+        .list_page(&owner, first.next_cursor.as_deref(), 2)
+        .unwrap();
+    assert_eq!(
+        second
+            .tasks
+            .iter()
+            .map(|task| task.run_id.as_str())
+            .collect::<Vec<_>>(),
+        all[2..4]
+            .iter()
+            .map(|task| task.run_id.as_str())
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        second.next_cursor.as_deref(),
+        Some(all[3].request_id.as_str())
+    );
+
+    let last = store
+        .list_page(&owner, second.next_cursor.as_deref(), 2)
+        .unwrap();
+    assert_eq!(
+        last.tasks
+            .iter()
+            .map(|task| task.run_id.as_str())
+            .collect::<Vec<_>>(),
+        all[4..]
+            .iter()
+            .map(|task| task.run_id.as_str())
+            .collect::<Vec<_>>(),
+    );
+    assert!(last.next_cursor.is_none());
+
+    let mut paged = first.tasks;
+    paged.extend(second.tasks);
+    paged.extend(last.tasks);
+    assert_eq!(paged.len(), all.len());
+    assert_eq!(
+        paged.iter().map(|task| &task.run_id).collect::<Vec<_>>(),
+        all.iter().map(|task| &task.run_id).collect::<Vec<_>>()
+    );
+    assert!(store.list_page(&owner, Some("unknown-request"), 2).is_err());
+    assert!(store.list_page(&owner, None, 0).is_err());
+    assert!(store.list_page(&owner, None, 101).is_err());
+}
+
 #[test]
 fn revocation_and_regrant_cannot_revive_an_old_lease() {
     let (_dir, s) = store();

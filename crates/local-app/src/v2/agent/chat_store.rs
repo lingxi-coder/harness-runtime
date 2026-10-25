@@ -76,6 +76,16 @@ pub struct ChatStore {
     index: Mutex<ChatIndex>,
 }
 
+/// Chat summaries exposed by one Local App. `next_cursor` identifies the last
+/// included chat in the same archive-filtered, stable sort order.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChatListPage {
+    /// Chat summaries in the current stable-order page.
+    pub chats: Vec<ChatSummary>,
+    /// Chat ID of the last included summary when another page is available.
+    pub next_cursor: Option<String>,
+}
+
 fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -262,6 +272,37 @@ impl ChatStore {
         if !(1..=100).contains(&limit) {
             return Err(invalid("invalid Chat list limit"));
         }
+        self.list_rows(cursor, limit, include_archived)
+    }
+
+    /// Return one App-scoped page in the same archive-filtered, stable order.
+    /// The next cursor is the last included Chat ID and is absent at exhaustion.
+    pub fn list_page(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+        include_archived: bool,
+    ) -> Result<ChatListPage, AppError> {
+        if !(1..=100).contains(&limit) {
+            return Err(invalid("invalid Chat list limit"));
+        }
+        let mut chats = self.list_rows(cursor, limit + 1, include_archived)?;
+        let has_more = chats.len() > limit;
+        chats.truncate(limit);
+        let next_cursor = if has_more {
+            chats.last().map(|chat| chat.chat_id.clone())
+        } else {
+            None
+        };
+        Ok(ChatListPage { chats, next_cursor })
+    }
+
+    fn list_rows(
+        &self,
+        cursor: Option<&str>,
+        limit: usize,
+        include_archived: bool,
+    ) -> Result<Vec<ChatSummary>, AppError> {
         let index = self
             .index
             .lock()
@@ -1037,6 +1078,28 @@ fn ensure_private_directory(path: &Path) -> Result<(), AppError> {
 mod tests {
     use super::*;
 
+    fn collect_chat_pages(store: &ChatStore, include_archived: bool) -> Vec<ChatSummary> {
+        let mut all = Vec::new();
+        let mut cursor = None;
+        for _ in 0..10 {
+            let page = store
+                .list_page(cursor.as_deref(), 2, include_archived)
+                .unwrap();
+            all.extend(page.chats);
+            match page.next_cursor {
+                Some(next) => {
+                    assert_eq!(
+                        all.last().map(|chat| chat.chat_id.as_str()),
+                        Some(next.as_str())
+                    );
+                    cursor = Some(next);
+                }
+                None => return all,
+            }
+        }
+        panic!("chat list pagination did not reach its final page");
+    }
+
     #[test]
     fn protocol_history_page_omits_exhausted_cursor_and_retains_next_page_cursor() {
         let page = ProtocolHistoryPage {
@@ -1060,6 +1123,62 @@ mod tests {
             serde_json::from_value::<ProtocolHistoryPage>(wire).unwrap(),
             more
         );
+    }
+
+    #[test]
+    fn chat_list_pages_preserve_order_archive_filter_and_cursor_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ChatStore::open(root.path()).unwrap();
+        let chats = (0..5)
+            .map(|index| {
+                store
+                    .create(
+                        Some(&format!("chat-{index}")),
+                        &uuid::Uuid::new_v4().to_string(),
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        store.archive(&chats[2].chat_id).unwrap();
+
+        let expected_active = store.list(None, 100, false).unwrap();
+        assert_eq!(collect_chat_pages(&store, false), expected_active);
+        assert!(!expected_active
+            .iter()
+            .any(|chat| chat.chat_id == chats[2].chat_id));
+
+        let first = store.list_page(None, 2, true).unwrap();
+        assert_eq!(first.chats, store.list(None, 2, true).unwrap());
+        assert_eq!(
+            first.next_cursor.as_deref(),
+            first.chats.last().map(|chat| chat.chat_id.as_str())
+        );
+        let second = store
+            .list_page(first.next_cursor.as_deref(), 2, true)
+            .unwrap();
+        assert_eq!(
+            second.chats,
+            store.list(first.next_cursor.as_deref(), 2, true).unwrap()
+        );
+        assert_ne!(
+            first
+                .chats
+                .iter()
+                .map(|chat| &chat.chat_id)
+                .collect::<Vec<_>>(),
+            second
+                .chats
+                .iter()
+                .map(|chat| &chat.chat_id)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            collect_chat_pages(&store, true),
+            store.list(None, 100, true).unwrap()
+        );
+        assert!(store.list_page(Some("missing-chat"), 2, false).is_err());
+        assert!(store.list_page(None, 0, false).is_err());
+        assert!(store.list_page(None, 101, false).is_err());
     }
 
     #[test]
