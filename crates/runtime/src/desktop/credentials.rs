@@ -507,7 +507,12 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     // env/host-supplied key ABOVE stored OAuth but a keychain-stored key BELOW
     // it, so the two sources must stay distinguishable.
     let mut stored_anthropic_api_key = false;
-    let resolved_anthropic_api_key = if cfg.api_key.is_empty() {
+    let resolved_anthropic_api_key = if credentials
+        .provider_key_is_suppressed("anthropic-api-key")
+        .await
+    {
+        None
+    } else if cfg.api_key.is_empty() {
         match credentials.get_anthropic_api_key().await {
             Ok(Some(key)) => {
                 stored_anthropic_api_key = true;
@@ -1103,6 +1108,8 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         })
         .collect();
     let model_resolution_client_config = assembled.client_config.clone();
+    let anthropic_dynamic_auth =
+        super::fusion_services::anthropic_dynamic_auth_profile(&assembled.client_config.providers);
     let mut client = ModelRuntime::from_config(assembled.client_config)
         .map_err(|e| BuildError::ApiBase(format!("llm-runtime config: {e}")))?;
     let model_resolution_context_provider: Arc<
@@ -1152,6 +1159,11 @@ pub(super) async fn resolve_llm_stack_with_credentials(
     if let Some(d) = openai_chatgpt_delegate {
         oauth_delegates.insert("openai-chatgpt".to_string(), d);
     }
+    let anthropic_oauth_delegate_slot = oauth_delegates.contains_key("anthropic-oauth");
+    // `has_oauth` above records which auth won during boot. An installed
+    // delegate may still have a valid session when an explicit API key won;
+    // request-local auth can use that session after the key is removed.
+    let anthropic_oauth_available = has_oauth_token && anthropic_oauth_delegate_slot;
 
     // Phase 2a §6.2: per-profile availability from the assembled credential
     // sources (each profile is "available" iff its keychain entry / env var
@@ -1164,7 +1176,7 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         &credentials,
         &assembled.credential_sources,
         has_api_key,
-        has_oauth,
+        anthropic_oauth_available,
         has_openai_chatgpt,
         // Isolated boots ignore ambient provider env vars too — see the
         // `isolated_credential_storage` doc: the flag means "this boot inherits
@@ -1196,13 +1208,17 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         .into_iter()
         .map(|a| (a.profile_name, a.available))
         .collect();
-    // `assemble` emits NO anthropic credential source in the unauthenticated
-    // (no key / no oauth) path, so `compute_availability` yields no "anthropic"
-    // entry there. The picker's Connect badge still needs anthropic represented,
-    // so surface it unconditionally from the engine's resolved auth state.
-    provider_availability
-        .entry("anthropic".to_string())
-        .or_insert(has_api_key || has_oauth);
+    if anthropic_dynamic_auth {
+        provider_availability.insert(
+            "anthropic".to_string(),
+            has_api_key || anthropic_oauth_available,
+        );
+    } else {
+        // Fixed/custom routes retain their explicit source's verdict.
+        provider_availability
+            .entry("anthropic".to_string())
+            .or_insert(has_api_key || has_oauth);
+    }
 
     // The anthropic probe is DEFINITIVE only on the stock first-party API
     // (`api_provider() == FirstParty`) with the default `api_base` and no
@@ -1522,7 +1538,9 @@ pub(super) async fn resolve_llm_stack_with_credentials(
         credentials: credentials.clone(),
         credential_sources: assembled.credential_sources.clone(),
         anthropic_has_api_key: fusion_route_flag(has_api_key),
-        anthropic_has_oauth: fusion_route_flag(has_oauth),
+        anthropic_has_oauth: fusion_route_flag(anthropic_oauth_available),
+        anthropic_dynamic_auth,
+        anthropic_oauth_delegate_slot,
         openai_chatgpt_available: fusion_route_flag(has_openai_chatgpt),
         openai_chatgpt_session_slot,
         // Round-4 review finding: a refresh must reproduce the boot probe

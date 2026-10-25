@@ -7,6 +7,8 @@ include!("../reasoning_preference_tests.rs");
 mod bash_precommit_wiring_tests;
 #[path = "device_tools_tests.rs"]
 mod device_tools_tests;
+#[path = "prompt_suggestion_tests.rs"]
+mod prompt_suggestion_tests;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -5042,6 +5044,63 @@ fn provider_credentials_round_trip_through_mobile_submit() {
             } if configured_provider_ids.is_empty()
         )));
     });
+}
+
+#[tokio::test]
+async fn retained_mobile_engines_observe_other_engine_credential_changes() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(FakeEncryptedStore::default());
+    let platform: Arc<dyn lingxi_core::host::Platform> =
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf()).with_secure_storage(storage));
+    let build = || {
+        build_mobile(
+            test_config(tmp.path()),
+            platform.clone(),
+            Arc::new(FakeListener::default()),
+            Arc::new(RecordingPermissionSink::default()),
+        )
+    };
+    let first = build().await.expect("first retained engine");
+    first
+        .credentials
+        .set_provider_key("anthropic", "old-key")
+        .await
+        .unwrap();
+    let second = build().await.expect("second retained engine");
+    let captured = second
+        .credentials
+        .get_anthropic_api_key()
+        .await
+        .unwrap()
+        .unwrap();
+
+    first
+        .credentials
+        .set_provider_key("anthropic", "new-key")
+        .await
+        .unwrap();
+    assert_eq!(
+        second
+            .credentials
+            .get_anthropic_api_key()
+            .await
+            .unwrap()
+            .unwrap()
+            .expose_secret(),
+        "new-key"
+    );
+    first
+        .credentials
+        .delete_provider_key("anthropic")
+        .await
+        .unwrap();
+    assert!(second
+        .credentials
+        .get_anthropic_api_key()
+        .await
+        .unwrap()
+        .is_none());
+    assert_eq!(captured.expose_secret(), "old-key");
 }
 
 /// The picker must offer ONLY providers the routing allowlist kept.

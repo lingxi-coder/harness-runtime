@@ -330,8 +330,17 @@ impl ConversationOrchestrator {
     }
 
     async fn initialize_prompt_suggestions(&self) -> bool {
-        if let Some(enabled) = self.suggestion_state().enabled {
-            return enabled;
+        {
+            let state = self.suggestion_state();
+            if let Some(enabled) = state.enabled {
+                return enabled;
+            }
+            // Transport turns can arrive before the native composer attaches.
+            // Do not retain a non-interactive decision for the later composer;
+            // headless SDK opt-in is handled separately by explicit_enablement.
+            if self.config.query_source == "sdk" && state.context.session_id.is_empty() {
+                return false;
+            }
         }
         let settings = self.suggestion_settings().await;
         let setting = settings
@@ -345,7 +354,9 @@ impl ConversationOrchestrator {
             } else {
                 let init = controls::initial_enablement(
                     env,
-                    telemetry::feature_flags::flag_bool("tengu_chomp_inflection", false),
+                    // LingXi ships suggestions without a remote rollout service.
+                    // Keep explicit flag overrides and all native user/env gates.
+                    telemetry::feature_flags::flag_bool("tengu_chomp_inflection", true),
                     !self.config.interactive_session && state.context.session_id.is_empty(),
                     self.config.query_source.starts_with("agent:"),
                     setting,
@@ -720,8 +731,9 @@ impl ConversationOrchestrator {
         }
         let attached = !self.suggestion_state().context.session_id.is_empty();
         let main_thread = self.config.query_source.starts_with("repl_main_thread");
-        let composer =
-            self.config.query_source == "sdk" && (self.config.interactive_session || attached);
+        // Mobile also sets interactive_session for scheduled runs. Only an
+        // attached composer may request automatic SDK-surface suggestions.
+        let composer = self.config.query_source == "sdk" && attached;
         if !(main_thread || composer)
             || self.config.bare
             || controls::parse_env(std::env::var("CLAUDE_CODE_SIMPLE").ok().as_deref())

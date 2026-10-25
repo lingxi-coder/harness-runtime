@@ -514,7 +514,12 @@ pub(super) async fn build_mobile_inner_with_ask(
     // Build the shared credential manager and provider-specific OAuth handles
     // before assembling the client. This lets a native Keychain session restore
     // into the live provider graph on every engine boot.
-    let credentials = Arc::new(CredentialManager::new(storage, clock.clone(), http.clone()));
+    // Every retained engine, including Cron and settings-only hosts, resolves
+    // the native store for each request. A manager-local TTL would otherwise
+    // keep another engine's acknowledged key rotation/deletion stale for 5 min.
+    let credentials = Arc::new(
+        CredentialManager::new(storage, clock.clone(), http.clone()).without_api_key_cache(),
+    );
     let llm_transport: Arc<dyn Transport> = Arc::new(
         platform_common::provider_transport()
             .map_err(|e| MobileBuildError::ApiBase(e.to_string()))?,
@@ -2612,7 +2617,10 @@ pub(super) async fn build_mobile_inner_with_ask(
     );
     let compactor = Arc::new(
         compaction::CompactionOrchestrator::with_autocompactor(
-            compaction::Autocompactor::with_forked_runner(forked_runner, cache_safe_slot.clone()),
+            compaction::Autocompactor::with_forked_runner(
+                forked_runner.clone(),
+                cache_safe_slot.clone(),
+            ),
             compaction::thresholds::auto_compact_threshold(&orch_cfg.model, &[]),
         )
         .with_model_derived_threshold(),
@@ -2706,6 +2714,8 @@ pub(super) async fn build_mobile_inner_with_ask(
     .with_compaction(compactor)
     .with_idle_compaction_enabled(cfg.idle_compaction_enabled)
     .with_cache_safe_slot(cache_safe_slot)
+    // Post-turn suggestions share the same provider and cached parent prefix.
+    .with_recap_runner(forked_runner)
     // Audit fix (#13): per-turn V2 `<task-reminder>` over the file-backed
     // TodoStore (tool_task IS registered on mobile) — mirror of desktop.
     .with_todo_reminder_tasks(Arc::new(

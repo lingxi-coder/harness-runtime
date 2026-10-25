@@ -28,7 +28,9 @@ fn anthropic_profile(
                 kind: CredentialKind::ApiKey,
             }),
         )
-    } else if inputs.anthropic_has_oauth {
+    } else if inputs.anthropic_has_oauth
+        && inputs.anthropic_api_base.trim_end_matches('/') == "https://api.anthropic.com"
+    {
         (
             AuthStrategy::OAuthBearer,
             CredentialConfig::Static {

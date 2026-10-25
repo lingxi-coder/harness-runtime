@@ -7392,9 +7392,11 @@ name = "tool-computer-use"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "branding",
  "core",
  "fs2",
+ "futures-util",
  "image 0.24.9",
  "lingxi-llm-client",
  "nix 0.27.1",

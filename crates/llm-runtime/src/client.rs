@@ -33,13 +33,27 @@ pub(crate) struct RouteEntry {
 }
 
 fn credential_scope(entry: &RouteEntry, profile_name: &str) -> CredentialScope {
-    let scope = CredentialScope::new(entry.provider_id.clone(), profile_name);
+    let scope = CredentialScope::new(entry.provider_id.clone(), profile_name)
+        .with_route(entry.base_url.clone(), entry.protocol);
     match &entry.credential {
         CredentialConfig::HostManaged { id } | CredentialConfig::Static { id } => {
             scope.with_credential_id(id.clone())
         }
         CredentialConfig::None | CredentialConfig::Env { .. } => scope,
     }
+}
+
+fn selected_auth(entry: &RouteEntry, credential: Option<&Credential>) -> AuthStrategy {
+    if credential_scope(entry, &entry.profile.profile_name).selects_anthropic_auth() {
+        match credential {
+            Some(Credential::ApiKey(_)) => return AuthStrategy::ApiKey,
+            Some(Credential::AnthropicOAuth { .. } | Credential::BearerToken(_)) => {
+                return AuthStrategy::OAuthBearer
+            }
+            _ => {}
+        }
+    }
+    entry.auth
 }
 
 fn plain_text_message_content_for_execution(execution: &crate::ExecutionContext) -> bool {
@@ -760,17 +774,17 @@ impl ModelRuntime {
             native_base_url: classifier_native_base_url(&entry.base_url),
             native_api_key: false,
         };
-        if entry.auth == AuthStrategy::ApiKey && facts.provider.as_deref() == Some("firstParty") {
-            let source = self.credential_source(model, profile).await?;
-            if source != crate::CredentialSource::OAuth {
-                facts.native_api_key = self
-                    .load_credential(entry, &route.profile_name)
-                    .await?
-                    .is_some_and(|credential| match credential {
-                        Credential::ApiKey(key) => classifier_native_api_key(&key),
-                        _ => false,
-                    });
-            }
+        if facts.provider.as_deref() == Some("firstParty") {
+            // Source inspection and credential loading are separate live
+            // queries. Classify one material snapshot so a rotation between
+            // those queries cannot pair an old source with the new key.
+            facts.native_api_key = self
+                .load_credential(entry, &route.profile_name)
+                .await?
+                .is_some_and(|credential| match credential {
+                    Credential::ApiKey(key) => classifier_native_api_key(&key),
+                    _ => false,
+                });
         }
         Ok(facts)
     }
@@ -947,17 +961,20 @@ impl ModelRuntime {
         // Native h3() can be proven false from a selected non-empty API key.
         // Capture through this request's HostAuthenticator OnceCell before the
         // TBC beta policy runs; final SDK signing reuses the same snapshot.
-        let native_tbc_first_party_h3 = if resolved_route.provider_id
-            == ProviderId::AnthropicFirstParty
+        let captured_credential = if resolved_route.provider_id == ProviderId::AnthropicFirstParty
             && effective_protocol == ProtocolFamily::AnthropicMessages
         {
-            let credential = authenticator.captured_credential().await?;
-            crate::model::thinking_binding_controls::first_party_h3_from_selected_credential(
-                credential.as_ref(),
-            )
+            authenticator.captured_credential().await?
         } else {
             None
         };
+        let request_auth = selected_auth(entry, captured_credential.as_ref());
+        let mut selected_profile = entry.profile.clone();
+        selected_profile.auth = request_auth;
+        let native_tbc_first_party_h3 =
+            crate::model::thinking_binding_controls::first_party_h3_from_selected_credential(
+                captured_credential.as_ref(),
+            );
         let prompt_cache_scope = credential_scope(entry, &resolved_route.profile_name);
         // Fast mode is a first-party Anthropic request property, not a generic
         // Anthropic-wire feature. Resolve the route before encoding and strip
@@ -1133,7 +1150,7 @@ impl ModelRuntime {
                 PromptCacheSubscriberState::Unknown
             } else if resolved_route.provider_id == ProviderId::AnthropicFirstParty
                 && effective_protocol == ProtocolFamily::AnthropicMessages
-                && entry.auth == AuthStrategy::OAuthBearer
+                && request_auth == AuthStrategy::OAuthBearer
                 && entry.base_url.trim_end_matches('/') == "https://api.anthropic.com"
             {
                 let selected_credential = authenticator.captured_credential().await?;
@@ -1157,7 +1174,7 @@ impl ModelRuntime {
                 ProviderId::Custom { .. } | ProviderId::OpenAICompatible { .. }
             ) || (resolved_route.provider_id == ProviderId::AnthropicFirstParty
                 && effective_protocol == ProtocolFamily::AnthropicMessages
-                && entry.auth == AuthStrategy::OAuthBearer)
+                && request_auth == AuthStrategy::OAuthBearer)
             {
                 PromptCacheSubscriberState::Unknown
             } else {
@@ -1191,7 +1208,7 @@ impl ModelRuntime {
                 });
             if request.execution.classifier_system_blocks {
                 let projection = lingxi_llm_client::providers::anthropic::system_prompt::project_classifier_system_blocks(
-                    &request.input.system, Some(&entry.profile), effective_protocol, cache_policy,
+                    &request.input.system, Some(&selected_profile), effective_protocol, cache_policy,
                 );
                 request_for_encoding.input.system =
                     projection.iter().map(|item| item.block.clone()).collect();
@@ -1210,15 +1227,15 @@ impl ModelRuntime {
                         && request.execution.query_source.as_deref() == Some("insights"));
                 let prefixed_system = context.native_system_prefix.as_ref().map(|(prefix, attribution)| {
                     if include_native_identity {
-                        lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_system_prefix(context.system.as_ref(), prefix, attribution, &entry.profile)
+                        lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_system_prefix(context.system.as_ref(), prefix, attribution, &selected_profile)
                     } else {
-                        lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_attribution(context.system.as_ref(), prefix, attribution, &entry.profile)
+                        lingxi_llm_client::providers::anthropic::system_prompt::prepend_native_attribution(context.system.as_ref(), prefix, attribution, &selected_profile)
                     }
                 });
                 if let Some(system) = prefixed_system.as_ref().or(context.system.as_ref()) {
                     let projection = project_system_prompt(
                         system,
-                        Some(&entry.profile),
+                        Some(&selected_profile),
                         &request.input.model,
                         effective_protocol,
                         cache_policy,
@@ -1244,7 +1261,7 @@ impl ModelRuntime {
                         .copied()
                 });
                 let policy = ForkMessageCachePolicy::for_profile(
-                    &entry.profile,
+                    &selected_profile,
                     context.policy.gate(),
                     fork_point,
                     telemetry::feature_flags::flag_bool("tengu_basalt_spur", false),
@@ -1332,12 +1349,12 @@ impl ModelRuntime {
                 .clone_from(&resolved_route.request_model);
             &routed_request
         };
-        let mut profile = entry.profile.clone();
+        let mut profile = selected_profile;
         profile.protocol = crate::upstream::family(&effective_protocol);
         let (wire_draft, mut provider_request) = crate::execution::prepare(
             &self.cache,
             profile,
-            entry.auth,
+            request_auth,
             &resolved_route,
             encoding_request,
             transport,
@@ -1849,10 +1866,14 @@ impl ModelRuntime {
             None,
             failure.clone(),
         ));
+        let captured = auth.captured_credential().await?;
+        let request_auth = selected_auth(entry, captured.as_ref());
+        let mut profile = entry.profile.clone();
+        profile.auth = request_auth;
         let (draft, mut host) = crate::execution::prepare(
             &self.cache,
-            entry.profile.clone(),
-            entry.auth,
+            profile,
+            request_auth,
             &route,
             request,
             transport,
@@ -2621,6 +2642,13 @@ impl ModelRuntime {
         let Some(credential) = credential else {
             return Ok(());
         };
+        if matches!(credential, Credential::AnthropicOAuth { .. })
+            && credential_scope(entry, profile).forbids_anthropic_oauth()
+        {
+            return Err(LlmError::Authentication {
+                message: "first-party OAuth cannot authenticate this endpoint".into(),
+            });
+        }
         let material = match credential {
             Credential::ApiKey(secret) | Credential::BearerToken(secret) => {
                 CredentialRef::Token(secret)
@@ -2646,7 +2674,13 @@ impl ModelRuntime {
             },
         };
         let mut sdk_profile = entry.profile.clone();
-        sdk_profile.auth = entry.auth;
+        sdk_profile.auth = selected_auth(entry, Some(credential));
+        if credential_scope(entry, profile).selects_anthropic_auth() {
+            request.headers.retain(|(name, _)| {
+                !name.eq_ignore_ascii_case("authorization")
+                    && !name.eq_ignore_ascii_case("x-api-key")
+            });
+        }
         apply_credential(
             request,
             &sdk_profile,
@@ -2689,6 +2723,10 @@ impl PreparedLlmCall {
 #[cfg(test)]
 #[path = "client_auth_snapshot_tests.rs"]
 mod auth_snapshot_tests;
+
+#[cfg(test)]
+#[path = "client_dynamic_auth_tests.rs"]
+mod dynamic_auth_tests;
 
 #[cfg(test)]
 mod shared_client_regression {

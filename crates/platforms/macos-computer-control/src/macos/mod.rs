@@ -8,6 +8,7 @@
 //! enumeration, frontmost detection, and hide/unhide).
 
 mod apps;
+mod capture_policy;
 mod keymap;
 mod tcc;
 
@@ -249,6 +250,52 @@ fn app_info_from(app: &NSRunningApplication) -> Option<AppInfo> {
 
 #[async_trait]
 impl ComputerControl for MacosComputerControl {
+    async fn screen_locked(&self) -> Result<bool, ComputerError> {
+        tcc::screen_locked()
+    }
+    fn screenshot_filtering(&self) -> &'static str {
+        "mask"
+    }
+    fn supports_target_application(&self) -> bool {
+        true
+    }
+    async fn target_application(&self, x: u32, y: u32) -> Result<Option<AppInfo>, ComputerError> {
+        self.app_at(x, y)
+    }
+    async fn screenshot_for_apps(&self, allowed: &[String]) -> Result<Screenshot, ComputerError> {
+        let image = self.capture_allowed(allowed)?;
+        Ok(Screenshot {
+            width: image.width(),
+            height: image.height(),
+            png_bytes: encode_png(image)?,
+        })
+    }
+    async fn zoom_for_apps(
+        &self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        allowed: &[String],
+    ) -> Result<Screenshot, ComputerError> {
+        let full = self.capture_allowed(allowed)?;
+        if x >= full.width() || y >= full.height() {
+            return Err(ComputerError::Other("zoom outside display".into()));
+        }
+        let image = image::imageops::crop_imm(
+            &full,
+            x,
+            y,
+            w.min(full.width() - x),
+            h.min(full.height() - y),
+        )
+        .to_image();
+        Ok(Screenshot {
+            width: image.width(),
+            height: image.height(),
+            png_bytes: encode_png(image)?,
+        })
+    }
     fn desktop_lock_scope(&self) -> Option<std::path::PathBuf> {
         // Effective UID identifies the current user's macOS desktop. The
         // literal OS temporary root deliberately ignores HOME, TMPDIR and

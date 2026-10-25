@@ -9,6 +9,7 @@ use lingxi_core::host::{Clock, HttpTransport, SecureStorage, SecureStorageError}
 use lingxi_core::types::{Secret, SecureStorageData, SecureStorageMetadata};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use thiserror::Error;
@@ -39,6 +40,19 @@ fn provider_key_account(id: &str) -> String {
 
 fn is_anthropic_api_key_id(id: &str) -> bool {
     matches!(id, "anthropic" | "anthropic-api-key")
+}
+
+fn canonical_provider_key_id(id: &str) -> &str {
+    if is_anthropic_api_key_id(id) {
+        "anthropic-api-key"
+    } else {
+        id
+    }
+}
+
+enum ProviderKeyOverride {
+    Value(Secret<String>),
+    Suppressed,
 }
 
 /// Keychain account name for a sensitive plugin `userConfig` value, namespaced
@@ -190,7 +204,11 @@ pub struct CredentialManager {
     /// lifetime of this engine process. The Electron host owns persistence;
     /// writing them to the Rust keychain on every launch would re-trigger the
     /// macOS Keychain authorization for each ad-hoc desktop build.
-    provider_key_cache: RwLock<HashMap<String, Secret<String>>>,
+    provider_key_cache: RwLock<HashMap<String, ProviderKeyOverride>>,
+    /// A packaged host owns provider-key persistence and injects only the key
+    /// needed by this engine. Missing injections must never reach ambient or
+    /// native key material, including after a new sidecar is started.
+    provider_keys_host_managed: AtomicBool,
     /// Sensitive plugin options injected by the packaged Desktop parent.
     /// The parent owns durable Keychain persistence; this cache gives the
     /// plugin loader the same `CredentialManager` API without writing a
@@ -217,10 +235,33 @@ impl CredentialManager {
             session_meta_lock: Mutex::new(()),
             api_key_cache: RwLock::new(None),
             provider_key_cache: RwLock::new(HashMap::new()),
+            provider_keys_host_managed: AtomicBool::new(false),
             plugin_secret_cache: RwLock::new(HashMap::new()),
             api_key_ttl: Duration::from_secs(300),
             openai_oauth_observer: std::sync::RwLock::new(None),
         }
+    }
+
+    /// Resolve persisted Anthropic keys from secure storage on every request.
+    ///
+    /// Mobile hosts can retain several engines (interactive sessions, settings,
+    /// and scheduled jobs) over the same native store. Each manager must observe
+    /// an acknowledged rotation or deletion made through any other manager,
+    /// without requiring engine replacement or sharing credentials across stores.
+    /// Process-local host-injected overrides retain their existing precedence.
+    #[must_use]
+    pub fn without_api_key_cache(mut self) -> Self {
+        self.api_key_ttl = Duration::ZERO;
+        self.api_key_cache = RwLock::new(None);
+        self
+    }
+
+    /// Let the host supply every provider API key through process-local
+    /// injection. Call before constructing the provider graph. OAuth, MCP,
+    /// and plugin secrets continue using the same persistent storage.
+    pub fn use_host_managed_provider_keys(&self) {
+        self.provider_keys_host_managed
+            .store(true, Ordering::Release);
     }
 
     /// Attach the packaged host's session persistence observer before boot.
@@ -236,13 +277,29 @@ impl CredentialManager {
     ///
     /// Returns `Ok(None)` when no key is present in storage.
     pub async fn get_anthropic_api_key(&self) -> Result<Option<Secret<String>>, CredentialError> {
-        if let Some(secret) = self.get_provider_key_ephemeral("anthropic-api-key").await {
-            return Ok(Some(secret));
+        if let Some(value) = self
+            .provider_key_cache
+            .read()
+            .await
+            .get("anthropic-api-key")
+        {
+            return Ok(match value {
+                ProviderKeyOverride::Value(secret) => {
+                    Some(Secret::new(secret.expose_secret().clone()))
+                }
+                ProviderKeyOverride::Suppressed => None,
+            });
         }
-        // Fast path: cached and fresh.
-        if let Some((s, cached_at)) = self.api_key_cache.read().await.as_ref() {
-            if self.clock.elapsed_since(*cached_at) < self.api_key_ttl {
-                return Ok(Some(Secret::new(s.expose_secret().clone())));
+        if self.provider_keys_host_managed.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let use_cache = !self.api_key_ttl.is_zero();
+        if use_cache {
+            // Fast path: cached and fresh.
+            if let Some((s, cached_at)) = self.api_key_cache.read().await.as_ref() {
+                if self.clock.elapsed_since(*cached_at) < self.api_key_ttl {
+                    return Ok(Some(Secret::new(s.expose_secret().clone())));
+                }
             }
         }
         // Slow path: load from storage.
@@ -251,9 +308,10 @@ impl CredentialManager {
         };
         let s = String::from_utf8(raw.expose_secret_bytes().to_vec())
             .map_err(|_| CredentialError::Unavailable)?;
-        let now = self.clock.now();
         let secret = Secret::new(s.clone());
-        *self.api_key_cache.write().await = Some((Secret::new(s), now));
+        if use_cache {
+            *self.api_key_cache.write().await = Some((Secret::new(s), self.clock.now()));
+        }
         Ok(Some(secret))
     }
 
@@ -347,29 +405,57 @@ impl CredentialManager {
     /// Rust secure storage. The desktop host has already persisted the key in
     /// its own OS Keychain and sends it over the one-shot stdin boundary.
     pub async fn set_provider_key_ephemeral(&self, id: &str, secret: &str) {
-        let id = if is_anthropic_api_key_id(id) {
-            "anthropic-api-key"
-        } else {
-            id
-        };
-        self.provider_key_cache
-            .write()
+        let id = canonical_provider_key_id(id);
+        self.provider_key_cache.write().await.insert(
+            id.to_string(),
+            ProviderKeyOverride::Value(Secret::new(secret.to_string())),
+        );
+    }
+
+    /// Suppress every fallback for a key deleted by its persistent host.
+    ///
+    /// Removing an override alone would expose an older native-store cache or
+    /// boot value. This explicit tombstone keeps a host-managed deletion in
+    /// force until the host injects a replacement or removes the override.
+    pub async fn suppress_provider_key_ephemeral(&self, id: &str) {
+        self.provider_key_cache.write().await.insert(
+            canonical_provider_key_id(id).to_string(),
+            ProviderKeyOverride::Suppressed,
+        );
+        if is_anthropic_api_key_id(id) {
+            *self.api_key_cache.write().await = None;
+        }
+    }
+
+    /// Whether the host deleted this key or has not supplied it in a
+    /// host-managed engine.
+    /// Composite providers must also suppress static, helper and environment
+    /// fallbacks when this is true.
+    pub async fn provider_key_is_suppressed(&self, id: &str) -> bool {
+        match self
+            .provider_key_cache
+            .read()
             .await
-            .insert(id.to_string(), Secret::new(secret.to_string()));
+            .get(canonical_provider_key_id(id))
+        {
+            Some(ProviderKeyOverride::Suppressed) => true,
+            Some(ProviderKeyOverride::Value(_)) => false,
+            None => self.provider_keys_host_managed.load(Ordering::Acquire),
+        }
     }
 
     /// Read a process-local provider key without consulting persistent storage.
     pub async fn get_provider_key_ephemeral(&self, id: &str) -> Option<Secret<String>> {
-        let id = if is_anthropic_api_key_id(id) {
-            "anthropic-api-key"
-        } else {
-            id
-        };
         self.provider_key_cache
             .read()
             .await
-            .get(id)
-            .map(|secret| Secret::new(secret.expose_secret().clone()))
+            .get(canonical_provider_key_id(id))
+            .and_then(|value| match value {
+                ProviderKeyOverride::Value(secret) => {
+                    Some(Secret::new(secret.expose_secret().clone()))
+                }
+                ProviderKeyOverride::Suppressed => None,
+            })
     }
 
     /// Remove a process-local provider key without touching persistent storage.
@@ -391,8 +477,21 @@ impl CredentialManager {
         &self,
         id: &str,
     ) -> Result<Option<Secret<String>>, CredentialError> {
-        if let Some(secret) = self.provider_key_cache.read().await.get(id) {
-            return Ok(Some(Secret::new(secret.expose_secret().clone())));
+        if let Some(value) = self
+            .provider_key_cache
+            .read()
+            .await
+            .get(canonical_provider_key_id(id))
+        {
+            return Ok(match value {
+                ProviderKeyOverride::Value(secret) => {
+                    Some(Secret::new(secret.expose_secret().clone()))
+                }
+                ProviderKeyOverride::Suppressed => None,
+            });
+        }
+        if self.provider_keys_host_managed.load(Ordering::Acquire) {
+            return Ok(None);
         }
         if is_anthropic_api_key_id(id) {
             return self.get_anthropic_api_key().await;
@@ -412,8 +511,16 @@ impl CredentialManager {
     /// Check whether a provider key exists without loading secret bytes when
     /// the underlying native store supports an attribute-only lookup.
     pub async fn has_provider_key(&self, id: &str) -> Result<bool, CredentialError> {
-        if self.provider_key_cache.read().await.contains_key(id) {
-            return Ok(true);
+        if let Some(value) = self
+            .provider_key_cache
+            .read()
+            .await
+            .get(canonical_provider_key_id(id))
+        {
+            return Ok(matches!(value, ProviderKeyOverride::Value(_)));
+        }
+        if self.provider_keys_host_managed.load(Ordering::Acquire) {
+            return Ok(false);
         }
         if is_anthropic_api_key_id(id) {
             return self
@@ -1049,6 +1156,192 @@ mod oauth_tests {
         (storage, cm)
     }
 
+    fn uncached_manager(storage: Arc<dyn SecureStorage>) -> CredentialManager {
+        CredentialManager::new(storage, Arc::new(FixedClock), Arc::new(NoHttp))
+            .without_api_key_cache()
+    }
+
+    #[tokio::test]
+    async fn uncached_managers_observe_shared_storage_rotations_and_deletions() {
+        let (storage, writer) = manager();
+        let reader = uncached_manager(storage.clone());
+        writer
+            .set_provider_key("anthropic", "old-key")
+            .await
+            .unwrap();
+        let captured_request_key = reader
+            .get_provider_key("anthropic-api-key")
+            .await
+            .unwrap()
+            .unwrap();
+
+        writer
+            .set_provider_key("anthropic", "new-key")
+            .await
+            .unwrap();
+        assert_eq!(
+            reader
+                .get_anthropic_api_key()
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "new-key"
+        );
+        assert_eq!(captured_request_key.expose_secret(), "old-key");
+        assert!(reader.api_key_cache.read().await.is_none());
+
+        writer
+            .delete_provider_key("anthropic-api-key")
+            .await
+            .unwrap();
+        assert!(reader
+            .get_provider_key("anthropic")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(!reader.has_provider_key("anthropic").await.unwrap());
+        assert_eq!(captured_request_key.expose_secret(), "old-key");
+    }
+
+    #[tokio::test]
+    async fn uncached_managers_preserve_store_isolation_and_session_overrides() {
+        let (storage, writer) = manager();
+        let reader = uncached_manager(storage);
+        let (isolated_storage, isolated_writer) = manager();
+        let isolated_reader = uncached_manager(isolated_storage);
+        writer
+            .set_provider_key("anthropic", "shared-key")
+            .await
+            .unwrap();
+        isolated_writer
+            .set_provider_key("anthropic", "isolated-key")
+            .await
+            .unwrap();
+        reader
+            .set_provider_key_ephemeral("anthropic", "session-key")
+            .await;
+        writer
+            .set_provider_key("anthropic", "rotated-key")
+            .await
+            .unwrap();
+        assert_eq!(
+            reader
+                .get_anthropic_api_key()
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "session-key"
+        );
+        reader.delete_provider_key_ephemeral("anthropic").await;
+        assert_eq!(
+            reader
+                .get_anthropic_api_key()
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "rotated-key"
+        );
+        writer.delete_anthropic_api_key().await.unwrap();
+        assert!(reader.get_anthropic_api_key().await.unwrap().is_none());
+        assert_eq!(
+            isolated_reader
+                .get_anthropic_api_key()
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "isolated-key"
+        );
+    }
+
+    /// Capture a lookup before its caller resumes, reproducing an old request
+    /// resolving its credential while a later settings write is acknowledged.
+    #[derive(Default)]
+    struct SuspendedReadStorage {
+        inner: MemStorage,
+        suspend_next: std::sync::atomic::AtomicBool,
+        captured: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl SecureStorage for SuspendedReadStorage {
+        async fn store(
+            &self,
+            service: &str,
+            account: &str,
+            data: SecureStorageData,
+        ) -> Result<(), SecureStorageError> {
+            self.inner.store(service, account, data).await
+        }
+
+        async fn retrieve(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Option<SecureStorageData>, SecureStorageError> {
+            let captured = self.inner.retrieve(service, account).await?;
+            if self
+                .suspend_next
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                self.captured.notify_one();
+                self.resume.notified().await;
+            }
+            Ok(captured)
+        }
+
+        async fn delete(&self, service: &str, account: &str) -> Result<(), SecureStorageError> {
+            self.inner.delete(service, account).await
+        }
+
+        async fn list(&self, service: &str) -> Result<Vec<String>, SecureStorageError> {
+            self.inner.list(service).await
+        }
+
+        fn is_encrypted(&self) -> bool {
+            false
+        }
+
+        fn backend(&self) -> SecureStorageBackend {
+            SecureStorageBackend::MemorySession
+        }
+    }
+
+    #[tokio::test]
+    async fn uncached_delayed_read_cannot_restore_a_rotated_or_deleted_key() {
+        for delete in [false, true] {
+            let storage = Arc::new(SuspendedReadStorage::default());
+            let reader = Arc::new(uncached_manager(storage.clone()));
+            let writer = uncached_manager(storage.clone());
+            writer.store_anthropic_api_key("old-key").await.unwrap();
+            storage
+                .suspend_next
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let pending = tokio::spawn({
+                let reader = reader.clone();
+                async move { reader.get_anthropic_api_key().await.unwrap().unwrap() }
+            });
+            storage.captured.notified().await;
+            if delete {
+                writer.delete_anthropic_api_key().await.unwrap();
+            } else {
+                writer.store_anthropic_api_key("new-key").await.unwrap();
+            }
+            storage.resume.notify_one();
+            assert_eq!(pending.await.unwrap().expose_secret(), "old-key");
+            let next = reader.get_anthropic_api_key().await.unwrap();
+            assert_eq!(
+                next.as_ref().map(|key| key.expose_secret().as_str()),
+                (!delete).then_some("new-key")
+            );
+            assert!(reader.api_key_cache.read().await.is_none());
+        }
+    }
+
     #[tokio::test]
     async fn openai_oauth_observer_receives_rotated_session() {
         struct Observer(tokio::sync::Mutex<Vec<OpenAiOAuthTokens>>);
@@ -1376,6 +1669,120 @@ mod oauth_tests {
             .expect("get")
             .expect("present");
         assert_eq!(got.expose_secret(), "sk-or-secret");
+    }
+
+    #[tokio::test]
+    async fn host_deleted_keys_cannot_reappear_from_persistent_or_cached_storage() {
+        for id in ["anthropic", "openrouter"] {
+            let (storage, cm) = manager();
+            cm.set_provider_key(id, "stored-key").await.unwrap();
+            // Prime the Anthropic TTL as well as retaining a durable fallback.
+            assert!(cm.get_provider_key(id).await.unwrap().is_some());
+            cm.set_provider_key_ephemeral(id, "host-key").await;
+            cm.suppress_provider_key_ephemeral(id).await;
+            let aliases: &[&str] = if id == "anthropic" {
+                &["anthropic", "anthropic-api-key"]
+            } else {
+                &["openrouter"]
+            };
+            for alias in aliases {
+                assert!(cm.provider_key_is_suppressed(alias).await);
+                assert!(cm.get_provider_key(alias).await.unwrap().is_none());
+                assert!(cm.get_provider_key_ephemeral(alias).await.is_none());
+                assert!(!cm.has_provider_key(alias).await.unwrap());
+            }
+            let account = if id == "anthropic" {
+                "anthropic-api-key".to_string()
+            } else {
+                provider_key_account(id)
+            };
+            assert!(storage
+                .retrieve("lingxi", &account)
+                .await
+                .unwrap()
+                .is_some());
+
+            cm.set_provider_key_ephemeral(id, "new-host-key").await;
+            for alias in aliases {
+                assert!(!cm.provider_key_is_suppressed(alias).await);
+                assert!(cm.has_provider_key(alias).await.unwrap());
+                assert_eq!(
+                    cm.get_provider_key(alias)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .expose_secret(),
+                    "new-host-key"
+                );
+            }
+            cm.suppress_provider_key_ephemeral(id).await;
+            cm.set_provider_key(id, "new-stored-key").await.unwrap();
+            assert!(!cm.provider_key_is_suppressed(id).await);
+            assert_eq!(
+                cm.get_provider_key(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .expose_secret(),
+                "new-stored-key"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn host_managed_keys_never_fall_back_to_storage_but_oauth_is_preserved() {
+        let (_storage, cm) = manager();
+        cm.store_anthropic_api_key("stored-anthropic")
+            .await
+            .unwrap();
+        cm.set_provider_key("openrouter", "stored-openrouter")
+            .await
+            .unwrap();
+        cm.store_oauth_tokens(
+            "oauth-access",
+            Some("oauth-refresh"),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(5_000),
+            vec![],
+            "email",
+            "org",
+        )
+        .await
+        .unwrap();
+        assert!(cm.get_anthropic_api_key().await.unwrap().is_some());
+        cm.use_host_managed_provider_keys();
+
+        for id in [
+            "anthropic",
+            "anthropic-api-key",
+            "openrouter",
+            "never-configured",
+        ] {
+            assert!(cm.provider_key_is_suppressed(id).await);
+            assert!(cm.get_provider_key(id).await.unwrap().is_none());
+            assert!(!cm.has_provider_key(id).await.unwrap());
+        }
+        assert_eq!(
+            cm.get_oauth_tokens()
+                .await
+                .unwrap()
+                .unwrap()
+                .access_token
+                .expose_secret(),
+            "oauth-access"
+        );
+        cm.set_provider_key_ephemeral("anthropic", "injected-key")
+            .await;
+        assert!(cm.has_provider_key("anthropic-api-key").await.unwrap());
+        assert_eq!(
+            cm.get_anthropic_api_key()
+                .await
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "injected-key"
+        );
+        cm.delete_provider_key_ephemeral("anthropic").await;
+        assert!(cm.get_anthropic_api_key().await.unwrap().is_none());
     }
 
     #[tokio::test]

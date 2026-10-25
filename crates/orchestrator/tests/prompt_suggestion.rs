@@ -95,6 +95,7 @@ struct SuggestionOutput {
     rows: Mutex<Vec<(String, String, String)>>,
     source_rows: Mutex<Vec<Vec<u16>>>,
     notices: Mutex<Vec<String>>,
+    enabled_states: Mutex<Vec<bool>>,
     ready: Notify,
 }
 #[async_trait]
@@ -119,7 +120,8 @@ impl OutputStream for SuggestionOutput {
     fn wants_prompt_suggestions(&self) -> bool {
         true
     }
-    async fn emit_prompt_suggestion_state(&self, _: bool, notice: Option<&str>) {
+    async fn emit_prompt_suggestion_state(&self, enabled: bool, notice: Option<&str>) {
+        self.enabled_states.lock().unwrap().push(enabled);
         if let Some(notice) = notice {
             self.notices.lock().unwrap().push(notice.to_owned());
         }
@@ -181,7 +183,35 @@ fn setup_with_suggestion(
     Arc<SuggestionOutput>,
     Arc<sidequery::CacheSafeParamsSlot>,
 ) {
-    telemetry::feature_flags::test_set_flag("tengu_chomp_inflection", true);
+    setup_with_config(suggestion, true, "repl_main_thread", None)
+}
+
+struct SuggestionSettings(bool);
+
+#[async_trait]
+impl hooks::mods::ModSettingsReader for SuggestionSettings {
+    async fn read(
+        &self,
+        _: Utf16JsonProjection,
+    ) -> Result<Utf16JsonProjection, hooks::mods::ModError> {
+        Ok(Utf16JsonProjection::from_serde_value(
+            &serde_json::json!({"promptSuggestionEnabled": self.0}),
+        )
+        .unwrap())
+    }
+}
+
+fn setup_with_config(
+    suggestion: Utf16JsonProjection,
+    interactive: bool,
+    query_source: &str,
+    setting: Option<bool>,
+) -> (
+    Arc<ConversationOrchestrator>,
+    Arc<SuggestionClient>,
+    Arc<SuggestionOutput>,
+    Arc<sidequery::CacheSafeParamsSlot>,
+) {
     let client = Arc::new(SuggestionClient {
         requests: Mutex::new(vec![]),
         suggestion,
@@ -202,10 +232,11 @@ fn setup_with_suggestion(
             ]
         })
         .collect();
-    let orch = ConversationOrchestrator::new_with_streaming(
+    let mut orch = ConversationOrchestrator::new_with_streaming(
         OrchestratorConfig {
             model: "claude-sonnet-4-6".into(),
-            interactive_session: true,
+            interactive_session: interactive,
+            query_source: query_source.into(),
             ..Default::default()
         },
         Arc::new(MockApiClient::new(vec![])),
@@ -222,6 +253,9 @@ fn setup_with_suggestion(
         sidequery::ForkedAgentRunner::new()
             .with_side_query_client(client.clone(), "fallback-model".into()),
     ));
+    if let Some(enabled) = setting {
+        orch = orch.with_mod_settings_reader(Arc::new(SuggestionSettings(enabled)));
+    }
     (
         ConversationOrchestrator::into_shared(orch),
         client,
@@ -390,6 +424,79 @@ async fn context(orch: &ConversationOrchestrator, focus: &str, empty: bool, pend
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn sdk_composer_attaching_after_the_first_turn_enables_default_generation() {
+    let (orch, client, output, _) = setup_with_config(
+        Utf16JsonProjection::from("Run the focused tests"),
+        false,
+        "sdk",
+        None,
+    );
+    orch.run_turn_streaming("first turn before context arrives")
+        .await
+        .unwrap();
+    assert!(output.enabled_states.lock().unwrap().is_empty());
+    context(&orch, "focused", true, false).await;
+    assert_eq!(*output.enabled_states.lock().unwrap(), vec![true]);
+    orch.run_turn_streaming("second turn with attached composer")
+        .await
+        .unwrap();
+    wait(&client.entered).await;
+    client.release.add_permits(1);
+    wait(&output.ready).await;
+    assert_eq!(
+        output.rows.lock().unwrap().last().unwrap().2,
+        "Run the focused tests"
+    );
+}
+
+#[tokio::test]
+async fn unattached_mobile_sdk_does_not_automatically_generate_suggestions() {
+    let (orch, client, output, _) = setup_with_config(
+        Utf16JsonProjection::from("Run the focused tests"),
+        true,
+        "sdk",
+        None,
+    );
+    orch.run_turn_streaming("first scheduled turn")
+        .await
+        .unwrap();
+    orch.run_turn_streaming("second scheduled turn")
+        .await
+        .unwrap();
+    assert!(client.requests.lock().unwrap().is_empty());
+    assert!(output.enabled_states.lock().unwrap().is_empty());
+
+    // Headless SDK consumers retain their separate explicit opt-in path.
+    client.release.add_permits(1);
+    let result = orch
+        .generate_prompt_suggestion_query(tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        result.suggestion.string_at(""),
+        Some("Run the focused tests")
+    );
+    assert_eq!(client.requests.lock().unwrap().len(), 1);
+    assert_eq!(output.rows.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn persisted_user_disable_still_blocks_attached_sdk_suggestions() {
+    let (orch, client, output, _) = setup_with_config(
+        Utf16JsonProjection::from("Run the focused tests"),
+        false,
+        "sdk",
+        Some(false),
+    );
+    context(&orch, "focused", true, false).await;
+    orch.run_turn_streaming("first turn").await.unwrap();
+    orch.run_turn_streaming("second turn").await.unwrap();
+    assert_eq!(*output.enabled_states.lock().unwrap(), vec![false]);
+    assert!(client.requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

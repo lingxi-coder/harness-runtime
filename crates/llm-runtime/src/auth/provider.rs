@@ -14,6 +14,11 @@ pub struct CredentialScope {
     /// Host-defined credential id from `CredentialConfig::Static` or
     /// `CredentialConfig::HostManaged`, when one was configured.
     pub credential_id: Option<String>,
+    /// Resolved endpoint, when the host knows the selected route. OAuth
+    /// credentials must not fall back onto a different provider origin.
+    pub base_url: Option<String>,
+    /// Protocol of that resolved endpoint.
+    pub protocol: Option<crate::ProtocolFamily>,
 }
 
 impl CredentialScope {
@@ -24,6 +29,8 @@ impl CredentialScope {
             provider_id,
             profile_name: profile_name.into(),
             credential_id: None,
+            base_url: None,
+            protocol: None,
         }
     }
 
@@ -32,6 +39,48 @@ impl CredentialScope {
     pub fn with_credential_id(mut self, credential_id: impl Into<String>) -> Self {
         self.credential_id = Some(credential_id.into());
         self
+    }
+
+    /// Attach the endpoint and protocol selected by the model router.
+    #[must_use]
+    pub fn with_route(
+        mut self,
+        base_url: impl Into<String>,
+        protocol: crate::ProtocolFamily,
+    ) -> Self {
+        self.base_url = Some(base_url.into());
+        self.protocol = Some(protocol);
+        self
+    }
+
+    /// The built-in first-party route can choose API key or OAuth for each
+    /// request. Custom endpoints and compatibility protocols cannot inherit
+    /// an account's first-party OAuth token.
+    #[must_use]
+    pub fn selects_anthropic_auth(&self) -> bool {
+        self.provider_id == ProviderId::AnthropicFirstParty
+            && self.profile_name == "anthropic"
+            && self.protocol == Some(crate::ProtocolFamily::AnthropicMessages)
+            && self
+                .base_url
+                .as_deref()
+                .is_some_and(|url| url.trim_end_matches('/') == "https://api.anthropic.com")
+            && matches!(
+                self.credential_id.as_deref(),
+                Some("anthropic-api-key" | "anthropic-oauth")
+            )
+    }
+
+    /// Whether known route metadata forbids forwarding first-party OAuth.
+    #[must_use]
+    pub fn forbids_anthropic_oauth(&self) -> bool {
+        self.base_url
+            .as_deref()
+            .is_some_and(|url| url.trim_end_matches('/') != "https://api.anthropic.com")
+            || self
+                .protocol
+                .is_some_and(|protocol| protocol != crate::ProtocolFamily::AnthropicMessages)
+            || self.provider_id != ProviderId::AnthropicFirstParty
     }
 }
 
