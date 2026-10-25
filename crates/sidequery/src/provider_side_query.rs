@@ -1573,7 +1573,15 @@ mod tests {
 
         assert_eq!(body["model"], "deepseek-flash");
         assert_eq!(body["max_tokens"], 8192);
-        assert_eq!(body["reasoning_effort"], "none");
+        assert_eq!(
+            body["thinking"],
+            serde_json::json!({ "type": "disabled" }),
+            "DeepSeek Chat uses the configured thinking_type wire"
+        );
+        assert!(
+            body.get("reasoning_effort").is_none(),
+            "the DeepSeek thinking_type route must not emit OpenAI reasoning_effort"
+        );
         assert_eq!(body["tools"][0]["function"]["name"], "StructuredOutput");
         assert_eq!(
             body["tool_choice"],
