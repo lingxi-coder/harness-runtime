@@ -20,19 +20,22 @@ use tool_api::tool_trait::{
     PromptOptions, Tool, ToolCallResult, ToolError, ToolInputRepairMetadata, ToolInputRepairSchema,
     ToolInputSchemaProvenance, ToolStaticContext, ValidationError,
 };
-use tool_api::util::path_validation::{canonicalize_and_validate, resolve_against_cwd};
+use tool_api::util::path_validation::{
+    canonicalize_and_validate, resolve_against_cwd, translate_model_path,
+};
 use tool_api::BuiltinToolContext;
 use visualization::{VisualizationId, VisualizationRef};
 
-const PROMPT: &str = "Create and manage desktop Local Apps. Load the local-app skill first. Desktop supports multi-file projects, frameworks, network, workers, local Node/Python backends and application-scoped native capabilities. Use Bash to install missing runtimes and dependencies, including Node, Python, Vite and TypeScript. Publish through this tool so the application appears in Apps and opens in its own window; a file path or a development server alone is not delivery. Use bundle_path for a directory with lingxi-app.json, or html/file_path for a simple document. Use start, status and logs to verify the registered app, and stop to stop its owned processes. Never pass private host transport fields.";
+const PROMPT: &str = "Create and manage Local Apps. Load the local-app skill first. Publish a multi-file project with schema-2 lingxi-app.json using bundle_path, or a simple document using html/file_path. Apps have independent versions and data and survive their authoring conversation. Read the latest revision and pass expectedRevision when updating; never silently overwrite concurrent work. Node/Python services run only after the user authorizes the exact release in the native Apps page, including install/build scripts. Keep dependencies inside the app environment, never change the shared Linux toolchain. Host and guest architectures and supported capabilities determine compatibility. Local publication does not upload to a market. Use start/status/logs to verify and stop for the app's own processes. Use agent_catalog to discover exact host model and tool IDs; discovery does not grant access. Never pass private host transport, source-session or permission fields.";
 // Matches the desktop host's transport budget, not mobile document limits.
 const MAX_HOST_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 static SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     generated_builtin_schema(&json!({
       "type":"object", "additionalProperties":false,
       "properties": {
-        "action":{"type":"string","enum":["publish","list","read","start","stop","status","logs"]},
-        "id":{"type":"string","pattern":"^a[a-f0-9]{20}$"},
+        "action":{"type":"string","enum":["publish","list","read","start","stop","status","logs","agent_catalog"]},
+        "id":{"type":"string","pattern":"^a[a-f0-9]{32}$"},
+        "expectedRevision":{"type":"integer","minimum":0,"description":"Required latest revision when updating an existing application; zero for a new app."},
         "name":{"type":"string","maxLength":60}, "summary":{"type":"string","maxLength":160},
         "html":{"type":"string"}, "file_path":{"type":"string"},
         "bundle_path":{"type":"string","description":"Absolute path of the application source directory containing lingxi-app.json. Files are copied into the desktop library; dependencies are installed using the manifest."},
@@ -46,6 +49,16 @@ pub struct DesktopLocalAppTool {
     ctx: BuiltinToolContext,
     config_home: PathBuf,
     visualizations: Option<Arc<visualization::VisualizationStore>>,
+    project_host: Option<Arc<dyn ProjectLocalAppHost>>,
+}
+
+/// An authenticated, application-owned service supplied by the native host.
+/// Private staged/source fields are produced by this adapter after Read checks,
+/// never accepted from model input. Execution consent remains owned by the host.
+#[async_trait]
+pub trait ProjectLocalAppHost: Send + Sync {
+    /// Dispatch the already validated/staged local application request.
+    async fn request(&self, request: Value) -> Result<Value, String>;
 }
 fn invalid(message: impl ToString) -> ToolError {
     ToolError::InvalidInput(message.to_string().into())
@@ -120,11 +133,19 @@ impl DesktopLocalAppTool {
             ctx,
             config_home,
             visualizations,
+            project_host: None,
         }
+    }
+    /// Use the native standalone application service instead of Desktop HTTP.
+    #[must_use]
+    pub fn with_host(mut self, host: Arc<dyn ProjectLocalAppHost>) -> Self {
+        self.project_host = Some(host);
+        self
     }
     fn source(&self, value: &str) -> Result<PathBuf, ToolError> {
         let (cwd, trusted) = self.ctx.cwd_and_trusted();
         let requested = resolve_against_cwd(PathBuf::from(value), &cwd);
+        let requested = translate_model_path(&self.ctx.fs, requested, false).map_err(invalid)?;
         canonicalize_and_validate(&requested, &trusted)
             .map_err(|_| ToolError::PathBlocked { path: requested })
     }
@@ -302,6 +323,10 @@ impl DesktopLocalAppTool {
     }
     async fn host(&self, input: &Value) -> Result<ToolCallResult, ToolError> {
         let body = request_body(input, MAX_HOST_REQUEST_BYTES)?;
+        if let Some(host) = &self.project_host {
+            let result = host.request(input.clone()).await.map_err(invalid)?;
+            return Ok(ToolCallResult::from_data(generated_builtin_result(&result)));
+        }
         let discovery: Value = serde_json::from_slice(&tokio::fs::read(self.config_home.join("desktop-local-app-host.json")).await
             .map_err(|_| invalid("Desktop Local App host is unavailable. Open or restart the LingXi desktop application."))?).map_err(io)?;
         let port = discovery["port"]
@@ -410,7 +435,7 @@ impl Tool for DesktopLocalAppTool {
         true
     }
     fn search_hint(&self) -> Option<Utf16JsonProjection> {
-        Some("create local desktop app 本地应用 application library backend".into())
+        Some("create local app 本地应用 application library backend".into())
     }
     fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
         matches!(
@@ -425,7 +450,7 @@ impl Tool for DesktopLocalAppTool {
         300_000
     }
     async fn description(&self, _: &Utf16JsonProjection, _: &DescriptionOptions) -> String {
-        "Publish and run desktop Local Apps: multi-file projects, Node/Python backends, native capabilities, library and independent windows.".into()
+        "Publish and run Local Apps: versioned multi-file projects, Node/Python services, native capabilities and independent application data.".into()
     }
     async fn prompt(&self, _: &PromptOptions) -> Utf16JsonProjection {
         source_text_projection(PROMPT)
@@ -455,6 +480,7 @@ impl Tool for DesktopLocalAppTool {
                 "bundle_path",
                 "visualization_id",
                 "visualization_revision",
+                "expectedRevision",
             ]
             .contains(&key.as_str())
             {
@@ -480,7 +506,7 @@ impl Tool for DesktopLocalAppTool {
             }
         }
         if let Some(id) = value["id"].as_str() {
-            if id.len() != 21
+            if id.len() != 33
                 || !id.starts_with('a')
                 || !id[1..]
                     .bytes()
@@ -490,7 +516,34 @@ impl Tool for DesktopLocalAppTool {
             }
         }
         let action = value["action"].as_str().unwrap_or("publish");
-        if !["publish", "list", "read", "start", "stop", "status", "logs"].contains(&action) {
+        if value
+            .get("expectedRevision")
+            .is_some_and(|revision| revision.as_u64().is_none())
+        {
+            return Err(ValidationError(
+                "expectedRevision must be a non-negative integer".into(),
+            ));
+        }
+        if action == "publish"
+            && value.get("id").is_some()
+            && value.get("expectedRevision").is_none()
+        {
+            return Err(ValidationError(
+                "Updating an application requires expectedRevision from its latest record".into(),
+            ));
+        }
+        if ![
+            "publish",
+            "list",
+            "read",
+            "start",
+            "stop",
+            "status",
+            "logs",
+            "agent_catalog",
+        ]
+        .contains(&action)
+        {
             return Err(ValidationError("Unknown LocalApp action".into()));
         }
         if action == "publish"
@@ -528,12 +581,13 @@ impl Tool for DesktopLocalAppTool {
         _: ToolProgressSender,
     ) -> Result<ToolCallResult, ToolError> {
         check_cancelled(&ctx)?;
+        self.validate_input(&input, &ctx).await.map_err(invalid)?;
         let mut input: Value =
             serde_json::from_str(&input.to_json_string().map_err(io)?).map_err(invalid)?;
         if input.get("action").is_none() {
             input["action"] = json!("publish");
         }
-        let imports = self.config_home.join("local-apps/desktop/imports");
+        let imports = self.config_home.join("local-app-imports");
         let staging = StagedSource(imports.join(uuid::Uuid::new_v4().simple().to_string()));
         let staged = &staging.0;
         let operation = async {
@@ -854,7 +908,7 @@ mod tests {
             matches!(result, Err(ToolError::InvalidInput(ref text)) if text.string_at("").is_some_and(|text| text.contains("imports directory")))
         );
         assert_eq!(
-            std::fs::read_dir(tool.config_home.join("local-apps/desktop/imports"))
+            std::fs::read_dir(tool.config_home.join("local-app-imports"))
                 .unwrap()
                 .count(),
             0
@@ -887,7 +941,7 @@ mod tests {
                     entered: entered.clone(),
                 }),
             );
-            let imports = tool.config_home.join("local-apps/desktop/imports");
+            let imports = tool.config_home.join("local-app-imports");
             let mut ctx = call_context();
             ctx.cancel = Some(Default::default());
             let cancel = ctx.cancel.clone().unwrap();
@@ -935,7 +989,7 @@ mod tests {
                 replace: None,
             }),
         );
-        let imports = tool.config_home.join("local-apps/desktop/imports");
+        let imports = tool.config_home.join("local-app-imports");
         runtime.block_on(async {
             let (entered, started) = tokio::sync::oneshot::channel();
             let (release, blocked) = std::sync::mpsc::channel();
@@ -1025,7 +1079,7 @@ mod tests {
             entered: entered.clone(),
             dropped: dropped.clone(),
         });
-        let imports = tool.config_home.join("local-apps/desktop/imports");
+        let imports = tool.config_home.join("local-app-imports");
         let mut ctx = call_context();
         ctx.cancel = Some(Default::default());
         let cancel = ctx.cancel.clone().unwrap();

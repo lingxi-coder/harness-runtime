@@ -14,7 +14,9 @@
 //! [`ToolRegistry::refresh_tool_search_view`]: crate::registry::ToolRegistry::refresh_tool_search_view
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
+
+type EntryFilter = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
 /// One row in the searchable registry view.
 #[derive(Debug, Clone)]
@@ -70,6 +72,7 @@ impl ToolRegistryView for StaticRegistryView {
 #[derive(Default)]
 pub struct SharedToolSearchView {
     entries: RwLock<Vec<ToolSearchEntry>>,
+    entry_filter: RwLock<Option<EntryFilter>>,
 }
 
 impl SharedToolSearchView {
@@ -78,7 +81,16 @@ impl SharedToolSearchView {
     pub fn new() -> Self {
         Self {
             entries: RwLock::new(Vec::new()),
+            entry_filter: RwLock::new(None),
         }
+    }
+
+    /// Install a live authority check so revocation also invalidates materialized entries.
+    pub fn set_entry_filter(&self, filter: EntryFilter) {
+        *self
+            .entry_filter
+            .write()
+            .expect("tool-search filter lock poisoned") = Some(filter);
     }
 
     /// Replace the searchable entry set (called by the registry refresh).
@@ -92,10 +104,7 @@ impl SharedToolSearchView {
     /// Number of searchable entries currently held (test/telemetry helper).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries
-            .read()
-            .expect("tool-search view lock poisoned")
-            .len()
+        self.entries().len()
     }
 
     /// Whether the view is empty.
@@ -107,9 +116,16 @@ impl SharedToolSearchView {
 
 impl ToolRegistryView for SharedToolSearchView {
     fn entries(&self) -> Vec<ToolSearchEntry> {
+        let filter = self
+            .entry_filter
+            .read()
+            .expect("tool-search filter lock poisoned");
         self.entries
             .read()
             .expect("tool-search view lock poisoned")
-            .clone()
+            .iter()
+            .filter(|entry| filter.as_ref().is_none_or(|filter| filter(&entry.name)))
+            .cloned()
+            .collect()
     }
 }

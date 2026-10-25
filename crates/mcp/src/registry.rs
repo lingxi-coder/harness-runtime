@@ -1839,7 +1839,9 @@ impl McpRegistry {
     async fn direct_inprocess_connection(&self, name: &str) -> Option<(McpConnectionId, String)> {
         let connections = self.connections.read().await;
         connections.iter().find_map(|(raw_name, state)| {
-            if normalize_name_for_mcp(raw_name) != name {
+            if raw_name != name
+                && (connections.contains_key(name) || normalize_name_for_mcp(raw_name) != name)
+            {
                 return None;
             }
             match state {
@@ -2087,8 +2089,133 @@ impl McpRegistry {
         tool_use_id: Option<&str>,
         on_progress: Option<crate::client::McpProgressCallback>,
     ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
+        self.call_tool_with_auth_retry_guarded(
+            server,
+            full_name,
+            input,
+            tool_use_id,
+            on_progress,
+            None,
+        )
+        .await
+    }
+
+    /// Current host-owned tool grant candidates. Descriptions/config secrets are
+    /// deliberately absent; consumers pair these opaque identities with UI metadata.
+    pub async fn tool_identity_catalog(&self) -> Vec<crate::tool_identity::McpToolIdentity> {
+        let connections = self.connections.read().await;
+        connections
+            .values()
+            .flat_map(|state| match state {
+                McpConnectionState::Connected { config, tools, .. }
+                | McpConnectionState::Cached { config, tools, .. } => tools
+                    .iter()
+                    .map(|tool| {
+                        crate::tool_identity::McpToolIdentity::from_config_tool(config, tool)
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+
+    /// Human-readable labels paired with exact identities for trusted grant UI.
+    /// No endpoint, header, environment or credential configuration is returned.
+    pub async fn tool_identity_labels(
+        &self,
+    ) -> Vec<(crate::tool_identity::McpToolIdentity, String)> {
+        self.connections
+            .read()
+            .await
+            .values()
+            .flat_map(|state| match state {
+                McpConnectionState::Connected { config, tools, .. }
+                | McpConnectionState::Cached { config, tools, .. } => tools
+                    .iter()
+                    .map(|tool| {
+                        (
+                            crate::tool_identity::McpToolIdentity::from_config_tool(config, tool),
+                            format!("{} · {}", config.name, tool.tool_name),
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+                _ => Vec::new(),
+            })
+            .collect()
+    }
+    async fn verify_tool_dispatch_guard(
+        &self,
+        server: &str,
+        full_name: &str,
+        guard: &Option<crate::tool_identity::McpToolDispatchGuard>,
+    ) -> Result<(), crate::client::McpClientError> {
+        let Some(guard) = guard else {
+            return Ok(());
+        };
+        let connections = self.connections.read().await;
+        // Guarded dispatch requires the exact raw config table key. Never pick a
+        // normalized-name match: different raw names can normalize to one FQN.
+        let allowed = connections.get(server).is_some_and(|state| match state {
+            McpConnectionState::Connected { config, tools, .. }
+            | McpConnectionState::Cached { config, tools, .. } => {
+                let prefix = format!("mcp__{}__", normalize_name_for_mcp(&config.name));
+                full_name.strip_prefix(&prefix).is_some_and(|raw_name| {
+                    let mut matches = tools.iter().filter(|tool| tool.tool_name == raw_name);
+                    let first = matches.next();
+                    // Ambiguous duplicate raw definitions fail closed as well.
+                    first.is_some_and(|tool| {
+                        matches.next().is_none()
+                            && guard(&crate::tool_identity::McpToolIdentity::from_config_tool(
+                                config, tool,
+                            ))
+                    })
+                })
+            }
+            _ => false,
+        });
+        if allowed {
+            Ok(())
+        } else {
+            Err(crate::client::McpClientError::Rpc(
+                "MCP tool capability changed or was revoked".into(),
+            ))
+        }
+    }
+
+    async fn client_for_guarded_dispatch(
+        &self,
+        server: &str,
+        guarded: bool,
+    ) -> Option<Arc<McpClient>> {
+        if guarded {
+            self.clients
+                .read()
+                .await
+                .get(server)
+                .map(|entry| Arc::clone(&entry.client))
+        } else {
+            self.get_client(server).await
+        }
+    }
+
+    /// Capability-aware dispatch. Checks both the immutable grant and current
+    /// discovery/configuration before every RPC, including auth retries.
+    pub async fn call_tool_with_auth_retry_guarded(
+        &self,
+        server: &str,
+        full_name: &str,
+        input: Utf16JsonProjection,
+        tool_use_id: Option<&str>,
+        on_progress: Option<crate::client::McpProgressCallback>,
+        guard: Option<crate::tool_identity::McpToolDispatchGuard>,
+    ) -> Result<lingxi_core::host::McpToolResultDto, crate::client::McpClientError> {
+        self.verify_tool_dispatch_guard(server, full_name, &guard)
+            .await?;
         let mut lazy_dialed = false;
-        let client = if let Some(client) = self.get_client(server).await {
+        let client = if let Some(client) = self
+            .client_for_guarded_dispatch(server, guard.is_some())
+            .await
+        {
             Some(client)
         } else {
             // ⚠️ Do NOT collapse this into `else if`. `clippy --fix` did exactly
@@ -2109,9 +2236,11 @@ impl McpRegistry {
                     .map_err(|error| {
                         crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(&error))
                     })?;
-                self.get_client(server).await
+                self.client_for_guarded_dispatch(server, guard.is_some())
+                    .await
             } else {
-                self.get_client(server).await
+                self.client_for_guarded_dispatch(server, guard.is_some())
+                    .await
             }
         };
         let Some(client) = client else {
@@ -2135,12 +2264,14 @@ impl McpRegistry {
             // The caller has already resolved the final segment back to the
             // server's raw tool name, so stripping the fixed prefix is safe and
             // avoids teaching an in-process provider about FQN normalization.
-            let prefix = format!("mcp__{server}__");
+            let prefix = format!("mcp__{}__", normalize_name_for_mcp(server));
             let tool_name = full_name.strip_prefix(&prefix).ok_or_else(|| {
                 crate::client::McpClientError::Rpc(
                     format!("invalid MCP tool name {full_name:?} for server {server:?}").into(),
                 )
             })?;
+            self.verify_tool_dispatch_guard(server, full_name, &guard)
+                .await?;
             return self
                 .transport
                 .call_tool(&McpRawConnection { connection_id }, tool_name, input)
@@ -2149,6 +2280,8 @@ impl McpRegistry {
                     crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(&error))
                 });
         };
+        self.verify_tool_dispatch_guard(server, full_name, &guard)
+            .await?;
         let first = client
             .call_tool_with_progress(full_name, input.clone(), tool_use_id, on_progress.clone())
             .await;
@@ -2157,10 +2290,14 @@ impl McpRegistry {
         };
         let raw_name = {
             let connections = self.connections.read().await;
-            connections
-                .keys()
-                .find(|name| normalize_name_for_mcp(name) == server)
-                .cloned()
+            if connections.contains_key(server) {
+                Some(server.to_owned())
+            } else {
+                connections
+                    .keys()
+                    .find(|name| normalize_name_for_mcp(name) == server)
+                    .cloned()
+            }
         };
         let config = if let Some(raw_name) = raw_name.as_deref() {
             self.get_config(raw_name).await
@@ -2198,6 +2335,8 @@ impl McpRegistry {
         let Some(raw_name) = raw_name else {
             return Err(error);
         };
+        self.verify_tool_dispatch_guard(server, full_name, &guard)
+            .await?;
         if session_expired {
             self.reconnect_preserving_auth(&raw_name).await
         } else {
@@ -2207,7 +2346,10 @@ impl McpRegistry {
             crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(&retry_error))
         })?;
         let mut _refreshed_from_cache = false;
-        let refreshed = if let Some(client) = self.get_client(server).await {
+        let refreshed = if let Some(client) = self
+            .client_for_guarded_dispatch(server, guard.is_some())
+            .await
+        {
             Some(client)
         } else if let Some(raw_key) = self.cached_raw_key(server).await {
             _refreshed_from_cache = true;
@@ -2216,9 +2358,11 @@ impl McpRegistry {
                 .map_err(|retry_error| {
                     crate::client::McpClientError::Rpc(mcp_error_source_diagnostic(&retry_error))
                 })?;
-            self.get_client(server).await
+            self.client_for_guarded_dispatch(server, guard.is_some())
+                .await
         } else {
-            self.get_client(server).await
+            self.client_for_guarded_dispatch(server, guard.is_some())
+                .await
         }
         .ok_or_else(|| {
             crate::client::McpClientError::Rpc(
@@ -2228,6 +2372,8 @@ impl McpRegistry {
                 .into(),
             )
         })?;
+        self.verify_tool_dispatch_guard(server, full_name, &guard)
+            .await?;
         let second = refreshed
             .call_tool_with_progress(full_name, input, tool_use_id, on_progress)
             .await;

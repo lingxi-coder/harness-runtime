@@ -572,6 +572,7 @@ mod tests {
         let runtime = Arc::new(mobile_linux_android::AndroidProotRuntime::new(
             mobile_linux_android::AndroidProotRuntimeConfig {
                 managed_root: root,
+                brand_profile: mobile_linux_api::BrandRuntimeProfile::default(),
                 app_sandbox_root: temp.path().to_path_buf(),
                 abi: "arm64-v8a".into(),
                 rootfs_version: "test".into(),

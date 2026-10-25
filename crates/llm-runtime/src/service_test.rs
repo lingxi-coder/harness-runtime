@@ -5717,6 +5717,61 @@ mod tests {
     }
 
     #[test]
+    fn side_query_thinking_preserves_explicit_disabled_without_inventing_it() {
+        let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
+            200,
+            ok_response_json(),
+        )));
+
+        let mut disabled = LlmRequest::new("deepseek-flash");
+        adapter.apply_side_query_thinking(
+            &mut disabled,
+            "deepseek-flash",
+            Some(crate::model::thinking::ThinkingConfig::Disabled),
+            None,
+        );
+        assert!(disabled.execution.side_thinking_disabled);
+        assert_eq!(
+            disabled
+                .input
+                .thinking
+                .as_ref()
+                .and_then(|thinking| thinking.mode),
+            Some(lingxi_llm_client::protocol::ThinkingMode::Disabled)
+        );
+
+        let mut unspecified = LlmRequest::new("deepseek-flash");
+        adapter.apply_side_query_thinking(&mut unspecified, "deepseek-flash", None, None);
+        assert!(!unspecified.execution.side_thinking_disabled);
+        assert!(unspecified.input.thinking.is_none());
+
+        let mut enabled = LlmRequest::new("deepseek-flash");
+        adapter.apply_side_query_thinking(
+            &mut enabled,
+            "deepseek-flash",
+            Some(crate::model::thinking::ThinkingConfig::Enabled { budget_tokens: 512 }),
+            None,
+        );
+        assert!(!enabled.execution.side_thinking_disabled);
+        assert_eq!(
+            enabled
+                .input
+                .thinking
+                .as_ref()
+                .and_then(|thinking| thinking.mode),
+            Some(lingxi_llm_client::protocol::ThinkingMode::Enabled)
+        );
+        assert_eq!(
+            enabled
+                .input
+                .thinking
+                .as_ref()
+                .and_then(|thinking| thinking.budget),
+            Some(lingxi_llm_client::protocol::ThinkingBudget::Tokens(512))
+        );
+    }
+
+    #[test]
     fn side_query_builder_preserves_source_system_utf16_units() {
         let adapter = make_adapter(FakeTransport::always(ProviderResponse::json(
             200,

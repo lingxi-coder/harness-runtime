@@ -4253,6 +4253,10 @@ pub trait OutputStream: Send + Sync {
     /// Session-scoped storage pause; clients keep it visible until recovery.
     async fn emit_session_storage_state(&self, _disk_full: bool) {}
 
+    /// Typed failure category only, before presentation may consume the error.
+    /// Never pass provider text, arguments, paths or credentials here.
+    fn note_model_error_kind(&self, _kind: &'static str) {}
+
     /// Emit provider status, native terminal reason, and provider stop reason
     /// without asking the sink to infer any value from rendered error text.
     async fn emit_terminal_api_error(

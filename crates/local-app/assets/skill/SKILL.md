@@ -1,48 +1,138 @@
 ---
 name: local-app
-description: Build a small app the user keeps on this device, such as a tracker, calculator, timer, checklist or game, as one HTML file that opens from the chat and the Apps page.
+description: Build and publish a device-local schema-2 app, including camera input or independent host Agent tasks when needed.
 session-modes: chat, code
 ---
 
 # Local apps
 
-Build the app as ONE self-contained HTML document and publish it with the `LocalApp` tool. It joins the user's app library on this device: it opens full screen from the card under your tool call and from the Apps page, works offline, and keeps its own data between launches.
-
-## When to use it
-
-- The user wants an app, tool, tracker, game, calculator, timer, checklist or similar that they will open again.
-- For a one-off chart or explainer inside the conversation, use an inline visualization instead when one is available.
+Use the `LocalApp` tool to publish an app into the user's device library. Desktop, Android and iOS use schema 2, independent of the creating conversation. The tool schema and the current host's capabilities are authoritative.
 
 ## Workflow
 
-1. If the request is vague, ask at most three short questions with `AskUserQuestion`: what it is for, the main screens, and what it must remember. Otherwise build it right away with sensible defaults.
-2. Write the complete document: `<!doctype html>`, `<html lang="…">`, a `<head>` with `<meta charset="utf-8">`, `<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">` and a `<title>`, then the body. Put all CSS in `<style>` and all JavaScript in classic `<script>` tags; draw icons as inline SVG and embed images as `data:` URIs.
-3. Publish it: call `LocalApp` with a short `name` (at most 60 characters), a one-line `summary`, and the document in `html`.
+1. Build immediately when the user supplied a clear request or approved a plan. Ask only for missing decisions that affect the result. A one-off chart or explanation can use an inline visualization; an app belongs in the Apps library.
+2. A simple static app can be one complete HTML document with inline CSS/JavaScript, published as `LocalApp({"name":"…","summary":"…","html":"…"})`. The host constructs its schema-2 package. For Agent/device capabilities, multiple files, packages or services, create a project containing `lingxi-app.json` and publish with `bundle_path`.
 <!-- if-shell -->
-   For a long script, Write the document to an `.html` file, check its script with the `{{SHELL_TOOL}}` tool when an interpreter such as `node` is available, then publish with `file_path` instead of `html`.
+   Write and check the project with the `{{SHELL_TOOL}}` tool. Keep dependencies and Python virtual environments inside the project. A long simple document may use `file_path` instead of embedding `html` in the tool call. Check scripts and the important user interactions before publication.
 <!-- end-if-shell -->
-4. Fix whatever the tool reports and publish again. It rejects anything that is not a complete HTML document and warns about resources that would break offline.
-5. Tell the user what the app does and that it opens from the card or the Apps page. Do not paste the HTML into your reply.
+3. For a project, declare only the needed capabilities, exact package source files, targets and repeatable install/build/process steps. Bind servers to `127.0.0.1` and their assigned `PORT`. Use `LOCAL_APP_DATA_DIR` for durable backend data; installation/build steps receive separate preparation data and must not migrate live user records.
+4. Fix whatever the tool reports, publish, and inspect `start`, `status` and `logs` where available. An application card and its entry in Apps are delivery; a source directory or temporary development server alone is not.
+5. Explain what works and what was actually tested. Do not describe source tests, a browser preview or a successful build as physical-device or real-model acceptance.
 
-## Changing an app
+## Project manifest
 
-- In the same conversation, publish again with the app's `id`. Each publish is a new revision; the app keeps its stored data.
-- For an app made earlier, call `LocalApp` with `action: "list"` to find its `id`, then `action: "read"` with that `id` to get the current document. Change it and publish with the same `id`.
-- Keep stored data readable by the new version: keep the keys, or store a schema version next to the data and convert old data when the app starts.
+Use the current schema only. A minimal project looks like:
 
-## Saving a visualization as an app
+```json
+{
+  "schema": 2,
+  "name": "My app",
+  "entry": {"type": "static", "path": "index.html"},
+  "targets": [
+    {"platform": "macos", "environment": "web"},
+    {"platform": "windows", "environment": "web"},
+    {"platform": "linux", "environment": "web"},
+    {"platform": "android", "environment": "web"},
+    {"platform": "ios", "environment": "web"}
+  ],
+  "package": {"files": ["index.html"], "dependencyLocks": []},
+  "dataSchema": {"version": 1, "compatibleFrom": 1}
+}
+```
 
-When the user wants to keep a visualization from this conversation as an app, call `LocalApp` with its `visualization_id` instead of writing a document. The app gets the visualization's code and the state the user saved in it, keeps its own data from then on, and works after the conversation is gone. Pass `name` when the visualization's title is longer than 60 characters. To change such an app later, `read` returns its fragment: change the fragment and publish it with the app's `id` in `fragment`.
+Static apps do not require Linux processes. A Node/Python app needs a compatible execution target and the user's exact-release consent in the native Apps page. On mobile, require an available Mobile Linux runtime rather than assuming Desktop commands or arbitrary native executables will run. Check architecture, runtime/channel and capability support. Do not modify the shared Linux toolchain. Package only declared source/build outputs and lockfiles; exclude credentials, local grants, user data and dependency caches.
 
-## Rules
+## Calling the host Agent with AG-UI 1.0
 
-- **Offline.** No CDN scripts, web fonts, remote images or other network resources. Inline everything. Use plain JavaScript and CSS: no frameworks, packages or build step.
-- **Data.** Keep small values in `localStorage` and records in IndexedDB. Each app has its own storage, which is deleted with the app. Validate what you read back, show the user when a save fails, and offer export and import as a JSON file for anything they would hate to lose.
-- **Phone first.** The layout works from 320 px wide up. Respect the safe areas with `env(safe-area-inset-*)`, make touch targets at least 44 px, avoid hover-only controls, and use `100dvh` rather than `100vh`.
-- **Look.** Follow `prefers-color-scheme` for light and dark, use the system font stack and one accent color.
-- **Accessibility.** Label every control, give icon-only buttons an `aria-label`, and keep text contrast readable.
-- **What a page cannot do.** No background work or notifications while the app is closed; no camera, microphone or location (they are denied); no calendar or contacts (offer an `.ics` or `.vcf` download instead); no AI model calls; no Web Workers or service workers. Links to other sites open outside the app after the user confirms.
+Declare `"capabilities":["agent"]` and `"agent":{"tools":[]}` in the schema-2
+manifest when the App needs model understanding or Agent execution. Use the
+host-injected `window.localApp.agent` and the official AG-UI 1.0 message/event
+contract, backed by the bundled official SDK 1.0.3. Never embed a provider key,
+reuse the creating conversation, or expose a Remote Control chat endpoint.
 
-## Bigger apps
+For an independent request, construct one standard user message and fresh run
+and thread IDs. The File helper creates the standard image/document content part:
 
-When the user wants a framework, a game engine, 3D graphics or a build step, and the `local-app-builder` plugin is installed, use its `create-local-app` skill instead. It builds a single-file app on a computer and publishes it through this same tool.
+```js
+const content = [{type: "text", text: "Describe the selected file."}];
+if (file) content.push(await localApp.agent.file(file));
+const {result, newMessages} = await localApp.agent.run({
+  protocolVersion: "1.0",
+  threadId: crypto.randomUUID(),
+  runId: crypto.randomUUID(),
+  messages: [{id: crypto.randomUUID(), role: "user", content}],
+  forwardedProps: {
+    "com.lingxi.localApp": {version: 1, outputSchema: applicationSchema}
+  }
+});
+```
+
+`agent.run` and Chat `send` use the official client and return official
+`RunAgentResult` (`result`, `newMessages`) only after successful completion.
+They reject failed, cancelled, interrupted or truncated runs. Display a validated
+structured `result`; do not extract JSON from Markdown. Read model text from
+standard messages and render it as text rather than executable markup.
+
+For streaming interfaces use `agent.createClient()` (an official `AbstractAgent`
+subclass), `addMessage`, `runAgent` and official subscriber callbacks. Raw
+`runAgent` follows official SDK semantics: inspect `onRunErrorEvent` and the
+normalized `onRunFinishedEvent({outcome})` rather than treating Promise settlement
+alone as success. `abortRun` requests cancellation; a terminal cancelled outcome
+confirms it. A new independent request needs a fresh client/thread and exactly
+one user message. For multiple turns create/open an App Chat, use its handle ID
+as `threadId`, and send a fresh `runId` for each turn. Chat history is paged as
+`{messages: Message[], nextCursor?}`. The host owns the real Harness transcript;
+client-provided history must match canonical messages.
+
+For durable recovery use `tasks.start` with the same official input, then
+`tasks.get/list/events/subscribe/cancel`. Task metadata includes `threadId` and
+`runId`. Persist those IDs, then reconnect read-only with
+`createClient({threadId}).connectAgent({runId})`; a reload never submits another
+model request. Identical input with the same `runId` is idempotent; changed input
+under that ID is rejected. Do not use the retired prompt/attachments/requestId
+or custom state-event protocol. Old Agent records are discarded, not converted.
+
+The creating chat can call `LocalApp({"action":"agent_catalog"})` to discover
+exact public tool IDs. Discovery grants nothing. Declare tool and Skill IDs in
+the release, get native grants, then request them only in
+`forwardedProps["com.lingxi.localApp"]` (`version:1`, optional `tools`, `skills`,
+`outputSchema`, `maxTurns`, `timeoutMs`). Standard top-level AG-UI frontend tools
+cannot grant host tools. The current host profile rejects unsupported frontend
+tools, state, context and resume features explicitly. Pages cannot approve tools
+or questions. MCP grants bind the exact connection, configuration revision, raw
+tool name and definition; Skills add instructions, not execution permission.
+
+Use standard browser File/camera selection with user confirmation before model
+submission. Files are limited to eight per new message, 25 MiB each and 50 MiB
+total; bytes and model support are checked by the host. Supported inputs are
+validated images, PDF and UTF-8 text/document formats. Audio/video, remote URL
+sources, provider file handles and arbitrary binary input are unsupported. Do
+not supply native paths or manually encode the File. Preserve the draft on photo
+return and release camera tracks when done.
+
+Mobile pages open in the operating system's resolved external browser, including
+OEM/third-party browsers. Do not choose a browser package or embed WebView.
+Android uses its user-visible foreground runtime. iOS26 uses an explicit native
+foreground handoff and a finite continued-processing lease; iOS27 user-invoked
+Intents require complete standard input. The SDK handles handoff/recovery; App
+code keeps the standard run contract. No path promises indefinite execution or
+automatic replay. Stop/revocation/release replacement cancel work; default limits
+are one active task per App, 20 turns and ten minutes, and an App may only lower
+native limits. Background Agent permission is separate from process permission.
+
+Use the current Local App Builder examples for one-shot file understanding and
+persistent attachment Chat. Keep business validation and explicit user save
+confirmation in the App. Verify actual configured model, errors, File contents,
+refresh, cancellation, Chat cold resume and saved data. Builds, mock outputs and
+standalone browser rendering are not real-provider or physical-device evidence.
+
+## Updates and data
+
+- Find an app with `list`, then `read` its source metadata and latest revision. Edit the source project and update the same ID with `expectedRevision`; never overwrite concurrent work silently.
+- Version switches preserve app data and may require new execution/capability consent. New code does not receive permissions from a saved model preference alone.
+- Keep data formats backward readable. A changed filesystem `dataSchema` requires the host's verified backup/migration transaction; do not erase data or bypass a migration refusal.
+- Use localStorage/IndexedDB for browser records, validate loaded data, report failed saves, and provide export/import for important records. Installation, publication and execution are different lifecycle steps.
+
+## Interface and verification
+
+Use local assets by default; AI/network features must honestly report their connectivity requirements. Support 320 px screens, safe areas, 44 px touch targets, light/dark preference and keyboard accessibility. Label controls and use adequate contrast. Use the Local App Builder plugin for frameworks or larger projects, retaining this schema-2 and host authorization contract. Test reload/storage, denial, cancellation and error recovery as well as the main flow.

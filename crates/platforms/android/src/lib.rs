@@ -46,6 +46,8 @@ use std::sync::Arc;
 /// P12); `app_files_root` is the app-private files directory the filesystem is
 /// confined to.
 pub struct AndroidPlatformInputs {
+    /// Authoritative Linux account and guest-path profile.
+    pub brand_profile: mobile_linux_api::BrandRuntimeProfile,
     /// The app's writable private files-dir root.
     pub app_files_root: PathBuf,
     /// Native camera (Kotlin impl).
@@ -83,7 +85,7 @@ pub struct AndroidPlatformInputs {
     /// Host workspace root exposed to the mobile-linux guest. Defaults to
     /// `<app_files_root>/workspaces/default` when unset.
     pub mobile_linux_workspace_root: Option<PathBuf>,
-    /// Stable workspace identifier for the guest path `/home/lingxi/lingxi/<id>`.
+    /// Stable workspace identifier appended under the selected brand workspace root.
     pub mobile_linux_workspace_id: Option<String>,
     /// Managed rootfs directory reserved for the runtime implementation.
     pub mobile_linux_managed_root: Option<PathBuf>,
@@ -127,7 +129,8 @@ impl AndroidPlatform {
             .mobile_linux_workspace_id
             .clone()
             .unwrap_or_else(|| "default".to_string());
-        let mounts = default_mobile_linux_mounts(&workspace_root, &workspace_id);
+        let mounts =
+            default_mobile_linux_mounts(&workspace_root, &workspace_id, &inputs.brand_profile);
         let canonical_workspace_root = std::fs::canonicalize(&workspace_root).ok();
         let guest_workspace_path = &mounts[0].guest_path;
         let mount_is_configured = inputs.mobile_linux.current_mounts().iter().any(|mount| {
@@ -136,9 +139,16 @@ impl AndroidPlatform {
                 && !mount.read_only
         });
         let sandbox_result = if mount_is_configured
-            && workspace_root_is_allowed(&mounts[0], inputs.mobile_linux_managed_root.as_deref())
-        {
-            MobileLinuxSandbox::new(inputs.mobile_linux.clone(), mounts)
+            && workspace_root_is_allowed(
+                &mounts[0],
+                inputs.mobile_linux_managed_root.as_deref(),
+                &inputs.brand_profile,
+            ) {
+            MobileLinuxSandbox::new(
+                inputs.mobile_linux.clone(),
+                mounts,
+                inputs.brand_profile.clone(),
+            )
         } else {
             Err(SandboxError::Unavailable(
                 "invalid mobile-linux workspace mount configuration".to_string(),
@@ -156,8 +166,12 @@ impl AndroidPlatform {
                             "unknown",
                             format!("mobile-linux shell unavailable: {error}"),
                         ));
-                    let sandbox = MobileLinuxSandbox::new(runtime.clone(), Vec::new())
-                        .expect("empty mobile-linux mount set must be valid");
+                    let sandbox = MobileLinuxSandbox::new(
+                        runtime.clone(),
+                        Vec::new(),
+                        inputs.brand_profile.clone(),
+                    )
+                    .expect("empty mobile-linux mount set must be valid");
                     (runtime, Arc::new(sandbox))
                 }
             };
@@ -193,11 +207,12 @@ impl AndroidPlatform {
 fn default_mobile_linux_mounts(
     workspace_root: &std::path::Path,
     workspace_id: &str,
+    profile: &mobile_linux_api::BrandRuntimeProfile,
 ) -> Vec<MountSpec> {
     let workspace_id = sanitize_workspace_id(workspace_id);
     vec![MountSpec {
         host_path: workspace_root.to_path_buf(),
-        guest_path: mobile_linux_api::guest_paths::workspace(&workspace_id),
+        guest_path: mobile_linux_api::guest_paths::workspace_for_profile(profile, &workspace_id),
         read_only: false,
         purpose: MountPurpose::Workspace,
     }]
@@ -215,10 +230,20 @@ fn sanitize_workspace_id(input: &str) -> String {
     }
 }
 
-fn workspace_root_is_allowed(mount: &MountSpec, managed_root: Option<&std::path::Path>) -> bool {
+fn workspace_root_is_allowed(
+    mount: &MountSpec,
+    managed_root: Option<&std::path::Path>,
+    profile: &mobile_linux_api::BrandRuntimeProfile,
+) -> bool {
     let workspace_root = &mount.host_path;
     let text = workspace_root.to_string_lossy().to_ascii_lowercase();
-    if text.contains("/.lingxi")
+    let contains_selected_config_directory = workspace_root.components().any(|component| {
+        component
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&profile.config_dir_name)
+    });
+    if contains_selected_config_directory
         || text.contains("keystore")
         || text.contains("credential")
         || text.contains("secret")
@@ -229,7 +254,7 @@ fn workspace_root_is_allowed(mount: &MountSpec, managed_root: Option<&std::path:
     if let Some(managed_root) = managed_root {
         // The runtime user home lives under managed_root. Permit only its exact
         // guest/host workspace twin, using the same canonical policy as the SDK.
-        if mobile_linux_core::is_persistent_user_workspace(managed_root, mount) {
+        if mobile_linux_core::is_persistent_user_workspace(managed_root, profile, mount) {
             return true;
         }
         let workspace_root = workspace_root
@@ -375,6 +400,7 @@ mod tests {
 
     fn inputs() -> AndroidPlatformInputs {
         AndroidPlatformInputs {
+            brand_profile: mobile_linux_api::BrandRuntimeProfile::default(),
             app_files_root: std::env::temp_dir(),
             camera: Arc::new(NoCam),
             audio: Arc::new(NoAudio),
@@ -442,11 +468,16 @@ mod tests {
         let workspace =
             mobile_linux_api::guest_paths::workspace_host_path(&managed, &guest).unwrap();
         std::fs::create_dir_all(&workspace).unwrap();
-        let mount = default_mobile_linux_mounts(&workspace, "projects").remove(0);
-        assert!(workspace_root_is_allowed(&mount, Some(&managed)));
+        let profile = mobile_linux_api::BrandRuntimeProfile::default();
+        let mount = default_mobile_linux_mounts(&workspace, "projects", &profile).remove(0);
+        assert!(workspace_root_is_allowed(&mount, Some(&managed), &profile));
         let mut mismatched = mount.clone();
         mismatched.guest_path = mobile_linux_api::guest_paths::workspace("other");
-        assert!(!workspace_root_is_allowed(&mismatched, Some(&managed)));
+        assert!(!workspace_root_is_allowed(
+            &mismatched,
+            Some(&managed),
+            &profile
+        ));
         for protected in [
             managed.clone(),
             temp.path().to_path_buf(),
@@ -454,13 +485,28 @@ mod tests {
             managed.join("persistent/lingxi/.lingxi"),
         ] {
             std::fs::create_dir_all(&protected).unwrap();
-            let protected_mount = default_mobile_linux_mounts(&protected, "projects").remove(0);
+            let protected_mount =
+                default_mobile_linux_mounts(&protected, "projects", &profile).remove(0);
             assert!(
-                !workspace_root_is_allowed(&protected_mount, Some(&managed)),
+                !workspace_root_is_allowed(&protected_mount, Some(&managed), &profile),
                 "{}",
                 protected.display()
             );
         }
+    }
+
+    #[test]
+    fn workspace_root_rejects_the_selected_brand_config_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let profile = mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
+        let private_config = temp
+            .path()
+            .join("persistent/atlas_guest")
+            .join(&profile.config_dir_name)
+            .join("settings.json");
+        let mount = default_mobile_linux_mounts(&private_config, "projects", &profile).remove(0);
+
+        assert!(!workspace_root_is_allowed(&mount, None, &profile));
     }
 
     #[cfg(unix)]
@@ -475,8 +521,9 @@ mod tests {
         let rootfs = managed.join("alpine-rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
         std::os::unix::fs::symlink(&rootfs, &workspace).unwrap();
-        let mount = default_mobile_linux_mounts(&workspace, "projects").remove(0);
-        assert!(!workspace_root_is_allowed(&mount, Some(&managed)));
+        let profile = mobile_linux_api::BrandRuntimeProfile::default();
+        let mount = default_mobile_linux_mounts(&workspace, "projects", &profile).remove(0);
+        assert!(!workspace_root_is_allowed(&mount, Some(&managed), &profile));
     }
 
     #[tokio::test]
@@ -495,10 +542,15 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("app sandbox");
         let managed_root = temp.path().join("mobile-linux/android-proot");
+        let brand_profile =
+            mobile_linux_api::BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
+        let guest_workspace_path =
+            mobile_linux_api::guest_paths::workspace_for_profile(&brand_profile, "default");
         let workspace = if persistent {
-            mobile_linux_api::guest_paths::workspace_host_path(
+            mobile_linux_api::guest_paths::workspace_host_path_for_profile(
                 &managed_root,
-                &mobile_linux_api::guest_paths::workspace("default"),
+                &brand_profile,
+                &guest_workspace_path,
             )
             .expect("persistent workspace")
         } else {
@@ -508,6 +560,7 @@ mod tests {
         let workspace = std::fs::canonicalize(workspace).expect("canonical workspace");
         let runtime: Arc<dyn MobileLinuxRuntime> =
             Arc::new(AndroidProotRuntime::new(AndroidProotRuntimeConfig {
+                brand_profile: brand_profile.clone(),
                 managed_root: managed_root.clone(),
                 app_sandbox_root: temp.path().to_path_buf(),
                 abi: "arm64-v8a".into(),
@@ -515,10 +568,15 @@ mod tests {
                 archive_sha256: None,
             }));
         runtime
-            .configure_mounts(default_mobile_linux_mounts(&workspace, "default"))
+            .configure_mounts(default_mobile_linux_mounts(
+                &workspace,
+                "default",
+                &brand_profile,
+            ))
             .await
             .expect("configure workspace mount");
         let mut android_inputs = inputs();
+        android_inputs.brand_profile = brand_profile;
         android_inputs.app_files_root = temp.path().to_path_buf();
         android_inputs.mobile_linux = runtime;
         android_inputs.mobile_linux_workspace_root = Some(workspace.clone());
@@ -527,7 +585,10 @@ mod tests {
 
         platform
             .filesystem()
-            .write_file("/home/lingxi/lingxi/default/probe.txt", "from guest path")
+            .write_file(
+                &format!("{guest_workspace_path}/probe.txt"),
+                "from guest path",
+            )
             .await
             .expect("guest file path resolves into workspace");
         assert_eq!(

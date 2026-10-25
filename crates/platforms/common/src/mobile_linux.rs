@@ -8,10 +8,10 @@ use lingxi_core::host::{
     SandboxError, SandboxFeatures, SandboxPolicy, SandboxedCommand, SandboxedTag,
 };
 use mobile_linux_api::{
-    LinuxCommandRequest, LinuxProcessHandle, MobileLinuxError, MobileLinuxRuntime,
-    MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskStatus, MountSpec, ProcessError,
-    ProcessOutput, ProcessStreamSink, RawStdioOpenRequest, RawStdioReadResult,
-    RawStdioSessionHandle, SandboxBackend,
+    BrandRuntimeProfile, LinuxCommandRequest, LinuxProcessHandle, MobileLinuxError,
+    MobileLinuxRuntime, MobileLinuxRuntimeMode, MobileLinuxSandboxPlan, MobileLinuxTaskStatus,
+    MountSpec, ProcessError, ProcessOutput, ProcessStreamSink, RawStdioOpenRequest,
+    RawStdioReadResult, RawStdioSessionHandle, SandboxBackend,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -21,13 +21,6 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 pub use mobile_linux_core::*;
-const ALLOWED_WRITABLE_GUEST_PATHS: &[&str] = &[
-    mobile_linux_api::guest_paths::HOME,
-    mobile_linux_api::guest_paths::ADMIN_HOME,
-    mobile_linux_api::guest_paths::SCRATCH[0],
-    mobile_linux_api::guest_paths::SCRATCH[1],
-    mobile_linux_api::guest_paths::WORKSPACE_ROOT,
-];
 
 fn to_sandbox_error(error: MobileLinuxError) -> SandboxError {
     match error {
@@ -204,6 +197,7 @@ fn build_linux_request(
     cmd: &ProcessCommand,
     policy: &SandboxPolicy,
     mounts: &[MountSpec],
+    writable_guest_roots: &[String],
 ) -> Result<LinuxCommandRequest, MobileLinuxError> {
     if cmd.command.trim().is_empty() {
         return Err(MobileLinuxError::InvalidRequest(
@@ -225,7 +219,7 @@ fn build_linux_request(
                 path.display()
             )));
         }
-        if !ALLOWED_WRITABLE_GUEST_PATHS
+        if !writable_guest_roots
             .iter()
             .any(|allowed| path_is_within_guest_path(&guest_path, allowed))
         {
@@ -253,7 +247,7 @@ fn build_linux_request(
         cwd: cmd
             .cwd
             .as_ref()
-            .map(|cwd| map_cwd_to_guest(cwd, mounts))
+            .map(|cwd| map_cwd_to_guest(cwd, mounts, writable_guest_roots))
             .transpose()?,
         env: cmd
             .env
@@ -291,14 +285,18 @@ fn map_command_or_cwd_to_guest(
     }
 }
 
-fn map_cwd_to_guest(value: &Path, mounts: &[MountSpec]) -> Result<String, MobileLinuxError> {
+fn map_cwd_to_guest(
+    value: &Path,
+    mounts: &[MountSpec],
+    writable_guest_roots: &[String],
+) -> Result<String, MobileLinuxError> {
     match map_host_path_to_guest(value, mounts) {
         Ok((_, guest)) => Ok(guest),
         Err(_) => {
             let value = value.to_string_lossy().into_owned();
             validate_guest_path(&value)
                 .map_err(|err| MobileLinuxError::InvalidRequest(err.to_string()))?;
-            if ALLOWED_WRITABLE_GUEST_PATHS
+            if writable_guest_roots
                 .iter()
                 .any(|allowed| path_is_within_guest_path(&value, allowed))
             {
@@ -425,6 +423,7 @@ pub struct MobileLinuxSandbox {
     backend: SandboxBackend,
     mode: MobileLinuxRuntimeMode,
     mounts: Vec<MountSpec>,
+    writable_guest_roots: Vec<String>,
 }
 
 impl std::fmt::Debug for MobileLinuxSandbox {
@@ -441,6 +440,7 @@ impl MobileLinuxSandbox {
     pub fn new(
         runtime: Arc<dyn MobileLinuxRuntime>,
         mounts: Vec<MountSpec>,
+        profile: BrandRuntimeProfile,
     ) -> Result<Self, SandboxError> {
         let backend = runtime.backend();
         if !matches!(
@@ -457,6 +457,9 @@ impl MobileLinuxSandbox {
             runtime,
             backend,
             mounts: normalized_mounts,
+            writable_guest_roots: mobile_linux_api::guest_paths::writable_roots_for_profile(
+                &profile,
+            ),
         })
     }
 }
@@ -480,7 +483,8 @@ impl Sandbox for MobileLinuxSandbox {
         cmd: ProcessCommand,
         policy: &SandboxPolicy,
     ) -> Result<SandboxedCommand, SandboxError> {
-        let request = build_linux_request(&cmd, policy, &self.mounts).map_err(to_sandbox_error)?;
+        let request = build_linux_request(&cmd, policy, &self.mounts, &self.writable_guest_roots)
+            .map_err(to_sandbox_error)?;
         let plan = MobileLinuxSandboxPlan {
             backend: self.backend,
             mode: self.mode,
@@ -1420,6 +1424,10 @@ mod tests {
         }
     }
 
+    fn test_profile() -> BrandRuntimeProfile {
+        BrandRuntimeProfile::default()
+    }
+
     fn foreground_fixture(
         runtime: Arc<MockRuntime>,
         stdin: Option<String>,
@@ -1427,7 +1435,8 @@ mod tests {
         owner: &str,
     ) -> (MobileLinuxProcessRunner, SandboxedCommand) {
         let runtime_trait: Arc<dyn MobileLinuxRuntime> = runtime.clone();
-        let sandbox = MobileLinuxSandbox::new(runtime_trait.clone(), Vec::new()).expect("sandbox");
+        let sandbox = MobileLinuxSandbox::new(runtime_trait.clone(), Vec::new(), test_profile())
+            .expect("sandbox");
         let command = ProcessCommand {
             command: "/bin/sh".into(),
             args: vec!["-c".into(), "printf safe".into(), "arg with spaces".into()],
@@ -1542,11 +1551,13 @@ mod tests {
                 .await,
             Err(ProcessError::Unsupported)
         ));
-        assert!(runtime
-            .raw_stdio_requests
-            .lock()
-            .expect("raw requests")
-            .is_empty());
+        assert!(
+            runtime
+                .raw_stdio_requests
+                .lock()
+                .expect("raw requests")
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1585,7 +1596,8 @@ mod tests {
         fs::create_dir_all(temp.path().join("readonly")).expect("readonly");
         let runtime: Arc<dyn MobileLinuxRuntime> =
             Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
-        let sandbox = MobileLinuxSandbox::new(runtime, sample_mounts(&temp)).expect("sandbox");
+        let sandbox = MobileLinuxSandbox::new(runtime, sample_mounts(&temp), test_profile())
+            .expect("sandbox");
 
         let cmd = sample_command(&temp);
         let prepared = sandbox
@@ -1609,11 +1621,85 @@ mod tests {
         assert_eq!(plan.request.mounts.len(), 2);
     }
 
+    #[test]
+    fn mobile_linux_sandbox_uses_selected_profile_for_project_source_writes_and_cwd() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let profile = BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
+        let home = temp.path().join("persistent/atlas_guest");
+        let workspace = home.join("atlas/projects");
+        let source = home.join(".atlas/.apps/calorie-a1b2c3d4/source");
+        fs::create_dir_all(&workspace).expect("primary workspace");
+        fs::create_dir_all(&source).expect("Project source");
+        let mounts = vec![
+            MountSpec {
+                host_path: workspace,
+                guest_path: mobile_linux_api::guest_paths::workspace_for_profile(
+                    &profile, "projects",
+                ),
+                read_only: false,
+                purpose: mobile_linux_api::MountPurpose::Workspace,
+            },
+            MountSpec {
+                host_path: source.clone(),
+                guest_path: profile
+                    .apps_guest_path()
+                    .join("calorie-a1b2c3d4/source")
+                    .to_string_lossy()
+                    .into_owned(),
+                read_only: false,
+                purpose: mobile_linux_api::MountPurpose::External,
+            },
+        ];
+        let runtime: Arc<dyn MobileLinuxRuntime> =
+            Arc::new(MockRuntime::new(SandboxBackend::IosIsh));
+        let sandbox = MobileLinuxSandbox::new(runtime, mounts, profile).expect("sandbox");
+        let policy = SandboxPolicy {
+            network: mobile_linux_api::NetworkPolicy::Disabled,
+            writable_paths: vec![source.clone()],
+            denied_paths: Vec::new(),
+            allow_subprocess: true,
+            limits: ResourceLimits::default(),
+        };
+        let command = ProcessCommand {
+            command: "/bin/sh".into(),
+            args: Vec::new(),
+            cwd: Some(source),
+            env: HashMap::new(),
+            timeout: None,
+            stdin: None,
+        };
+
+        let prepared = sandbox
+            .prepare(command.clone(), &policy)
+            .expect("selected-profile source is writable and host-backed");
+        let plan = prepared
+            .backend_plan()
+            .expect("backend plan")
+            .downcast::<MobileLinuxSandboxPlan>()
+            .expect("plan type");
+        assert_eq!(
+            plan.request.cwd.as_deref(),
+            Some("/home/atlas_guest/.atlas/.apps/calorie-a1b2c3d4/source")
+        );
+
+        let foreign_account_command = ProcessCommand {
+            cwd: Some(PathBuf::from(
+                "/home/lingxi/.lingxi/.apps/calorie-a1b2c3d4/source",
+            )),
+            ..command
+        };
+        let error = sandbox
+            .prepare(foreign_account_command, &policy)
+            .expect_err("the default account guest path must not pass Atlas policy");
+        assert!(matches!(error, SandboxError::Unavailable(_)));
+    }
+
     #[tokio::test]
     async fn mobile_linux_sandbox_probe_does_not_overclaim_enforcement() {
         let runtime: Arc<dyn MobileLinuxRuntime> =
             Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
-        let sandbox = MobileLinuxSandbox::new(runtime, Vec::new()).expect("sandbox");
+        let sandbox =
+            MobileLinuxSandbox::new(runtime, Vec::new(), test_profile()).expect("sandbox");
 
         let capability = sandbox.probe_capability().await;
         assert!(capability.available);
@@ -1630,7 +1716,8 @@ mod tests {
         fs::create_dir_all(temp.path().join("readonly")).expect("readonly");
         let runtime: Arc<dyn MobileLinuxRuntime> =
             Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
-        let sandbox = MobileLinuxSandbox::new(runtime, sample_mounts(&temp)).expect("sandbox");
+        let sandbox = MobileLinuxSandbox::new(runtime, sample_mounts(&temp), test_profile())
+            .expect("sandbox");
         let mut policy = sample_policy(&temp);
         policy.denied_paths = vec![temp.path().join("workspace/private")];
 
@@ -1647,7 +1734,8 @@ mod tests {
         fs::create_dir_all(temp.path().join("readonly")).expect("readonly");
         let runtime: Arc<dyn MobileLinuxRuntime> =
             Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
-        let sandbox = MobileLinuxSandbox::new(runtime, sample_mounts(&temp)).expect("sandbox");
+        let sandbox = MobileLinuxSandbox::new(runtime, sample_mounts(&temp), test_profile())
+            .expect("sandbox");
         let mut policy = sample_policy(&temp);
         policy.writable_paths = vec![temp.path().join("readonly")];
 
@@ -1665,7 +1753,8 @@ mod tests {
         fs::create_dir_all(temp.path().join("outside")).expect("outside");
         let runtime: Arc<dyn MobileLinuxRuntime> =
             Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
-        let sandbox = MobileLinuxSandbox::new(runtime, sample_mounts(&temp)).expect("sandbox");
+        let sandbox = MobileLinuxSandbox::new(runtime, sample_mounts(&temp), test_profile())
+            .expect("sandbox");
         let mut cmd = sample_command(&temp);
         // Linux tempdirs live under /tmp, which is also an explicitly allowed
         // guest cwd. Use an unmapped path outside every allowed guest root.
@@ -1689,7 +1778,7 @@ mod tests {
             read_only: true,
             purpose: mobile_linux_api::MountPurpose::Shared,
         }];
-        let error = MobileLinuxSandbox::new(runtime.clone(), sensitive)
+        let error = MobileLinuxSandbox::new(runtime.clone(), sensitive, test_profile())
             .expect_err("sensitive path must be rejected");
         assert!(matches!(error, SandboxError::Unavailable(_)));
 
@@ -1709,7 +1798,7 @@ mod tests {
                 purpose: mobile_linux_api::MountPurpose::Shared,
             },
         ];
-        let error = MobileLinuxSandbox::new(runtime.clone(), overlapping)
+        let error = MobileLinuxSandbox::new(runtime.clone(), overlapping, test_profile())
             .expect_err("overlapping guest targets must be rejected");
         assert!(matches!(error, SandboxError::Unavailable(_)));
 
@@ -1720,7 +1809,7 @@ mod tests {
             read_only: false,
             purpose: mobile_linux_api::MountPurpose::External,
         }];
-        MobileLinuxSandbox::new(runtime, external_rw)
+        MobileLinuxSandbox::new(runtime, external_rw, test_profile())
             .expect("explicit host-approved external write mount should be accepted");
     }
 
@@ -1747,7 +1836,7 @@ mod tests {
             },
         ];
         assert!(matches!(
-            MobileLinuxSandbox::new(runtime.clone(), aliases),
+            MobileLinuxSandbox::new(runtime.clone(), aliases, test_profile()),
             Err(SandboxError::Unavailable(_))
         ));
 
@@ -1766,7 +1855,7 @@ mod tests {
             },
         ];
         assert!(matches!(
-            MobileLinuxSandbox::new(runtime, nested_alias),
+            MobileLinuxSandbox::new(runtime, nested_alias, test_profile()),
             Err(SandboxError::Unavailable(_))
         ));
     }
@@ -1790,7 +1879,7 @@ mod tests {
             purpose: mobile_linux_api::MountPurpose::Workspace,
         }];
 
-        let error = MobileLinuxSandbox::new(runtime, mounts)
+        let error = MobileLinuxSandbox::new(runtime, mounts, test_profile())
             .expect_err("symlinked mount root must be rejected");
         assert!(matches!(error, SandboxError::Unavailable(_)));
     }
@@ -1802,7 +1891,8 @@ mod tests {
         fs::create_dir_all(temp.path().join("readonly")).unwrap();
         let runtime = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
         runtime.raw_stdio_never_close.store(true, Ordering::Release);
-        let sandbox = MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp)).unwrap();
+        let sandbox =
+            MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp), test_profile()).unwrap();
         let mut request = sample_command(&temp);
         request.stdin = None;
         request.args = vec!["-c".into(), "pwd".into()];
@@ -1854,7 +1944,8 @@ mod tests {
         let runtime_impl = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
         let runtime: Arc<dyn MobileLinuxRuntime> = runtime_impl.clone();
         let sandbox =
-            MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp)).expect("sandbox");
+            MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp), test_profile())
+                .expect("sandbox");
         let prepared = sandbox
             .prepare(sample_command(&temp), &sample_policy(&temp))
             .expect("prepare");
@@ -1888,7 +1979,8 @@ mod tests {
         let runtime_impl = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
         let runtime: Arc<dyn MobileLinuxRuntime> = runtime_impl.clone();
         let sandbox =
-            MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp)).expect("sandbox");
+            MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp), test_profile())
+                .expect("sandbox");
         let prepared = sandbox
             .prepare(sample_command(&temp), &sample_policy(&temp))
             .expect("prepare");
@@ -1920,9 +2012,11 @@ mod tests {
             .kill(&foreign)
             .await
             .expect_err("unknown handles must fail closed");
-        assert!(error
-            .to_string()
-            .contains("unknown background process handle"));
+        assert!(
+            error
+                .to_string()
+                .contains("unknown background process handle")
+        );
         assert!(runtime_impl.killed.lock().expect("kill mutex").is_empty());
     }
 
@@ -1934,7 +2028,8 @@ mod tests {
         let runtime_impl = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
         let runtime: Arc<dyn MobileLinuxRuntime> = runtime_impl.clone();
         let sandbox =
-            MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp)).expect("sandbox");
+            MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp), test_profile())
+                .expect("sandbox");
         let prepared = sandbox
             .prepare(sample_command(&temp), &sample_policy(&temp))
             .expect("prepare");
@@ -1969,7 +2064,8 @@ mod tests {
         let runtime_impl = Arc::new(MockRuntime::new(SandboxBackend::AndroidProot));
         let runtime: Arc<dyn MobileLinuxRuntime> = runtime_impl.clone();
         let sandbox =
-            MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp)).expect("sandbox");
+            MobileLinuxSandbox::new(runtime.clone(), sample_mounts(&temp), test_profile())
+                .expect("sandbox");
         let prepared = sandbox
             .prepare(sample_command(&temp), &sample_policy(&temp))
             .expect("prepare");

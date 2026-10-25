@@ -24,6 +24,12 @@ pub use api::{
     ShutdownReport, TurnOutcome,
 };
 pub mod models;
+/// Shared bounded Local App Agent attachment decoding for desktop and mobile.
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+pub mod app_agent_input;
+/// Shared immutable Local App Skill verification and workspace materialization.
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+pub mod app_agent_skills;
 /// Unified audio composition usable without a conversation engine.
 pub use audio_runtime as audio;
 

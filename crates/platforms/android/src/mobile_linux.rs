@@ -3,11 +3,11 @@
 
 use async_trait::async_trait;
 use mobile_linux_api::{
-    LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle, MobileLinuxCapability,
-    MobileLinuxError, MobileLinuxEvent, MobileLinuxRuntime, MobileLinuxRuntimeMode,
-    MobileLinuxTaskSnapshot, MountSpec, ProcessStreamSink, PtyOpenRequest, PtySessionHandle,
-    PtySize, RawStdioOpenRequest, RawStdioReadResult, RawStdioSessionHandle, RootfsStatus,
-    SandboxBackend,
+    BrandRuntimeProfile, LinuxCommandRequest, LinuxCommandResult, LinuxProcessHandle,
+    MobileLinuxCapability, MobileLinuxError, MobileLinuxEvent, MobileLinuxRuntime,
+    MobileLinuxRuntimeMode, MobileLinuxTaskSnapshot, MountSpec, ProcessStreamSink, PtyOpenRequest,
+    PtySessionHandle, PtySize, RawStdioOpenRequest, RawStdioReadResult, RawStdioSessionHandle,
+    RootfsStatus, SandboxBackend,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,6 +17,8 @@ use std::sync::Arc;
 pub struct AndroidProotRuntimeConfig {
     /// App-private managed runtime directory.
     pub managed_root: PathBuf,
+    /// Authoritative product account, guest-path, and config identity.
+    pub brand_profile: BrandRuntimeProfile,
     /// Canonical application sandbox directory.
     pub app_sandbox_root: PathBuf,
     /// Android guest ABI.
@@ -34,7 +36,7 @@ pub struct AndroidProotRuntime {
 }
 
 impl AndroidProotRuntime {
-    /// Construct a runtime with LingXi's existing application layout.
+    /// Construct a runtime with the selected product brand's application layout.
     #[must_use]
     pub fn new(config: AndroidProotRuntimeConfig) -> Self {
         Self::new_with_native_library_dir(config, product_native_library_dir())
@@ -50,6 +52,7 @@ impl AndroidProotRuntime {
             inner: mobile_linux_android::AndroidProotRuntime::new(
                 mobile_linux_android::AndroidProotRuntimeConfig {
                     managed_root: config.managed_root,
+                    brand_profile: config.brand_profile,
                     app_sandbox_root: config.app_sandbox_root,
                     abi: config.abi,
                     rootfs_version: config.rootfs_version,
@@ -258,19 +261,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn product_facade_uses_sdk_runtime_and_preserves_missing_rootfs() {
+    async fn product_facade_forwards_selected_brand_profile_to_sdk_runtime() {
         let directory = tempfile::tempdir().unwrap();
+        let profile = BrandRuntimeProfile::new("atlas", "atlas_guest", ".atlas");
         let runtime = AndroidProotRuntime::new(AndroidProotRuntimeConfig {
             managed_root: directory.path().join("runtime"),
+            brand_profile: profile.clone(),
             app_sandbox_root: directory.path().to_path_buf(),
             abi: "arm64-v8a".into(),
             rootfs_version: "fixture-v1".into(),
             archive_sha256: None,
         });
+        let status = runtime.rootfs_status().await.unwrap();
         assert_eq!(runtime.backend(), SandboxBackend::AndroidProot);
+        assert_eq!(status.state, RootfsState::Missing);
         assert_eq!(
-            runtime.rootfs_status().await.unwrap().state,
-            RootfsState::Missing
+            status.writable_guest_paths,
+            mobile_linux_api::guest_paths::writable_roots_for_profile(&profile)
         );
     }
 }

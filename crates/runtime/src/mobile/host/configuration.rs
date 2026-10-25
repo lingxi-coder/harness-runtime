@@ -20,6 +20,11 @@ use super::MobileEngineError;
 // Mirrors the `DesktopConfig` pattern (harness-runtime::desktop/src/lib.rs:799-846).
 #[derive(Clone)]
 pub struct MobileConfig {
+    /// Product identity for guest paths and the native account directory.
+    /// This is independent of the signed-in provider or Firebase account.
+    pub brand_runtime_profile: mobile_linux_api::BrandRuntimeProfile,
+    /// Private model/tool service bootstrap for Local Apps; never a chat.
+    pub app_agent_host: bool,
     /// Host-scoped official catalog delivery; never inferred from credentials.
     pub startup_catalog: Option<provider_config::startup_catalog::StartupCatalog>,
     /// Host-owned Git root-marker cache shared by cloned configs and every
@@ -128,6 +133,7 @@ impl std::fmt::Debug for MobileConfig {
         // host logging (copies the `DesktopConfig` Debug pattern at
         // harness-runtime::desktop/src/lib.rs:799-846).
         f.debug_struct("MobileConfig")
+            .field("brand_runtime_profile", &self.brand_runtime_profile)
             .field("host_git_root_cache", &"<host-owned cache>")
             .field("build_info", &self.build_info)
             .field("api_base", &self.api_base)
@@ -185,6 +191,8 @@ impl std::fmt::Debug for MobileConfig {
 impl Default for MobileConfig {
     fn default() -> Self {
         Self {
+            brand_runtime_profile: mobile_linux_api::BrandRuntimeProfile::default(),
+            app_agent_host: false,
             startup_catalog: None,
             host_git_root_cache: Arc::new(tool_api::HostGitRootCache::new()),
             build_info: command_api::builtins::BuildInfo::default(),

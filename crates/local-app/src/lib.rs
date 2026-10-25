@@ -19,12 +19,19 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "legacy-document-import")]
 pub mod checks;
+#[cfg(feature = "legacy-document-import")]
 pub mod service;
 pub mod skill;
+#[cfg(feature = "legacy-document-import")]
 pub mod store;
+/// Schema-2, session-independent source applications and host lifecycle API.
+pub mod v2;
 
+#[cfg(feature = "legacy-document-import")]
 pub use service::{HostResponse, LocalAppService, BOOT_PLACEHOLDER};
+#[cfg(feature = "legacy-document-import")]
 pub use store::{
     AppSummary, LocalAppId, LocalAppStore, NewRevision, Published, SourceFormat, StoreError,
     VisualizationOrigin,

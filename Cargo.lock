@@ -162,7 +162,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -173,7 +173,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -219,7 +219,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
  "x11rb",
 ]
 
@@ -1882,7 +1882,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2494,8 +2494,10 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hooks",
+ "httparse",
  "insta",
  "jsonrpc",
+ "jsonschema",
  "lingxi-llm-client",
  "llm-runtime",
  "local-app",
@@ -2858,7 +2860,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -3261,9 +3263,9 @@ dependencies = [
 
 [[package]]
 name = "jsonschema"
-version = "0.46.3"
+version = "0.46.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cbe92a2f8b00686061eab5cdcfd6f382c27f2084456e7be90ae9f0fe4a30552a"
+checksum = "f0a699d3e77675e6aa4bfffe3b907c8b5f7ed3241f9965bffb25475ad4b08d05"
 dependencies = [
  "ahash",
  "bytecount",
@@ -3274,16 +3276,25 @@ dependencies = [
  "getrandom 0.3.4",
  "idna",
  "itoa",
+ "jsonschema-regex",
  "num-cmp",
  "num-traits",
  "percent-encoding",
  "referencing",
  "regex",
- "regex-syntax",
  "serde",
  "serde_json",
  "unicode-general-category",
  "uuid-simd",
+]
+
+[[package]]
+name = "jsonschema-regex"
+version = "0.46.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6dbd1086b01b9349fd4ef9a07433965af64c8ce8159abe633a189e4ff817bd13"
+dependencies = [
+ "regex-syntax",
 ]
 
 [[package]]
@@ -3635,11 +3646,16 @@ dependencies = [
 name = "local-app"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "branding",
  "core",
+ "fs2",
+ "jsonschema",
  "platform-posix",
+ "semver",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -3953,7 +3969,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-android"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9#d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=ae1da3f8efaf4610416ad77ede31f6f1ea3f19e3#ae1da3f8efaf4610416ad77ede31f6f1ea3f19e3"
 dependencies = [
  "async-trait",
  "mobile-linux-api",
@@ -3967,7 +3983,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-api"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9#d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=ae1da3f8efaf4610416ad77ede31f6f1ea3f19e3#ae1da3f8efaf4610416ad77ede31f6f1ea3f19e3"
 dependencies = [
  "async-trait",
  "serde",
@@ -3977,7 +3993,7 @@ dependencies = [
 [[package]]
 name = "mobile-linux-core"
 version = "0.1.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9#d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=ae1da3f8efaf4610416ad77ede31f6f1ea3f19e3#ae1da3f8efaf4610416ad77ede31f6f1ea3f19e3"
 dependencies = [
  "mobile-linux-api",
  "serde",
@@ -4099,7 +4115,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5176,7 +5192,7 @@ dependencies = [
 [[package]]
 name = "platform-pty"
 version = "0.12.0"
-source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9#d96c0b9b40a7d0efbf1e14e333e06b6d641ac6d9"
+source = "git+https://github.com/lingxi-coder/mobile-linux-runtime.git?rev=ae1da3f8efaf4610416ad77ede31f6f1ea3f19e3#ae1da3f8efaf4610416ad77ede31f6f1ea3f19e3"
 dependencies = [
  "anyhow",
  "filedescriptor",
@@ -5591,7 +5607,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -5792,9 +5808,9 @@ dependencies = [
 
 [[package]]
 name = "referencing"
-version = "0.46.3"
+version = "0.46.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e125f10bdcd507598c702daada18c47fe5bfba4d7a9545b015b5d432f7168ca3"
+checksum = "0fbf332a2f81899f6836f22c03da73dae8a664c32e3016b84692c23cddadc95d"
 dependencies = [
  "ahash",
  "fluent-uri 0.4.1",
@@ -5990,7 +6006,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.4.15",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6003,7 +6019,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6616,7 +6632,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7970,7 +7986,7 @@ checksum = "f2f6fb2847f6742cd76af783a2a2c49e9375d0a111c7bef6f71cd9e738c72d6e"
 dependencies = [
  "memoffset",
  "tempfile",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8537,7 +8553,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

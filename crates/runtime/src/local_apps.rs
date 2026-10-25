@@ -4,45 +4,14 @@
 //! (a card under the tool call and an Apps page); CLI and headless leave it
 //! off, so neither the `LocalApp` tool nor the `local-app` skill exists there.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use command_api::{BundledPromptFn, CommandRegistry, CommandSource, SlashCommandKind};
-use lingxi_core::host::FileSystem;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
-use local_app::LocalAppStore;
 
 /// `loaded_from` tag of the registered skill; `/reload-skills` leaves it alone.
 pub const SKILL_LOADED_FROM: &str = "local-app";
-
-/// The one library per config home in this process, so the tool and the host
-/// service share the store's in-process writer serialization.
-pub fn shared_store(fs: Arc<dyn FileSystem>, config_home: &Path) -> Arc<LocalAppStore> {
-    static STORES: OnceLock<Mutex<HashMap<PathBuf, Arc<LocalAppStore>>>> = OnceLock::new();
-    let mut stores = STORES
-        .get_or_init(Mutex::default)
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    stores
-        .entry(config_home.to_path_buf())
-        .or_insert_with(|| Arc::new(LocalAppStore::new(fs, config_home.to_path_buf())))
-        .clone()
-}
-
-/// Register the `LocalApp` tool over `store`.
-pub fn register_tool(
-    registry: &mut tool_api::ToolRegistry,
-    ctx: tool_api::BuiltinToolContext,
-    store: Arc<LocalAppStore>,
-    visualizations: Option<Arc<visualization::VisualizationStore>>,
-) {
-    let mut tool = tool_ui::LocalAppTool::new(ctx, store);
-    if let Some(visualizations) = visualizations {
-        tool = tool.with_visualizations(visualizations);
-    }
-    registry.register_builtin(Arc::new(tool));
-}
 
 struct LocalAppPrompt(Utf16JsonProjection);
 
@@ -74,21 +43,7 @@ pub fn register_skill(
     register_skill_text(
         registry,
         available_tool_names,
-        &local_app::skill::skill_markdown(
-            available_tool_names
-                .iter()
-                .any(|name| name == shell_tool)
-                .then_some(shell_tool),
-        ),
-    );
-}
-
-/// Desktop projects use a different workflow and capability contract.
-pub fn register_desktop_skill(registry: &mut CommandRegistry, available_tool_names: &[String]) {
-    register_skill_text(
-        registry,
-        available_tool_names,
-        include_str!("../assets/desktop-local-app.md"),
+        &include_str!("../assets/desktop-local-app.md").replace("{{SHELL_TOOL}}", shell_tool),
     );
 }
 

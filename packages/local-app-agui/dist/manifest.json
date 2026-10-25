@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "package": {
+    "name": "@lingxi/local-app-agui",
+    "version": "0.1.0"
+  },
+  "source": {
+    "repository": "https://github.com/ag-ui-protocol/ag-ui",
+    "ref": "release/2026-10-16",
+    "commit": "a1131c90709d51d562202b7b6cc0a2a1b48b05fc"
+  },
+  "dependencies": {
+    "@ag-ui/client": "1.0.3",
+    "@ag-ui/core": "1.0.3",
+    "zod": "3.25.76",
+    "esbuild": "0.28.2",
+    "typescript": "5.8.3"
+  },
+  "npmPackages": {
+    "@ag-ui/client": {
+      "version": "1.0.3",
+      "resolved": "https://registry.npmjs.org/@ag-ui/client/-/client-1.0.3.tgz",
+      "integrity": "sha512-pqp6hEiO+gjAKIBSA/g8SzPy17XHZhbKZFK3Q4DhZ7bNLR34xNpPfXogP3bSQrzsKh2hmSc9ZYUutTpe/BQBpw==",
+      "license": "MIT"
+    },
+    "@ag-ui/core": {
+      "version": "1.0.3",
+      "resolved": "https://registry.npmjs.org/@ag-ui/core/-/core-1.0.3.tgz",
+      "integrity": "sha512-HdMdZPOqworKlnzLaNktnbNYgIzOPbzt5ow6J4bPhbmHCdpWpCSZQFgkifQkn1zVHgCK1V+pmKc8xtW6FsQZKA==",
+      "license": "MIT"
+    },
+    "zod": {
+      "version": "3.25.76",
+      "resolved": "https://registry.npmjs.org/zod/-/zod-3.25.76.tgz",
+      "integrity": "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==",
+      "license": "MIT"
+    }
+  },
+  "lockfile": {
+    "path": "package-lock.json",
+    "sha256": "b8f7f50b3ce4f8aeec3ed5ccf50052518db0127b8b677be6aad92646ace8dcad"
+  },
+  "schema": {
+    "path": "spec/ag-ui-1.0.schema.json",
+    "sha256": "4b5c93226838a0e72d88e6c5df20633c686c49fcb75d9be2815c6cbf9e48e71a",
+    "bytes": 94359
+  },
+  "artifacts": {
+    "dist/browser.entry.js": "e5be4af2b4d4786110062c77ca8ad4d84be9d817d8fee22cb3ce59fe55049127",
+    "dist/browser.global.js": "61ad0825f37989b902aa6efd8f4440c01fa1c137b358061d38f4d2fb6daeb73a",
+    "dist/browser.source.js": "b207d7a316ee9cd2c0fdea2a7135cbd16a2f6147ad8ea9fe9f9010a10a8609dc",
+    "dist/client.bundle.js": "fdc48ceeade2fe77eed3376230e86edd5a20545be830891562f0678dabbefc24",
+    "dist/licenses/AG-UI-MIT.txt": "06dcddbb6908a0c6dd4a9e8ec822eea41d5a460a53089fecccc8a68049e99241",
+    "dist/licenses/README.md": "cbc669e18e9d0817b7a13a6f3c6d728bda44609bea5fa391b18983d828c45548",
+    "dist/licenses/THIRD-PARTY-NOTICES.md": "babfc6edb622d2a12e08b66b77e8eea707d0049f18767d7d7c562a6eddbcac9a",
+    "dist/licenses/third-party/ag-ui-client-1.0.3-LICENSE": "06dcddbb6908a0c6dd4a9e8ec822eea41d5a460a53089fecccc8a68049e99241",
+    "dist/licenses/third-party/ag-ui-core-1.0.3-LICENSE": "06dcddbb6908a0c6dd4a9e8ec822eea41d5a460a53089fecccc8a68049e99241",
+    "dist/licenses/third-party/ag-ui-encoder-1.0.3-LICENSE": "06dcddbb6908a0c6dd4a9e8ec822eea41d5a460a53089fecccc8a68049e99241",
+    "dist/licenses/third-party/ag-ui-proto-1.0.3-LICENSE": "06dcddbb6908a0c6dd4a9e8ec822eea41d5a460a53089fecccc8a68049e99241",
+    "dist/licenses/third-party/compare-versions-6.1.1-LICENSE": "4c247e0dce60c6a29332afa80ba7d81243e7045b0e4b6e6e59e21fb5a1a7b5ab",
+    "dist/licenses/third-party/fast-json-patch-3.1.1-LICENSE.txt": "26593d78926902a82eb9bc7e40d1811fc381055f23516b92fe48ca8399bf02df",
+    "dist/licenses/third-party/rxjs-7.8.1-LICENSE.txt": "81c407ac717813b0e3795402960e04003c7bba8ba59b621624707028531c9ade",
+    "dist/licenses/third-party/tslib-2.8.1-LICENSE.txt": "210b19e543130388c68654b7497e967119ce17145f66ab7d85688fbd70f08751",
+    "dist/licenses/third-party/types-uuid-10.0.0-LICENSE": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383",
+    "dist/licenses/third-party/untruncate-json-0.0.1-LICENSE": "815f2dfb530534ef6cf975dd8120ce6f66c414d87e43e85ce62faa40cf591df6",
+    "dist/licenses/third-party/uuid-11.1.1-LICENSE.md": "beaa6b04fb82e41dd2ad679e19e27953afb5999b1abbb455b6564e78ebfeb332",
+    "dist/licenses/third-party/zod-3.25.76-LICENSE": "3f1189b28e3866e0d979968d466b78f813f76827cfdca1fbb124cc0a5c8841f8",
+    "dist/types/browser-source.d.ts": "2b22b78027c8a53718dabd9a16c5e5b979752158532bb69a977d5379a91dc9b1",
+    "dist/types/browser.d.ts": "d68f8ddd482b84c53ba6e576f4ebdd30d6276df808cbc38ab6e76b2e16d0cc7c",
+    "dist/types/client.d.ts": "4da4a88eb66b18bc64e39e4f6afc11829ce0834bcd5aadfc0d77b079ee013a9f",
+    "dist/types/file.d.ts": "305f43d728d03f5e2c03d5715fbbec02c9c004e9a638aa8d4f7df7a55e824407",
+    "dist/types/index.d.ts": "157230411f80a2b68ce9937de0d8861db867989e3cf436773580837d3a65041b",
+    "dist/types/validators.d.ts": "1374b828746dc6edbbf571c86b21760f2c124cda55237f0d9e188d9f6e901763"
+  }
+}

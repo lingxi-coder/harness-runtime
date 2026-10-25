@@ -6,19 +6,29 @@ rust-version.workspace = true
 license.workspace = true
 description = "Built-in local apps: the device's app library, publish-time document checks, the host file service and the `local-app` skill."
 
+[features]
+default = ["legacy-document-import"]
+# Kept while existing callers transition; schema-2 storage has no engine dependency.
+legacy-document-import = ["dep:core", "dep:branding", "dep:tokio", "dep:platform-posix"]
+
 [dependencies]
-core = { path = "../core" }
-branding.workspace = true
+core = { path = "../core", optional = true }
+branding = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync"], optional = true }
 uuid = { version = "1.10", features = ["v4"] }
+sha2 = "0.10"
+base64 = "0.22"
+jsonschema = { version = "=0.46.10", default-features = false }
+fs2 = "0.4"
+semver = "1"
+platform-posix = { path = "../platforms/posix", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-platform-posix = { path = "../platforms/posix" }
 
 [lints]
 workspace = true

@@ -1,0 +1,6 @@
+# These files are hashed or copied verbatim from their upstream publishers.
+dist/** -text
+spec/ag-ui-1.0.schema.json -text
+licenses/** -text
+dist/licenses/** -whitespace
+licenses/** -whitespace

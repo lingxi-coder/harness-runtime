@@ -1,0 +1,61 @@
+{
+  "threadId": "thread-fixture-1",
+  "runId": "run-fixture-1",
+  "protocolVersion": "1.0",
+  "state": {},
+  "messages": [
+    {
+      "id": "message-fixture-1",
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Inspect this image."
+        },
+        {
+          "type": "image",
+          "id": "file-fixture-1",
+          "source": {
+            "type": "data",
+            "value": "iVBORw==",
+            "mimeType": "image/png"
+          },
+          "metadata": {
+            "com.lingxi.localApp": {
+              "version": 1,
+              "filename": "photo.png"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "tools": [],
+  "context": [],
+  "forwardedProps": {
+    "com.lingxi.localApp": {
+      "version": 1,
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "additionalProperties": false
+      },
+      "tools": [
+        "builtin:Read"
+      ],
+      "skills": [
+        "extract-text"
+      ],
+      "maxTurns": 2,
+      "timeoutMs": 15000
+    }
+  },
+  "resume": []
+}

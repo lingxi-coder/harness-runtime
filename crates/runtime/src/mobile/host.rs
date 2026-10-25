@@ -270,6 +270,8 @@ pub struct MobileRuntime {
     pub(crate) plugin_archive_session: Arc<plugin::PluginArchiveSession>,
     /// Ready services used to create RAM-only lightweight conversations.
     pub side_chat_factory: Arc<dyn crate::side_chat::SideChatFactory>,
+    /// Independent Local App tasks over ready native host services.
+    pub app_agent_factory: Arc<super::app_agent::AppAgentFactory>,
     /// Product region captured with the running model client.
     pub provider_region: llm_runtime::Region,
     /// Shared settings baseline used by both the Mod reader and the public
@@ -8995,20 +8997,6 @@ impl MobileEngineHandle {
             self.runtime().handle().clone(),
         )
         .map(Arc::new)
-    }
-
-    /// Local-app host for the Apps page and the app WebViews. It shares this
-    /// engine's app library, so an app the agent publishes is listed and
-    /// served at once.
-    #[must_use]
-    pub fn local_app_host(&self) -> Arc<crate::mobile::local_app_host::LocalAppHost> {
-        Arc::new(
-            crate::mobile::local_app_host::LocalAppHost::for_config_home(
-                self.fs.clone(),
-                &self.lingxi_home,
-                self.runtime().handle().clone(),
-            ),
-        )
     }
 }
 #[cfg(test)]

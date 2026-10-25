@@ -1,6 +1,6 @@
 //! Host wiring for local apps: the `/local-app` skill follows the `LocalApp`
-//! tool, one library per config home, and the mobile UniFFI host lists,
-//! serves and deletes what the agent publishes.
+//! tool, and the independent mobile app service observes what the ordinary
+//! development session publishes without owning that session.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -8,11 +8,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use client::adapter::PermissionRequestSink;
 use command_api::{CommandRegistry, SlashCommandKind};
-use harness_runtime::local_apps::{register_skill, shared_store};
-use harness_runtime::mobile::local_app_host::LocalAppHost;
+use harness_runtime::local_apps::register_skill;
+use harness_runtime::mobile::unified_local_apps::MobileLocalAppServiceHandle;
 use lingxi_core::host::{FileSystem, OrchestratorHandle, Platform};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ToolUseId};
+use serde_json::json;
 
 const VISUALIZATION_FRAGMENT: &str = "<p>assembled-create-app-marker</p>";
 
@@ -46,7 +47,7 @@ fn body(registry: &CommandRegistry) -> Option<Utf16JsonProjection> {
 
 async fn assert_assembled_tool_saves_current_visualization(
     orchestrator: &orchestrator::ConversationOrchestrator,
-    fs: Arc<dyn FileSystem>,
+    _fs: Arc<dyn FileSystem>,
     config_home: &Path,
     desktop: bool,
 ) {
@@ -113,7 +114,7 @@ async fn assert_assembled_tool_saves_current_visualization(
             }
             let input: serde_json::Value =
                 serde_json::from_slice(&buffer[header_end..header_end + length]).unwrap();
-            let body = r#"{"action":"publish","id":"a00000000000000000000","revision":1,"name":"Assembled visualization"}"#;
+            let body = r#"{"action":"publish","id":"a00000000000000000000000000000000","revision":1,"name":"Assembled visualization"}"#;
             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             input
         }))
@@ -157,27 +158,35 @@ async fn assert_assembled_tool_saves_current_visualization(
         return;
     }
 
-    let host_runtime = tokio::runtime::Handle::current();
-    let host_config_home = config_home.to_path_buf();
-    let (apps, served) = tokio::task::spawn_blocking(move || {
-        let host = LocalAppHost::for_config_home(fs, &host_config_home, host_runtime);
-        let apps = host.list();
-        let served = apps
-            .first()
-            .map(|app| host.serve(app.id.clone(), "/".to_owned()));
-        (apps, served)
-    })
-    .await
-    .expect("run synchronous LocalAppHost methods outside the runtime");
-    assert_eq!(apps.len(), 1, "the host should observe the newly saved app");
-    assert_eq!(apps[0].name, "Assembled visualization");
-    let served = served.expect("serve the listed local app");
-    assert_eq!(served.status, 200);
+    // The native app service reads the same durable library without borrowing
+    // an engine runtime or requiring Linux for this static release.
+    let service =
+        MobileLocalAppServiceHandle::new(config_home.into(), None, "android".into()).unwrap();
+    let apps = service.request_value(json!({"op":"list"})).await.unwrap();
+    let apps = apps.as_array().unwrap();
+    assert_eq!(
+        apps.len(),
+        1,
+        "the standalone service sees the published app"
+    );
+    assert_eq!(apps[0]["name"], "Assembled visualization");
+    let app_id = apps[0]["appId"].as_str().unwrap();
+    let release = service
+        .request_value(json!({"op":"getRelease","appId":app_id,"revision":1}))
+        .await
+        .unwrap();
+    assert_eq!(release["manifest"]["schema"], 2);
+    let layout = service
+        .request_value(json!({"op":"layout","appId":app_id}))
+        .await
+        .unwrap();
+    let source = Path::new(layout["sourcePath"].as_str().unwrap()).join("index.html");
+    assert!(std::fs::read_to_string(source)
+        .unwrap()
+        .contains(VISUALIZATION_FRAGMENT));
     assert!(
-        String::from_utf8(served.body)
-            .unwrap()
-            .contains(VISUALIZATION_FRAGMENT),
-        "the published app should contain the source visualization fragment"
+        !config_home.join("local-apps/index.json").exists(),
+        "new publication must not populate the archived chat-document registry"
     );
 }
 
@@ -204,14 +213,14 @@ fn skill_follows_the_tool_and_names_the_host_shell() {
         .unwrap()
         .string_at("")
         .unwrap()
-        .contains("with the `Bash` tool"));
+        .contains("with `Bash`"));
 
     register_skill(&mut registry, &names(&["LocalApp"]), "Shell");
-    assert!(!body(&registry)
+    assert!(body(&registry)
         .unwrap()
         .string_at("")
         .unwrap()
-        .contains("file_path"));
+        .contains("with `Shell`"));
     assert_eq!(
         registry
             .list_all()
@@ -224,69 +233,6 @@ fn skill_follows_the_tool_and_names_the_host_shell() {
 
     register_skill(&mut registry, &names(&["Read"]), "Shell");
     assert!(body(&registry).is_none(), "the skill leaves with the tool");
-}
-
-#[test]
-fn the_mobile_host_lists_serves_and_deletes_the_shared_library() {
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let home = tempfile::tempdir().unwrap();
-    let fs: Arc<dyn FileSystem> = Arc::new(platform_posix::PosixFileSystem::new(
-        home.path().to_path_buf(),
-    ));
-    let store = shared_store(fs.clone(), home.path());
-    assert!(Arc::ptr_eq(&store, &shared_store(fs.clone(), home.path())));
-    assert!(!Arc::ptr_eq(
-        &store,
-        &shared_store(fs.clone(), Path::new("/tmp/other-home"))
-    ));
-
-    let host = LocalAppHost::for_config_home(fs, home.path(), runtime.handle().clone());
-    assert!(host.list().is_empty());
-    let published = runtime
-        .block_on(store.publish(
-            None,
-            Some("Water"),
-            Some("Log glasses"),
-            "<!doctype html><title>Water</title>",
-            7,
-        ))
-        .unwrap();
-    let id = published.id.as_str().to_string();
-
-    let listed = host.list();
-    assert_eq!(listed.len(), 1);
-    assert_eq!(
-        (
-            listed[0].id.as_str(),
-            listed[0].name.as_str(),
-            listed[0].revision
-        ),
-        (id.as_str(), "Water", 1)
-    );
-    assert_eq!(host.get(id.clone()).unwrap().summary, "Log glasses");
-
-    let document = host.serve(id.clone(), "/".into());
-    assert_eq!(
-        (document.status, document.mime_type.as_str()),
-        (200, "text/html")
-    );
-    assert_eq!(document.body, b"<!doctype html><title>Water</title>");
-    assert!(document
-        .headers
-        .iter()
-        .any(|header| header.name == "Content-Security-Policy"
-            && header.value.starts_with("sandbox allow-scripts")));
-    assert_eq!(host.serve(id.clone(), "/app.js".into()).status, 404);
-    assert_eq!(host.serve("NOT-AN-ID".into(), "/".into()).status, 404);
-
-    assert!(host.delete(id.clone()));
-    assert!(!host.delete(id.clone()));
-    assert!(host.get(id.clone()).is_none());
-    assert_eq!(host.serve(id, "/index.html".into()).status, 404);
-    assert!(host.list().is_empty());
 }
 
 #[tokio::test]

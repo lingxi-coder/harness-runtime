@@ -16,6 +16,120 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+/// The brand identity used for a mobile Linux guest account and its writable
+/// directories. This is product identity; it is independent of the signed-in
+/// Firebase or provider account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrandRuntimeProfile {
+    /// Stable, lowercase brand path component (for example, `lingxi`).
+    pub brand_id: &'static str,
+    /// Linux account name and persistent-home directory name.
+    pub linux_user: &'static str,
+    /// Config directory component below the Linux user's home (for example,
+    /// `.lingxi`).
+    pub config_dir_name: &'static str,
+}
+
+impl BrandRuntimeProfile {
+    /// Construct a static profile for a product build or a profile-specific
+    /// test. Path components are validated by the runtime directory resolver.
+    #[must_use]
+    pub const fn new(
+        brand_id: &'static str,
+        linux_user: &'static str,
+        config_dir_name: &'static str,
+    ) -> Self {
+        Self {
+            brand_id,
+            linux_user,
+            config_dir_name,
+        }
+    }
+
+    /// LingXi's stable mobile Linux identity. Keep this in sync with the
+    /// LingXi rootfs account metadata in mobile-linux-runtime.
+    pub const LINGXI: Self = Self::new("lingxi", "lingxi", ".lingxi");
+
+    /// Whether each configured identity is exactly one safe path component.
+    #[must_use]
+    pub fn has_safe_path_components(self) -> bool {
+        fn slug(value: &str, max_len: usize) -> bool {
+            let bytes = value.as_bytes();
+            !bytes.is_empty()
+                && bytes.len() <= max_len
+                && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+                && bytes.iter().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'_' | b'-')
+                })
+        }
+        fn username(value: &str) -> bool {
+            let bytes = value.as_bytes();
+            !bytes.is_empty()
+                && bytes.len() <= 32
+                && (bytes[0].is_ascii_lowercase() || bytes[0] == b'_')
+                && bytes.iter().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                })
+                && value != "root"
+        }
+        let config = self.config_dir_name.as_bytes();
+        slug(self.brand_id, 63)
+            && username(self.linux_user)
+            && config.len() >= 2
+            && config.len() <= 64
+            && config[0] == b'.'
+            && (config[1].is_ascii_lowercase() || config[1].is_ascii_digit())
+            && config[1..].iter().all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'_' | b'-')
+            })
+    }
+
+    /// Guest home for this Linux account.
+    #[must_use]
+    pub fn guest_home(self) -> PathBuf {
+        Path::new("/home").join(self.linux_user)
+    }
+
+    /// Brand-scoped workspace root within the guest home.
+    #[must_use]
+    pub fn workspace_root_guest_path(self) -> PathBuf {
+        self.guest_home().join(self.brand_id)
+    }
+
+    /// Guest config directory within the user's home.
+    #[must_use]
+    pub fn config_guest_path(self) -> PathBuf {
+        self.guest_home().join(self.config_dir_name)
+    }
+
+    /// Stable guest projects directory for this brand.
+    #[must_use]
+    pub fn projects_guest_path(self) -> PathBuf {
+        self.workspace_root_guest_path().join("projects")
+    }
+
+    /// Guest path of the mobile authoring source directory root.
+    #[must_use]
+    pub fn apps_guest_path(self) -> PathBuf {
+        self.config_guest_path().join(".apps")
+    }
+
+    /// Host-side persistent account home below a runtime managed root.
+    #[must_use]
+    pub fn persistent_home_host_path(self, managed_root: &Path) -> PathBuf {
+        managed_root.join("persistent").join(self.linux_user)
+    }
+}
+
+/// Runtime profile selected by the LingXi product build.
+pub const LINGXI_RUNTIME_PROFILE: BrandRuntimeProfile = BrandRuntimeProfile::LINGXI;
+
 /// Canonical branded counterpart of the native effort-level environment.
 pub const EFFORT_LEVEL_ENV: &str = "LINGXI_EFFORT_LEVEL";
 

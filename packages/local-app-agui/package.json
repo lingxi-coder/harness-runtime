@@ -1,0 +1,53 @@
+{
+  "name": "@lingxi/local-app-agui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared Local App adapter for the official AG-UI 1.0 TypeScript SDK",
+  "license": "UNLICENSED",
+  "files": [
+    "dist/",
+    "licenses/",
+    "spec/",
+    "src/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "generate-fixture": "node ./scripts/generate-sdk-fixture.mjs",
+    "test": "node --test ./tests/*.test.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "main": "./dist/client.bundle.js",
+  "types": "./dist/types/index.d.ts",
+  "dependencies": {
+    "@ag-ui/client": "1.0.3",
+    "@ag-ui/core": "1.0.3",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "typescript": "5.8.3"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/client.bundle.js"
+    },
+    "./client": {
+      "types": "./dist/types/client.d.ts",
+      "import": "./dist/client.bundle.js"
+    },
+    "./browser": {
+      "types": "./dist/types/browser.d.ts",
+      "import": "./dist/browser.entry.js"
+    },
+    "./browser/global": "./dist/browser.global.js",
+    "./browser/source": {
+      "types": "./dist/types/browser-source.d.ts",
+      "import": "./dist/browser.source.js"
+    },
+    "./schema": "./spec/ag-ui-1.0.schema.json",
+    "./package.json": "./package.json"
+  }
+}
