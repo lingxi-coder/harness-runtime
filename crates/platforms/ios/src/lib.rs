@@ -142,7 +142,7 @@ impl IosPlatform {
             let runtime = runtime.expect("mobile-linux runtime must exist when selected");
             let (runtime, sandbox): (Arc<dyn MobileLinuxRuntime>, Arc<dyn Sandbox>) =
                 match workspace_mounts.and_then(|mounts| {
-                    MobileLinuxSandbox::new(runtime.clone(), mounts)
+                    MobileLinuxSandbox::new(runtime.clone(), mounts, inputs.brand_profile.clone())
                         .map_err(|error| format!("invalid mobile-linux workspace mounts: {error}"))
                 }) {
                     Ok(sandbox) => (runtime, Arc::new(sandbox)),
@@ -155,8 +155,12 @@ impl IosPlatform {
                                 "arm64",
                                 error,
                             ));
-                        let sandbox = MobileLinuxSandbox::new(unavailable.clone(), Vec::new())
-                            .expect("empty mobile-linux mount set must be valid");
+                        let sandbox = MobileLinuxSandbox::new(
+                            unavailable.clone(),
+                            Vec::new(),
+                            inputs.brand_profile.clone(),
+                        )
+                        .expect("empty mobile-linux mount set must be valid");
                         (unavailable, Arc::new(sandbox))
                     }
                 };
@@ -483,8 +487,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use lingxi_core::host::{
-        CameraError, CapturePhotoOpts, CapturedImage, FsError, ShareError, SharePayload,
-        ShareResult,
+        CameraError, CapturePhotoOpts, CapturedImage, FsError, ProcessCommand, SandboxPolicy,
+        ShareError, SharePayload, ShareResult,
     };
 
     struct StubCamera;
@@ -638,18 +642,63 @@ mod tests {
         assert_eq!(mounts[1].guest_path, app_guest);
         assert_eq!(mounts[1].purpose, MountPurpose::External);
 
+        let runtime: Arc<dyn MobileLinuxRuntime> =
+            Arc::new(UnavailableMobileLinuxRuntime::unavailable(
+                SandboxBackend::IosIsh,
+                MobileLinuxRuntimeMode::MobileLinux,
+                "ios",
+                "arm64",
+                "test stub",
+            ));
+        let sandbox =
+            MobileLinuxSandbox::new(runtime, mounts.clone(), profile.clone()).expect("sandbox");
+        let prepared = sandbox
+            .prepare(
+                ProcessCommand {
+                    command: "/bin/sh".into(),
+                    args: vec!["-lc".into(), "pwd".into()],
+                    cwd: Some(app_host.clone()),
+                    env: Default::default(),
+                    timeout: None,
+                    stdin: None,
+                },
+                &SandboxPolicy {
+                    network: mobile_linux_api::NetworkPolicy::Disabled,
+                    writable_paths: vec![app_host.clone()],
+                    denied_paths: Vec::new(),
+                    allow_subprocess: true,
+                    limits: mobile_linux_api::ResourceLimits::default(),
+                },
+            )
+            .expect("prepare with exact Project mounts");
+        let plan = prepared
+            .backend_plan()
+            .expect("mobile sandbox plan")
+            .downcast::<mobile_linux_api::MobileLinuxSandboxPlan>()
+            .expect("mobile Linux sandbox plan type");
+        assert_eq!(plan.mounts.len(), 2);
+        for mount in &mounts {
+            let mut canonical_mount = mount.clone();
+            canonical_mount.host_path = mount.host_path.canonicalize().expect("canonical mount");
+            assert!(plan.mounts.contains(&canonical_mount));
+        }
+        assert_eq!(plan.request.mounts, plan.mounts);
+        assert_eq!(plan.request.cwd.as_deref(), Some(app_guest));
+
         let wrong_profile =
             mobile_linux_api::BrandRuntimeProfile::new("other", "other_guest", ".other");
-        assert!(append_additional_workspace_mounts(
-            build_mobile_linux_mounts(
-                Some(mounts[0].host_path.clone()),
-                Some("projects".into()),
+        assert!(
+            append_additional_workspace_mounts(
+                build_mobile_linux_mounts(
+                    Some(mounts[0].host_path.clone()),
+                    Some("projects".into()),
+                    &wrong_profile,
+                ),
+                vec![external_mount(app_host, app_guest)],
                 &wrong_profile,
-            ),
-            vec![external_mount(app_host, app_guest)],
-            &wrong_profile,
-        )
-        .is_err());
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -694,12 +743,14 @@ mod tests {
         {
             let alias = home.join(".atlas/.apps/alias");
             std::os::unix::fs::symlink(&app_host, &alias).expect("create app alias symlink");
-            assert!(append_additional_workspace_mounts(
-                primary,
-                vec![external_mount(alias, format!("{apps_guest}/alias"))],
-                &profile,
-            )
-            .is_err());
+            assert!(
+                append_additional_workspace_mounts(
+                    primary,
+                    vec![external_mount(alias, format!("{apps_guest}/alias"))],
+                    &profile,
+                )
+                .is_err()
+            );
         }
     }
 
@@ -718,21 +769,21 @@ mod tests {
         let parent_guest = "/home/atlas_guest/.atlas/.apps/team";
         let nested_guest = "/home/atlas_guest/.atlas/.apps/team/nested";
         let app = external_mount(parent.clone(), parent_guest);
-        assert!(append_additional_workspace_mounts(
-            primary.clone(),
-            vec![app.clone(), app],
-            &profile,
-        )
-        .is_err());
-        assert!(append_additional_workspace_mounts(
-            primary,
-            vec![
-                external_mount(parent, parent_guest),
-                external_mount(nested, nested_guest)
-            ],
-            &profile,
-        )
-        .is_err());
+        assert!(
+            append_additional_workspace_mounts(primary.clone(), vec![app.clone(), app], &profile,)
+                .is_err()
+        );
+        assert!(
+            append_additional_workspace_mounts(
+                primary,
+                vec![
+                    external_mount(parent, parent_guest),
+                    external_mount(nested, nested_guest)
+                ],
+                &profile,
+            )
+            .is_err()
+        );
     }
 
     /// The assembly seam this pins: selecting mobile-linux mode must wrap the

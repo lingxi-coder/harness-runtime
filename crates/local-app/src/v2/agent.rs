@@ -7,7 +7,7 @@ pub use chat_store::{ChatMessageMetadata, ChatStore};
 
 use super::AppError;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -563,6 +563,9 @@ pub fn error_message(code: &str) -> &'static str {
         }
         "model_tools_unsupported" => {
             "The selected model does not support the tools required for this task or structured result."
+        }
+        "model_structured_output_unsupported" => {
+            "The selected model route cannot enforce the requested structured result schema. Choose a model with compatible structured-output support."
         }
         "invalid_images" | "invalid_attachments" => {
             "A file could not be decoded or exceeds the attachment limits. Choose a smaller valid file."

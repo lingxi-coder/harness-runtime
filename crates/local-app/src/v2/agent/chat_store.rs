@@ -1,14 +1,13 @@
 //! Durable App-owned Chat metadata. Transcript text stays in the Harness
 //! session JSONL; this index holds only routing and attachment metadata.
 use super::{
-    invalid,
+    AttachmentMetadata, ChatRole, ChatState, ChatSummary, State, invalid,
     protocol::{self, ProtocolMessageDigest},
-    AttachmentMetadata, ChatRole, ChatState, ChatSummary, State,
 };
 use crate::v2::AppError;
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::Digest;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -60,6 +59,7 @@ struct StoredProtocolMessage {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProtocolHistoryPage {
     pub messages: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 }
 
@@ -1038,6 +1038,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn protocol_history_page_omits_exhausted_cursor_and_retains_next_page_cursor() {
+        let page = ProtocolHistoryPage {
+            messages: vec![serde_json::json!({"id":"m1","role":"user","content":"Hello"})],
+            next_cursor: None,
+        };
+        let exhausted = serde_json::to_value(&page).unwrap();
+        assert_eq!(exhausted, serde_json::json!({"messages":page.messages}));
+        assert_eq!(
+            serde_json::from_value::<ProtocolHistoryPage>(exhausted).unwrap(),
+            page
+        );
+
+        let more = ProtocolHistoryPage {
+            next_cursor: Some("m1".into()),
+            ..page
+        };
+        let wire = serde_json::to_value(&more).unwrap();
+        assert_eq!(wire["nextCursor"], "m1");
+        assert_eq!(
+            serde_json::from_value::<ProtocolHistoryPage>(wire).unwrap(),
+            more
+        );
+    }
+
+    #[test]
     fn chat_session_identity_is_host_only_and_startup_reconciles_task_state() {
         let root = tempfile::tempdir().unwrap();
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -1110,18 +1135,20 @@ mod tests {
         let messages = store.message_metadata(&chat.chat_id).unwrap();
         assert_eq!(messages[0].message_id, "user-id");
         assert_eq!(messages[1].message_id, "assistant-id");
-        assert!(store
-            .record_message(
-                &chat.chat_id,
-                ChatMessageMetadata {
-                    message_id: "assistant-id".into(),
-                    run_id: "other-run".into(),
-                    role: ChatRole::Assistant,
-                    created_at: 2,
-                    attachments: Vec::new(),
-                },
-            )
-            .is_err());
+        assert!(
+            store
+                .record_message(
+                    &chat.chat_id,
+                    ChatMessageMetadata {
+                        message_id: "assistant-id".into(),
+                        run_id: "other-run".into(),
+                        role: ChatRole::Assistant,
+                        created_at: 2,
+                        attachments: Vec::new(),
+                    },
+                )
+                .is_err()
+        );
     }
 
     #[test]
@@ -1167,11 +1194,13 @@ mod tests {
         recovered
             .rollback_protocol_message(&chat.chat_id, "task-private-uuid", "user-message-1")
             .unwrap();
-        assert!(recovered
-            .protocol_history_page(&chat.chat_id, None, 10)
-            .unwrap()
-            .messages
-            .is_empty());
+        assert!(
+            recovered
+                .protocol_history_page(&chat.chat_id, None, 10)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
         assert_eq!(
             recovered.protocol_history_digests(&chat.chat_id).unwrap(),
             Vec::new()

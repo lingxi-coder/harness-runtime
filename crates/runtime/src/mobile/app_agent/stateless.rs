@@ -1,15 +1,15 @@
 //! Independent stateless Local App understanding requests.
-use super::{schema::NativeSchema, AppAgentFactory, STRUCTURED_OUTPUT_TOOL_NAME};
+use super::{AppAgentFactory, STRUCTURED_OUTPUT_TOOL_NAME, schema::NativeSchema};
 use crate::app_agent_input;
 use cost::{
     CostCalculator, ModelRef as CostModelRef, PricingCatalog, ProviderId as CostProviderId,
 };
 use lingxi_core::{
     host::json_schema_validator::{CompiledJsonSchema, JsonSchemaValidation},
-    types::{utf16_json::Utf16JsonProjection, ContentBlock, ConversationMessage, MessageId},
+    types::{ContentBlock, ConversationMessage, MessageId, utf16_json::Utf16JsonProjection},
 };
 use local_app::v2::agent::{Admission, Input, TaskResult};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sidequery::{
     ProviderSideQueryClient, QuerySource, SideQueryClient, SideQueryRequest,
     StrictStructuredQueryRequest,
@@ -63,12 +63,17 @@ pub(super) fn harness_structured_output_available(capabilities: AppAgentModelCap
 fn structured_output_mode(
     capabilities: AppAgentModelCapabilities,
 ) -> Result<StructuredOutputMode, &'static str> {
-    if capabilities.supports_native_structured_output {
-        Ok(StructuredOutputMode::NativeJsonSchema)
-    } else if capabilities.supports_tools {
+    // Prefer the trusted, host-owned result tool whenever the selected route
+    // can call tools. Some providers advertise native structured output but
+    // reject the strict response_format shape for a particular resolved route;
+    // the forced tool path keeps schema validation on the host and uses the
+    // same model/profile without invoking that separate codec path.
+    if capabilities.supports_tools {
         Ok(StructuredOutputMode::InternalTool)
+    } else if capabilities.supports_native_structured_output {
+        Ok(StructuredOutputMode::NativeJsonSchema)
     } else {
-        Err("model_tools_unsupported")
+        Err("model_structured_output_unsupported")
     }
 }
 
@@ -158,6 +163,60 @@ fn structured_tool_result(calls: &[Utf16JsonProjection]) -> Result<Value, &'stat
     Ok(result)
 }
 
+fn internal_structured_query_request(
+    model: &str,
+    profile: &str,
+    message: ConversationMessage,
+    tool: llm_runtime::ToolDeclaration,
+) -> SideQueryRequest {
+    SideQueryRequest {
+        enable_prompt_caching: false,
+        model_attempt: None,
+        api_attempts_left: None,
+        native_prompt_context: None,
+        model: model.to_owned(),
+        model_source: None,
+        profile: Some(profile.to_owned()),
+        system_prompt: None,
+        typed_attachment_ids: Default::default(),
+        task_deliveries: Default::default(),
+        system_prompt_input: None,
+        messages: vec![message],
+        tools: vec![tool],
+        tool_choice: Some(json!({
+            "type": "tool",
+            "name": STRUCTURED_OUTPUT_TOOL_NAME
+        })),
+        output_format: None,
+        max_tokens: Some(8192),
+        max_retries: 0,
+        temperature: None,
+        thinking: Some(llm_runtime::model::thinking::ThinkingConfig::Disabled),
+        effort: None,
+        stop_sequences: Vec::new(),
+        query_source: QuerySource::Custom("local_app_agent".into()),
+        skip_system_prompt_prefix: true,
+    }
+}
+
+async fn query_internal_structured_output(
+    client: &dyn SideQueryClient,
+    model: &str,
+    profile: &str,
+    message: ConversationMessage,
+    schema: &Value,
+) -> Result<(Value, cost::Usage), String> {
+    let tool = structured_output_tool(schema).map_err(str::to_owned)?;
+    let response = client
+        .query(internal_structured_query_request(
+            model, profile, message, tool,
+        ))
+        .await
+        .map_err(map_side_query_error)?;
+    let result = structured_tool_result(&response.tool_calls).map_err(str::to_owned)?;
+    Ok((result, response.usage))
+}
+
 async fn validate_schema_result(
     value: Value,
     schema: &NativeSchema,
@@ -243,42 +302,14 @@ impl AppAgentFactory {
                     (response.value, response.usage)
                 }
                 StructuredOutputMode::InternalTool => {
-                    let tool = structured_output_tool(&schema_source)?;
-                    let response = client
-                        .query(SideQueryRequest {
-                            enable_prompt_caching: false,
-                            model_attempt: None,
-                            api_attempts_left: None,
-                            native_prompt_context: None,
-                            model: admission.task.model.model_id.clone(),
-                            model_source: None,
-                            profile: Some(admission.task.model.provider_id.clone()),
-                            system_prompt: None,
-                            typed_attachment_ids: Default::default(),
-                            task_deliveries: Default::default(),
-                            system_prompt_input: None,
-                            messages: vec![message],
-                            tools: vec![tool],
-                            tool_choice: Some(json!({
-                                "type": "tool",
-                                "name": STRUCTURED_OUTPUT_TOOL_NAME
-                            })),
-                            output_format: None,
-                            max_tokens: Some(8192),
-                            max_retries: 0,
-                            temperature: None,
-                            thinking: Some(llm_runtime::model::thinking::ThinkingConfig::Disabled),
-                            effort: None,
-                            stop_sequences: Vec::new(),
-                            query_source: QuerySource::Custom("local_app_agent".into()),
-                            skip_system_prompt_prefix: true,
-                        })
-                        .await
-                        .map_err(map_side_query_error)?;
-                    (
-                        structured_tool_result(&response.tool_calls)?,
-                        response.usage,
+                    query_internal_structured_output(
+                        &client,
+                        &admission.task.model.model_id,
+                        &admission.task.model.provider_id,
+                        message,
+                        &schema_source,
                     )
+                    .await?
                 }
             };
             let value = validate_schema_result(value, &schema).await?;
@@ -367,7 +398,9 @@ fn user_message(mut blocks: Vec<ContentBlock>) -> ConversationMessage {
 
 fn map_side_query_error(error: sidequery::SideQueryError) -> String {
     match error {
-        sidequery::SideQueryError::StructuredOutputUnsupported => "model_tools_unsupported".into(),
+        sidequery::SideQueryError::StructuredOutputUnsupported => {
+            "model_structured_output_unsupported".into()
+        }
         _ => "model_api_failed".into(),
     }
 }
@@ -501,6 +534,108 @@ mod tests {
         );
     }
 
+    struct StructuredToolRecordingClient {
+        seen: std::sync::Mutex<Option<SideQueryRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SideQueryClient for StructuredToolRecordingClient {
+        async fn query(
+            &self,
+            request: SideQueryRequest,
+        ) -> Result<sidequery::SideQueryResponse, sidequery::SideQueryError> {
+            *self.seen.lock().expect("recorded SideQuery request") = Some(request);
+            Ok(sidequery::SideQueryResponse {
+                text: None,
+                structured: None,
+                tool_calls: vec![Utf16JsonProjection::parse(
+                    r#"{"id":"call_1","name":"StructuredOutput","input":{"result":{"calories":321}}}"#,
+                )
+                .expect("tool call is valid JSON")],
+                usage: cost::Usage::default(),
+                stop_reason: Some("tool_use".into()),
+                retry_count: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn resolved_dual_capability_route_uses_host_forced_tool_not_native_json_schema() {
+        let registry = ModelRegistry::from_config(ClientConfig {
+            providers: vec![profile(
+                "deepseek",
+                ProtocolFamily::OpenAiChat,
+                "chat",
+                0,
+                Capabilities {
+                    vision: true,
+                    tools: true,
+                    structured_output: true,
+                    ..Default::default()
+                },
+            )],
+        })
+        .expect("configured dual-capability route");
+        let route = resolve_selected_route_with("deepseek-flash", "deepseek", |model, profile| {
+            registry.resolve_media_route_in(model, profile)
+        })
+        .expect("selected model route resolves");
+        assert_eq!(route.main.request_model, "deepseek-flash");
+        assert_eq!(route.main.profile_name, "deepseek");
+        let can_encode_native_schema = ProtocolFamily::OpenAiChat.encodes_response_format();
+        assert!(can_encode_native_schema);
+        let capabilities = route_capabilities(&route, can_encode_native_schema);
+        assert!(capabilities.supports_tools);
+        assert!(capabilities.supports_native_structured_output);
+        assert_eq!(
+            structured_output_mode(capabilities),
+            Ok(StructuredOutputMode::InternalTool),
+            "use the same route's tool support before its native response-format path"
+        );
+
+        let schema = json!({
+            "type":"object",
+            "properties":{"calories":{"type":"integer"}},
+            "required":["calories"],
+            "additionalProperties":false
+        });
+        let client = StructuredToolRecordingClient {
+            seen: std::sync::Mutex::new(None),
+        };
+        let (value, _) = query_internal_structured_output(
+            &client,
+            "deepseek-flash",
+            "deepseek",
+            ConversationMessage::user(MessageId::new(), "Estimate calories.".into()),
+            &schema,
+        )
+        .await
+        .expect("forced structured tool returns a result");
+        let compiled = NativeSchema::compile(&schema).expect("schema compiles");
+        assert_eq!(
+            validate_schema_result(value, compiled.as_ref())
+                .await
+                .expect("tool result passes host schema validation"),
+            json!({"calories":321})
+        );
+
+        let request = client
+            .seen
+            .lock()
+            .expect("recorded SideQuery request")
+            .clone()
+            .expect("request was sent");
+        assert_eq!(request.model, "deepseek-flash");
+        assert_eq!(request.profile.as_deref(), Some("deepseek"));
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(request.tools[0].name, STRUCTURED_OUTPUT_TOOL_NAME);
+        assert_eq!(
+            request.tool_choice,
+            Some(json!({"type":"tool","name":"StructuredOutput"}))
+        );
+        assert!(request.output_format.is_none());
+    }
+
     #[test]
     fn strict_schema_and_tool_call_capabilities_are_independent() {
         let strict = AppAgentModelCapabilities {
@@ -519,7 +654,7 @@ mod tests {
         let unsupported = AppAgentModelCapabilities::default();
         assert_eq!(
             structured_output_mode(unsupported),
-            Err("model_tools_unsupported")
+            Err("model_structured_output_unsupported")
         );
         assert!(!supports_structured_output(unsupported));
         assert!(!harness_structured_output_available(unsupported));
@@ -528,6 +663,14 @@ mod tests {
             ..Default::default()
         };
         assert!(harness_structured_output_available(tool_only));
+    }
+
+    #[test]
+    fn native_structured_rejection_is_not_reported_as_tool_capability_failure() {
+        assert_eq!(
+            map_side_query_error(sidequery::SideQueryError::StructuredOutputUnsupported),
+            "model_structured_output_unsupported"
+        );
     }
 
     #[test]

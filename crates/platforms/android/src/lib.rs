@@ -144,7 +144,11 @@ impl AndroidPlatform {
                 inputs.mobile_linux_managed_root.as_deref(),
                 &inputs.brand_profile,
             ) {
-            MobileLinuxSandbox::new(inputs.mobile_linux.clone(), mounts)
+            MobileLinuxSandbox::new(
+                inputs.mobile_linux.clone(),
+                mounts,
+                inputs.brand_profile.clone(),
+            )
         } else {
             Err(SandboxError::Unavailable(
                 "invalid mobile-linux workspace mount configuration".to_string(),
@@ -162,8 +166,12 @@ impl AndroidPlatform {
                             "unknown",
                             format!("mobile-linux shell unavailable: {error}"),
                         ));
-                    let sandbox = MobileLinuxSandbox::new(runtime.clone(), Vec::new())
-                        .expect("empty mobile-linux mount set must be valid");
+                    let sandbox = MobileLinuxSandbox::new(
+                        runtime.clone(),
+                        Vec::new(),
+                        inputs.brand_profile.clone(),
+                    )
+                    .expect("empty mobile-linux mount set must be valid");
                     (runtime, Arc::new(sandbox))
                 }
             };
