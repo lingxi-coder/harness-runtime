@@ -737,7 +737,10 @@ impl ComputerControl for MacosComputerControl {
     }
 
     async fn check_os_permissions(&self) -> Option<(bool, bool)> {
-        Some(tcc::check_os_permissions())
+        tcc::check_os_permissions()
+    }
+    async fn query_os_permissions(&self) -> Result<Option<(bool, bool)>, ComputerError> {
+        tcc::query_os_permissions().map(Some)
     }
 }
 

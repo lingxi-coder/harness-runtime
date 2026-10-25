@@ -686,6 +686,10 @@ struct PolicyRaceBackend {
     enumeration_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     switched: std::sync::atomic::AtomicBool,
     switch_on_key: bool,
+    revoke_os_on_key: bool,
+    query_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    query_calls: AtomicU64,
+    query_hook_after: AtomicU64,
     launched: std::sync::atomic::AtomicBool,
 }
 impl PolicyRaceBackend {
@@ -699,12 +703,26 @@ impl PolicyRaceBackend {
             enumeration_hook: Mutex::new(None),
             switched: std::sync::atomic::AtomicBool::new(false),
             switch_on_key: false,
+            revoke_os_on_key: false,
+            query_hook: Mutex::new(None),
+            query_calls: AtomicU64::new(0),
+            query_hook_after: AtomicU64::new(0),
             launched: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
 #[async_trait]
 impl lingxi_core::host::computer_control::ComputerControl for PolicyRaceBackend {
+    async fn query_os_permissions(&self) -> Result<Option<(bool, bool)>, ComputerError> {
+        tokio::task::yield_now().await;
+        let call = self.query_calls.fetch_add(1, Ordering::SeqCst);
+        if call >= self.query_hook_after.load(Ordering::SeqCst) {
+            if let Some(hook) = self.query_hook.lock().unwrap().take() {
+                hook();
+            }
+        }
+        self.inner.query_os_permissions().await
+    }
     fn capabilities(&self) -> lingxi_core::host::computer_control::ComputerBackendCapabilities {
         self.inner.capabilities()
     }
@@ -769,6 +787,9 @@ impl lingxi_core::host::computer_control::ComputerControl for PolicyRaceBackend 
         self.inner.key(key).await?;
         if self.switch_on_key {
             self.switched.store(true, Ordering::SeqCst);
+        }
+        if self.revoke_os_on_key {
+            self.inner.set_os_permissions(Some((false, true)));
         }
         Ok(())
     }
@@ -1018,4 +1039,320 @@ async fn authority_envelope_rejects_an_exited_owner_process_without_reviving_gra
         .is_err());
     assert!(tool.state.lock().unwrap().allowed_apps.is_empty());
     assert_eq!(backend.events(), ["screenshot"]);
+}
+
+#[tokio::test]
+async fn live_os_revocation_clears_grants_frames_and_flags_until_fresh_approval() {
+    let backend = Arc::new(RecordingBackend::default());
+    backend.set_os_permissions(Some((true, true)));
+    let tool = make_tool(backend.clone());
+    let context = ctx();
+    invoke(&tool, json!({"action":"screenshot"}), context.clone())
+        .await
+        .unwrap();
+    tool.state.lock().unwrap().grant_flags = GrantFlags {
+        clipboard_read: true,
+        clipboard_write: true,
+        system_key_combos: true,
+    };
+    backend.set_os_permissions(Some((false, true)));
+    assert!(invoke(
+        &tool,
+        json!({"action":"type","text":"must not appear"}),
+        context.clone()
+    )
+    .await
+    .is_err());
+    assert!(tool.state.lock().unwrap().allowed_apps.is_empty());
+    assert!(!tool.state.lock().unwrap().grant_flags.clipboard_read);
+    assert!(tool.runtime.lock().unwrap().frames.is_empty());
+    backend.set_os_permissions(Some((true, true)));
+    assert!(invoke(
+        &tool,
+        json!({"action":"type","text":"old grant"}),
+        context.clone()
+    )
+    .await
+    .is_err());
+    grant(&tool).await.unwrap();
+    invoke(
+        &tool,
+        json!({"action":"type","text":"fresh grant"}),
+        context,
+    )
+    .await
+    .unwrap();
+    assert_eq!(backend.events(), ["screenshot", "type:fresh grant"]);
+}
+
+#[tokio::test]
+async fn live_recording_revocation_invalidates_cached_frames_and_blocks_capture() {
+    let backend = Arc::new(RecordingBackend::default());
+    backend.set_os_permissions(Some((true, true)));
+    let tool = make_tool(backend.clone());
+    let context = ctx();
+    invoke(&tool, json!({"action":"screenshot"}), context.clone())
+        .await
+        .unwrap();
+    backend.set_os_permissions(Some((true, false)));
+    assert!(tool
+        .native_computer_frame(&context)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(invoke(&tool, json!({"action":"screenshot"}), context)
+        .await
+        .is_err());
+    assert!(tool.state.lock().unwrap().allowed_apps.is_empty());
+    assert_eq!(backend.events(), ["screenshot"]);
+}
+
+#[tokio::test]
+async fn os_revocation_during_key_repeat_stops_the_next_effect() {
+    let file = PolicyFile::new(policy("allowed", true, json!([app("allow")])));
+    let mut backend = PolicyRaceBackend::new();
+    backend.revoke_os_on_key = true;
+    backend.inner.set_os_permissions(Some((true, true)));
+    let backend = Arc::new(backend);
+    let tool = race_tool(backend.clone(), &file);
+    assert!(
+        invoke(&tool, json!({"action":"key","text":"a","repeat":3}), ctx())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        backend
+            .inner
+            .events()
+            .iter()
+            .filter(|event| *event == "key:a")
+            .count(),
+        1
+    );
+    assert!(tool.state.lock().unwrap().allowed_apps.is_empty());
+    backend.inner.set_os_permissions(Some((true, true)));
+    assert!(
+        invoke(&tool, json!({"action":"key","text":"a"}), ctx())
+            .await
+            .is_err(),
+        "permanent settings must not revive old grants after an OS restoration"
+    );
+}
+
+#[tokio::test]
+async fn os_revocation_during_drag_releases_input_and_skips_later_points() {
+    let file = PolicyFile::new(policy("allowed", true, json!([app("allow")])));
+    let backend = Arc::new(PolicyRaceBackend::new());
+    backend.inner.set_os_permissions(Some((true, true)));
+    let inner = backend.inner.clone();
+    *backend.effect_hook.lock().unwrap() = Some(Box::new(move || {
+        inner.set_os_permissions(Some((false, true)))
+    }));
+    let tool = race_tool(backend.clone(), &file);
+    assert!(invoke(
+        &tool,
+        json!({"action":"left_click_drag","path":[[0,0],[1,1],[2,2]]}),
+        ctx()
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        backend
+            .inner
+            .events()
+            .iter()
+            .filter(|event| event.starts_with("move:"))
+            .count(),
+        1
+    );
+    assert!(!backend
+        .inner
+        .events()
+        .iter()
+        .any(|event| event == "mouse_down"));
+}
+
+#[tokio::test]
+async fn os_revocation_during_hold_is_polled_and_releases_the_owned_key() {
+    let backend = Arc::new(RecordingBackend::default());
+    backend.set_os_permissions(Some((true, true)));
+    let tool = make_tool(backend.clone());
+    let holding = invoke(
+        &tool,
+        json!({"action":"hold_key","text":"a","duration":10}),
+        ctx(),
+    );
+    let revoke = async {
+        loop {
+            if backend.events().iter().any(|event| event == "down:a") {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        backend.set_os_permissions(Some((false, true)));
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        tokio::join!(holding, revoke)
+    })
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    assert!(backend.events().iter().any(|event| event == "up:a"));
+    assert!(tool.runtime.lock().unwrap().held_keys.is_empty());
+}
+
+#[tokio::test]
+async fn final_os_query_cannot_outlive_policy_revocation_or_cancellation_before_an_effect() {
+    for cancelled in [false, true] {
+        let file = PolicyFile::new(policy("initial", true, json!([app("allow")])));
+        let backend = Arc::new(PolicyRaceBackend::new());
+        backend.inner.set_os_permissions(Some((true, true)));
+        let tool = race_tool(backend.clone(), &file);
+        let mut context = ctx();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        context.cancel = Some(cancel.clone());
+        let revision = tool.sync_policy(&context).await.unwrap();
+        backend.query_hook_after.store(1, Ordering::SeqCst);
+        let path = file.0.clone();
+        *backend.query_hook.lock().unwrap() = Some(Box::new(move || {
+            if cancelled {
+                cancel.cancel();
+            } else {
+                replace(&path, policy("revoked", false, json!([])));
+            }
+        }));
+        assert!(tool
+            .guard_effect(
+                "type",
+                &test_projection(&json!({"text":"must not appear"})),
+                "type",
+                None,
+                &context,
+                revision.as_deref()
+            )
+            .await
+            .is_err());
+        assert_eq!(backend.query_calls.load(Ordering::SeqCst), 2);
+        assert!(backend.inner.events().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn os_query_after_approval_cannot_commit_a_stale_or_cancelled_grant() {
+    for cancelled in [false, true] {
+        let file = PolicyFile::new(policy("initial", true, json!([])));
+        let backend = Arc::new(PolicyRaceBackend::new());
+        backend.inner.set_os_permissions(Some((true, true)));
+        let tool = race_tool(backend.clone(), &file);
+        backend.query_hook_after.store(1, Ordering::SeqCst);
+        let mut context = ctx();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        context.cancel = Some(cancel.clone());
+        let path = file.0.clone();
+        *backend.query_hook.lock().unwrap() = Some(Box::new(move || {
+            if cancelled {
+                cancel.cancel();
+            } else {
+                replace(&path, policy("revoked", false, json!([])));
+            }
+        }));
+        assert!(invoke(
+            &tool,
+            json!({"action":"request_access","reason":"test pending access","apps":["test.app"]}),
+            context
+        )
+        .await
+        .is_err());
+        assert!(tool.state.lock().unwrap().allowed_apps.is_empty());
+        assert!(backend.inner.events().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn final_os_query_cannot_return_a_native_frame_after_policy_revocation() {
+    let file = PolicyFile::new(policy("initial", true, json!([app("allow")])));
+    let backend = Arc::new(PolicyRaceBackend::new());
+    backend.inner.set_os_permissions(Some((true, true)));
+    let tool = race_tool(backend.clone(), &file);
+    let context = ctx();
+    invoke(&tool, json!({"action":"screenshot"}), context.clone())
+        .await
+        .unwrap();
+    backend.query_hook_after.store(
+        backend.query_calls.load(Ordering::SeqCst) + 1,
+        Ordering::SeqCst,
+    );
+    let path = file.0.clone();
+    *backend.query_hook.lock().unwrap() = Some(Box::new(move || {
+        replace(&path, policy("revoked", false, json!([])))
+    }));
+    assert!(tool
+        .native_computer_frame(&context)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(tool.runtime.lock().unwrap().frames.is_empty());
+}
+
+#[tokio::test]
+async fn unavailable_os_query_blocks_this_operation_without_latching_a_false_revocation() {
+    let backend = Arc::new(RecordingBackend::default());
+    backend.set_os_permissions(Some((true, true)));
+    let tool = make_tool(backend.clone());
+    let context = ctx();
+    invoke(&tool, json!({"action":"screenshot"}), context.clone())
+        .await
+        .unwrap();
+    invoke(
+        &tool,
+        json!({"action":"key_down","text":"a"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    backend.set_os_query_error(true);
+    let error = invoke(
+        &tool,
+        json!({"action":"type","text":"blocked"}),
+        context.clone(),
+    )
+    .await
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("Could not verify macOS Accessibility"));
+    assert!(!tool.os_permissions_revoked.load(Ordering::SeqCst));
+    assert!(!tool.state.lock().unwrap().allowed_apps.is_empty());
+    assert!(tool.runtime.lock().unwrap().frames.is_empty());
+    assert!(tool.runtime.lock().unwrap().held_keys.is_empty());
+    assert!(backend.events().iter().any(|event| event == "up:a"));
+    assert!(!backend.events().iter().any(|event| event == "type:blocked"));
+    backend.set_os_query_error(false);
+    invoke(
+        &tool,
+        json!({"action":"type","text":"retry after service recovery"}),
+        context,
+    )
+    .await
+    .unwrap();
+    assert!(backend
+        .events()
+        .iter()
+        .any(|event| event == "type:retry after service recovery"));
+}
+
+#[tokio::test]
+async fn unavailable_os_query_does_not_open_a_misleading_tcc_or_application_approval_panel() {
+    let backend = Arc::new(RecordingBackend::default());
+    backend.set_os_permissions(Some((true, true)));
+    backend.set_os_query_error(true);
+    let mut tool = make_tool(backend);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+    tool.access_resolver = Arc::new(TuiBridgeResolver::new(sender));
+    let error = grant(&tool).await.unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("Could not verify macOS Accessibility"));
+    assert!(receiver.try_recv().is_err());
+    assert!(!tool.os_permissions_revoked.load(Ordering::SeqCst));
 }

@@ -427,11 +427,7 @@ impl ComputerTool {
             self.invalidate_frame(ctx).await;
             return Ok(None);
         }
-        if cc
-            .check_os_permissions()
-            .await
-            .is_some_and(|(a, r)| !a || !r)
-        {
+        if self.check_live_os_permissions(ctx).await.is_err() {
             return Ok(None);
         }
         if self.enforce_tier("key").await.is_err() {
@@ -462,6 +458,14 @@ impl ComputerTool {
             self.invalidate_frame(ctx).await;
             return Ok(None);
         }
+        if self.check_policy_revision(revision.as_deref()).is_err() {
+            self.invalidate_frame(ctx).await;
+            return Ok(None);
+        }
+        if self.check_live_os_permissions(ctx).await.is_err() {
+            return Ok(None);
+        }
+        self.check_cancel(ctx)?;
         if self.check_policy_revision(revision.as_deref()).is_err() {
             self.invalidate_frame(ctx).await;
             return Ok(None);

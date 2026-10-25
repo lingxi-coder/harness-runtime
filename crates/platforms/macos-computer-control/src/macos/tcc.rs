@@ -6,20 +6,10 @@
 //! is simpler and lighter than pulling in a whole accessibility crate for two
 //! functions.
 //!
-//! Both bindings use the REQUEST variant, not the read-only preflight/query
-//! variant, even though this function is conceptually a "check" — found via
-//! live interactive testing of the `request_access` TCC panel: with the
-//! read-only `CGPreflightScreenCaptureAccess()` this crate originally used,
-//! nothing ever actually asks the OS for Screen Recording access, so macOS
-//! never adds this process to System Settings → Screen & System Audio
-//! Recording — the panel's "Open System Settings → Screen Recording" row
-//! sends the user to a list with no entry to toggle on at all, a dead end.
-//! Both `AXIsProcessTrustedWithOptions` (with the prompt option) and
-//! `CGRequestScreenCaptureAccess` are documented by Apple as idempotent
-//! after the first decision: once the user has answered (via the native
-//! prompt this triggers, or a manual System Settings toggle), later calls
-//! just return the current status without re-prompting — so it is safe to
-//! call this on every single `request_access` invocation, not just once.
+//! `request_access` uses the request variants so macOS can register the app
+//! in System Settings. Effects use only read-only queries. A nominal trust
+//! result is not sufficient evidence of working AX messaging, so Accessibility
+//! additionally needs a bounded real message before reporting access as available.
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn CGSessionCopyCurrentDictionary() -> core_foundation::dictionary::CFDictionaryRef;
@@ -36,6 +26,17 @@ extern "C" {
     /// are valid) if the ABI-level byte the callee returns is ever anything
     /// else in the unused high bits of the underlying register/byte.
     fn AXIsProcessTrustedWithOptions(options: core_foundation::dictionary::CFDictionaryRef) -> u8;
+    fn AXIsProcessTrusted() -> u8;
+    fn AXUIElementCreateSystemWide() -> core_foundation::base::CFTypeRef;
+    fn AXUIElementSetMessagingTimeout(
+        element: core_foundation::base::CFTypeRef,
+        seconds: f32,
+    ) -> i32;
+    fn AXUIElementCopyAttributeValue(
+        element: core_foundation::base::CFTypeRef,
+        attribute: core_foundation::string::CFStringRef,
+        value: *mut core_foundation::base::CFTypeRef,
+    ) -> i32;
 }
 
 /// Refuse operations when Quartz cannot establish a console session or reports a lock.
@@ -72,11 +73,75 @@ extern "C" {
     /// a C99 `bool` in the real header, unlike `AXIsProcessTrustedWithOptions`'s
     /// legacy `Boolean` — Rust `bool` is the correct ABI type here.
     fn CGRequestScreenCaptureAccess() -> bool;
+    fn CGPreflightScreenCaptureAccess() -> bool;
+}
+
+/// Read-only live TCC queries. Never registers/prompts for access during effects.
+#[must_use]
+pub fn query_os_permissions(
+) -> Result<(bool, bool), lingxi_core::host::computer_control::ComputerError> {
+    Ok((query_accessibility()?, unsafe {
+        CGPreflightScreenCaptureAccess()
+    }))
+}
+
+fn query_unavailable() -> lingxi_core::host::computer_control::ComputerError {
+    lingxi_core::host::computer_control::ComputerError::PermissionDenied("Could not verify macOS Accessibility access. Retry when the accessibility service is available.".into())
+}
+
+fn accessibility_query_result(
+    trusted: bool,
+    status: i32,
+    has_value: bool,
+) -> Result<bool, lingxi_core::host::computer_control::ComputerError> {
+    if !trusted || status == -25211 {
+        return Ok(false);
+    }
+    match (status, has_value) {
+        (0, true) | (-25212, _) => Ok(true), // No focused application is not a TCC revocation.
+        _ => Err(query_unavailable()),
+    }
+}
+
+fn query_accessibility() -> Result<bool, lingxi_core::host::computer_control::ComputerError> {
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::string::CFString;
+
+    let trusted = unsafe { AXIsProcessTrusted() } != 0;
+    if !trusted {
+        return Ok(false);
+    }
+    let raw = unsafe { AXUIElementCreateSystemWide() };
+    if raw.is_null() {
+        return Err(query_unavailable());
+    }
+    let system = unsafe { CFType::wrap_under_create_rule(raw) };
+    if unsafe { AXUIElementSetMessagingTimeout(system.as_concrete_TypeRef(), 0.25) } != 0 {
+        return Err(query_unavailable());
+    }
+    let attribute = CFString::from_static_string("AXFocusedApplication");
+    let mut value = std::ptr::null();
+    let status = unsafe {
+        AXUIElementCopyAttributeValue(
+            system.as_concrete_TypeRef(),
+            attribute.as_concrete_TypeRef(),
+            &mut value,
+        )
+    };
+    let has_value = !value.is_null();
+    if has_value {
+        // Copy ownership must be released even on an unexpected error/value pair.
+        let _value = unsafe { CFType::wrap_under_create_rule(value) };
+    }
+    // In particular, kAXErrorAPIDisabled (-25211) overrides a nominal trust=true result.
+    // Busy/unknown failures block only this operation; they must not latch a
+    // fabricated permission revocation or tell the user to reauthorize.
+    accessibility_query_result(trusted, status, has_value)
 }
 
 /// `(accessibility_granted, screen_recording_granted)`.
 #[must_use]
-pub fn check_os_permissions() -> (bool, bool) {
+pub fn check_os_permissions() -> Option<(bool, bool)> {
     use core_foundation::base::{CFType, TCFType};
     use core_foundation::boolean::CFBoolean;
     use core_foundation::dictionary::CFDictionary;
@@ -98,8 +163,32 @@ pub fn check_os_permissions() -> (bool, bool) {
     // trivially safe to call from any thread at any time. `options` outlives
     // the call (it's a local binding dropped after this statement, not
     // before).
-    let accessibility =
-        unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) } != 0;
-    let screen_recording = unsafe { CGRequestScreenCaptureAccess() };
-    (accessibility, screen_recording)
+    let _ = unsafe { AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef()) };
+    let _ = unsafe { CGRequestScreenCaptureAccess() };
+    query_os_permissions().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::accessibility_query_result;
+
+    #[test]
+    fn cached_trust_cannot_override_disabled_or_unavailable_ax_messaging() {
+        assert!(accessibility_query_result(true, 0, true).unwrap());
+        assert!(!accessibility_query_result(false, 0, true).unwrap());
+        assert!(!accessibility_query_result(true, -25211, false).unwrap());
+        assert!(!accessibility_query_result(true, -25211, true).unwrap());
+        assert!(accessibility_query_result(true, -25212, false).unwrap());
+        assert!(accessibility_query_result(true, 0, false).is_err());
+        for status in [-25204, -1, 1] {
+            assert!(
+                accessibility_query_result(true, status, true).is_err(),
+                "AX status {status}"
+            );
+            assert!(
+                accessibility_query_result(true, status, false).is_err(),
+                "AX status {status}"
+            );
+        }
+    }
 }
