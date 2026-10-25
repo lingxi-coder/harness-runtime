@@ -189,6 +189,32 @@ pub trait ComputerControl: Send + Sync {
     }
     /// Capture the current (primary or last-targeted) display.
     async fn screenshot(&self) -> Result<Screenshot, ComputerError>;
+    /// Capture capability reported truthfully to the model: native, mask, or none.
+    fn screenshot_filtering(&self) -> &'static str {
+        "none"
+    }
+    async fn screenshot_for_apps(&self, _allowed: &[String]) -> Result<Screenshot, ComputerError> {
+        self.screenshot().await
+    }
+    async fn zoom_for_apps(
+        &self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        _allowed: &[String],
+    ) -> Result<Screenshot, ComputerError> {
+        self.zoom(x, y, w, h).await
+    }
+    fn supports_target_application(&self) -> bool {
+        false
+    }
+    async fn screen_locked(&self) -> Result<bool, ComputerError> {
+        Ok(false)
+    }
+    async fn target_application(&self, _x: u32, _y: u32) -> Result<Option<AppInfo>, ComputerError> {
+        Err(ComputerError::Unsupported("target_application".into()))
+    }
     /// Return the primary display size in pixels `(width, height)`.
     async fn display_size(&self) -> Result<(u32, u32), ComputerError>;
     /// Move the cursor to `(x, y)`.

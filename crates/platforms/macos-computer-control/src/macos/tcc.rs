@@ -22,6 +22,7 @@
 //! call this on every single `request_access` invocation, not just once.
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
+    fn CGSessionCopyCurrentDictionary() -> core_foundation::dictionary::CFDictionaryRef;
     /// `AXIsProcessTrustedWithOptions(options)` — `ApplicationServices/
     /// HIServices`. With `kAXTrustedCheckOptionPrompt` set to `true` in
     /// `options`, this prompts (and registers the process in System
@@ -35,6 +36,31 @@ extern "C" {
     /// are valid) if the ABI-level byte the callee returns is ever anything
     /// else in the unused high bits of the underlying register/byte.
     fn AXIsProcessTrustedWithOptions(options: core_foundation::dictionary::CFDictionaryRef) -> u8;
+}
+
+/// Refuse operations when Quartz cannot establish a console session or reports a lock.
+pub fn screen_locked() -> Result<bool, lingxi_core::host::computer_control::ComputerError> {
+    use core_foundation::{
+        base::{CFType, TCFType},
+        boolean::CFBoolean,
+        dictionary::CFDictionary,
+        string::CFString,
+    };
+    let raw = unsafe { CGSessionCopyCurrentDictionary() };
+    if raw.is_null() {
+        return Err(
+            lingxi_core::host::computer_control::ComputerError::PermissionDenied(
+                "No active Quartz session".into(),
+            ),
+        );
+    }
+    let session: CFDictionary<CFString, CFType> =
+        unsafe { CFDictionary::wrap_under_create_rule(raw) };
+    let key = CFString::from_static_string("CGSSessionScreenIsLocked");
+    Ok(session
+        .find(&key)
+        .and_then(|value| value.downcast::<CFBoolean>())
+        .is_some_and(bool::from))
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]

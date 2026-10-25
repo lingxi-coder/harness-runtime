@@ -6,27 +6,13 @@
 //! (`platform-macos-computer-control`) on desktop, or a mobile `UniFFI` impl.
 //! Pure-Rust dispatch.
 //!
-//! Contract alignment (parity with claude-code's internal `@ant/computer-use-mcp`
-//! surface, ground-truthed against the 2.1.218 binary since that package isn't
-//! in the leaked source tree): upstream exposes this as ~20 SEPARATE
-//! `mcp__computer-use__*` MCP tools plus a "teach mode" tutorial feature
-//! (`request_teach_access`/`teach_step`/`teach_batch`) behind a
-//! subscription+`GrowthBook`-gated dynamic MCP server. `LingXi` keeps the
-//! existing single builtin `computer` tool + `action` enum design (a
-//! deliberate, already-reviewed divergence — splitting into N registered
-//! tools would ripple through the whole tool-registry/system-prompt stack for
-//! no behavioral gain), but the ACTION SET, validation rules, error wording,
-//! and the tiered per-app permission model below are ported byte-for-byte
-//! where the binary gave concrete ground truth. Teach mode is NOT ported
-//! (a distinct, TUI-overlay-shaped feature, out of scope here).
-//!
-//! Session-scoped permission model (parity with `request_access` /
-//! `list_granted_applications` / the app-allowlist + grant-flags the real
-//! tool surface enforces): apps are allowed at a `read` / `click` / `full`
-//! tier; `clipboardRead` / `clipboardWrite` / `systemKeyCombos` are separate
-//! opt-in grants. `request_access` drives the SAME generic Allow/Deny
-//! permission-prompt flow every other `LingXi` tool uses (`check_permissions`
-//! → `PermissionResult::Ask`) rather than a bespoke approval dialog.
+//! LingXi exposes a combined `computer` action adapter. App classification and
+//! key capability checks are verified against the pinned Claude Code 2.1.310
+//! helpers; this is not an identical MCP tool schema or native implementation.
+//! Requests use a dedicated `ComputerAccessResolver` even in generic tool bypass
+//! modes. The Desktop host's device policy is rechecked before effects, between
+//! batch operations and before publishing a new observation. Policy revisions
+//! revoke session app and capability grants and invalidate cached frames.
 
 #![forbid(unsafe_code)]
 // Dead code kept visible, not swept: this crate had 1 item(s) rustc could
@@ -58,8 +44,13 @@ use tool_api::tool_trait::{
 use tool_api::BuiltinToolContext;
 
 mod access_resolver;
+mod app_policy;
+mod browser;
+mod device_policy;
+mod key_policy;
 mod lock;
 mod permission_model;
+mod policy_execution;
 mod validate;
 
 pub use access_resolver::{
@@ -119,6 +110,7 @@ pub const NOTIFY_EXIT: &str = "Claude is done using your computer";
 /// `ComputerTool` — screenshot + mouse/keyboard/clipboard/app automation.
 #[derive(Clone)]
 pub struct ComputerTool {
+    policy_path: Option<std::path::PathBuf>,
     ctx: BuiltinToolContext,
     state: std::sync::Arc<Mutex<SessionState>>,
     access_resolver: std::sync::Arc<dyn ComputerAccessResolver>,
@@ -149,12 +141,21 @@ impl ComputerTool {
         access_resolver: std::sync::Arc<dyn ComputerAccessResolver>,
     ) -> Self {
         Self {
+            policy_path: std::env::var_os("LINGXI_DESKTOP_COMPUTER_POLICY")
+                .map(std::path::PathBuf::from),
             ctx,
             state: std::sync::Arc::new(Mutex::new(SessionState::default())),
             access_resolver,
             lock_home: lock::lingxi_config_home_dir(),
             runtime: std::sync::Arc::new(Mutex::new(ExecutionState::default())),
         }
+    }
+
+    #[must_use]
+    /// Use the trusted Desktop host device-policy file for live execution checks.
+    pub fn with_device_policy_path(mut self, path: std::path::PathBuf) -> Self {
+        self.policy_path = Some(path);
+        self
     }
 
     /// Redirect the cross-session lock to `home` instead of the real
@@ -294,11 +295,7 @@ static INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
             },
             // `request_access`: one-sentence explanation shown to the user.
             "reason": { "type": "string" },
-            // `request_access`: requested tier for `apps` (LingXi addition —
-            // upstream computes a per-app "proposedTier" heuristically rather
-            // than taking one explicitly; exposing it directly is simpler and
-            // still reachable from the tiered model). Defaults to "full".
-            "tier": { "type": "string", "enum": ["read", "click", "full"] },
+            // Access tiers are computed by application category, never by the model.
             // `request_access` grant flags — camelCase matches the binary's
             // own (Anthropic-internal-extension) field names verbatim; every
             // other field above follows the public computer-use snake_case
@@ -590,6 +587,11 @@ impl Tool for ComputerTool {
             return Err(error);
         }
         self.validate_final_input(&action, &input)?;
+        if let Err(error) = self.sync_policy(&ctx).await {
+            self.invalidate_frame(&ctx).await;
+            self.release_owned_inputs(&ctx).await?;
+            return Err(error);
+        }
         let dirty = {
             let runtime = self
                 .runtime
@@ -674,6 +676,7 @@ impl Tool for ComputerTool {
         self.apply_model_observation(ctx, content, blocks).await
     }
     async fn begin_computer_sequence(&self, ctx: &ToolUseContext) -> Result<(), ToolError> {
+        self.sync_policy(ctx).await?;
         let _call = self.acquire_call("screenshot", ctx).await?;
         let generation = self.desktop_generation()?;
         let mut runtime = self
@@ -763,24 +766,24 @@ impl ComputerTool {
         input: &Utf16JsonProjection,
         ctx: &ToolUseContext,
     ) -> Result<ToolCallResult, ToolError> {
-        let raw_apps: Vec<String> = input
-            .get_property("apps")
-            .and_then(|apps| apps.array_len().map(|len| (apps, len)))
-            .map(|(apps, len)| {
-                (0..len)
-                    .filter_map(|index| apps.get_index(index).and_then(exact_string))
-                    .collect()
+        let revision = self.sync_policy(ctx).await?;
+        let apps = input.get_property("apps").ok_or_else(|| {
+            ToolError::InvalidInput("\"apps\" must be an array of strings.".into())
+        })?;
+        let len = apps.array_len().ok_or_else(|| {
+            ToolError::InvalidInput("\"apps\" must be an array of strings.".into())
+        })?;
+        let raw_apps = (0..len)
+            .map(|index| {
+                apps.get_index(index).and_then(exact_string).ok_or_else(|| {
+                    ToolError::InvalidInput("\"apps\" must be an array of strings.".into())
+                })
             })
-            .unwrap_or_default();
-        let mut resolved_apps = Vec::with_capacity(raw_apps.len());
-        for name in &raw_apps {
-            resolved_apps.push(self.resolve_app_identifier(name).await);
-        }
-        let tier = match input.get_property("tier").and_then(|value| value.as_str()) {
-            Some("read") => AppTier::Read,
-            Some("click") => AppTier::Click,
-            _ => AppTier::Full, // default — matches upstream's "full" unless the model asks for less
-        };
+            .collect::<Result<Vec<_>, _>>()?;
+        let reason = input
+            .get_property("reason")
+            .and_then(exact_string)
+            .ok_or_else(|| ToolError::InvalidInput("reason is required".into()))?;
         let tcc_state = match self.ctx.computer_control.as_ref() {
             Some(cc) => cc.check_os_permissions().await.and_then(|(acc, rec)| {
                 (!acc || !rec).then_some(permission::computer_access::TccState {
@@ -790,78 +793,160 @@ impl ComputerTool {
             }),
             None => None,
         };
+        if let Some(tcc_state) = tcc_state {
+            let request = permission::computer_access::ComputerAccessRequest {
+                reason,
+                apps: vec![],
+                tier: AppTier::Full.to_bridge(),
+                clipboard_read: false,
+                clipboard_write: false,
+                system_key_combos: false,
+                tcc_state: Some(tcc_state),
+            };
+            self.check_cancel(ctx)?;
+            if let Some(cancel) = &ctx.cancel {
+                tokio::select! { biased; () = cancel.cancelled() => return Err(ToolError::Aborted), _ = self.access_resolver.resolve(request) => {} }
+            } else {
+                self.access_resolver.resolve(request).await;
+            }
+            self.check_cancel(ctx)?;
+            self.check_policy_revision(revision.as_deref())?;
+            let granted = if let Some(cc) = &self.ctx.computer_control {
+                cc.check_os_permissions().await == Some((true, true))
+            } else {
+                false
+            };
+            if !granted {
+                return Err(ToolError::PermissionDenied("macOS Accessibility / Screen Recording permissions are still not granted. Grant them in System Settings before retrying.".into()));
+            }
+            return Ok(finish(
+                json!({"message":"macOS Accessibility and Screen Recording are now both granted. Call request_access again to select applications."}),
+                "request_access",
+            ));
+        }
+        let installed = if let Some(cc) = &self.ctx.computer_control {
+            cc.list_installed_apps().await.unwrap_or_default()
+        } else {
+            vec![]
+        };
+        let policy = self.policy_snapshot()?;
+        let mut candidates = Vec::new();
+        let mut denied = Vec::new();
+        for name in raw_apps {
+            let app = installed.iter().find(|a| a.bundle_id == name).or_else(|| {
+                installed
+                    .iter()
+                    .find(|a| a.display_name.eq_ignore_ascii_case(&name))
+            });
+            let (id, display_name) = app.map_or((name.clone(), name), |a| {
+                (a.bundle_id.clone(), a.display_name.clone())
+            });
+            if app_policy::blocked(Some(&id), &display_name)
+                || policy
+                    .as_ref()
+                    .is_some_and(|(_, p)| p.denies(&id, &display_name))
+            {
+                denied.push(id);
+            } else if !candidates.iter().any(|(existing, _)| existing == &id) {
+                let tier = app_policy::maximum_tier(Some(&id), &display_name);
+                candidates.push((id, tier));
+            }
+        }
+        let requested_flags = GrantFlags {
+            clipboard_read: input
+                .get_property("clipboardRead")
+                .and_then(|v| v.as_bool())
+                == Some(true),
+            clipboard_write: input
+                .get_property("clipboardWrite")
+                .and_then(|v| v.as_bool())
+                == Some(true),
+            system_key_combos: input
+                .get_property("systemKeyCombos")
+                .and_then(|v| v.as_bool())
+                == Some(true),
+        };
+        let (missing, previous_flags) = {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+            (
+                candidates
+                    .iter()
+                    .filter(|(id, _)| state.tier_for(id).is_none())
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                state.grant_flags,
+            )
+        };
+        let flags = GrantFlags {
+            clipboard_read: requested_flags.clipboard_read && !previous_flags.clipboard_read,
+            clipboard_write: requested_flags.clipboard_write && !previous_flags.clipboard_write,
+            system_key_combos: requested_flags.system_key_combos
+                && !previous_flags.system_key_combos,
+        };
         let request = permission::computer_access::ComputerAccessRequest {
-            reason: input
-                .get_property("reason")
-                .and_then(exact_string)
-                .unwrap_or_else(|| "control your computer".to_string()),
-            apps: resolved_apps
+            reason,
+            apps: missing
                 .iter()
-                .map(|label| permission::computer_access::RequestedApp {
+                .map(|(label, _)| permission::computer_access::RequestedApp {
                     label: label.clone(),
                 })
                 .collect(),
-            tier: tier.to_bridge(),
-            clipboard_read: input
-                .get_property("clipboardRead")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false),
-            clipboard_write: input
-                .get_property("clipboardWrite")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false),
-            system_key_combos: input
-                .get_property("systemKeyCombos")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false),
-            tcc_state,
+            tier: missing
+                .iter()
+                .map(|(_, tier)| *tier)
+                .max()
+                .unwrap_or(AppTier::Read)
+                .to_bridge(),
+            clipboard_read: flags.clipboard_read,
+            clipboard_write: flags.clipboard_write,
+            system_key_combos: flags.system_key_combos,
+            tcc_state: None,
         };
-        // Pause here for the user's real decision — the resolver is either a
-        // live `TuiBridgeResolver` (real interactive dialog) or the hermetic
-        // `DenyAllResolver` (no UI wired: fails closed, grants nothing).
         self.check_cancel(ctx)?;
-        let response = if let Some(cancel) = &ctx.cancel {
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => return Err(ToolError::Aborted),
-                response = self.access_resolver.resolve(request) => response,
-            }
+        let response = if missing.is_empty()
+            && !flags.clipboard_read
+            && !flags.clipboard_write
+            && !flags.system_key_combos
+        {
+            permission::computer_access::ComputerAccessResponse::default()
+        } else if let Some(cancel) = &ctx.cancel {
+            tokio::select! { biased; () = cancel.cancelled() => return Err(ToolError::Aborted), response = self.access_resolver.resolve(request) => response }
         } else {
             self.access_resolver.resolve(request).await
         };
-        // Resolver completion cannot commit a grant after cancellation.
         self.check_cancel(ctx)?;
-        if response.granted_apps.is_empty() {
-            self.invalidate_frame(ctx).await;
-        }
-
+        self.check_policy_revision(revision.as_deref())?;
         let mut state = self
             .state
             .lock()
-            .map_err(|_| ToolError::Internal("computer-use session state poisoned".into()))?;
-        self.check_cancel(ctx)?;
-        for name in &response.granted_apps {
-            state.grant_app(name.clone(), tier);
+            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+        for (id, tier) in &missing {
+            if response.granted_apps.contains(id) {
+                state.grant_app(id.clone(), *tier);
+            }
         }
         state.merge_grant_flags(GrantFlags {
-            clipboard_read: response.clipboard_read,
-            clipboard_write: response.clipboard_write,
-            system_key_combos: response.system_key_combos,
+            clipboard_read: flags.clipboard_read && response.clipboard_read,
+            clipboard_write: flags.clipboard_write && response.clipboard_write,
+            system_key_combos: flags.system_key_combos && response.system_key_combos,
         });
-        let granted: Vec<Value> = response.granted_apps.iter().map(|a| json!(a)).collect();
-        let denied: Vec<Value> = resolved_apps
+        let granted = candidates
             .iter()
-            .filter(|a| !response.granted_apps.contains(a))
-            .map(|a| json!(a))
-            .collect();
-        let grant_flags = json!({
-            "clipboardRead": state.grant_flags.clipboard_read,
-            "clipboardWrite": state.grant_flags.clipboard_write,
-            "systemKeyCombos": state.grant_flags.system_key_combos,
-        });
-        drop(state);
+            .filter(|(id, _)| state.tier_for(id).is_some())
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        denied.extend(
+            candidates
+                .iter()
+                .filter(|(id, _)| !granted.contains(id))
+                .map(|(id, _)| id.clone()),
+        );
+        let grant_flags = json!({"clipboardRead":state.grant_flags.clipboard_read,"clipboardWrite":state.grant_flags.clipboard_write,"systemKeyCombos":state.grant_flags.system_key_combos});
         Ok(finish(
-            json!({ "granted": granted, "denied": denied, "grant_flags": grant_flags }),
+            json!({ "granted":granted, "denied":denied, "grant_flags":grant_flags }),
             "request_access",
         ))
     }
@@ -1111,9 +1196,37 @@ impl ComputerTool {
         // the seam check so it succeeds even when no ComputerControl is
         // wired, and before the tier gate since it never touches an app.
         self.check_cancel(ctx)?;
+        let revision = self.sync_policy(ctx).await?;
+        if self.ctx.computer_control.is_some()
+            && self
+                .state
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+                .allowed_apps
+                .is_empty()
+        {
+            return Err(ToolError::PermissionDenied(
+                "No applications are granted for this session. Call request_access first.".into(),
+            ));
+        }
+        if let Some(backend) = &self.ctx.computer_control {
+            if backend
+                .screen_locked()
+                .await
+                .map_err(|error| map_err(&error))?
+            {
+                return Err(ToolError::PermissionDenied(
+                    "The screen is locked. Unlock it before using display-scope computer tools."
+                        .into(),
+                ));
+            }
+        }
+        let pinned_input = self.pin_pointer_input(action, input).await?;
+        let input = pinned_input.as_ref().unwrap_or(input);
         if action == "wait" {
             let secs = validate::wait_duration(input)?;
             self.wait_cancellable(secs, ctx).await?;
+            self.check_policy_revision(revision.as_deref())?;
             return Ok(json!({ "ok":true,"waited_seconds":secs }));
         }
 
@@ -1132,28 +1245,62 @@ impl ComputerTool {
         } else {
             action
         };
-        let application = self
-            .enforce_tier(
-                if !modifiers.is_empty()
-                    || has_held_keys
-                        && matches!(
-                            action,
-                            "mouse_move"
-                                | "left_click"
-                                | "double_click"
-                                | "triple_click"
-                                | "scroll"
-                                | "left_click_drag"
-                                | "left_mouse_down"
-                                | "left_mouse_up"
-                        )
-                {
-                    "key"
-                } else {
-                    tier_action
-                },
-            )
-            .await?;
+        let required_action = if !modifiers.is_empty()
+            || has_held_keys
+                && matches!(
+                    action,
+                    "mouse_move"
+                        | "left_click"
+                        | "double_click"
+                        | "triple_click"
+                        | "scroll"
+                        | "left_click_drag"
+                        | "left_mouse_down"
+                        | "left_mouse_up"
+                ) {
+            "key"
+        } else {
+            tier_action
+        };
+        let checks_target = self
+            .ctx
+            .computer_control
+            .as_ref()
+            .is_some_and(|cc| cc.supports_target_application())
+            && matches!(
+                action,
+                "mouse_move"
+                    | "mouse_click"
+                    | "left_click"
+                    | "right_click"
+                    | "middle_click"
+                    | "double_click"
+                    | "triple_click"
+                    | "scroll"
+                    | "left_click_drag"
+                    | "left_mouse_down"
+                    | "left_mouse_up"
+            );
+        let application = if checks_target
+            && matches!(
+                action,
+                "mouse_move"
+                    | "mouse_click"
+                    | "left_click"
+                    | "right_click"
+                    | "middle_click"
+                    | "double_click"
+                    | "triple_click"
+                    | "scroll"
+                    | "left_click_drag"
+                    | "left_mouse_down"
+                    | "left_mouse_up"
+            ) {
+            self.enforce_target(input, required_action, ctx, revision.as_deref())
+                .await?
+        } else {
+            self.enforce_tier(required_action).await?
+        };
 
         let cc = self.ctx.computer_control.as_ref().ok_or_else(|| {
             ToolError::Internal("computer-control not available on this platform".into())
@@ -1181,7 +1328,25 @@ impl ComputerTool {
         if changes_desktop(action) {
             self.mark_input_changed(ctx).await?;
         }
-        let added = self.press_keys(&modifiers).await?;
+        self.check_policy_revision(revision.as_deref())?;
+        if checks_target {
+            self.enforce_target(input, required_action, ctx, revision.as_deref())
+                .await?;
+        } else {
+            self.enforce_tier(required_action).await?;
+        }
+        self.check_cancel(ctx)?;
+        self.check_policy_revision(revision.as_deref())?;
+        let added = self
+            .press_keys(
+                &modifiers,
+                action,
+                input,
+                required_action,
+                ctx,
+                revision.as_deref(),
+            )
+            .await?;
         let compound_click = matches!(
             action,
             "mouse_click"
@@ -1197,7 +1362,22 @@ impl ComputerTool {
                 .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
                 .backend_mouse_dirty = true;
         }
-        let result = self.execute_backend(action, input, ctx).await;
+        let result: Result<Value, ToolError> = async {
+            if checks_target {
+                self.enforce_target(input, required_action, ctx, revision.as_deref())
+                    .await?;
+            } else {
+                self.enforce_tier(required_action).await?;
+            }
+            self.check_cancel(ctx)?;
+            self.check_policy_revision(revision.as_deref())?;
+            let value = self
+                .execute_backend(action, input, required_action, ctx, revision.as_deref())
+                .await?;
+            self.check_policy_revision(revision.as_deref())?;
+            Ok(value)
+        }
+        .await;
         if compound_click && result.is_ok() {
             self.runtime
                 .lock()
@@ -1245,14 +1425,17 @@ impl ComputerTool {
         }
     }
 
-    /// System-level shortcuts (quit app, switch app, lock screen, …) need the
-    /// `systemKeyCombos` grant regardless of the frontmost app's tier. Best-
-    /// effort detection over the most common macOS system chords — the
-    /// binary's own detector isn't reconstructable byte-for-byte from strings
-    /// alone, so this list is a documented approximation, not a verified
-    /// byte-exact port.
+    /// Clipboard and system shortcuts require independent opt-in grants.
+    /// The classifier is differential-tested against the pinned 2.1.310 helper.
     fn enforce_system_shortcut_grant(&self, chord: &str) -> Result<(), ToolError> {
-        if !validate::is_system_shortcut(chord) {
+        let (read, write) = key_policy::clipboard_flags(chord);
+        if read {
+            self.require_grant_flag(GrantFlags::clipboard_read_enabled, "clipboardRead")?;
+        }
+        if write {
+            self.require_grant_flag(GrantFlags::clipboard_write_enabled, "clipboardWrite")?;
+        }
+        if !key_policy::system_shortcut(chord, cfg!(target_os = "macos")) {
             return Ok(());
         }
         let state = self
@@ -1347,13 +1530,30 @@ impl ComputerTool {
     }
     async fn wait_cancellable(&self, seconds: f64, ctx: &ToolUseContext) -> Result<(), ToolError> {
         self.check_cancel(ctx)?;
+        let expected = self
+            .state
+            .lock()
+            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+            .policy_revision
+            .clone();
         let sleep = tokio::time::sleep(std::time::Duration::from_secs_f64(seconds));
-        if let Some(cancel) = &ctx.cancel {
-            tokio::select! { biased; ()=cancel.cancelled()=>Err(ToolError::Aborted), ()=sleep=>Ok(()) }
-        } else {
-            sleep.await;
-            Ok(())
-        }
+        let changed = async {
+            if self.policy_path.is_none() {
+                return std::future::pending::<Result<(), ToolError>>().await;
+            }
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                self.check_policy_revision(expected.as_deref())?;
+            }
+        };
+        let cancelled = async {
+            if let Some(cancel) = &ctx.cancel {
+                cancel.cancelled().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! { biased; ()=cancelled=>Err(ToolError::Aborted), result=changed=>result, ()=sleep=>Ok(()) }
     }
     fn validate_final_input(
         &self,
@@ -1539,13 +1739,17 @@ impl ComputerTool {
         &self,
         action: &str,
         input: &Utf16JsonProjection,
+        required_action: &str,
         ctx: &ToolUseContext,
+        revision: Option<&str>,
     ) -> Result<Value, ToolError> {
         let cc = self
             .ctx
             .computer_control
             .as_ref()
             .ok_or_else(|| ToolError::Internal("computer unavailable".into()))?;
+        self.guard_effect(action, input, required_action, None, ctx, revision)
+            .await?;
         if input
             .get_property("use_current_cursor")
             .and_then(|value| value.as_bool())
@@ -1585,7 +1789,11 @@ impl ComputerTool {
         }
         match action {
             "screenshot" => {
-                let s = cc.screenshot().await.map_err(|e| map_err(&e))?;
+                let allowed = self.allowed_bundle_ids()?;
+                let s = cc
+                    .screenshot_for_apps(&allowed)
+                    .await
+                    .map_err(|e| map_err(&e))?;
                 // Best-effort: a backend that can't enumerate displays (or
                 // reports just one) simply gets no note — never fail the
                 // screenshot itself over this.
@@ -1594,6 +1802,7 @@ impl ComputerTool {
                     Err(_) => None,
                 };
                 let mut data = image_action_result(s, note.as_deref())?;
+                data["screenshotFiltering"] = json!(cc.screenshot_filtering());
                 self.record_frame(&mut data, ctx).await?;
                 Ok(data)
             }
@@ -1644,7 +1853,11 @@ impl ComputerTool {
             "left_click_drag" => {
                 if let Some(path) = extensions::path(input)? {
                     let (x, y) = path[0];
+                    self.guard_effect(action, input, required_action, Some((x, y)), ctx, revision)
+                        .await?;
                     cc.mouse_move(x, y).await.map_err(|e| map_err(&e))?;
+                    self.guard_effect(action, input, required_action, Some((x, y)), ctx, revision)
+                        .await?;
                     cc.mouse_down().await.map_err(|e| map_err(&e))?;
                     self.runtime
                         .lock()
@@ -1652,7 +1865,16 @@ impl ComputerTool {
                         .held_mouse = true;
                     let mut result = Ok(());
                     for (x, y) in path.into_iter().skip(1) {
-                        result = self.check_cancel(ctx);
+                        result = self
+                            .guard_effect(
+                                action,
+                                input,
+                                required_action,
+                                Some((x, y)),
+                                ctx,
+                                revision,
+                            )
+                            .await;
                         if result.is_err() {
                             break;
                         }
@@ -1673,14 +1895,31 @@ impl ComputerTool {
                     let to = validate::require_coord(input, "coordinate")?;
                     let from = coord(input, "start_coordinate");
                     if let Some((x, y)) = from {
+                        self.guard_effect(
+                            action,
+                            input,
+                            required_action,
+                            Some((x, y)),
+                            ctx,
+                            revision,
+                        )
+                        .await?;
                         cc.mouse_move(x, y).await.map_err(|e| map_err(&e))?;
                     }
+                    self.guard_effect(action, input, required_action, from, ctx, revision)
+                        .await?;
                     cc.mouse_down().await.map_err(|e| map_err(&e))?;
                     self.runtime
                         .lock()
                         .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
                         .held_mouse = true;
-                    let moved = cc.mouse_move(to.0, to.1).await.map_err(|e| map_err(&e));
+                    let moved = match self
+                        .guard_effect(action, input, required_action, Some(to), ctx, revision)
+                        .await
+                    {
+                        Ok(()) => cc.mouse_move(to.0, to.1).await.map_err(|e| map_err(&e)),
+                        Err(error) => Err(error),
+                    };
                     let released = cc.mouse_up().await.map_err(|e| map_err(&e));
                     if released.is_ok() {
                         self.runtime
@@ -1711,6 +1950,15 @@ impl ComputerTool {
                 if let Some((x, y)) = coord(input, "coordinate") {
                     cc.mouse_move(x, y).await.map_err(|e| map_err(&e))?;
                 }
+                self.guard_effect(
+                    action,
+                    input,
+                    required_action,
+                    coord(input, "coordinate"),
+                    ctx,
+                    revision,
+                )
+                .await?;
                 cc.mouse_down().await.map_err(|e| map_err(&e))?;
                 self.runtime
                     .lock()
@@ -1766,7 +2014,8 @@ impl ComputerTool {
                     .and_then(|value| value.as_bool())
                     == Some(true)
                 {
-                    self.check_cancel(ctx)?;
+                    self.guard_effect(action, input, required_action, None, ctx, revision)
+                        .await?;
                     self.runtime
                         .lock()
                         .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
@@ -1790,7 +2039,8 @@ impl ComputerTool {
                     cc.validate_keys(&keys).await.map_err(|e| map_err(&e))?;
                 }
                 for _ in 0..repeat {
-                    self.check_cancel(ctx)?;
+                    self.guard_effect(action, input, required_action, None, ctx, revision)
+                        .await?;
                     self.runtime
                         .lock()
                         .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
@@ -1816,7 +2066,8 @@ impl ComputerTool {
                     .await
                     .map_err(|e| map_err(&e))?;
                 self.enforce_cumulative_shortcuts(std::slice::from_ref(&key))?;
-                self.press_keys(&[key]).await?;
+                self.press_keys(&[key], action, input, required_action, ctx, revision)
+                    .await?;
                 Ok(json!({"ok":true}))
             }
             "key_up" => {
@@ -1840,7 +2091,9 @@ impl ComputerTool {
                 let secs = validate::hold_duration(input)?;
                 self.enforce_cumulative_shortcuts(&keys)?;
                 cc.validate_keys(&keys).await.map_err(|e| map_err(&e))?;
-                let added = self.press_keys(&keys).await?;
+                let added = self
+                    .press_keys(&keys, action, input, required_action, ctx, revision)
+                    .await?;
                 let result = self.wait_cancellable(secs, ctx).await;
                 let released = self.release_keys(&added).await;
                 result.and(released)?;
@@ -1860,8 +2113,9 @@ impl ComputerTool {
             }
             "zoom" => {
                 let (x0, y0, x1, y1) = validate::require_region(input)?;
+                let allowed = self.allowed_bundle_ids()?;
                 let s = cc
-                    .zoom(x0, y0, x1 - x0, y1 - y0)
+                    .zoom_for_apps(x0, y0, x1 - x0, y1 - y0, &allowed)
                     .await
                     .map_err(|e| map_err(&e))?;
                 self.invalidate_frame(ctx).await;
@@ -1904,6 +2158,8 @@ impl ComputerTool {
                         .into(),
                     ));
                 }
+                self.guard_effect(action, input, required_action, None, ctx, revision)
+                    .await?;
                 cc.open_application(resolved.clone())
                     .await
                     .map_err(|e| map_err(&e))?;
@@ -1916,7 +2172,15 @@ impl ComputerTool {
         }
     }
 
-    async fn press_keys(&self, keys: &[String]) -> Result<Vec<String>, ToolError> {
+    async fn press_keys(
+        &self,
+        keys: &[String],
+        action: &str,
+        input: &Utf16JsonProjection,
+        required_action: &str,
+        ctx: &ToolUseContext,
+        revision: Option<&str>,
+    ) -> Result<Vec<String>, ToolError> {
         let mut added = Vec::new();
         let Some(cc) = &self.ctx.computer_control else {
             return Ok(added);
@@ -1931,6 +2195,13 @@ impl ComputerTool {
                 .contains(&key);
             if already {
                 continue;
+            }
+            if let Err(error) = self
+                .guard_effect(action, input, required_action, None, ctx, revision)
+                .await
+            {
+                let _ = self.release_keys(&added).await;
+                return Err(error);
             }
             if let Err(error) = cc.key_down(key.clone()).await {
                 let _ = self.release_keys(&added).await;
@@ -2177,6 +2448,9 @@ fn batch_failure_result(
 /// TUI should call [`register_all_with_access_resolver`] instead.
 pub fn register_all(reg: &mut tool_api::ToolRegistry, ctx: tool_api::BuiltinToolContext) {
     use std::sync::Arc;
+    if let Some(browser) = browser::BrowserTool::from_environment(Arc::new(DenyAllResolver)) {
+        reg.register_builtin(Arc::new(browser));
+    }
     reg.register_builtin(Arc::new(ComputerTool::new(ctx)));
 }
 
@@ -2189,6 +2463,9 @@ pub fn register_all_with_access_resolver(
     access_resolver: std::sync::Arc<dyn ComputerAccessResolver>,
 ) {
     use std::sync::Arc;
+    if let Some(browser) = browser::BrowserTool::from_environment(access_resolver.clone()) {
+        reg.register_builtin(Arc::new(browser));
+    }
     reg.register_builtin(Arc::new(ComputerTool::with_access_resolver(
         ctx,
         access_resolver,
@@ -2669,7 +2946,7 @@ mod integration_tests {
         // "can't tell what's frontmost" branch specifically.
         call(
             &tool,
-            json!({ "action": "request_access", "apps": ["Anything"] }),
+            json!({ "action": "request_access", "reason": "exercise the computer permission contract", "apps": ["Anything"] }),
         )
         .await
         .unwrap();
@@ -2692,7 +2969,7 @@ mod integration_tests {
         let tool = tool_with(mock);
         call(
             &tool,
-            json!({ "action": "request_access", "apps": ["com.granted.app"] }),
+            json!({ "action": "request_access", "reason": "exercise the computer permission contract", "apps": ["com.granted.app"] }),
         )
         .await
         .unwrap();
@@ -2711,11 +2988,11 @@ mod integration_tests {
     #[tokio::test]
     async fn enforce_tier_denies_an_under_tiered_app_for_a_full_tier_action() {
         let mut mock = MockCc::default();
-        *mock.frontmost.get_mut().unwrap() = Ok(Some(app("com.granted.app", "Granted")));
+        *mock.frontmost.get_mut().unwrap() = Ok(Some(app("com.apple.Terminal", "Terminal")));
         let tool = tool_with(mock);
         call(
             &tool,
-            json!({ "action": "request_access", "apps": ["com.granted.app"], "tier": "click" }),
+            json!({ "action": "request_access", "reason": "exercise the computer permission contract", "apps": ["com.apple.Terminal"], "tier": "full" }),
         )
         .await
         .unwrap();
@@ -2725,7 +3002,7 @@ mod integration_tests {
             .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "permission denied: \"Granted\" is granted at tier \"click\"; this action requires tier \"full\". Call request_access to upgrade it."
+            "permission denied: \"Terminal\" is granted at tier \"click\"; this action requires tier \"full\". Call request_access to upgrade it."
         );
     }
 
@@ -2736,7 +3013,7 @@ mod integration_tests {
         let tool = tool_with(mock);
         call(
             &tool,
-            json!({ "action": "request_access", "apps": ["com.granted.app"] }),
+            json!({ "action": "request_access", "reason": "exercise the computer permission contract", "apps": ["com.granted.app"] }),
         )
         .await
         .unwrap();
@@ -2768,7 +3045,7 @@ mod integration_tests {
         let tool = tool_with(mock);
         call(
             &tool,
-            json!({ "action": "request_access", "apps": ["Slack"] }),
+            json!({ "action": "request_access", "reason": "exercise the computer permission contract", "apps": ["Slack"] }),
         )
         .await
         .unwrap();
@@ -2792,7 +3069,7 @@ mod integration_tests {
         .unwrap_err();
         assert_eq!(
             err.to_string(),
-            "permission denied: \"com.foo.bar\" is not granted for this session. Call request_access first."
+            "permission denied: No applications are granted for this session. Call request_access first."
         );
     }
 
@@ -2805,7 +3082,7 @@ mod integration_tests {
         let tool = tool_with(mock);
         call(
             &tool,
-            json!({"action": "request_access", "apps": ["TextEdit"]}),
+            json!({"action": "request_access", "reason": "exercise the computer permission contract", "apps": ["TextEdit"]}),
         )
         .await
         .unwrap();
@@ -2831,6 +3108,7 @@ mod integration_tests {
         };
         *mock.frontmost.lock().unwrap() = Ok(Some(app("com.apple.TextEdit", "TextEdit")));
         let (tool, cc) = tool_with_shared_cc(mock);
+        call(&tool, json!({"action":"request_access","reason":"inspect the granted app", "apps":["com.apple.TextEdit"]})).await.unwrap();
         let result = call(&tool, json!({"action": "screenshot"})).await.unwrap();
         *cc.frontmost.lock().unwrap() = Err(());
         assert_eq!(
@@ -2851,7 +3129,7 @@ mod integration_tests {
         let tool = tool_with(mock);
         call(
             &tool,
-            json!({ "action": "request_access", "apps": ["com.granted.app"] }),
+            json!({ "action": "request_access", "reason": "exercise the computer permission contract", "apps": ["com.granted.app"] }),
         )
         .await
         .unwrap();
@@ -2874,7 +3152,7 @@ mod integration_tests {
         let tool = tool_with(mock);
         call(
             &tool,
-            json!({ "action": "request_access", "apps": ["com.granted.app"] }),
+            json!({ "action": "request_access", "reason": "exercise the computer permission contract", "apps": ["com.granted.app"] }),
         )
         .await
         .unwrap();
@@ -2907,7 +3185,7 @@ mod integration_tests {
         let tool = tool_with(mock);
         call(
             &tool,
-            json!({ "action": "request_access", "apps": ["com.granted.app"] }),
+            json!({ "action": "request_access", "reason": "exercise the computer permission contract", "apps": ["com.granted.app"] }),
         )
         .await
         .unwrap();
@@ -2926,13 +3204,13 @@ mod integration_tests {
     #[tokio::test]
     async fn computer_batch_stops_on_first_error_and_reports_completed_steps() {
         let mut mock = MockCc::default();
-        *mock.frontmost.get_mut().unwrap() = Ok(Some(app("com.granted.app", "Granted")));
+        *mock.frontmost.get_mut().unwrap() = Ok(Some(app("com.apple.Terminal", "Terminal")));
         let tool = tool_with(mock);
         // Second action (`type`) needs Full tier; only Click is granted here
         // — it must fail and stop the batch there, not run the third action.
         call(
             &tool,
-            json!({ "action": "request_access", "apps": ["com.granted.app"], "tier": "click" }),
+            json!({ "action": "request_access", "reason": "exercise the computer permission contract", "apps": ["com.apple.Terminal"], "tier": "full" }),
         )
         .await
         .unwrap();
@@ -2965,7 +3243,7 @@ mod integration_tests {
         let tool = tool_with(mock);
         call(
             &tool,
-            json!({ "action": "request_access", "apps": ["com.granted.app"] }),
+            json!({ "action": "request_access", "reason": "exercise the computer permission contract", "apps": ["com.granted.app"] }),
         )
         .await
         .unwrap();
@@ -3055,7 +3333,7 @@ mod integration_tests {
         let tool = ComputerTool::new(ctx).with_lock_home(test_lock_home());
         let result = call(
             &tool,
-            json!({ "action": "request_access", "apps": ["Granted"] }),
+            json!({ "action": "request_access", "reason": "exercise the computer permission contract", "apps": ["Granted"] }),
         )
         .await
         .unwrap();
@@ -3104,7 +3382,7 @@ mod integration_tests {
                 .with_lock_home(test_lock_home());
         let result = call(
             &tool,
-            json!({ "action": "request_access", "apps": ["com.a.app", "com.b.app"] }),
+            json!({ "action": "request_access", "reason": "exercise the computer permission contract", "apps": ["com.a.app", "com.b.app"] }),
         )
         .await
         .unwrap();
@@ -3247,6 +3525,7 @@ mod integration_tests {
             ..Default::default()
         };
         let tool = tool_with(mock);
+        call(&tool, json!({"action":"request_access","reason":"inspect the granted app", "apps":["com.apple.TextEdit"]})).await.unwrap();
         let result = call(&tool, json!({ "action": "screenshot" }))
             .await
             .unwrap();
@@ -3266,6 +3545,7 @@ mod integration_tests {
             ..Default::default()
         };
         let tool = tool_with(mock);
+        call(&tool, json!({"action":"request_access","reason":"inspect the granted app", "apps":["com.apple.TextEdit"]})).await.unwrap();
         let result = call(&tool, json!({ "action": "screenshot" }))
             .await
             .unwrap();
@@ -3320,7 +3600,7 @@ mod integration_tests {
         // succeed even while a different live session holds the lock.
         call(
             &tool,
-            json!({ "action": "request_access", "apps": ["Slack"] }),
+            json!({ "action": "request_access", "reason": "exercise the computer permission contract", "apps": ["Slack"] }),
         )
         .await
         .expect("request_access is exempt from the cross-session lock");
@@ -3346,6 +3626,7 @@ mod integration_tests {
             ..Default::default()
         })
         .with_lock_home(home.clone());
+        call(&tool, json!({"action":"request_access","reason":"inspect the granted app", "apps":["com.apple.TextEdit"]})).await.unwrap();
         call(&tool, json!({ "action": "screenshot" }))
             .await
             .expect("a dead holder's lock must be treated as stale, not blocking");
@@ -3357,6 +3638,8 @@ mod integration_tests {
     }
 }
 use lingxi_core::host::computer_control::{canonical_computer_key as canonical_key, ComputerError};
+#[cfg(test)]
+mod device_policy_tests;
 #[cfg(test)]
 mod execution_tests;
 mod extensions;

@@ -9,7 +9,7 @@ use std::sync::{
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
-struct RecordingBackend {
+pub(super) struct RecordingBackend {
     events: Mutex<Vec<String>>,
     geometry: AtomicU64,
     desktop_scope: Option<std::path::PathBuf>,
@@ -20,17 +20,87 @@ struct RecordingBackend {
     click_failure: std::sync::atomic::AtomicBool,
     text_failure: std::sync::atomic::AtomicBool,
     button_cleanup_failures: AtomicU64,
+    target_checks: std::sync::atomic::AtomicBool,
+    target: Mutex<Option<AppInfo>>,
+    policy_on_click: Mutex<Option<(std::path::PathBuf, Value)>>,
+    captures: Mutex<Vec<Vec<String>>>,
+    os_permissions: Mutex<Option<(bool, bool)>>,
+    locked: std::sync::atomic::AtomicBool,
+    target_after_display_size: Mutex<Option<Option<AppInfo>>>,
+    target_after_geometry: Mutex<Option<Option<AppInfo>>>,
+    cursor: Mutex<Option<(u32, u32)>>,
+    cursor_after_display_size: Mutex<Option<(u32, u32)>>,
+    allowed_target_point: Mutex<Option<(u32, u32)>>,
+    target_points: Mutex<Vec<(u32, u32)>>,
 }
 impl RecordingBackend {
     fn event(&self, event: String) {
         self.events.lock().unwrap().push(event);
     }
-    fn events(&self) -> Vec<String> {
+    pub(super) fn events(&self) -> Vec<String> {
         self.events.lock().unwrap().clone()
+    }
+    pub(super) fn use_target_checks(&self, app: Option<AppInfo>) {
+        *self.target.lock().unwrap() = app;
+        self.target_checks.store(true, Ordering::SeqCst);
+    }
+    pub(super) fn replace_policy_on_click(&self, path: std::path::PathBuf, value: Value) {
+        *self.policy_on_click.lock().unwrap() = Some((path, value));
+    }
+    pub(super) fn captured_apps(&self) -> Vec<Vec<String>> {
+        self.captures.lock().unwrap().clone()
+    }
+    pub(super) fn set_os_permissions(&self, value: Option<(bool, bool)>) {
+        *self.os_permissions.lock().unwrap() = value;
+    }
+    pub(super) fn set_locked(&self, locked: bool) {
+        self.locked.store(locked, Ordering::SeqCst);
+    }
+    pub(super) fn change_target_during_display_size(&self, target: Option<AppInfo>) {
+        *self.target_after_display_size.lock().unwrap() = Some(target);
+    }
+    pub(super) fn change_target_during_geometry(&self, target: Option<AppInfo>) {
+        *self.target_after_geometry.lock().unwrap() = Some(target);
+    }
+    pub(super) fn move_cursor_during_display_size(&self, start: (u32, u32), end: (u32, u32)) {
+        *self.cursor.lock().unwrap() = Some(start);
+        *self.cursor_after_display_size.lock().unwrap() = Some(end);
+        *self.allowed_target_point.lock().unwrap() = Some(start);
+    }
+    pub(super) fn checked_target_points(&self) -> Vec<(u32, u32)> {
+        self.target_points.lock().unwrap().clone()
     }
 }
 #[async_trait]
 impl ComputerControl for RecordingBackend {
+    async fn screen_locked(&self) -> Result<bool, ComputerError> {
+        Ok(self.locked.load(Ordering::SeqCst))
+    }
+    async fn check_os_permissions(&self) -> Option<(bool, bool)> {
+        *self.os_permissions.lock().unwrap()
+    }
+    fn supports_target_application(&self) -> bool {
+        self.target_checks.load(Ordering::SeqCst)
+    }
+    async fn target_application(&self, x: u32, y: u32) -> Result<Option<AppInfo>, ComputerError> {
+        self.target_points.lock().unwrap().push((x, y));
+        if self
+            .allowed_target_point
+            .lock()
+            .unwrap()
+            .is_some_and(|point| point != (x, y))
+        {
+            return Ok(Some(AppInfo {
+                bundle_id: "other.app".into(),
+                display_name: "Other".into(),
+            }));
+        }
+        Ok(self.target.lock().unwrap().clone())
+    }
+    async fn screenshot_for_apps(&self, allowed: &[String]) -> Result<Screenshot, ComputerError> {
+        self.captures.lock().unwrap().push(allowed.to_vec());
+        self.screenshot().await
+    }
     fn desktop_lock_scope(&self) -> Option<std::path::PathBuf> {
         self.desktop_scope.clone()
     }
@@ -43,6 +113,10 @@ impl ComputerControl for RecordingBackend {
         }
     }
     async fn frame_geometry(&self) -> Result<Option<ComputerFrameGeometry>, ComputerError> {
+        tokio::task::yield_now().await;
+        if let Some(target) = self.target_after_geometry.lock().unwrap().take() {
+            *self.target.lock().unwrap() = target;
+        }
         Ok(Some(ComputerFrameGeometry {
             display_id: 1,
             pixel_width: 4,
@@ -91,6 +165,13 @@ impl ComputerControl for RecordingBackend {
         })
     }
     async fn display_size(&self) -> Result<(u32, u32), ComputerError> {
+        tokio::task::yield_now().await;
+        if let Some(target) = self.target_after_display_size.lock().unwrap().take() {
+            *self.target.lock().unwrap() = target;
+        }
+        if let Some(cursor) = self.cursor_after_display_size.lock().unwrap().take() {
+            *self.cursor.lock().unwrap() = Some(cursor);
+        }
         Ok((4, 4))
     }
     async fn frontmost_app(&self) -> Result<Option<AppInfo>, ComputerError> {
@@ -105,6 +186,11 @@ impl ComputerControl for RecordingBackend {
     }
     async fn left_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
         self.event(format!("click:{x},{y}"));
+        if let Some((path, value)) = self.policy_on_click.lock().unwrap().take() {
+            let temporary = path.with_extension("next");
+            std::fs::write(&temporary, serde_json::to_vec(&value).unwrap()).unwrap();
+            std::fs::rename(temporary, path).unwrap();
+        }
         Ok(())
     }
     async fn right_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
@@ -114,6 +200,12 @@ impl ComputerControl for RecordingBackend {
     async fn double_click(&self, x: u32, y: u32) -> Result<(), ComputerError> {
         self.event(format!("double:{x},{y}"));
         Ok(())
+    }
+    async fn click_current(&self, _button: &str, _count: u32) -> Result<(), ComputerError> {
+        self.event("click_current".into());
+        Err(ComputerError::Other(
+            "a checked target must never fall back to the live cursor".into(),
+        ))
     }
     async fn mouse_click(&self, x: u32, y: u32, button: &str) -> Result<(), ComputerError> {
         self.event(format!("{button}:{x},{y}"));
@@ -200,10 +292,10 @@ impl ComputerControl for RecordingBackend {
         Ok(())
     }
     async fn cursor_position(&self) -> Result<(u32, u32), ComputerError> {
-        Ok((2, 3))
+        Ok(self.cursor.lock().unwrap().unwrap_or((2, 3)))
     }
 }
-fn make_tool(cc: Arc<RecordingBackend>) -> ComputerTool {
+pub(super) fn make_tool(cc: Arc<RecordingBackend>) -> ComputerTool {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let fs = tool_api::test_support::make_dummy_fs();
     let bus = Arc::new(telemetry::AnalyticsBus::new());
@@ -221,7 +313,7 @@ fn make_tool(cc: Arc<RecordingBackend>) -> ComputerTool {
         .grant_app("test.app".into(), AppTier::Full);
     tool
 }
-async fn invoke(
+pub(super) async fn invoke(
     tool: &ComputerTool,
     input: Value,
     ctx: ToolUseContext,
@@ -244,7 +336,7 @@ async fn invoke(
     Ok(result)
 }
 
-fn ctx() -> ToolUseContext {
+pub(super) fn ctx() -> ToolUseContext {
     tool_api::test_support::fresh_ctx()
 }
 
@@ -1029,7 +1121,7 @@ async fn cancelled_access_cannot_commit_late_grants() {
     context.cancel = Some(cancel.clone());
     let request = invoke(
         &tool,
-        json!({"action":"request_access","apps":["late.app"],"systemKeyCombos":true}),
+        json!({"action":"request_access", "reason":"exercise the permission contract","apps":["late.app"],"systemKeyCombos":true}),
         context,
     );
     let respond = async {
@@ -1208,7 +1300,7 @@ async fn different_config_homes_share_the_same_physical_desktop_lease() {
     assert!(backend.events().is_empty());
     invoke(
         &second,
-        json!({"action":"request_access","apps":["test.app"]}),
+        json!({"action":"request_access", "reason":"exercise the permission contract","apps":["test.app"]}),
         ctx(),
     )
     .await

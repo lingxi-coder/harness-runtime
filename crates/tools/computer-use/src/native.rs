@@ -406,10 +406,25 @@ impl ComputerTool {
         ctx: &ToolUseContext,
     ) -> Result<Option<ComputerFrame>, ToolError> {
         self.check_cancel(ctx)?;
+        let revision = match self.sync_policy(ctx).await {
+            Ok(revision) => revision,
+            Err(_) => {
+                self.invalidate_frame(ctx).await;
+                return Ok(None);
+            }
+        };
         let Some(cc) = &self.ctx.computer_control else {
             return Ok(None);
         };
         if self.native_capabilities().is_none() {
+            return Ok(None);
+        }
+        if cc
+            .screen_locked()
+            .await
+            .map_err(|error| crate::map_err(&error))?
+        {
+            self.invalidate_frame(ctx).await;
             return Ok(None);
         }
         if cc
@@ -444,6 +459,10 @@ impl ComputerTool {
             .as_ref()
             != Some(&observed.source)
         {
+            self.invalidate_frame(ctx).await;
+            return Ok(None);
+        }
+        if self.check_policy_revision(revision.as_deref()).is_err() {
             self.invalidate_frame(ctx).await;
             return Ok(None);
         }

@@ -90,6 +90,7 @@ impl GrantFlags {
 /// Full session-scoped computer-use state for one `ComputerTool` instance.
 #[derive(Debug, Default)]
 pub struct SessionState {
+    pub policy_revision: Option<String>,
     /// Bundle id → tier, insertion order preserved for stable
     /// `list_granted_applications` output.
     apps: HashMap<String, AppTier>,
@@ -113,14 +114,16 @@ pub struct SessionState {
 }
 
 impl SessionState {
-    /// Grant (or upgrade) one app to `tier`. Never downgrades an existing
-    /// grant — matches upstream's "previously granted apps remain granted"
-    /// `request_access` contract (a second call adds/upgrades, never revokes).
+    pub fn revoke_grants(&mut self) {
+        self.apps.clear();
+        self.order.clear();
+        self.allowed_apps.clear();
+        self.grant_flags = GrantFlags::default();
+    }
+    /// Append a new app; preserve existing entries exactly, matching 2.1.310.
+    /// Device-policy revision changes revoke grants through a separate path.
     pub fn grant_app(&mut self, bundle_id: String, tier: AppTier) {
-        let entry = self.apps.entry(bundle_id.clone()).or_insert(tier);
-        if tier > *entry {
-            *entry = tier;
-        }
+        self.apps.entry(bundle_id.clone()).or_insert(tier);
         if !self.order.contains(&bundle_id) {
             self.order.push(bundle_id);
         }
@@ -189,11 +192,11 @@ mod tests {
     }
 
     #[test]
-    fn grant_app_upgrades_when_higher_tier_requested() {
+    fn grant_app_preserves_existing_tier_when_requested_again() {
         let mut s = SessionState::default();
         s.grant_app("com.foo".into(), AppTier::Click);
         s.grant_app("com.foo".into(), AppTier::Full);
-        assert_eq!(s.tier_for("com.foo"), Some(AppTier::Full));
+        assert_eq!(s.tier_for("com.foo"), Some(AppTier::Click));
     }
 
     #[test]
