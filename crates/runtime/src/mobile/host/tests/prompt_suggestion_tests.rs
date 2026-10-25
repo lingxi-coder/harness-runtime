@@ -7,6 +7,28 @@ use lingxi_core::host::{OrchestratorHandle, PromptSuggestionContext};
 
 use super::{build_mobile, test_config, FakeListener, HostFakePlatform, RecordingPermissionSink};
 
+#[derive(Default)]
+struct SuggestionAnalytics {
+    events: tokio::sync::Mutex<Vec<(String, telemetry::LogEventMetadata)>>,
+}
+
+#[async_trait::async_trait]
+impl telemetry::AnalyticsSink for SuggestionAnalytics {
+    async fn log_event(&self, name: &str, metadata: telemetry::LogEventMetadata) {
+        if name.contains("suggestion") || name == "tengu_feature_bad" {
+            self.events.lock().await.push((name.into(), metadata));
+        }
+    }
+
+    async fn log_event_async(&self, name: &str, metadata: telemetry::LogEventMetadata) {
+        self.log_event(name, metadata).await;
+    }
+
+    fn name(&self) -> &str {
+        "mobile-suggestion-test"
+    }
+}
+
 fn read_request(socket: &mut std::net::TcpStream) -> serde_json::Value {
     socket.set_nonblocking(false).unwrap();
     socket
@@ -66,6 +88,50 @@ async fn mobile_default_composer_generates_and_delivers_a_post_turn_suggestion()
     let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     server.set_nonblocking(true).unwrap();
     let base = format!("http://{}", server.local_addr().unwrap());
+
+    let root = tempfile::tempdir().unwrap();
+    let mut config = test_config(root.path());
+    config.workspace_trusted = true;
+    config.api_base = base;
+    config.api_key = "test-fixture-key".into();
+    config.default_model = "claude-sonnet-4-5".into();
+    let listener = Arc::new(FakeListener::default());
+    let build_started = Instant::now();
+    let runtime = build_mobile(
+        config,
+        Arc::new(HostFakePlatform::new(root.path().into())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+    )
+    .await
+    .unwrap();
+    let build_elapsed = build_started.elapsed();
+    let analytics = Arc::new(SuggestionAnalytics::default());
+    runtime
+        .mcp_tool_context
+        .bus
+        .attach_sink(analytics.clone())
+        .await;
+    let session_id = runtime
+        .orchestrator
+        .current_session_id()
+        .await
+        .as_uuid()
+        .to_string();
+    runtime
+        .orchestrator
+        .update_prompt_suggestion_context(PromptSuggestionContext {
+            session_id: session_id.clone(),
+            focus: "focused".into(),
+            input_empty: true,
+            pending_permission: false,
+            elicitation_active: false,
+        })
+        .await
+        .unwrap();
+
+    // Mobile startup may load bundled resources before any model query. Start
+    // the provider deadline only once the runtime and attached UI are ready.
     let (requests_tx, requests_rx) = tokio::sync::oneshot::channel();
     let server_thread = std::thread::spawn(move || {
         let mut requests = Vec::new();
@@ -96,49 +162,21 @@ async fn mobile_default_composer_generates_and_delivers_a_post_turn_suggestion()
         let _ = requests_tx.send(requests);
     });
 
-    let root = tempfile::tempdir().unwrap();
-    let mut config = test_config(root.path());
-    config.workspace_trusted = true;
-    config.api_base = base;
-    config.api_key = "test-fixture-key".into();
-    config.default_model = "claude-sonnet-4-5".into();
-    let listener = Arc::new(FakeListener::default());
-    let runtime = build_mobile(
-        config,
-        Arc::new(HostFakePlatform::new(root.path().into())),
-        listener.clone(),
-        Arc::new(RecordingPermissionSink::default()),
-    )
-    .await
-    .unwrap();
-    let session_id = runtime
-        .orchestrator
-        .current_session_id()
-        .await
-        .as_uuid()
-        .to_string();
-    runtime
-        .orchestrator
-        .update_prompt_suggestion_context(PromptSuggestionContext {
-            session_id: session_id.clone(),
-            focus: "focused".into(),
-            input_empty: true,
-            pending_permission: false,
-            elicitation_active: false,
-        })
-        .await
-        .unwrap();
-
     for prompt in ["Find the bug", "Fix it and then run the focused tests"] {
-        tokio::time::timeout(
+        let result = tokio::time::timeout(
             Duration::from_secs(10),
             runtime.orchestrator.run_turn_streaming(prompt),
         )
-        .await
-        .expect("foreground mobile turn must finish")
-        .unwrap();
+        .await;
+        match result {
+            Ok(outcome) => { outcome.unwrap(); }
+            Err(error) => panic!(
+                "foreground mobile turn timed out: {error}; build={build_elapsed:?}, session={session_id}, prompt={prompt:?}, events={:?}",
+                listener.received.lock().await
+            ),
+        }
     }
-    tokio::time::timeout(Duration::from_secs(10), async {
+    let suggestion_result = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let events = listener.received.lock().await;
             if let Some(ClientEvent::PromptSuggestion {
@@ -165,8 +203,17 @@ async fn mobile_default_composer_generates_and_delivers_a_post_turn_suggestion()
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("default mobile composition must publish a generated suggestion");
+    .await;
+    if let Err(error) = suggestion_result {
+        panic!(
+            "default mobile composition did not publish a suggestion: {error}; session={session_id}; current_session={}; permission={:?}; analytics={:?}; events={:?}; history={:?}",
+            runtime.orchestrator.current_session_id().await.as_uuid(),
+            runtime.orchestrator.permission_mode(),
+            analytics.events.lock().await,
+            listener.received.lock().await,
+            runtime.orchestrator.snapshot_history().await,
+        );
+    }
     let requests = requests_rx.await.unwrap();
     server_thread.join().unwrap();
     assert_eq!(requests.len(), 3);
