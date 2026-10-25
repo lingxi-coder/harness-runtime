@@ -16,12 +16,38 @@ Root-absolute framework requests are redirected with HTTP 307 into the current e
 
 Mobile application content opens in the **OS-selected installed external browser**, not an embedded WebView/WKWebView. Browser support is feature-detected; authors must not assume a browser brand or package. Desktop retains its own window. The gateway serves `/__run/<runId>/__host/sdk.js` (root-absolute `/__local_app_sdk.js` redirects only from the current run). Authors load it before SDK calls; native Desktop preloads remain authoritative there. File and camera selection use browser inputs and OS permissions, independently of LingXi execution and Agent grants. Native management UI must not claim it can revoke external browser site permissions or erase its site data.
 
-`localApp.agent.run(input)` resolves to the final reply. Durable `agent.tasks.start/get/list/subscribe/cancel` exposes task identity, history and progress; App-owned `agent.chats.create/open/list/archive/delete` returns handles with `send/history/subscribe/cancel`. The host maps `chats.open` to its scoped `get` operation and subscriptions read the durable task/chat records. A JavaScript Promise does not survive reload; reconnect through task state or Chat history. The host derives App/run identity from the current route and admits only its fixed task and Chat operation allowlist. The page cannot select another app, call arbitrary host methods, grant tools, access approval/settings operations or obtain provider credentials. Requests require exact Host, Origin and run-qualified Referer, fixed-length multipart framing and strict field validation; the gateway returns the existing `{ok,value}` or `{ok:false,error}` envelope.
+The gateway serves the shared official AG-UI SDK 1.0.3 and its authenticated
+custom transport binding. `agent.createClient` returns an official AbstractAgent;
+`agent.file(File)` constructs standard content parts. Thin run/start/send methods
+accept RunAgentInput, and task event batches contain standard BaseEvents with a
+separate replay sequence. `forwardedProps["com.lingxi.localApp"]` holds versioned
+host options; it is not a permission grant. Tasks/Chats CRUD remains host-owned.
+No compatibility aliases, old pending-store loader or prototype-message migration
+is supported. Obsolete Agent data is deleted only within its known private scope.
 
-Attachments are ordinary browser `File` objects. File bytes and request metadata travel in one `multipart/form-data` request, with at most 8 files, 25 MiB per file and 50 MiB total. The gateway streams the fixed-length body into a host-selected anonymous spool file under the private App library, validates and reads one bounded part at a time, then removes the file on completion or error. The directory is owner-only, the file is 0600, pages cannot choose its path, and a single global upload permit bounds concurrent decoding. There is no public two-stage upload endpoint or arbitrary-path input. The Agent host rechecks the release, tool grants, request scope and current invocation for every operation; stopping or replacing a run revokes its gateway connections.
+Standard inline image/document parts are validated and decoded only at the host
+execution boundary, with eight files, 25 MiB/file and 50 MiB/new message limits.
+Private Chat assets preserve exact standard message semantics for cold history;
+their filesystem references never leave the host. The bound HTTP transport must
+reconstruct and validate the complete standard input before admission. There is
+no public two-stage upload or arbitrary-path input. Host/Origin/current-epoch
+Referer and strict framing checks remain required. Stop and release replacement
+revoke existing connections and task access.
 
-`localApp.host.open()` returns to the trusted native approval UI through an app deep link; it does not approve a request. Before submission, the browser SDK saves the full pending input and `File` contents in app-origin IndexedDB; it uses that record for an iOS handoff. The wake link contains only app ID, installed revision and exact request ID, never prompt, files or credentials. After native continuation attaches, LingXi returns to the original browser URL with the exact `__lingxi_ready=<requestId>` marker. Only that matching marker can claim and submit the saved request once; an ordinary reload never replays it. Pending data expires after 24 hours and accepted idempotency receipts after 7 days; storage is capped at 32 records and 100 MiB. The recovery page lists saved request IDs and offers user-confirmed return links; storage expiry never submits a replacement request.
+The browser retains full pending input in its new App/revision-scoped IndexedDB
+store for native foreground handoff. The wake link and ready marker identify the
+standard runId; they contain no prompt, files, paths or credentials. Claiming the
+matching reservation submits only that saved input. Ordinary reload reads events
+or history; it never replays a model request. Native approval remains outside
+page JavaScript. Detaching a subscription differs from explicit cancellation.
 
-On iOS 26, browser Agent requests use a finite foreground `BGContinuedProcessingTask` handoff. The native UI first waits for the actual OS handler to attach, then reserves the exact browser request for a receive deadline (60 seconds by default, at most 120 seconds); after admission, the persisted task follows its own host/grant timeout and the system continuation budget. On iOS 27, `RunLocalAppAgentIntent` receives the complete prompt/files input and waits for the final result through the same Agent broker rather than treating admission as completion. Neither path promises an always-running background worker or preserves a page Promise across suspension. Android holds a user-visible foreground runtime notification while the browser owns a run. An explicit native Stop action remains authoritative; neither closing the browser tab nor the native management page stops the app. Linux commands share the user's HOME. Per-run directories, process ownership and the browser gateway are not a security sandbox.
+On iOS26 the native foreground action obtains a real BGContinuedProcessingTask
+before opening the browser and reserves the exact App/revision/runId for a
+bounded receive window. Admitted work has its own task limits under the finite
+OS lease. iOS27 LongRunningIntent receives a complete RunAgentInput and returns
+the actual terminal AG-UI event JSON, not an admission receipt or a new reply
+format. Task metadata alone never proves completion: success requires the real
+standard terminal event. On Android the runtime is owned by a foreground service
+with visible Stop controls. Neither platform promises an always-running process.
 
 Host tests cover the gateway and lifecycle, plus an explicitly fake SDK boundary for cancellation/reap faults. They do not substitute for the required signed Android/iPhone Python/Node service tests or generated bindings/native package checks.

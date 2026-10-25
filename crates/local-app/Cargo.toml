@@ -20,6 +20,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync"], optional = true }
 uuid = { version = "1.10", features = ["v4"] }
 sha2 = "0.10"
+base64 = "0.22"
+jsonschema = { version = "=0.46.10", default-features = false }
 fs2 = "0.4"
 semver = "1"
 platform-posix = { path = "../platforms/posix", optional = true }

@@ -1,6 +1,5 @@
 //! Per-installation loopback gateway. A URL contains an unguessable run epoch;
 //! every accepted connection is cancelled when that epoch is stopped.
-use base64::Engine as _;
 use std::{
     collections::BTreeMap,
     fs::{self, DirBuilder},
@@ -17,35 +16,16 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 const MAX_HEAD: usize = 32 * 1024;
-const MAX_AGENT_FILE_COUNT: usize = 8;
-const MAX_AGENT_FILE_SIZE: usize = 25 * 1024 * 1024;
-const MAX_AGENT_FILES_TOTAL: usize = 50 * 1024 * 1024;
-const MAX_AGENT_METADATA: usize = 1024 * 1024;
-const MAX_AGENT_BODY: usize = MAX_AGENT_FILES_TOTAL + 2 * 1024 * 1024;
-const MAX_MULTIPART_PART_HEAD: usize = 16 * 1024;
-// A single upload is decoded at a time across all Apps to bound base64 DTO memory.
+const MAX_AGENT_BODY: usize = 116 * 1024 * 1024;
+const MAX_AGENT_JSON_DEPTH: usize = 128;
+// Serialize large full-input transfers across Apps to bound inline file memory.
 static AGENT_REQUESTS: Semaphore = Semaphore::const_new(1);
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PageRequest {
     method: String,
-    args: serde_json::Value,
-}
-
-struct MultipartPart<'a> {
-    name: String,
-    filename: Option<String>,
-    media_type: Option<String>,
-    body: &'a [u8],
-}
-
-struct SpooledPart {
-    name: String,
-    filename: Option<String>,
-    media_type: Option<String>,
-    body_start: u64,
-    body_end: u64,
+    args: Box<serde_json::value::RawValue>,
 }
 
 #[derive(Clone)]
@@ -253,663 +233,95 @@ fn validate_private_spool_dir(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn split_header_parameters(
-    value: &str,
-) -> Result<(String, BTreeMap<String, String>), &'static str> {
-    let mut pieces = Vec::new();
-    let mut start = 0;
-    let mut quoted = false;
+fn parse_page_request<R: Read + Seek>(mut reader: R) -> Result<PageRequest, &'static str> {
+    use serde::Deserialize as _;
+
+    reader
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| "could not seek Agent request body")?;
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    let request =
+        PageRequest::deserialize(&mut deserializer).map_err(|_| "invalid Agent request JSON")?;
+    deserializer
+        .end()
+        .map_err(|_| "invalid Agent request JSON")?;
+
+    // RawValue keeps large inline DataSource payloads in one allocation. Its
+    // deserializer can capture deeply nested values without serde_json's usual
+    // recursion limit, so enforce the same bound with a no-allocation scan.
+    validate_agent_json_depth(request.args.get())?;
+    Ok(request)
+}
+
+fn validate_agent_json_depth(value: &str) -> Result<(), &'static str> {
+    let mut depth = 0_usize;
+    let mut in_string = false;
     let mut escaped = false;
-    for (index, ch) in value.char_indices() {
-        if escaped {
-            escaped = false;
-        } else if quoted && ch == '\\' {
-            escaped = true;
-        } else if ch == '"' {
-            quoted = !quoted;
-        } else if ch == ';' && !quoted {
-            pieces.push(value[start..index].trim());
-            start = index + ch.len_utf8();
-        }
-    }
-    if quoted || escaped {
-        return Err("invalid multipart header parameter");
-    }
-    pieces.push(value[start..].trim());
-    let Some((kind, rest)) = pieces.split_first() else {
-        return Err("invalid multipart header");
-    };
-    let mut parameters = BTreeMap::new();
-    for piece in rest {
-        let Some((name, raw)) = piece.split_once('=') else {
-            return Err("invalid multipart header parameter");
-        };
-        let name = name.trim().to_ascii_lowercase();
-        if name.is_empty() || parameters.contains_key(&name) {
-            return Err("duplicate multipart header parameter");
-        }
-        let raw = raw.trim();
-        let parameter = if raw.starts_with('"') {
-            if !raw.ends_with('"') || raw.len() < 2 {
-                return Err("invalid quoted multipart parameter");
+    for byte in value.bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
             }
-            let mut output = String::with_capacity(raw.len() - 2);
-            let mut chars = raw[1..raw.len() - 1].chars();
-            while let Some(ch) = chars.next() {
-                if ch == '\\' {
-                    let Some(escaped) = chars.next() else {
-                        return Err("invalid quoted multipart parameter");
-                    };
-                    if escaped != '\\' && escaped != '"' {
-                        return Err("invalid quoted multipart escape");
-                    }
-                    output.push(escaped);
-                } else {
-                    output.push(ch);
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > MAX_AGENT_JSON_DEPTH {
+                    return Err("Agent request JSON is too deeply nested");
                 }
             }
-            output
-        } else {
-            if raw.is_empty()
-                || raw
-                    .bytes()
-                    .any(|byte| byte.is_ascii_whitespace() || byte == b'"')
-            {
-                return Err("invalid multipart parameter");
+            b'}' | b']' => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or("invalid Agent request JSON structure")?;
             }
-            raw.to_owned()
-        };
-        parameters.insert(name, parameter);
-    }
-    Ok((kind.trim().to_ascii_lowercase(), parameters))
-}
-
-fn multipart_boundary(content_type: &[u8]) -> Result<Vec<u8>, &'static str> {
-    let content_type = std::str::from_utf8(content_type).map_err(|_| "invalid content type")?;
-    let (kind, parameters) = split_header_parameters(content_type)?;
-    if kind != "multipart/form-data" {
-        return Err("Agent requires multipart/form-data");
-    }
-    let boundary = parameters
-        .get("boundary")
-        .ok_or("multipart boundary is missing")?;
-    let bytes = boundary.as_bytes();
-    if bytes.is_empty()
-        || bytes.len() > 70
-        || bytes
-            .iter()
-            .any(|byte| !byte.is_ascii_graphic() || *byte == b'"')
-    {
-        return Err("invalid multipart boundary");
-    }
-    Ok(bytes.to_vec())
-}
-
-fn find_bytes(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if needle.is_empty() || from > haystack.len() || needle.len() > haystack.len() - from {
-        return None;
-    }
-    haystack[from..]
-        .windows(needle.len())
-        .position(|window| window == needle)
-        .map(|offset| from + offset)
-}
-
-fn parse_disposition(value: &[u8]) -> Result<(String, Option<String>), &'static str> {
-    let value = std::str::from_utf8(value).map_err(|_| "invalid multipart disposition")?;
-    let (kind, parameters) = split_header_parameters(value)?;
-    if kind != "form-data" {
-        return Err("invalid multipart disposition");
-    }
-    let name = parameters
-        .get("name")
-        .cloned()
-        .ok_or("multipart field name is missing")?;
-    let filename = parameters.get("filename").cloned();
-    if parameters
-        .keys()
-        .any(|key| key != "name" && key != "filename")
-    {
-        return Err("unsupported multipart disposition parameter");
-    }
-    Ok((name, filename))
-}
-
-fn valid_media_type(value: &str) -> bool {
-    let mut parts = value.split('/');
-    let Some(major) = parts.next() else {
-        return false;
-    };
-    let Some(minor) = parts.next() else {
-        return false;
-    };
-    parts.next().is_none()
-        && !major.is_empty()
-        && !minor.is_empty()
-        && major
-            .bytes()
-            .chain(minor.bytes())
-            .all(|byte| byte.is_ascii_alphanumeric() || b"!#$&^_.+-".contains(&byte))
-}
-
-fn parse_part<'a>(headers: &[u8], body: &'a [u8]) -> Result<MultipartPart<'a>, &'static str> {
-    let headers = std::str::from_utf8(headers).map_err(|_| "invalid multipart part headers")?;
-    let mut disposition = None;
-    let mut media_type = None;
-    for line in headers.split("\r\n") {
-        let Some((name, value)) = line.split_once(':') else {
-            return Err("invalid multipart part header");
-        };
-        let value = value.trim().as_bytes();
-        if name.eq_ignore_ascii_case("content-disposition") {
-            if disposition.replace(value).is_some() {
-                return Err("duplicate multipart disposition");
-            }
-        } else if name.eq_ignore_ascii_case("content-type") {
-            if media_type.replace(value).is_some() {
-                return Err("duplicate multipart content type");
-            }
-        } else {
-            return Err("unsupported multipart part header");
+            _ => {}
         }
     }
-    let (name, filename) =
-        parse_disposition(disposition.ok_or("multipart disposition is missing")?)?;
-    let media_type = match media_type {
-        Some(value) => Some(
-            std::str::from_utf8(value)
-                .map_err(|_| "invalid multipart content type")?
-                .split(';')
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_ascii_lowercase(),
-        ),
-        None => None,
-    };
-    if let Some(media_type) = &media_type {
-        if !valid_media_type(media_type) {
-            return Err("invalid multipart content type");
-        }
-    }
-    Ok(MultipartPart {
-        name,
-        filename,
-        media_type,
-        body,
-    })
-}
-
-fn parse_multipart_parts<'a>(
-    body: &'a [u8],
-    boundary: &[u8],
-) -> Result<Vec<MultipartPart<'a>>, &'static str> {
-    let mut first = b"--".to_vec();
-    first.extend_from_slice(boundary);
-    first.extend_from_slice(b"\r\n");
-    if !body.starts_with(&first) {
-        return Err("invalid multipart body start");
-    }
-    let mut marker = b"\r\n--".to_vec();
-    marker.extend_from_slice(boundary);
-    let mut cursor = first.len();
-    let mut parts = Vec::new();
-    loop {
-        let headers_end = find_bytes(body, b"\r\n\r\n", cursor)
-            .filter(|end| *end - cursor <= MAX_MULTIPART_PART_HEAD)
-            .ok_or("multipart part headers are missing or too large")?;
-        let part_body_start = headers_end + 4;
-        let mut search = part_body_start;
-        let (delimiter, suffix) = loop {
-            let candidate =
-                find_bytes(body, &marker, search).ok_or("multipart terminator is missing")?;
-            let suffix_at = candidate + marker.len();
-            if body.get(suffix_at..suffix_at + 2) == Some(b"\r\n") {
-                break (candidate, false);
-            }
-            if body.get(suffix_at..suffix_at + 2) == Some(b"--") {
-                break (candidate, true);
-            }
-            search = candidate + 1;
-        };
-        let part = parse_part(
-            &body[cursor..headers_end],
-            &body[part_body_start..delimiter],
-        )?;
-        parts.push(part);
-        if parts.len() > MAX_AGENT_FILE_COUNT + 1 {
-            return Err("too many multipart fields");
-        }
-        let suffix_at = delimiter + marker.len();
-        if suffix {
-            let tail = &body[suffix_at + 2..];
-            if !tail.is_empty() && tail != b"\r\n" {
-                return Err("unexpected multipart epilogue");
-            }
-            break;
-        }
-        cursor = suffix_at + 2;
-    }
-    Ok(parts)
-}
-
-fn safe_filename(filename: &str) -> bool {
-    !filename.is_empty()
-        && filename.len() <= 255
-        && filename != "."
-        && filename != ".."
-        && !filename
-            .chars()
-            .any(|ch| ch == '/' || ch == '\\' || ch.is_control())
-}
-
-fn validate_file_size(size: usize, total: &mut usize) -> Result<(), &'static str> {
-    if size > MAX_AGENT_FILE_SIZE {
-        return Err("Agent attachment exceeds the per-file limit");
-    }
-    *total = total
-        .checked_add(size)
-        .filter(|total| *total <= MAX_AGENT_FILES_TOTAL)
-        .ok_or("Agent attachments exceed the total limit")?;
-    Ok(())
-}
-
-fn parse_agent_multipart(parts: Vec<MultipartPart<'_>>) -> Result<PageRequest, &'static str> {
-    let mut metadata = None;
-    let mut files = Vec::new();
-    let mut total = 0;
-    for part in parts {
-        match part.name.as_str() {
-            "request" => {
-                if metadata.is_some()
-                    || part.filename.is_some()
-                    || part.body.len() > MAX_AGENT_METADATA
-                {
-                    return Err("invalid or duplicate Agent metadata field");
-                }
-                if part
-                    .media_type
-                    .as_deref()
-                    .is_some_and(|value| value != "application/json" && value != "text/plain")
-                {
-                    return Err("Agent metadata must be JSON or plain text");
-                }
-                metadata = Some(part.body);
-            }
-            "attachment" => {
-                let filename = part.filename.ok_or("attachment filename is missing")?;
-                if !safe_filename(&filename) {
-                    return Err("attachment filename must be a safe leaf name");
-                }
-                validate_file_size(part.body.len(), &mut total)?;
-                files.push((
-                    filename,
-                    part.media_type
-                        .unwrap_or_else(|| "application/octet-stream".into()),
-                    part.body,
-                ));
-                if files.len() > MAX_AGENT_FILE_COUNT {
-                    return Err("too many Agent attachments");
-                }
-            }
-            _ => return Err("unknown multipart field"),
-        }
-    }
-    let metadata = metadata.ok_or("Agent metadata field is missing")?;
-    let mut request: PageRequest =
-        serde_json::from_slice(metadata).map_err(|_| "invalid Agent metadata JSON")?;
-    let accepts_files = matches!(
-        request.method.as_str(),
-        "agent.tasks.start" | "agent.chats.send"
-    );
-    if !files.is_empty() && !accepts_files {
-        return Err("attachments are only accepted with a task or chat send");
-    }
-    if accepts_files {
-        let input = request
-            .args
-            .get_mut("input")
-            .and_then(serde_json::Value::as_object_mut)
-            .ok_or("Agent input is missing")?;
-        if input.contains_key("attachments") || input.contains_key("images") {
-            return Err("attachments must be sent as multipart file parts");
-        }
-        if !files.is_empty() {
-            let normalized = files
-                .into_iter()
-                .map(|(name, media_type, bytes)| {
-                    serde_json::json!({
-                        "name": name,
-                        "mediaType": media_type,
-                        "base64": base64::engine::general_purpose::STANDARD.encode(bytes),
-                    })
-                })
-                .collect();
-            input.insert("attachments".into(), serde_json::Value::Array(normalized));
-        }
-    }
-    Ok(request)
-}
-
-fn read_part_headers(
-    file: &mut std::fs::File,
-    start: u64,
-    length: u64,
-) -> Result<(Vec<u8>, u64), &'static str> {
-    file.seek(SeekFrom::Start(start))
-        .map_err(|_| "could not seek multipart headers")?;
-    let mut header = Vec::with_capacity(1024);
-    let mut chunk = [0_u8; 1024];
-    loop {
-        let count = file
-            .read(&mut chunk)
-            .map_err(|_| "could not read multipart headers")?;
-        if count == 0 {
-            return Err("multipart part headers are missing");
-        }
-        header.extend_from_slice(&chunk[..count]);
-        if let Some(end) = find_bytes(&header, b"\r\n\r\n", 0) {
-            if end > MAX_MULTIPART_PART_HEAD {
-                return Err("multipart part headers are too large");
-            }
-            let body_start = start + end as u64 + 4;
-            if body_start > length {
-                return Err("multipart part headers exceed the request body");
-            }
-            header.truncate(end);
-            file.seek(SeekFrom::Start(body_start))
-                .map_err(|_| "could not seek multipart body")?;
-            return Ok((header, body_start));
-        }
-        if header.len() > MAX_MULTIPART_PART_HEAD + 3 {
-            return Err("multipart part headers are too large");
-        }
-    }
-}
-
-fn find_spooled_delimiter(
-    file: &mut std::fs::File,
-    length: u64,
-    start: u64,
-    marker: &[u8],
-) -> Result<(u64, bool), &'static str> {
-    if marker.is_empty() || start > length {
-        return Err("invalid multipart delimiter scan");
-    }
-    file.seek(SeekFrom::Start(start))
-        .map_err(|_| "could not seek multipart body")?;
-    let mut position = start;
-    let mut carry = Vec::new();
-    let mut chunk = [0_u8; 8192];
-    while position < length {
-        let limit = (length - position).min(chunk.len() as u64) as usize;
-        let count = file
-            .read(&mut chunk[..limit])
-            .map_err(|_| "could not scan multipart body")?;
-        if count == 0 {
-            break;
-        }
-        let mut joined = Vec::with_capacity(carry.len() + count);
-        joined.extend_from_slice(&carry);
-        joined.extend_from_slice(&chunk[..count]);
-        let joined_start = position - carry.len() as u64;
-        let saved_cursor = position + count as u64;
-        let mut search = 0;
-        while let Some(candidate_offset) = find_bytes(&joined, marker, search) {
-            let candidate = joined_start + candidate_offset as u64;
-            let suffix_at = candidate + marker.len() as u64;
-            if suffix_at + 2 <= length {
-                let suffix_offset = (suffix_at - joined_start) as usize;
-                let suffix = if suffix_offset + 2 <= joined.len() {
-                    [joined[suffix_offset], joined[suffix_offset + 1]]
-                } else {
-                    file.seek(SeekFrom::Start(suffix_at))
-                        .map_err(|_| "could not inspect multipart delimiter")?;
-                    let mut suffix = [0_u8; 2];
-                    file.read_exact(&mut suffix)
-                        .map_err(|_| "could not inspect multipart delimiter")?;
-                    file.seek(SeekFrom::Start(saved_cursor))
-                        .map_err(|_| "could not resume multipart scan")?;
-                    suffix
-                };
-                if suffix == *b"\r\n" {
-                    return Ok((candidate, false));
-                }
-                if suffix == *b"--" {
-                    return Ok((candidate, true));
-                }
-            }
-            search = candidate_offset + 1;
-        }
-        let keep = marker.len().saturating_sub(1).min(joined.len());
-        carry.clear();
-        carry.extend_from_slice(&joined[joined.len() - keep..]);
-        position = saved_cursor;
-    }
-    Err("multipart terminator is missing")
-}
-
-fn scan_multipart_spool(
-    file: &mut std::fs::File,
-    length: u64,
-    boundary: &[u8],
-) -> Result<Vec<SpooledPart>, &'static str> {
-    let mut first = b"--".to_vec();
-    first.extend_from_slice(boundary);
-    first.extend_from_slice(b"\r\n");
-    if first.len() as u64 > length {
-        return Err("invalid multipart body start");
-    }
-    file.seek(SeekFrom::Start(0))
-        .map_err(|_| "could not seek multipart body")?;
-    let mut opening = vec![0_u8; first.len()];
-    file.read_exact(&mut opening)
-        .map_err(|_| "invalid multipart body start")?;
-    if opening != first {
-        return Err("invalid multipart body start");
-    }
-
-    let mut marker = b"\r\n--".to_vec();
-    marker.extend_from_slice(boundary);
-    let mut cursor = first.len() as u64;
-    let mut parts = Vec::new();
-    loop {
-        let (headers, body_start) = read_part_headers(file, cursor, length)?;
-        let part = parse_part(&headers, &[])?;
-        let (body_end, closing) = find_spooled_delimiter(file, length, body_start, &marker)?;
-        parts.push(SpooledPart {
-            name: part.name,
-            filename: part.filename,
-            media_type: part.media_type,
-            body_start,
-            body_end,
-        });
-        if parts.len() > MAX_AGENT_FILE_COUNT + 1 {
-            return Err("too many multipart fields");
-        }
-        let suffix_at = body_end + marker.len() as u64;
-        if closing {
-            let tail_length = length.saturating_sub(suffix_at + 2);
-            if tail_length == 2 {
-                file.seek(SeekFrom::Start(suffix_at + 2))
-                    .map_err(|_| "could not inspect multipart epilogue")?;
-                let mut tail = [0_u8; 2];
-                file.read_exact(&mut tail)
-                    .map_err(|_| "could not inspect multipart epilogue")?;
-                if tail != *b"\r\n" {
-                    return Err("unexpected multipart epilogue");
-                }
-            } else if tail_length != 0 {
-                return Err("unexpected multipart epilogue");
-            }
-            break;
-        }
-        cursor = suffix_at + 2;
-        if cursor >= length {
-            return Err("multipart terminator is missing");
-        }
-    }
-    Ok(parts)
-}
-
-fn read_spooled_part(
-    file: &mut std::fs::File,
-    part: &SpooledPart,
-    maximum: usize,
-) -> Result<Vec<u8>, &'static str> {
-    let length = usize::try_from(part.body_end.saturating_sub(part.body_start))
-        .map_err(|_| "multipart part is too large")?;
-    if length > maximum {
-        return Err("multipart part exceeds its size limit");
-    }
-    file.seek(SeekFrom::Start(part.body_start))
-        .map_err(|_| "could not seek multipart part")?;
-    let mut bytes = vec![0_u8; length];
-    file.read_exact(&mut bytes)
-        .map_err(|_| "could not read multipart part")?;
-    Ok(bytes)
-}
-
-fn parse_agent_spool(
-    file: &mut std::fs::File,
-    parts: Vec<SpooledPart>,
-) -> Result<PageRequest, &'static str> {
-    let mut metadata = None;
-    let mut files = Vec::new();
-    let mut total = 0;
-    for part in &parts {
-        let size = usize::try_from(part.body_end.saturating_sub(part.body_start))
-            .map_err(|_| "multipart part is too large")?;
-        match part.name.as_str() {
-            "request" => {
-                if metadata.is_some() || part.filename.is_some() || size > MAX_AGENT_METADATA {
-                    return Err("invalid or duplicate Agent metadata field");
-                }
-                if part
-                    .media_type
-                    .as_deref()
-                    .is_some_and(|value| value != "application/json" && value != "text/plain")
-                {
-                    return Err("Agent metadata must be JSON or plain text");
-                }
-                metadata = Some(part);
-            }
-            "attachment" => {
-                let filename = part
-                    .filename
-                    .as_deref()
-                    .ok_or("attachment filename is missing")?;
-                if !safe_filename(filename) {
-                    return Err("attachment filename must be a safe leaf name");
-                }
-                validate_file_size(size, &mut total)?;
-                files.push(part);
-                if files.len() > MAX_AGENT_FILE_COUNT {
-                    return Err("too many Agent attachments");
-                }
-            }
-            _ => return Err("unknown multipart field"),
-        }
-    }
-    let metadata = metadata.ok_or("Agent metadata field is missing")?;
-    let metadata = read_spooled_part(file, metadata, MAX_AGENT_METADATA)?;
-    let mut request: PageRequest =
-        serde_json::from_slice(&metadata).map_err(|_| "invalid Agent metadata JSON")?;
-    drop(metadata);
-    let accepts_files = matches!(
-        request.method.as_str(),
-        "agent.tasks.start" | "agent.chats.send"
-    );
-    if !files.is_empty() && !accepts_files {
-        return Err("attachments are only accepted with a task or chat send");
-    }
-    if accepts_files {
-        let input = request
-            .args
-            .get_mut("input")
-            .and_then(serde_json::Value::as_object_mut)
-            .ok_or("Agent input is missing")?;
-        if input.contains_key("attachments") || input.contains_key("images") {
-            return Err("attachments must be sent as multipart file parts");
-        }
-        if !files.is_empty() {
-            let mut normalized = Vec::with_capacity(files.len());
-            for part in files {
-                let name = part
-                    .filename
-                    .clone()
-                    .ok_or("attachment filename is missing")?;
-                let media_type = part
-                    .media_type
-                    .clone()
-                    .unwrap_or_else(|| "application/octet-stream".into());
-                let bytes = read_spooled_part(file, part, MAX_AGENT_FILE_SIZE)?;
-                let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                drop(bytes);
-                normalized.push(serde_json::json!({
-                    "name": name,
-                    "mediaType": media_type,
-                    "base64": encoded,
-                }));
-            }
-            input.insert("attachments".into(), serde_json::Value::Array(normalized));
-        }
-    }
-    Ok(request)
-}
-
-fn write_json_value(
-    value: serde_json::Value,
-    output: &mut String,
-) -> Result<(), serde_json::Error> {
-    use serde_json::Value;
-    match value {
-        Value::Null => output.push_str("null"),
-        Value::Bool(value) => output.push_str(if value { "true" } else { "false" }),
-        Value::Number(value) => output.push_str(&value.to_string()),
-        Value::String(value)
-            if value
-                .bytes()
-                .all(|byte| byte >= 0x20 && byte != b'"' && byte != b'\\') =>
-        {
-            // Base64 and ordinary printable strings need no JSON escaping.
-            // Move their allocation directly into the output instead of
-            // retaining one full encoded DTO beside a second serialized copy.
-            output.push('"');
-            output.push_str(&value);
-            output.push('"');
-        }
-        Value::String(value) => output.push_str(&serde_json::to_string(&value)?),
-        Value::Array(values) => {
-            output.push('[');
-            for (index, value) in values.into_iter().enumerate() {
-                if index != 0 {
-                    output.push(',');
-                }
-                write_json_value(value, output)?;
-            }
-            output.push(']');
-        }
-        Value::Object(values) => {
-            output.push('{');
-            for (index, (key, value)) in values.into_iter().enumerate() {
-                if index != 0 {
-                    output.push(',');
-                }
-                output.push_str(&serde_json::to_string(&key)?);
-                output.push(':');
-                write_json_value(value, output)?;
-            }
-            output.push('}');
-        }
+    if in_string || escaped || depth != 0 {
+        return Err("invalid Agent request JSON structure");
     }
     Ok(())
 }
 
-fn compact_json(value: serde_json::Value) -> Result<String, serde_json::Error> {
-    let mut output = String::new();
-    write_json_value(value, &mut output)?;
-    Ok(output)
+fn is_page_method_allowed(method: &str) -> bool {
+    matches!(
+        method,
+        "agent.tasks.start"
+            | "agent.tasks.get"
+            | "agent.tasks.list"
+            | "agent.tasks.cancel"
+            | "agent.tasks.events"
+            | "agent.chats.create"
+            | "agent.chats.get"
+            | "agent.chats.list"
+            | "agent.chats.archive"
+            | "agent.chats.delete"
+            | "agent.chats.history"
+            | "agent.chats.send"
+            | "agent.chats.cancel"
+    )
+}
+
+fn is_agent_json_content_type(value: &[u8]) -> bool {
+    value.eq_ignore_ascii_case(b"application/json")
+}
+
+fn browser_sdk_script(configuration: &str) -> String {
+    let browser_sdk =
+        include_str!("browser_sdk.js").replace("__LINGXI_APP_CONFIGURATION__", configuration);
+    let agui_bundle = include_str!("../../../../../packages/local-app-agui/dist/browser.global.js");
+    let mut script = String::with_capacity(agui_bundle.len() + browser_sdk.len() + 3);
+    script.push_str(agui_bundle);
+    script.push_str("\n;\n");
+    script.push_str(&browser_sdk);
+    script
 }
 
 async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
@@ -1049,8 +461,7 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
             return error(&mut socket, 503, "application host unavailable").await;
         };
         let config = serde_json::json!({"appId":host.app_id,"name":host.name,"revision":host.revision,"hostPlatform":host.platform,"runId":route.run_id,"capabilities":route.capabilities,"services":route.services.keys().collect::<Vec<_>>()});
-        let script = include_str!("browser_sdk.js")
-            .replace("__LINGXI_APP_CONFIGURATION__", &config.to_string());
+        let script = browser_sdk_script(&config.to_string());
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}\r\n", script.len(), security_headers(route)).as_bytes()).await?;
         if method == "GET" {
             socket.write_all(script.as_bytes()).await?;
@@ -1113,10 +524,9 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
         {
             return error(&mut socket, 403, "invalid application caller").await;
         }
-        let boundary = match multipart_boundary(content_types[0].value) {
-            Ok(boundary) => boundary,
-            Err(_) => return error(&mut socket, 400, "invalid Agent multipart content type").await,
-        };
+        if !is_agent_json_content_type(content_types[0].value) {
+            return error(&mut socket, 400, "Agent requires application/json").await;
+        }
         if !transfers.is_empty() || lengths.len() != 1 {
             return error(&mut socket, 400, "Agent requires a fixed content length").await;
         }
@@ -1149,34 +559,16 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
         };
         let input = {
             let mut spool = spool;
-            let parts = match scan_multipart_spool(&mut spool, length as u64, &boundary) {
-                Ok(parts) => parts,
-                Err(_) => return error(&mut socket, 400, "invalid Agent multipart request").await,
-            };
-            match parse_agent_spool(&mut spool, parts) {
+            match parse_page_request(&mut spool) {
                 Ok(input) => input,
                 Err(_) => return error(&mut socket, 400, "invalid Agent request").await,
             }
         };
-        // The raw wire body stays on the anonymous tempfile. Parsing scans it
-        // in bounded chunks and reads one capped part at a time; the spool is
-        // released before native JSON serialization. Timeout, parse rejection,
-        // cancellation, and normal return all close it through RAII.
-        if !matches!(
-            input.method.as_str(),
-            "agent.tasks.start"
-                | "agent.tasks.get"
-                | "agent.tasks.list"
-                | "agent.tasks.cancel"
-                | "agent.chats.create"
-                | "agent.chats.get"
-                | "agent.chats.list"
-                | "agent.chats.archive"
-                | "agent.chats.delete"
-                | "agent.chats.history"
-                | "agent.chats.send"
-                | "agent.chats.cancel"
-        ) {
+        // The raw wire body stays on the anonymous tempfile until the official
+        // args value has been parsed into its single bounded RawValue allocation.
+        // Timeout, parse rejection, cancellation, and normal return close the
+        // spool through RAII.
+        if !is_page_method_allowed(&input.method) {
             return error(
                 &mut socket,
                 403,
@@ -1192,10 +584,7 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
             return error(&mut socket, 503, "application host unavailable").await;
         };
         let PageRequest { method, args } = input;
-        let arguments = match compact_json(args) {
-            Ok(arguments) => arguments,
-            Err(_) => return error(&mut socket, 500, "could not serialize Agent request").await,
-        };
+        let arguments = String::from(Box::<str>::from(args));
         let result = owner
             .agent_page_json(host.app_id.clone(), route.run_id.clone(), method, arguments)
             .await;
@@ -1337,7 +726,10 @@ fn security_headers(route: &Route) -> String {
     } else {
         "()"
     };
-    format!("Content-Security-Policy: sandbox allow-scripts allow-forms allow-modals allow-downloads allow-same-origin allow-top-navigation-to-custom-protocols; default-src 'self' data: blob:{remote_scripts}; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:{remote_scripts}; style-src 'self' 'unsafe-inline'{remote_scripts}; connect-src 'self' ws://127.0.0.1:{}{remote_sources}; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'\r\nPermissions-Policy: camera={camera}, microphone={microphone}, geolocation=()\r\nReferrer-Policy: same-origin\r\nX-Frame-Options: DENY\r\n", route.port)
+    format!(
+        "Content-Security-Policy: sandbox allow-scripts allow-forms allow-modals allow-downloads allow-same-origin allow-top-navigation-to-custom-protocols; default-src 'self' data: blob:{remote_scripts}; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:{remote_scripts}; style-src 'self' 'unsafe-inline'{remote_scripts}; connect-src 'self' ws://127.0.0.1:{}{remote_sources}; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-src 'none'; frame-ancestors 'none'\r\nPermissions-Policy: camera={camera}, microphone={microphone}, geolocation=()\r\nReferrer-Policy: same-origin\r\nX-Frame-Options: DENY\r\n",
+        route.port
+    )
 }
 
 async fn forward_response<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin>(
@@ -1830,17 +1222,15 @@ mod absolute_path_tests {
 }
 
 #[cfg(test)]
-mod agent_multipart_tests {
+mod agent_json_tests {
     use super::*;
-    use std::io::Write;
-
-    const BOUNDARY: &[u8] = b"agent-boundary";
+    use base64::Engine as _;
 
     #[tokio::test]
-    async fn upload_body_spools_in_chunks_and_drops_tempfiles_on_timeout_or_eof() {
+    async fn request_body_spools_in_chunks_and_drops_tempfiles_on_timeout_or_eof() {
         let scratch = tempfile::tempdir().unwrap();
         let scratch_path = scratch.path().canonicalize().unwrap();
-        let spool_path = scratch_path.join("host-owned-upload-spool");
+        let spool_path = scratch_path.join("host-owned-agent-spool");
         ensure_host_directory(&spool_path, true).unwrap();
         assert_ne!(spool_path, std::env::temp_dir());
         let spool_dir = spool_path.as_path();
@@ -1943,160 +1333,123 @@ mod agent_multipart_tests {
         }
     }
 
-    fn multipart_request(metadata: &[u8], filename: &str, bytes: &[u8]) -> Vec<u8> {
-        let mut body = Vec::new();
-        body.extend_from_slice(b"--agent-boundary\r\nContent-Disposition: form-data; name=\"request\"\r\nContent-Type: application/json\r\n\r\n");
-        body.extend_from_slice(metadata);
-        body.extend_from_slice(b"\r\n--agent-boundary\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"");
-        body.extend_from_slice(filename.as_bytes());
-        body.extend_from_slice(b"\"\r\nContent-Type: application/octet-stream\r\n\r\n");
-        body.extend_from_slice(bytes);
-        body.extend_from_slice(b"\r\n--agent-boundary--\r\n");
-        body
-    }
-
-    fn parse_spooled(body: &[u8]) -> Result<PageRequest, &'static str> {
-        let directory = tempfile::tempdir().map_err(|_| "could not create test spool dir")?;
-        let mut spool =
-            tempfile::tempfile_in(directory.path()).map_err(|_| "could not create test spool")?;
-        spool
-            .write_all(body)
-            .map_err(|_| "could not write test spool")?;
-        let parts = scan_multipart_spool(&mut spool, body.len() as u64, BOUNDARY)?;
-        parse_agent_spool(&mut spool, parts)
-    }
-
     #[test]
-    fn spooled_parser_finds_split_delimiter_and_converts_one_binary_part() {
-        let metadata = br#"{"method":"agent.tasks.start","args":{"input":{"requestId":"spooled-1","prompt":"describe"}}}"#;
-        let header_prefix = b"--agent-boundary\r\nContent-Disposition: form-data; name=\"request\"\r\nContent-Type: application/json\r\n\r\n";
-        let attachment_prefix = b"\r\n--agent-boundary\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"meal.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n";
-        let body_start = header_prefix.len() + metadata.len() + attachment_prefix.len();
-        let marker = b"\r\n--agent-boundary";
-        let target = 8192 - marker.len() / 2;
-        let padding = (target + 8192 - body_start % 8192) % 8192;
-        let mut bytes = vec![b'x'; padding];
-        bytes.extend_from_slice(b"\r\n--agent-boundaryXstill-file");
-        let body = multipart_request(metadata, "meal.bin", &bytes);
-        let request = parse_spooled(&body).unwrap();
-        assert_eq!(request.args["input"]["requestId"], "spooled-1");
-        assert_eq!(
-            request.args["input"]["attachments"][0]["base64"],
-            base64::engine::general_purpose::STANDARD.encode(&bytes)
-        );
-    }
-
-    #[test]
-    fn spooled_parser_rejects_duplicate_headers_and_unsafe_filenames() {
-        let metadata = br#"{"method":"agent.tasks.start","args":{"input":{"requestId":"req-1","prompt":"x"}}}"#;
-        let path = multipart_request(metadata, "../private.txt", b"x");
-        assert!(parse_spooled(&path).is_err());
-        let duplicate = String::from_utf8(multipart_request(metadata, "x.txt", b"x"))
-            .unwrap()
-            .replace(
-                "Content-Disposition: form-data; name=\"attachment\"; filename=\"x.txt\"",
-                "Content-Disposition: form-data; name=\"attachment\"; filename=\"x.txt\"\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"y.txt\"",
-            );
-        assert!(parse_spooled(duplicate.as_bytes()).is_err());
-    }
-
-    #[test]
-    fn compact_serializer_preserves_escaped_metadata_and_base64_payloads() {
-        let value = serde_json::json!({
-            "prompt": "line one\n\"quoted\" \\ path",
-            "attachments": [{"name": "餐食.jpg", "base64": "YWJj+/=="}],
-            "outputSchema": {"required": ["items", "range"]}
+    fn full_official_input_and_large_inline_document_are_preserved_as_json() {
+        let bytes = vec![0x5a; 1024 * 1024 + 17];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let expected_input = serde_json::json!({
+            "threadId": "thread-1",
+            "runId": "run-1",
+            "protocolVersion": "1.0",
+            "messages": [{
+                "id": "message-1",
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Inspect this file"},
+                    {
+                        "type": "document",
+                        "id": "part-1",
+                        "source": {
+                            "type": "data",
+                            "value": encoded,
+                            "mimeType": "application/octet-stream"
+                        },
+                        "metadata": {
+                            "com.lingxi.localApp": {
+                                "version": 1,
+                                "filename": "sample.bin"
+                            }
+                        }
+                    }
+                ]
+            }],
+            "forwardedProps": {
+                "com.lingxi.localApp": {"version": 1}
+            }
         });
-        let expected = value.clone();
-        let serialized = compact_json(value).unwrap();
+        let wire = serde_json::json!({
+            "method": "agent.tasks.start",
+            "args": {"input": expected_input}
+        });
+        let body = serde_json::to_vec(&wire).unwrap();
+        assert!(body.len() > 1024 * 1024);
+        assert!(body.len() < MAX_AGENT_BODY);
+
+        let request = parse_page_request(std::io::Cursor::new(body)).unwrap();
+        assert_eq!(request.method, "agent.tasks.start");
+        let args = serde_json::from_str::<serde_json::Value>(request.args.get()).unwrap();
+        assert_eq!(args["input"], expected_input);
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&serialized).unwrap(),
-            expected
+            args["input"]["messages"][0]["content"][1]["metadata"]["com.lingxi.localApp"]
+                ["filename"],
+            "sample.bin"
         );
     }
 
     #[test]
-    fn multipart_binary_is_converted_to_the_internal_attachment_dto() {
-        let metadata = br#"{"method":"agent.tasks.start","args":{"input":{"requestId":"req-1","prompt":"describe"}}}"#;
-        let bytes = b"\x00\xfffile\r\n--agent-boundaryXstill-file";
-        let body = multipart_request(metadata, "meal.bin", bytes);
-        let parts = parse_multipart_parts(&body, BOUNDARY).unwrap();
-        let request = parse_agent_multipart(parts).unwrap();
-        let attachment = &request.args["input"]["attachments"][0];
-        assert_eq!(attachment["name"], "meal.bin");
-        assert_eq!(attachment["mediaType"], "application/octet-stream");
-        assert_eq!(
-            attachment["base64"],
-            base64::engine::general_purpose::STANDARD.encode(bytes)
+    fn request_parser_rejects_unknown_fields_trailing_data_and_excessive_nesting() {
+        let unknown = br#"{"method":"agent.tasks.start","args":{},"unexpected":true}"#;
+        assert!(parse_page_request(std::io::Cursor::new(unknown)).is_err());
+
+        let trailing = br#"{"method":"agent.tasks.events","args":{}} false"#;
+        assert!(parse_page_request(std::io::Cursor::new(trailing)).is_err());
+
+        let nested = format!(
+            "{{\"method\":\"agent.tasks.events\",\"args\":{}}}",
+            format!("{}null{}", "[".repeat(160), "]".repeat(160))
         );
-        assert_eq!(request.args["input"]["requestId"], "req-1");
+        assert!(parse_page_request(std::io::Cursor::new(nested)).is_err());
     }
 
     #[test]
-    fn multipart_accepts_quoted_leaf_names_and_rejects_ambiguous_parameters() {
-        let body = b"--agent-boundary\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n{\"method\":\"agent.tasks.start\",\"args\":{\"input\":{\"requestId\":\"req-1\",\"prompt\":\"x\"}}}\r\n--agent-boundary\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"notes; review.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--agent-boundary--\r\n";
-        let parts = parse_multipart_parts(body, BOUNDARY).unwrap();
-        assert_eq!(parts[1].filename.as_deref(), Some("notes; review.txt"));
-
-        let duplicate_parameter = body
-            .windows(b"filename=\"notes; review.txt\"".len())
-            .position(|window| window == b"filename=\"notes; review.txt\"")
-            .unwrap();
-        let mut ambiguous = body.to_vec();
-        ambiguous.splice(
-            duplicate_parameter..duplicate_parameter + b"filename=\"notes; review.txt\"".len(),
-            b"filename=\"first.txt\"; filename=\"second.txt\""
-                .iter()
-                .copied(),
+    fn json_depth_limit_ignores_brackets_inside_strings_and_caps_containers() {
+        assert!(validate_agent_json_depth(r#"{"text":"[[[[{{{{}}}}]]]]"}"#).is_ok());
+        let at_limit = format!(
+            "{}0{}",
+            "[".repeat(MAX_AGENT_JSON_DEPTH),
+            "]".repeat(MAX_AGENT_JSON_DEPTH)
         );
-        assert!(parse_multipart_parts(&ambiguous, BOUNDARY).is_err());
-
-        let duplicate_header = String::from_utf8_lossy(body).replace(
-            "Content-Disposition: form-data; name=\"attachment\"; filename=\"notes; review.txt\"",
-            "Content-Disposition: form-data; name=\"attachment\"; filename=\"notes.txt\"\r\nContent-Disposition: form-data; name=\"other\"",
+        let over_limit = format!(
+            "{}0{}",
+            "[".repeat(MAX_AGENT_JSON_DEPTH + 1),
+            "]".repeat(MAX_AGENT_JSON_DEPTH + 1)
         );
-        assert!(parse_multipart_parts(duplicate_header.as_bytes(), BOUNDARY).is_err());
+        assert!(validate_agent_json_depth(&at_limit).is_ok());
+        assert!(validate_agent_json_depth(&over_limit).is_err());
     }
 
     #[test]
-    fn multipart_rejects_paths_inline_legacy_images_and_wrong_file_operations() {
-        let metadata = br#"{"method":"agent.tasks.start","args":{"input":{"requestId":"req-1","prompt":"x"}}}"#;
-        let path = multipart_request(metadata, "../private.txt", b"x");
-        assert!(parse_multipart_parts(&path, BOUNDARY)
-            .and_then(parse_agent_multipart)
-            .is_err());
-
-        let legacy = br#"{"method":"agent.tasks.start","args":{"input":{"requestId":"req-1","prompt":"x","images":[]}}}"#;
-        let legacy_body = multipart_request(legacy, "file.txt", b"x");
-        let parts = parse_multipart_parts(&legacy_body, BOUNDARY).unwrap();
-        assert!(parse_agent_multipart(parts).is_err());
-
-        let non_task = br#"{"method":"agent.tasks.get","args":{"runId":"r"}}"#;
-        let non_task_body = multipart_request(non_task, "file.txt", b"x");
-        let parts = parse_multipart_parts(&non_task_body, BOUNDARY).unwrap();
-        assert!(parse_agent_multipart(parts).is_err());
+    fn page_allowlist_has_standard_event_reads_but_no_native_event_operation() {
+        assert!(is_page_method_allowed("agent.tasks.events"));
+        assert!(is_page_method_allowed("agent.tasks.start"));
+        assert!(is_page_method_allowed("agent.chats.send"));
+        assert!(!is_page_method_allowed("eventsNative"));
+        assert!(!is_page_method_allowed("agent.eventsNative"));
+        assert!(!is_page_method_allowed("agent.run"));
     }
 
     #[test]
-    fn multipart_enforces_file_count_and_size_limits() {
-        let mut total = 0;
-        assert!(validate_file_size(MAX_AGENT_FILE_SIZE + 1, &mut total).is_err());
-        assert!(validate_file_size(MAX_AGENT_FILE_SIZE, &mut total).is_ok());
-        assert!(validate_file_size(MAX_AGENT_FILE_SIZE, &mut total).is_ok());
-        assert!(validate_file_size(1, &mut total).is_err());
+    fn gateway_accepts_only_the_json_agent_envelope_content_type() {
+        assert!(is_agent_json_content_type(b"application/json"));
+        assert!(is_agent_json_content_type(b"APPLICATION/JSON"));
+        assert!(!is_agent_json_content_type(
+            b"application/json; charset=utf-8"
+        ));
+        assert!(!is_agent_json_content_type(
+            b"multipart/form-data; boundary=test"
+        ));
+        assert_eq!(MAX_AGENT_BODY, 116 * 1024 * 1024);
+        assert_eq!(MAX_AGENT_JSON_DEPTH, 128);
+    }
 
-        let metadata = br#"{"method":"agent.tasks.start","args":{"input":{"requestId":"req-1","prompt":"x"}}}"#;
-        let mut body = Vec::new();
-        body.extend_from_slice(
-            b"--agent-boundary\r\nContent-Disposition: form-data; name=\"request\"\r\n\r\n",
-        );
-        body.extend_from_slice(metadata);
-        for _ in 0..=MAX_AGENT_FILE_COUNT {
-            body.extend_from_slice(b"\r\n--agent-boundary\r\nContent-Disposition: form-data; name=\"attachment\"; filename=\"x.txt\"\r\n\r\nx");
-        }
-        body.extend_from_slice(b"\r\n--agent-boundary--\r\n");
-        assert!(parse_multipart_parts(&body, BOUNDARY)
-            .and_then(parse_agent_multipart)
-            .is_err());
+    #[test]
+    fn sdk_bootstrap_loads_the_pinned_agui_global_before_the_host_adapter() {
+        let bundle = include_str!("../../../../../packages/local-app-agui/dist/browser.global.js");
+        let script = browser_sdk_script(r#"{"appId":"fixture"}"#);
+        assert!(script.starts_with(bundle));
+        let host_adapter = script.find("const config =").unwrap();
+        assert!(host_adapter >= bundle.len());
+        assert!(script[bundle.len()..].contains("installBrowserAgent"));
+        assert!(!script.contains("__LINGXI_APP_CONFIGURATION__"));
     }
 }

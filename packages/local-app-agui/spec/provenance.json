@@ -1,0 +1,14 @@
+{
+  "sourceRepository": "https://github.com/ag-ui-protocol/ag-ui",
+  "sourceRef": "release/2026-10-16",
+  "sourceCommit": "a1131c90709d51d562202b7b6cc0a2a1b48b05fc",
+  "schemaPath": "docs/spec/1.0/schema.json",
+  "schemaUrl": "https://ag-ui.com/spec/1.0/schema.json",
+  "schemaFile": "ag-ui-1.0.schema.json",
+  "schemaBytes": 94359,
+  "schemaSha256": "4b5c93226838a0e72d88e6c5df20633c686c49fcb75d9be2815c6cbf9e48e71a",
+  "packages": {
+    "@ag-ui/client": "1.0.3",
+    "@ag-ui/core": "1.0.3"
+  }
+}

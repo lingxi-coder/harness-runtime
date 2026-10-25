@@ -597,6 +597,8 @@ async fn data_schema_change_does_not_prepare_or_replace_the_live_application() {
 
 #[tokio::test]
 async fn external_browser_sdk_and_agent_route_bind_caller_to_the_current_epoch() {
+    use base64::Engine as _;
+
     let (dir, service) = service();
     let published = publish(&service, dir.path(), "browser").await;
     let id = published["record"]["appId"].as_str().unwrap();
@@ -610,58 +612,48 @@ async fn external_browser_sdk_and_agent_route_bind_caller_to_the_current_epoch()
     assert!(sdk.starts_with("HTTP/1.1 200"));
     assert!(sdk.contains(id));
     assert!(!sdk.contains("__LINGXI_APP_CONFIGURATION__"));
-    assert!(sdk.contains("revision: config.revision"));
-    assert!(sdk.contains("agent.tasks.start"));
-    assert!(sdk.contains("agent.chats.history"));
-    assert!(sdk.contains("__lingxi_ready"));
-    assert!(sdk.contains("getAll('__lingxi_ready')"));
-    assert!(sdk.contains("readyIds.length !== 1"));
-    assert!(sdk.contains("usage.costUsd !== undefined"));
-    assert!(sdk.contains("invalid_host_response"));
-    assert!(sdk.contains("reply.chatId !== id"));
-    assert!(!sdk.contains("inputTokens: 0"));
-    assert!(!sdk.contains("message.text === reply.text"));
-    assert!(sdk.contains("pendingTtlMs = 24 * 60 * 60 * 1000"));
-    assert!(sdk.contains("acceptedTtlMs = 7 * 24 * 60 * 60 * 1000"));
-    assert!(sdk.contains("maxPendingRecords = 32"));
-    assert!(sdk.contains("maxPendingStorageBytes = 100 * 1024 * 1024"));
-    assert!(sdk.contains("state: 'rejected'"));
-    assert!(sdk.contains("recordExpired"));
-    assert!(sdk.contains("navigator.serviceWorker.register"));
-    assert!(sdk.contains("scope: `${location.origin}/`"));
+    assert!(sdk.contains("window.LingxiLocalAppAGUI"));
+    assert!(sdk.contains("installBrowserAgent"));
+    assert!(sdk.contains("agent.tasks.events"));
+    assert!(sdk.contains("application/json"));
+    assert!(sdk.contains("RUN_FINISHED"));
+
     let recovery = get(port, &format!("/__run/{epoch}/__host/recovery-sw.js")).await;
     assert!(recovery.starts_with("HTTP/1.1 200 OK"));
     assert!(recovery.contains("Service-Worker-Allowed: /"));
     assert!(recovery.contains(&format!("\"appId\":\"{id}\"")));
-    assert!(recovery.contains("request.method !== 'GET' || request.mode !== 'navigate'"));
-    assert!(recovery.contains("__lingxi-offline-recovery"));
-    assert!(recovery.contains("review:'agent'"));
-    assert!(recovery.contains("cache.put(recoveryUrl"));
-    assert!(recovery.contains("indexedDB.open('lingxi-local-app-agent-'"));
-    assert!(recovery.contains("record.requestId"));
-    assert!(recovery.contains("Saved pending requests expire after 24 hours"));
-    assert!(recovery.contains("accepted request receipts expire after 7 days"));
-    assert!(recovery.contains("expired record(s) were deleted"));
-    assert!(!recovery.contains("record.prompt"));
-    assert!(!recovery.contains("record.files"));
+    assert!(recovery.contains("runId"));
+    assert!(recovery.contains("lingxi-local-app-agui-"));
+    assert!(recovery.contains("record.runId"));
+    assert!(recovery.contains("id.textContent=record.runId"));
     assert!(!recovery.contains("cache.put(request"));
-    assert!(!recovery.contains("caches.match(request)"), "the worker must not cache arbitrary pages or Agent responses");
-    async fn post(
+    assert!(
+        !recovery.contains("caches.match(request)"),
+        "the worker must not cache arbitrary pages or Agent responses"
+    );
+
+    fn input(run_id: &str) -> Value {
+        json!({
+            "threadId": format!("thread-{run_id}"),
+            "runId": run_id,
+            "protocolVersion": "1.0",
+            "messages": [{
+                "id": format!("message-{run_id}"),
+                "role": "user",
+                "content": [{"type":"text","text":"test"}]
+            }],
+            "forwardedProps": {"com.lingxi.localApp":{"version":1}}
+        })
+    }
+
+    async fn post_body(
         port: u16,
         epoch: &str,
         origin: bool,
         referer_epoch: &str,
-        method: &str,
-        extra: &str,
+        content_type: &str,
+        body: &str,
     ) -> String {
-        let args = if method == "agent.tasks.start" {
-            r#""args":{"input":{"requestId":"gateway-test-request","prompt":"test"}}"#
-        } else {
-            r#""args":{}"#
-        };
-        let metadata = format!(r#"{{"method":"{method}",{args}{extra}}}"#);
-        let boundary = "gateway-test-boundary";
-        let body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"request\"\r\nContent-Type: application/json\r\n\r\n{metadata}\r\n--{boundary}--\r\n");
         let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
             .await
             .unwrap();
@@ -670,33 +662,93 @@ async fn external_browser_sdk_and_agent_route_bind_caller_to_the_current_epoch()
         } else {
             String::new()
         };
-        socket.write_all(format!("POST /__run/{epoch}/__host/agent HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{origin}Referer: http://127.0.0.1:{port}/__run/{referer_epoch}/index.html\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nX-LingXi-App-Request: 1\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        socket.write_all(format!("POST /__run/{epoch}/__host/agent HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{origin}Referer: http://127.0.0.1:{port}/__run/{referer_epoch}/index.html\r\nContent-Type: {content_type}\r\nX-LingXi-App-Request: 1\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
         let mut out = Vec::new();
         socket.read_to_end(&mut out).await.unwrap();
         String::from_utf8(out).unwrap()
     }
+
+    async fn post(
+        port: u16,
+        epoch: &str,
+        origin: bool,
+        referer_epoch: &str,
+        method: &str,
+        args: Value,
+        extra: &str,
+    ) -> String {
+        let mut body = json!({"method":method,"args":args}).to_string();
+        if !extra.is_empty() {
+            body.pop();
+            body.push_str(extra);
+            body.push('}');
+        }
+        post_body(
+            port,
+            epoch,
+            origin,
+            referer_epoch,
+            "application/json",
+            &body,
+        )
+        .await
+    }
+
     async fn framing_response(port: u16, epoch: &str, framing: &str) -> String {
         let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
             .await
             .unwrap();
-        socket.write_all(format!("POST /__run/{epoch}/__host/agent HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nReferer: http://127.0.0.1:{port}/__run/{epoch}/index.html\r\nContent-Type: multipart/form-data; boundary=agent-boundary\r\nX-LingXi-App-Request: 1\r\n{framing}\r\n\r\n").as_bytes()).await.unwrap();
+        socket.write_all(format!("POST /__run/{epoch}/__host/agent HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nReferer: http://127.0.0.1:{port}/__run/{epoch}/index.html\r\nContent-Type: application/json\r\nX-LingXi-App-Request: 1\r\n{framing}\r\n\r\n").as_bytes()).await.unwrap();
         let mut out = Vec::new();
         socket.read_to_end(&mut out).await.unwrap();
         String::from_utf8(out).unwrap()
     }
-    assert!(framing_response(port, epoch, "Transfer-Encoding: chunked\r\n")
-        .await
-        .starts_with("HTTP/1.1 400"));
-    assert!(framing_response(port, epoch, &format!("Content-Length: {}\r\n", 52 * 1024 * 1024 + 1))
-        .await
-        .starts_with("HTTP/1.1 413"));
-    assert!(post(port, epoch, false, epoch, "agent.tasks.start", "")
-        .await
-        .starts_with("HTTP/1.1 403"));
-    assert!(post(port, epoch, true, "stale", "agent.tasks.start", "")
-        .await
-        .starts_with("HTTP/1.1 403"));
-    assert!(post(port, epoch, true, epoch, "answer", "")
+
+    assert!(
+        framing_response(port, epoch, "Transfer-Encoding: chunked\r\n")
+            .await
+            .starts_with("HTTP/1.1 400")
+    );
+    assert!(framing_response(
+        port,
+        epoch,
+        &format!("Content-Length: {}\r\n", 116 * 1024 * 1024 + 1)
+    )
+    .await
+    .starts_with("HTTP/1.1 413"));
+    assert!(post(
+        port,
+        epoch,
+        false,
+        epoch,
+        "agent.tasks.start",
+        json!({"input": input("gateway-test-run")}),
+        ""
+    )
+    .await
+    .starts_with("HTTP/1.1 403"));
+    assert!(post_body(
+        port,
+        epoch,
+        true,
+        epoch,
+        "multipart/form-data; boundary=legacy",
+        "{}"
+    )
+    .await
+    .starts_with("HTTP/1.1 400"));
+    assert!(post(
+        port,
+        epoch,
+        true,
+        "stale",
+        "agent.tasks.start",
+        json!({"input": input("gateway-test-run")}),
+        ""
+    )
+    .await
+    .starts_with("HTTP/1.1 403"));
+    assert!(post(port, epoch, true, epoch, "answer", json!({}), "")
         .await
         .starts_with("HTTP/1.1 403"));
     assert!(post(
@@ -704,21 +756,80 @@ async fn external_browser_sdk_and_agent_route_bind_caller_to_the_current_epoch()
         epoch,
         true,
         epoch,
+        "eventsNative",
+        json!({"runId":"private-run"}),
+        ""
+    )
+    .await
+    .starts_with("HTTP/1.1 403"));
+    assert!(post(
+        port,
+        epoch,
+        true,
+        epoch,
         "agent.tasks.start",
-        r#", "appId":"other""#
+        json!({"input": input("gateway-test-run")}),
+        ",\"appId\":\"other\""
     )
     .await
     .starts_with("HTTP/1.1 400"));
-    let no_model = post(port, epoch, true, epoch, "agent.tasks.start", "").await;
+    assert!(post(
+        port,
+        epoch,
+        true,
+        epoch,
+        "agent.tasks.events",
+        json!({"runId":"missing-run","afterSequence":0}),
+        ""
+    )
+    .await
+    .starts_with("HTTP/1.1 200"));
+
+    let bytes = vec![0x5a; 1024 * 1024 + 17];
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    let large_input = json!({
+        "threadId":"thread-large-file",
+        "runId":"gateway-large-file-run",
+        "protocolVersion":"1.0",
+        "messages":[{
+            "id":"message-large-file",
+            "role":"user",
+            "content":[
+                {"type":"text","text":"Inspect this document"},
+                {
+                    "type":"document",
+                    "source":{"type":"data","value":encoded,"mimeType":"application/octet-stream"},
+                    "metadata":{"com.lingxi.localApp":{"version":1,"filename":"large.bin"}}
+                }
+            ]
+        }],
+        "forwardedProps":{"com.lingxi.localApp":{"version":1}}
+    });
+    let large_body = json!({
+        "method":"agent.tasks.start",
+        "args":{"input":large_input}
+    })
+    .to_string();
+    assert!(large_body.len() > 1024 * 1024);
+    let no_model = post_body(port, epoch, true, epoch, "application/json", &large_body).await;
     assert!(no_model.starts_with("HTTP/1.1 200"));
     assert!(no_model.contains("agent_model_host_not_ready"));
+
     service
         .request_value(json!({"op":"restart","appId":id}))
         .await
         .unwrap();
-    assert!(post(port, epoch, true, epoch, "agent.tasks.start", "")
-        .await
-        .starts_with("HTTP/1.1 410"));
+    assert!(post(
+        port,
+        epoch,
+        true,
+        epoch,
+        "agent.tasks.start",
+        json!({"input": input("gateway-after-restart")}),
+        ""
+    )
+    .await
+    .starts_with("HTTP/1.1 410"));
     service
         .request_value(json!({"op":"stop","appId":id}))
         .await

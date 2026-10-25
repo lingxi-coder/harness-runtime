@@ -1,7 +1,7 @@
 //! Shared bounded, path-free attachment decoding for Local App Agent turns.
 use base64::Engine;
 use lingxi_core::types::{ContentBlock, DocumentSource, ImageSource};
-use local_app::v2::agent::{AttachmentMetadata, Input};
+use local_app::v2::agent::{AttachmentMetadata, Input, InputContentPart};
 
 /// Decoded model-ready content with safe metadata for host-owned history.
 #[derive(Debug)]
@@ -16,73 +16,56 @@ pub struct PreparedInput {
 
 /// Decode and validate all uploaded files without resolving or opening host paths.
 pub async fn prepare(input: &Input) -> Result<PreparedInput, String> {
-    let mut blocks = vec![ContentBlock::Text {
-        text: input.prompt.clone(),
-        citations: None,
-    }];
-    let mut attachments = Vec::with_capacity(input.attachments.len());
+    let mut blocks = Vec::new();
+    let attachment_count = input.attachments.len()
+        + input
+            .content_parts
+            .iter()
+            .filter(|part| matches!(part, InputContentPart::Attachment { .. }))
+            .count();
+    let mut attachments = Vec::with_capacity(attachment_count);
     let mut uses_vision = false;
 
-    for attachment in &input.attachments {
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(&attachment.base64)
-            .map_err(|_| "invalid_attachments")?;
-        if bytes.is_empty() || bytes.len() > 25 * 1024 * 1024 {
-            return Err("invalid_attachments".into());
-        }
-        let media_type = attachment.media_type.to_ascii_lowercase();
-        let label = format!("Attachment: {} ({media_type})", attachment.name);
+    if input.content_parts.is_empty() {
         blocks.push(ContentBlock::Text {
-            text: label,
+            text: input.prompt.clone(),
             citations: None,
         });
-
-        if media_type.starts_with("image/") {
-            if !image_signature(&bytes, &media_type) {
-                return Err("invalid_attachments".into());
-            }
-            let processed = tokio::task::spawn_blocking(move || {
-                tool_api::util::image_budget::process_image(bytes)
-            })
-            .await
-            .map_err(|_| "invalid_attachments")?
-            .map_err(|_| "invalid_attachments")?;
-            blocks.push(ContentBlock::Image {
-                source: ImageSource::Base64 {
-                    media_type: processed.media_type,
-                    data: processed.base64,
-                },
-            });
-            uses_vision = true;
-        } else if media_type == "application/pdf" {
-            if !bytes.starts_with(b"%PDF-") {
-                return Err("invalid_attachments".into());
-            }
-            blocks.push(ContentBlock::Document {
-                source: DocumentSource::Base64 {
-                    media_type,
-                    data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-                },
-            });
-            uses_vision = true;
-        } else if is_text_media(&media_type) {
-            let text = String::from_utf8(bytes).map_err(|_| "invalid_attachments")?;
-            if text.len() > 25 * 1024 * 1024 {
-                return Err("invalid_attachments".into());
-            }
-            blocks.push(ContentBlock::Text {
-                text,
-                citations: None,
-            });
-        } else {
-            return Err("attachment_type_unsupported".into());
+        for attachment in &input.attachments {
+            append_attachment(
+                &mut blocks,
+                &mut attachments,
+                &mut uses_vision,
+                &attachment.name,
+                &attachment.media_type,
+                &attachment.base64,
+            )
+            .await?;
         }
-
-        attachments.push(AttachmentMetadata {
-            name: attachment.name.clone(),
-            media_type: attachment.media_type.clone(),
-            size: bytes_len(&attachment.base64)?,
-        });
+    } else {
+        for part in &input.content_parts {
+            match part {
+                InputContentPart::Text { text } => blocks.push(ContentBlock::Text {
+                    text: text.clone(),
+                    citations: None,
+                }),
+                InputContentPart::Attachment {
+                    name,
+                    media_type,
+                    base64,
+                } => {
+                    append_attachment(
+                        &mut blocks,
+                        &mut attachments,
+                        &mut uses_vision,
+                        name,
+                        media_type,
+                        base64,
+                    )
+                    .await?;
+                }
+            }
+        }
     }
 
     Ok(PreparedInput {
@@ -90,6 +73,72 @@ pub async fn prepare(input: &Input) -> Result<PreparedInput, String> {
         attachments,
         uses_vision,
     })
+}
+
+async fn append_attachment(
+    blocks: &mut Vec<ContentBlock>,
+    attachments: &mut Vec<AttachmentMetadata>,
+    uses_vision: &mut bool,
+    name: &str,
+    supplied_media_type: &str,
+    encoded: &str,
+) -> Result<(), String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| "invalid_attachments")?;
+    if bytes.is_empty() || bytes.len() > 25 * 1024 * 1024 {
+        return Err("invalid_attachments".into());
+    }
+    let media_type = supplied_media_type.to_ascii_lowercase();
+    blocks.push(ContentBlock::Text {
+        text: format!("Attachment: {name} ({media_type})"),
+        citations: None,
+    });
+    if media_type.starts_with("image/") {
+        if !image_signature(&bytes, &media_type) {
+            return Err("invalid_attachments".into());
+        }
+        let processed =
+            tokio::task::spawn_blocking(move || tool_api::util::image_budget::process_image(bytes))
+                .await
+                .map_err(|_| "invalid_attachments")?
+                .map_err(|_| "invalid_attachments")?;
+        blocks.push(ContentBlock::Image {
+            source: ImageSource::Base64 {
+                media_type: processed.media_type,
+                data: processed.base64,
+            },
+        });
+        *uses_vision = true;
+    } else if media_type == "application/pdf" {
+        if !bytes.starts_with(b"%PDF-") {
+            return Err("invalid_attachments".into());
+        }
+        blocks.push(ContentBlock::Document {
+            source: DocumentSource::Base64 {
+                media_type: media_type.clone(),
+                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            },
+        });
+        *uses_vision = true;
+    } else if is_text_media(&media_type) {
+        let text = String::from_utf8(bytes).map_err(|_| "invalid_attachments")?;
+        if text.len() > 25 * 1024 * 1024 {
+            return Err("invalid_attachments".into());
+        }
+        blocks.push(ContentBlock::Text {
+            text,
+            citations: None,
+        });
+    } else {
+        return Err("attachment_type_unsupported".into());
+    }
+    attachments.push(AttachmentMetadata {
+        name: name.to_owned(),
+        media_type: supplied_media_type.to_owned(),
+        size: bytes_len(encoded)?,
+    });
+    Ok(())
 }
 
 fn bytes_len(encoded: &str) -> Result<u64, String> {
@@ -133,12 +182,17 @@ mod tests {
     fn input(media_type: &str, name: &str, bytes: &[u8]) -> Input {
         Input {
             request_id: "request-1".into(),
+            protocol_thread_id: None,
+            protocol_parent_run_id: None,
+            protocol_input_digest: None,
+            protocol_message_sha256: None,
             prompt: "inspect".into(),
             attachments: vec![local_app::v2::agent::Attachment {
                 name: name.into(),
                 media_type: media_type.into(),
                 base64: base64::engine::general_purpose::STANDARD.encode(bytes),
             }],
+            content_parts: Vec::new(),
             output_schema: None,
             tools: Vec::new(),
             skills: Vec::new(),

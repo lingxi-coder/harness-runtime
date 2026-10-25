@@ -2,20 +2,27 @@
 (() => {
   if (window.top !== window || window.localApp) return;
   const config = __LINGXI_APP_CONFIGURATION__;
-  const base = `${location.origin}/__run/${encodeURIComponent(config.runId)}/`;
-  const maxFiles = 8;
-  const maxFileBytes = 25 * 1024 * 1024;
-  const maxTotalBytes = 50 * 1024 * 1024;
+  const agui = window.LingxiLocalAppAGUI;
+  if (!agui || typeof agui.installBrowserAgent !== 'function') {
+    throw new Error('The pinned AG-UI browser bundle must load before the Local App SDK.');
+  }
+
+  const base = location.origin + '/__run/' + encodeURIComponent(config.runId) + '/';
+  const maxRequestBodyBytes = 116 * 1024 * 1024;
   const pendingTtlMs = 24 * 60 * 60 * 1000;
   const acceptedTtlMs = 7 * 24 * 60 * 60 * 1000;
   const maxPendingRecords = 32;
   const maxPendingStorageBytes = 100 * 1024 * 1024;
   const pendingStore = 'pending';
-  const pendingDbName = `lingxi-local-app-agent-${config.appId}`;
-  const pendingPrefix = `${config.appId}:${config.revision}:`;
+  const pendingDbName = 'lingxi-local-app-agui-' + config.appId;
+  const obsoletePendingDbName = 'lingxi-local-app-agent-' + config.appId;
+  const pendingPrefix = config.appId + ':' + config.revision + ':';
   const inFlight = new Map();
   const handoffWaiters = new Map();
+  const chatIds = new Set();
+  const chatMessageIds = new Map();
   const recoveryState = {status: 'checking'};
+  const textEncoder = new TextEncoder();
 
   const makeError = (message, code = 'agent_error', cause) => {
     const error = new Error(message, cause ? {cause} : undefined);
@@ -23,19 +30,141 @@
     return error;
   };
 
-  function requestId() {
-    if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
-    const bytes = new Uint8Array(16);
-    crypto.getRandomValues(bytes);
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    return [...bytes].map((value, index) => `${index === 4 || index === 6 || index === 8 || index === 10 ? '-' : ''}${value.toString(16).padStart(2, '0')}`).join('');
-  }
-
   function isRecord(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
     const prototype = Object.getPrototypeOf(value);
     return prototype === Object.prototype || prototype === null;
+  }
+
+  function canonical(value) {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (isRecord(value)) {
+      return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+    }
+    return value;
+  }
+
+  function hex(bytes) {
+    return [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, '0')).join('');
+  }
+
+  async function digestStringInChunks(value) {
+    if (!crypto.subtle) throw makeError('Secure request recovery is unavailable in this browser.', 'storage_unavailable');
+    const chunkSize = 1024 * 1024;
+    const digests = [];
+    for (let offset = 0; offset < value.length; offset += chunkSize) {
+      const bytes = textEncoder.encode(value.slice(offset, Math.min(offset + chunkSize, value.length)));
+      digests.push(hex(await crypto.subtle.digest('SHA-256', bytes)));
+    }
+    return {length: value.length, chunks: digests};
+  }
+
+  function dataParts(input) {
+    const parts = [];
+    for (let messageIndex = 0; messageIndex < (input?.messages || []).length; messageIndex++) {
+      const message = input.messages[messageIndex];
+      if (!Array.isArray(message.content)) continue;
+      for (let partIndex = 0; partIndex < message.content.length; partIndex++) {
+        const part = message.content[partIndex];
+        if ((part.type === 'image' || part.type === 'document') && part.source?.type === 'data') {
+          parts.push({
+            messageId: message.id,
+            messageIndex,
+            partId: part.id || null,
+            partIndex,
+            type: part.type,
+            mimeType: part.source.mimeType,
+            value: part.source.value
+          });
+        }
+      }
+    }
+    return parts;
+  }
+
+  async function inputPayloadDigests(input) {
+    const payloads = [];
+    for (const part of dataParts(input)) {
+      payloads.push({
+        messageId: part.messageId,
+        messageIndex: part.messageIndex,
+        partId: part.partId,
+        partIndex: part.partIndex,
+        type: part.type,
+        mimeType: part.mimeType,
+        digest: await digestStringInChunks(part.value)
+      });
+    }
+    return payloads;
+  }
+
+  function cloneWithoutInlinePayloads(value, lengths) {
+    if (Array.isArray(value)) return value.map(item => cloneWithoutInlinePayloads(item, lengths));
+    if (!isRecord(value)) return value;
+    const result = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (key === 'source' && isRecord(item) && item.type === 'data'
+          && typeof item.value === 'string') {
+        lengths.total += item.value.length;
+        const source = {};
+        for (const [sourceKey, sourceValue] of Object.entries(item)) {
+          source[sourceKey] = sourceKey === 'value'
+            ? ''
+            : cloneWithoutInlinePayloads(sourceValue, lengths);
+        }
+        result[key] = source;
+      } else {
+        result[key] = cloneWithoutInlinePayloads(item, lengths);
+      }
+    }
+    return result;
+  }
+
+  async function fingerprint(method, args) {
+    const payloads = await inputPayloadDigests(args.input);
+    const lengths = {total: 0};
+    const metadata = cloneWithoutInlinePayloads(args, lengths);
+    const bytes = textEncoder.encode(JSON.stringify(canonical({method, args: metadata, payloads})));
+    return hex(await crypto.subtle.digest('SHA-256', bytes));
+  }
+
+  function inlineFileTotals(input, knownMessageIds) {
+    let count = 0;
+    let bytes = 0;
+    for (const part of dataParts(input)) {
+      if (knownMessageIds.has(part.messageId)) continue;
+      count++;
+      const value = part.value;
+      const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+      bytes += (value.length / 4) * 3 - padding;
+    }
+    return {count, bytes};
+  }
+
+  function utf8ByteLengthInChunks(value) {
+    let length = 0;
+    const chunkSize = 32 * 1024;
+    for (let offset = 0; offset < value.length;) {
+      let end = Math.min(offset + chunkSize, value.length);
+      if (end < value.length) {
+        const last = value.charCodeAt(end - 1);
+        const next = value.charCodeAt(end);
+        if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end--;
+      }
+      length += textEncoder.encode(value.slice(offset, end)).byteLength;
+      if (length > maxRequestBodyBytes) return length;
+      offset = end;
+    }
+    return length;
+  }
+
+  function recordBytes(record) {
+    if (Number.isSafeInteger(record.storageBytes) && record.storageBytes >= 0) return record.storageBytes;
+    const copy = {...record};
+    delete copy.storageBytes;
+    const lengths = {total: 0};
+    const metadata = cloneWithoutInlinePayloads(copy, lengths);
+    return textEncoder.encode(JSON.stringify(metadata)).byteLength + lengths.total;
   }
 
   function database() {
@@ -52,22 +181,25 @@
     });
   }
 
+  function deleteObsoletePendingDatabase() {
+    if (!('indexedDB' in window)) return Promise.resolve(false);
+    return new Promise(resolve => {
+      try {
+        const request = indexedDB.deleteDatabase(obsoletePendingDbName);
+        request.onsuccess = () => resolve(true);
+        request.onerror = () => resolve(false);
+        request.onblocked = () => resolve(false);
+      } catch {
+        resolve(false);
+      }
+    });
+  }
+
   function recordExpired(record, now = Date.now()) {
     const accepted = record?.state === 'accepted';
     const timestamp = accepted ? record.acceptedAt : record?.createdAt;
     const ttl = accepted ? acceptedTtlMs : pendingTtlMs;
     return !Number.isFinite(timestamp) || timestamp > now + 5 * 60 * 1000 || now - timestamp >= ttl;
-  }
-
-  function recordBytes(record) {
-    let metadata;
-    try {
-      metadata = JSON.stringify({key: record.key, appId: record.appId, revision: record.revision,
-        requestId: record.requestId, method: record.method, args: record.args,
-        fingerprint: record.fingerprint, state: record.state, runId: record.runId});
-    } catch { return maxPendingStorageBytes + 1; }
-    const files = Array.isArray(record.files) ? record.files : [];
-    return new TextEncoder().encode(metadata || '').byteLength + files.reduce((total, file) => total + (file?.size || 0), 0);
   }
 
   async function collectExpired() {
@@ -100,29 +232,32 @@
       const store = tx.objectStore(pendingStore);
       const request = store.get(record.key);
       let failure = null;
+      const next = {...record};
+      delete next.storageBytes;
+      next.storageBytes = recordBytes(next);
       request.onsuccess = () => {
         const existing = request.result;
-        if (existing && (existing.appId !== config.appId || existing.revision !== config.revision
-            || existing.requestId !== record.requestId || existing.fingerprint !== record.fingerprint
-            || existing.method !== record.method)) {
-          failure = makeError('This requestId is already bound to different input.', 'request_id_conflict');
+        if (existing && (existing.appId !== config.appId || existing.revision !== next.revision
+            || existing.runId !== next.runId || existing.fingerprint !== next.fingerprint
+            || existing.method !== next.method)) {
+          failure = makeError('This runId is already bound to different input.', 'run_id_conflict');
           return;
         }
-        if (existing?.state === 'accepted' && record.state !== 'accepted') return;
-        if (!existing && record.state !== 'accepted') {
-          failure = makeError('The saved Agent request expired; create a new request after reviewing it.', 'request_expired');
+        if (existing?.state === 'accepted' && next.state !== 'accepted') return;
+        if (!existing && next.state !== 'accepted') {
+          failure = makeError('The saved Agent run expired; create a new run after reviewing it.', 'run_expired');
           return;
         }
-        if (existing && recordExpired(existing) && record.state !== 'accepted') {
-          store.delete(record.key);
-          failure = makeError('The saved Agent request expired; create a new request after reviewing it.', 'request_expired');
+        if (existing && recordExpired(existing) && next.state !== 'accepted') {
+          store.delete(next.key);
+          failure = makeError('The saved Agent run expired; create a new run after reviewing it.', 'run_expired');
           return;
         }
-        store.put(record);
+        store.put(next);
       };
       tx.oncomplete = () => { db.close(); failure ? reject(failure) : resolve(); };
-      tx.onerror = () => { db.close(); reject(makeError('Could not save the Agent request for recovery.', 'storage_unavailable', tx.error)); };
-      tx.onabort = () => { db.close(); reject(makeError('Could not save the Agent request for recovery.', 'storage_unavailable', tx.error)); };
+      tx.onerror = () => { db.close(); reject(makeError('Could not save the Agent run for recovery.', 'storage_unavailable', tx.error)); };
+      tx.onabort = () => { db.close(); reject(makeError('Could not save the Agent run for recovery.', 'storage_unavailable', tx.error)); };
     });
   }
 
@@ -152,15 +287,15 @@
         request.onsuccess = () => {
           const existing = request.result;
           if (existing) {
-            conflict = existing.appId !== config.appId || existing.revision !== config.revision
-              || existing.requestId !== record.requestId || existing.fingerprint !== record.fingerprint
+            conflict = existing.appId !== config.appId || existing.revision !== record.revision
+              || existing.runId !== record.runId || existing.fingerprint !== record.fingerprint
               || existing.method !== record.method;
             if (conflict) return;
             if (existing.state === 'accepted') { result = existing; return; }
             if (existing.state === 'rejected') {
               const projectedBytes = liveBytes - recordBytes(existing) + recordBytes(record);
               if (projectedBytes > maxPendingStorageBytes) {
-                failure = makeError('Browser recovery storage is full. Forget an old request and try again.', 'storage_full');
+                failure = makeError('Browser recovery storage is full. Forget an old run and try again.', 'storage_full');
                 return;
               }
               store.put(record);
@@ -171,7 +306,7 @@
             return;
           }
           if (liveCount + 1 > maxPendingRecords || liveBytes + recordBytes(record) > maxPendingStorageBytes) {
-            failure = makeError('Browser recovery storage is full. Forget an old request and try again.', 'storage_full');
+            failure = makeError('Browser recovery storage is full. Forget an old run and try again.', 'storage_full');
             return;
           }
           store.add(record);
@@ -180,16 +315,16 @@
       };
       tx.oncomplete = () => {
         db.close();
-        if (conflict) reject(makeError('This requestId is already bound to different input.', 'request_id_conflict'));
+        if (conflict) reject(makeError('This runId is already bound to different input.', 'run_id_conflict'));
         else if (failure) reject(failure);
         else resolve(result);
       };
-      tx.onerror = () => { db.close(); reject(makeError('Could not save the Agent request for recovery.', 'storage_unavailable', tx.error)); };
-      tx.onabort = () => { db.close(); reject(makeError('Could not save the Agent request for recovery.', 'storage_unavailable', tx.error)); };
+      tx.onerror = () => { db.close(); reject(makeError('Could not save the Agent run for recovery.', 'storage_unavailable', tx.error)); };
+      tx.onabort = () => { db.close(); reject(makeError('Could not save the Agent run for recovery.', 'storage_unavailable', tx.error)); };
     });
   }
 
-  async function claimPending(key, requestIdValue) {
+  async function claimPending(key, runId) {
     const db = await database();
     return new Promise((resolve, reject) => {
       const tx = db.transaction(pendingStore, 'readwrite');
@@ -202,127 +337,44 @@
           store.delete(key);
           return;
         }
-        if (record && record.requestId === requestIdValue && record.state === 'waking'
+        if (record && record.runId === runId && record.state === 'waking'
             && record.appId === config.appId && record.revision === config.revision) {
           record.state = 'sending';
           record.sendingAt = Date.now();
+          record.storageBytes = recordBytes(record);
           store.put(record);
           claimed = record;
         }
       };
       tx.oncomplete = () => { db.close(); resolve(claimed); };
-      tx.onerror = () => { db.close(); reject(makeError('Could not restore the saved Agent request.', 'storage_unavailable', tx.error)); };
-      tx.onabort = () => { db.close(); reject(makeError('Could not restore the saved Agent request.', 'storage_unavailable', tx.error)); };
+      tx.onerror = () => { db.close(); reject(makeError('Could not restore the saved Agent run.', 'storage_unavailable', tx.error)); };
+      tx.onabort = () => { db.close(); reject(makeError('Could not restore the saved Agent run.', 'storage_unavailable', tx.error)); };
     });
   }
 
-  function validFile(file) {
-    return typeof File === 'function' && file instanceof File;
-  }
-
-  function safeFileName(name) {
-    return typeof name === 'string' && name.length > 0 && name.length <= 255
-      && name !== '.' && name !== '..' && !/[\/\\\u0000-\u001f\u007f]/u.test(name);
-  }
-
-  function canonical(value) {
-    if (Array.isArray(value)) return value.map(canonical);
-    if (isRecord(value)) {
-      return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+  async function invoke(method, args = {}) {
+    const body = JSON.stringify({method, args});
+    if (utf8ByteLengthInChunks(body) > maxRequestBodyBytes) {
+      throw makeError('The AG-UI request exceeds the 116 MiB transport limit.', 'invalid_input');
     }
-    return value;
-  }
-
-  async function fingerprint(metadata, files) {
-    if (!crypto.subtle) throw makeError('Secure file recovery is unavailable in this browser.', 'storage_unavailable');
-    const fileHashes = [];
-    for (const file of files) {
-      const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
-      fileHashes.push({name: file.name, mediaType: file.type || 'application/octet-stream', size: file.size,
-        digest: [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('')});
-    }
-    const bytes = new TextEncoder().encode(JSON.stringify(canonical({metadata, files: fileHashes})));
-    const digest = await crypto.subtle.digest('SHA-256', bytes);
-    return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');
-  }
-
-  async function normalizeInput(input) {
-    if (!isRecord(input)) throw new TypeError('Agent input must be an object.');
-    const allowed = new Set(['requestId', 'prompt', 'attachments', 'outputSchema', 'tools', 'skills', 'maxTurns', 'timeoutMs']);
-    for (const key of Object.keys(input)) {
-      if (!allowed.has(key)) throw new TypeError(`Unsupported Agent input field: ${key}`);
-    }
-    const id = input.requestId === undefined ? requestId() : input.requestId;
-    if (typeof id !== 'string' || id.length < 1 || id.length > 128 || /[\u0000-\u001f\u007f]/u.test(id)) {
-      throw new TypeError('requestId must be a nonempty string of at most 128 characters.');
-    }
-    if (typeof input.prompt !== 'string') throw new TypeError('prompt must be a string.');
-    const attachments = input.attachments === undefined ? [] : input.attachments;
-    if (!Array.isArray(attachments) || attachments.length > maxFiles || attachments.some(file => !validFile(file))) {
-      throw new TypeError('attachments must contain up to eight browser File objects.');
-    }
-    let total = 0;
-    for (const file of attachments) {
-      if (!safeFileName(file.name)) throw new TypeError('Each attachment needs a safe file name.');
-      if (file.size > maxFileBytes) throw makeError('Each attachment must be 25 MiB or smaller.', 'attachment_too_large');
-      total += file.size;
-      if (total > maxTotalBytes) throw makeError('Attachments must total 50 MiB or less.', 'attachments_too_large');
-    }
-    const metadata = {};
-    for (const key of ['prompt', 'outputSchema', 'tools', 'skills', 'maxTurns', 'timeoutMs']) {
-      if (input[key] !== undefined) metadata[key] = input[key];
-    }
-    metadata.requestId = id;
-    let serialized;
-    try { serialized = JSON.stringify(metadata); }
-    catch (cause) { throw makeError('Agent input must contain JSON-compatible options.', 'invalid_input', cause); }
-    if (typeof serialized !== 'string' || new TextEncoder().encode(serialized).byteLength > 1024 * 1024) {
-      throw makeError('Agent metadata must be 1 MiB or smaller.', 'invalid_input');
-    }
-    return {id, metadata, files: [...attachments]};
-  }
-
-  function requestKey(id) { return `${pendingPrefix}${id}`; }
-
-  async function storeRequest(method, args, normalized) {
-    const key = requestKey(normalized.id);
-    const metadata = {method, args};
-    const digest = await fingerprint(metadata, normalized.files);
-    const record = {key, appId: config.appId, revision: config.revision, requestId: normalized.id,
-      method, args, files: normalized.files, fingerprint: digest, state: 'pending', createdAt: Date.now()};
-    return reservePending(record);
-  }
-
-  async function finishAccepted(record, runId) {
-    await writePending({key: record.key, appId: config.appId, revision: config.revision,
-      requestId: record.requestId, method: record.method, fingerprint: record.fingerprint,
-      state: 'accepted', runId, acceptedAt: Date.now()});
-    return {runId};
-  }
-
-  function hostError(result) {
-    const detail = result?.error || {};
-    const error = makeError(detail.message || 'Agent request failed.', detail.code || 'agent_error');
-    // A host error envelope means admission failed before a runId was created.
-    error.definitive = true;
-    return error;
-  }
-
-  async function invoke(method, args = {}, files = []) {
-    const form = new FormData();
-    form.append('request', JSON.stringify({method, args}));
-    for (const file of files) form.append('attachment', file, file.name);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 120000);
     let response;
     try {
-      response = await fetch(`${base}__host/agent`, {
-        method: 'POST', credentials: 'omit', cache: 'no-store', redirect: 'error',
-        headers: {'X-LingXi-App-Request': '1'}, body: form, signal: controller.signal
+      response = await fetch(base + '__host/agent', {
+        method: 'POST',
+        credentials: 'omit',
+        cache: 'no-store',
+        redirect: 'error',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-LingXi-App-Request': '1'
+        },
+        body,
+        signal: controller.signal
       });
     } catch (cause) {
-      const error = makeError('LingXi is unavailable or paused. The request is saved for an explicit retry.', 'host_unavailable', cause);
-      throw error;
+      throw makeError('LingXi is unavailable or paused. The run is saved for an explicit retry.', 'host_unavailable', cause);
     } finally {
       clearTimeout(timer);
     }
@@ -334,139 +386,185 @@
     let result;
     try { result = await response.json(); }
     catch (cause) { throw makeError('The host returned an invalid Agent response.', 'invalid_host_response', cause); }
-    if (!result?.ok) throw hostError(result);
+    if (!result?.ok) {
+      const detail = result?.error || {};
+      const error = makeError(detail.message || 'Agent request failed.', detail.code || 'agent_error');
+      error.definitive = true;
+      throw error;
+    }
     return result.value;
   }
 
-  function wakeLink(requestIdValue) {
-    const url = new URL(`lingxi://apps/${encodeURIComponent(config.appId)}`);
-    url.searchParams.set('review', 'agent');
-    url.searchParams.set('requestId', requestIdValue);
-    url.searchParams.set('revision', String(config.revision));
-    return url.href;
+  function requestKey(runId) { return pendingPrefix + runId; }
+
+  async function storeRequest(method, extraArgs, input, knownMessageIds) {
+    const args = {...extraArgs, input};
+    const digest = await fingerprint(method, args);
+    const uploads = inlineFileTotals(input, knownMessageIds);
+    const runId = input.runId;
+    const key = requestKey(runId);
+    const record = {
+      key,
+      appId: config.appId,
+      revision: config.revision,
+      runId,
+      threadId: input.threadId,
+      method,
+      chatId: method === 'agent.chats.send' ? input.threadId : undefined,
+      input,
+      knownMessageIds: [...knownMessageIds],
+      uploads,
+      fingerprint: digest,
+      state: 'pending',
+      createdAt: Date.now()
+    };
+    record.storageBytes = recordBytes(record);
+    return await reservePending(record);
   }
 
-  function waitForHandoff(requestIdValue) {
+  async function finishAccepted(record) {
+    const accepted = {key: record.key, appId: record.appId, revision: record.revision,
+      runId: record.runId, threadId: record.threadId, method: record.method,
+      fingerprint: record.fingerprint, state: 'accepted', acceptedAt: Date.now()};
+    await writePending(accepted);
+    return {runId: record.runId};
+  }
+
+  function waitForHandoff(runId) {
     let waiter;
     const promise = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        handoffWaiters.delete(requestIdValue);
+        handoffWaiters.delete(runId);
         reject(makeError('Return to this app after LingXi confirms the Agent handoff.', 'handoff_timeout'));
       }, 120000);
       waiter = {
         promise: null,
-        resolve(value) { clearTimeout(timeout); handoffWaiters.delete(requestIdValue); resolve(value); },
-        reject(error) { clearTimeout(timeout); handoffWaiters.delete(requestIdValue); reject(error); }
+        resolve(value) { clearTimeout(timeout); handoffWaiters.delete(runId); resolve(value); },
+        reject(error) { clearTimeout(timeout); handoffWaiters.delete(runId); reject(error); }
       };
-      handoffWaiters.set(requestIdValue, waiter);
+      handoffWaiters.set(runId, waiter);
     });
     waiter.promise = promise;
     return promise;
   }
 
+  function wakeLink(runId) {
+    const url = new URL('lingxi://apps/' + encodeURIComponent(config.appId));
+    url.searchParams.set('review', 'agent');
+    url.searchParams.set('runId', runId);
+    url.searchParams.set('revision', String(config.revision));
+    return url.href;
+  }
+
   async function submitRecord(record) {
-    const key = record.key;
-    if (record.state === 'accepted' && record.runId) return {runId: record.runId};
-    if (inFlight.has(key)) return inFlight.get(key);
+    if (record.state === 'accepted' && record.runId) {
+      return {runId: record.runId};
+    }
+    if (inFlight.has(record.key)) return inFlight.get(record.key);
     const promise = (async () => {
       const active = {...record, state: 'sending', sendingAt: Date.now()};
       await writePending(active);
       try {
-        const value = await invoke(record.method, record.args, record.files || []);
-        if (!value || typeof value.runId !== 'string' || !value.runId) {
-          throw makeError('The host did not return a task ID.', 'invalid_host_response');
+        const args = record.method === 'agent.chats.send'
+          ? {chatId: record.chatId, input: record.input}
+          : {input: record.input};
+        const value = await invoke(record.method, args);
+        if (!value || value.runId !== record.runId) {
+          throw makeError('The host did not preserve the AG-UI runId.', 'invalid_host_response');
         }
-        return await finishAccepted(record, value.runId);
+        const accepted = await finishAccepted(record);
+        return accepted;
       } catch (error) {
         if (error.definitive) {
-          // Keep only a short dedup receipt. The user can explicitly retry the
-          // same requestId and reattach the same input; this record retains no
-          // prompt or file bytes after the host rejects admission.
           await writePending({key: record.key, appId: record.appId, revision: record.revision,
-            requestId: record.requestId, method: record.method, fingerprint: record.fingerprint,
-            state: 'rejected', createdAt: record.createdAt, lastError: error.code || 'agent_rejected'});
+            runId: record.runId, threadId: record.threadId, method: record.method,
+            fingerprint: record.fingerprint, state: 'rejected', createdAt: record.createdAt,
+            lastError: error.code || 'agent_rejected'});
         } else {
           await writePending({...record, state: 'uncertain', lastError: error.code || 'host_unavailable', lastAttemptAt: Date.now()});
         }
         throw error;
       }
     })();
-    inFlight.set(key, promise);
+    inFlight.set(record.key, promise);
     try { return await promise; }
-    finally { inFlight.delete(key); }
+    finally { inFlight.delete(record.key); }
   }
 
-  async function startInput(method, extraArgs, input) {
-    const normalized = await normalizeInput(input);
-    const args = {...extraArgs, input: normalized.metadata};
-    const record = await storeRequest(method, args, normalized);
+  async function startInput(method, extraArgs, input, knownMessageIds = new Set()) {
+    const persistentChat = method === 'agent.chats.send';
+    if (method === 'agent.tasks.start' && chatIds.has(input?.threadId)) {
+      throw makeError('This thread belongs to a persistent chat; use its chat handle.', 'chat_thread_required');
+    }
+    if (persistentChat && input?.threadId !== extraArgs.chatId) {
+      throw new TypeError('A chat RunAgentInput.threadId must equal the chat handle id.');
+    }
+    const normalized = agui.validateLocalAppRunInput(input, {persistentChat, knownMessageIds});
+    const record = await storeRequest(method, extraArgs, normalized, knownMessageIds);
     if (record.state === 'accepted' && record.runId) return {runId: record.runId};
     if (inFlight.has(record.key)) return inFlight.get(record.key);
     if (config.hostPlatform === 'ios') {
       if (record.state !== 'waking') {
         await writePending({...record, state: 'waking', wakeRequestedAt: Date.now()});
       }
-      const currentWaiter = handoffWaiters.get(normalized.id);
-      if (currentWaiter) return currentWaiter.promise;
-      const pending = waitForHandoff(normalized.id);
-      try { location.assign(wakeLink(normalized.id)); }
+      const waiter = handoffWaiters.get(normalized.runId);
+      if (waiter) return waiter.promise;
+      const pending = waitForHandoff(normalized.runId);
+      try { location.assign(wakeLink(normalized.runId)); }
       catch (cause) {
-        handoffWaiters.get(normalized.id)?.reject(makeError('Could not open LingXi for the Agent handoff.', 'handoff_unavailable', cause));
+        handoffWaiters.get(normalized.runId)?.reject(makeError('Could not open LingXi for the Agent handoff.', 'handoff_unavailable', cause));
       }
       return pending;
     }
     return submitRecord(record);
   }
 
-  function terminal(task) {
-    return ['succeeded', 'failed', 'cancelled', 'interrupted'].includes(task?.state);
+  function hostEventError(runId, error) {
+    window.dispatchEvent(new CustomEvent('localApp:agent-events-error', {
+      detail: {runId, code: error?.code || 'host_unavailable', message: error?.message || 'Could not read AG-UI events.'}
+    }));
   }
 
-  function taskReply(task) {
-    const result = task?.result;
-    const usage = task?.usage;
-    if (!task || typeof task.runId !== 'string' || !task.runId || !result || typeof result.text !== 'string'
-        || !isRecord(usage)
-        || Object.keys(usage).some(key => !['inputTokens', 'outputTokens', 'costUsd', 'costEstimated', 'turns'].includes(key))
-        || (usage.inputTokens !== undefined && (!Number.isSafeInteger(usage.inputTokens) || usage.inputTokens < 0))
-        || (usage.outputTokens !== undefined && (!Number.isSafeInteger(usage.outputTokens) || usage.outputTokens < 0))
-        || (usage.costUsd !== undefined && (typeof usage.costUsd !== 'number' || !Number.isFinite(usage.costUsd) || usage.costUsd < 0))
-        || (usage.costEstimated !== undefined && typeof usage.costEstimated !== 'boolean')
-        || (usage.turns !== undefined && (!Number.isSafeInteger(usage.turns) || usage.turns < 0))
-        || !Array.isArray(result.attachments) || result.attachments.length !== 0) {
-      throw makeError('The completed task is missing its result or has invalid usage details.', 'invalid_host_response');
+  async function taskEvents(input) {
+    if (!isRecord(input) || typeof input.runId !== 'string' || !input.runId) {
+      throw new TypeError('tasks.events requires a runId.');
     }
-    return {runId: task.runId, text: typeof result.text === 'string' ? result.text : '',
-      ...(result.output === undefined ? {} : {output: result.output}),
-      ...(result.chatId === undefined ? {} : {chatId: result.chatId}),
-      ...(result.messageId === undefined ? {} : {messageId: result.messageId}),
-      attachments: [],
-      usage};
+    if (input.afterSequence !== undefined && (!Number.isSafeInteger(input.afterSequence) || input.afterSequence < 0)) {
+      throw new TypeError('afterSequence must be a nonnegative safe integer.');
+    }
+    const page = await invoke('agent.tasks.events', input);
+    if (!isRecord(page) || !Array.isArray(page.events) || !Number.isSafeInteger(page.sequence) || page.sequence < 0) {
+      throw makeError('The host returned an invalid AG-UI event page.', 'invalid_host_response');
+    }
+    return {...page, events: page.events.map(event => agui.validateEvent(event))};
   }
 
-  function taskFailure(task) {
-    const error = makeError(task?.error?.message || `Agent task ended in ${task?.state || 'an unknown state'}.`,
-      task?.error?.code || task?.state || 'agent_task_failed');
-    error.task = task;
-    return error;
-  }
-
-  function subscribeTask(runId, listener) {
+  function subscribeTaskEvents(runId, listener) {
     if (typeof listener !== 'function') throw new TypeError('A listener is required.');
     let active = true;
     let timer = null;
-    let sequence = -1;
+    let afterSequence;
     const poll = async () => {
       try {
-        const task = await invoke('agent.tasks.get', {runId});
+        const page = await taskEvents(afterSequence === undefined ? {runId} : {runId, afterSequence});
         if (!active) return;
-        if (Number.isSafeInteger(task?.sequence) && task.sequence > sequence) {
-          sequence = task.sequence;
-          listener({type: 'state', runId, sequence, time: task.updatedAt, task});
+        for (const event of page.events) {
+          listener(event);
+          if (event.type === 'RUN_FINISHED' || event.type === 'RUN_ERROR') {
+            active = false;
+            clearTimeout(timer);
+            return;
+          }
         }
-        if (terminal(task)) { active = false; return; }
+        afterSequence = page.sequence;
+        const task = await invoke('agent.tasks.get', {runId});
+        if (['succeeded', 'failed', 'cancelled', 'interrupted'].includes(task?.state)) {
+          hostEventError(runId, makeError('The host task ended without a terminal AG-UI event.', 'missing_terminal_event'));
+          active = false;
+          return;
+        }
       } catch (error) {
-        if (active) listener({type: 'connection', runId, error: {code: error.code || 'host_unavailable', message: error.message}});
+        if (active) hostEventError(runId, error);
       }
       if (active) timer = setTimeout(poll, 1000);
     };
@@ -474,62 +572,58 @@
     return () => { active = false; clearTimeout(timer); };
   }
 
-  function waitForTaskRecord(runId) {
-    return new Promise((resolve, reject) => {
-      let unsubscribe = () => {};
-      unsubscribe = subscribeTask(runId, event => {
-        if (event.type === 'connection') {
-          unsubscribe();
-          reject(makeError(event.error?.message || 'The application host is unavailable.', event.error?.code || 'host_unavailable'));
-          return;
-        }
-        if (event.type !== 'state' || !terminal(event.task)) return;
-        unsubscribe();
-        if (event.task.state === 'succeeded') resolve(event.task);
-        else reject(taskFailure(event.task));
-      });
-    });
-  }
-
-  function waitForTask(runId) { return waitForTaskRecord(runId).then(taskReply); }
-
-  function chatHandle(summary) {
-    const id = summary.chatId;
+  function requestChatHandle(summary) {
+    const id = summary?.chatId;
     if (typeof id !== 'string' || !id) throw makeError('The host returned an invalid Chat ID.', 'invalid_host_response');
+    chatIds.add(id);
+    if (!chatMessageIds.has(id)) chatMessageIds.set(id, new Set());
+    const knownMessages = chatMessageIds.get(id);
     const handle = {
       id,
       async send(input) {
-        const {runId} = await startInput('agent.chats.send', {chatId: id}, input);
-        const task = await waitForTaskRecord(runId);
-        const reply = taskReply(task);
-        if (reply.chatId !== id || typeof reply.messageId !== 'string' || !reply.messageId) {
-          throw makeError('The completed chat task is missing its durable message identity.', 'invalid_host_response');
-        }
-        return reply;
+        if (input?.threadId !== id) throw new TypeError('A chat RunAgentInput.threadId must equal the chat handle id.');
+        return agent.run(input);
       },
-      history(options = {}) { return invoke('agent.chats.history', {...options, chatId: id}); },
+      async history(options = {}) {
+        if (!isRecord(options) || Object.keys(options).some(key => !['cursor', 'limit'].includes(key))) {
+          throw new TypeError('Chat history options may contain only cursor and limit.');
+        }
+        const page = await invoke('agent.chats.history', {...options, chatId: id});
+        if (!isRecord(page) || !Array.isArray(page.messages)
+            || (page.nextCursor !== undefined && typeof page.nextCursor !== 'string')) {
+          throw makeError('The host returned invalid chat history.', 'invalid_host_response');
+        }
+        const messages = page.messages.map(message => agui.validateMessage(message));
+        for (const message of messages) knownMessages.add(message.id);
+        return {...page, messages};
+      },
       subscribe(listener) {
         if (typeof listener !== 'function') throw new TypeError('A listener is required.');
         let active = true;
-        let timer;
-        let summaryKey = '';
-        let seen = new Set();
+        let timer = null;
+        let cursor;
+        const seen = new Set();
         const poll = async () => {
           try {
-            const current = await invoke('agent.chats.get', {chatId: id});
-            if (!active) return;
-            const key = `${current.updatedAt}:${current.state}`;
-            if (key !== summaryKey) {
-              summaryKey = key;
-              listener({type: 'state', chatId: id, chat: current});
+            let page = await handle.history({limit: 50, ...(cursor ? {cursor} : {})});
+            while (active) {
+              for (const message of page.messages) {
+                if (!seen.has(message.id)) {
+                  seen.add(message.id);
+                  listener(message);
+                }
+              }
+              if (!page.nextCursor) {
+                if (page.messages.length) cursor = page.messages[page.messages.length - 1].id;
+                break;
+              }
+              cursor = page.nextCursor;
+              page = await handle.history({cursor, limit: 50});
             }
-            const page = await invoke('agent.chats.history', {chatId: id, limit: 50});
-            const messages = Array.isArray(page?.messages) ? page.messages : [];
-            const added = messages.filter(message => message.messageId && !seen.has(message.messageId));
-            for (const message of messages) if (message.messageId) seen.add(message.messageId);
-            if (added.length) listener({type: 'messages', chatId: id, messages: added, nextCursor: page.nextCursor});
           } catch (error) {
-            if (active) listener({type: 'connection', chatId: id, error: {code: error.code || 'host_unavailable', message: error.message}});
+            if (active) window.dispatchEvent(new CustomEvent('localApp:chat-history-error', {
+              detail: {chatId: id, code: error.code || 'host_unavailable', message: error.message}
+            }));
           }
           if (active) timer = setTimeout(poll, 1000);
         };
@@ -541,24 +635,69 @@
     return Object.freeze(handle);
   }
 
+  const tasks = Object.freeze({
+    start(input) {
+      const known = chatMessageIds.get(input?.threadId) || new Set();
+      return startInput('agent.tasks.start', {}, input, known);
+    },
+    get(runId) { return invoke('agent.tasks.get', {runId}); },
+    list(options) { return invoke('agent.tasks.list', options || {}); },
+    events: taskEvents,
+    subscribe: subscribeTaskEvents,
+    async cancel(runId) { await invoke('agent.tasks.cancel', {runId}); }
+  });
+
+  let agent;
+  const chats = Object.freeze({
+    async create(options = {}) { return requestChatHandle(await invoke('agent.chats.create', options)); },
+    async open(chatId) { return requestChatHandle(await invoke('agent.chats.get', {chatId})); },
+    list(options) { return invoke('agent.chats.list', options || {}); },
+    async archive(chatId) { await invoke('agent.chats.archive', {chatId}); },
+    async delete(chatId) {
+      await invoke('agent.chats.delete', {chatId});
+      chatIds.delete(chatId);
+      chatMessageIds.delete(chatId);
+    }
+  });
+
+  const transport = {
+    start(input, options = {}) {
+      if (options.persistentChat) {
+        return startInput('agent.chats.send', {chatId: input.threadId}, input,
+          options.knownMessageIds || chatMessageIds.get(input.threadId) || new Set());
+      }
+      return startInput('agent.tasks.start', {}, input, options.knownMessageIds || new Set());
+    },
+    events: taskEvents,
+    async status({runId}) { return invoke('agent.tasks.get', {runId}); },
+    async cancel({runId}) { await invoke('agent.tasks.cancel', {runId}); }
+  };
+  agent = agui.installBrowserAgent({
+    transport,
+    tasks,
+    chats,
+    isPersistentThread: threadId => chatIds.has(threadId)
+  });
+
   async function restoreWakeMarker() {
     const url = new URL(location.href);
-    const readyIds = url.searchParams.getAll('__lingxi_ready');
-    if (!readyIds.length) return;
+    const readyRunIds = url.searchParams.getAll('__lingxi_ready');
+    if (!readyRunIds.length) return;
     url.searchParams.delete('__lingxi_ready');
     history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`);
-    if (config.hostPlatform !== 'ios' || readyIds.length !== 1 || !readyIds[0]) return;
-    const id = readyIds[0];
-    const key = requestKey(id);
-    const record = await claimPending(key, id);
+    if (config.hostPlatform !== 'ios' || readyRunIds.length !== 1 || !readyRunIds[0]) return;
+    const runId = readyRunIds[0];
+    const record = await claimPending(requestKey(runId), runId);
     if (!record) return;
-    const current = {...record, state: 'sending'};
     try {
-      const accepted = await submitRecord(current);
-      handoffWaiters.get(id)?.resolve(accepted);
+      const accepted = await submitRecord(record);
+      handoffWaiters.get(runId)?.resolve(accepted);
+      window.dispatchEvent(new CustomEvent('localApp:agent-handoff-ready', {detail: {runId, ...accepted}}));
     } catch (error) {
-      handoffWaiters.get(id)?.reject(error);
-      window.dispatchEvent(new CustomEvent('localApp:agent-handoff-error', {detail: {requestId: id, code: error.code, message: error.message}}));
+      handoffWaiters.get(runId)?.reject(error);
+      window.dispatchEvent(new CustomEvent('localApp:agent-handoff-error', {
+        detail: {runId, code: error.code || 'host_unavailable', message: error.message}
+      }));
     }
   }
 
@@ -568,7 +707,7 @@
     let decoded;
     try { decoded = decodeURIComponent(path.split('?')[0]); } catch { throw new Error('Invalid service path.'); }
     if (/%2f|%5c/i.test(path.split('?')[0]) || decoded.includes('\\') || decoded.includes('\0') || decoded.split('/').some(part => part === '.' || part === '..')) throw new Error('Invalid service path.');
-    return `${base}__service/${encodeURIComponent(name)}${path}`;
+    return base + '__service/' + encodeURIComponent(name) + path;
   }
 
   function pickFiles(options = {}) {
@@ -609,8 +748,8 @@
       return;
     }
     try {
-      const script = new URL(`${base}__host/recovery-sw.js`, location.href);
-      await navigator.serviceWorker.register(script.href, {scope: `${location.origin}/`});
+      const script = new URL(base + '__host/recovery-sw.js', location.href);
+      await navigator.serviceWorker.register(script.href, {scope: location.origin + '/'});
       let timer;
       try {
         await Promise.race([
@@ -632,35 +771,26 @@
     }
   }
 
-  const tasks = Object.freeze({
-    start: input => startInput('agent.tasks.start', {}, input),
-    get: runId => invoke('agent.tasks.get', {runId}),
-    list: options => invoke('agent.tasks.list', options || {}),
-    subscribe: subscribeTask,
-    async cancel(runId) { await invoke('agent.tasks.cancel', {runId}); }
-  });
-  const chats = Object.freeze({
-    async create(options = {}) { return chatHandle(await invoke('agent.chats.create', options)); },
-    async open(chatId) { return chatHandle(await invoke('agent.chats.get', {chatId})); },
-    list: options => invoke('agent.chats.list', options || {}),
-    async archive(chatId) { await invoke('agent.chats.archive', {chatId}); },
-    async delete(chatId) { await invoke('agent.chats.delete', {chatId}); }
-  });
-  const agent = Object.freeze({
-    async run(input) { const {runId} = await tasks.start(input); return waitForTask(runId); },
-    tasks,
-    chats
-  });
-  const host = Object.freeze({
-    open: () => { location.href = `lingxi://apps/${encodeURIComponent(config.appId)}?review=agent`; }
-  });
   const files = Object.freeze({pick: pickFiles});
+  const host = Object.freeze({
+    open: () => { location.href = 'lingxi://apps/' + encodeURIComponent(config.appId) + '?review=agent'; }
+  });
   Object.defineProperty(window, 'localApp', {configurable: false, writable: false, value: Object.freeze({
-    info: async () => ({id: config.appId, name: config.name, platform: 'mobile-browser', hostPlatform: config.hostPlatform, revision: config.revision, runId: config.runId, recovery: {...recoveryState}}),
+    info: async () => ({
+      id: config.appId,
+      name: config.name,
+      platform: 'mobile-browser',
+      hostPlatform: config.hostPlatform,
+      revision: config.revision,
+      runId: config.runId,
+      recovery: {...recoveryState}
+    }),
     agent, files, host, serviceUrl,
     serviceSocketUrl: async (name, path = '/') => serviceUrl(name, path).replace(/^http:/, 'ws:')
   })});
+
   void registerRecoveryPage();
+  void deleteObsoletePendingDatabase();
   const collectExpiredAndNotify = () => collectExpired().then(({expired}) => {
     if (expired) window.dispatchEvent(new CustomEvent('localApp:agent-recovery-expired', {
       detail: {appId: config.appId, count: expired, pendingTtlHours: 24, acceptedTtlDays: 7}
@@ -674,7 +804,9 @@
 
   const restoreSafely = () => {
     void restoreWakeMarker().catch(error => {
-      window.dispatchEvent(new CustomEvent('localApp:agent-handoff-error', {detail: {code: error.code || 'storage_unavailable', message: error.message}}));
+      window.dispatchEvent(new CustomEvent('localApp:agent-handoff-error', {
+        detail: {runId: error.runId, code: error.code || 'storage_unavailable', message: error.message}
+      }));
     });
   };
   window.addEventListener('pageshow', restoreSafely);

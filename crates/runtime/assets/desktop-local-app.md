@@ -51,40 +51,86 @@ A new release reuses the app's data. Installation and build steps receive a sepa
 
 Public publication is a separate native review action. Export only the explicit package list; exclude credentials, session transcripts, grants, browser stores, databases and private files. Market installation copies code, not author permissions. A permitted customization creates a new app/source project and preserves its upstream attribution; upstream updates cannot overwrite the customized copy.
 
-## Calling an Agent from an app
+## Calling the host Agent with AG-UI 1.0
 
-For image recognition, validated structured model output or authorized tool tasks, declare `agent` and use `window.localApp.agent`. Each call is an independent app-owned Harness task, not the chat that created the app. Pass the app context explicitly. The host selects the App's configured model and owns credentials, tool authorization and trusted permission/question UI. Do not create a second direct-provider engine, embed provider keys, or route same-device calls through Remote Control.
+Declare `"capabilities":["agent"]` and `"agent":{"tools":[]}` in the schema-2
+manifest when the App needs model understanding or Agent execution. Use the
+host-injected `window.localApp.agent` and the official AG-UI 1.0 message/event
+contract, backed by the bundled official SDK 1.0.3. Never embed a provider key,
+reuse the creating conversation, or expose a Remote Control chat endpoint.
+
+For an independent request, construct one standard user message and fresh run
+and thread IDs. The File helper creates the standard image/document content part:
 
 ```js
-const request = {
-  requestId: crypto.randomUUID(),
-  prompt: 'Describe the meal and state uncertain ingredients and portions.',
-  images: [{ media_type: 'image/jpeg', base64: jpegBytesAsBase64 }],
-  outputSchema: {
-    type: 'object', additionalProperties: false, required: ['description'],
-    properties: { description: { type: 'string' } }
-  },
-  tools: [], maxTurns: 4, timeoutMs: 120000
-};
-// Persist request before sending. An uncertain retry must reuse it unchanged.
-const { runId } = await window.localApp.agent.run(request);
-// Persist runId and reconnect after reload; do not submit a new task.
-const unsubscribe = window.localApp.agent.subscribe(runId, event => {
-  if (event.type === 'state') renderRun(event.run);
-  else renderProgress(event.phase);
+const content = [{type: "text", text: "Describe the selected file."}];
+if (file) content.push(await localApp.agent.file(file));
+const {result, newMessages} = await localApp.agent.run({
+  protocolVersion: "1.0",
+  threadId: crypto.randomUUID(),
+  runId: crypto.randomUUID(),
+  messages: [{id: crypto.randomUUID(), role: "user", content}],
+  forwardedProps: {
+    "com.lingxi.localApp": {version: 1, outputSchema: applicationSchema}
+  }
 });
-const current = await window.localApp.agent.get(runId);
-// Explicit user cancellation: await window.localApp.agent.cancel(runId).
-// unsubscribe() removes the listener without cancelling the task.
 ```
 
-- `run` accepts required `requestId` and `prompt`; optional `images`, `outputSchema`, `tools`, `maxTurns`, `timeoutMs`. It returns `{runId}`, not the final result. App-provided limits can only reduce host limits (defaults: one active task per App, 20 turns, 10 minutes). The app cannot choose credentials, chat IDs, workspace directories or permission modes.
-- Images use `{media_type,base64}` with base64 bytes, not a data URL or local file path. Resize camera/file images before sending; the host validates encoding, signature, supported media type and size limits. Obtain a user gesture before capture/upload.
-- `get` returns a run with `state`, `sequence`, timestamps, chosen `model`, `limits`, optional `result`, `usage` and `error:{code,message}`. Handle `queued`, `running`, `succeeded`, `failed`, `cancelled`, `interrupted`. Successful structured tasks return schema-validated `result.output`; unstructured tasks may return `result.text`. Never parse a failed response's Markdown as a successful structured result. Usage may contain `inputTokens`, `outputTokens`, `costUsd` and `turns`.
-- `subscribe` returns an unsubscribe function synchronously and replays current state before live events. Events have `runId`, increasing `sequence`, and `time`: `{type:'state',run}` or `{type:'progress',phase,text?}`. Ignore duplicate/out-of-order events and stale `get` responses. Phases include `starting`, `thinking`, `tool`, `waiting_for_permission`, `waiting_for_answer`. Direct the user to the trusted LingXi UI when waiting; the app cannot grant its own tools or answer approvals.
-- Before writing a tool-enabled manifest, call `LocalApp({"action":"agent_catalog"})` from the creating chat to discover public tool IDs. This does not authorize the app or expose credentials/configuration.
-- Declare only needed opaque host tool catalog IDs in `agent.tools` and request a subset per run. No-tool tasks use `[]`. The user grants each tool in Apps. Never derive an MCP authorization ID from a display name or assume all tools on a granted server are allowed. A tool or connection change requires the host to validate its grant again.
-- Persist request identity before IPC. Same ID plus identical input is idempotent; different input with the same ID is rejected. Remove temporarily stored photo payloads once accepted, keep `runId`, and use `get`/`subscribe` on reload. Interrupted tasks are not automatically replayed. Only an explicit new user attempt starts another task.
-- Closing the window cancels by default; continued Agent execution needs its separate background grant in Apps. Stop, revoke, deletion and application revision replacement cancel tasks. Release camera tracks and listeners on teardown, but do not cancel a task merely because the page reloads. Keep saved results in the app's own storage and require confirmation before recording uncertain model estimates.
+`agent.run` and Chat `send` use the official client and return official
+`RunAgentResult` (`result`, `newMessages`) only after successful completion.
+They reject failed, cancelled, interrupted or truncated runs. Display a validated
+structured `result`; do not extract JSON from Markdown. Read model text from
+standard messages and render it as text rather than executable markup.
 
-Use the local-app-builder plugin's Desktop calorie example when available for camera/choose-photo, request recovery, validated food candidates, editable portions and explicit save. Its calorie ranges are app business logic and are labeled model estimates unless an actually authorized nutrition tool supplies verifiable data. Verify the registered app with a real configured model, reload/cancel/error paths and saved data; mocked outputs or standalone browser rendering do not prove host execution. Use this API only when the current host advertises Agent support. Mobile and Desktop task ownership is bound to the active schema-2 release and invocation; a capability declaration does not grant execution.
+For streaming interfaces use `agent.createClient()` (an official `AbstractAgent`
+subclass), `addMessage`, `runAgent` and official subscriber callbacks. Raw
+`runAgent` follows official SDK semantics: inspect `onRunErrorEvent` and the
+normalized `onRunFinishedEvent({outcome})` rather than treating Promise settlement
+alone as success. `abortRun` requests cancellation; a terminal cancelled outcome
+confirms it. A new independent request needs a fresh client/thread and exactly
+one user message. For multiple turns create/open an App Chat, use its handle ID
+as `threadId`, and send a fresh `runId` for each turn. Chat history is paged as
+`{messages: Message[], nextCursor?}`. The host owns the real Harness transcript;
+client-provided history must match canonical messages.
+
+For durable recovery use `tasks.start` with the same official input, then
+`tasks.get/list/events/subscribe/cancel`. Task metadata includes `threadId` and
+`runId`. Persist those IDs, then reconnect read-only with
+`createClient({threadId}).connectAgent({runId})`; a reload never submits another
+model request. Identical input with the same `runId` is idempotent; changed input
+under that ID is rejected. Do not use the retired prompt/attachments/requestId
+or custom state-event protocol. Old Agent records are discarded, not converted.
+
+The creating chat can call `LocalApp({"action":"agent_catalog"})` to discover
+exact public tool IDs. Discovery grants nothing. Declare tool and Skill IDs in
+the release, get native grants, then request them only in
+`forwardedProps["com.lingxi.localApp"]` (`version:1`, optional `tools`, `skills`,
+`outputSchema`, `maxTurns`, `timeoutMs`). Standard top-level AG-UI frontend tools
+cannot grant host tools. The current host profile rejects unsupported frontend
+tools, state, context and resume features explicitly. Pages cannot approve tools
+or questions. MCP grants bind the exact connection, configuration revision, raw
+tool name and definition; Skills add instructions, not execution permission.
+
+Use standard browser File/camera selection with user confirmation before model
+submission. Files are limited to eight per new message, 25 MiB each and 50 MiB
+total; bytes and model support are checked by the host. Supported inputs are
+validated images, PDF and UTF-8 text/document formats. Audio/video, remote URL
+sources, provider file handles and arbitrary binary input are unsupported. Do
+not supply native paths or manually encode the File. Preserve the draft on photo
+return and release camera tracks when done.
+
+Mobile pages open in the operating system's resolved external browser, including
+OEM/third-party browsers. Do not choose a browser package or embed WebView.
+Android uses its user-visible foreground runtime. iOS26 uses an explicit native
+foreground handoff and a finite continued-processing lease; iOS27 user-invoked
+Intents require complete standard input. The SDK handles handoff/recovery; App
+code keeps the standard run contract. No path promises indefinite execution or
+automatic replay. Stop/revocation/release replacement cancel work; default limits
+are one active task per App, 20 turns and ten minutes, and an App may only lower
+native limits. Background Agent permission is separate from process permission.
+
+Use the current Local App Builder examples for one-shot file understanding and
+persistent attachment Chat. Keep business validation and explicit user save
+confirmation in the App. Verify actual configured model, errors, File contents,
+refresh, cancellation, Chat cold resume and saved data. Builds, mock outputs and
+standalone browser rendering are not real-provider or physical-device evidence.

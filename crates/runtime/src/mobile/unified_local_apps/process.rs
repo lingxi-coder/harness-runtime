@@ -469,7 +469,7 @@ impl MobileLocalAppServiceHandle {
                                 .unwrap_or_else(|| "install/build command failed".into()),
                             status.exit_code
                         ),
-                    ))
+                    ));
                 }
                 _ => {}
             }

@@ -2,11 +2,12 @@
 //! never from a page message. Prompt/images/credentials are deliberately absent
 //! from persisted records. All methods are synchronous; call off the UI thread.
 mod chat_store;
+pub mod protocol;
 pub use chat_store::{ChatMessageMetadata, ChatStore};
 
 use super::AppError;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -19,6 +20,8 @@ const MAX_ATTACHMENTS: usize = 8;
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 const MAX_ATTACHMENT_BASE64_BYTES: usize = ((MAX_ATTACHMENT_BYTES + 2) / 3) * 4;
+const MAX_PROTOCOL_EVENT_LOG_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_PROTOCOL_EVENT_PAGE: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -112,9 +115,23 @@ impl Settings {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Input {
     pub request_id: String,
+    /// Public AG-UI thread identity, kept inside the private task ledger so a
+    /// duplicate runId cannot be replayed against another thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_parent_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_input_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol_message_sha256: Option<String>,
     pub prompt: String,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    /// Ordered normalized parts used by the AG-UI adapter. The older private
+    /// prompt/attachments form remains an internal boundary input only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content_parts: Vec<InputContentPart>,
     #[serde(default)]
     pub output_schema: Option<Value>,
     #[serde(default)]
@@ -125,6 +142,19 @@ pub struct Input {
     pub max_turns: Option<u32>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum InputContentPart {
+    Text {
+        text: String,
+    },
+    Attachment {
+        name: String,
+        #[serde(rename = "mediaType")]
+        media_type: String,
+        base64: String,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -278,7 +308,17 @@ struct Record {
     cancel_requested: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     chat_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    protocol_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    protocol_input_digest: Option<String>,
     task: Task,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SequencedEvent {
+    sequence: u64,
+    event: Value,
 }
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -291,6 +331,7 @@ struct Ledger {
 /// One instance per native app service. Its caller owns the library RuntimeLease.
 pub struct AgentStore {
     path: PathBuf,
+    events_root: PathBuf,
     ledger: Mutex<Ledger>,
 }
 /// Newly accepted tasks execute exactly once; duplicates only return a snapshot.
@@ -300,6 +341,13 @@ pub struct Admission {
     pub tools: BTreeMap<String, ToolGrant>,
     pub skills: Vec<String>,
     pub chat_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProtocolEventPage {
+    pub events: Vec<Value>,
+    pub sequence: u64,
 }
 
 fn invalid(message: &str) -> AppError {
@@ -339,12 +387,38 @@ fn digest(input: &Input, chat_id: Option<&str>) -> Result<String, AppError> {
 /// Public browser APIs accept File objects; only native bridges handle this
 /// already-normalized base64 form.
 pub fn validate_input(input: &Input) -> Result<(), AppError> {
+    let content_attachment_count = input
+        .content_parts
+        .iter()
+        .filter(|part| matches!(part, InputContentPart::Attachment { .. }))
+        .count();
     if input.request_id.is_empty()
         || input.request_id.len() > 128
         || input.request_id.chars().any(char::is_control)
-        || input.prompt.trim().is_empty()
+        || input.protocol_thread_id.as_ref().is_some_and(|thread| {
+            thread.is_empty() || thread.len() > 128 || thread.chars().any(char::is_control)
+        })
+        || input.protocol_parent_run_id.as_ref().is_some_and(|run| {
+            run.is_empty() || run.len() > 128 || run.chars().any(char::is_control)
+        })
+        || input.protocol_input_digest.as_ref().is_some_and(|hash| {
+            hash.len() != 64
+                || !hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        || input.protocol_message_sha256.as_ref().is_some_and(|hash| {
+            hash.len() != 64
+                || !hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        || (input.prompt.trim().is_empty()
+            && input.attachments.is_empty()
+            && content_attachment_count == 0)
         || input.prompt.len() > 256 * 1024
-        || input.attachments.len() > MAX_ATTACHMENTS
+        || input.attachments.len() + content_attachment_count > MAX_ATTACHMENTS
+        || input.content_parts.len() > 256
         || input.tools.len() > 128
         || input.skills.len() > 128
         || input.skills.iter().any(|skill| !valid_skill_id(skill))
@@ -362,38 +436,48 @@ pub fn validate_input(input: &Input) -> Result<(), AppError> {
         return Err(invalid("invalid Agent input"));
     }
     let mut total = 0usize;
-    for attachment in &input.attachments {
-        if attachment.name.trim().is_empty()
-            || attachment.name.len() > 255
-            || attachment.name.contains(['/', '\\'])
-            || attachment.name.chars().any(char::is_control)
-            || attachment.media_type.trim().is_empty()
-            || attachment.media_type.len() > 127
-            || attachment.media_type.chars().any(char::is_control)
-            || attachment.base64.len() > MAX_ATTACHMENT_BASE64_BYTES
-            || !valid_base64(&attachment.base64)
+    let mut account = |name: &str, media_type: &str, encoded: &str| {
+        if name.trim().is_empty()
+            || name.len() > 255
+            || name.contains(['/', '\\'])
+            || name.chars().any(char::is_control)
+            || media_type.trim().is_empty()
+            || media_type.len() > 127
+            || media_type.chars().any(char::is_control)
+            || encoded.len() > MAX_ATTACHMENT_BASE64_BYTES
+            || !valid_base64(encoded)
         {
             return Err(invalid("invalid Agent attachments"));
         }
-        let padding = attachment
-            .base64
+        let padding = encoded
             .as_bytes()
             .iter()
             .rev()
             .take_while(|byte| **byte == b'=')
             .count();
-        let estimated = attachment
-            .base64
+        let estimated = encoded
             .len()
             .saturating_div(4)
             .saturating_mul(3)
             .saturating_sub(padding);
-        if estimated > MAX_ATTACHMENT_BYTES {
+        total = total.saturating_add(estimated);
+        if estimated > MAX_ATTACHMENT_BYTES || total > MAX_TOTAL_ATTACHMENT_BYTES {
             return Err(invalid("invalid Agent attachments"));
         }
-        total = total.saturating_add(estimated);
-        if total > MAX_TOTAL_ATTACHMENT_BYTES {
-            return Err(invalid("invalid Agent attachments"));
+        Ok(())
+    };
+    for attachment in &input.attachments {
+        account(&attachment.name, &attachment.media_type, &attachment.base64)?;
+    }
+    for part in &input.content_parts {
+        match part {
+            InputContentPart::Text { text } if text.len() <= 256 * 1024 => {}
+            InputContentPart::Text { .. } => return Err(invalid("invalid Agent input")),
+            InputContentPart::Attachment {
+                name,
+                media_type,
+                base64,
+            } => account(name, media_type, base64)?,
         }
     }
     Ok(())
@@ -514,7 +598,9 @@ pub fn error_message(code: &str) -> &'static str {
 
 impl AgentStore {
     pub fn open(root: &Path) -> Result<Self, AppError> {
-        fs::create_dir_all(root)?;
+        ensure_private_directory(root)?;
+        let events_root = root.join("protocol-events");
+        ensure_private_directory(&events_root)?;
         let path = root.join("agent-tasks.json");
         let mut ledger: Ledger = match fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)?,
@@ -533,10 +619,24 @@ impl AgentStore {
                 });
                 record.task.sequence += 1;
                 record.task.updated_at = now();
+            } else if record.protocol_thread_id.is_some()
+                && !read_protocol_events(&protocol_event_path(&events_root, &record.task.run_id)?)?
+                    .last()
+                    .is_some_and(|entry| is_terminal_event(&entry.event))
+                && record.task.state == State::Succeeded
+            {
+                record.task.state = State::Interrupted;
+                record.task.error = Some(TaskError {
+                    code: "protocol_terminal_missing".into(),
+                    message: "The run completed without a durable terminal protocol event.".into(),
+                });
+                record.task.sequence += 1;
+                record.task.updated_at = now();
             }
         }
         let store = Self {
             path,
+            events_root,
             ledger: Mutex::new(ledger),
         };
         {
@@ -545,6 +645,69 @@ impl AgentStore {
                 .lock()
                 .map_err(|_| invalid("Agent storage unavailable"))?;
             store.persist(&ledger)?;
+        }
+        let incomplete = store
+            .ledger
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?
+            .runs
+            .values()
+            .filter(|record| record.protocol_thread_id.is_some())
+            .map(|record| {
+                (
+                    record.owner.clone(),
+                    record.task.run_id.clone(),
+                    record.task.request_id.clone(),
+                    record
+                        .protocol_thread_id
+                        .clone()
+                        .expect("filtered thread ID"),
+                    record.task.state.clone(),
+                    record.task.error.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (owner, task_id, run_id, thread_id, state, task_error) in incomplete {
+            let path = store.event_path(&task_id)?;
+            let events = read_protocol_events(&path)?;
+            if events.is_empty() {
+                store.append_event(
+                    &owner,
+                    &task_id,
+                    json!({
+                        "type":"RUN_STARTED",
+                        "protocolVersion":"1.0",
+                        "threadId":thread_id,
+                        "runId":run_id
+                    }),
+                )?;
+            }
+            if !events
+                .last()
+                .is_some_and(|entry| is_terminal_event(&entry.event))
+            {
+                let terminal = match state {
+                    State::Cancelled => json!({
+                        "type":"RUN_FINISHED",
+                        "threadId":thread_id,
+                        "runId":run_id,
+                        "outcome":{"type":"cancelled"}
+                    }),
+                    State::Failed => json!({
+                        "type":"RUN_ERROR",
+                        "message":task_error.as_ref().map_or("The Agent run failed.", |error| error.message.as_str()),
+                        "code":task_error.as_ref().map_or("agent_failed", |error| error.code.as_str())
+                    }),
+                    State::Succeeded | State::Interrupted | State::Queued | State::Running => {
+                        json!({
+                            "type":"RUN_ERROR",
+                            "message":"The host restarted before the Agent run completed.",
+                            "code":task_error.as_ref().map_or("host_restarted", |error| error.code.as_str())
+                        })
+                    }
+                };
+                store.append_event(&owner, &task_id, terminal)?;
+            }
         }
         Ok(store)
     }
@@ -763,6 +926,8 @@ impl AgentStore {
                     epoch: grant.epoch,
                     cancel_requested: false,
                     chat_id: chat_id.map(str::to_owned),
+                    protocol_thread_id: input.protocol_thread_id.clone(),
+                    protocol_input_digest: input.protocol_input_digest.clone(),
                     task: task.clone(),
                 },
             );
@@ -789,6 +954,221 @@ impl AgentStore {
             })
             .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
         Ok(record.task.clone())
+    }
+    /// Resolve the public AG-UI runId to the private, path-safe task UUID.
+    pub fn task_id_for_request(&self, owner: &Owner, run_id: &str) -> Result<String, AppError> {
+        owner.validate()?;
+        let ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
+        ledger
+            .runs
+            .values()
+            .find(|record| {
+                record.owner.app_id == owner.app_id
+                    && record.owner.release_digest == owner.release_digest
+                    && record.task.request_id == run_id
+            })
+            .map(|record| record.task.run_id.clone())
+            .ok_or_else(|| AppError::NotFound("Agent task".into()))
+    }
+    pub fn get_by_request(&self, owner: &Owner, run_id: &str) -> Result<Task, AppError> {
+        let id = self.task_id_for_request(owner, run_id)?;
+        self.get(owner, &id)
+    }
+    pub fn protocol_input_fingerprint(
+        &self,
+        owner: &Owner,
+        run_id: &str,
+    ) -> Result<String, AppError> {
+        owner.validate()?;
+        let ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
+        ledger
+            .runs
+            .values()
+            .find(|record| {
+                record.owner.app_id == owner.app_id
+                    && record.owner.release_digest == owner.release_digest
+                    && record.task.request_id == run_id
+            })
+            .and_then(|record| record.protocol_input_digest.clone())
+            .ok_or_else(|| AppError::NotFound("AG-UI request fingerprint".into()))
+    }
+    pub fn thread_id_for_request(&self, owner: &Owner, run_id: &str) -> Result<String, AppError> {
+        owner.validate()?;
+        let ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
+        ledger
+            .runs
+            .values()
+            .find(|record| {
+                record.owner.app_id == owner.app_id
+                    && record.owner.release_digest == owner.release_digest
+                    && record.task.request_id == run_id
+            })
+            .and_then(|record| record.protocol_thread_id.clone())
+            .ok_or_else(|| AppError::NotFound("AG-UI task".into()))
+    }
+    /// Remove an admission that failed before RUN_STARTED. The request ID can
+    /// then be retried because the host never accepted execution.
+    pub fn rollback_queued_admission(&self, owner: &Owner, id: &str) -> Result<(), AppError> {
+        owner.validate()?;
+        let path = self.event_path(id)?;
+        let mut ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let record = ledger
+            .runs
+            .get(id)
+            .filter(|record| record.owner == *owner)
+            .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
+        if record.task.state != State::Queued || !read_protocol_events(&path)?.is_empty() {
+            return Err(invalid("Agent admission has already started"));
+        }
+        let mut next = ledger.clone();
+        next.runs.remove(id);
+        self.persist(&next)?;
+        *ledger = next;
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    }
+    /// Append one schema-validated AG-UI event to the durable task log.
+    pub fn append_event(
+        &self,
+        owner: &Owner,
+        task_id: &str,
+        event: Value,
+    ) -> Result<u64, AppError> {
+        owner.validate()?;
+        protocol::validate_event(&event)
+            .map_err(|_| invalid("AG-UI event does not match the pinned protocol"))?;
+        let path = self.event_path(task_id)?;
+        let ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let record = ledger
+            .runs
+            .get(task_id)
+            .filter(|record| record.owner == *owner)
+            .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
+        let thread_id = record
+            .protocol_thread_id
+            .as_deref()
+            .ok_or_else(|| invalid("Agent task is not an AG-UI run"))?;
+        validate_event_identity(&event, thread_id, &record.task.request_id)?;
+        let events = read_protocol_events(&path)?;
+        if events.is_empty() {
+            if event["type"] != "RUN_STARTED" {
+                return Err(invalid("AG-UI run must begin with RUN_STARTED"));
+            }
+        } else {
+            if event["type"] == "RUN_STARTED" {
+                return Err(invalid("AG-UI run already has RUN_STARTED"));
+            }
+            if events
+                .last()
+                .is_some_and(|entry| is_terminal_event(&entry.event))
+            {
+                return Err(invalid("AG-UI run already has a terminal event"));
+            }
+        }
+        let sequence = events.len() as u64 + 1;
+        let entry = SequencedEvent { sequence, event };
+        let encoded = serde_json::to_vec(&entry)?;
+        if encoded.len() > 3 * 1024 * 1024
+            || events.len() >= 10_000
+            || fs::metadata(&path)
+                .map_or(0, |metadata| metadata.len())
+                .saturating_add(encoded.len() as u64 + 1)
+                > MAX_PROTOCOL_EVENT_LOG_BYTES
+        {
+            return Err(invalid("AG-UI event log exceeds its storage limit"));
+        }
+        ensure_private_directory(&self.events_root)?;
+        if fs::symlink_metadata(&path)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink() || !metadata.is_file())
+        {
+            return Err(invalid("AG-UI event log is unavailable"));
+        }
+        let mut options = fs::OpenOptions::new();
+        options.append(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path)?;
+        use std::io::Write;
+        file.write_all(&encoded)?;
+        file.write_all(b"\n")?;
+        file.sync_data()?;
+        Ok(sequence)
+    }
+    /// Read-only bounded replay for a public runId; the cursor is a transport
+    /// sequence, not an event field and does not start/retry model execution.
+    pub fn protocol_events(
+        &self,
+        owner: &Owner,
+        run_id: &str,
+        after_sequence: u64,
+    ) -> Result<ProtocolEventPage, AppError> {
+        owner.validate()?;
+        let ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let record = ledger
+            .runs
+            .values()
+            .find(|record| {
+                record.owner.app_id == owner.app_id
+                    && record.owner.release_digest == owner.release_digest
+                    && record.task.request_id == run_id
+            })
+            .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
+        if record.protocol_thread_id.is_none() {
+            return Err(invalid("Agent task is not an AG-UI run"));
+        }
+        let task_id = record.task.run_id.clone();
+        let path = self.event_path(&task_id)?;
+        let events = read_protocol_events(&path)?;
+        let latest = events.last().map_or(0, |entry| entry.sequence);
+        if record.task.state.terminal()
+            && !events
+                .last()
+                .is_some_and(|entry| is_terminal_event(&entry.event))
+        {
+            return Err(invalid("AG-UI event stream ended without a terminal event"));
+        }
+        if after_sequence > latest {
+            return Err(invalid("invalid AG-UI event cursor"));
+        }
+        let page = events
+            .iter()
+            .filter(|entry| entry.sequence > after_sequence)
+            .take(MAX_PROTOCOL_EVENT_PAGE)
+            .cloned()
+            .collect::<Vec<_>>();
+        let sequence = page.last().map_or(after_sequence, |entry| entry.sequence);
+        Ok(ProtocolEventPage {
+            events: page.into_iter().map(|entry| entry.event).collect(),
+            sequence,
+        })
+    }
+    fn event_path(&self, task_id: &str) -> Result<PathBuf, AppError> {
+        protocol_event_path(&self.events_root, task_id)
     }
     /// Return task states for startup reconciliation across App release
     /// upgrades. This host-only view deliberately ignores release digest and
@@ -996,6 +1376,133 @@ impl AgentStore {
             Ok(record.task.clone())
         })
     }
+
+    /// If the standard terminal event could not be durably recorded, prevent
+    /// private task metadata from claiming a successful public run.
+    pub fn interrupt_after_protocol_failure(
+        &self,
+        owner: &Owner,
+        id: &str,
+        code: &str,
+    ) -> Result<Task, AppError> {
+        self.change(|ledger| {
+            let record = ledger
+                .runs
+                .get_mut(id)
+                .filter(|record| record.owner == *owner && record.protocol_thread_id.is_some())
+                .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
+            record.task.state = State::Interrupted;
+            record.task.phase = None;
+            record.task.result = None;
+            record.task.error = Some(TaskError {
+                code: code.to_owned(),
+                message: error_message(code).to_owned(),
+            });
+            record.task.sequence = record.task.sequence.saturating_add(1);
+            record.task.updated_at = now();
+            Ok(record.task.clone())
+        })
+    }
+}
+
+fn ensure_private_directory(path: &Path) -> Result<(), AppError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(invalid("Agent storage directory is unavailable"));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(path)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(invalid("Agent storage directory is unavailable"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
+fn protocol_event_path(events_root: &Path, task_id: &str) -> Result<PathBuf, AppError> {
+    let uuid = uuid::Uuid::parse_str(task_id)
+        .ok()
+        .filter(|uuid| uuid.to_string() == task_id)
+        .ok_or_else(|| invalid("invalid internal Agent task ID"))?;
+    let path = events_root.join(format!("{uuid}.jsonl"));
+    if !path.starts_with(events_root) {
+        return Err(invalid("invalid internal Agent task ID"));
+    }
+    Ok(path)
+}
+
+fn validate_event_identity(
+    event: &Value,
+    expected_thread_id: &str,
+    expected_run_id: &str,
+) -> Result<(), AppError> {
+    let event_type = event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if matches!(event_type, "RUN_STARTED" | "RUN_FINISHED")
+        && (event.get("threadId").and_then(Value::as_str) != Some(expected_thread_id)
+            || event.get("runId").and_then(Value::as_str) != Some(expected_run_id))
+    {
+        return Err(invalid("AG-UI event identity does not match its run"));
+    }
+    Ok(())
+}
+
+fn is_terminal_event(event: &Value) -> bool {
+    matches!(
+        event.get("type").and_then(Value::as_str),
+        Some("RUN_FINISHED" | "RUN_ERROR")
+    )
+}
+
+fn read_protocol_events(path: &Path) -> Result<Vec<SequencedEvent>, AppError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() > MAX_PROTOCOL_EVENT_LOG_BYTES
+    {
+        return Err(invalid("AG-UI event log is unavailable"));
+    }
+    let encoded = fs::read_to_string(path)?;
+    let mut events = Vec::new();
+    for line in encoded.lines() {
+        let entry: SequencedEvent =
+            serde_json::from_str(line).map_err(|_| invalid("AG-UI event log is invalid"))?;
+        if entry.sequence != events.len() as u64 + 1
+            || protocol::validate_event(&entry.event).is_err()
+            || (events.is_empty() && entry.event["type"] != "RUN_STARTED")
+            || events
+                .last()
+                .is_some_and(|last: &SequencedEvent| is_terminal_event(&last.event))
+        {
+            return Err(invalid("AG-UI event log ordering is invalid"));
+        }
+        events.push(entry);
+    }
+    Ok(events)
 }
 
 #[cfg(test)]

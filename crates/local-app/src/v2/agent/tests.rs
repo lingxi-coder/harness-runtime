@@ -22,12 +22,17 @@ fn settings() -> Settings {
 fn input() -> Input {
     Input {
         request_id: "request-1".into(),
+        protocol_thread_id: None,
+        protocol_parent_run_id: None,
+        protocol_input_digest: None,
+        protocol_message_sha256: None,
         prompt: "private photo description".into(),
         attachments: vec![Attachment {
             name: "photo.txt".into(),
             media_type: "text/plain".into(),
             base64: "cHJpdmF0ZQ==".into(),
         }],
+        content_parts: Vec::new(),
         output_schema: None,
         tools: vec![],
         skills: vec![],
@@ -53,6 +58,26 @@ fn deduplication_does_not_admit_another_task() {
     let mut changed = input();
     changed.prompt = "changed".into();
     assert!(s.admit(&owner(), &changed, &[]).is_err());
+}
+
+#[test]
+fn unstarted_protocol_admission_can_be_rolled_back_for_safe_retry() {
+    let (_dir, store) = store();
+    let mut input = input();
+    input.request_id = "retry-run".into();
+    input.protocol_thread_id = Some("thread-retry".into());
+    input.protocol_input_digest = Some("a".repeat(64));
+    let admitted = store.admit(&owner(), &input, &[]).unwrap();
+    assert!(admitted.start);
+
+    store
+        .rollback_queued_admission(&owner(), &admitted.task.run_id)
+        .unwrap();
+    assert!(store.get_by_request(&owner(), "retry-run").is_err());
+
+    let retried = store.admit(&owner(), &input, &[]).unwrap();
+    assert!(retried.start);
+    assert_ne!(retried.task.run_id, admitted.task.run_id);
 }
 
 #[test]
@@ -462,11 +487,9 @@ fn native_interaction_phases_are_durable_sequenced_and_cleared_on_terminal() {
         store.get(&owner(), &run.run_id).unwrap().sequence,
         pending.sequence
     );
-    assert!(
-        store
-            .set_phase(&owner(), &run.run_id, Some("approve_any_tool"))
-            .is_err()
-    );
+    assert!(store
+        .set_phase(&owner(), &run.run_id, Some("approve_any_tool"))
+        .is_err());
     let finished = store
         .update(&owner(), &run.run_id, State::Cancelled, None, None, None)
         .unwrap();
@@ -475,4 +498,108 @@ fn native_interaction_phases_are_durable_sequenced_and_cleared_on_terminal() {
         .set_phase(&owner(), &run.run_id, Some("waiting_for_permission"))
         .unwrap();
     assert!(store.get(&owner(), &run.run_id).unwrap().phase.is_none());
+}
+
+#[test]
+fn protocol_events_are_schema_valid_durable_ordered_and_owner_scoped() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = AgentStore::open(dir.path()).unwrap();
+    store.configure(owner(), Some(settings())).unwrap();
+    let mut run_input = input();
+    run_input.protocol_thread_id = Some("thread-1".into());
+    let task = store.admit(&owner(), &run_input, &[]).unwrap().task;
+
+    store
+        .append_event(
+            &owner(),
+            &task.run_id,
+            serde_json::json!({"type":"RUN_STARTED","protocolVersion":"1.0","threadId":"thread-1","runId":"request-1"}),
+        )
+        .unwrap();
+    store
+        .append_event(
+            &owner(),
+            &task.run_id,
+            serde_json::json!({"type":"TEXT_MESSAGE_START","messageId":"message-1"}),
+        )
+        .unwrap();
+    store
+        .append_event(
+            &owner(),
+            &task.run_id,
+            serde_json::json!({"type":"TEXT_MESSAGE_CONTENT","messageId":"message-1","delta":"hello"}),
+        )
+        .unwrap();
+    store
+        .append_event(
+            &owner(),
+            &task.run_id,
+            serde_json::json!({"type":"TEXT_MESSAGE_END","messageId":"message-1"}),
+        )
+        .unwrap();
+    store
+        .append_event(
+            &owner(),
+            &task.run_id,
+            serde_json::json!({"type":"RUN_FINISHED","threadId":"thread-1","runId":"request-1","result":{"food":"soup"},"outcome":{"type":"success"}}),
+        )
+        .unwrap();
+
+    let first = store.protocol_events(&owner(), "request-1", 0).unwrap();
+    assert_eq!(first.events.len(), 5);
+    assert_eq!(first.sequence, 5);
+    assert_eq!(
+        store.protocol_events(&owner(), "request-1", 3).unwrap(),
+        ProtocolEventPage {
+            events: first.events[3..].to_vec(),
+            sequence: 5,
+        }
+    );
+    assert!(store
+        .append_event(
+            &owner(),
+            &task.run_id,
+            serde_json::json!({"type":"RUN_FINISHED","threadId":"thread-1","runId":"request-1"}),
+        )
+        .is_err());
+    assert!(store
+        .protocol_events(
+            &Owner {
+                app_id: format!("a{}", "3".repeat(32)),
+                ..owner()
+            },
+            "request-1",
+            0,
+        )
+        .is_err());
+}
+
+#[test]
+fn host_restart_ends_protocol_stream_as_error_not_success() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = AgentStore::open(dir.path()).unwrap();
+    store.configure(owner(), Some(settings())).unwrap();
+    let mut run_input = input();
+    run_input.protocol_thread_id = Some("thread-restart".into());
+    let task = store.admit(&owner(), &run_input, &[]).unwrap().task;
+    store
+        .append_event(
+            &owner(),
+            &task.run_id,
+            serde_json::json!({"type":"RUN_STARTED","threadId":"thread-restart","runId":"request-1"}),
+        )
+        .unwrap();
+    drop(store);
+
+    let recovered = AgentStore::open(dir.path()).unwrap();
+    let page = recovered.protocol_events(&owner(), "request-1", 0).unwrap();
+    assert_eq!(page.events.last().unwrap()["type"], "RUN_ERROR");
+    assert_eq!(page.events.last().unwrap()["code"], "host_restarted");
+    assert_eq!(
+        recovered
+            .get_by_request(&owner(), "request-1")
+            .unwrap()
+            .state,
+        State::Interrupted
+    );
 }

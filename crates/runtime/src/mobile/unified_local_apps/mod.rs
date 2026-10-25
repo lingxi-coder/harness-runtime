@@ -1182,9 +1182,9 @@ impl MobileLocalAppServiceHandle {
     }
     /// Trusted native UI only. The page SDK has no route to this method.
     pub async fn agent_host_json(self: Arc<Self>, request: String) -> String {
-        // Trusted iOS `startNative` carries the same bounded attachment bytes
-        // as the page upload path (50 MiB decoded, about 67 MiB base64).
-        if request.len() > 80 * 1024 * 1024 {
+        // Trusted iOS `startNative` carries a complete bounded AG-UI JSON
+        // request, including inline DataSource base64 values.
+        if request.len() > 116 * 1024 * 1024 {
             return agent_envelope(Err("agent_input_too_large".into()));
         }
         let request: Value = match serde_json::from_str(&request) {

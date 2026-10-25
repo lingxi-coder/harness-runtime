@@ -9,25 +9,25 @@
 <title>LingXi app paused</title><style>
 body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:12vh auto;padding:0 1.25rem;color:#17202a;background:#f6f8fa}main{background:white;border:1px solid #d9e0e7;border-radius:16px;padding:1.4rem}h1{font-size:1.4rem}p{color:#425466}button,a.return{display:inline-block;padding:.7rem 1rem;border:0;border-radius:9px;background:#155eef;color:white;font:inherit;text-decoration:none}li{margin:.55rem 0;overflow-wrap:anywhere}code{font-size:.92em}
 </style></head><body><main><h1>LingXi is paused or unavailable</h1>
-<p>This saved page contains no prompt, files, or Agent result. Return to LingXi, then reopen this app in the external browser. Saved pending requests expire after 24 hours; accepted request receipts expire after 7 days. Expired records are deleted and are never sent again automatically.</p>
+<p>This saved page contains no prompt, files, or Agent result. Return to LingXi, then reopen this app in the external browser. Pending runs expire after 24 hours; accepted run receipts expire after 7 days. Expired records are deleted and are never sent again automatically.</p>
 <p><a class="return" id="return" href="#">Return to LingXi</a></p>
-<h2>Requests saved in this browser</h2><p id="status">Checking this app's saved request IDs…</p><ul id="requests"></ul>
+<h2>Runs saved in this browser</h2><p id="status">Checking this app's saved run IDs…</p><ul id="runs"></ul>
 <script>
 const config=__LINGXI_RECOVERY_CONFIGURATION__;
 const returnUrl='lingxi://apps/'+encodeURIComponent(config.appId);
 document.querySelector('#return').href=returnUrl;
-const list=document.querySelector('#requests');
+const list=document.querySelector('#runs');
 const status=document.querySelector('#status');
 function showMessage(text){status.textContent=text;}
-if(!('indexedDB' in globalThis)){showMessage('This browser cannot read saved request IDs.');}
+if(!('indexedDB' in globalThis)){showMessage('This browser cannot read saved run IDs.');}
 else{
- const opening=indexedDB.open('lingxi-local-app-agent-'+config.appId);
+ const opening=indexedDB.open('lingxi-local-app-agui-'+config.appId);
  opening.onupgradeneeded=()=>{if(!opening.result.objectStoreNames.contains('pending'))opening.result.createObjectStore('pending',{keyPath:'key'});};
- opening.onerror=()=>showMessage('Saved request IDs are unavailable in this browser.');
- opening.onblocked=()=>showMessage('Saved request IDs are busy in another tab.');
+ opening.onerror=()=>showMessage('Saved run IDs are unavailable in this browser.');
+ opening.onblocked=()=>showMessage('Saved run IDs are busy in another tab.');
  opening.onsuccess=()=>{
   const db=opening.result;
-  if(!db.objectStoreNames.contains('pending')){db.close();showMessage('There are no saved request IDs.');return;}
+  if(!db.objectStoreNames.contains('pending')){db.close();showMessage('There are no saved run IDs.');return;}
   const tx=db.transaction('pending','readwrite');
   const cursor=tx.objectStore('pending').openCursor();let count=0;let expired=0;
   cursor.onsuccess=()=>{
@@ -40,21 +40,21 @@ else{
    if(record.appId===config.appId&&(!Number.isFinite(timestamp)||timestamp>Date.now()+5*60*1000||Date.now()-timestamp>=ttl)){
     item.delete();expired++;
    }else if(record.appId===config.appId&&record.revision===config.revision&&!accepted
-      &&typeof record.requestId==='string'&&record.requestId.length>0&&record.requestId.length<=128
-      &&!/[\\u0000-\\u001f\\u007f]/u.test(record.requestId)){
+      &&record.state!=='rejected'&&record.input&&typeof record.runId==='string'&&record.runId.length>0
+      &&!/[\\u0000-\\u001f\\u007f]/u.test(record.runId)){
     const row=document.createElement('li');const id=document.createElement('code');
-    id.textContent=record.requestId;row.append(id);
+    id.textContent=record.runId;row.append(id);
     if(config.hostPlatform==='ios'){
-     const query=new URLSearchParams({review:'agent',requestId:record.requestId,revision:String(config.revision)});
+     const query=new URLSearchParams({review:'agent',runId:record.runId,revision:String(config.revision)});
      const review=document.createElement('a');review.className='return';review.href=returnUrl+'?'+query.toString();
-     review.textContent=' Review this request in LingXi';row.append(' ',review);
+     review.textContent=' Review this run in LingXi';row.append(' ',review);
     }
     list.append(row);count++;
    }
    item.continue();
   };
-  tx.oncomplete=()=>{db.close();showMessage((count?String(count)+' request ID(s) are saved. Choose a request only after returning to LingXi.':'There are no saved request IDs.')+(expired?' '+String(expired)+' expired record(s) were deleted.':''));};
-  tx.onerror=()=>{db.close();showMessage('Saved request IDs are unavailable in this browser.');};
+  tx.oncomplete=()=>{db.close();showMessage((count?String(count)+' run ID(s) are saved. Choose a run only after returning to LingXi.':'There are no saved run IDs.')+(expired?' '+String(expired)+' expired record(s) were deleted.':''));};
+  tx.onerror=()=>{db.close();showMessage('Saved run IDs are unavailable in this browser.');};
  };
 }
 </script></main></body></html>`;
