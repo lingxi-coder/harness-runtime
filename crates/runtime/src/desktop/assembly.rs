@@ -1,3 +1,6 @@
+use super::permission_config::{
+    append_desktop_computer_permission_rules, DesktopComputerPermissionIntegration,
+};
 use super::platform::{
     DesktopFileSystem, DesktopLspTransport, DesktopProcess, DesktopWorktreeManager,
 };
@@ -2768,6 +2771,19 @@ pub async fn build_with_credential_stack(
     // relative) are expanded when they land in `trusted_dirs`. Assigned in BOTH
     // arms below (the full union when enforcing; `--add-dir` only otherwise), so
     // it is always initialized before its later reads.
+    // Use the same backend instance for permission assembly and tool registration.
+    // CLI/mobile and transports without the trusted Desktop host policy keep
+    // their existing generic gates and fail-closed resolver behavior.
+    let desktop_computer_control = platform_macos_computer_control::new_if_supported();
+    let absolute_host_path =
+        |name| std::env::var_os(name).is_some_and(|path| std::path::Path::new(&path).is_absolute());
+    let computer_permission_integration = DesktopComputerPermissionIntegration {
+        transport: cfg.session_composition() == super::DesktopSessionComposition::Transport,
+        access_resolver: cfg.computer_access_tx.is_some(),
+        native_control: desktop_computer_control.is_some(),
+        computer_policy: absolute_host_path("LINGXI_DESKTOP_COMPUTER_POLICY"),
+        browser_descriptor: absolute_host_path("LINGXI_DESKTOP_BROWSER_DESCRIPTOR"),
+    };
     let perms: Arc<dyn PermissionGate> = if enforce_permissions {
         // Read the persistable rule tiers in ASCENDING priority — user →
         // project → local (3c: settings.local.json read after project so a
@@ -2810,6 +2826,11 @@ pub async fn build_with_credential_stack(
         append_mcp_permission_rules(
             &mut rules,
             &mcp_configs,
+            allow_managed_permission_rules_only,
+        );
+        append_desktop_computer_permission_rules(
+            &mut rules,
+            computer_permission_integration,
             allow_managed_permission_rules_only,
         );
         if cfg.restricted {
@@ -4669,7 +4690,7 @@ pub async fn build_with_credential_stack(
         deep_link: None,
         calendar: None,
         contacts: None,
-        computer_control: platform_macos_computer_control::new_if_supported(),
+        computer_control: desktop_computer_control,
         mobile_shell: None,
         mobile_git: None,
         mobile_git_secret: None,

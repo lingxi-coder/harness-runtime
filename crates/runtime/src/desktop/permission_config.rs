@@ -5,6 +5,12 @@ use platform_windows::WindowsMcpTransport;
 
 use super::DesktopConfig;
 
+#[path = "computer_permission_rules.rs"]
+mod computer_permission_rules;
+pub(super) use computer_permission_rules::{
+    append_desktop_computer_permission_rules, DesktopComputerPermissionIntegration,
+};
+
 /// Parse just the settings fields the sandbox runtime consumes, retaining the
 /// exact raw JSON until the filesystem path fields cross into Rust's OS-facing
 /// `String` representation. Other top-level settings cannot cause this sandbox
