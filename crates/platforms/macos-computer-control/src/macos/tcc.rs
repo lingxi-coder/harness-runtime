@@ -32,9 +32,10 @@ extern "C" {
         element: core_foundation::base::CFTypeRef,
         seconds: f32,
     ) -> i32;
-    fn AXUIElementCopyAttributeValue(
+    fn AXUIElementCopyElementAtPosition(
         element: core_foundation::base::CFTypeRef,
-        attribute: core_foundation::string::CFStringRef,
+        x: f32,
+        y: f32,
         value: *mut core_foundation::base::CFTypeRef,
     ) -> i32;
 }
@@ -74,6 +75,8 @@ extern "C" {
     /// legacy `Boolean` — Rust `bool` is the correct ABI type here.
     fn CGRequestScreenCaptureAccess() -> bool;
     fn CGPreflightScreenCaptureAccess() -> bool;
+    fn CGEventCreate(source: core_foundation::base::CFTypeRef) -> core_foundation::base::CFTypeRef;
+    fn CGEventGetLocation(event: core_foundation::base::CFTypeRef) -> core_graphics::geometry::CGPoint;
 }
 
 /// Read-only live TCC queries. Never registers/prompts for access during effects.
@@ -106,9 +109,9 @@ fn accessibility_query_result(
         return Ok(false);
     }
     match (status, has_value) {
-        (0, true) | (-25212, _) => Ok(true), // No focused application is not a TCC revocation.
+        (0, true) => Ok(true),
         _ => Err(query_unavailable(
-            "focused_application",
+            "hit_test",
             Some(status),
             Some(has_value),
         )),
@@ -117,7 +120,6 @@ fn accessibility_query_result(
 
 fn query_accessibility() -> Result<bool, lingxi_core::host::computer_control::ComputerError> {
     use core_foundation::base::{CFType, TCFType};
-    use core_foundation::string::CFString;
 
     let trusted = unsafe { AXIsProcessTrusted() } != 0;
     if !trusted {
@@ -133,12 +135,26 @@ fn query_accessibility() -> Result<bool, lingxi_core::host::computer_control::Co
     if timeout_status != 0 {
         return Err(query_unavailable("set_timeout", Some(timeout_status), None));
     }
-    let attribute = CFString::from_static_string("AXFocusedApplication");
+    // A system-wide focused-application query can return CannotComplete even
+    // with working AX access. Hit testing is the same real AX request used to
+    // establish input targets, and requires no focus or application content.
+    // Creating a snapshot event reads the current cursor; it never posts input.
+    let raw_event = unsafe { CGEventCreate(std::ptr::null()) };
+    if raw_event.is_null() {
+        return Err(query_unavailable("create_cursor_event", None, Some(false)));
+    }
+    let event = unsafe { CFType::wrap_under_create_rule(raw_event) };
+    let point = unsafe { CGEventGetLocation(event.as_concrete_TypeRef()) };
+    let (x, y) = (point.x as f32, point.y as f32);
+    if !x.is_finite() || !y.is_finite() {
+        return Err(query_unavailable("cursor_location", None, None));
+    }
     let mut value = std::ptr::null();
     let status = unsafe {
-        AXUIElementCopyAttributeValue(
+        AXUIElementCopyElementAtPosition(
             system.as_concrete_TypeRef(),
-            attribute.as_concrete_TypeRef(),
+            x,
+            y,
             &mut value,
         )
     };
@@ -192,7 +208,7 @@ mod tests {
         assert!(!accessibility_query_result(false, 0, true).unwrap());
         assert!(!accessibility_query_result(true, -25211, false).unwrap());
         assert!(!accessibility_query_result(true, -25211, true).unwrap());
-        assert!(accessibility_query_result(true, -25212, false).unwrap());
+        assert!(accessibility_query_result(true, -25212, false).is_err());
         assert!(accessibility_query_result(true, 0, false).is_err());
         for status in [-25204, -1, 1] {
             assert!(
@@ -211,7 +227,7 @@ mod tests {
         let error = accessibility_query_result(true, -25204, false)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("stage=focused_application"));
+        assert!(error.contains("stage=hit_test"));
         assert!(error.contains("status=Some(-25204)"));
         assert!(error.contains("hasValue=Some(false)"));
         let error = query_unavailable("set_timeout", Some(-25202), None).to_string();
