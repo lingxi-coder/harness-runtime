@@ -567,6 +567,60 @@ pub fn error_message(code: &str) -> &'static str {
         "model_structured_output_unsupported" => {
             "The selected model route cannot enforce the requested structured result schema. Choose a model with compatible structured-output support."
         }
+        "model_invalid_request" => {
+            "The model request was invalid. Check its input, attachment and structured-output requirements."
+        }
+        "model_provider_http_400" => {
+            "The model provider rejected the request with HTTP 400. Check the selected model's request format and attachment support."
+        }
+        "model_auth_failed" | "model_provider_http_401" => {
+            "The model provider rejected authentication. Check the provider connection in trusted native settings."
+        }
+        "model_provider_http_403" => {
+            "The model provider denied access to this request. Check account and model access."
+        }
+        "model_provider_http_413" | "model_request_too_large" => {
+            "The request exceeds the provider's size or context limit. Use smaller files or a shorter request."
+        }
+        "model_provider_http_422" => {
+            "The model provider rejected the request schema or format. Check the structured-output schema."
+        }
+        "model_rate_limited" | "model_provider_http_429" => {
+            "The model provider rate-limited this request. Wait a while and try again."
+        }
+        "model_quota_exceeded" => {
+            "The model provider account has reached a usage or billing limit."
+        }
+        "model_provider_http_5xx" | "model_provider_failed" => {
+            "The model provider could not complete the request. Try again later."
+        }
+        "model_transport_failed" => {
+            "The connection to the model provider failed. Check network, proxy and TLS settings."
+        }
+        "model_invalid_response" => {
+            "The model provider returned a response the host could not decode. Try again or select another model."
+        }
+        "model_request_not_sent" => {
+            "The host rejected the model request before sending it. Review model settings and retry."
+        }
+        "model_capability_unsupported" => {
+            "A required model capability is unavailable on the selected route. Choose a compatible model in native settings."
+        }
+        "model_media_unavailable" => {
+            "The host could not prepare or process this media with the selected model. Check the file or choose a compatible model."
+        }
+        "model_media_partial" => {
+            "Only part of the media analysis completed, so no result was accepted. Review usage before manually starting another run."
+        }
+        "model_settings_failed" => {
+            "The host could not resolve the selected model settings. Reopen native Agent settings or try again later."
+        }
+        "model_cost_unavailable" => {
+            "The host could not finalize model usage accounting. Check this task's status before retrying."
+        }
+        "model_file_upload_uncertain" => {
+            "The provider upload outcome is uncertain. Verify task and provider state before retrying; an automatic retry could create a duplicate upload."
+        }
         "invalid_images" | "invalid_attachments" => {
             "A file could not be decoded or exceeds the attachment limits. Choose a smaller valid file."
         }

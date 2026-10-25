@@ -1788,8 +1788,9 @@ impl AppAgentHost {
                     OrchestratorError::StreamingProtocol(_) => "model_stream_protocol_failed",
                     OrchestratorError::StreamEndedWithoutStop => "model_stream_incomplete",
                     OrchestratorError::Internal(_) => "agent_internal_error",
-                    OrchestratorError::ApiCall(_) => "model_api_failed",
-                    OrchestratorError::Streaming(_) => "model_stream_failed",
+                    OrchestratorError::ApiCall(error) | OrchestratorError::Streaming(error) => {
+                        super::stateless::safe_llm_error_code(&error)
+                    }
                     _ => "model_execution_failed",
                 };
                 return Err(code.into());

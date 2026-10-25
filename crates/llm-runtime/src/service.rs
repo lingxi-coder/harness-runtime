@@ -3373,6 +3373,19 @@ impl ApiService {
                 },
             )
         }));
+        if req.execution.side_thinking_disabled {
+            // `reasoning_for_request(Disabled)` intentionally returns None
+            // for non-Claude models. Keep the explicit off intent in the SDK
+            // request anyway: codecs use it to distinguish “thinking is off”
+            // from “the caller did not specify a thinking mode”. In
+            // particular, DeepSeek rejects forced tool choice while thinking
+            // is on, but accepts it when the request explicitly disables
+            // thinking.
+            req.input.thinking = Some(lingxi_llm_client::protocol::ThinkingConfig {
+                mode: Some(lingxi_llm_client::protocol::ThinkingMode::Disabled),
+                ..Default::default()
+            });
+        }
         req.input.temperature = temperature.or_else(|| {
             if thinking.is_some()
                 && !has_thinking

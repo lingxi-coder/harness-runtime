@@ -401,7 +401,71 @@ fn map_side_query_error(error: sidequery::SideQueryError) -> String {
         sidequery::SideQueryError::StructuredOutputUnsupported => {
             "model_structured_output_unsupported".into()
         }
-        _ => "model_api_failed".into(),
+        sidequery::SideQueryError::Api(error) => safe_llm_error_code(&error).into(),
+        sidequery::SideQueryError::InvalidResponse(_) => "model_invalid_response".into(),
+        sidequery::SideQueryError::Partial { source, .. } => map_side_query_error(*source),
+    }
+}
+
+/// Stable host-owned failure codes. Never use `Display`, `Debug`, or provider
+/// text here: those can contain response bodies, credentials, paths, or model
+/// generated content.
+pub(super) fn safe_llm_error_code(error: &llm_runtime::LlmError) -> &'static str {
+    use llm_runtime::LlmError;
+
+    match error.classification_source() {
+        LlmError::Authentication { .. }
+        | LlmError::OAuthRefreshDead
+        | LlmError::PermissionDenied { .. } => match error.http_status() {
+            Some(401) => "model_provider_http_401",
+            Some(403) => "model_provider_http_403",
+            _ => "model_auth_failed",
+        },
+        LlmError::RateLimited { .. } => "model_rate_limited",
+        LlmError::QuotaExceeded => "model_quota_exceeded",
+        LlmError::InvalidRequest { .. } => {
+            provider_http_status_code(error.http_status()).unwrap_or("model_invalid_request")
+        }
+        LlmError::RequestTooLarge
+        | LlmError::ContextOverflow { .. }
+        | LlmError::InputBudgetExceeded { .. } => "model_request_too_large",
+        LlmError::Transport { .. }
+        | LlmError::TransportTimeout { .. }
+        | LlmError::TlsCert { .. }
+        | LlmError::ProxyTunnelResponse { .. }
+        | LlmError::StreamInterrupted { .. } => "model_transport_failed",
+        LlmError::RequestDispatchRejected { .. } | LlmError::ApiAttemptsExhausted => {
+            "model_request_not_sent"
+        }
+        LlmError::ModelUnavailable => "model_unavailable",
+        LlmError::UnsupportedCapability { .. } => "model_capability_unsupported",
+        LlmError::MediaDelegationUnavailable { .. } => "model_media_unavailable",
+        LlmError::MediaDelegationPartial { .. } => "model_media_partial",
+        LlmError::SettingsSource { .. } => "model_settings_failed",
+        LlmError::CostUnavailable { .. } => "model_cost_unavailable",
+        LlmError::FileUploadOutcomeUnknown { .. } => "model_file_upload_uncertain",
+        LlmError::ProviderInternal
+        | LlmError::ProviderTimeout { .. }
+        | LlmError::Overloaded { .. } => {
+            provider_http_status_code(error.http_status()).unwrap_or("model_provider_failed")
+        }
+        LlmError::MalformedToolInput { .. } => "model_invalid_response",
+        _ => "model_api_failed",
+    }
+}
+
+/// Only a finite set of provider status codes crosses the Local App boundary.
+/// The raw status and provider message are never interpolated into a code.
+fn provider_http_status_code(status: Option<u16>) -> Option<&'static str> {
+    match status? {
+        400 => Some("model_provider_http_400"),
+        401 => Some("model_provider_http_401"),
+        403 => Some("model_provider_http_403"),
+        413 => Some("model_provider_http_413"),
+        422 => Some("model_provider_http_422"),
+        429 => Some("model_provider_http_429"),
+        500..=599 => Some("model_provider_http_5xx"),
+        _ => None,
     }
 }
 
@@ -670,6 +734,159 @@ mod tests {
         assert_eq!(
             map_side_query_error(sidequery::SideQueryError::StructuredOutputUnsupported),
             "model_structured_output_unsupported"
+        );
+    }
+
+    fn provider_error(source: llm_runtime::LlmError, display: &str) -> llm_runtime::LlmError {
+        let units = display.encode_utf16().collect();
+        llm_runtime::LlmError::ProviderErrorText {
+            source: Box::new(source),
+            text: lingxi_llm_client::protocol::ProviderErrorText::new(display.to_owned(), units)
+                .expect("provider canary is valid UTF-16"),
+            native_anthropic_facts: None,
+        }
+    }
+
+    #[test]
+    fn side_query_errors_keep_typed_codes_without_provider_canaries() {
+        use std::time::Duration;
+
+        let local_invalid = sidequery::SideQueryError::Api(llm_runtime::LlmError::InvalidRequest {
+            message: "local validation canary /private/request.json".into(),
+        });
+        let provider_invalid = sidequery::SideQueryError::Api(provider_error(
+            llm_runtime::LlmError::InvalidRequest {
+                message: "typed invalid request canary".into(),
+            },
+            "400 PROVIDER_BODY_CANARY API_KEY_CANARY /private/provider-response.json",
+        ));
+        let auth = sidequery::SideQueryError::Api(provider_error(
+            llm_runtime::LlmError::Authentication {
+                message: "typed auth canary".into(),
+            },
+            "401 AUTH_BODY_CANARY API_KEY_CANARY",
+        ));
+        let rate_limited = sidequery::SideQueryError::Api(llm_runtime::LlmError::RateLimited {
+            retry_after: None,
+            scope: Some("RATE_LIMIT_CANARY".into()),
+        });
+        let quota = sidequery::SideQueryError::Api(llm_runtime::LlmError::QuotaExceeded);
+        let transport = sidequery::SideQueryError::Api(llm_runtime::LlmError::Transport {
+            message: "transport canary /private/client.key".into(),
+        });
+        let invalid_response = sidequery::SideQueryError::InvalidResponse(
+            "INVALID_RESPONSE_BODY_CANARY /private/response.json".into(),
+        );
+        let partial = sidequery::SideQueryError::Partial {
+            source: Box::new(sidequery::SideQueryError::Api(provider_error(
+                llm_runtime::LlmError::InvalidRequest {
+                    message: "partial typed error canary".into(),
+                },
+                "400 PARTIAL_BODY_CANARY SECRET_TOKEN_CANARY",
+            ))),
+            usage: cost::Usage::default(),
+            elapsed: Duration::from_millis(1),
+            retry_count: 0,
+            api_calls: 1,
+        };
+        let capability =
+            sidequery::SideQueryError::Api(llm_runtime::LlmError::UnsupportedCapability {
+                capability: "CAPABILITY_CANARY".into(),
+            });
+        let media_unavailable =
+            sidequery::SideQueryError::Api(llm_runtime::LlmError::MediaDelegationUnavailable {
+                message: "MEDIA_CANARY /private/input.jpg".into(),
+            });
+        let media_partial =
+            sidequery::SideQueryError::Api(llm_runtime::LlmError::MediaDelegationPartial {
+                message: "PARTIAL_MEDIA_CANARY /private/input.jpg".into(),
+                accounting: llm_runtime::MediaDelegationAccounting::from_counts(
+                    10,
+                    1,
+                    0,
+                    0,
+                    0,
+                    0,
+                    Duration::from_millis(2),
+                    0,
+                    1,
+                ),
+            });
+        let settings = sidequery::SideQueryError::Api(llm_runtime::LlmError::SettingsSource {
+            kind: "SETTINGS_KIND_CANARY".into(),
+            message: Utf16JsonProjection::root_string(
+                "SETTINGS_CANARY /private/settings.json".into(),
+                "SETTINGS_CANARY /private/settings.json"
+                    .encode_utf16()
+                    .collect(),
+            )
+            .expect("settings message projection"),
+            diagnostics: Utf16JsonProjection::root_string(
+                "SETTINGS_DIAGNOSTICS_CANARY".into(),
+                "SETTINGS_DIAGNOSTICS_CANARY".encode_utf16().collect(),
+            )
+            .expect("settings diagnostics projection"),
+            effective: None,
+        });
+        let cost_unavailable =
+            sidequery::SideQueryError::Api(llm_runtime::LlmError::CostUnavailable {
+                message: "COST_CANARY /private/pricing.json".into(),
+            });
+        let upload_uncertain =
+            sidequery::SideQueryError::Api(llm_runtime::LlmError::FileUploadOutcomeUnknown {
+                message: "UPLOAD_CANARY provider-resource-id".into(),
+            });
+
+        let cases = [
+            (local_invalid, "model_invalid_request"),
+            (provider_invalid, "model_provider_http_400"),
+            (auth, "model_provider_http_401"),
+            (rate_limited, "model_rate_limited"),
+            (quota, "model_quota_exceeded"),
+            (transport, "model_transport_failed"),
+            (invalid_response, "model_invalid_response"),
+            (partial, "model_provider_http_400"),
+            (capability, "model_capability_unsupported"),
+            (media_unavailable, "model_media_unavailable"),
+            (media_partial, "model_media_partial"),
+            (settings, "model_settings_failed"),
+            (cost_unavailable, "model_cost_unavailable"),
+            (upload_uncertain, "model_file_upload_uncertain"),
+        ];
+        let canaries = [
+            "CANARY",
+            "API_KEY_CANARY",
+            "SECRET_TOKEN_CANARY",
+            "/private/",
+            "response.json",
+            "CAPABILITY_CANARY",
+            "MEDIA_CANARY",
+            "PARTIAL_MEDIA_CANARY",
+            "SETTINGS_CANARY",
+            "SETTINGS_DIAGNOSTICS_CANARY",
+            "COST_CANARY",
+            "UPLOAD_CANARY",
+        ];
+
+        for (error, expected_code) in cases {
+            let code = map_side_query_error(error);
+            assert_eq!(code, expected_code);
+            for canary in canaries {
+                assert!(!code.contains(canary), "error code leaked {canary}: {code}");
+            }
+            let message = local_app::v2::agent::error_message(&code);
+            for canary in canaries {
+                assert!(
+                    !message.contains(canary),
+                    "error copy leaked {canary}: {message}"
+                );
+            }
+        }
+
+        assert_eq!(provider_http_status_code(Some(418)), None);
+        assert_eq!(
+            provider_http_status_code(Some(401)),
+            Some("model_provider_http_401")
         );
     }
 

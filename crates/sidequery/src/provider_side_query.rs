@@ -1342,6 +1342,82 @@ mod tests {
         }
     }
 
+    fn deepseek_session_client(transport: Arc<StubTransport>) -> ProviderSideQueryClient {
+        let mut provider = llm_runtime::builtin_presets()
+            .providers
+            .into_iter()
+            .find(|provider| {
+                provider.profile_name == "deepseek"
+                    && provider.protocol == ProtocolFamily::OpenAiChat
+            })
+            .expect("the built-in DeepSeek Chat profile exists");
+        provider.base_url = "https://deepseek.invalid".into();
+        provider.auth = AuthStrategy::ApiKey;
+        provider.credential = CredentialConfig::Static {
+            id: "deepseek-side-query-test".into(),
+        };
+        provider.connection = Default::default();
+        let client = ModelRuntime::from_config(ClientConfig {
+            providers: vec![provider],
+        })
+        .expect("DeepSeek test client config")
+        .with_credential_provider(Arc::new(StaticCredentialProvider::new(Credential::ApiKey(
+            "dummy-no-network-test-key".into(),
+        ))));
+        let service = llm_runtime::ApiService::new(
+            Arc::new(client),
+            transport,
+            llm_runtime::SubscriberState::default(),
+            llm_runtime::model::user_agent::UserAgentEnv::default(),
+            "test",
+            None,
+            None,
+        );
+        ProviderSideQueryClient::from_service(Arc::new(service))
+    }
+
+    fn local_app_deepseek_image_request(
+        thinking: Option<llm_runtime::model::thinking::ThinkingConfig>,
+    ) -> SideQueryRequest {
+        use lingxi_core::types::{ContentBlock, ImageSource};
+
+        let mut request = req(None);
+        request.model = "deepseek-flash".into();
+        request.profile = Some("deepseek".into());
+        request.system_prompt = None;
+        request.system_prompt_input = None;
+        let mut message = ConversationMessage::user(
+            MessageId::new(),
+            "Return the requested structured result.".into(),
+        );
+        if let ConversationMessage::User { content, .. } = &mut message {
+            content.push(ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "image/jpeg".into(),
+                    data: "/9j/2Q==".into(),
+                },
+            });
+        }
+        request.messages = vec![message];
+        request.tools = vec![tool_declaration(
+            "StructuredOutput",
+            "Return the requested result matching the schema.",
+            r#"{"type":"object","properties":{"result":{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}},"required":["result"],"additionalProperties":false}"#,
+        )];
+        request.tool_choice = Some(serde_json::json!({
+            "type": "tool",
+            "name": "StructuredOutput"
+        }));
+        request.output_format = None;
+        request.max_tokens = Some(8192);
+        request.temperature = None;
+        request.thinking = thinking;
+        request.effort = None;
+        request.query_source = QuerySource::Custom("local_app_agent".into());
+        request.skip_system_prompt_prefix = true;
+        request
+    }
+
     fn text_content(text: &Option<Utf16JsonProjection>) -> Option<String> {
         text.as_ref()
             .and_then(|text| text.string_at(""))
@@ -1450,6 +1526,96 @@ mod tests {
         );
         assert!(client.query_json_schema(strict).await.is_err());
         assert!(transport.received.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deepseek_local_app_disabled_image_and_forced_tool_reach_recording_transport() {
+        let response = serde_json::json!({
+            "id": "chatcmpl-local-app-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "deepseek-flash",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_local_app_test",
+                        "type": "function",
+                        "function": {
+                            "name": "StructuredOutput",
+                            "arguments": r#"{"result":{"ok":true}}"#
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": { "prompt_tokens": 8, "completion_tokens": 3, "total_tokens": 11 }
+        })
+        .to_string();
+        let transport = Arc::new(StubTransport::new(response));
+        let client = deepseek_session_client(transport.clone());
+
+        let response = client
+            .query(local_app_deepseek_image_request(Some(
+                llm_runtime::model::thinking::ThinkingConfig::Disabled,
+            )))
+            .await
+            .expect("explicitly disabled DeepSeek image/tool side query should dispatch");
+        assert_eq!(response.tool_calls.len(), 1);
+
+        let received = transport.received.lock().unwrap();
+        assert_eq!(received.len(), 1, "exactly one request reaches the recorder");
+        let request_body = received[0].body.as_deref().expect("request body exists");
+        let body: serde_json::Value =
+            serde_json::from_str(request_body).expect("provider request body is JSON");
+
+        assert_eq!(body["model"], "deepseek-flash");
+        assert_eq!(body["max_tokens"], 8192);
+        assert_eq!(body["reasoning_effort"], "none");
+        assert_eq!(body["tools"][0]["function"]["name"], "StructuredOutput");
+        assert_eq!(
+            body["tool_choice"],
+            serde_json::json!({
+                "type": "function",
+                "function": { "name": "StructuredOutput" }
+            })
+        );
+        let parts = body["messages"][0]["content"]
+            .as_array()
+            .expect("mixed text and image message is encoded as content parts");
+        let image = parts
+            .iter()
+            .find(|part| part["type"] == "image_url")
+            .expect("inline image reaches Chat Completions");
+        assert_eq!(image["image_url"]["url"], "data:image/jpeg;base64,/9j/2Q==");
+    }
+
+    #[tokio::test]
+    async fn deepseek_local_app_unspecified_thinking_does_not_become_disabled() {
+        let transport = Arc::new(StubTransport::new("unused"));
+        let client = deepseek_session_client(transport.clone());
+
+        let error = client
+            .query(local_app_deepseek_image_request(None))
+            .await
+            .expect_err("an unspecified thinking mode must not be rewritten as disabled");
+        assert!(
+            matches!(
+                &error,
+                SideQueryError::Api(error)
+                    if matches!(
+                        error.classification_source(),
+                        LlmError::UnsupportedCapability { .. }
+                    )
+            ),
+            "expected the existing local forced-tool guard, got {error:?}"
+        );
+        assert!(
+            transport.received.lock().unwrap().is_empty(),
+            "unspecified thinking is rejected locally before dispatch"
+        );
     }
 
     #[tokio::test]
