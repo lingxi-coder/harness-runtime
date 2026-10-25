@@ -1,6 +1,62 @@
 use super::{device_policy, ComputerTool, ToolError, ToolUseContext};
 
 impl ComputerTool {
+    pub(crate) async fn revoke_os_permissions(
+        &self,
+        ctx: &ToolUseContext,
+    ) -> Result<(), ToolError> {
+        self.os_permissions_revoked
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.state
+            .lock()
+            .map_err(|_| ToolError::Internal("computer state poisoned".into()))?
+            .revoke_grants();
+        {
+            let mut runtime = self
+                .runtime
+                .lock()
+                .map_err(|_| ToolError::Internal("computer state poisoned".into()))?;
+            runtime.frames.clear();
+            runtime.snapshots.clear();
+            runtime.pending_observations.clear();
+        }
+        // Cleanup must remain unconditional after revocation, including when a
+        // mouse button or modifier is down at the instant the OS state changes.
+        self.release_owned_inputs(ctx).await
+    }
+
+    pub(crate) async fn check_current_os_permissions(
+        &self,
+        ctx: &ToolUseContext,
+    ) -> Result<(), ToolError> {
+        if let Some(backend) = &self.ctx.computer_control {
+            if backend
+                .query_os_permissions()
+                .await
+                .is_some_and(|(accessibility, recording)| !accessibility || !recording)
+            {
+                self.revoke_os_permissions(ctx).await?;
+                return Err(ToolError::PermissionDenied("macOS Accessibility / Screen Recording access was revoked. Restore it in System Settings, then call request_access again.".into()));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn check_live_os_permissions(
+        &self,
+        ctx: &ToolUseContext,
+    ) -> Result<(), ToolError> {
+        self.check_current_os_permissions(ctx).await?;
+        if self
+            .os_permissions_revoked
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(ToolError::PermissionDenied(
+                "OS permissions changed. Call request_access again to select applications.".into(),
+            ));
+        }
+        Ok(())
+    }
     pub(crate) async fn pin_pointer_input(
         &self,
         action: &str,
@@ -87,6 +143,9 @@ impl ComputerTool {
     ) -> Result<(), ToolError> {
         self.check_cancel(ctx)?;
         self.check_policy_revision(revision)?;
+        if !matches!(action, "key_up" | "left_mouse_up") {
+            self.check_live_os_permissions(ctx).await?;
+        }
         let backend = self.ctx.computer_control.as_ref().ok_or_else(|| {
             ToolError::PermissionDenied("Computer control is unavailable.".into())
         })?;
@@ -130,6 +189,11 @@ impl ComputerTool {
             .await?;
         } else {
             self.enforce_tier(required_action).await?;
+        }
+        self.check_cancel(ctx)?;
+        self.check_policy_revision(revision)?;
+        if !matches!(action, "key_up" | "left_mouse_up") {
+            self.check_live_os_permissions(ctx).await?;
         }
         self.check_cancel(ctx)?;
         self.check_policy_revision(revision)
@@ -271,7 +335,11 @@ impl ComputerTool {
                 state.policy_revision = revision.clone();
             }
             if let Some((_, policy)) = &snapshot {
-                if policy.enabled {
+                if policy.enabled
+                    && !self
+                        .os_permissions_revoked
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                {
                     for (id, tier) in policy.permanent_grants() {
                         state.grant_app(id.to_owned(), tier);
                     }

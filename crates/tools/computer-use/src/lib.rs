@@ -111,6 +111,7 @@ pub const NOTIFY_EXIT: &str = "Claude is done using your computer";
 #[derive(Clone)]
 pub struct ComputerTool {
     policy_path: Option<std::path::PathBuf>,
+    os_permissions_revoked: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ctx: BuiltinToolContext,
     state: std::sync::Arc<Mutex<SessionState>>,
     access_resolver: std::sync::Arc<dyn ComputerAccessResolver>,
@@ -141,6 +142,7 @@ impl ComputerTool {
         access_resolver: std::sync::Arc<dyn ComputerAccessResolver>,
     ) -> Self {
         Self {
+            os_permissions_revoked: Default::default(),
             policy_path: std::env::var_os("LINGXI_DESKTOP_COMPUTER_POLICY")
                 .map(std::path::PathBuf::from),
             ctx,
@@ -592,6 +594,12 @@ impl Tool for ComputerTool {
             self.release_owned_inputs(&ctx).await?;
             return Err(error);
         }
+        if !matches!(
+            action.as_str(),
+            "request_access" | "key_up" | "left_mouse_up"
+        ) {
+            self.check_live_os_permissions(&ctx).await?;
+        }
         let dirty = {
             let runtime = self
                 .runtime
@@ -794,6 +802,7 @@ impl ComputerTool {
             None => None,
         };
         if let Some(tcc_state) = tcc_state {
+            self.revoke_os_permissions(ctx).await?;
             let request = permission::computer_access::ComputerAccessRequest {
                 reason,
                 apps: vec![],
@@ -919,6 +928,9 @@ impl ComputerTool {
         };
         self.check_cancel(ctx)?;
         self.check_policy_revision(revision.as_deref())?;
+        self.check_current_os_permissions(ctx).await?;
+        self.check_cancel(ctx)?;
+        self.check_policy_revision(revision.as_deref())?;
         let mut state = self
             .state
             .lock()
@@ -938,6 +950,10 @@ impl ComputerTool {
             .filter(|(id, _)| state.tier_for(id).is_some())
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
+        if !granted.is_empty() {
+            self.os_permissions_revoked
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+        }
         denied.extend(
             candidates
                 .iter()
@@ -1197,6 +1213,9 @@ impl ComputerTool {
         // wired, and before the tier gate since it never touches an app.
         self.check_cancel(ctx)?;
         let revision = self.sync_policy(ctx).await?;
+        if !matches!(action, "key_up" | "left_mouse_up") {
+            self.check_live_os_permissions(ctx).await?;
+        }
         if self.ctx.computer_control.is_some()
             && self
                 .state
@@ -1337,6 +1356,9 @@ impl ComputerTool {
         }
         self.check_cancel(ctx)?;
         self.check_policy_revision(revision.as_deref())?;
+        if !matches!(action, "key_up" | "left_mouse_up") {
+            self.check_live_os_permissions(ctx).await?;
+        }
         let added = self
             .press_keys(
                 &modifiers,
@@ -1371,9 +1393,17 @@ impl ComputerTool {
             }
             self.check_cancel(ctx)?;
             self.check_policy_revision(revision.as_deref())?;
+            if !matches!(action, "key_up" | "left_mouse_up") {
+                self.check_live_os_permissions(ctx).await?;
+            }
             let value = self
                 .execute_backend(action, input, required_action, ctx, revision.as_deref())
                 .await?;
+            self.check_policy_revision(revision.as_deref())?;
+            if !matches!(action, "key_up" | "left_mouse_up") {
+                self.check_live_os_permissions(ctx).await?;
+            }
+            self.check_cancel(ctx)?;
             self.check_policy_revision(revision.as_deref())?;
             Ok(value)
         }
@@ -1538,12 +1568,10 @@ impl ComputerTool {
             .clone();
         let sleep = tokio::time::sleep(std::time::Duration::from_secs_f64(seconds));
         let changed = async {
-            if self.policy_path.is_none() {
-                return std::future::pending::<Result<(), ToolError>>().await;
-            }
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 self.check_policy_revision(expected.as_deref())?;
+                self.check_live_os_permissions(ctx).await?;
             }
         };
         let cancelled = async {

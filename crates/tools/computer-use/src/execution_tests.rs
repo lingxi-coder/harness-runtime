@@ -79,6 +79,9 @@ impl ComputerControl for RecordingBackend {
     async fn check_os_permissions(&self) -> Option<(bool, bool)> {
         *self.os_permissions.lock().unwrap()
     }
+    async fn query_os_permissions(&self) -> Option<(bool, bool)> {
+        *self.os_permissions.lock().unwrap()
+    }
     fn supports_target_application(&self) -> bool {
         self.target_checks.load(Ordering::SeqCst)
     }

@@ -36,6 +36,7 @@ extern "C" {
     /// are valid) if the ABI-level byte the callee returns is ever anything
     /// else in the unused high bits of the underlying register/byte.
     fn AXIsProcessTrustedWithOptions(options: core_foundation::dictionary::CFDictionaryRef) -> u8;
+    fn AXIsProcessTrusted() -> u8;
 }
 
 /// Refuse operations when Quartz cannot establish a console session or reports a lock.
@@ -72,6 +73,15 @@ extern "C" {
     /// a C99 `bool` in the real header, unlike `AXIsProcessTrustedWithOptions`'s
     /// legacy `Boolean` — Rust `bool` is the correct ABI type here.
     fn CGRequestScreenCaptureAccess() -> bool;
+    fn CGPreflightScreenCaptureAccess() -> bool;
+}
+
+/// Read-only live TCC queries. Never registers/prompts for access during effects.
+#[must_use]
+pub fn query_os_permissions() -> (bool, bool) {
+    (unsafe { AXIsProcessTrusted() } != 0, unsafe {
+        CGPreflightScreenCaptureAccess()
+    })
 }
 
 /// `(accessibility_granted, screen_recording_granted)`.
