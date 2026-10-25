@@ -3,6 +3,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, DirBuilder},
+    future::Future,
     io::{Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
     sync::{Arc, Weak},
@@ -17,9 +18,13 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_HEAD: usize = 32 * 1024;
 const MAX_AGENT_BODY: usize = 116 * 1024 * 1024;
+const MAX_AGENT_CONTROL_BODY: usize = 32 * 1024;
 const MAX_AGENT_JSON_DEPTH: usize = 128;
 // Serialize large full-input transfers across Apps to bound inline file memory.
 static AGENT_REQUESTS: Semaphore = Semaphore::const_new(1);
+// Small polling and cancellation requests stay available while a large or slow
+// Agent input is being admitted. Their count and body size bound their memory.
+static AGENT_CONTROL_REQUESTS: Semaphore = Semaphore::const_new(8);
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -309,6 +314,19 @@ fn is_page_method_allowed(method: &str) -> bool {
     )
 }
 
+fn is_small_control_method(method: &str) -> bool {
+    matches!(
+        method,
+        "agent.tasks.get"
+            | "agent.tasks.list"
+            | "agent.tasks.cancel"
+            | "agent.tasks.events"
+            | "agent.chats.get"
+            | "agent.chats.list"
+            | "agent.chats.cancel"
+    )
+}
+
 fn is_agent_json_content_type(value: &[u8]) -> bool {
     value.eq_ignore_ascii_case(b"application/json")
 }
@@ -328,7 +346,35 @@ fn browser_sdk_script(configuration: &str) -> String {
     script
 }
 
-async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
+async fn serve(socket: TcpStream, route: &Route) -> std::io::Result<()> {
+    serve_with_agent_dispatch(
+        socket,
+        route,
+        &AGENT_REQUESTS,
+        &AGENT_CONTROL_REQUESTS,
+        |host, run_id, method, arguments| async move {
+            let owner = host.owner.upgrade()?;
+            Some(
+                owner
+                    .agent_page_json(host.app_id, run_id, method, arguments)
+                    .await,
+            )
+        },
+    )
+    .await
+}
+
+async fn serve_with_agent_dispatch<F, Fut>(
+    mut socket: TcpStream,
+    route: &Route,
+    agent_requests: &Semaphore,
+    agent_control_requests: &Semaphore,
+    dispatch: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce(BrowserHost, String, String, String) -> Fut,
+    Fut: Future<Output = Option<String>>,
+{
     let mut bytes = Vec::with_capacity(4096);
     let head_end = loop {
         if let Some(index) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
@@ -541,12 +587,30 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
             Some(length) if length <= MAX_AGENT_BODY => length,
             _ => return error(&mut socket, 413, "Agent request too large").await,
         };
-        let Ok(_upload_permit) = AGENT_REQUESTS.try_acquire() else {
-            return error(&mut socket, 429, "application host is busy; retry later").await;
-        };
         if length == 0 {
             return error(&mut socket, 400, "invalid request body").await;
         }
+        let small_body = length <= MAX_AGENT_CONTROL_BODY;
+        let mut control_permit = if small_body {
+            match agent_control_requests.try_acquire() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    return error(&mut socket, 429, "application host is busy; retry later").await;
+                }
+            }
+        } else {
+            None
+        };
+        let mut heavy_permit = if small_body {
+            None
+        } else {
+            match agent_requests.try_acquire() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    return error(&mut socket, 429, "application host is busy; retry later").await;
+                }
+            }
+        };
         let prefix = &bytes[head_end..];
         let spool = match tokio::time::timeout(
             Duration::from_secs(30),
@@ -580,18 +644,37 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
             )
             .await;
         }
-        let Some((host, owner)) = route
-            .host
-            .as_ref()
-            .and_then(|host| host.owner.upgrade().map(|owner| (host, owner)))
-        else {
+        let control_method = is_small_control_method(&input.method);
+        if control_method && !small_body {
+            return error(&mut socket, 413, "Agent control request too large").await;
+        }
+        let _heavy_permit = if control_method {
+            None
+        } else {
+            let permit = match heavy_permit.take() {
+                Some(permit) => permit,
+                None => match agent_requests.try_acquire() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        return error(&mut socket, 429, "application host is busy; retry later")
+                            .await;
+                    }
+                },
+            };
+            // The body was bounded and parsed while holding the control lane;
+            // after taking the heavy lane, only its one request can retain an
+            // arbitrary-size input across the awaited native handoff.
+            drop(control_permit.take());
+            Some(permit)
+        };
+        let Some(host) = route.host.as_ref().cloned() else {
             return error(&mut socket, 503, "application host unavailable").await;
         };
         let PageRequest { method, args } = input;
         let arguments = String::from(Box::<str>::from(args));
-        let result = owner
-            .agent_page_json(host.app_id.clone(), route.run_id.clone(), method, arguments)
-            .await;
+        let Some(result) = dispatch(host, route.run_id.clone(), method, arguments).await else {
+            return error(&mut socket, 503, "application host unavailable").await;
+        };
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n", result.len()).as_bytes()).await?;
         return socket.write_all(result.as_bytes()).await;
     }
@@ -1460,5 +1543,373 @@ mod agent_json_tests {
         assert!(host_adapter >= bundle.len());
         assert!(script[bundle.len()..].contains("installBrowserAgent"));
         assert!(!script.contains("__LINGXI_APP_CONFIGURATION__"));
+    }
+}
+
+#[cfg(test)]
+mod agent_control_lane_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::task::JoinSet;
+
+    struct TestAdmission {
+        heavy: Semaphore,
+        control: Semaphore,
+    }
+
+    struct DelayedAgent {
+        chat_started: tokio::sync::Notify,
+        release_chat: Semaphore,
+        delay_events: AtomicBool,
+        events_started: AtomicUsize,
+        eight_events_started: tokio::sync::Notify,
+        release_events: Semaphore,
+        cancelled: AtomicBool,
+        dispatch_count: AtomicUsize,
+    }
+
+    impl DelayedAgent {
+        fn new() -> Self {
+            Self {
+                chat_started: tokio::sync::Notify::new(),
+                release_chat: Semaphore::new(0),
+                delay_events: AtomicBool::new(false),
+                events_started: AtomicUsize::new(0),
+                eight_events_started: tokio::sync::Notify::new(),
+                release_events: Semaphore::new(0),
+                cancelled: AtomicBool::new(false),
+                dispatch_count: AtomicUsize::new(0),
+            }
+        }
+
+        async fn dispatch(
+            &self,
+            host: BrowserHost,
+            run_id: String,
+            method: String,
+            arguments: String,
+        ) -> Option<String> {
+            if host.app_id != "authorized-app" || run_id != "epoch" {
+                return None;
+            }
+            self.dispatch_count.fetch_add(1, Ordering::SeqCst);
+            let arguments: serde_json::Value = serde_json::from_str(&arguments).ok()?;
+            let value = match method.as_str() {
+                "agent.chats.send" => {
+                    if arguments["chatId"] != "chat-1" || arguments["input"]["runId"] != "run-1" {
+                        return None;
+                    }
+                    self.chat_started.notify_one();
+                    self.release_chat.acquire().await.ok()?.forget();
+                    serde_json::json!({"runId":"run-1"})
+                }
+                "agent.tasks.get" => {
+                    if arguments["runId"] != "run-1" {
+                        return None;
+                    }
+                    serde_json::json!({
+                        "runId":"run-1",
+                        "state":if self.cancelled.load(Ordering::SeqCst) {"cancelled"} else {"running"}
+                    })
+                }
+                "agent.tasks.events" => {
+                    if arguments["runId"] != "run-1" {
+                        return None;
+                    }
+                    if self.delay_events.load(Ordering::SeqCst) {
+                        let started = self.events_started.fetch_add(1, Ordering::SeqCst) + 1;
+                        if started == 8 {
+                            self.eight_events_started.notify_one();
+                        }
+                        self.release_events.acquire().await.ok()?.forget();
+                    }
+                    serde_json::json!({"events":[],"sequence":1})
+                }
+                "agent.tasks.list" => serde_json::json!({"tasks":[]}),
+                "agent.tasks.cancel" => {
+                    if arguments["runId"] != "run-1" {
+                        return None;
+                    }
+                    self.cancelled.store(true, Ordering::SeqCst);
+                    serde_json::Value::Null
+                }
+                _ => return None,
+            };
+            Some(serde_json::json!({"ok":true,"value":value}).to_string())
+        }
+    }
+
+    fn spawn_test_gateway(
+        listener: TcpListener,
+        route: Route,
+        admission: Arc<TestAdmission>,
+        agent: Arc<DelayedAgent>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let listener = Arc::new(listener);
+            let route = Arc::new(route);
+            let permits = Arc::new(Semaphore::new(32));
+            loop {
+                let socket = tokio::select! {
+                    _ = route.cancel.cancelled() => break,
+                    accepted = listener.accept() => match accepted {
+                        Ok((socket, peer)) if peer.ip().is_loopback() => socket,
+                        Ok(_) => continue,
+                        Err(_) => break,
+                    },
+                };
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    continue;
+                };
+                let route = route.clone();
+                let admission = admission.clone();
+                let agent = agent.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    tokio::select! {
+                        _ = route.cancel.cancelled() => {},
+                        _ = serve_with_agent_dispatch(
+                            socket,
+                            &route,
+                            &admission.heavy,
+                            &admission.control,
+                            move |host, run_id, method, arguments| {
+                                let agent = agent.clone();
+                                async move { agent.dispatch(host, run_id, method, arguments).await }
+                            },
+                        ) => {},
+                    }
+                });
+            }
+        })
+    }
+
+    async fn post_body(port: u16, origin: &str, body: &str) -> String {
+        let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        socket
+            .write_all(
+                format!(
+                    "POST /__run/epoch/__host/agent HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {origin}\r\nReferer: http://127.0.0.1:{port}/__run/epoch/index.html\r\nContent-Type: application/json\r\nX-LingXi-App-Request: 1\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut output = Vec::new();
+        let read_result =
+            tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut output))
+                .await
+                .unwrap();
+        if let Err(error) = read_result {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+            assert!(
+                !output.is_empty(),
+                "connection reset before the gateway response arrived"
+            );
+        }
+        String::from_utf8(output).unwrap()
+    }
+
+    async fn post_json(port: u16, method: &str, args: serde_json::Value) -> String {
+        post_body(
+            port,
+            &format!("http://127.0.0.1:{port}"),
+            &serde_json::json!({"method":method,"args":args}).to_string(),
+        )
+        .await
+    }
+
+    fn status(response: &str) -> u16 {
+        response
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    fn json_body(response: &str) -> serde_json::Value {
+        serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
+    }
+
+    #[tokio::test]
+    async fn slow_chat_send_keeps_bounded_control_requests_live_and_rejects_oversized_controls() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_root = temp.path().canonicalize().unwrap();
+        let spool_path = temp_root.join("host-owned-agent-spool");
+        ensure_host_directory(&spool_path, true).unwrap();
+        let spool_dir = spool_path.canonicalize().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = CancellationToken::new();
+        let route = Route {
+            host: Some(BrowserHost {
+                owner: Weak::new(),
+                app_id: "authorized-app".into(),
+                name: "Test App".into(),
+                revision: 1,
+                platform: "android".into(),
+            }),
+            run_id: "epoch".into(),
+            root: temp.path().into(),
+            spool_dir: spool_dir.clone(),
+            entry: "index.html".into(),
+            entry_service: None,
+            services: BTreeMap::new(),
+            port,
+            capabilities: Vec::new(),
+            cancel: cancel.clone(),
+        };
+        let admission = Arc::new(TestAdmission {
+            heavy: Semaphore::new(1),
+            control: Semaphore::new(8),
+        });
+        let agent = Arc::new(DelayedAgent::new());
+        let server = spawn_test_gateway(listener, route, admission, agent.clone());
+
+        let chat_send = tokio::spawn(post_json(
+            port,
+            "agent.chats.send",
+            serde_json::json!({
+                "chatId":"chat-1",
+                "input":{"runId":"run-1"}
+            }),
+        ));
+        if tokio::time::timeout(Duration::from_secs(2), agent.chat_started.notified())
+            .await
+            .is_err()
+        {
+            if chat_send.is_finished() {
+                panic!(
+                    "chat.send did not reach dispatch: {}",
+                    chat_send.await.unwrap()
+                );
+            }
+            panic!("chat.send remained pending without entering dispatch");
+        }
+        assert!(!chat_send.is_finished());
+
+        let get = post_json(
+            port,
+            "agent.tasks.get",
+            serde_json::json!({"runId":"run-1"}),
+        )
+        .await;
+        assert_eq!(status(&get), 200);
+        assert_eq!(json_body(&get)["value"]["state"], "running");
+        let events = post_json(
+            port,
+            "agent.tasks.events",
+            serde_json::json!({"runId":"run-1","afterSequence":0}),
+        )
+        .await;
+        assert_eq!(status(&events), 200);
+        assert_eq!(json_body(&events)["value"]["sequence"], 1);
+        let list = post_json(port, "agent.tasks.list", serde_json::json!({"limit":10})).await;
+        assert_eq!(status(&list), 200);
+        assert_eq!(json_body(&list)["value"]["tasks"], serde_json::json!([]));
+        let cancel_response = post_json(
+            port,
+            "agent.tasks.cancel",
+            serde_json::json!({"runId":"run-1"}),
+        )
+        .await;
+        assert_eq!(status(&cancel_response), 200);
+        assert_eq!(
+            json_body(&cancel_response)["value"],
+            serde_json::Value::Null
+        );
+        let cancelled = post_json(
+            port,
+            "agent.tasks.get",
+            serde_json::json!({"runId":"run-1"}),
+        )
+        .await;
+        assert_eq!(status(&cancelled), 200);
+        assert_eq!(json_body(&cancelled)["value"]["state"], "cancelled");
+
+        let competing_heavy = serde_json::json!({
+            "method":"agent.tasks.start",
+            "args":{"input":{"padding":"x".repeat(MAX_AGENT_CONTROL_BODY)}}
+        })
+        .to_string();
+        assert!(competing_heavy.len() > MAX_AGENT_CONTROL_BODY);
+        let competing_response =
+            post_body(port, &format!("http://127.0.0.1:{port}"), &competing_heavy).await;
+        assert_eq!(status(&competing_response), 429);
+        assert_eq!(std::fs::read_dir(&spool_dir).unwrap().count(), 0);
+
+        let call_count = agent.dispatch_count.load(Ordering::SeqCst);
+        let unauthorized_body = serde_json::json!({
+            "method":"agent.tasks.events",
+            "args":{"runId":"run-1","padding":"x".repeat(MAX_AGENT_CONTROL_BODY)}
+        })
+        .to_string();
+        assert!(unauthorized_body.len() > MAX_AGENT_CONTROL_BODY);
+        let unauthorized = post_body(port, "https://untrusted.example", &unauthorized_body).await;
+        assert_eq!(status(&unauthorized), 403);
+        assert_eq!(agent.dispatch_count.load(Ordering::SeqCst), call_count);
+        assert_eq!(std::fs::read_dir(&spool_dir).unwrap().count(), 0);
+
+        agent.delay_events.store(true, Ordering::SeqCst);
+        let mut event_requests = JoinSet::new();
+        for _ in 0..9 {
+            event_requests.spawn(post_json(
+                port,
+                "agent.tasks.events",
+                serde_json::json!({"runId":"run-1","afterSequence":0}),
+            ));
+        }
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            agent.eight_events_started.notified(),
+        )
+        .await
+        .unwrap();
+        let saturated = tokio::time::timeout(Duration::from_secs(2), event_requests.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(status(&saturated), 429);
+        assert_eq!(agent.events_started.load(Ordering::SeqCst), 8);
+        agent.release_events.add_permits(8);
+        let mut released_control_responses = 0;
+        while let Some(result) = event_requests.join_next().await {
+            assert_eq!(status(&result.unwrap()), 200);
+            released_control_responses += 1;
+        }
+        assert_eq!(released_control_responses, 8);
+
+        agent.release_chat.add_permits(1);
+        let chat_response = chat_send.await.unwrap();
+        assert_eq!(status(&chat_response), 200);
+        assert_eq!(json_body(&chat_response)["value"]["runId"], "run-1");
+
+        let dispatch_count = agent.dispatch_count.load(Ordering::SeqCst);
+        let oversized_control = serde_json::json!({
+            "method":"agent.tasks.events",
+            "args":{"runId":"run-1","padding":"x".repeat(MAX_AGENT_CONTROL_BODY)}
+        })
+        .to_string();
+        assert!(oversized_control.len() > MAX_AGENT_CONTROL_BODY);
+        let oversized = post_body(
+            port,
+            &format!("http://127.0.0.1:{port}"),
+            &oversized_control,
+        )
+        .await;
+        assert_eq!(status(&oversized), 413);
+        assert_eq!(agent.dispatch_count.load(Ordering::SeqCst), dispatch_count);
+        assert_eq!(std::fs::read_dir(&spool_dir).unwrap().count(), 0);
+
+        cancel.cancel();
+        server.await.unwrap();
     }
 }
