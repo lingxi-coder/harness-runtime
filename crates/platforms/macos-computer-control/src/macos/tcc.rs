@@ -85,8 +85,16 @@ pub fn query_os_permissions(
     }))
 }
 
-fn query_unavailable() -> lingxi_core::host::computer_control::ComputerError {
-    lingxi_core::host::computer_control::ComputerError::PermissionDenied("Could not verify macOS Accessibility access. Retry when the accessibility service is available.".into())
+fn query_unavailable(
+    stage: &str,
+    status: Option<i32>,
+    has_value: Option<bool>,
+) -> lingxi_core::host::computer_control::ComputerError {
+    // Status and presence are safe diagnostic facts: never include the AX value
+    // itself, window titles, application content or any user-controlled string.
+    lingxi_core::host::computer_control::ComputerError::PermissionDenied(format!(
+        "Could not verify macOS Accessibility access. Retry when the accessibility service is available. (AX probe stage={stage}, status={status:?}, hasValue={has_value:?})"
+    ))
 }
 
 fn accessibility_query_result(
@@ -99,7 +107,11 @@ fn accessibility_query_result(
     }
     match (status, has_value) {
         (0, true) | (-25212, _) => Ok(true), // No focused application is not a TCC revocation.
-        _ => Err(query_unavailable()),
+        _ => Err(query_unavailable(
+            "focused_application",
+            Some(status),
+            Some(has_value),
+        )),
     }
 }
 
@@ -113,11 +125,13 @@ fn query_accessibility() -> Result<bool, lingxi_core::host::computer_control::Co
     }
     let raw = unsafe { AXUIElementCreateSystemWide() };
     if raw.is_null() {
-        return Err(query_unavailable());
+        return Err(query_unavailable("create_systemwide", None, Some(false)));
     }
     let system = unsafe { CFType::wrap_under_create_rule(raw) };
-    if unsafe { AXUIElementSetMessagingTimeout(system.as_concrete_TypeRef(), 0.25) } != 0 {
-        return Err(query_unavailable());
+    let timeout_status =
+        unsafe { AXUIElementSetMessagingTimeout(system.as_concrete_TypeRef(), 0.25) };
+    if timeout_status != 0 {
+        return Err(query_unavailable("set_timeout", Some(timeout_status), None));
     }
     let attribute = CFString::from_static_string("AXFocusedApplication");
     let mut value = std::ptr::null();
@@ -170,7 +184,7 @@ pub fn check_os_permissions() -> Option<(bool, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use super::accessibility_query_result;
+    use super::{accessibility_query_result, query_unavailable};
 
     #[test]
     fn cached_trust_cannot_override_disabled_or_unavailable_ax_messaging() {
@@ -190,5 +204,23 @@ mod tests {
                 "AX status {status}"
             );
         }
+    }
+
+    #[test]
+    fn unavailable_queries_report_only_the_bounded_probe_stage_and_raw_status() {
+        let error = accessibility_query_result(true, -25204, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("stage=focused_application"));
+        assert!(error.contains("status=Some(-25204)"));
+        assert!(error.contains("hasValue=Some(false)"));
+        let error = query_unavailable("set_timeout", Some(-25202), None).to_string();
+        assert!(error.contains("stage=set_timeout"));
+        assert!(error.contains("status=Some(-25202)"));
+        assert!(error.contains("hasValue=None"));
+        let error = query_unavailable("create_systemwide", None, Some(false)).to_string();
+        assert!(error.contains("stage=create_systemwide"));
+        assert!(error.contains("status=None"));
+        assert!(error.contains("hasValue=Some(false)"));
     }
 }
