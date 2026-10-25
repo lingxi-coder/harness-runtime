@@ -603,6 +603,12 @@ pub fn error_message(code: &str) -> &'static str {
         "model_request_not_sent" => {
             "The host rejected the model request before sending it. Review model settings and retry."
         }
+        "model_request_outcome_unknown" => {
+            "An earlier model request may have been sent. Check task and provider state before retrying to avoid duplicate work or charges."
+        }
+        "model_request_attempts_exhausted" => {
+            "The model request attempt limit was reached. Review task history and usage before starting another run."
+        }
         "model_capability_unsupported" => {
             "A required model capability is unavailable on the selected route. Choose a compatible model in native settings."
         }

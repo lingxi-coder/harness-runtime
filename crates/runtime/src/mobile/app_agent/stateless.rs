@@ -1,9 +1,7 @@
 //! Independent stateless Local App understanding requests.
 use super::{AppAgentFactory, STRUCTURED_OUTPUT_TOOL_NAME, schema::NativeSchema};
 use crate::app_agent_input;
-use cost::{
-    CostCalculator, ModelRef as CostModelRef, PricingCatalog, ProviderId as CostProviderId,
-};
+use cost::{CostCalculator, ModelRef as CostModelRef, PricingCatalog, ProviderId as CostProviderId};
 use lingxi_core::{
     host::json_schema_validator::{CompiledJsonSchema, JsonSchemaValidation},
     types::{ContentBlock, ConversationMessage, MessageId, utf16_json::Utf16JsonProjection},
@@ -434,9 +432,13 @@ pub(super) fn safe_llm_error_code(error: &llm_runtime::LlmError) -> &'static str
         | LlmError::TlsCert { .. }
         | LlmError::ProxyTunnelResponse { .. }
         | LlmError::StreamInterrupted { .. } => "model_transport_failed",
-        LlmError::RequestDispatchRejected { .. } | LlmError::ApiAttemptsExhausted => {
-            "model_request_not_sent"
-        }
+        LlmError::RequestDispatchRejected {
+            prior_dispatch: true,
+        } => "model_request_outcome_unknown",
+        LlmError::RequestDispatchRejected {
+            prior_dispatch: false,
+        } => "model_request_not_sent",
+        LlmError::ApiAttemptsExhausted => "model_request_attempts_exhausted",
         LlmError::ModelUnavailable => "model_unavailable",
         LlmError::UnsupportedCapability { .. } => "model_capability_unsupported",
         LlmError::MediaDelegationUnavailable { .. } => "model_media_unavailable",
@@ -887,6 +889,58 @@ mod tests {
         assert_eq!(
             provider_http_status_code(Some(401)),
             Some("model_provider_http_401")
+        );
+    }
+
+    #[test]
+    fn dispatch_failure_codes_reflect_prior_physical_attempts() {
+        let prior_attempt_rejected = llm_runtime::LlmError::RequestDispatchRejected {
+            prior_dispatch: true,
+        };
+        let wrapped_prior_attempt_rejected = provider_error(
+            llm_runtime::LlmError::RequestDispatchRejected {
+                prior_dispatch: true,
+            },
+            "PROVIDER_BODY_CANARY API_KEY_CANARY /private/provider-response.json",
+        );
+        let cases = [
+            (
+                llm_runtime::LlmError::RequestDispatchRejected {
+                    prior_dispatch: false,
+                },
+                "model_request_not_sent",
+            ),
+            (prior_attempt_rejected, "model_request_outcome_unknown"),
+            (
+                wrapped_prior_attempt_rejected,
+                "model_request_outcome_unknown",
+            ),
+            (
+                llm_runtime::LlmError::ApiAttemptsExhausted,
+                "model_request_attempts_exhausted",
+            ),
+        ];
+        let canaries = ["CANARY", "API_KEY_CANARY", "/private/"];
+
+        for (error, expected_code) in cases {
+            let code = safe_llm_error_code(&error);
+            assert_eq!(code, expected_code);
+            let message = local_app::v2::agent::error_message(code);
+            for canary in canaries {
+                assert!(!code.contains(canary), "error code leaked {canary}: {code}");
+                assert!(
+                    !message.contains(canary),
+                    "error copy leaked {canary}: {message}"
+                );
+            }
+        }
+        assert_eq!(
+            local_app::v2::agent::error_message("model_request_outcome_unknown"),
+            "An earlier model request may have been sent. Check task and provider state before retrying to avoid duplicate work or charges."
+        );
+        assert_eq!(
+            local_app::v2::agent::error_message("model_request_attempts_exhausted"),
+            "The model request attempt limit was reached. Review task history and usage before starting another run."
         );
     }
 
