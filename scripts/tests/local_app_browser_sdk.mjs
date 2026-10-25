@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
+import {spawnSync} from 'node:child_process';
 import {readFileSync} from 'node:fs';
 import {File} from 'node:buffer';
 import {webcrypto} from 'node:crypto';
 import test from 'node:test';
+import {fileURLToPath} from 'node:url';
 import vm from 'node:vm';
 
 const bundle = readFileSync(new URL('../../packages/local-app-agui/dist/browser.global.js', import.meta.url), 'utf8');
@@ -324,6 +326,20 @@ test('file picker and run-scoped service helpers remain available', async () => 
 test('host preexisting SDK and child frame remain untouched', () => {
   assert.equal(browser({existing: true}).api.desktop, true);
   assert.equal(browser({child: true}).api, undefined);
+});
+
+test('dynamic ES module import exposes the official SDK before the browser host adapter', () => {
+  const fixture = fileURLToPath(new URL('./fixtures/local_app_browser_sdk_module.mjs', import.meta.url));
+  const repositoryRoot = fileURLToPath(new URL('../../', import.meta.url));
+  const result = spawnSync(process.execPath, [fixture], {
+    cwd: repositoryRoot,
+    encoding: 'utf8',
+    timeout: 15000,
+  });
+
+  assert.equal(result.error, undefined, result.error?.message);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /module-mode browser SDK bootstrap initialized localApp, File, and fresh client APIs/);
 });
 
 test('offline recovery uses only the new AG-UI runId store and callback', () => {

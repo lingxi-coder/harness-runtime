@@ -62,18 +62,34 @@ impl AppAgentFactory {
         use sha2::Digest;
         let mut models = Vec::new();
         for m in self.api.model_listings().into_iter().filter(|m| !m.hidden) {
-            let ready = self
+            let route = self
                 .api
-                .credential_source(&m.request_model, Some(&m.profile_name))
-                .await
-                .is_ok_and(|s| {
-                    !matches!(
-                        s,
-                        llm_runtime::CredentialSource::None
-                            | llm_runtime::CredentialSource::Unknown
-                    )
-                });
-            models.push(json!({"providerId":m.profile_name,"modelId":m.request_model,"label":m.display_model,"canSelect":ready,"supportsImages":m.capabilities.vision,"supportsStructuredOutput":m.capabilities.tools}));
+                .resolve_media_route(&m.request_model, Some(&m.profile_name));
+            let capabilities = route
+                .as_ref()
+                .map(|route| stateless::app_agent_capabilities(&self.api, route))
+                .unwrap_or_default();
+            let ready = route.is_ok()
+                && self
+                    .api
+                    .credential_source(&m.request_model, Some(&m.profile_name))
+                    .await
+                    .is_ok_and(|s| {
+                        !matches!(
+                            s,
+                            llm_runtime::CredentialSource::None
+                                | llm_runtime::CredentialSource::Unknown
+                        )
+                    });
+            models.push(json!({
+                "providerId":m.profile_name,
+                "modelId":m.request_model,
+                "label":m.display_model,
+                "canSelect":ready,
+                "supportsImages":capabilities.supports_images,
+                "supportsTools":capabilities.supports_tools,
+                "supportsStructuredOutput":stateless::supports_structured_output(capabilities)
+            }));
         }
         let mut tools: BTreeMap<String, ToolGrant> = BUILTINS
             .iter()
@@ -172,25 +188,24 @@ impl AppAgentFactory {
             return Err("invalid_admission".into());
         }
         let model = &admission.task.model;
-        let listing = self
-            .api
-            .model_listings()
-            .into_iter()
-            .find(|m| {
-                !m.hidden
-                    && m.profile_name == model.provider_id
-                    && m.request_model == model.model_id
-            })
-            .ok_or("model_unavailable")?;
+        let route =
+            stateless::resolve_selected_route(&self.api, &model.model_id, &model.provider_id)?;
+        let capabilities = stateless::app_agent_capabilities(&self.api, &route);
         if input.attachments.iter().any(|file| {
             file.media_type.starts_with("image/") || file.media_type == "application/pdf"
-        }) && !listing.capabilities.vision
+        }) && !capabilities.supports_images
         {
             return Err("model_vision_unsupported".into());
         }
-        if (input.output_schema.is_some() || !admission.tools.is_empty())
-            && !listing.capabilities.tools
+        // Persistent Harness chats and tool-using tasks enforce schemas with
+        // the internal StructuredOutput tool, so this execution path requires
+        // function-tool capability even when the route supports native JSON.
+        if input.output_schema.is_some()
+            && !stateless::harness_structured_output_available(capabilities)
         {
+            return Err("model_tools_unsupported".into());
+        }
+        if !admission.tools.is_empty() && !capabilities.supports_tools {
             return Err("model_tools_unsupported".into());
         }
         if !self

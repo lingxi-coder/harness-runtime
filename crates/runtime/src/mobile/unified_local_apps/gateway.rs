@@ -317,9 +317,13 @@ fn browser_sdk_script(configuration: &str) -> String {
     let browser_sdk =
         include_str!("browser_sdk.js").replace("__LINGXI_APP_CONFIGURATION__", configuration);
     let agui_bundle = include_str!("../../../../../packages/local-app-agui/dist/browser.global.js");
-    let mut script = String::with_capacity(agui_bundle.len() + browser_sdk.len() + 3);
+    let mut script = String::with_capacity(agui_bundle.len() + browser_sdk.len() + 96);
     script.push_str(agui_bundle);
-    script.push_str("\n;\n");
+    // browser.global.js declares its namespace with top-level var, which
+    // becomes module-scoped when this route is loaded through import().
+    // Publish that exact official bundle export on the browser global before
+    // the host adapter runs. In a classic script this is an idempotent write.
+    script.push_str("\n;\nglobalThis.LingxiLocalAppAGUI = LingxiLocalAppAGUI;\n;\n");
     script.push_str(&browser_sdk);
     script
 }
@@ -1447,7 +1451,12 @@ mod agent_json_tests {
         let bundle = include_str!("../../../../../packages/local-app-agui/dist/browser.global.js");
         let script = browser_sdk_script(r#"{"appId":"fixture"}"#);
         assert!(script.starts_with(bundle));
+        let global_export = script
+            .find("globalThis.LingxiLocalAppAGUI = LingxiLocalAppAGUI;")
+            .unwrap();
         let host_adapter = script.find("const config =").unwrap();
+        assert!(global_export >= bundle.len());
+        assert!(global_export < host_adapter);
         assert!(host_adapter >= bundle.len());
         assert!(script[bundle.len()..].contains("installBrowserAgent"));
         assert!(!script.contains("__LINGXI_APP_CONFIGURATION__"));
