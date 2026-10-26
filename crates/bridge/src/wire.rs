@@ -137,6 +137,10 @@ pub struct BridgeRequest {
     pub id: u64,
     /// Method name (e.g. `"run_turn"`, `"dispatch_tool"`).
     pub method: String,
+    /// Optional W3C parent context for this request. This is transport metadata,
+    /// separate from the command payload and never an authorization input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<telemetry::otel::SerializedTraceContext>,
     /// Method parameters. // M9: typed against `lingxi_core::types::Effect`.
     #[serde(with = "lingxi_core::types::utf16_json::raw_json_serde")]
     pub params: Utf16JsonProjection,

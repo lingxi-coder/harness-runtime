@@ -336,7 +336,7 @@ fn mod_turn_step_stream(
     let worker_model = effective_model.clone();
     let worker_error = physical_error.clone();
     tokio::spawn(lingxi_core::host::model_safety::bind_current_model_safety(
-        async move {
+        telemetry::otel::bind_current_trace_context(async move {
             let finish_wire = worker_wire.clone();
             let requested_model = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let source_requested = requested_model.clone();
@@ -762,7 +762,7 @@ fn mod_turn_step_stream(
                     let _ = sender.send((Err(typed), ack)).await;
                 }
             }
-        },
+        }),
     ));
     let stream = futures::stream::unfold(
         (receiver, None::<tokio::sync::oneshot::Sender<()>>),
