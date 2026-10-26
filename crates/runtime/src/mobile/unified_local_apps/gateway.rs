@@ -383,6 +383,18 @@ struct HtmlTag {
     declaration: bool,
 }
 
+fn is_html_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0c' | b'\r')
+}
+
+fn is_html_whitespace_char(character: char) -> bool {
+    matches!(character, ' ' | '\t' | '\n' | '\u{000c}' | '\r')
+}
+
+fn trim_html_whitespace(value: &str) -> &str {
+    value.trim_matches(is_html_whitespace_char)
+}
+
 fn next_html_tag(html: &str, lower: &str, mut cursor: usize) -> Option<HtmlTag> {
     let bytes = lower.as_bytes();
     loop {
@@ -394,7 +406,9 @@ fn next_html_tag(html: &str, lower: &str, mut cursor: usize) -> Option<HtmlTag> 
             continue;
         }
         let mut name_start = start + 1;
-        let declaration = bytes.get(name_start).is_some_and(|byte| matches!(*byte, b'!' | b'?'));
+        let declaration = bytes
+            .get(name_start)
+            .is_some_and(|byte| matches!(*byte, b'!' | b'?'));
         if declaration {
             name_start += 1;
         }
@@ -407,16 +421,15 @@ fn next_html_tag(html: &str, lower: &str, mut cursor: usize) -> Option<HtmlTag> 
             continue;
         }
         let mut name_end = name_start;
-        while bytes.get(name_end).is_some_and(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b':')
-        }) {
+        while bytes
+            .get(name_end)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b':'))
+        {
             name_end += 1;
         }
         let boundary = bytes.get(name_end).copied();
         if !declaration
-            && !boundary.is_some_and(|byte| {
-                byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>')
-            })
+            && !boundary.is_some_and(|byte| is_html_whitespace(byte) || matches!(byte, b'/' | b'>'))
         {
             // Skip the malformed/start-like token as one attribute-bearing tag,
             // so a '<head>' substring inside it cannot become an insertion point.
@@ -435,12 +448,18 @@ fn next_html_tag(html: &str, lower: &str, mut cursor: usize) -> Option<HtmlTag> 
 }
 
 fn skip_raw_text_element(html: &str, lower: &str, after_opening_tag: usize, name: &str) -> usize {
+    if name == "plaintext" {
+        return html.len();
+    }
+    if name == "script" {
+        return skip_script_element(html, lower, after_opening_tag);
+    }
     let closing = format!("</{name}");
     let mut cursor = after_opening_tag;
     while let Some(offset) = lower[cursor..].find(&closing) {
         let start = cursor + offset;
         let boundary = lower.as_bytes().get(start + closing.len()).copied();
-        if boundary.is_some_and(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>')) {
+        if boundary.is_some_and(|byte| is_html_whitespace(byte) || matches!(byte, b'/' | b'>')) {
             return find_tag_end(html, start).unwrap_or(html.len());
         }
         cursor = start + closing.len();
@@ -448,48 +467,166 @@ fn skip_raw_text_element(html: &str, lower: &str, after_opening_tag: usize, name
     html.len()
 }
 
-fn next_tag_cursor(html: &str, lower: &str, tag: &HtmlTag) -> usize {
+fn is_html_tag_boundary(byte: u8) -> bool {
+    is_html_whitespace(byte) || matches!(byte, b'/' | b'>')
+}
+
+fn skip_script_element(html: &str, lower: &str, after_opening_tag: usize) -> usize {
+    let bytes = lower.as_bytes();
+    let mut state = 0_u8; // script data, escaped, or double escaped
+    let mut cursor = after_opening_tag;
+    while cursor < bytes.len() {
+        let rest = &bytes[cursor..];
+        if state != 0 && rest.starts_with(b"-->") {
+            state = 0;
+            cursor += 3;
+            continue;
+        }
+        if state == 0 && rest.starts_with(b"<!--") {
+            state = 1;
+            cursor += 4;
+            continue;
+        }
+        if state == 2
+            && rest.starts_with(b"</script")
+            && bytes
+                .get(cursor + 8)
+                .copied()
+                .is_some_and(is_html_tag_boundary)
+        {
+            state = 1;
+            cursor += 8;
+            continue;
+        }
+        if state != 2
+            && rest.starts_with(b"</script")
+            && bytes
+                .get(cursor + 8)
+                .copied()
+                .is_some_and(is_html_tag_boundary)
+        {
+            return find_tag_end(html, cursor).unwrap_or(html.len());
+        }
+        if state == 1
+            && rest.starts_with(b"<script")
+            && bytes
+                .get(cursor + 7)
+                .copied()
+                .is_some_and(is_html_tag_boundary)
+        {
+            state = 2;
+            cursor += 7;
+            continue;
+        }
+        cursor += 1;
+    }
+    html.len()
+}
+
+fn next_raw_text_cursor(html: &str, lower: &str, tag: &HtmlTag) -> usize {
     if !tag.closing && !tag.declaration {
         let name = &lower[tag.name_start..tag.name_end];
-        if matches!(name, "script" | "style" | "textarea" | "title") {
+        if matches!(
+            name,
+            "script"
+                | "style"
+                | "textarea"
+                | "title"
+                | "noscript"
+                | "iframe"
+                | "xmp"
+                | "noembed"
+                | "noframes"
+                | "plaintext"
+        ) {
             return skip_raw_text_element(html, lower, tag.end, name);
         }
     }
     tag.end
 }
 
-fn find_opening_tag_end(html: &str, name: &str) -> Option<usize> {
-    let lower = html.to_ascii_lowercase();
-    let mut cursor = 0;
-    while let Some(tag) = next_html_tag(html, &lower, cursor) {
-        if !tag.closing
-            && !tag.declaration
-            && lower[tag.name_start..tag.name_end].eq(name)
-        {
-            return Some(tag.end);
+fn skip_template_element(html: &str, lower: &str, after_opening_tag: usize) -> usize {
+    let mut depth = 1_usize;
+    let mut cursor = after_opening_tag;
+    while let Some(tag) = next_html_tag(html, lower, cursor) {
+        if !tag.declaration && lower[tag.name_start..tag.name_end].eq("template") {
+            if tag.closing {
+                depth -= 1;
+                if depth == 0 {
+                    return tag.end;
+                }
+            } else {
+                depth += 1;
+            }
         }
-        cursor = next_tag_cursor(html, &lower, &tag);
+        // Unlike the outer scanner, this cursor must see nested template tags
+        // so it can match their closing tags. It still skips comments and raw
+        // text, where a template-looking substring is not a tag token.
+        cursor = next_raw_text_cursor(html, lower, &tag);
     }
-    None
+    html.len()
+}
+
+fn next_tag_cursor(html: &str, lower: &str, tag: &HtmlTag) -> usize {
+    if !tag.closing && !tag.declaration && lower[tag.name_start..tag.name_end].eq("template") {
+        return skip_template_element(html, lower, tag.end);
+    }
+    next_raw_text_cursor(html, lower, tag)
 }
 
 fn is_webmcp_script_source(value: &str, expected: &str) -> bool {
-    let path = value.trim().split(|character| matches!(character, '?' | '#')).next().unwrap_or("");
+    let path = trim_html_whitespace(value)
+        .split(|character| matches!(character, '?' | '#'))
+        .next()
+        .unwrap_or("");
     path == expected || path == "/__host/webmcp.js"
 }
 
-fn script_tag_has_webmcp_source(attributes: &str, expected: &str) -> bool {
+fn base_href_may_override_origin(href: &str) -> bool {
+    // Mobile pages use an HTTP loopback origin. A custom-scheme sentinel has
+    // a fresh opaque Origin on each comparison, even for a relative URL.
+    let document_base = url::Url::parse("http://local-app.invalid/index.html")
+        .expect("static Local App URL is valid");
+    let Ok(candidate) = document_base.join(trim_html_whitespace(href)) else {
+        return false;
+    };
+    if matches!(candidate.scheme(), "data" | "javascript") {
+        return false;
+    }
+    candidate.origin() != document_base.origin()
+}
+
+#[derive(Default)]
+struct ScriptAttributes<'a> {
+    source: Option<&'a str>,
+    script_type: Option<&'a str>,
+    href: Option<&'a str>,
+    asynchronous: bool,
+    defer: bool,
+    no_module: bool,
+    integrity: bool,
+}
+
+fn script_attributes(attributes: &str) -> ScriptAttributes<'_> {
+    let mut result = ScriptAttributes::default();
+    let mut seen_source = false;
+    let mut seen_type = false;
+    let mut seen_href = false;
+    let mut seen_async = false;
+    let mut seen_defer = false;
+    let mut seen_no_module = false;
+    let mut seen_integrity = false;
     let mut cursor = 0;
     while cursor < attributes.len() {
         while let Some(character) = attributes[cursor..].chars().next() {
-            if !character.is_ascii_whitespace() && character != '/' {
+            if !is_html_whitespace_char(character) && character != '/' {
                 break;
             }
             cursor += character.len_utf8();
         }
         let name_start = cursor;
         while let Some(character) = attributes[cursor..].chars().next() {
-            if character.is_ascii_whitespace() || matches!(character, '=' | '/' | '>') {
+            if is_html_whitespace_char(character) || matches!(character, '=' | '/' | '>') {
                 break;
             }
             cursor += character.len_utf8();
@@ -502,83 +639,215 @@ fn script_tag_has_webmcp_source(attributes: &str, expected: &str) -> bool {
         }
         let name = &attributes[name_start..cursor];
         while let Some(character) = attributes[cursor..].chars().next() {
-            if !character.is_ascii_whitespace() {
+            if !is_html_whitespace_char(character) {
                 break;
             }
             cursor += character.len_utf8();
         }
-        if attributes.as_bytes().get(cursor) != Some(&b'=') {
-            continue;
-        }
-        cursor += 1;
-        while let Some(character) = attributes[cursor..].chars().next() {
-            if !character.is_ascii_whitespace() {
-                break;
+        let value = if attributes.as_bytes().get(cursor) == Some(&b'=') {
+            cursor += 1;
+            while let Some(character) = attributes[cursor..].chars().next() {
+                if !is_html_whitespace_char(character) {
+                    break;
+                }
+                cursor += character.len_utf8();
             }
-            cursor += character.len_utf8();
-        }
-        let value = match attributes[cursor..].chars().next() {
-            Some(quote @ ('\'' | '"')) => {
-                cursor += 1;
-                let value_start = cursor;
-                while let Some(character) = attributes[cursor..].chars().next() {
-                    if character == quote {
-                        break;
+            match attributes[cursor..].chars().next() {
+                Some(quote @ ('\'' | '"')) => {
+                    cursor += 1;
+                    let value_start = cursor;
+                    while let Some(character) = attributes[cursor..].chars().next() {
+                        if character == quote {
+                            break;
+                        }
+                        cursor += character.len_utf8();
                     }
-                    cursor += character.len_utf8();
-                }
-                let value = &attributes[value_start..cursor];
-                if cursor < attributes.len() {
-                    cursor += quote.len_utf8();
-                }
-                value
-            },
-            Some(_) => {
-                let value_start = cursor;
-                while let Some(character) = attributes[cursor..].chars().next() {
-                    if character.is_ascii_whitespace() || character == '>' {
-                        break;
+                    let value = &attributes[value_start..cursor];
+                    if cursor < attributes.len() {
+                        cursor += quote.len_utf8();
                     }
-                    cursor += character.len_utf8();
+                    value
                 }
-                &attributes[value_start..cursor]
+                Some(_) => {
+                    let value_start = cursor;
+                    while let Some(character) = attributes[cursor..].chars().next() {
+                        if is_html_whitespace_char(character) || character == '>' {
+                            break;
+                        }
+                        cursor += character.len_utf8();
+                    }
+                    &attributes[value_start..cursor]
+                }
+                None => "",
             }
-            None => "",
+        } else {
+            ""
         };
-        if name.eq_ignore_ascii_case("src") && is_webmcp_script_source(value, expected) {
-            return true;
+        if name.eq_ignore_ascii_case("src") && !seen_source {
+            result.source = Some(value);
+            seen_source = true;
+        } else if name.eq_ignore_ascii_case("type") && !seen_type {
+            result.script_type = Some(value);
+            seen_type = true;
+        } else if name.eq_ignore_ascii_case("href") && !seen_href {
+            result.href = Some(value);
+            seen_href = true;
+        } else if name.eq_ignore_ascii_case("async") && !seen_async {
+            result.asynchronous = true;
+            seen_async = true;
+        } else if name.eq_ignore_ascii_case("defer") && !seen_defer {
+            result.defer = true;
+            seen_defer = true;
+        } else if name.eq_ignore_ascii_case("nomodule") && !seen_no_module {
+            result.no_module = true;
+            seen_no_module = true;
+        } else if name.eq_ignore_ascii_case("integrity") && !seen_integrity {
+            result.integrity = true;
+            seen_integrity = true;
         }
     }
-    false
+    result
+}
+
+fn is_classic_script(attributes: &ScriptAttributes<'_>) -> bool {
+    let Some(script_type) = attributes.script_type else {
+        return true;
+    };
+    let mime = trim_html_whitespace(
+        trim_html_whitespace(script_type)
+            .split(';')
+            .next()
+            .unwrap_or(""),
+    );
+    mime.is_empty()
+        || [
+            "application/ecmascript",
+            "application/javascript",
+            "application/x-ecmascript",
+            "application/x-javascript",
+            "text/ecmascript",
+            "text/javascript",
+            "text/javascript1.0",
+            "text/javascript1.1",
+            "text/javascript1.2",
+            "text/javascript1.3",
+            "text/javascript1.4",
+            "text/javascript1.5",
+            "text/jscript",
+            "text/livescript",
+            "text/x-ecmascript",
+            "text/x-javascript",
+        ]
+        .iter()
+        .any(|candidate| mime.eq_ignore_ascii_case(candidate))
+}
+
+fn may_run_before_later_host_script(attributes: &ScriptAttributes<'_>) -> bool {
+    if attributes
+        .script_type
+        .is_some_and(|value| trim_html_whitespace(value).eq_ignore_ascii_case("module"))
+    {
+        return attributes.asynchronous;
+    }
+    if !is_classic_script(attributes) {
+        return false;
+    }
+    if attributes.source.is_none() {
+        return true;
+    }
+    attributes.asynchronous || attributes.no_module || !attributes.defer
+}
+
+fn reliable_host_script(attributes: &ScriptAttributes<'_>) -> bool {
+    attributes.source.is_some()
+        && is_classic_script(attributes)
+        && !attributes.asynchronous
+        && !attributes.defer
+        && !attributes.no_module
+        && !attributes.integrity
 }
 
 fn has_existing_webmcp_script(html: &str, expected: &str) -> bool {
     let lower = html.to_ascii_lowercase();
     let mut cursor = 0;
+    let mut earlier_blocking_application_script = false;
+    let mut base_href_seen = false;
+    let mut base_overrides_origin = false;
     while let Some(tag) = next_html_tag(html, &lower, cursor) {
         let name = &lower[tag.name_start..tag.name_end];
-        if !tag.closing
-            && !tag.declaration
-            && name == "script"
-            && script_tag_has_webmcp_source(&html[tag.name_end..tag.end.saturating_sub(1)], expected)
-        {
-            return true;
+        if !tag.closing && !tag.declaration && name == "base" {
+            let href = script_attributes(&html[tag.name_end..tag.end.saturating_sub(1)]).href;
+            if !base_href_seen {
+                if let Some(href) = href {
+                    base_href_seen = true;
+                    base_overrides_origin = base_href_may_override_origin(href);
+                }
+            }
+        } else if !tag.closing && !tag.declaration && name == "script" {
+            let attributes = script_attributes(&html[tag.name_end..tag.end.saturating_sub(1)]);
+            let host_script = attributes.source.is_some_and(|value| {
+                !base_overrides_origin && is_webmcp_script_source(value, expected)
+            });
+            if host_script
+                && reliable_host_script(&attributes)
+                && !earlier_blocking_application_script
+            {
+                return true;
+            }
+            if !host_script && may_run_before_later_host_script(&attributes) {
+                earlier_blocking_application_script = true;
+            }
         }
         cursor = next_tag_cursor(html, &lower, &tag);
     }
     false
 }
 
-fn find_doctype_end(html: &str) -> Option<usize> {
+fn find_leading_doctype_end(html: &str) -> Option<usize> {
     let lower = html.to_ascii_lowercase();
     let mut cursor = 0;
     while let Some(tag) = next_html_tag(html, &lower, cursor) {
         if tag.declaration && lower[tag.name_start..tag.name_end].eq("doctype") {
-            return Some(tag.end);
+            let tag_start = tag.name_start.saturating_sub(2);
+            return is_leading_html_preamble(&html[..tag_start]).then_some(tag.end);
+        }
+        if !tag.declaration {
+            return None;
         }
         cursor = next_tag_cursor(html, &lower, &tag);
     }
     None
+}
+
+fn is_leading_html_preamble(value: &str) -> bool {
+    let mut cursor = if value.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        0
+    };
+    let bytes = value.as_bytes();
+    while cursor < bytes.len() {
+        if is_html_whitespace(bytes[cursor]) {
+            cursor += 1;
+            continue;
+        }
+        if bytes[cursor..].starts_with(b"<!--") {
+            let Some(end) = value[cursor + 4..].find("-->") else {
+                return false;
+            };
+            cursor += 4 + end + 3;
+            continue;
+        }
+        if bytes[cursor..].starts_with(b"<?") || bytes[cursor..].starts_with(b"<!") {
+            let Some(end) = bytes[cursor + 2..].iter().position(|byte| *byte == b'>') else {
+                return false;
+            };
+            cursor += 2 + end + 1;
+            continue;
+        }
+        return false;
+    }
+    true
 }
 
 fn inject_webmcp_script(html: &str, run_id: &str) -> Option<String> {
@@ -588,11 +857,14 @@ fn inject_webmcp_script(html: &str, run_id: &str) -> Option<String> {
         return None;
     }
     let script = format!("<script src=\"{source}\" data-lingxi-webmcp></script>");
-    let doctype_end = find_doctype_end(html);
-    let insert_at = find_opening_tag_end(html, "head")
-        .or_else(|| find_opening_tag_end(html, "html"))
-        .or(doctype_end)
-        .unwrap_or(0);
+    let doctype_end = find_leading_doctype_end(html);
+    let insert_at = doctype_end.unwrap_or_else(|| {
+        if html.starts_with('\u{feff}') {
+            '\u{feff}'.len_utf8()
+        } else {
+            0
+        }
+    });
     let mut injected = String::with_capacity(html.len() + script.len());
     injected.push_str(&html[..insert_at]);
     injected.push_str(&script);
@@ -1048,23 +1320,25 @@ where
     if !metadata.is_file() {
         return error(&mut socket, 404, "asset not found").await;
     }
-    let content_type = match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
-        "html" | "htm" => "text/html; charset=utf-8",
-        "js" | "mjs" => "text/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" => "application/json",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "wasm" => "application/wasm",
-        "ico" => "image/x-icon",
-        "woff2" => "font/woff2",
-        _ => "application/octet-stream",
+    let extension = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let is_html = extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm");
+    let content_type = if is_html {
+        "text/html; charset=utf-8"
+    } else {
+        match extension {
+            "js" | "mjs" => "text/javascript; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "json" => "application/json",
+            "svg" => "image/svg+xml",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            "wasm" => "application/wasm",
+            "ico" => "image/x-icon",
+            "woff2" => "font/woff2",
+            _ => "application/octet-stream",
+        }
     };
-    let is_html = file.extension().and_then(|e| e.to_str()).is_some_and(|extension| {
-        extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm")
-    });
     if is_html && metadata.len() <= MAX_STATIC_HTML_TRANSFORM_BYTES {
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
         file_handle.read_to_end(&mut bytes).await?;
@@ -1236,6 +1510,21 @@ fn confined_file(root: &Path, raw: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relative_base_preserves_the_mobile_http_origin() {
+        for href in ["/assets/", "./assets/", "../assets/", "", "#fragment"] {
+            assert!(!base_href_may_override_origin(href), "{href}");
+        }
+        for href in [
+            "https://other.example/",
+            "lingxi-app://current/custom/",
+            "mailto:x",
+        ] {
+            assert!(base_href_may_override_origin(href), "{href}");
+        }
+    }
+
     pub(super) async fn exchange(port: u16, bytes: Vec<u8>) -> Vec<u8> {
         let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
             .await
@@ -1299,6 +1588,11 @@ mod tests {
             "<!doctype html><html><head data-note=\"left>right\"><script id=\"app-start\"></script></head><body></body></html>",
         )
         .unwrap();
+        std::fs::write(
+            temp.path().join("UPPER.HTML"),
+            "<!doctype html><script id=\"app-start\"></script>",
+        )
+        .unwrap();
         std::fs::write(temp.path().join("asset.js"), "window.asset = true;").unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1338,6 +1632,22 @@ mod tests {
         assert_eq!(body.matches("data-lingxi-webmcp").count(), 1);
         assert!(body.find(script).unwrap() < body.find("id=\"app-start\"").unwrap());
         assert!(response.contains(&format!("Content-Length: {}\r\n", body.len())));
+
+        let response = String::from_utf8(
+            exchange(
+                port,
+                format!(
+                    "GET /__run/current-run/UPPER.HTML HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+                )
+                .into_bytes(),
+            )
+            .await,
+        )
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("Content-Type: text/html; charset=utf-8"));
+        let body = response.split_once("\r\n\r\n").unwrap().1;
+        assert!(body.find("webmcp.js").unwrap() < body.find("id=\"app-start\"").unwrap());
 
         let response = String::from_utf8(
             exchange(
@@ -1708,6 +2018,25 @@ mod webmcp_injection_tests {
 
         let current_run_loaded = "<script src=\"/__run/run-5/__host/webmcp.js\"></script>";
         assert!(inject_webmcp_script(current_run_loaded, "run-5").is_none());
+
+        let late_head = "<!doctype html><script id=\"app-start\"></script><head></head>";
+        let late_head_injected = inject_webmcp_script(late_head, "run-11").unwrap();
+        let late_head_script =
+            "<script src=\"/__run/run-11/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        let doctype_end = "<!doctype html>".len();
+        assert!(late_head_injected.starts_with(&format!(
+            "{}{}",
+            &late_head[..doctype_end],
+            late_head_script
+        )));
+        assert!(
+            late_head_injected.find(late_head_script).unwrap()
+                < late_head_injected.find("id=\"app-start\"").unwrap()
+        );
+
+        let vt_prefix = "\u{000b}<!doctype html><script id=\"app-start\"></script>";
+        let vt_injected = inject_webmcp_script(vt_prefix, "run-16").unwrap();
+        assert!(vt_injected.starts_with("<script src=\"/__run/run-16/__host/webmcp.js\""));
     }
 
     #[test]
@@ -1732,6 +2061,109 @@ mod webmcp_injection_tests {
         // host resource and must not suppress run-scoped injection.
         let unrelated = "<script src=\"/other/__run/run-7/__host/webmcp.js\"></script>";
         assert!(inject_webmcp_script(unrelated, "run-7").is_some());
+    }
+
+    #[test]
+    fn template_content_and_inert_raw_text_do_not_suppress_or_capture_injection() {
+        let html = "<!doctype html><template><template><!-- </template><head> --><script>const fake='</template><head><script src=\"/__host/webmcp.js\">';</script><head><script src=\"/__host/webmcp.js\"></script></head></template></template><noscript><head><script src=\"/__host/webmcp.js\"></script></head></noscript><script id=\"app-start\"></script>";
+        let injected = inject_webmcp_script(html, "run-8").unwrap();
+        let script = "<script src=\"/__run/run-8/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        let doctype_end = "<!doctype html>".len();
+        assert!(injected.starts_with(&format!("{}{}", &html[..doctype_end], script)));
+        assert_eq!(injected.matches("data-lingxi-webmcp").count(), 1);
+        assert!(injected.find(script).unwrap() < injected.find("id=\"app-start\"").unwrap());
+
+        let minimal = "<!doctype html><template><head></head><p>x</p></template><script id=\"app-start\"></script>";
+        let minimal_injected = inject_webmcp_script(minimal, "run-10").unwrap();
+        let minimal_script =
+            "<script src=\"/__run/run-10/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        assert!(minimal_injected.starts_with(&format!(
+            "{}{}",
+            &minimal[..doctype_end],
+            minimal_script
+        )));
+        assert!(
+            minimal_injected.find(minimal_script).unwrap()
+                < minimal_injected.find("id=\"app-start\"").unwrap()
+        );
+
+        let template_only_script = "<!doctype html><template><script src=\"/__host/webmcp.js\"></script></template><script id=\"app-start\"></script>";
+        assert!(inject_webmcp_script(template_only_script, "run-9").is_some());
+
+        let double_escaped_script = "<!doctype html><script><!--<script></script><head><script src=\"/__host/webmcp.js\"></script></script><script id=\"app-start\"></script>";
+        let double_escaped_injected =
+            inject_webmcp_script(double_escaped_script, "run-12").unwrap();
+        let double_escaped_host =
+            "<script src=\"/__run/run-12/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        assert!(double_escaped_injected.starts_with(&format!(
+            "{}{}",
+            &double_escaped_script[..doctype_end],
+            double_escaped_host
+        )));
+        assert!(
+            double_escaped_injected.find(double_escaped_host).unwrap()
+                < double_escaped_injected.find("id=\"app-start\"").unwrap()
+        );
+
+        let invalid_whitespace = "<!doctype html><script\u{00a0}src=\"/__host/webmcp.js\"></script><script\u{000b}src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>";
+        assert!(inject_webmcp_script(invalid_whitespace, "run-15").is_some());
+    }
+
+    #[test]
+    fn only_an_early_blocking_classic_first_src_counts_as_preloaded_webmcp() {
+        let root = "/__host/webmcp.js";
+        for markup in [
+            "<script type=\"application/json\" src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script async src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script defer src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script type=\"module\" src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script type=\"text/javascript\u{00a0}\" src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script type=\"text/javascript\u{000b}\" src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<base href=\"https://other.example/\"><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script src=\"/other.js\" src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script id=\"app-start\"></script><script src=\"/__host/webmcp.js\"></script>",
+            "<script async src=\"/app.js\"></script><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script type=\"module\" async src=\"/app.js\"></script><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+        ] {
+            let html = format!("<!doctype html>{markup}");
+            assert!(inject_webmcp_script(&html, "run-13").is_some(), "{markup}");
+        }
+        let already_blocking = format!(
+            "<!doctype html><script src=\"{root}\"></script><script id=\"app-start\"></script>"
+        );
+        assert!(inject_webmcp_script(&already_blocking, "run-14").is_none());
+
+        for ignored_base in [
+            "<base href=\"data:text/html,\"><script src=\"/__host/webmcp.js\"></script>",
+            "<base href=\"javascript:alert(1)\"><script src=\"/__host/webmcp.js\"></script>",
+            "<base href=\"http[\"><script src=\"/__host/webmcp.js\"></script>",
+        ] {
+            let html = format!("<!doctype html>{ignored_base}<script id=\"app-start\"></script>");
+            assert!(inject_webmcp_script(&html, "run-14").is_none(), "{ignored_base}");
+        }
+
+        for first_base in [
+            "data:text/html,",
+            "javascript:alert(1)",
+            "http://[",
+        ] {
+            let html = format!(
+                "<!doctype html><base href=\"{first_base}\"><base href=\"https://example.invalid/assets/\"><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>"
+            );
+            assert!(inject_webmcp_script(&html, "run-15").is_none(), "{first_base}");
+        }
+
+        for valid_override in [
+            "mailto:x",
+            "about:blank",
+            "lingxi-app://app/custom/",
+            "foo:opaque",
+        ] {
+            let html = format!(
+                "<!doctype html><base href=\"{valid_override}\"><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>"
+            );
+            assert!(inject_webmcp_script(&html, "run-16").is_some(), "{valid_override}");
+        }
     }
 }
 
