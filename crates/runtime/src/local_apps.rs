@@ -34,17 +34,20 @@ impl BundledPromptFn for LocalAppPrompt {
 }
 
 /// (Re)register `/local-app` when the host offers the `LocalApp` tool.
-/// `shell_tool` names the host's shell tool for the optional check step.
+/// `shell_tool` names the host's shell tool for the optional check step, when
+/// that host has one.
 pub fn register_skill(
     registry: &mut CommandRegistry,
     available_tool_names: &[String],
-    shell_tool: &str,
+    shell_tool: Option<&str>,
 ) {
-    register_skill_text(
-        registry,
-        available_tool_names,
-        &include_str!("../assets/desktop-local-app.md").replace("{{SHELL_TOOL}}", shell_tool),
-    );
+    let shell_tool = shell_tool.filter(|shell| {
+        available_tool_names
+            .iter()
+            .any(|name| name.as_str() == *shell)
+    });
+    let markdown = local_app::skill::skill_markdown(shell_tool);
+    register_skill_text(registry, available_tool_names, &markdown);
 }
 
 fn register_skill_text(

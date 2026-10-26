@@ -6469,7 +6469,7 @@ pub async fn build_with_credential_stack(
         crate::local_apps::register_skill(
             &mut reg,
             &[local_app::TOOL_NAME.to_string(), "Bash".to_string()],
-            "Bash",
+            Some("Bash"),
         );
     }
     command_api::builtins::list_agents::register(

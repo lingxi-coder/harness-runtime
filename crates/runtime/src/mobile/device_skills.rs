@@ -161,7 +161,11 @@ pub(crate) fn register_mobile_device_skills(
         tool_shell_mobile::TOOL_NAME,
     );
     // `/local-app` follows the `LocalApp` tool the same way.
-    crate::local_apps::register_skill(registry, available_tool_names, tool_shell_mobile::TOOL_NAME);
+    crate::local_apps::register_skill(
+        registry,
+        available_tool_names,
+        Some(tool_shell_mobile::TOOL_NAME),
+    );
 }
 
 #[cfg(test)]
