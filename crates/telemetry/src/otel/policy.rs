@@ -1,18 +1,39 @@
 //! The outbound diagnostic schema. Content opt-ins never bypass this boundary.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::record::{AttrValue, Attributes};
+
+// Advanced under the process runtime-slot write lock. Exporters also check it
+// after their runtime has detached, so opt-out revokes draining and pending work.
+static PROCESS_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn current_generation() -> u64 {
+    PROCESS_GENERATION.load(Ordering::Acquire)
+}
+
+pub(crate) fn advance_generation() -> u64 {
+    PROCESS_GENERATION
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1)
+}
 
 #[derive(Debug)]
 pub(crate) struct ExportPolicy {
     enabled: AtomicBool,
+    generation: u64,
 }
 
 impl ExportPolicy {
+    #[cfg(test)]
     pub(crate) fn new(enabled: bool) -> Self {
+        Self::for_generation(enabled, current_generation())
+    }
+
+    pub(crate) fn for_generation(enabled: bool, generation: u64) -> Self {
         Self {
             enabled: AtomicBool::new(enabled),
+            generation,
         }
     }
 
@@ -21,7 +42,7 @@ impl ExportPolicy {
             // Opt-out is sticky: a fresh runtime is required to opt back in.
             self.revoke();
         }
-        self.enabled.load(Ordering::Acquire)
+        self.enabled.load(Ordering::Acquire) && self.generation == current_generation()
     }
 
     pub(crate) fn revoke(&self) {
@@ -69,6 +90,7 @@ pub(crate) fn filter_attributes(attrs: &Attributes, metrics: bool) -> Attributes
                     | "request.kind"
                     | "operation"
                     | "method"
+                    | "phase"
                     | "hook_event"
                     | "hook_type"
                     | "metrics_exporter"
@@ -106,6 +128,9 @@ pub(crate) fn filter_attributes(attrs: &Attributes, metrics: bool) -> Attributes
             if !dimension && (metrics || !measurement) {
                 return None;
             }
+            if key == "phase" && !matches!(value, AttrValue::Str(_)) {
+                return None;
+            }
             let value = match value {
                 AttrValue::Float(value) if !value.is_finite() => return None,
                 AttrValue::Str(value) if measurement => {
@@ -125,6 +150,9 @@ pub(crate) fn filter_attributes(attrs: &Attributes, metrics: bool) -> Attributes
 }
 
 fn safe_dimension(key: &str, value: &str) -> Option<String> {
+    if key == "phase" && !matches!(value, "pre" | "post") {
+        return None;
+    }
     if !safe_label(value) {
         return None;
     }
@@ -200,6 +228,22 @@ mod tests {
         assert!(logs.contains_key("duration_ms"));
         let metrics = filter_attributes(&attrs, true);
         assert_eq!(metrics.len(), 2);
+    }
+
+    #[test]
+    fn hook_phase_accepts_only_known_lifecycle_values() {
+        for metrics in [false, true] {
+            for phase in ["pre", "post"] {
+                let attrs = [("phase".to_string(), AttrValue::from(phase))]
+                    .into_iter()
+                    .collect();
+                assert_eq!(filter_attributes(&attrs, metrics), attrs);
+            }
+            for phase in [AttrValue::from("private-phase"), AttrValue::from(1_i64)] {
+                let attrs = [("phase".to_string(), phase)].into_iter().collect();
+                assert!(filter_attributes(&attrs, metrics).is_empty());
+            }
+        }
     }
 
     #[test]

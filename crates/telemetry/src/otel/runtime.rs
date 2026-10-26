@@ -150,6 +150,7 @@ pub async fn disable_process_async() {
 
 fn revoke_active_runtime() -> Option<Arc<OtelRuntime>> {
     let mut slot = runtime_slot().write().ok()?;
+    policy::advance_generation();
     let runtime = slot.take()?;
     runtime.policy.revoke();
     Some(runtime)
@@ -254,12 +255,23 @@ enum MetricUpdateKind {
 }
 
 impl OtelRuntime {
+    #[cfg(test)]
     fn new(
         config: OtelConfig,
         entrypoint: &'static str,
         record_session_metric: bool,
     ) -> Result<Self, String> {
         let policy = Arc::new(ExportPolicy::new(config.enabled));
+        let runtime = Self::with_policy(config, entrypoint, policy)?;
+        runtime.emit_started(record_session_metric);
+        Ok(runtime)
+    }
+
+    fn with_policy(
+        config: OtelConfig,
+        entrypoint: &'static str,
+        policy: Arc<ExportPolicy>,
+    ) -> Result<Self, String> {
         let resource = build_resource(&config);
         let metrics = build_metrics_runtime(&config, resource.clone(), &policy)?;
         let logs = build_logger_provider(&config, resource.clone(), &policy)?;
@@ -279,29 +291,32 @@ impl OtelRuntime {
             debug: Mutex::new(DebugMirrorState::default()),
         };
 
-        runtime.emit_span("lingxi.telemetry.start", runtime.process_attributes());
-        runtime.emit_log_event(
+        Ok(runtime)
+    }
+
+    fn emit_started(&self, record_session_metric: bool) {
+        self.emit_span("lingxi.telemetry.start", self.process_attributes());
+        self.emit_log_event(
             "telemetry_started",
             &attrs_from_pairs(&[
-                ("entrypoint", AttrValue::from(entrypoint)),
+                ("entrypoint", AttrValue::from(self.entrypoint)),
                 (
                     "metrics_exporter",
-                    AttrValue::from(exporter_kind_name(&runtime.config.metrics.kind)),
+                    AttrValue::from(exporter_kind_name(&self.config.metrics.kind)),
                 ),
                 (
                     "logs_exporter",
-                    AttrValue::from(exporter_kind_name(&runtime.config.logs.kind)),
+                    AttrValue::from(exporter_kind_name(&self.config.logs.kind)),
                 ),
                 (
                     "traces_exporter",
-                    AttrValue::from(exporter_kind_name(&runtime.config.traces.kind)),
+                    AttrValue::from(exporter_kind_name(&self.config.traces.kind)),
                 ),
             ]),
         );
         if record_session_metric {
-            runtime.record_counter(metrics::SESSION_COUNT, 1.0, &Attributes::new());
+            self.record_counter(metrics::SESSION_COUNT, 1.0, &Attributes::new());
         }
-        Ok(runtime)
     }
 
     fn shutdown(&self) {
@@ -579,8 +594,9 @@ pub async fn install_process_with_config_async(
     record_session_metric: bool,
     config: OtelConfig,
 ) -> TelemetryGuard {
+    let generation = reserve_install_generation();
     match tokio::task::spawn_blocking(move || {
-        install_process_with_config(entrypoint, record_session_metric, config)
+        install_reserved_generation(entrypoint, record_session_metric, config, generation)
     })
     .await
     {
@@ -598,24 +614,55 @@ pub fn install_process_with_config(
     record_session_metric: bool,
     config: OtelConfig,
 ) -> TelemetryGuard {
-    if !config.enabled || policy::privacy_disabled() {
-        disable_process();
+    let generation = reserve_install_generation();
+    install_reserved_generation(entrypoint, record_session_metric, config, generation)
+}
+
+fn reserve_install_generation() -> u64 {
+    // Serialize consent changes and publication, but never hold this lock while
+    // constructing or shutting down providers.
+    let _slot = runtime_slot()
+        .write()
+        .unwrap_or_else(|err| err.into_inner());
+    policy::advance_generation()
+}
+
+fn retire_reserved_generation(generation: u64) {
+    let previous = {
+        let mut slot = runtime_slot()
+            .write()
+            .unwrap_or_else(|err| err.into_inner());
+        if generation != policy::current_generation() {
+            return;
+        }
+        slot.take()
+    };
+    if let Some(previous) = previous {
+        previous.policy.revoke();
+        previous.shutdown();
+    }
+}
+
+fn install_reserved_generation(
+    entrypoint: &'static str,
+    record_session_metric: bool,
+    config: OtelConfig,
+    generation: u64,
+) -> TelemetryGuard {
+    if generation != policy::current_generation() {
         return TelemetryGuard::disabled();
     }
-    match OtelRuntime::new(config, entrypoint, record_session_metric) {
+    if !config.enabled || policy::privacy_disabled() {
+        retire_reserved_generation(generation);
+        return TelemetryGuard::disabled();
+    }
+    let export_policy = Arc::new(ExportPolicy::for_generation(config.enabled, generation));
+    match OtelRuntime::with_policy(config, entrypoint, export_policy) {
         Ok(runtime) => {
-            let runtime = Arc::new(runtime);
-            if let Ok(mut slot) = runtime_slot().write() {
-                if let Some(previous) = slot.replace(runtime.clone()) {
-                    previous.policy.revoke();
-                    previous.shutdown();
-                }
-            }
-            TelemetryGuard {
-                runtime: Some(runtime),
-            }
+            publish_reserved_runtime(Arc::new(runtime), record_session_metric, generation)
         }
         Err(err) => {
+            retire_reserved_generation(generation);
             emit_diag(
                 true,
                 &format!("OpenTelemetry initialization failed for {entrypoint}: {err}"),
@@ -623,6 +670,36 @@ pub fn install_process_with_config(
             );
             TelemetryGuard::disabled()
         }
+    }
+}
+
+fn publish_reserved_runtime(
+    runtime: Arc<OtelRuntime>,
+    record_session_metric: bool,
+    generation: u64,
+) -> TelemetryGuard {
+    let (published, previous) = {
+        let mut slot = runtime_slot()
+            .write()
+            .unwrap_or_else(|err| err.into_inner());
+        if generation == policy::current_generation() && runtime.policy.allowed() {
+            (true, slot.replace(runtime.clone()))
+        } else {
+            (false, None)
+        }
+    };
+    if !published {
+        runtime.policy.revoke();
+        runtime.shutdown();
+        return TelemetryGuard::disabled();
+    }
+    runtime.emit_started(record_session_metric);
+    if let Some(previous) = previous {
+        previous.policy.revoke();
+        previous.shutdown();
+    }
+    TelemetryGuard {
+        runtime: Some(runtime),
     }
 }
 
@@ -1259,7 +1336,7 @@ impl OtelRuntime {
 ///   `cache_read_tokens`, `cost_usd`/`cost_usd_micros`, `duration_ms`,
 ///   `speed`, `query_source`, …). Numeric attrs stay numeric, as in CC.
 /// * `tengu_api_request_failed` / `tengu_api_rate_limited` → `api_error`
-///   (`error` carries the port's stable `error_kind` label — CC puts the
+///   (`error_kind` carries the port's stable failure label — CC puts the
 ///   provider error message there, which the bus does not transport).
 /// * the tool `_completed`/`_failed`/`_timeout` families → `tool_result`
 ///   (`success`/`duration_ms` are STRING attrs, matching `vc("tool_result",
@@ -1323,15 +1400,15 @@ fn cc_named_log_for_event(
         "tengu_api_request_failed" | "tengu_api_rate_limited" => {
             let mut attrs = attrs_from_optional_pairs([
                 ("model", stable_string(metadata, "model")),
-                ("error", stable_string(metadata, "error_kind")),
+                ("error_kind", stable_string(metadata, "error_kind")),
                 ("request_id", stable_string(metadata, "request_id")),
                 (
                     "status_code",
                     int_value(metadata, "status_code").map(AttrValue::from),
                 ),
             ]);
-            if name == "tengu_api_rate_limited" && !attrs.contains_key("error") {
-                attrs.insert("error".into(), AttrValue::from("rate_limited"));
+            if name == "tengu_api_rate_limited" && !attrs.contains_key("error_kind") {
+                attrs.insert("error_kind".into(), AttrValue::from("rate_limited"));
             }
             Some(("api_error", attrs))
         }
@@ -2846,6 +2923,94 @@ mod tests {
     }
 
     #[test]
+    fn wire_export_preserves_hook_phases_and_canonical_api_error_kinds() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let (port, captured, collector) = spawn_http_collector();
+        let mut config = enabled_lookup(port);
+        config.metrics.protocol = OtlpProtocol::HttpJson;
+        config.logs.protocol = OtlpProtocol::HttpJson;
+        config.traces.protocol = OtlpProtocol::HttpJson;
+        let guard = install_process_with_config("schema-test", true, config);
+        emit_hook_lifecycle("pre", "completed", "Read", Some(10));
+        emit_hook_lifecycle("post", "completed", "Read", Some(20));
+        let bus = AnalyticsBus::new();
+        Runtime::new().unwrap().block_on(async {
+            let mut metadata = LogEventMetadata::new();
+            metadata.insert("model".into(), AnalyticsValue::String("test-model".into()));
+            metadata.insert(
+                "error_kind".into(),
+                AnalyticsValue::String("overloaded".into()),
+            );
+            bus.log_event("tengu_api_request_failed", metadata).await;
+            bus.log_event("tengu_api_rate_limited", LogEventMetadata::new())
+                .await;
+        });
+        drop(guard);
+        collector.join().unwrap();
+        let requests = captured.lock().unwrap();
+        let metrics: serde_json::Value = serde_json::from_slice(
+            &requests
+                .iter()
+                .find(|r| r.path == "/v1/metrics")
+                .unwrap()
+                .body,
+        )
+        .unwrap();
+        let hook_histogram = metrics["resourceMetrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|resource| resource["scopeMetrics"].as_array().unwrap())
+            .flat_map(|scope| scope["metrics"].as_array().unwrap())
+            .find(|metric| metric["name"] == metrics::HOOK && metric.get("histogram").is_some())
+            .expect("exported hook histogram");
+        let points = hook_histogram["histogram"]["dataPoints"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            points.len(),
+            2,
+            "pre/post durations must use distinct series"
+        );
+        for (phase, duration) in [("pre", 10.0), ("post", 20.0)] {
+            let point =
+                points
+                    .iter()
+                    .find(|point| {
+                        point["attributes"].as_array().unwrap().iter().any(|attr| {
+                            attr["key"] == "phase" && attr["value"]["stringValue"] == phase
+                        })
+                    })
+                    .expect("hook phase dimension");
+            assert_eq!(point["sum"].as_f64(), Some(duration));
+        }
+        let logs: serde_json::Value =
+            serde_json::from_slice(&requests.iter().find(|r| r.path == "/v1/logs").unwrap().body)
+                .unwrap();
+        let api_errors: Vec<_> = logs["resourceLogs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|resource| resource["scopeLogs"].as_array().unwrap())
+            .flat_map(|scope| scope["logRecords"].as_array().unwrap())
+            .filter(|log| log["body"]["stringValue"] == "api_error")
+            .collect();
+        assert_eq!(api_errors.len(), 2);
+        for error_kind in ["overloaded", "rate_limited"] {
+            assert!(
+                api_errors.iter().any(|log| log["attributes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|attr| attr["key"] == "error_kind"
+                        && attr["value"]["stringValue"] == error_kind)),
+                "canonical api_error lost {error_kind}"
+            );
+        }
+    }
+
+    #[test]
     fn http_runtime_exports_all_three_signals() {
         let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
         let (port, captured, handle) = spawn_http_collector();
@@ -3077,6 +3242,83 @@ mod tests {
         assert!(runtime.logs.is_some());
         assert!(runtime.traces.is_some());
         runtime.shutdown();
+    }
+
+    #[test]
+    fn disable_revokes_runtime_waiting_for_publication() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let config = enabled_lookup(listener.local_addr().unwrap().port());
+        let generation = reserve_install_generation();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        let installer = thread::spawn(move || {
+            let policy = Arc::new(ExportPolicy::for_generation(true, generation));
+            let runtime = Arc::new(OtelRuntime::with_policy(config, "pending", policy).unwrap());
+            ready_tx.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            publish_reserved_runtime(runtime, true, generation)
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        disable_process();
+        resume_tx.send(()).unwrap();
+        let guard = installer.join().unwrap();
+        assert!(guard.runtime.is_none());
+        assert!(runtime_slot().read().unwrap().is_none());
+        assert!(
+            matches!(listener.accept(), Err(err) if err.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn disable_revokes_detached_runtime_before_queued_export() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut guard = install_process_with_config(
+            "draining",
+            true,
+            enabled_lookup(listener.local_addr().unwrap().port()),
+        );
+        emit_named_log_event("queued_event", &Attributes::new());
+        // Pause at shutdown_async's transition between detaching and draining.
+        let runtime = guard.runtime.take().unwrap();
+        detach_runtime(&runtime);
+        assert!(runtime.policy.allowed());
+        disable_process();
+        assert!(!runtime.policy.allowed());
+        runtime.shutdown();
+        assert!(
+            matches!(listener.accept(), Err(err) if err.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn stale_disabled_or_failed_installer_preserves_newer_runtime() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let stale_generation = reserve_install_generation();
+        let mut enabled = enabled_lookup(1);
+        enabled.metrics.kind = ExporterKind::None;
+        enabled.logs.kind = ExporterKind::None;
+        enabled.traces.kind = ExporterKind::None;
+        let current = install_process_with_config("newer", false, enabled.clone());
+        let runtime = current.runtime.as_ref().unwrap();
+        let mut disabled = enabled;
+        disabled.enabled = false;
+        let stale = install_reserved_generation("stale", false, disabled, stale_generation);
+        assert!(stale.runtime.is_none());
+        // Also exercise the cleanup used when an older provider build fails.
+        retire_reserved_generation(stale_generation);
+        assert!(runtime.policy.allowed());
+        assert!(Arc::ptr_eq(
+            runtime_slot().read().unwrap().as_ref().unwrap(),
+            runtime
+        ));
+        drop(current);
     }
 
     #[test]
@@ -3484,7 +3726,7 @@ mod tests {
             .find(|sample| sample.event_name == "api_error")
             .expect("api_error log record");
         assert_eq!(
-            api_error.attributes.get("error"),
+            api_error.attributes.get("error_kind"),
             Some(&AttrValue::from("overloaded"))
         );
         assert_eq!(
