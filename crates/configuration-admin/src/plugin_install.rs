@@ -4,11 +4,11 @@
 //!
 //! install (`<plugin>[@<market>]`):
 //! 1. resolve the marketplace from the `known_marketplaces.json` registry
-//!    (an explicit `@market`, else the first registry whose `marketplace.json`
+//!    (an explicit `@market`, else the first registry whose marketplace file
 //!    lists a plugin of that name);
 //! 2. copy the plugin tree `<installLocation>/<entry.source>` → the versioned
-//!    cache `cache/{market}/{plugin}/{version}/` (version from the plugin's
-//!    `plugin.json`);
+//!    cache `cache/{market}/{plugin}/{version}/` (version from the plugin
+//!    manifest, or the marketplace entry when that optional manifest is absent);
 //! 3. write the v2 `installed_plugins.json` record
 //!    (`plugins["<plugin>@<market>"] = [{scope, installPath, version,
 //!    installedAt, lastUpdated}]`) and set `enabledPlugins[id]=true` at scope.
@@ -753,9 +753,7 @@ async fn materialize_external_plugin_source_with_bus(
 }
 
 fn marketplace_entry(market_root: &Path, name: &str) -> Option<Value> {
-    let manifest = market_root
-        .join(branding::PLUGIN_MANIFEST_DIR)
-        .join("marketplace.json");
+    let manifest = branding::marketplace_manifest_path(market_root).ok()?;
     let raw = std::fs::read_to_string(manifest).ok()?;
     let value: Value = serde_json::from_str(&raw).ok()?;
     let plugins = value.get("plugins").and_then(Value::as_array)?;
@@ -763,6 +761,18 @@ fn marketplace_entry(market_root: &Path, name: &str) -> Option<Value> {
         .iter()
         .find(|p| p.get("name").and_then(Value::as_str) == Some(name))
         .cloned()
+}
+
+pub(crate) fn marketplace_entry_for_plugin_id(
+    plugins_dir: &Path,
+    plugin_id: &str,
+) -> Option<Value> {
+    let (name, marketplace) = split_id(plugin_id);
+    let marketplace = marketplace?;
+    let root = load_registry(plugins_dir)
+        .get(marketplace)
+        .and_then(install_location)?;
+    marketplace_entry(&root, name)
 }
 
 fn resolve_plugin_source(
@@ -854,9 +864,7 @@ async fn resolve_plugin_source_with_bus(
 /// or non-boolean values leave the manifest fallback in control; the
 /// marketplace validator is responsible for surfacing schema type errors.
 fn marketplace_entry_default_enabled(market_root: &Path, name: &str) -> Option<bool> {
-    let manifest = market_root
-        .join(branding::PLUGIN_MANIFEST_DIR)
-        .join("marketplace.json");
+    let manifest = branding::marketplace_manifest_path(market_root).ok()?;
     let raw = std::fs::read_to_string(manifest).ok()?;
     let value: Value = serde_json::from_str(&raw).ok()?;
     value
@@ -870,15 +878,12 @@ fn marketplace_entry_default_enabled(market_root: &Path, name: &str) -> Option<b
 
 /// Manifest-level `defaultEnabled`, whose public-schema default is true.
 fn plugin_default_enabled(plugin_root: &Path) -> bool {
-    std::fs::read_to_string(
-        plugin_root
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("plugin.json"),
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    .and_then(|value| value.get("defaultEnabled").and_then(Value::as_bool))
-    .unwrap_or(true)
+    branding::plugin_manifest_path(plugin_root)
+        .ok()
+        .and_then(|manifest| std::fs::read_to_string(manifest).ok())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.get("defaultEnabled").and_then(Value::as_bool))
+        .unwrap_or(true)
 }
 
 /// Recursive directory copy (sync).
@@ -1011,19 +1016,29 @@ fn fail(verb: &str, arg: &str, reason: &str) -> String {
     format!("✘ Failed to {verb} plugin \"{arg}\": {reason}")
 }
 
-/// Read a plugin's declared `userConfig` schema (`field → {sensitive, required,
-/// …}`) from its `<root>/.lingxi-plugin/plugin.json`. Missing / malformed ⇒ an
-/// empty map (⇒ any `--config` key is "not declared").
-fn read_user_config_schema(plugin_root: &Path) -> Map<String, Value> {
-    std::fs::read_to_string(
-        plugin_root
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("plugin.json"),
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    .and_then(|v| v.get("userConfig").and_then(Value::as_object).cloned())
-    .unwrap_or_default()
+/// Read a plugin's declared `userConfig` schema from its selected root manifest.
+/// The marketplace entry supplies it only when the root `plugin.json` is
+/// absent. A present malformed manifest never falls back to the entry.
+fn read_user_config_schema(
+    plugin_root: &Path,
+    marketplace_entry: Option<&Value>,
+) -> Map<String, Value> {
+    let Ok(manifest_path) = branding::plugin_manifest_path(plugin_root) else {
+        return Map::new();
+    };
+    match std::fs::symlink_metadata(&manifest_path) {
+        Ok(_) => std::fs::read_to_string(manifest_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .and_then(|value| value.get("userConfig").and_then(Value::as_object).cloned())
+            .unwrap_or_default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => marketplace_entry
+            .and_then(|entry| entry.get("userConfig"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
+        Err(_) => Map::new(),
+    }
 }
 
 /// Is a declared userConfig field sensitive (routed to secure storage)?
@@ -1621,7 +1636,11 @@ fn stage_and_publish_cache_dir(
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error.to_string());
     }
-    plugin::ensure_plugin_manifest(&staging)?;
+    // The caller validated the selected metadata file before staging. A
+    // missing plugin.json is valid for marketplace plugins whose entry
+    // supplies the manifest fields; `ensure_plugin_manifest` would mistake
+    // that optional-manifest tree for an MCPB bundle and require root
+    // `manifest.json`.
     let canonical_staged = std::fs::canonicalize(&staging)
         .map_err(|error| format!("Failed to resolve staged plugin cache: {error}"))?;
     if canonical_staged.parent() != Some(canonical_parent.as_path()) {
@@ -1735,6 +1754,23 @@ async fn run_install_inner(
         ));
     };
 
+    // Use the runtime's typed manifest parser before deriving cache identity
+    // or installing user configuration. A present malformed native manifest
+    // must fail here rather than becoming `unknown` or falling back to the
+    // other metadata format.
+    let manifest_version = plugin::discovery::plugin_manifest_version(&plugin_src)
+        .await
+        .map_err(|reason| {
+            format!(
+                "Installing plugin \"{arg}\"...{}",
+                fail("install", arg, &reason)
+            )
+        })?;
+    let marketplace_catalog_entry = registry
+        .get(&market_name)
+        .and_then(install_location)
+        .and_then(|root| marketplace_entry(&root, name));
+
     let full_id = format!("{name}@{market_name}");
     if dependency_stack.contains(&full_id) {
         let mut cycle = dependency_stack.clone();
@@ -1787,22 +1823,22 @@ async fn run_install_inner(
     // marketplace/cache plugins.
     // Done BEFORE materialisation so a bad `--config` aborts without a half
     // install; a no-op when no `--config` was passed (byte-identical to before).
-    let schema = read_user_config_schema(&plugin_src);
+    let schema = read_user_config_schema(&plugin_src, marketplace_catalog_entry.as_ref());
     let config_pairs = parse_config_pairs(config, &schema)?;
     if !config_pairs.is_empty() {
         persist_plugin_options(scope, home, cwd, &full_id, &schema, &config_pairs)?;
     }
 
-    // Version from the plugin's own manifest.
-    let version = std::fs::read_to_string(
-        plugin_src
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("plugin.json"),
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    .and_then(|v| v.get("version").and_then(Value::as_str).map(String::from))
-    .unwrap_or_else(|| "unknown".to_string());
+    // Version from the selected, typed plugin manifest.
+    let version = manifest_version
+        .or_else(|| {
+            marketplace_catalog_entry
+                .as_ref()
+                .and_then(|entry| entry.get("version"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
 
     let proj = project_path(scope, cwd);
     // Already installed AT THIS (scope, projectPath) slot? A record at a
@@ -1961,13 +1997,10 @@ async fn install_declared_dependencies(
         .and_then(install_location)
         .ok_or_else(|| format!("Marketplace \"{owner_marketplace}\" is not available"))?;
     let owner_name = name_of(owner_id);
-    let manifest = std::fs::read_to_string(
-        plugin_source
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("plugin.json"),
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let manifest = branding::plugin_manifest_path(plugin_source)
+        .ok()
+        .and_then(|manifest| std::fs::read_to_string(manifest).ok())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
     let entry = marketplace_entry(&market_root, owner_name);
     let manifest_dependencies = plugin::parse_dependencies(
         manifest
@@ -1984,20 +2017,17 @@ async fn install_declared_dependencies(
     if dependencies.is_empty() {
         return Ok(());
     }
-    let cross_market_allow = std::fs::read_to_string(
-        market_root
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("marketplace.json"),
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    .and_then(|value| {
-        value
-            .get("allowCrossMarketplaceDependenciesOn")
-            .and_then(Value::as_array)
-            .cloned()
-    })
-    .unwrap_or_default();
+    let cross_market_allow = branding::marketplace_manifest_path(&market_root)
+        .ok()
+        .and_then(|manifest| std::fs::read_to_string(manifest).ok())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| {
+            value
+                .get("allowCrossMarketplaceDependenciesOn")
+                .and_then(Value::as_array)
+                .cloned()
+        })
+        .unwrap_or_default();
 
     let enabled_scope = parse_scope(scope)?;
     for (dependency, requirements) in dependencies {
@@ -2019,7 +2049,20 @@ async fn install_declared_dependencies(
             resolve_plugin_source_with_bus(&dependency_id, plugins_dir, analytics_bus, yes)
                 .await?
                 .ok_or_else(|| format!("Plugin dependency \"{dependency_id}\" was not found"))?;
-        let available = plugin_version(&dependency_source);
+        let available = plugin::discovery::plugin_manifest_version(&dependency_source)
+            .await
+            .map_err(|error| {
+                format!("Plugin dependency \"{dependency_id}\" has an invalid manifest: {error}")
+            })?
+            .or_else(|| {
+                marketplace_entry_for_plugin_id(plugins_dir, &dependency_id).and_then(|entry| {
+                    entry
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+            })
+            .unwrap_or_else(|| "unknown".to_string());
         let array_enabled = enabled_plugin_value_is_array(enabled_scope, home, cwd, &dependency_id);
         let dependency_project = project_path(enabled_scope, cwd);
         let installed_dependency = installed_tx
@@ -2148,7 +2191,16 @@ where
         }
         return result;
     };
-    let schema = read_user_config_schema(&plugin_source);
+    plugin::discovery::plugin_manifest_version(&plugin_source)
+        .await
+        .map_err(|reason| {
+            format!(
+                "Installing plugin \"{arg}\"...{}",
+                fail("install", arg, &reason)
+            )
+        })?;
+    let marketplace_entry = marketplace_entry_for_plugin_id(plugins_dir, &plugin_key);
+    let schema = read_user_config_schema(&plugin_source, marketplace_entry.as_ref());
     let pairs = parse_config_pairs(config, &schema)?;
     let sensitive: Vec<&ConfigPair> = pairs
         .iter()
@@ -2430,6 +2482,7 @@ where
         },
         |marketplace| format!("{name}@{marketplace}"),
     );
+    let marketplace_entry = marketplace_entry_for_plugin_id(plugins_dir, &plugin_key);
     let sensitive_keys: Vec<String> = installed
         .get("plugins")
         .and_then(|plugins| plugins.get(&plugin_key))
@@ -2442,7 +2495,7 @@ where
         .and_then(|record| record.get("installPath"))
         .and_then(Value::as_str)
         .and_then(|path| confined_cache_record_path(plugins_dir, Path::new(path)))
-        .map(|path| read_user_config_schema(&path))
+        .map(|path| read_user_config_schema(&path, marketplace_entry.as_ref()))
         .unwrap_or_default()
         .into_iter()
         .filter_map(|(key, field)| {
@@ -2594,19 +2647,6 @@ async fn resolve_source_with_bus(
     )
     .await?
     .map(|source| (market.to_string(), source)))
-}
-
-/// The version string from a plugin's own manifest (`unknown` when absent).
-fn plugin_version(plugin_src: &Path) -> String {
-    std::fs::read_to_string(
-        plugin_src
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("plugin.json"),
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    .and_then(|v| v.get("version").and_then(Value::as_str).map(String::from))
-    .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// `plugin update <plugin> [--scope]` — re-materialize an installed plugin from
@@ -2804,7 +2844,17 @@ async fn update_inner(
             (idx, ov, op)
         };
 
-        let new_version = plugin_version(&plugin_src);
+        let manifest_version = plugin::discovery::plugin_manifest_version(&plugin_src)
+            .await
+            .map_err(|error| format!("Plugin manifest is invalid: {error}"))?;
+        let marketplace_version = load_registry(plugins_dir)
+            .get(&market_name)
+            .and_then(install_location)
+            .and_then(|market_root| marketplace_entry(&market_root, split_id(&id).0))
+            .and_then(|entry| entry.get("version").and_then(Value::as_str).map(str::to_owned));
+        let new_version = manifest_version
+            .or(marketplace_version)
+            .unwrap_or_else(|| "unknown".to_string());
         let id_name = split_id(&id).0;
         let dest = plugins_dir
             .join("cache")
@@ -3032,6 +3082,230 @@ mod tests {
             user_settings(&e)["enabledPlugins"]["hello@mymkt"],
             Value::Bool(true)
         );
+    }
+
+    #[test]
+    fn install_and_runtime_discovery_preserve_current_claude_plugin_tree() {
+        let e = env();
+        std::fs::remove_dir_all(e.market.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        let plugin_manifest_dir = e.market.join(branding::CLAUDE_PLUGIN_MANIFEST_DIR);
+        std::fs::create_dir_all(&plugin_manifest_dir).unwrap();
+        std::fs::create_dir_all(e.market.join("skills/webmcp")).unwrap();
+        std::fs::write(
+            plugin_manifest_dir.join("marketplace.json"),
+            r#"{"name":"ora","owner":{"name":"ora"},"plugins":[{"name":"webmcp","version":"0.10.0","source":"./"}]}"#,
+        )
+        .unwrap();
+        let plugin_json = br#"{"name":"webmcp","version":"0.10.0","skills":"./skills"}"#;
+        std::fs::write(plugin_manifest_dir.join("plugin.json"), plugin_json).unwrap();
+        let skill_body = "# Upstream WebMCP\n\nUse ${CLAUDE_PLUGIN_ROOT}/resources as shipped.\n";
+        let skill_path = e.market.join("skills/webmcp/SKILL.md");
+        std::fs::write(&skill_path, skill_body).unwrap();
+        let install_location = std::fs::canonicalize(&e.market)
+            .unwrap()
+            .display()
+            .to_string();
+        std::fs::write(
+            e.plugins.join("known_marketplaces.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "ora": {
+                    "source": {"source": "directory", "path": install_location.clone()},
+                    "installLocation": install_location
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let message = run_install("webmcp@ora", None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect("temporary Claude-format marketplace installs");
+        assert!(message.contains("Successfully installed plugin: webmcp@ora"));
+
+        let cache = e.plugins.join("cache/ora/webmcp/0.10.0");
+        assert_eq!(
+            std::fs::read(
+                cache
+                    .join(branding::CLAUDE_PLUGIN_MANIFEST_DIR)
+                    .join("plugin.json")
+            )
+            .unwrap(),
+            plugin_json,
+            "the source manifest is copied byte-for-byte"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cache.join("skills/webmcp/SKILL.md")).unwrap(),
+            skill_body
+        );
+        assert!(!cache.join(branding::PLUGIN_MANIFEST_DIR).exists());
+        assert_eq!(
+            installed_db(&e)["plugins"]["webmcp@ora"][0]["version"],
+            "0.10.0"
+        );
+
+        let enabled = std::collections::BTreeMap::from([("webmcp@ora".to_string(), true)]);
+        let context = plugin::PluginDiscoveryContext::new(
+            e.cwd.clone(),
+            e.cwd.clone(),
+            Arc::new(plugin::PluginArchiveSession::new()),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let discovered = runtime.block_on(plugin::discover_enabled_plugins(
+            &e.plugins, &enabled, &context,
+        ));
+        assert_eq!(discovered.len(), 1);
+        let (_id, manifest, install_path) = &discovered[0];
+        assert_eq!(manifest.name, "webmcp");
+        assert_eq!(manifest.version, "0.10.0");
+        assert_eq!(install_path, &cache);
+        assert!(matches!(
+            &manifest.source,
+            plugin::PluginSource::LocalPath { path } if path == &cache
+        ));
+        assert_eq!(std::fs::read_to_string(&skill_path).unwrap(), skill_body);
+    }
+
+    #[test]
+    fn install_uses_marketplace_manifest_when_claude_plugin_json_is_absent() {
+        let e = env();
+        std::fs::remove_dir_all(e.market.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        let manifest_dir = e.market.join(branding::CLAUDE_PLUGIN_MANIFEST_DIR);
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::create_dir_all(e.market.join("skills/webmcp")).unwrap();
+        std::fs::write(
+            manifest_dir.join("marketplace.json"),
+            r#"{"name":"ora","owner":{"name":"ora"},"plugins":[{"name":"webmcp","version":"0.10.0","source":"./","skills":"./skills","userConfig":{"tone":{"type":"string","title":"Tone","description":"Response style"}}}]}"#,
+        )
+        .unwrap();
+        let skill_body = "# WebMCP\n\nMarketplace entry supplied this plugin manifest.\n";
+        let skill_path = e.market.join("skills/webmcp/SKILL.md");
+        std::fs::write(&skill_path, skill_body).unwrap();
+        let install_location = std::fs::canonicalize(&e.market)
+            .unwrap()
+            .display()
+            .to_string();
+        std::fs::write(
+            e.plugins.join("known_marketplaces.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "ora": {
+                    "source": {"source": "directory", "path": install_location.clone()},
+                    "installLocation": install_location
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        run_install(
+            "webmcp@ora",
+            None,
+            &["tone=concise".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .expect("the marketplace entry supplies the missing manifest");
+
+        let cache = e.plugins.join("cache/ora/webmcp/0.10.0");
+        assert!(!cache
+            .join(branding::CLAUDE_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json")
+            .exists());
+        assert_eq!(
+            std::fs::read_to_string(cache.join("skills/webmcp/SKILL.md")).unwrap(),
+            skill_body
+        );
+        assert_eq!(
+            user_settings(&e)["pluginConfigs"]["webmcp@ora"]["options"]["tone"],
+            "concise"
+        );
+        assert_eq!(
+            installed_db(&e)["plugins"]["webmcp@ora"][0]["version"],
+            "0.10.0"
+        );
+
+        let enabled = std::collections::BTreeMap::from([("webmcp@ora".to_string(), true)]);
+        let context = plugin::PluginDiscoveryContext::new(
+            e.cwd.clone(),
+            e.cwd.clone(),
+            Arc::new(plugin::PluginArchiveSession::new()),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let discovered = runtime.block_on(plugin::discover_enabled_plugins(
+            &e.plugins, &enabled, &context,
+        ));
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].1.name, "webmcp");
+        assert_eq!(discovered[0].1.version, "0.10.0");
+        assert_eq!(discovered[0].1.components.skills.len(), 1);
+        assert_eq!(std::fs::read_to_string(skill_path).unwrap(), skill_body);
+    }
+
+    #[test]
+    fn update_uses_marketplace_version_when_claude_plugin_json_is_absent() {
+        let e = env();
+        std::fs::remove_dir_all(e.market.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::remove_dir_all(
+            e.market
+                .join("plugins/hello")
+                .join(branding::PLUGIN_MANIFEST_DIR),
+        )
+        .unwrap();
+        let manifest_dir = e.market.join(branding::CLAUDE_PLUGIN_MANIFEST_DIR);
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        let marketplace_path = manifest_dir.join("marketplace.json");
+        let marketplace = |version: &str| {
+            serde_json::json!({
+                "name": "mymkt",
+                "owner": {"name": "me"},
+                "plugins": [{
+                    "name": "hello",
+                    "version": version,
+                    "source": "./plugins/hello",
+                    "commands": "./commands"
+                }]
+            })
+        };
+        std::fs::write(
+            &marketplace_path,
+            serde_json::to_vec(&marketplace("1.0.0")).unwrap(),
+        )
+        .unwrap();
+
+        run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect("marketplace entry can install a plugin without plugin.json");
+        assert_eq!(
+            installed_db(&e)["plugins"]["hello@mymkt"][0]["version"],
+            "1.0.0"
+        );
+
+        std::fs::write(
+            &marketplace_path,
+            serde_json::to_vec(&marketplace("2.0.0")).unwrap(),
+        )
+        .unwrap();
+        let message = run_update("hello@mymkt", "user", &e.plugins, &e.home, &e.cwd)
+            .expect("update falls back to the marketplace entry version");
+        assert!(message.contains("updated from 1.0.0 to 2.0.0"));
+        assert_eq!(
+            installed_db(&e)["plugins"]["hello@mymkt"][0]["version"],
+            "2.0.0"
+        );
+        let updated_cache = e.plugins.join("cache/mymkt/hello/2.0.0");
+        assert!(updated_cache.join("commands/hi.md").exists());
+        assert!(!updated_cache
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json")
+            .exists());
+        assert!(!updated_cache
+            .join(branding::CLAUDE_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json")
+            .exists());
     }
 
     #[test]
@@ -3816,8 +4090,8 @@ mod tests {
         );
     }
 
-    /// Overwrite the marketplace `hello` plugin's manifest to declare the given
-    /// `userConfig` object (JSON), so `--config` has a schema to validate against.
+    /// Overwrite the marketplace `hello` plugin's manifest with a valid
+    /// `userConfig` schema for `--config` behavior tests.
     fn set_user_config(e: &Env, user_config_json: &str) {
         let p = e
             .market
@@ -3882,7 +4156,10 @@ mod tests {
     #[test]
     fn install_config_persists_nonsensitive_options() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"description":"","sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         run_install(
             "hello@mymkt",
             None,
@@ -4061,7 +4338,7 @@ mod tests {
         let e = env();
         set_user_config(
             &e,
-            r#"{"RETRIES":{"type":"number"},"ENABLED":{"type":"boolean"}}"#,
+            r#"{"RETRIES":{"type":"number","title":"Retries","description":""},"ENABLED":{"type":"boolean","title":"Enabled","description":""}}"#,
         );
         run_install(
             "hello@mymkt",
@@ -4080,7 +4357,10 @@ mod tests {
     #[test]
     fn install_config_rejects_invalid_scalar_before_materialization() {
         let e = env();
-        set_user_config(&e, r#"{"ENABLED":{"type":"boolean"}}"#);
+        set_user_config(
+            &e,
+            r#"{"ENABLED":{"type":"boolean","title":"Enabled","description":""}}"#,
+        );
         let error = run_install(
             "hello@mymkt",
             None,
@@ -4102,7 +4382,7 @@ mod tests {
         let e = env();
         set_user_config(
             &e,
-            r#"{"API_KEY":{"description":"","sensitive":true},"REGION":{"sensitive":false}}"#,
+            r#"{"API_KEY":{"type":"string","title":"API key","description":"","sensitive":true},"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
         );
         run_install(
             "hello@mymkt",
@@ -4122,7 +4402,10 @@ mod tests {
     #[test]
     fn install_config_malformed_errors() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         let err = run_install(
             "hello@mymkt",
             None,
@@ -4141,7 +4424,10 @@ mod tests {
     #[test]
     fn install_config_undeclared_key_errors() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         let err = run_install(
             "hello@mymkt",
             None,
@@ -4160,7 +4446,10 @@ mod tests {
     #[test]
     fn install_config_empty_value_errors() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         let err = run_install(
             "hello@mymkt",
             None,
@@ -4179,7 +4468,10 @@ mod tests {
     #[test]
     fn uninstall_clears_plugin_config() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         run_install(
             "hello@mymkt",
             None,
@@ -4366,7 +4658,10 @@ mod tests {
     #[test]
     fn install_config_rejected_for_project_scope() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         let err = run_install(
             "hello@mymkt",
             Some("project"),
@@ -4385,7 +4680,10 @@ mod tests {
     #[test]
     fn install_config_rejected_for_local_scope() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         let err = run_install(
             "hello@mymkt",
             Some("local"),
@@ -4404,7 +4702,10 @@ mod tests {
     #[test]
     fn install_config_persists_with_explicit_user_scope() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"description":"","sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         run_install(
             "hello@mymkt",
             Some("user"),

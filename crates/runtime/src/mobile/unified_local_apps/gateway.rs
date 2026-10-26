@@ -20,6 +20,8 @@ const MAX_HEAD: usize = 32 * 1024;
 const MAX_AGENT_BODY: usize = 116 * 1024 * 1024;
 const MAX_AGENT_CONTROL_BODY: usize = 32 * 1024;
 const MAX_AGENT_JSON_DEPTH: usize = 128;
+const MAX_STATIC_HTML_TRANSFORM_BYTES: u64 = 4 * 1024 * 1024;
+const WEBMCP_SCRIPT_ROUTE: &str = "__host/webmcp.js";
 // Serialize large full-input transfers across Apps to bound inline file memory.
 static AGENT_REQUESTS: Semaphore = Semaphore::const_new(1);
 // Small polling and cancellation requests stay available while a large or slow
@@ -346,6 +348,258 @@ fn browser_sdk_script(configuration: &str) -> String {
     script
 }
 
+fn encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn find_tag_end(html: &str, start: usize) -> Option<usize> {
+    let mut quote = None;
+    for (offset, byte) in html.as_bytes().iter().copied().enumerate().skip(start) {
+        match (quote, byte) {
+            (Some(active), value) if active == value => quote = None,
+            (Some(_), _) => {}
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'>') => return Some(offset + 1),
+            (None, _) => {}
+        }
+    }
+    None
+}
+
+struct HtmlTag {
+    name_start: usize,
+    name_end: usize,
+    end: usize,
+    closing: bool,
+    declaration: bool,
+}
+
+fn next_html_tag(html: &str, lower: &str, mut cursor: usize) -> Option<HtmlTag> {
+    let bytes = lower.as_bytes();
+    loop {
+        let offset = lower[cursor..].find('<')?;
+        let start = cursor + offset;
+        if lower[start..].starts_with("<!--") {
+            let close = lower[start + 4..].find("-->")?;
+            cursor = start + 4 + close + 3;
+            continue;
+        }
+        let mut name_start = start + 1;
+        let declaration = bytes.get(name_start).is_some_and(|byte| matches!(*byte, b'!' | b'?'));
+        if declaration {
+            name_start += 1;
+        }
+        let closing = !declaration && bytes.get(name_start) == Some(&b'/');
+        if closing {
+            name_start += 1;
+        }
+        if !declaration && !bytes.get(name_start).is_some_and(u8::is_ascii_alphabetic) {
+            cursor = start + 1;
+            continue;
+        }
+        let mut name_end = name_start;
+        while bytes.get(name_end).is_some_and(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b':')
+        }) {
+            name_end += 1;
+        }
+        let boundary = bytes.get(name_end).copied();
+        if !declaration
+            && !boundary.is_some_and(|byte| {
+                byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>')
+            })
+        {
+            // Skip the malformed/start-like token as one attribute-bearing tag,
+            // so a '<head>' substring inside it cannot become an insertion point.
+            cursor = find_tag_end(html, start).unwrap_or(start + 1);
+            continue;
+        }
+        let end = find_tag_end(html, start)?;
+        return Some(HtmlTag {
+            name_start,
+            name_end,
+            end,
+            closing,
+            declaration,
+        });
+    }
+}
+
+fn skip_raw_text_element(html: &str, lower: &str, after_opening_tag: usize, name: &str) -> usize {
+    let closing = format!("</{name}");
+    let mut cursor = after_opening_tag;
+    while let Some(offset) = lower[cursor..].find(&closing) {
+        let start = cursor + offset;
+        let boundary = lower.as_bytes().get(start + closing.len()).copied();
+        if boundary.is_some_and(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'>')) {
+            return find_tag_end(html, start).unwrap_or(html.len());
+        }
+        cursor = start + closing.len();
+    }
+    html.len()
+}
+
+fn next_tag_cursor(html: &str, lower: &str, tag: &HtmlTag) -> usize {
+    if !tag.closing && !tag.declaration {
+        let name = &lower[tag.name_start..tag.name_end];
+        if matches!(name, "script" | "style" | "textarea" | "title") {
+            return skip_raw_text_element(html, lower, tag.end, name);
+        }
+    }
+    tag.end
+}
+
+fn find_opening_tag_end(html: &str, name: &str) -> Option<usize> {
+    let lower = html.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(tag) = next_html_tag(html, &lower, cursor) {
+        if !tag.closing
+            && !tag.declaration
+            && lower[tag.name_start..tag.name_end].eq(name)
+        {
+            return Some(tag.end);
+        }
+        cursor = next_tag_cursor(html, &lower, &tag);
+    }
+    None
+}
+
+fn is_webmcp_script_source(value: &str, expected: &str) -> bool {
+    let path = value.trim().split(|character| matches!(character, '?' | '#')).next().unwrap_or("");
+    path == expected || path == "/__host/webmcp.js"
+}
+
+fn script_tag_has_webmcp_source(attributes: &str, expected: &str) -> bool {
+    let mut cursor = 0;
+    while cursor < attributes.len() {
+        while let Some(character) = attributes[cursor..].chars().next() {
+            if !character.is_ascii_whitespace() && character != '/' {
+                break;
+            }
+            cursor += character.len_utf8();
+        }
+        let name_start = cursor;
+        while let Some(character) = attributes[cursor..].chars().next() {
+            if character.is_ascii_whitespace() || matches!(character, '=' | '/' | '>') {
+                break;
+            }
+            cursor += character.len_utf8();
+        }
+        if cursor == name_start {
+            if let Some(character) = attributes[cursor..].chars().next() {
+                cursor += character.len_utf8();
+            }
+            continue;
+        }
+        let name = &attributes[name_start..cursor];
+        while let Some(character) = attributes[cursor..].chars().next() {
+            if !character.is_ascii_whitespace() {
+                break;
+            }
+            cursor += character.len_utf8();
+        }
+        if attributes.as_bytes().get(cursor) != Some(&b'=') {
+            continue;
+        }
+        cursor += 1;
+        while let Some(character) = attributes[cursor..].chars().next() {
+            if !character.is_ascii_whitespace() {
+                break;
+            }
+            cursor += character.len_utf8();
+        }
+        let value = match attributes[cursor..].chars().next() {
+            Some(quote @ ('\'' | '"')) => {
+                cursor += 1;
+                let value_start = cursor;
+                while let Some(character) = attributes[cursor..].chars().next() {
+                    if character == quote {
+                        break;
+                    }
+                    cursor += character.len_utf8();
+                }
+                let value = &attributes[value_start..cursor];
+                if cursor < attributes.len() {
+                    cursor += quote.len_utf8();
+                }
+                value
+            },
+            Some(_) => {
+                let value_start = cursor;
+                while let Some(character) = attributes[cursor..].chars().next() {
+                    if character.is_ascii_whitespace() || character == '>' {
+                        break;
+                    }
+                    cursor += character.len_utf8();
+                }
+                &attributes[value_start..cursor]
+            }
+            None => "",
+        };
+        if name.eq_ignore_ascii_case("src") && is_webmcp_script_source(value, expected) {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_existing_webmcp_script(html: &str, expected: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(tag) = next_html_tag(html, &lower, cursor) {
+        let name = &lower[tag.name_start..tag.name_end];
+        if !tag.closing
+            && !tag.declaration
+            && name == "script"
+            && script_tag_has_webmcp_source(&html[tag.name_end..tag.end.saturating_sub(1)], expected)
+        {
+            return true;
+        }
+        cursor = next_tag_cursor(html, &lower, &tag);
+    }
+    false
+}
+
+fn find_doctype_end(html: &str) -> Option<usize> {
+    let lower = html.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(tag) = next_html_tag(html, &lower, cursor) {
+        if tag.declaration && lower[tag.name_start..tag.name_end].eq("doctype") {
+            return Some(tag.end);
+        }
+        cursor = next_tag_cursor(html, &lower, &tag);
+    }
+    None
+}
+
+fn inject_webmcp_script(html: &str, run_id: &str) -> Option<String> {
+    let run_id = encode_path_segment(run_id);
+    let source = format!("/__run/{run_id}/{WEBMCP_SCRIPT_ROUTE}");
+    if has_existing_webmcp_script(html, &source) {
+        return None;
+    }
+    let script = format!("<script src=\"{source}\" data-lingxi-webmcp></script>");
+    let doctype_end = find_doctype_end(html);
+    let insert_at = find_opening_tag_end(html, "head")
+        .or_else(|| find_opening_tag_end(html, "html"))
+        .or(doctype_end)
+        .unwrap_or(0);
+    let mut injected = String::with_capacity(html.len() + script.len());
+    injected.push_str(&html[..insert_at]);
+    injected.push_str(&script);
+    injected.push_str(&html[insert_at..]);
+    Some(injected)
+}
+
 async fn serve(socket: TcpStream, route: &Route) -> std::io::Result<()> {
     serve_with_agent_dispatch(
         socket,
@@ -456,7 +710,11 @@ where
                 String::new()
             };
             let relative = target.trim_start_matches('/');
-            let target = if relative == "__local_app_sdk.js" {
+            let path = relative.split('?').next().unwrap_or(relative);
+            let target = if matches!(
+                path,
+                "__local_app_sdk.js" | "__host/sdk.js" | "__host/recovery-sw.js" | WEBMCP_SCRIPT_ROUTE
+            ) {
                 relative.to_owned()
             } else if relative.is_empty() || relative.starts_with('?') {
                 format!("{}{relative}", route.entry)
@@ -473,6 +731,7 @@ where
         )
         .await;
     };
+    let relative_path = relative.split('?').next().unwrap_or(relative);
     // Reject request-smuggling ambiguity before opening any upstream socket.
     let lengths: Vec<_> = request
         .headers
@@ -503,7 +762,7 @@ where
     }
     // Reserved routes are handled before any user application service. The
     // caller cannot select an app, run, model, permission mode or host operation.
-    if relative == "__local_app_sdk.js" || relative == "__host/sdk.js" {
+    if relative_path == "__local_app_sdk.js" || relative_path == "__host/sdk.js" {
         if method != "GET" && method != "HEAD" {
             return error(&mut socket, 405, "SDK accepts GET and HEAD").await;
         }
@@ -518,7 +777,21 @@ where
         }
         return Ok(());
     }
-    if relative == "__host/recovery-sw.js" {
+    if relative_path == WEBMCP_SCRIPT_ROUTE {
+        if method != "GET" && method != "HEAD" {
+            return error(&mut socket, 405, "WebMCP polyfill accepts GET and HEAD").await;
+        }
+        let Some(_host) = &route.host else {
+            return error(&mut socket, 503, "application host unavailable").await;
+        };
+        let script = include_str!("../../../../../packages/local-app-webmcp/dist/webmcp-polyfill.iife.js");
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}\r\n", script.len(), security_headers(route)).as_bytes()).await?;
+        if method == "GET" {
+            socket.write_all(script.as_bytes()).await?;
+        }
+        return Ok(());
+    }
+    if relative_path == "__host/recovery-sw.js" {
         if method != "GET" && method != "HEAD" {
             return error(&mut socket, 405, "recovery worker accepts GET and HEAD").await;
         }
@@ -789,6 +1062,22 @@ where
         "woff2" => "font/woff2",
         _ => "application/octet-stream",
     };
+    let is_html = file.extension().and_then(|e| e.to_str()).is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm")
+    });
+    if is_html && metadata.len() <= MAX_STATIC_HTML_TRANSFORM_BYTES {
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file_handle.read_to_end(&mut bytes).await?;
+        let body = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|html| inject_webmcp_script(html, &route.run_id))
+            .map_or(bytes, |html| html.into_bytes());
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}\r\n", body.len(), security_headers(route)).as_bytes()).await?;
+        if method == "GET" {
+            socket.write_all(&body).await?;
+        }
+        return Ok(());
+    }
     socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}\r\n", metadata.len(), security_headers(route)).as_bytes()).await?;
     if method == "GET" {
         tokio::io::copy(&mut file_handle, &mut socket).await?;
@@ -947,7 +1236,7 @@ fn confined_file(root: &Path, raw: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    async fn exchange(port: u16, bytes: Vec<u8>) -> Vec<u8> {
+    pub(super) async fn exchange(port: u16, bytes: Vec<u8>) -> Vec<u8> {
         let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
             .await
             .unwrap();
@@ -998,6 +1287,80 @@ mod tests {
             .await;
             assert!(String::from_utf8_lossy(&response).starts_with(&format!("HTTP/1.1 {expected}")));
         }
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn static_html_receives_run_scoped_webmcp_and_non_html_stays_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("index.html"),
+            "<!doctype html><html><head data-note=\"left>right\"><script id=\"app-start\"></script></head><body></body></html>",
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("asset.js"), "window.asset = true;").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = CancellationToken::new();
+        let task = spawn(
+            listener,
+            Route {
+                host: None,
+                run_id: "current-run".into(),
+                root: temp.path().into(),
+                spool_dir: temp.path().into(),
+                entry: "index.html".into(),
+                entry_service: None,
+                services: BTreeMap::new(),
+                port,
+                capabilities: vec![],
+                cancel: cancel.clone(),
+            },
+        );
+
+        let response = String::from_utf8(
+            exchange(
+                port,
+                format!(
+                    "GET /__run/current-run/ HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+                )
+                .into_bytes(),
+            )
+            .await,
+        )
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("Content-Security-Policy:"));
+        assert!(response.contains("script-src 'self'"));
+        let body = response.split_once("\r\n\r\n").unwrap().1;
+        let script = "<script src=\"/__run/current-run/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        assert_eq!(body.matches("data-lingxi-webmcp").count(), 1);
+        assert!(body.find(script).unwrap() < body.find("id=\"app-start\"").unwrap());
+        assert!(response.contains(&format!("Content-Length: {}\r\n", body.len())));
+
+        let response = String::from_utf8(
+            exchange(
+                port,
+                format!(
+                    "GET /__run/current-run/asset.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+                )
+                .into_bytes(),
+            )
+            .await,
+        )
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.ends_with("window.asset = true;"));
+        assert!(!response.contains("data-lingxi-webmcp"));
+
+        let stale = exchange(
+            port,
+            format!("GET /__run/old-run/__host/webmcp.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
+                .into_bytes(),
+        )
+        .await;
+        assert!(String::from_utf8_lossy(&stale).starts_with("HTTP/1.1 410"));
         cancel.cancel();
         task.await.unwrap();
     }
@@ -1303,8 +1666,72 @@ mod absolute_path_tests {
                 assert!(response.contains("Location: /__run/current/dist/assets/app.js?q=1"));
             }
         }
+        let response = super::tests::exchange(
+            port,
+            format!(
+                "GET /__host/webmcp.js?cache=1 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nReferer: http://127.0.0.1:{port}/__run/current/dist/index.html\r\n\r\n"
+            )
+            .into_bytes(),
+        )
+        .await;
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 307"));
+        assert!(response.contains("Location: /__run/current/__host/webmcp.js?cache=1"));
         cancel.cancel();
         task.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod webmcp_injection_tests {
+    use super::*;
+
+    #[test]
+    fn script_injection_handles_head_without_head_and_duplicate_source() {
+        let with_head = "<!doctype html><html><head data-note=\"left>right\"><script id=\"app-start\"></script></head><body></body></html>";
+        let injected = inject_webmcp_script(with_head, "run-1").unwrap();
+        let script = "<script src=\"/__run/run-1/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        assert_eq!(injected.matches("data-lingxi-webmcp").count(), 1);
+        assert!(injected.find(script).unwrap() < injected.find("id=\"app-start\"").unwrap());
+
+        let no_head = "<!doctype html><script id=\"app-start\"></script>";
+        let injected = inject_webmcp_script(no_head, "run-2").unwrap();
+        assert!(injected.starts_with("<!doctype html><script src=\"/__run/run-2/__host/webmcp.js\""));
+        assert!(injected.find("webmcp.js").unwrap() < injected.find("id=\"app-start\"").unwrap());
+
+        let no_document_tags = "<script id=\"app-start\"></script>";
+        let injected = inject_webmcp_script(no_document_tags, "run-3").unwrap();
+        assert!(injected.starts_with("<script src=\"/__run/run-3/__host/webmcp.js\""));
+
+        let already_loaded = "<html><head><script src=\"/__host/webmcp.js?cache=1\"></script></head></html>";
+        assert!(inject_webmcp_script(already_loaded, "run-4").is_none());
+
+        let current_run_loaded = "<script src=\"/__run/run-5/__host/webmcp.js\"></script>";
+        assert!(inject_webmcp_script(current_run_loaded, "run-5").is_none());
+    }
+
+    #[test]
+    fn comments_and_script_or_style_strings_do_not_suppress_injection() {
+        let html = "<!doctype html><!-- data-lingxi-webmcp <script src=\"/__host/webmcp.js\"></script> --><script>const fake='<script src=\"/__run/run-6/__host/webmcp.js\">'; const marker='data-lingxi-webmcp';</script><style>body::after{content:'__host/webmcp.js'}</style><p>app</p>";
+        let injected = inject_webmcp_script(html, "run-6").unwrap();
+        let script = "<script src=\"/__run/run-6/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        assert_eq!(injected.matches(script).count(), 1);
+        assert!(injected.find(script).unwrap() < injected.find("<script>const fake").unwrap());
+    }
+
+    #[test]
+    fn pseudo_head_in_attributes_and_raw_text_are_not_insertion_points_or_duplicates() {
+        let html = "<!doctype html><!-- <head><script src=\"/__host/webmcp.js\"></script></head> --><div title=\"<head>\" data-route=\"/__run/run-7/__host/webmcp.js\"></div><script>const fakeHead='<head>'; const fakeSource='/__run/run-7/__host/webmcp.js';</script><style>.fake::after{content:'<head>'}</style><p>app</p>";
+        let injected = inject_webmcp_script(html, "run-7").unwrap();
+        let script = "<script src=\"/__run/run-7/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        let doctype_end = "<!doctype html>".len();
+        assert!(injected.starts_with(&format!("{}{}", &html[..doctype_end], script)));
+        assert_eq!(injected.matches(script).count(), 1);
+
+        // A script-looking URL in an unrelated actual script path is not the
+        // host resource and must not suppress run-scoped injection.
+        let unrelated = "<script src=\"/other/__run/run-7/__host/webmcp.js\"></script>";
+        assert!(inject_webmcp_script(unrelated, "run-7").is_some());
     }
 }
 

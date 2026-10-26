@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://github.com/w3c-oss/webmcp-polyfill",
+    "commit": "f629c99458514784b9104864e5535245ca7ac6b0",
+    "license": "Apache-2.0",
+    "gitBlobShas": {
+      "src/auto.ts": "43e63ce7211857817b32aff0f3984dc850319fb0",
+      "src/index.ts": "6093d3810bfb81bb81345c7ce5bd3a3eda3c8b9d",
+      "src/frames.ts": "1458b1f486e551944184345e4e8dfca18b122974",
+      "package.json": "6a5ff1257b60b151b09d85957c7f75006c39fae6",
+      "tsconfig.json": "e92507ab31e02077faf21cbe32c73b577b0aecf4",
+      "LICENSE": "d645695673349e3947e8e5ae42332d0ac3164cd7"
+    },
+    "sha256": {
+      "src/auto.ts": "9c4eb81565caef71001e9fec5fd7e1d6f40c5e7f268f92f0441d6f33f5cbf55d",
+      "src/index.ts": "7f1ee203ee0c0cc24dadc750d6ea027e9cbf038c479948ff1827a22bd32d5a95",
+      "src/frames.ts": "b1fddd840422947f834370d5f6d6ee1aefc84ca68f0be443e93ba8df841d0b00",
+      "package.json": "63fc3875e9ffcb23facb922056f1ab521bf1158bfc00994d13f3c6a55231281c",
+      "tsconfig.json": "96ff94832faa1735ffa2ad94207b27cb3f6a761d7fcbda3dd5a2dbd9c4bf1957",
+      "LICENSE": "8c6db340475136df3c1201d458fa5755698eace76e510471ecc9d857d6083dac"
+    }
+  },
+  "build": {
+    "entryPoint": "upstream/src/auto.ts",
+    "format": "iife",
+    "target": "es2022",
+    "minify": true,
+    "legalComments": "inline",
+    "esbuildVersion": "0.28.2"
+  }
+}

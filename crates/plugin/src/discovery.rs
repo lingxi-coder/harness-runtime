@@ -4,7 +4,8 @@
 //! `loadAllPluginsCacheOnly()` (`main.tsx:282`), whose shared body is
 //! `loadPluginsFromMarketplaces({cacheOnly})` (`pluginLoader.ts:1887`). For
 //! each installed plugin it runs `createPluginFromPath()`
-//! (`pluginLoader.ts:1348`): read `<pluginPath>/.lingxi-plugin/plugin.json`
+//! (`pluginLoader.ts:1348`): read the selected LingXi-native or current
+//! upstream plugin manifest path
 //! (`loadPluginManifest`) or canonicalize the matching marketplace entry when
 //! that file is absent, then **auto-detect** the optional `commands/`,
 //! `agents/`, `skills/`, `output-styles/` directories (Step 3,
@@ -19,14 +20,14 @@
 //!   `cache/{marketplace}/{plugin}/{version}/` — the real layout
 //!   `loadAllPluginsCacheOnly` consumes. Against a real `~/.lingxi/plugins`
 //!   (which holds `cache/`, `npm-cache/`, `installed_plugins.json` — none with
-//!   a direct `.lingxi-plugin/plugin.json`) this is what discovers the
+//!   a direct plugin manifest) this is what discovers the
 //!   actually-installed plugins.
 //!
 //! * [`discover_installed_plugins`] is a flat directory-walk that loads any
-//!   directory holding a direct `.lingxi-plugin/plugin.json` child. It is the
+//!   directory holding a direct current-format `plugin.json` child. It is the
 //!   primitive used by the local-path install arm (a pre-fetched plugin dir
 //!   passed by path, as with `--add-dir`) — NOT the real cache layout. Against
-//!   a real claude-code plugins dir it finds nothing, by design.
+//!   a Claude Code plugins dir it finds nothing, by design.
 //!
 //! Recorded marketplace paths may omit `plugin.json`; that path uses the
 //! matching validated local marketplace entry as the manifest source. Direct
@@ -1908,7 +1909,7 @@ pub async fn discover_effective_plugins_with_bus(
 /// Each returned tuple is `(freshly-minted id, manifest, install dir)`. A
 /// missing `plugins_dir` yields an empty vec (zero-cost on a fresh install,
 /// matching claude-code's resilient boot). Directories without a readable
-/// `.lingxi-plugin/plugin.json` are skipped.
+/// current-format plugin manifest are skipped.
 ///
 /// `PluginId` is a UUID newtype with no string-stable derivation, so a fresh
 /// id is minted per plugin and stamped onto the returned manifest; callers
@@ -1998,9 +1999,10 @@ enum CliPluginDirKind {
 }
 
 /// Oracle `W0e`: names that mark a directory as plugin content rather than a
-/// collection of plugins. LingXi's manifest dir is `.lingxi-plugin`.
+/// collection of plugins.
 const CLI_PLUGIN_CONTENT_NAMES: &[&str] = &[
     branding::PLUGIN_MANIFEST_DIR,
+    branding::CLAUDE_PLUGIN_MANIFEST_DIR,
     "commands",
     "skills",
     "agents",
@@ -2028,7 +2030,12 @@ const CLI_PLUGIN_COMPONENT_DIR_NAMES: &[&str] = &[
 ];
 
 async fn child_has_readable_manifest(dir: &Path) -> bool {
-    let manifest = dir.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json");
+    let manifest = match branding::plugin_manifest_path(dir) {
+        Ok(manifest) => manifest,
+        // Treat an uninspectable native path as present so a collection does
+        // not hide a child whose metadata must fail closed when loaded.
+        Err(_) => return true,
+    };
     match tokio::fs::OpenOptions::new()
         .read(true)
         .open(&manifest)
@@ -2230,9 +2237,8 @@ async fn discover_cli_plugin_dirs_impl(
                 }
                 None => {
                     tracing::warn!(
-                        "Failed to load session plugin from {}: no readable {}/plugin.json",
-                        plugin_root.display(),
-                        branding::PLUGIN_MANIFEST_DIR
+                        "Failed to load session plugin from {}: no readable plugin manifest",
+                        plugin_root.display()
                     );
                 }
             }
@@ -2276,11 +2282,10 @@ async fn unwrap_zip_root(root: &Path) -> PathBuf {
         }
     }
     if let Some(inner) = only {
-        if tokio::fs::metadata(inner.join(branding::PLUGIN_MANIFEST_DIR))
-            .await
-            .map(|m| m.is_dir())
-            .unwrap_or(false)
-        {
+        let manifest_dir = branding::plugin_manifest_path(&inner)
+            .ok()
+            .and_then(|manifest| manifest.parent().map(Path::to_path_buf));
+        if manifest_dir.is_some_and(|dir| dir.is_dir()) {
             tracing::debug!(
                 "Inline plugin zip had wrapper directory; using {}",
                 inner.display()
@@ -2411,6 +2416,43 @@ async fn read_plugin_manifest(
         .map_err(|_| ())
 }
 
+/// Validate the selected plugin manifest using the same strict raw schema as
+/// runtime discovery, returning its declared version when present.
+///
+/// Marketplace entries may supply the manifest when the plugin root has no
+/// `plugin.json`, so absence is `Ok(None)`. A present but malformed or unsafe
+/// file is an error; the installer must not turn it into an `unknown` version
+/// or try the other supported metadata path.
+pub async fn plugin_manifest_version(plugin_dir: &Path) -> Result<Option<String>, String> {
+    let root = canonical_plugin_root(plugin_dir).await.ok_or_else(|| {
+        format!(
+            "plugin source is not a readable directory: {}",
+            plugin_dir.display()
+        )
+    })?;
+    let manifest_path = branding::plugin_manifest_path(&root)
+        .map_err(|error| format!("could not inspect plugin manifest path: {error}"))?;
+    let Some(raw) = read_plugin_manifest(&root, &manifest_path)
+        .await
+        .map_err(|_| {
+            format!(
+                "plugin manifest path is unsafe or unreadable: {}",
+                manifest_path.display()
+            )
+        })?
+    else {
+        return Ok(None);
+    };
+    parse_raw_manifest(&raw)
+        .map(|manifest| manifest.version)
+        .map_err(|error| {
+            format!(
+                "invalid plugin manifest at {}: {error}",
+                manifest_path.display()
+            )
+        })
+}
+
 fn parse_raw_manifest(raw: &str) -> Result<RawManifest, serde_json::Error> {
     let raw = raw.strip_prefix(UTF8_BOM).unwrap_or(raw);
     serde_json::from_str(raw)
@@ -2444,9 +2486,7 @@ async fn load_marketplace_manifest_fallback(
         return None;
     }
 
-    let catalog_path = marketplace_root
-        .join(branding::PLUGIN_MANIFEST_DIR)
-        .join("marketplace.json");
+    let catalog_path = branding::marketplace_manifest_path(&marketplace_root).ok()?;
     let catalog_path = canonical_regular_path_under(&marketplace_root, &catalog_path)?;
     let catalog_raw = tokio::fs::read_to_string(catalog_path).await.ok()?;
     let catalog_raw = catalog_raw.strip_prefix(UTF8_BOM).unwrap_or(&catalog_raw);
@@ -2513,9 +2553,17 @@ async fn load_plugin_from_path_internal(
     // even when its lexical path contains no `..` segment.
     let plugin_root = canonical_plugin_root(plugin_dir).await?;
     let plugin_dir = plugin_root.as_path();
-    let manifest_path = plugin_dir
-        .join(branding::PLUGIN_MANIFEST_DIR)
-        .join("plugin.json");
+    let manifest_path = match branding::plugin_manifest_path(plugin_dir) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                plugin = %plugin_dir.display(),
+                "skipping plugin with an uninspectable plugin manifest path"
+            );
+            return None;
+        }
+    };
     let parsed = match read_plugin_manifest(plugin_dir, &manifest_path).await {
         Ok(Some(raw)) => match parse_raw_manifest(&raw) {
             Ok(manifest) => manifest,
@@ -3422,11 +3470,12 @@ async fn load_marketplace_renames(
     let Some(plugins_root) = cache_root_for_plugin(plugin_dir) else {
         return (HashMap::new(), HashSet::new());
     };
-    let path = plugins_root
+    let market_root = plugins_root
         .join("marketplaces")
-        .join(sanitize_segment(marketplace, false))
-        .join(branding::PLUGIN_MANIFEST_DIR)
-        .join("marketplace.json");
+        .join(sanitize_segment(marketplace, false));
+    let Ok(path) = branding::marketplace_manifest_path(&market_root) else {
+        return (HashMap::new(), HashSet::new());
+    };
     let Ok(raw) = tokio::fs::read_to_string(path).await else {
         return (HashMap::new(), HashSet::new());
     };
@@ -4569,6 +4618,118 @@ pub(crate) fn skip_mcp_test_env_guard() -> std::sync::MutexGuard<'static, ()> {
     guard
 }
 
+#[derive(Debug)]
+struct PluginPathTokenSentinels {
+    claude_root: String,
+    lingxi_root: String,
+    claude_data: String,
+    lingxi_data: String,
+}
+
+impl PluginPathTokenSentinels {
+    fn new(raw: &str) -> Self {
+        fn unique(raw: &str, name: &str) -> String {
+            let mut counter = 0u32;
+            loop {
+                let candidate = format!("__PLUGIN_INSTANCE_PATH_TOKEN_{name}_{counter}__");
+                if !raw.contains(&candidate) {
+                    return candidate;
+                }
+                counter += 1;
+            }
+        }
+
+        Self {
+            claude_root: unique(raw, "CLAUDE_ROOT"),
+            lingxi_root: unique(raw, "NATIVE_ROOT"),
+            claude_data: unique(raw, "CLAUDE_DATA"),
+            lingxi_data: unique(raw, "NATIVE_DATA"),
+        }
+    }
+
+    fn protect(&self, raw: &str) -> String {
+        let lingxi_root = format!("${{{}}}", branding::PLUGIN_ROOT_ENV);
+        let lingxi_data = format!("${{{}}}", branding::PLUGIN_DATA_ENV);
+        raw.replace("${CLAUDE_PLUGIN_ROOT}", &self.claude_root)
+            .replace(&lingxi_root, &self.lingxi_root)
+            .replace("${CLAUDE_PLUGIN_DATA}", &self.claude_data)
+            .replace(&lingxi_data, &self.lingxi_data)
+    }
+
+    fn restore(&self, value: &mut String) {
+        let lingxi_root = format!("${{{}}}", branding::PLUGIN_ROOT_ENV);
+        let lingxi_data = format!("${{{}}}", branding::PLUGIN_DATA_ENV);
+        *value = value
+            .replace(&self.claude_root, "${CLAUDE_PLUGIN_ROOT}")
+            .replace(&self.lingxi_root, &lingxi_root)
+            .replace(&self.claude_data, "${CLAUDE_PLUGIN_DATA}")
+            .replace(&self.lingxi_data, &lingxi_data);
+    }
+
+    fn restore_config(&self, config: &mut mcp::McpServerConfig) {
+        use lingxi_core::host::McpTransportSpec;
+
+        match &mut config.spec {
+            McpTransportSpec::Stdio { command, args, env } => {
+                self.restore(command);
+                for value in args {
+                    self.restore(value);
+                }
+                for value in env.values_mut() {
+                    self.restore(value);
+                }
+            }
+            McpTransportSpec::Sse {
+                url,
+                headers,
+                headers_helper,
+                ..
+            }
+            | McpTransportSpec::Http {
+                url,
+                headers,
+                headers_helper,
+                ..
+            }
+            | McpTransportSpec::WebSocket {
+                url,
+                headers,
+                headers_helper,
+            } => {
+                self.restore(url);
+                for value in headers.values_mut() {
+                    self.restore(value);
+                }
+                if let Some(helper) = headers_helper {
+                    self.restore(helper);
+                }
+            }
+            McpTransportSpec::InProcess { .. }
+            | McpTransportSpec::SseIde { .. }
+            | McpTransportSpec::WsIde { .. }
+            | McpTransportSpec::SdkControl { .. } => {}
+        }
+    }
+}
+
+/// Keep plugin-instance path tokens out of the generic MCP environment
+/// expansion pass. They must resolve later against the owning plugin's
+/// materialized root/data directory, even when the host process happens to
+/// export variables with the same upstream names.
+fn parse_plugin_mcp_json_with_instance_tokens(
+    raw: &str,
+    scope: mcp::ConfigScope,
+) -> Result<Vec<mcp::McpServerConfig>, String> {
+    let tokens = PluginPathTokenSentinels::new(raw);
+    let protected = tokens.protect(raw);
+    let mut configs =
+        mcp::parse_plugin_mcp_json_string(&protected, scope).map_err(|error| error.to_string())?;
+    for config in &mut configs {
+        tokens.restore_config(config);
+    }
+    Ok(configs)
+}
+
 /// Read the plugin-root `.mcp.json` into `{ server name → McpServerConfig }`.
 ///
 /// Mirrors `loadPluginMcpServers` (`mcpPluginIntegration.ts:137`): the file is
@@ -4596,7 +4757,7 @@ async fn load_mcp_servers(plugin_dir: &Path) -> HashMap<String, mcp::McpServerCo
     // (`vve`: `let B=KY().safeParse(U)`), not the 7-key config table `ZGn`
     // that `.mcp.json` / settings / `--mcp-config` go through — so the two
     // internal-only IDE transports are accepted here and rejected there.
-    match mcp::parse_plugin_mcp_json_string(raw, mcp::ConfigScope::Dynamic) {
+    match parse_plugin_mcp_json_with_instance_tokens(raw, mcp::ConfigScope::Dynamic) {
         Ok(configs) => configs.into_iter().map(|c| (c.name.clone(), c)).collect(),
         Err(e) => {
             tracing::warn!(error = %e, path = %path.display(), "skipping malformed plugin .mcp.json");
@@ -4988,7 +5149,7 @@ async fn load_declared_mcp_servers(
                         .await;
                     }
                     other => {
-                        if let Ok(parsed) = mcp::parse_plugin_mcp_json_string(
+                        if let Ok(parsed) = parse_plugin_mcp_json_with_instance_tokens(
                             &other.to_string(),
                             mcp::ConfigScope::Dynamic,
                         ) {
@@ -4999,9 +5160,10 @@ async fn load_declared_mcp_servers(
             }
         }
         other => {
-            if let Ok(parsed) =
-                mcp::parse_plugin_mcp_json_string(&other.to_string(), mcp::ConfigScope::Dynamic)
-            {
+            if let Ok(parsed) = parse_plugin_mcp_json_with_instance_tokens(
+                &other.to_string(),
+                mcp::ConfigScope::Dynamic,
+            ) {
                 out.extend(parsed.into_iter().map(|cfg| (cfg.name.clone(), cfg)));
             }
         }
@@ -5053,7 +5215,7 @@ async fn merge_one_declared_mcp_source(
         return;
     }
     let parse = |raw_json: &str| {
-        mcp::parse_plugin_mcp_json_string(raw_json, mcp::ConfigScope::Dynamic).map(|v| {
+        parse_plugin_mcp_json_with_instance_tokens(raw_json, mcp::ConfigScope::Dynamic).map(|v| {
             v.into_iter()
                 .map(|cfg| (cfg.name.clone(), cfg))
                 .collect::<HashMap<_, _>>()
@@ -5533,6 +5695,105 @@ mod tests {
             })
             .collect();
         assert_eq!(skills, vec!["base", "extra"]);
+    }
+
+    #[tokio::test]
+    async fn current_claude_plugin_layout_loads_default_and_declared_components_verbatim() {
+        use lingxi_core::host::McpTransportSpec;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::CLAUDE_PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join("skills/default")).unwrap();
+        fs::create_dir_all(plugin.join("extra-skills/upstream")).unwrap();
+        fs::create_dir_all(plugin.join("commands")).unwrap();
+        fs::create_dir_all(plugin.join("custom-commands")).unwrap();
+        fs::create_dir_all(plugin.join("agents")).unwrap();
+        fs::create_dir_all(plugin.join("custom-agents")).unwrap();
+        fs::create_dir_all(plugin.join("mcp")).unwrap();
+        fs::write(
+            plugin
+                .join(branding::CLAUDE_PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"webmcp","version":"0.10.0","skills":"./extra-skills","commands":"./custom-commands","agents":"./custom-agents","mcpServers":"./mcp/servers.json"}"#,
+        )
+        .unwrap();
+        let upstream_skill = "# WebMCP\n\nKeep ${CLAUDE_PLUGIN_ROOT}/docs unchanged.\n";
+        let upstream_skill_path = plugin.join("extra-skills/upstream/SKILL.md");
+        fs::write(&upstream_skill_path, upstream_skill).unwrap();
+        fs::write(plugin.join("skills/default/SKILL.md"), "default skill").unwrap();
+        fs::write(plugin.join("commands/default.md"), "default command").unwrap();
+        fs::write(plugin.join("custom-commands/install.md"), "custom command").unwrap();
+        fs::write(plugin.join("agents/default.md"), "default agent").unwrap();
+        fs::write(plugin.join("custom-agents/reviewer.md"), "custom agent").unwrap();
+        fs::write(
+            plugin.join(".mcp.json"),
+            r#"{"mcpServers":{"default-stdio":{"command":"node","args":["${CLAUDE_PLUGIN_ROOT}/default.js"]},"default-http":{"type":"http","url":"https://example.test/mcp"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            plugin.join("mcp/servers.json"),
+            r#"{"mcpServers":{"declared":{"command":"node","args":["${CLAUDE_PLUGIN_ROOT}/declared.js"]}}}"#,
+        )
+        .unwrap();
+
+        let (_id, manifest) = load_plugin_from_path(plugin).await.unwrap();
+        assert_eq!(manifest.version, "0.10.0");
+        assert_eq!(manifest.components.skills.len(), 2);
+        assert_eq!(manifest.components.commands.len(), 1);
+        assert_eq!(manifest.components.agents.len(), 1);
+        assert!(manifest.components.commands[0]
+            .path
+            .starts_with(plugin.join("custom-commands")));
+        assert!(manifest.components.agents[0]
+            .path
+            .starts_with(plugin.join("custom-agents")));
+        assert!(manifest
+            .components
+            .skills
+            .iter()
+            .all(|component| component.path.starts_with(plugin)));
+        assert_eq!(
+            fs::read_to_string(upstream_skill_path).unwrap(),
+            upstream_skill
+        );
+        assert!(!plugin.join(branding::PLUGIN_MANIFEST_DIR).exists());
+
+        let servers = &manifest.components.mcp_servers;
+        assert!(servers.contains_key("default-stdio"));
+        assert!(servers.contains_key("default-http"));
+        assert!(servers.contains_key("declared"));
+        assert!(servers
+            .values()
+            .all(|server| server.scope == mcp::ConfigScope::Dynamic));
+        assert!(servers
+            .values()
+            .any(|server| matches!(&server.spec, McpTransportSpec::Http { .. })));
+    }
+
+    #[tokio::test]
+    async fn malformed_native_manifest_does_not_fallback_to_a_valid_claude_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin = tmp.path();
+        fs::create_dir_all(plugin.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::create_dir_all(plugin.join(branding::CLAUDE_PLUGIN_MANIFEST_DIR)).unwrap();
+        fs::write(
+            plugin
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            b"{ malformed native manifest",
+        )
+        .unwrap();
+        fs::write(
+            plugin
+                .join(branding::CLAUDE_PLUGIN_MANIFEST_DIR)
+                .join("plugin.json"),
+            r#"{"name":"valid-claude-plugin","version":"1.0.0"}"#,
+        )
+        .unwrap();
+
+        assert!(load_plugin_from_path(plugin).await.is_none());
+        assert!(plugin_manifest_version(plugin).await.is_err());
     }
 
     /// Themes (`.json`) and workflows (`.js`) auto-scan when the manifest
@@ -7300,6 +7561,71 @@ mod tests {
         assert!(
             servers.contains_key("echo"),
             "BOM-prefixed root .mcp.json must still parse its server map, got {servers:?}"
+        );
+    }
+
+    #[test]
+    fn plugin_mcp_path_tokens_are_not_expanded_from_process_environment() {
+        use lingxi_core::host::McpTransportSpec;
+
+        let _guard = crate::plugin_seed_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let previous_root = std::env::var_os("CLAUDE_PLUGIN_ROOT");
+        let previous_data = std::env::var_os("CLAUDE_PLUGIN_DATA");
+        std::env::set_var("CLAUDE_PLUGIN_ROOT", "/unrelated/session/root");
+        std::env::set_var("CLAUDE_PLUGIN_DATA", "/unrelated/session/data");
+
+        let raw = serde_json::json!({"mcpServers": {
+            "stdio": {
+                "command": "${CLAUDE_PLUGIN_ROOT}/server",
+                "args": [format!("${{{}}}/arg", branding::PLUGIN_ROOT_ENV)],
+                "env": {"CACHE": "${CLAUDE_PLUGIN_DATA}/cache"}
+            },
+            "remote": {
+                "type": "http",
+                "url": "https://${CLAUDE_PLUGIN_ROOT}/mcp",
+                "headers": {"X-Data": "${CLAUDE_PLUGIN_DATA}"},
+                "headersHelper": "${CLAUDE_PLUGIN_ROOT}/headers.sh"
+            }
+        }})
+        .to_string();
+        let parsed = parse_plugin_mcp_json_with_instance_tokens(&raw, mcp::ConfigScope::Dynamic);
+
+        match previous_root {
+            Some(value) => std::env::set_var("CLAUDE_PLUGIN_ROOT", value),
+            None => std::env::remove_var("CLAUDE_PLUGIN_ROOT"),
+        }
+        match previous_data {
+            Some(value) => std::env::set_var("CLAUDE_PLUGIN_DATA", value),
+            None => std::env::remove_var("CLAUDE_PLUGIN_DATA"),
+        }
+
+        let configs = parsed.expect("plugin MCP config parses");
+        let by_name = configs
+            .into_iter()
+            .map(|config| (config.name.clone(), config))
+            .collect::<HashMap<_, _>>();
+        let McpTransportSpec::Stdio { command, args, env } = &by_name["stdio"].spec else {
+            panic!("expected stdio config");
+        };
+        assert_eq!(command, "${CLAUDE_PLUGIN_ROOT}/server");
+        assert_eq!(args[0], format!("${{{}}}/arg", branding::PLUGIN_ROOT_ENV));
+        assert_eq!(env["CACHE"], "${CLAUDE_PLUGIN_DATA}/cache");
+        let McpTransportSpec::Http {
+            url,
+            headers,
+            headers_helper,
+            ..
+        } = &by_name["remote"].spec
+        else {
+            panic!("expected HTTP config");
+        };
+        assert_eq!(url, "https://${CLAUDE_PLUGIN_ROOT}/mcp");
+        assert_eq!(headers["X-Data"], "${CLAUDE_PLUGIN_DATA}");
+        assert_eq!(
+            headers_helper.as_deref(),
+            Some("${CLAUDE_PLUGIN_ROOT}/headers.sh")
         );
     }
 

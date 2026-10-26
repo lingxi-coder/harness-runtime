@@ -754,9 +754,9 @@ fn available_plugins(
         let Some(root) = install_location.map(PathBuf::from) else {
             continue;
         };
-        let manifest_path = root
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("marketplace.json");
+        let Ok(manifest_path) = branding::marketplace_manifest_path(&root) else {
+            continue;
+        };
         let Ok(raw) = std::fs::read_to_string(&manifest_path) else {
             continue;
         };
@@ -851,6 +851,45 @@ mod tests {
             },
             root,
         )
+    }
+
+    #[test]
+    fn public_catalog_discovers_plugins_from_current_claude_marketplace_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plugins = tmp.path().join("plugins");
+        let marketplace = tmp.path().join("ora-marketplace");
+        let manifest_dir = marketplace.join(branding::CLAUDE_PLUGIN_MANIFEST_DIR);
+        fs::create_dir_all(&plugins).unwrap();
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::write(
+            manifest_dir.join("marketplace.json"),
+            r#"{"name":"ora","owner":{"name":"ora"},"plugins":[{"name":"webmcp","version":"0.10.0","description":"MCP tools for browsers","source":"./"}]}"#,
+        )
+        .unwrap();
+        let install_location = fs::canonicalize(&marketplace)
+            .unwrap()
+            .display()
+            .to_string();
+        fs::write(
+            plugins.join("known_marketplaces.json"),
+            serde_json::to_vec(&json!({
+                "ora": {
+                    "source": {"source": "directory", "path": install_location.clone()},
+                    "installLocation": install_location
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let (available, marketplaces) =
+            available_plugins(&plugins, &BTreeMap::new()).expect("catalog rows");
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0].id, "webmcp@ora");
+        assert_eq!(available[0].version, "0.10.0");
+        assert_eq!(available[0].description, "MCP tools for browsers");
+        assert_eq!(marketplaces.len(), 1);
+        assert_eq!(marketplaces[0].name, "ora");
     }
 
     fn install_schema_fixture(context: &SettingsContext) {

@@ -1,0 +1,29 @@
+{
+  "name": "@lingxi/local-app-webmcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Pinned WebMCP document.modelContext polyfill resource for Local Apps",
+  "license": "Apache-2.0",
+  "files": [
+    "dist/",
+    "upstream/",
+    "provenance.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "node ./scripts/build.mjs",
+    "test": "node --test ./tests/*.test.mjs"
+  },
+  "exports": {
+    "./browser/iife": "./dist/webmcp-polyfill.iife.js",
+    "./browser/source": {
+      "types": "./dist/webmcp-polyfill.source.d.ts",
+      "import": "./dist/webmcp-polyfill.source.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

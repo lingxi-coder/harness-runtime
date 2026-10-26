@@ -1,11 +1,10 @@
 //! `.mcpb` bundle install (Stage 3): unpack a zip plugin bundle with
 //! path-traversal + too-many-files + zip-bomb guards, verify its content hash,
-//! and normalize it into a loadable plugin directory.
+//! and normalize MCP-style bundles into a loadable plugin directory.
 //!
-//! A `.mcpb` is a zip archive. The common bundle ships a plugin tree with
-//! `.lingxi-plugin/plugin.json`; an MCP-style bundle roots a `manifest.json`
-//! instead, which we translate into a minimal synthetic `plugin.json` so the
-//! shared loader can read it.
+//! A `.mcpb` is a zip archive. An upstream or LingXi plugin bundle keeps its
+//! existing plugin metadata path; an MCP-style bundle roots a `manifest.json`
+//! instead, which we translate into a minimal LingXi `plugin.json`.
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -534,16 +533,17 @@ fn unpack_zip_with_limits(bytes: &[u8], dest: &Path, limits: ZipLimits) -> Resul
     Ok(())
 }
 
-/// Ensure the extracted bundle at `dir` has a `.lingxi-plugin/plugin.json` the
-/// shared loader can read. If it is missing but a root `manifest.json` (MCPB
-/// schema) is present, translate the `name`/`version` into a minimal synthetic
-/// `plugin.json`.
+/// Ensure the extracted bundle at `dir` has a supported plugin manifest the
+/// shared loader can read. If both supported paths are absent but a root
+/// `manifest.json` (MCPB schema) is present, translate the `name`/`version`
+/// into a minimal synthetic LingXi `plugin.json`.
 ///
 /// # Errors
 /// Returns a byte-faithful detail when neither manifest is present/valid.
 pub fn ensure_plugin_manifest(dir: &Path) -> Result<(), String> {
-    let plugin_json = dir.join(branding::PLUGIN_MANIFEST_DIR).join("plugin.json");
-    if plugin_json.exists() {
+    let plugin_json = branding::plugin_manifest_path(dir)
+        .map_err(|error| format!("Could not inspect plugin manifest path: {error}"))?;
+    if std::fs::symlink_metadata(&plugin_json).is_ok() {
         return Ok(());
     }
     let manifest_path = dir.join("manifest.json");
@@ -957,6 +957,24 @@ mod tests {
         let p = std::env::temp_dir().join(format!("lingxi-mcpb-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         p
+    }
+
+    #[test]
+    fn ensure_manifest_preserves_current_upstream_plugin_json() {
+        let root = scratch("upstream-plugin");
+        let manifest_dir = root.join(branding::CLAUDE_PLUGIN_MANIFEST_DIR);
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        let raw = br#"{"name":"webmcp","version":"0.10.0"}"#;
+        std::fs::write(manifest_dir.join("plugin.json"), raw).unwrap();
+
+        ensure_plugin_manifest(&root).unwrap();
+
+        assert_eq!(
+            std::fs::read(manifest_dir.join("plugin.json")).unwrap(),
+            raw
+        );
+        assert!(!root.join(branding::PLUGIN_MANIFEST_DIR).exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn zip_with(entries: &[(&str, &[u8])]) -> Vec<u8> {

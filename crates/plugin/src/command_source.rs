@@ -195,8 +195,9 @@ fn run_command_source(command: &str, timeout_secs: u64) -> Result<PathBuf, Strin
     if !has_plugin_content {
         let shown_path: String = printed.chars().take(200).collect();
         return Err(format!(
-            "Plugin source command `{shown}` printed `{shown_path}`, but that directory has no plugin content (expected {}/ or a commands/, skills/, agents/, hooks/, themes/, output-styles/, monitors/, workflows/, SKILL.md, .mcp.json, or .lsp.json at the top level). Nothing was installed.",
-            branding::PLUGIN_MANIFEST_DIR
+            "Plugin source command `{shown}` printed `{shown_path}`, but that directory has no plugin content (expected {}/, {}/, or a commands/, skills/, agents/, hooks/, themes/, output-styles/, monitors/, workflows/, SKILL.md, .mcp.json, or .lsp.json at the top level). Nothing was installed.",
+            branding::PLUGIN_MANIFEST_DIR,
+            branding::CLAUDE_PLUGIN_MANIFEST_DIR
         ));
     }
     tracing::info!(
@@ -269,6 +270,7 @@ fn is_plugin_content_entry(name: &str) -> bool {
             | ".mcp.json"
             | ".lsp.json"
     ) || name == branding::PLUGIN_MANIFEST_DIR
+        || name == branding::CLAUDE_PLUGIN_MANIFEST_DIR
 }
 
 fn copy_plugin_directory(src: &Path, dest: &Path) -> Result<(), String> {

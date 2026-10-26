@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "f629c99458514784b9104864e5535245ca7ac6b0",
+  "sourceFiles": {
+    "src/auto.ts": {
+      "sha256": "9c4eb81565caef71001e9fec5fd7e1d6f40c5e7f268f92f0441d6f33f5cbf55d",
+      "bytes": 105
+    },
+    "src/index.ts": {
+      "sha256": "7f1ee203ee0c0cc24dadc750d6ea027e9cbf038c479948ff1827a22bd32d5a95",
+      "bytes": 21544
+    },
+    "src/frames.ts": {
+      "sha256": "b1fddd840422947f834370d5f6d6ee1aefc84ca68f0be443e93ba8df841d0b00",
+      "bytes": 24046
+    },
+    "package.json": {
+      "sha256": "63fc3875e9ffcb23facb922056f1ab521bf1158bfc00994d13f3c6a55231281c",
+      "bytes": 1205
+    },
+    "tsconfig.json": {
+      "sha256": "96ff94832faa1735ffa2ad94207b27cb3f6a761d7fcbda3dd5a2dbd9c4bf1957",
+      "bytes": 425
+    },
+    "LICENSE": {
+      "sha256": "8c6db340475136df3c1201d458fa5755698eace76e510471ecc9d857d6083dac",
+      "bytes": 11359
+    }
+  },
+  "artifact": {
+    "path": "webmcp-polyfill.iife.js",
+    "sha256": "8898727f639ea180c8101050d257a402abd029b8ea61320045175ff32b7efe56",
+    "bytes": 15370
+  },
+  "sourceModule": {
+    "path": "webmcp-polyfill.source.js",
+    "sha256": "552d0128908c35a1c400d75577ab0888466cbcadbc18b0d6d00b4291ee1f8cbf",
+    "bytes": 15733
+  },
+  "builder": {
+    "entryPoint": "upstream/src/auto.ts",
+    "format": "iife",
+    "target": "es2022",
+    "minify": true,
+    "legalComments": "inline",
+    "esbuildVersion": "0.28.2"
+  }
+}

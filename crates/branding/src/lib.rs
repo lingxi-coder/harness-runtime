@@ -245,8 +245,51 @@ pub const MEMORY_FILE: &str = "LINGXI.md";
 /// Local-override memory filename.
 pub const MEMORY_LOCAL_FILE: &str = "LINGXI.local.md";
 
-/// Manifest directory name inside a plugin / marketplace package.
+/// Manifest directory name inside a native LingXi plugin / marketplace package.
 pub const PLUGIN_MANIFEST_DIR: &str = ".lingxi-plugin";
+
+/// Current upstream Claude plugin / marketplace metadata directory.
+///
+/// This is an import-format boundary only: it does not change LingXi's config
+/// home, install/cache roots, or the location where LingXi-authored metadata is
+/// written. When both this directory and [`PLUGIN_MANIFEST_DIR`] contain the
+/// requested metadata file, the LingXi-native file wins.
+pub const CLAUDE_PLUGIN_MANIFEST_DIR: &str = ".claude-plugin";
+
+/// Resolve a metadata file while preserving the format path that supplied it.
+///
+/// The LingXi-native path has precedence. Only a genuinely absent native file
+/// allows the current upstream Claude path to be selected. A present but
+/// unreadable, malformed, or symlinked native file is returned to the caller
+/// so its normal validation fails closed instead of falling back. If neither
+/// file exists, the native path is returned so creation stays LingXi-native.
+fn preferred_plugin_metadata_path(root: &Path, filename: &str) -> std::io::Result<PathBuf> {
+    let native = root.join(PLUGIN_MANIFEST_DIR).join(filename);
+    match std::fs::symlink_metadata(&native) {
+        Ok(_) => return Ok(native),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let claude = root.join(CLAUDE_PLUGIN_MANIFEST_DIR).join(filename);
+    match std::fs::symlink_metadata(&claude) {
+        Ok(_) => Ok(claude),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(native),
+        Err(error) => Err(error),
+    }
+}
+
+/// Resolve a plugin's `plugin.json`, preferring the LingXi-native path when
+/// both current formats are present.
+pub fn plugin_manifest_path(root: &Path) -> std::io::Result<PathBuf> {
+    preferred_plugin_metadata_path(root, "plugin.json")
+}
+
+/// Resolve a marketplace's `marketplace.json`, preferring the LingXi-native
+/// path when both current formats are present.
+pub fn marketplace_manifest_path(root: &Path) -> std::io::Result<PathBuf> {
+    preferred_plugin_metadata_path(root, "marketplace.json")
+}
 
 /// Env var naming a plugin's materialized (read-only) install root. Used for
 /// `${LINGXI_PLUGIN_ROOT}` token substitution in skill/agent prompts, hook
@@ -254,12 +297,8 @@ pub const PLUGIN_MANIFEST_DIR: &str = ".lingxi-plugin";
 /// `command`/`args`/`env`/`workspaceFolder` and monitor commands, and injected
 /// under this name into the spawned child's environment.
 ///
-/// Oracle counterpart: `CLAUDE_PLUGIN_ROOT`. The Claude spelling is
-/// **replaced, not aliased** — LingXi neither reads `.claude-plugin` nor
-/// exports any `CLAUDE_PLUGIN_*` alias, and the brand gate
-/// (`scripts/checks/check_brand_leaks.py`, rule G2) treats a `CLAUDE_PLUGIN_*` read
-/// outside the brand-normalization fixtures as a leak. Oracle fixtures are
-/// compared only after brand-token normalization.
+/// Current upstream Claude plugin tokens are accepted at the per-plugin
+/// boundary; LingXi's native token remains the persisted spelling.
 pub const PLUGIN_ROOT_ENV: &str = "LINGXI_PLUGIN_ROOT";
 
 /// Env var naming a plugin's *writable* per-plugin data directory, which is
@@ -267,8 +306,8 @@ pub const PLUGIN_ROOT_ENV: &str = "LINGXI_PLUGIN_ROOT";
 /// [`PLUGIN_ROOT_ENV`] (plugin data must never be able to overwrite the
 /// materialized install). Same substitution surfaces as [`PLUGIN_ROOT_ENV`].
 ///
-/// Oracle counterpart: `CLAUDE_PLUGIN_DATA`, replaced rather than aliased —
-/// see [`PLUGIN_ROOT_ENV`].
+/// Current upstream Claude plugin tokens are accepted at the per-plugin
+/// boundary; LingXi data stays under LingXi's own plugin root.
 pub const PLUGIN_DATA_ENV: &str = "LINGXI_PLUGIN_DATA";
 
 /// Env var naming the current project directory. Same substitution surfaces as
@@ -413,6 +452,50 @@ mod tests {
         assert_eq!(got, Path::new("/custom"));
         let empty = config_home(Path::new("/home/u"), Some(OsString::from("")));
         assert_eq!(empty, Path::new(""));
+    }
+
+    #[test]
+    fn plugin_metadata_resolution_prefers_native_and_preserves_selected_path() {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "branding-plugin-metadata-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let native = root.join(PLUGIN_MANIFEST_DIR).join("plugin.json");
+        let claude = root.join(CLAUDE_PLUGIN_MANIFEST_DIR).join("plugin.json");
+
+        assert_eq!(plugin_manifest_path(&root).unwrap(), native);
+
+        std::fs::create_dir_all(claude.parent().unwrap()).unwrap();
+        std::fs::write(&claude, b"{ malformed upstream data").unwrap();
+        assert_eq!(plugin_manifest_path(&root).unwrap(), claude);
+
+        std::fs::create_dir_all(native.parent().unwrap()).unwrap();
+        std::fs::write(&native, b"{ malformed native data").unwrap();
+        assert_eq!(
+            plugin_manifest_path(&root).unwrap(),
+            native,
+            "a present malformed native file must keep precedence"
+        );
+
+        let native_marketplace = root.join(PLUGIN_MANIFEST_DIR).join("marketplace.json");
+        let claude_marketplace = root
+            .join(CLAUDE_PLUGIN_MANIFEST_DIR)
+            .join("marketplace.json");
+        std::fs::write(&claude_marketplace, b"{\"name\":\"upstream\"}").unwrap();
+        assert_eq!(
+            marketplace_manifest_path(&root).unwrap(),
+            claude_marketplace
+        );
+        std::fs::write(&native_marketplace, b"{ malformed native marketplace").unwrap();
+        assert_eq!(
+            marketplace_manifest_path(&root).unwrap(),
+            native_marketplace,
+            "a present malformed native marketplace must keep precedence"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
