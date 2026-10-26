@@ -50,6 +50,20 @@ mod lifecycle;
 mod result_holding;
 pub(super) mod suggestions;
 
+/// A headless process may serve many SDK requests. Start spans at the request
+/// dispatch boundary rather than around the long-lived input loop.
+async fn with_request_span<T>(
+    kind: &'static str,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    telemetry::otel::with_operation_span(
+        "lingxi.headless.request",
+        telemetry::otel::Attributes::from([("request.kind".into(), kind.into())]),
+        future,
+    )
+    .await
+}
+
 fn init_host_metadata(runtime: &Runtime) -> StreamJsonInitHostMetadata {
     let present = |name: &str| {
         runtime
@@ -529,7 +543,10 @@ pub fn run_oneshot<'a>(
     sink: &'a dyn OutputSink,
 ) -> futures::future::BoxFuture<'a, i32> {
     let operation = Box::pin(run_oneshot_inner(argv, runtime, sink));
-    Box::pin(run_print_owned(runtime, operation))
+    Box::pin(with_request_span(
+        "print",
+        run_print_owned(runtime, operation),
+    ))
 }
 
 async fn run_oneshot_inner(argv: &Argv, runtime: &Runtime, sink: &dyn OutputSink) -> i32 {
@@ -779,31 +796,34 @@ pub async fn run_stream_json_print(
     stream: Arc<StreamJsonStream>,
     permission_mode: permission::PermissionMode,
 ) -> i32 {
-    run_print_owned(runtime, async {
-        let code =
-            run_stream_json_print_inner(argv, runtime, stream.clone(), permission_mode).await;
-        if runtime.policy_helper_refusal.current().is_some() {
-            return exit_codes::RUNTIME_ERROR;
-        }
-        // Publish the native JSON result before entering the shared
-        // shutdown barrier. Stream-json has already delivered each frame.
-        let cost = runtime.orchestrator.snapshot_cost().await;
-        stream.refresh_held_result_totals(
-            &cost,
-            &argv.betas.clone().unwrap_or_default(),
-            runtime.agent_session_statistics().await.map(|stats| {
-                serde_json::to_value(stats).expect("agent statistics are JSON scalars")
-            }),
-        );
-        if runtime.policy_helper_refusal.current().is_some() {
-            return exit_codes::RUNTIME_ERROR;
-        }
-        if stream.publish_json().await.is_err() {
-            exit_codes::RUNTIME_ERROR
-        } else {
-            code
-        }
-    })
+    with_request_span(
+        "print",
+        run_print_owned(runtime, async {
+            let code =
+                run_stream_json_print_inner(argv, runtime, stream.clone(), permission_mode).await;
+            if runtime.policy_helper_refusal.current().is_some() {
+                return exit_codes::RUNTIME_ERROR;
+            }
+            // Publish the native JSON result before entering the shared
+            // shutdown barrier. Stream-json has already delivered each frame.
+            let cost = runtime.orchestrator.snapshot_cost().await;
+            stream.refresh_held_result_totals(
+                &cost,
+                &argv.betas.clone().unwrap_or_default(),
+                runtime.agent_session_statistics().await.map(|stats| {
+                    serde_json::to_value(stats).expect("agent statistics are JSON scalars")
+                }),
+            );
+            if runtime.policy_helper_refusal.current().is_some() {
+                return exit_codes::RUNTIME_ERROR;
+            }
+            if stream.publish_json().await.is_err() {
+                exit_codes::RUNTIME_ERROR
+            } else {
+                code
+            }
+        }),
+    )
     .await
 }
 
@@ -1805,43 +1825,46 @@ async fn run_stream_json_input_loop_inner(
         // Probe handle: after the turn, `is_cancelled()` distinguishes an
         // interrupt-aborted turn from a completed one (binary `mCo(reason)`).
         let cancel_probe = cancel.clone();
-        let turn_result = if let (Some(slot), Some(_schema)) =
-            (&runtime.structured_output_slot, &argv.json_schema)
-        {
-            match execute_structured_output(
-                runtime,
-                &prompt,
-                Vec::new(),
-                Some(&turn.content_projection),
-                external_message_id,
-                slot,
-                argv.max_budget_usd,
-                cancel,
-                None,
-            )
-            .await
+        let turn_result = with_request_span("stream_json", async {
+            if let (Some(slot), Some(_schema)) =
+                (&runtime.structured_output_slot, &argv.json_schema)
             {
-                Ok(value) => {
-                    stream.set_structured_output(value).await;
-                    Ok(orchestrator::TurnOutcome::EndTurn)
+                match execute_structured_output(
+                    runtime,
+                    &prompt,
+                    Vec::new(),
+                    Some(&turn.content_projection),
+                    external_message_id,
+                    slot,
+                    argv.max_budget_usd,
+                    cancel,
+                    None,
+                )
+                .await
+                {
+                    Ok(value) => {
+                        stream.set_structured_output(value).await;
+                        Ok(orchestrator::TurnOutcome::EndTurn)
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
+            } else {
+                orchestrator::native_user_message_source::with_sdk_source(
+                    orchestrator::mod_prompt_origin::with_origin(
+                        json!({"kind":"sdk"}),
+                        runtime
+                            .orchestrator
+                            .run_turn_streaming_with_cancel_projected_content(
+                                &turn.content_projection,
+                                cancel,
+                                external_message_id,
+                            ),
+                    ),
+                )
+                .await
             }
-        } else {
-            orchestrator::native_user_message_source::with_sdk_source(
-                orchestrator::mod_prompt_origin::with_origin(
-                    json!({"kind":"sdk"}),
-                    runtime
-                        .orchestrator
-                        .run_turn_streaming_with_cancel_projected_content(
-                            &turn.content_projection,
-                            cancel,
-                            external_message_id,
-                        ),
-                ),
-            )
-            .await
-        };
+        })
+        .await;
         // The control plane's token is also its busy flag. Release it only
         // after the orchestrator future has naturally completed so Block tools
         // remain protected, but always release it before accepting between-turn

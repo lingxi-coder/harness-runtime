@@ -4797,6 +4797,21 @@ pub(super) async fn register_mod_persisted_attachment_if_visible(
     }
 }
 
+/// Only fixed categories leave the host. MCP/plugin tool names may contain
+/// user-controlled identifiers and therefore never become span attributes.
+fn diagnostic_tool_kind(name: &str) -> &'static str {
+    match name {
+        "Bash" | "Shell" | "shell" => "shell",
+        "Read" | "Glob" | "Grep" | "read" | "glob" | "grep" => "file_read",
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => "file_write",
+        "WebSearch" | "WebFetch" => "web",
+        "Agent" | "Task" => "agent",
+        "computer" | "Computer" | "ComputerUse" => "computer",
+        _ if name.starts_with("mcp__") => "mcp",
+        _ => "other",
+    }
+}
+
 async fn dispatch_tool_uses_tracked_deferred_core(
     orch: &ConversationOrchestrator,
     tool_uses: &[(ToolUseId, String, Utf16JsonProjection, Option<String>)],
@@ -6839,26 +6854,42 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     // Keep the call future in this inner scope. When cancellation wins,
                     // leaving the scope drops the non-cooperative future (and its
                     // progress sender) before we await the progress consumer below.
-                    // A permission prompt may have parked this Arc while the
-                    // owning app revoked its grant. Recheck live authority at
-                    // physical dispatch, after all approvals and input hooks.
-                    let tool_call = async {
-                        orch.tools.check_session_tool_access(tool_handle.as_ref())?;
-                        tool_handle
-                            .call(effective_input.clone(), ctx, progress_tx)
-                            .await
-                    };
-                    tokio::pin!(tool_call);
-                    let outcome = match (interrupt_behavior, dispatch_cancel) {
-                        (tool_api::tool_trait::InterruptBehavior::Cancel, Some(cancel)) => {
-                            tokio::select! {
-                                biased;
-                                () = cancel.cancelled() => Err(tool_api::ToolError::Aborted),
-                                outcome = &mut tool_call => outcome,
+                    let mut trace_attributes = telemetry::otel::Attributes::new();
+                    trace_attributes.insert(
+                        "tool_name".into(),
+                        telemetry::otel::AttrValue::from(diagnostic_tool_kind(name)),
+                    );
+                    let span = telemetry::otel::start_operation_span(
+                        "lingxi.tool.execute",
+                        trace_attributes,
+                    );
+                    let trace_context = span.trace_context();
+                    let outcome = telemetry::otel::with_trace_context_future(
+                        trace_context.as_ref(),
+                        async {
+                            // Recheck live authority after approvals and input hooks.
+                            let tool_call = async {
+                                orch.tools.check_session_tool_access(tool_handle.as_ref())?;
+                                tool_handle.call(effective_input.clone(), ctx, progress_tx).await
+                            };
+                            tokio::pin!(tool_call);
+                            match (interrupt_behavior, dispatch_cancel) {
+                                (tool_api::tool_trait::InterruptBehavior::Cancel, Some(cancel)) => {
+                                    tokio::select! {
+                                        biased;
+                                        () = cancel.cancelled() => Err(tool_api::ToolError::Aborted),
+                                        outcome = &mut tool_call => outcome,
+                                    }
+                                }
+                                _ => tool_call.await,
                             }
-                        }
-                        _ => tool_call.await,
-                    };
+                        },
+                    ).await;
+                    span.set_outcome(match &outcome {
+                        Err(tool_api::ToolError::Aborted) => "cancelled",
+                        Ok(result) if !result.is_error => "success",
+                        _ => "error",
+                    });
                     (record, outcome)
                 }
             }

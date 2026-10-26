@@ -30,8 +30,10 @@ use prometheus::{Encoder, Registry, TextEncoder};
 
 use super::code_language::language_for_path;
 use super::config::{ExporterKind, OtelConfig, OtlpExporterConfig, OtlpProtocol};
+use super::export_policy::GatedExporter;
 use super::git_ops::git_counter_hits;
 use super::metrics;
+use super::policy::{self, filter_attributes, ExportPolicy};
 use super::record::{truncate_content, AttrValue, Attributes};
 use crate::sink::{AnalyticsValue, LogEventMetadata};
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
@@ -54,6 +56,104 @@ impl TelemetryGuard {
     pub fn disabled() -> Self {
         TelemetryGuard { runtime: None }
     }
+
+    /// Flush without blocking an async host's executor.
+    pub async fn force_flush_async(&self) -> Result<(), String> {
+        let Some(runtime) = self.runtime.clone() else {
+            return Ok(());
+        };
+        tokio::task::spawn_blocking(move || force_flush_runtime(&runtime))
+            .await
+            .map_err(|_| "telemetry flush worker failed".to_string())?
+    }
+
+    /// Explicit async shutdown for hosts that can await lifecycle completion.
+    /// Drop still provides a bounded synchronous fallback for early returns.
+    pub async fn shutdown_async(mut self) -> Result<(), String> {
+        let Some(runtime) = self.runtime.take() else {
+            return Ok(());
+        };
+        detach_runtime(&runtime);
+        tokio::task::spawn_blocking(move || runtime.shutdown())
+            .await
+            .map_err(|_| "telemetry shutdown worker failed".to_string())
+    }
+
+    /// Flush accepted diagnostics for deterministic shutdown or validation.
+    /// Disabled/revoked providers remain silent, including queued records.
+    pub fn force_flush(&self) -> Result<(), String> {
+        let Some(runtime) = &self.runtime else {
+            return Ok(());
+        };
+        force_flush_runtime(runtime)
+    }
+}
+
+fn force_flush_runtime(runtime: &OtelRuntime) -> Result<(), String> {
+    if !runtime.policy.allowed() {
+        return Ok(());
+    }
+    let timeout = duration_ms(runtime.config.timeouts.flush_timeout_ms);
+    if let Some(metrics) = &runtime.metrics {
+        let provider = metrics.provider.clone();
+        run_with_timeout("metrics.force_flush", timeout, move || {
+            provider.force_flush().map_err(|err| err.to_string())
+        })?;
+    }
+    if let Some(logs) = &runtime.logs {
+        let provider = logs.clone();
+        run_with_timeout("logs.force_flush", timeout, move || {
+            provider.force_flush().map_err(|err| err.to_string())
+        })?;
+    }
+    if let Some(traces) = &runtime.traces {
+        let provider = traces.clone();
+        run_with_timeout("traces.force_flush", timeout, move || {
+            provider.force_flush().map_err(|err| err.to_string())
+        })?;
+    }
+    Ok(())
+}
+
+fn detach_runtime(runtime: &Arc<OtelRuntime>) {
+    if let Ok(mut slot) = runtime_slot().write() {
+        if slot
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, runtime))
+        {
+            slot.take();
+        }
+    }
+}
+
+/// Revoke reporting before draining providers. Pending batches are discarded.
+/// Already in-flight requests cannot be retracted; their normal timeouts apply.
+pub fn disable_process() {
+    if let Some(runtime) = revoke_active_runtime() {
+        runtime.shutdown();
+    }
+}
+
+/// Revoke immediately, then await bounded teardown away from the async host.
+/// A caller may acknowledge opt-out after this returns; queued exports stay
+/// revoked even if the waiting future is cancelled during teardown.
+pub async fn disable_process_async() {
+    if let Some(runtime) = revoke_active_runtime() {
+        if tokio::task::spawn_blocking(move || runtime.shutdown())
+            .await
+            .is_err()
+        {
+            emit_diag(true, "OpenTelemetry shutdown worker failed", false);
+        }
+    }
+}
+
+fn revoke_active_runtime() -> Option<Arc<OtelRuntime>> {
+    let mut slot = runtime_slot().write().ok()?;
+    policy::advance_generation();
+    let runtime = slot.take()?;
+    runtime.policy.revoke();
+    Some(runtime)
 }
 
 impl Drop for TelemetryGuard {
@@ -61,14 +161,7 @@ impl Drop for TelemetryGuard {
         let Some(runtime) = self.runtime.take() else {
             return;
         };
-        if let Ok(mut slot) = runtime_slot().write() {
-            let clear = slot
-                .as_ref()
-                .is_some_and(|active| Arc::ptr_eq(active, &runtime));
-            if clear {
-                slot.take();
-            }
-        }
+        detach_runtime(&runtime);
         runtime.shutdown();
     }
 }
@@ -83,6 +176,7 @@ struct OtelRuntime {
     logs: Option<SdkLoggerProvider>,
     traces: Option<SdkTracerProvider>,
     shutdown: AtomicBool,
+    policy: Arc<ExportPolicy>,
     #[cfg(test)]
     debug: Mutex<DebugMirrorState>,
 }
@@ -161,15 +255,27 @@ enum MetricUpdateKind {
 }
 
 impl OtelRuntime {
+    #[cfg(test)]
     fn new(
         config: OtelConfig,
         entrypoint: &'static str,
         record_session_metric: bool,
     ) -> Result<Self, String> {
+        let policy = Arc::new(ExportPolicy::new(config.enabled));
+        let runtime = Self::with_policy(config, entrypoint, policy)?;
+        runtime.emit_started(record_session_metric);
+        Ok(runtime)
+    }
+
+    fn with_policy(
+        config: OtelConfig,
+        entrypoint: &'static str,
+        policy: Arc<ExportPolicy>,
+    ) -> Result<Self, String> {
         let resource = build_resource(&config);
-        let metrics = build_metrics_runtime(&config, resource.clone())?;
-        let logs = build_logger_provider(&config, resource.clone())?;
-        let traces = build_tracer_provider(&config, resource.clone())?;
+        let metrics = build_metrics_runtime(&config, resource.clone(), &policy)?;
+        let logs = build_logger_provider(&config, resource.clone(), &policy)?;
+        let traces = build_tracer_provider(&config, resource.clone(), &policy)?;
 
         let runtime = OtelRuntime {
             config,
@@ -180,33 +286,37 @@ impl OtelRuntime {
             logs,
             traces,
             shutdown: AtomicBool::new(false),
+            policy,
             #[cfg(test)]
             debug: Mutex::new(DebugMirrorState::default()),
         };
 
-        runtime.emit_span("lingxi.telemetry.start", runtime.process_attributes());
-        runtime.emit_log_event(
+        Ok(runtime)
+    }
+
+    fn emit_started(&self, record_session_metric: bool) {
+        self.emit_span("lingxi.telemetry.start", self.process_attributes());
+        self.emit_log_event(
             "telemetry_started",
             &attrs_from_pairs(&[
-                ("entrypoint", AttrValue::from(entrypoint)),
+                ("entrypoint", AttrValue::from(self.entrypoint)),
                 (
                     "metrics_exporter",
-                    AttrValue::from(exporter_kind_name(&runtime.config.metrics.kind)),
+                    AttrValue::from(exporter_kind_name(&self.config.metrics.kind)),
                 ),
                 (
                     "logs_exporter",
-                    AttrValue::from(exporter_kind_name(&runtime.config.logs.kind)),
+                    AttrValue::from(exporter_kind_name(&self.config.logs.kind)),
                 ),
                 (
                     "traces_exporter",
-                    AttrValue::from(exporter_kind_name(&runtime.config.traces.kind)),
+                    AttrValue::from(exporter_kind_name(&self.config.traces.kind)),
                 ),
             ]),
         );
         if record_session_metric {
-            runtime.record_counter(metrics::SESSION_COUNT, 1.0, &Attributes::new());
+            self.record_counter(metrics::SESSION_COUNT, 1.0, &Attributes::new());
         }
-        Ok(runtime)
     }
 
     fn shutdown(&self) {
@@ -287,6 +397,9 @@ impl OtelRuntime {
     }
 
     fn record_counter(&self, instrument: &str, value: f64, attrs: &Attributes) {
+        if !self.policy.allowed() || !value.is_finite() || value < 0.0 {
+            return;
+        }
         let Some(metrics) = &self.metrics else {
             return;
         };
@@ -318,6 +431,9 @@ impl OtelRuntime {
     }
 
     fn record_histogram(&self, instrument: &str, value: f64, attrs: &Attributes) {
+        if !self.policy.allowed() || !value.is_finite() {
+            return;
+        }
         let Some(metrics) = &self.metrics else {
             return;
         };
@@ -359,11 +475,14 @@ impl OtelRuntime {
         if self.config.metrics_include.resource_attributes {
             out.extend(resource_kvs(&self.resource));
         }
-        out.extend(attrs_to_kvs(attrs));
+        out.extend(attrs_to_kvs(&filter_attributes(attrs, true)));
         out
     }
 
     fn emit_log_event(&self, event_name: &'static str, attrs: &Attributes) {
+        if !self.policy.allowed() {
+            return;
+        }
         let Some(provider) = &self.logs else {
             #[cfg(test)]
             self.debug
@@ -380,7 +499,8 @@ impl OtelRuntime {
         let mut record = logger.create_log_record();
         record.set_event_name(event_name);
         record.set_body(AnyValue::String(event_name.into()));
-        record.add_attributes(log_attrs(attrs));
+        record.add_attributes(log_attrs(&filter_attributes(attrs, false)));
+        set_log_trace_context(&mut record);
         logger.emit(record);
         #[cfg(test)]
         self.debug
@@ -394,6 +514,14 @@ impl OtelRuntime {
     }
 
     fn emit_dynamic_log_event(&self, body_name: &str, attrs: &Attributes) {
+        if !self.policy.allowed() {
+            return;
+        }
+        let body_name = if policy::safe_label(body_name) {
+            body_name
+        } else {
+            "analytics_event"
+        };
         let mut dynamic_attrs = attrs.clone();
         dynamic_attrs.insert(
             "analytics_event".into(),
@@ -415,7 +543,8 @@ impl OtelRuntime {
         let mut record = logger.create_log_record();
         record.set_event_name("analytics_bus_event");
         record.set_body(AnyValue::String(body_name.to_string().into()));
-        record.add_attributes(log_attrs(&dynamic_attrs));
+        record.add_attributes(log_attrs(&filter_attributes(&dynamic_attrs, false)));
+        set_log_trace_context(&mut record);
         logger.emit(record);
         #[cfg(test)]
         self.debug
@@ -429,13 +558,16 @@ impl OtelRuntime {
     }
 
     fn emit_span(&self, name: &'static str, attrs: Vec<KeyValue>) {
+        if !self.policy.allowed() {
+            return;
+        }
         let Some(provider) = &self.traces else {
             return;
         };
         let tracer = provider.tracer(super::logs::TRACING_SIGNAL);
         let mut span = tracer
             .span_builder(name)
-            .with_attributes(attrs)
+            .with_attributes(filter_span_kvs(attrs))
             .start(&tracer);
         span.end();
     }
@@ -448,9 +580,32 @@ impl OtelRuntime {
 /// telemetry side effects.
 pub fn install_process(entrypoint: &'static str, record_session_metric: bool) -> TelemetryGuard {
     let Some(config) = super::init_from_env() else {
+        disable_process();
         return TelemetryGuard::disabled();
     };
     install_process_with_config(entrypoint, record_session_metric, config)
+}
+
+/// Initialize providers without blocking an async host's executor. The Tokio
+/// blocking pool preserves its runtime handle for tonic/gRPC clients, while
+/// the blocking HTTP client's own constructor is isolated from Tokio below.
+pub async fn install_process_with_config_async(
+    entrypoint: &'static str,
+    record_session_metric: bool,
+    config: OtelConfig,
+) -> TelemetryGuard {
+    let generation = reserve_install_generation();
+    match tokio::task::spawn_blocking(move || {
+        install_reserved_generation(entrypoint, record_session_metric, config, generation)
+    })
+    .await
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            emit_diag(true, "OpenTelemetry initialization worker failed", false);
+            TelemetryGuard::disabled()
+        }
+    }
 }
 
 /// Install the process-scoped OTEL runtime from an already-resolved config.
@@ -459,19 +614,55 @@ pub fn install_process_with_config(
     record_session_metric: bool,
     config: OtelConfig,
 ) -> TelemetryGuard {
-    match OtelRuntime::new(config, entrypoint, record_session_metric) {
+    let generation = reserve_install_generation();
+    install_reserved_generation(entrypoint, record_session_metric, config, generation)
+}
+
+fn reserve_install_generation() -> u64 {
+    // Serialize consent changes and publication, but never hold this lock while
+    // constructing or shutting down providers.
+    let _slot = runtime_slot()
+        .write()
+        .unwrap_or_else(|err| err.into_inner());
+    policy::advance_generation()
+}
+
+fn retire_reserved_generation(generation: u64) {
+    let previous = {
+        let mut slot = runtime_slot()
+            .write()
+            .unwrap_or_else(|err| err.into_inner());
+        if generation != policy::current_generation() {
+            return;
+        }
+        slot.take()
+    };
+    if let Some(previous) = previous {
+        previous.policy.revoke();
+        previous.shutdown();
+    }
+}
+
+fn install_reserved_generation(
+    entrypoint: &'static str,
+    record_session_metric: bool,
+    config: OtelConfig,
+    generation: u64,
+) -> TelemetryGuard {
+    if generation != policy::current_generation() {
+        return TelemetryGuard::disabled();
+    }
+    if !config.enabled || policy::privacy_disabled() {
+        retire_reserved_generation(generation);
+        return TelemetryGuard::disabled();
+    }
+    let export_policy = Arc::new(ExportPolicy::for_generation(config.enabled, generation));
+    match OtelRuntime::with_policy(config, entrypoint, export_policy) {
         Ok(runtime) => {
-            let runtime = Arc::new(runtime);
-            if let Ok(mut slot) = runtime_slot().write() {
-                if let Some(previous) = slot.replace(runtime.clone()) {
-                    previous.shutdown();
-                }
-            }
-            TelemetryGuard {
-                runtime: Some(runtime),
-            }
+            publish_reserved_runtime(Arc::new(runtime), record_session_metric, generation)
         }
         Err(err) => {
+            retire_reserved_generation(generation);
             emit_diag(
                 true,
                 &format!("OpenTelemetry initialization failed for {entrypoint}: {err}"),
@@ -479,6 +670,36 @@ pub fn install_process_with_config(
             );
             TelemetryGuard::disabled()
         }
+    }
+}
+
+fn publish_reserved_runtime(
+    runtime: Arc<OtelRuntime>,
+    record_session_metric: bool,
+    generation: u64,
+) -> TelemetryGuard {
+    let (published, previous) = {
+        let mut slot = runtime_slot()
+            .write()
+            .unwrap_or_else(|err| err.into_inner());
+        if generation == policy::current_generation() && runtime.policy.allowed() {
+            (true, slot.replace(runtime.clone()))
+        } else {
+            (false, None)
+        }
+    };
+    if !published {
+        runtime.policy.revoke();
+        runtime.shutdown();
+        return TelemetryGuard::disabled();
+    }
+    runtime.emit_started(record_session_metric);
+    if let Some(previous) = previous {
+        previous.policy.revoke();
+        previous.shutdown();
+    }
+    TelemetryGuard {
+        runtime: Some(runtime),
     }
 }
 
@@ -836,6 +1057,9 @@ pub fn record_git_operation_counters(command: &str, exit_code: i32) {
 pub fn prometheus_text() -> Option<String> {
     let slot = runtime_slot().read().ok()?;
     let runtime = slot.as_ref()?;
+    if !runtime.policy.allowed() {
+        return None;
+    }
     let metrics = runtime.metrics.as_ref()?;
     let registry = metrics.prometheus_registry.as_ref()?;
     let encoder = TextEncoder::new();
@@ -877,46 +1101,132 @@ pub fn with_trace_context<T>(
 }
 
 /// Run `future` with `trace_context` attached while it is being polled.
-pub async fn with_trace_context_future<T>(
+pub fn with_trace_context_future<T>(
     trace_context: Option<&SerializedTraceContext>,
     future: impl std::future::Future<Output = T>,
-) -> T {
-    let Some(trace_context) = trace_context else {
-        return future.await;
-    };
-    let propagator = TraceContextPropagator::new();
-    let carrier = TraceCarrier::from_serialized(trace_context);
-    let cx = propagator.extract(&carrier);
-    if !cx.span().span_context().is_valid() {
-        return future.await;
+) -> impl std::future::Future<Output = T> {
+    // Box before constructing this wrapper's state machine. Agent futures can
+    // be large; storing one in each await branch multiplies stack pressure even
+    // when telemetry is disabled.
+    let future = Box::pin(future);
+    let trace_context = trace_context.cloned();
+    async move {
+        let Some(trace_context) = trace_context else {
+            return future.await;
+        };
+        let propagator = TraceContextPropagator::new();
+        let carrier = TraceCarrier::from_serialized(&trace_context);
+        let cx = propagator.extract(&carrier);
+        if !cx.span().span_context().is_valid() {
+            return future.await;
+        }
+        future.with_context(cx).await
     }
-    future.with_context(cx).await
+}
+
+/// Capture the parent now, before a future is handed to a task scheduler.
+pub fn bind_current_trace_context<F: std::future::Future>(
+    future: F,
+) -> impl std::future::Future<Output = F::Output> {
+    let context = capture_current_trace_context();
+    let future = Box::pin(future);
+    async move { with_trace_context_future(context.as_ref(), future).await }
 }
 
 /// Run one async turn future inside a fresh OTEL span when tracing is enabled.
-pub async fn with_turn_span<T>(
+pub fn with_turn_span<T>(
     span_name: &'static str,
     future: impl std::future::Future<Output = T>,
-) -> T {
-    let Some(cx) = current_turn_span_context(span_name) else {
-        return future.await;
-    };
-    let result = future.with_context(cx.clone()).await;
-    cx.span().end();
-    result
+) -> impl std::future::Future<Output = T> {
+    with_operation_span(span_name, Attributes::new(), future)
 }
 
-fn current_turn_span_context(span_name: &'static str) -> Option<Context> {
+/// Run an operation with the current W3C parent and end it even if cancelled.
+/// Only the diagnostic allowlist reaches the outgoing span.
+pub fn with_operation_span<T>(
+    span_name: &'static str,
+    attributes: Attributes,
+    future: impl std::future::Future<Output = T>,
+) -> impl std::future::Future<Output = T> {
+    let future = Box::pin(future);
+    async move {
+        // Parent lookup remains at poll time so surrounding context restorers
+        // establish the parent before this operation starts.
+        let span = start_operation_span(span_name, attributes);
+        let Some(cx) = span.context.clone() else {
+            return future.await;
+        };
+        let result = future.with_context(cx).await;
+        span.set_outcome("completed");
+        result
+    }
+}
+
+/// An operation whose lifetime may span stream polling or multiple futures.
+/// Drop ends the span; absent an explicit outcome it records cancellation.
+pub struct OperationSpan {
+    context: Option<Context>,
+    outcome_set: AtomicBool,
+}
+
+impl OperationSpan {
+    /// The operation's W3C context for polling owned futures and streams.
+    pub fn trace_context(&self) -> Option<SerializedTraceContext> {
+        let cx = self.context.as_ref()?;
+        let _guard = cx.clone().attach();
+        capture_current_trace_context()
+    }
+
+    /// Bounded outcome labels only; never attach an error message or content.
+    pub fn set_outcome(&self, outcome: &'static str) {
+        let Some(cx) = &self.context else {
+            return;
+        };
+        if !matches!(outcome, "success" | "error" | "cancelled" | "completed") {
+            return;
+        }
+        self.outcome_set.store(true, Ordering::Release);
+        cx.span().set_attribute(KeyValue::new("outcome", outcome));
+        if outcome == "error" {
+            cx.span()
+                .set_status(opentelemetry::trace::Status::error("operation_failed"));
+        }
+    }
+}
+
+impl Drop for OperationSpan {
+    fn drop(&mut self) {
+        if let Some(cx) = &self.context {
+            if !self.outcome_set.load(Ordering::Acquire) {
+                cx.span()
+                    .set_attribute(KeyValue::new("outcome", "cancelled"));
+            }
+            cx.span().end();
+        }
+    }
+}
+
+/// Start a child operation of the current W3C context, or a root operation.
+pub fn start_operation_span(span_name: &'static str, attributes: Attributes) -> OperationSpan {
+    OperationSpan {
+        context: current_operation_span_context(span_name, &attributes),
+        outcome_set: AtomicBool::new(false),
+    }
+}
+
+fn current_operation_span_context(span_name: &'static str, attrs: &Attributes) -> Option<Context> {
     let slot = runtime_slot().read().ok()?;
     let runtime = slot.as_ref()?;
-    if runtime.shutdown.load(Ordering::Relaxed) {
+    if runtime.shutdown.load(Ordering::Relaxed) || !runtime.policy.allowed() {
         return None;
     }
     let provider = runtime.traces.as_ref()?;
     let tracer = provider.tracer(super::logs::TRACING_SIGNAL);
+    let mut attributes = runtime.process_attributes();
+    attributes.extend(attrs_to_kvs(&filter_attributes(attrs, false)));
     let span = tracer
         .span_builder(span_name)
-        .with_attributes(runtime.process_attributes())
+        .with_attributes(attributes)
         .start(&tracer);
     Some(Context::current_with_span(span))
 }
@@ -924,7 +1234,7 @@ fn current_turn_span_context(span_name: &'static str) -> Option<Context> {
 fn with_runtime(f: impl FnOnce(&OtelRuntime)) {
     if let Ok(slot) = runtime_slot().read() {
         if let Some(runtime) = slot.as_ref() {
-            if !runtime.shutdown.load(Ordering::Relaxed) {
+            if !runtime.shutdown.load(Ordering::Relaxed) && runtime.policy.allowed() {
                 f(runtime);
             }
         }
@@ -939,16 +1249,22 @@ struct TraceCarrier {
 
 impl TraceCarrier {
     fn from_serialized(serialized: &SerializedTraceContext) -> Self {
+        // Only fixed-width W3C traceparent crosses this boundary. Arbitrary
+        // vendor tracestate can contain client data and is not propagated.
+        let parent = &serialized.traceparent;
+        if parent.len() != 55 || !parent.is_ascii() {
+            return Self::default();
+        }
         Self {
-            traceparent: Some(serialized.traceparent.clone()),
-            tracestate: serialized.tracestate.clone(),
+            traceparent: Some(parent.clone()),
+            tracestate: None,
         }
     }
 
     fn into_serialized(self) -> Option<SerializedTraceContext> {
         self.traceparent.map(|traceparent| SerializedTraceContext {
             traceparent,
-            tracestate: self.tracestate.filter(|tracestate| !tracestate.is_empty()),
+            tracestate: None,
         })
     }
 }
@@ -1020,7 +1336,7 @@ impl OtelRuntime {
 ///   `cache_read_tokens`, `cost_usd`/`cost_usd_micros`, `duration_ms`,
 ///   `speed`, `query_source`, …). Numeric attrs stay numeric, as in CC.
 /// * `tengu_api_request_failed` / `tengu_api_rate_limited` → `api_error`
-///   (`error` carries the port's stable `error_kind` label — CC puts the
+///   (`error_kind` carries the port's stable failure label — CC puts the
 ///   provider error message there, which the bus does not transport).
 /// * the tool `_completed`/`_failed`/`_timeout` families → `tool_result`
 ///   (`success`/`duration_ms` are STRING attrs, matching `vc("tool_result",
@@ -1084,15 +1400,15 @@ fn cc_named_log_for_event(
         "tengu_api_request_failed" | "tengu_api_rate_limited" => {
             let mut attrs = attrs_from_optional_pairs([
                 ("model", stable_string(metadata, "model")),
-                ("error", stable_string(metadata, "error_kind")),
+                ("error_kind", stable_string(metadata, "error_kind")),
                 ("request_id", stable_string(metadata, "request_id")),
                 (
                     "status_code",
                     int_value(metadata, "status_code").map(AttrValue::from),
                 ),
             ]);
-            if name == "tengu_api_rate_limited" && !attrs.contains_key("error") {
-                attrs.insert("error".into(), AttrValue::from("rate_limited"));
+            if name == "tengu_api_rate_limited" && !attrs.contains_key("error_kind") {
+                attrs.insert("error_kind".into(), AttrValue::from("rate_limited"));
             }
             Some(("api_error", attrs))
         }
@@ -1540,7 +1856,11 @@ fn attr_str(value: &AttrValue) -> Option<&str> {
 fn build_metrics_runtime(
     config: &OtelConfig,
     resource: Resource,
+    policy: &Arc<ExportPolicy>,
 ) -> Result<Option<MetricsRuntime>, String> {
+    if !config.enabled || !policy.allowed() {
+        return Ok(None);
+    }
     let provider = match &config.metrics.kind {
         ExporterKind::None => return Ok(None),
         ExporterKind::Prometheus => {
@@ -1556,9 +1876,12 @@ fn build_metrics_runtime(
             return Ok(Some(MetricsRuntime::new(provider, Some(registry))));
         }
         ExporterKind::Console => {
-            let reader = PeriodicReader::builder(opentelemetry_stdout::MetricExporter::default())
-                .with_interval(duration_ms_opt(config.metrics.export_interval_ms))
-                .build();
+            let reader = PeriodicReader::builder(GatedExporter::new(
+                opentelemetry_stdout::MetricExporter::default(),
+                policy,
+            ))
+            .with_interval(duration_ms_opt(config.metrics.export_interval_ms))
+            .build();
             SdkMeterProvider::builder()
                 .with_resource(resource)
                 .with_reader(reader)
@@ -1566,7 +1889,7 @@ fn build_metrics_runtime(
         }
         ExporterKind::Otlp => {
             let exporter = build_metric_exporter(&config.metrics)?;
-            let reader = PeriodicReader::builder(exporter)
+            let reader = PeriodicReader::builder(GatedExporter::new(exporter, policy))
                 .with_interval(duration_ms_opt(config.metrics.export_interval_ms))
                 .build();
             SdkMeterProvider::builder()
@@ -1590,7 +1913,11 @@ fn build_metrics_runtime(
 fn build_logger_provider(
     config: &OtelConfig,
     resource: Resource,
+    policy: &Arc<ExportPolicy>,
 ) -> Result<Option<SdkLoggerProvider>, String> {
+    if !config.enabled || !policy.allowed() {
+        return Ok(None);
+    }
     let provider = match &config.logs.kind {
         ExporterKind::None => return Ok(None),
         ExporterKind::Prometheus => {
@@ -1602,9 +1929,12 @@ fn build_logger_provider(
             return Ok(None);
         }
         ExporterKind::Console => {
-            let batch = BatchLogProcessor::builder(opentelemetry_stdout::LogExporter::default())
-                .with_batch_config(log_batch_config(config))
-                .build();
+            let batch = BatchLogProcessor::builder(GatedExporter::new(
+                opentelemetry_stdout::LogExporter::default(),
+                policy,
+            ))
+            .with_batch_config(log_batch_config(config))
+            .build();
             SdkLoggerProvider::builder()
                 .with_resource(resource)
                 .with_log_processor(batch)
@@ -1612,7 +1942,7 @@ fn build_logger_provider(
         }
         ExporterKind::Otlp => {
             let exporter = build_log_exporter(&config.logs)?;
-            let batch = BatchLogProcessor::builder(exporter)
+            let batch = BatchLogProcessor::builder(GatedExporter::new(exporter, policy))
                 .with_batch_config(log_batch_config(config))
                 .build();
             SdkLoggerProvider::builder()
@@ -1636,8 +1966,9 @@ fn build_logger_provider(
 fn build_tracer_provider(
     config: &OtelConfig,
     resource: Resource,
+    policy: &Arc<ExportPolicy>,
 ) -> Result<Option<SdkTracerProvider>, String> {
-    if !config.enabled || !config.enhanced_telemetry {
+    if !config.enabled || !policy.allowed() {
         return Ok(None);
     }
 
@@ -1652,9 +1983,12 @@ fn build_tracer_provider(
             return Ok(None);
         }
         ExporterKind::Console => {
-            let batch = BatchSpanProcessor::builder(opentelemetry_stdout::SpanExporter::default())
-                .with_batch_config(trace_batch_config(config))
-                .build();
+            let batch = BatchSpanProcessor::builder(GatedExporter::new(
+                opentelemetry_stdout::SpanExporter::default(),
+                policy,
+            ))
+            .with_batch_config(trace_batch_config(config))
+            .build();
             SdkTracerProvider::builder()
                 .with_resource(resource)
                 .with_span_processor(batch)
@@ -1663,7 +1997,7 @@ fn build_tracer_provider(
         }
         ExporterKind::Otlp => {
             let exporter = build_span_exporter(&config.traces)?;
-            let batch = BatchSpanProcessor::builder(exporter)
+            let batch = BatchSpanProcessor::builder(GatedExporter::new(exporter, policy))
                 .with_batch_config(trace_batch_config(config))
                 .build();
             SdkTracerProvider::builder()
@@ -1790,6 +2124,21 @@ where
 }
 
 fn build_http_client(config: &OtlpExporterConfig) -> Result<reqwest::blocking::Client, String> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let config = config.clone();
+        return thread::Builder::new()
+            .name("lingxi-otel-http-init".into())
+            .spawn(move || build_http_client_blocking(&config))
+            .map_err(|_| "failed to spawn OTLP HTTP initialization worker".to_string())?
+            .join()
+            .map_err(|_| "OTLP HTTP initialization worker failed".to_string())?;
+    }
+    build_http_client_blocking(config)
+}
+
+fn build_http_client_blocking(
+    config: &OtlpExporterConfig,
+) -> Result<reqwest::blocking::Client, String> {
     let mut builder = reqwest::blocking::Client::builder();
     if let Some(timeout_ms) = config.timeout_ms {
         builder = builder.timeout(duration_ms(timeout_ms));
@@ -1907,12 +2256,13 @@ fn normalize_http_endpoint(config: &OtlpExporterConfig) -> Result<Option<String>
         return Ok(None);
     };
     let mut url = reqwest::Url::parse(&endpoint).map_err(|err| err.to_string())?;
-    if url.path().is_empty() || url.path() == "/" {
-        url.set_path(match config.signal {
+    if !config.endpoint_is_signal_specific {
+        let suffix = match config.signal {
             super::config::Signal::Metrics => "/v1/metrics",
             super::config::Signal::Logs => "/v1/logs",
             super::config::Signal::Traces => "/v1/traces",
-        });
+        };
+        url.set_path(&format!("{}{suffix}", url.path().trim_end_matches('/')));
     }
     Ok(Some(url.to_string()))
 }
@@ -1929,7 +2279,19 @@ fn normalize_grpc_endpoint(config: &OtlpExporterConfig) -> Option<String> {
 }
 
 fn build_resource(config: &OtelConfig) -> Resource {
-    let mut builder = Resource::builder_empty().with_service_name(config.service_name.clone());
+    let service_name = if policy::safe_label(&config.service_name) {
+        config.service_name.as_str()
+    } else {
+        super::config::DEFAULT_SERVICE_NAME
+    };
+    let mut builder = Resource::builder_empty()
+        .with_service_name(service_name.to_owned())
+        .with_attributes([
+            KeyValue::new("service.instance.id", new_instance_id()),
+            KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+            KeyValue::new("os.type", std::env::consts::OS),
+            KeyValue::new("host.arch", std::env::consts::ARCH),
+        ]);
     let attrs = config
         .resource_attributes
         .as_deref()
@@ -1946,10 +2308,11 @@ fn parse_resource_attributes(raw: &str) -> Vec<KeyValue> {
         .filter_map(|entry| {
             let (key, value) = entry.split_once('=')?;
             let key = key.trim();
-            if key.is_empty() {
+            let value = value.trim();
+            if !policy::resource_key_allowed(key) || !policy::safe_label(value) {
                 return None;
             }
-            Some(KeyValue::new(key.to_string(), value.trim().to_string()))
+            Some(KeyValue::new(key.to_string(), value.to_string()))
         })
         .collect()
 }
@@ -1957,8 +2320,28 @@ fn parse_resource_attributes(raw: &str) -> Vec<KeyValue> {
 fn resource_kvs(resource: &Resource) -> Vec<KeyValue> {
     resource
         .iter()
+        // The resource distinguishes cumulative metric writers. Copying its
+        // ephemeral identity into each datapoint would create a user-facing
+        // high-cardinality dimension, so keep it exclusively on the resource.
+        .filter(|(key, _)| key.as_str() != "service.instance.id")
         .map(|(key, value)| KeyValue::new(key.to_string(), value.clone()))
         .collect()
+}
+
+fn new_instance_id() -> String {
+    use opentelemetry_sdk::trace::{IdGenerator, RandomIdGenerator};
+    let mut bytes = RandomIdGenerator::default().new_trace_id().to_bytes();
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = opentelemetry::trace::TraceId::from_bytes(bytes).to_string();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    )
 }
 
 fn attrs_to_kvs(attrs: &Attributes) -> Vec<KeyValue> {
@@ -1966,6 +2349,37 @@ fn attrs_to_kvs(attrs: &Attributes) -> Vec<KeyValue> {
         .iter()
         .map(|(key, value)| attr_to_key_value(key, value))
         .collect()
+}
+
+fn filter_span_kvs(attrs: Vec<KeyValue>) -> Vec<KeyValue> {
+    attrs.into_iter().filter(|attr| {
+        let key = attr.key.as_str();
+        if policy::resource_key_allowed(key) {
+            return matches!(&attr.value, opentelemetry::Value::String(value) if policy::safe_label(value.as_str()));
+        }
+        let value = match &attr.value {
+            opentelemetry::Value::String(value) => AttrValue::from(value.as_str()),
+            opentelemetry::Value::Bool(value) => AttrValue::from(*value),
+            opentelemetry::Value::I64(value) => AttrValue::from(*value),
+            opentelemetry::Value::F64(value) => AttrValue::from(*value),
+            _ => return false,
+        };
+        filter_attributes(&attrs_from_pairs(&[(key, value)]), false).contains_key(key)
+    }).collect()
+}
+
+fn set_log_trace_context(record: &mut impl opentelemetry::logs::LogRecord) {
+    Context::map_current(|context| {
+        let span = context.span();
+        let span_context = span.span_context();
+        if span_context.is_valid() {
+            record.set_trace_context(
+                span_context.trace_id(),
+                span_context.span_id(),
+                Some(span_context.trace_flags()),
+            );
+        }
+    });
 }
 
 fn log_attrs(attrs: &Attributes) -> Vec<(String, AnyValue)> {
@@ -2029,6 +2443,7 @@ fn trace_sampler(config: &OtelConfig) -> opentelemetry_sdk::trace::Sampler {
 
 fn parse_ratio(raw: Option<&str>) -> f64 {
     raw.and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite())
         .map(|value| value.clamp(0.0, 1.0))
         .unwrap_or(1.0)
 }
@@ -2094,7 +2509,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::runtime::Runtime;
 
-    static RUNTIME_SLOT_LOCK: Mutex<()> = Mutex::new(());
+    use crate::TEST_POLICY_LOCK as RUNTIME_SLOT_LOCK;
 
     struct TestSpan(SpanContext);
 
@@ -2151,7 +2566,7 @@ mod tests {
             super::super::config::ENV_ENABLE_TELEMETRY => Some("1".to_string()),
             super::super::config::ENV_ENHANCED_TELEMETRY_BETA => Some("1".to_string()),
             "OTEL_EXPORTER_OTLP_ENDPOINT" => Some(format!("http://127.0.0.1:{port}")),
-            "OTEL_EXPORTER_OTLP_HEADERS" => Some("authorization=Bearer test".to_string()),
+            "OTEL_EXPORTER_OTLP_HEADERS" => Some("authorization=Bearer%20test".to_string()),
             "OTEL_METRICS_EXPORTER" => Some("otlp".to_string()),
             "OTEL_LOGS_EXPORTER" => Some("otlp".to_string()),
             "OTEL_TRACES_EXPORTER" => Some("otlp".to_string()),
@@ -2159,6 +2574,88 @@ mod tests {
             "OTEL_SERVICE_NAME" => Some("telemetry-test".to_string()),
             _ => None,
         })
+    }
+
+    #[test]
+    fn http_endpoint_appends_signal_to_generic_base_but_preserves_specific_endpoint() {
+        let generic = OtelConfig::from_lookup(|key| match key {
+            "OTEL_EXPORTER_OTLP_ENDPOINT" => Some("https://collector.example/otel/".into()),
+            _ => None,
+        });
+        assert_eq!(
+            normalize_http_endpoint(&generic.traces).unwrap().as_deref(),
+            Some("https://collector.example/otel/v1/traces")
+        );
+        assert_eq!(
+            normalize_http_endpoint(&generic.logs).unwrap().as_deref(),
+            Some("https://collector.example/otel/v1/logs")
+        );
+        assert_eq!(
+            normalize_http_endpoint(&generic.metrics)
+                .unwrap()
+                .as_deref(),
+            Some("https://collector.example/otel/v1/metrics")
+        );
+        let specific = OtelConfig::from_lookup(|key| match key {
+            "OTEL_EXPORTER_OTLP_ENDPOINT" => Some("https://collector.example/otel".into()),
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" => {
+                Some("https://collector.example/custom-traces".into())
+            }
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT" => Some("https://collector.example/".into()),
+            _ => None,
+        });
+        assert_eq!(
+            normalize_http_endpoint(&specific.traces)
+                .unwrap()
+                .as_deref(),
+            Some("https://collector.example/custom-traces")
+        );
+        assert_eq!(
+            normalize_http_endpoint(&specific.logs).unwrap().as_deref(),
+            Some("https://collector.example/")
+        );
+        assert_eq!(
+            normalize_grpc_endpoint(&specific.metrics).as_deref(),
+            Some("https://collector.example/otel")
+        );
+    }
+
+    #[test]
+    fn resource_instance_is_ephemeral_generated_and_never_a_metric_dimension() {
+        let mut config = local_runtime_config();
+        config.resource_attributes = Some(
+            "service.instance.id=PRIVATE_USER_ID,user.id=PRIVATE_USER,service.version=1.2.3".into(),
+        );
+        let first = build_resource(&config);
+        let second = build_resource(&config);
+        let instance_key = opentelemetry::Key::from_static_str("service.instance.id");
+        let first_id = first
+            .get(&instance_key)
+            .expect("generated instance id")
+            .to_string();
+        let second_id = second
+            .get(&instance_key)
+            .expect("generated instance id")
+            .to_string();
+        assert_ne!(first_id, second_id);
+        assert_eq!(first_id.len(), 36);
+        assert_eq!(&first_id[14..15], "4");
+        assert!(matches!(first_id.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
+        for index in [8, 13, 18, 23] {
+            assert_eq!(first_id.as_bytes()[index], b'-');
+        }
+        assert!(!first_id.contains("PRIVATE"));
+        assert!(first
+            .get(&opentelemetry::Key::from_static_str("user.id"))
+            .is_none());
+        assert!(!resource_kvs(&first)
+            .iter()
+            .any(|attr| attr.key.as_str() == "service.instance.id"));
+        assert!(filter_attributes(
+            &attrs_from_pairs(&[("service.instance.id", AttrValue::from("PRIVATE_USER_ID"))]),
+            true
+        )
+        .is_empty());
     }
 
     fn local_runtime_config() -> OtelConfig {
@@ -2229,14 +2726,17 @@ mod tests {
             serialized.traceparent,
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
         );
-        assert_eq!(serialized.tracestate.as_deref(), Some("foo=bar"));
+        assert!(
+            serialized.tracestate.is_none(),
+            "vendor state is not exported"
+        );
     }
 
     #[test]
     fn with_trace_context_restores_the_serialized_parent() {
         let restored = SerializedTraceContext {
             traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
-            tracestate: Some("foo=bar".into()),
+            tracestate: None,
         };
 
         let inside = with_trace_context(Some(&restored), capture_current_trace_context)
@@ -2245,11 +2745,27 @@ mod tests {
         assert!(capture_current_trace_context().is_none());
     }
 
+    #[test]
+    fn incoming_context_rejects_oversized_parent_and_discards_vendor_state() {
+        let valid = SerializedTraceContext {
+            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
+            tracestate: Some("private=PRIVATE_PAYLOAD".into()),
+        };
+        let restored = with_trace_context(Some(&valid), capture_current_trace_context).unwrap();
+        assert_eq!(restored.traceparent, valid.traceparent);
+        assert!(restored.tracestate.is_none());
+        let invalid = SerializedTraceContext {
+            traceparent: "x".repeat(4096),
+            tracestate: None,
+        };
+        assert!(with_trace_context(Some(&invalid), capture_current_trace_context).is_none());
+    }
+
     #[tokio::test]
     async fn with_trace_context_future_restores_the_serialized_parent() {
         let restored = SerializedTraceContext {
             traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
-            tracestate: Some("foo=bar".into()),
+            tracestate: None,
         };
 
         let inside = with_trace_context_future(Some(&restored), async {
@@ -2271,6 +2787,46 @@ mod tests {
             "OTEL_TRACES_EXPORTER" => Some("console".to_string()),
             _ => None,
         })
+    }
+
+    struct LargeFuture([u8; 256 * 1024]);
+
+    impl std::future::Future for LargeFuture {
+        type Output = u8;
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<u8> {
+            std::task::Poll::Ready(self.0[0])
+        }
+    }
+
+    #[test]
+    fn telemetry_wrappers_bound_large_future_size_including_disabled_path() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let turn = with_turn_span("lingxi.large.turn", LargeFuture([7; 256 * 1024]));
+        assert!(
+            std::mem::size_of_val(&turn) < 1024,
+            "turn wrapper retains large inline future"
+        );
+        assert_eq!(runtime.block_on(turn), 7);
+        let operation = with_operation_span(
+            "lingxi.large.operation",
+            Attributes::new(),
+            LargeFuture([8; 256 * 1024]),
+        );
+        assert!(std::mem::size_of_val(&operation) < 1024);
+        assert_eq!(runtime.block_on(operation), 8);
+        let context = with_trace_context_future(None, LargeFuture([9; 256 * 1024]));
+        assert!(std::mem::size_of_val(&context) < 1024);
+        assert_eq!(runtime.block_on(context), 9);
+        let bound = bind_current_trace_context(LargeFuture([10; 256 * 1024]));
+        assert!(std::mem::size_of_val(&bound) < 1024);
+        assert_eq!(runtime.block_on(bound), 10);
     }
 
     #[tokio::test]
@@ -2302,11 +2858,29 @@ mod tests {
     ) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind test collector");
         let port = listener.local_addr().unwrap().port();
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking collector");
         let captured = Arc::new(Mutex::new(Vec::new()));
         let shared = captured.clone();
         let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
             for _ in 0..3 {
-                let (mut stream, _) = listener.accept().expect("accept request");
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error)
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                                && Instant::now() < deadline =>
+                        {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        result => panic!("collector did not receive three signals: {result:?}"),
+                    }
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
                 let mut header_buf = Vec::new();
                 let mut byte = [0u8; 1];
                 while stream.read_exact(&mut byte).is_ok() {
@@ -2349,7 +2923,96 @@ mod tests {
     }
 
     #[test]
+    fn wire_export_preserves_hook_phases_and_canonical_api_error_kinds() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let (port, captured, collector) = spawn_http_collector();
+        let mut config = enabled_lookup(port);
+        config.metrics.protocol = OtlpProtocol::HttpJson;
+        config.logs.protocol = OtlpProtocol::HttpJson;
+        config.traces.protocol = OtlpProtocol::HttpJson;
+        let guard = install_process_with_config("schema-test", true, config);
+        emit_hook_lifecycle("pre", "completed", "Read", Some(10));
+        emit_hook_lifecycle("post", "completed", "Read", Some(20));
+        let bus = AnalyticsBus::new();
+        Runtime::new().unwrap().block_on(async {
+            let mut metadata = LogEventMetadata::new();
+            metadata.insert("model".into(), AnalyticsValue::String("test-model".into()));
+            metadata.insert(
+                "error_kind".into(),
+                AnalyticsValue::String("overloaded".into()),
+            );
+            bus.log_event("tengu_api_request_failed", metadata).await;
+            bus.log_event("tengu_api_rate_limited", LogEventMetadata::new())
+                .await;
+        });
+        drop(guard);
+        collector.join().unwrap();
+        let requests = captured.lock().unwrap();
+        let metrics: serde_json::Value = serde_json::from_slice(
+            &requests
+                .iter()
+                .find(|r| r.path == "/v1/metrics")
+                .unwrap()
+                .body,
+        )
+        .unwrap();
+        let hook_histogram = metrics["resourceMetrics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|resource| resource["scopeMetrics"].as_array().unwrap())
+            .flat_map(|scope| scope["metrics"].as_array().unwrap())
+            .find(|metric| metric["name"] == metrics::HOOK && metric.get("histogram").is_some())
+            .expect("exported hook histogram");
+        let points = hook_histogram["histogram"]["dataPoints"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            points.len(),
+            2,
+            "pre/post durations must use distinct series"
+        );
+        for (phase, duration) in [("pre", 10.0), ("post", 20.0)] {
+            let point =
+                points
+                    .iter()
+                    .find(|point| {
+                        point["attributes"].as_array().unwrap().iter().any(|attr| {
+                            attr["key"] == "phase" && attr["value"]["stringValue"] == phase
+                        })
+                    })
+                    .expect("hook phase dimension");
+            assert_eq!(point["sum"].as_f64(), Some(duration));
+        }
+        let logs: serde_json::Value =
+            serde_json::from_slice(&requests.iter().find(|r| r.path == "/v1/logs").unwrap().body)
+                .unwrap();
+        let api_errors: Vec<_> = logs["resourceLogs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|resource| resource["scopeLogs"].as_array().unwrap())
+            .flat_map(|scope| scope["logRecords"].as_array().unwrap())
+            .filter(|log| log["body"]["stringValue"] == "api_error")
+            .collect();
+        assert_eq!(api_errors.len(), 2);
+        for error_kind in ["overloaded", "rate_limited"] {
+            assert!(
+                api_errors.iter().any(|log| log["attributes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|attr| attr["key"] == "error_kind"
+                        && attr["value"]["stringValue"] == error_kind)),
+                "canonical api_error lost {error_kind}"
+            );
+        }
+    }
+
+    #[test]
     fn http_runtime_exports_all_three_signals() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
         let (port, captured, handle) = spawn_http_collector();
         let runtime = OtelRuntime::new(enabled_lookup(port), "test-entry", true).expect("runtime");
 
@@ -2378,53 +3041,310 @@ mod tests {
     }
 
     #[test]
-    fn traces_require_enhanced_beta_and_do_not_connect_when_disabled() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test collector");
-        listener.set_nonblocking(true).expect("set nonblocking");
-        let endpoint = format!("http://{}", listener.local_addr().expect("local address"));
-        let config = OtelConfig::from_lookup(|key| match key {
-            super::super::config::ENV_ENABLE_TELEMETRY => Some("1".to_string()),
-            "OTEL_METRICS_EXPORTER" | "OTEL_LOGS_EXPORTER" => Some("none".to_string()),
-            "OTEL_TRACES_EXPORTER" => Some("otlp".to_string()),
-            "OTEL_EXPORTER_OTLP_ENDPOINT" => Some(endpoint.clone()),
-            _ => None,
-        });
-
-        let runtime = OtelRuntime::new(config, "test-entry", false).expect("runtime");
-        assert!(
-            runtime.traces.is_none(),
-            "master telemetry alone must not construct a trace provider"
-        );
-        runtime.emit_span("test.span", Vec::new());
+    fn generic_base_path_and_encoded_auth_headers_reach_all_signal_endpoints() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        let (port, captured, collector) = spawn_http_collector();
+        let mut config = enabled_lookup(port);
+        for exporter in [&mut config.metrics, &mut config.logs, &mut config.traces] {
+            exporter.endpoint = Some(format!("http://127.0.0.1:{port}/otel"));
+        }
+        let runtime = OtelRuntime::new(config, "path-test", true).unwrap();
         runtime.shutdown();
-        std::thread::sleep(Duration::from_millis(25));
+        collector.join().unwrap();
+        let requests = captured.lock().unwrap();
+        for signal in ["metrics", "logs", "traces"] {
+            let request = requests
+                .iter()
+                .find(|request| request.path == format!("/otel/v1/{signal}"))
+                .expect("signal path appended to base");
+            assert_eq!(
+                request.headers.get("authorization").map(String::as_str),
+                Some("Bearer test")
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_install_flush_and_drop_are_safe_inside_current_thread_runtime() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let (port, captured, collector) = spawn_http_collector();
+        // Exercises the synchronous fallback used by existing async consumers.
+        // reqwest::blocking construction previously panicked here before a turn.
+        let guard = install_process_with_config("async-sync-fallback", true, enabled_lookup(port));
+        with_operation_span("lingxi.async.test", Attributes::new(), async {
+            emit_named_log_event("async_event", &Attributes::new());
+        })
+        .await;
+        guard.force_flush().unwrap();
+        disable_process();
+        drop(guard);
+        collector.join().unwrap();
+        assert_eq!(captured.lock().unwrap().len(), 3);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_http_lifecycle_exports_without_blocking_host_executor() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let (port, captured, collector) = spawn_http_collector();
+        let guard =
+            install_process_with_config_async("async-host", true, enabled_lookup(port)).await;
         assert!(
-            matches!(
-                listener.accept(),
-                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock
-            ),
-            "disabled enhanced tracing must not open a collector connection"
+            guard.runtime.is_some(),
+            "async initialization must not silently fail"
+        );
+        with_operation_span("lingxi.async.request", Attributes::new(), async {
+            tokio::task::yield_now().await;
+            emit_named_log_event("async_event", &Attributes::new());
+        })
+        .await;
+        guard.force_flush_async().await.unwrap();
+        disable_process_async().await;
+        assert!(runtime_slot().read().unwrap().is_none());
+        assert!(!guard.runtime.as_ref().unwrap().policy.allowed());
+        guard.shutdown_async().await.unwrap();
+        collector.join().unwrap();
+        assert_eq!(captured.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn wire_export_preserves_parent_log_correlation_and_ends_cancelled_spans_without_content() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let (port, captured, collector) = spawn_http_collector();
+        let mut config = enabled_lookup(port);
+        config.metrics.protocol = OtlpProtocol::HttpJson;
+        config.logs.protocol = OtlpProtocol::HttpJson;
+        config.traces.protocol = OtlpProtocol::HttpJson;
+        config.resource_attributes = Some("user.id=PRIVATE_RESOURCE,service.version=1.2.3".into());
+        let guard = install_process_with_config("wire-test", true, config);
+        let attributes = attrs_from_pairs(&[
+            ("status", AttrValue::from("success")),
+            ("prompt", AttrValue::from("PRIVATE_PROMPT")),
+            ("tool_parameters", AttrValue::from("PRIVATE_TOOL")),
+            ("session_id", AttrValue::from("PRIVATE_SESSION")),
+            ("path", AttrValue::from("PRIVATE_PATH")),
+        ]);
+        Runtime::new().unwrap().block_on(with_operation_span(
+            "lingxi.test.root",
+            attributes.clone(),
+            async {
+                with_operation_span("lingxi.test.child", attributes.clone(), async {
+                    emit_named_log_event("test_correlated_event", &attributes);
+                    record_counter(metrics::SESSION_COUNT, 1.0, &attributes);
+                })
+                .await;
+                let cancelled = tokio::time::timeout(
+                    Duration::from_millis(1),
+                    with_operation_span(
+                        "lingxi.test.cancelled",
+                        Attributes::new(),
+                        std::future::pending::<()>(),
+                    ),
+                )
+                .await;
+                assert!(cancelled.is_err());
+            },
+        ));
+        drop(guard);
+        collector.join().unwrap();
+        let requests = captured.lock().unwrap();
+        for request in requests.iter() {
+            let body = String::from_utf8_lossy(&request.body);
+            assert!(
+                !body.contains("PRIVATE_"),
+                "private field escaped on {}",
+                request.path
+            );
+        }
+        let trace: serde_json::Value = serde_json::from_slice(
+            &requests
+                .iter()
+                .find(|r| r.path == "/v1/traces")
+                .unwrap()
+                .body,
+        )
+        .unwrap();
+        let spans: Vec<&serde_json::Value> = trace["resourceSpans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|resource| resource["scopeSpans"].as_array().unwrap())
+            .flat_map(|scope| scope["spans"].as_array().unwrap())
+            .collect();
+        let root = spans
+            .iter()
+            .find(|span| span["name"] == "lingxi.test.root")
+            .unwrap();
+        let child = spans
+            .iter()
+            .find(|span| span["name"] == "lingxi.test.child")
+            .unwrap();
+        let cancelled = spans
+            .iter()
+            .find(|span| span["name"] == "lingxi.test.cancelled")
+            .unwrap();
+        assert_eq!(root["traceId"], child["traceId"]);
+        assert_eq!(root["spanId"], child["parentSpanId"]);
+        assert_eq!(root["spanId"], cancelled["parentSpanId"]);
+        assert!(cancelled["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|attr| attr["key"] == "outcome" && attr["value"]["stringValue"] == "cancelled"));
+        let logs: serde_json::Value =
+            serde_json::from_slice(&requests.iter().find(|r| r.path == "/v1/logs").unwrap().body)
+                .unwrap();
+        let correlated = logs["resourceLogs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|resource| resource["scopeLogs"].as_array().unwrap())
+            .flat_map(|scope| scope["logRecords"].as_array().unwrap())
+            .find(|log| log["body"]["stringValue"] == "test_correlated_event")
+            .unwrap();
+        assert_eq!(correlated["traceId"], child["traceId"]);
+        assert_eq!(correlated["spanId"], child["spanId"]);
+    }
+
+    #[test]
+    fn disabled_config_never_constructs_providers_or_connects() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind collector");
+        listener.set_nonblocking(true).unwrap();
+        let mut config = enabled_lookup(listener.local_addr().unwrap().port());
+        config.enabled = false;
+        let guard = install_process_with_config("disabled", true, config);
+        record_counter(metrics::SESSION_COUNT, 1.0, &Attributes::new());
+        emit_named_log_event("disabled_event", &Attributes::new());
+        guard.force_flush().unwrap();
+        drop(guard);
+        assert!(runtime_slot().read().unwrap().is_none());
+        assert!(
+            matches!(listener.accept(), Err(err) if err.kind() == std::io::ErrorKind::WouldBlock)
         );
     }
 
     #[test]
-    fn enhanced_gate_does_not_disable_metrics_or_logs() {
+    fn normal_enabled_telemetry_includes_traces_without_legacy_beta_gate() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
         let config = OtelConfig::from_lookup(|key| match key {
             super::super::config::ENV_ENABLE_TELEMETRY => Some("1".to_string()),
             "OTEL_METRICS_EXPORTER" => Some("prometheus".to_string()),
             "OTEL_LOGS_EXPORTER" | "OTEL_TRACES_EXPORTER" => Some("console".to_string()),
             _ => None,
         });
-
+        assert!(!config.enhanced_telemetry);
         let runtime = OtelRuntime::new(config, "test-entry", false).expect("runtime");
         assert!(runtime.metrics.is_some());
         assert!(runtime.logs.is_some());
-        assert!(runtime.traces.is_none());
+        assert!(runtime.traces.is_some());
         runtime.shutdown();
     }
 
     #[test]
+    fn disable_revokes_runtime_waiting_for_publication() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let config = enabled_lookup(listener.local_addr().unwrap().port());
+        let generation = reserve_install_generation();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (resume_tx, resume_rx) = mpsc::sync_channel(1);
+        let installer = thread::spawn(move || {
+            let policy = Arc::new(ExportPolicy::for_generation(true, generation));
+            let runtime = Arc::new(OtelRuntime::with_policy(config, "pending", policy).unwrap());
+            ready_tx.send(()).unwrap();
+            resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            publish_reserved_runtime(runtime, true, generation)
+        });
+        ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        disable_process();
+        resume_tx.send(()).unwrap();
+        let guard = installer.join().unwrap();
+        assert!(guard.runtime.is_none());
+        assert!(runtime_slot().read().unwrap().is_none());
+        assert!(
+            matches!(listener.accept(), Err(err) if err.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn disable_revokes_detached_runtime_before_queued_export() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut guard = install_process_with_config(
+            "draining",
+            true,
+            enabled_lookup(listener.local_addr().unwrap().port()),
+        );
+        emit_named_log_event("queued_event", &Attributes::new());
+        // Pause at shutdown_async's transition between detaching and draining.
+        let runtime = guard.runtime.take().unwrap();
+        detach_runtime(&runtime);
+        assert!(runtime.policy.allowed());
+        disable_process();
+        assert!(!runtime.policy.allowed());
+        runtime.shutdown();
+        assert!(
+            matches!(listener.accept(), Err(err) if err.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
+    fn stale_disabled_or_failed_installer_preserves_newer_runtime() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let stale_generation = reserve_install_generation();
+        let mut enabled = enabled_lookup(1);
+        enabled.metrics.kind = ExporterKind::None;
+        enabled.logs.kind = ExporterKind::None;
+        enabled.traces.kind = ExporterKind::None;
+        let current = install_process_with_config("newer", false, enabled.clone());
+        let runtime = current.runtime.as_ref().unwrap();
+        let mut disabled = enabled;
+        disabled.enabled = false;
+        let stale = install_reserved_generation("stale", false, disabled, stale_generation);
+        assert!(stale.runtime.is_none());
+        // Also exercise the cleanup used when an older provider build fails.
+        retire_reserved_generation(stale_generation);
+        assert!(runtime.policy.allowed());
+        assert!(Arc::ptr_eq(
+            runtime_slot().read().unwrap().as_ref().unwrap(),
+            runtime
+        ));
+        drop(current);
+    }
+
+    #[test]
+    fn revoke_discards_queued_otlp_batches_before_shutdown() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
+        clear_runtime();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind collector");
+        listener.set_nonblocking(true).unwrap();
+        let guard = install_process_with_config(
+            "revoked",
+            true,
+            enabled_lookup(listener.local_addr().unwrap().port()),
+        );
+        emit_named_log_event("queued_event", &Attributes::new());
+        disable_process();
+        guard.force_flush().unwrap();
+        drop(guard);
+        assert!(runtime_slot().read().unwrap().is_none());
+        assert!(
+            matches!(listener.accept(), Err(err) if err.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
+
+    #[test]
     fn managed_generic_endpoint_keeps_all_signals_on_managed_collector() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
         let (port, captured, handle) = spawn_http_collector();
         let config = OtelConfig::from_lookup_with_source(|key| match key {
             super::super::config::ENV_ENABLE_TELEMETRY => Some(super::super::config::ConfigValue {
@@ -2490,6 +3410,7 @@ mod tests {
 
     #[test]
     fn prometheus_exporter_renders_metrics_text() {
+        let _lock = RUNTIME_SLOT_LOCK.lock().unwrap();
         let config = OtelConfig::from_lookup(|key| match key {
             super::super::config::ENV_ENABLE_TELEMETRY => Some("1".to_string()),
             "OTEL_METRICS_EXPORTER" => Some("prometheus".to_string()),
@@ -2805,7 +3726,7 @@ mod tests {
             .find(|sample| sample.event_name == "api_error")
             .expect("api_error log record");
         assert_eq!(
-            api_error.attributes.get("error"),
+            api_error.attributes.get("error_kind"),
             Some(&AttrValue::from("overloaded"))
         );
         assert_eq!(

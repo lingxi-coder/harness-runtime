@@ -655,6 +655,7 @@ mod tests {
     async fn assert_shutdown_interrupts_pending_operation(stall_frame: bool) {
         let flushing = Arc::new(Notify::new());
         let frame = Frame::Request(crate::wire::BridgeRequest {
+            trace_context: None,
             id: 1,
             method: "test".into(),
             params: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap(),
@@ -793,6 +794,7 @@ mod tests {
                 shutdown_rx,
             ));
             let frame = Frame::Request(crate::wire::BridgeRequest {
+                trace_context: None,
                 id: 1,
                 method: "resume_selected_session".into(),
                 params: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap(),
@@ -883,6 +885,7 @@ mod tests {
         ));
         for (id, method) in [(1, "model"), (2, "model"), (3, "cancel"), (4, "approve")] {
             let frame = Frame::Request(crate::wire::BridgeRequest {
+                trace_context: None,
                 id,
                 method: method.into(),
                 params: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap(),
@@ -965,6 +968,7 @@ mod tests {
         ));
         for (id, method) in [(1, "model"), (2, "model"), (3, "approve")] {
             let frame = Frame::Request(crate::wire::BridgeRequest {
+                trace_context: None,
                 id,
                 method: method.into(),
                 params: lingxi_core::types::utf16_json::Utf16JsonProjection::parse("null").unwrap(),

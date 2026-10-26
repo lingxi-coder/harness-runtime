@@ -7739,13 +7739,15 @@ impl ApiService {
         dispatch: DispatchHeaderState,
         policy: NonStreamDrivePolicy,
     ) -> crate::BoxFuture<'a, Result<HistoryResponse, LlmError>> {
-        Box::pin(self.drive_non_stream_inner(
-            req,
-            retry_control,
-            initial_consecutive_overloaded,
-            chain,
-            dispatch,
-            policy,
+        Box::pin(crate::model::request_trace::non_stream(
+            self.drive_non_stream_inner(
+                req,
+                retry_control,
+                initial_consecutive_overloaded,
+                chain,
+                dispatch,
+                policy,
+            ),
         ))
     }
 
@@ -9499,7 +9501,9 @@ impl ApiService {
         req: LlmRequest,
     ) -> crate::BoxFuture<'_, Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError>>
     {
-        Box::pin(self.drive_stream_inner(req))
+        Box::pin(crate::model::request_trace::stream(
+            self.drive_stream_inner(req),
+        ))
     }
 
     #[allow(clippy::too_many_lines)]

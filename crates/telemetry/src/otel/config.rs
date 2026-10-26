@@ -1,20 +1,10 @@
-//! OpenTelemetry monitoring config: the full env surface CC 2.1.207 consumes.
+//! Typed configuration for LingXi operational diagnostics.
 //!
-//! This module parses the enterprise "Monitoring" env surface into a typed
-//! [`OtelConfig`]. It is the **load-bearing parity** for H-BIN-06: the exact
-//! env-var names, precedence rules, boolean/numeric parse semantics, and
-//! defaults must match the binary byte-for-byte. Actual OTLP wire egress (the
-//! SDK exporters/readers that consume this config) is the documented remainder.
-//!
-//! ## Rebrand policy (see the repo env-var rule)
-//!
-//! The four CC gate-family vars `CLAUDE_CODE_OTEL_*` are renamed to
-//! `LINGXI_OTEL_*` (matching the existing `LINGXI_OTEL_DIAG_STDERR` sibling in
-//! the hook-env denylist), and the master toggle `CLAUDE_CODE_ENABLE_TELEMETRY`
-//! is renamed to `LINGXI_ENABLE_TELEMETRY`. Every **standard OpenTelemetry
-//! spec** var (`OTEL_*`) keeps its canonical spelling — those names are part of
-//! the `OTel` wire contract and enterprise collectors/dashboards key on them, so
-//! renaming would break interop (the same reasoning that keeps `tengu_*` names).
+//! Standard `OTEL_*` variables preserve their protocol meaning and per-signal
+//! precedence. The LingXi master switch is default-off; privacy vetoes win over
+//! enablement. Product defaults exclude identity dimensions and use `lingxi`
+//! as service name. Legacy content and beta preferences remain parseable for
+//! internal callers, but cannot bypass the outbound field policy or gate traces.
 
 use std::collections::BTreeMap;
 
@@ -40,11 +30,8 @@ pub struct ConfigValue {
 /// `o7u(){return ct(process.env.CLAUDE_CODE_ENABLE_TELEMETRY)}`).
 pub const ENV_ENABLE_TELEMETRY: &str = "LINGXI_ENABLE_TELEMETRY";
 
-/// Explicit opt-in required before detailed OpenTelemetry traces are exported.
-///
-/// Unlike the rebranded LingXi gate family, this keeps Claude Code's canonical
-/// spelling because managed enterprise settings and deployment templates use
-/// this beta-contract name directly.
+/// Legacy preference retained in parsed configuration. Standard trace export
+/// is controlled by the master switch and `OTEL_TRACES_EXPORTER`.
 pub const ENV_ENHANCED_TELEMETRY_BETA: &str = "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA";
 
 /// Force-flush deadline in ms (rebrand of CC `CLAUDE_CODE_OTEL_FLUSH_TIMEOUT_MS`,
@@ -117,7 +104,7 @@ pub const ENV_LOGS_EXPORT_INTERVAL: &str = "OTEL_LOGS_EXPORT_INTERVAL";
 
 /// Resource attributes (`k=v,k=v`), merged into the OTLP resource.
 pub const ENV_RESOURCE_ATTRIBUTES: &str = "OTEL_RESOURCE_ATTRIBUTES";
-/// `service.name` resource attribute override (binary default `"claude-code"`).
+/// `service.name` resource attribute override (default `lingxi`).
 pub const ENV_SERVICE_NAME: &str = "OTEL_SERVICE_NAME";
 
 /// Traces sampler selection (e.g. `parentbased_always_on`).
@@ -135,8 +122,8 @@ pub const DEFAULT_HEADERS_HELPER_DEBOUNCE_MS: i64 = 1_740_000;
 pub const DEFAULT_METRIC_EXPORT_INTERVAL_MS: i64 = 60_000;
 /// Binary default for [`ENV_LOGS_EXPORT_INTERVAL`] (`5000`).
 pub const DEFAULT_LOGS_EXPORT_INTERVAL_MS: i64 = 5000;
-/// Binary default for `service.name` (`t["service.name"]||"claude-code"`).
-pub const DEFAULT_SERVICE_NAME: &str = "claude-code";
+/// Product default for the `service.name` resource attribute.
+pub const DEFAULT_SERVICE_NAME: &str = "lingxi";
 /// Binary default for [`ENV_CONTENT_MAX_LENGTH`] (`var frg=61440`, i.e. 60 KiB).
 pub const DEFAULT_CONTENT_MAX_LENGTH: i64 = 61440;
 
@@ -375,19 +362,18 @@ impl OtlpProtocol {
     }
 }
 
-/// `OTEL_METRICS_INCLUDE_*` attribute toggles, with the binary defaults from
-/// `C4h` (`SESSION_ID:true, VERSION:false, ACCOUNT_UUID:true, ENTRYPOINT:false,
-/// RESOURCE_ATTRIBUTES:true`).
+/// Metric dimension hints. Identity is disabled by default and always removed
+/// by the outbound diagnostic allowlist.
 // Deliberately one bool per CC env flag — a faithful mirror of the binary's
 // `C4h` map, not a state struct to be collapsed.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MetricsInclude {
-    /// `OTEL_METRICS_INCLUDE_SESSION_ID` (default `true`).
+    /// Legacy include hint; production egress excludes session identifiers.
     pub session_id: bool,
     /// `OTEL_METRICS_INCLUDE_VERSION` (default `false`).
     pub version: bool,
-    /// `OTEL_METRICS_INCLUDE_ACCOUNT_UUID` (default `true`).
+    /// Legacy include hint; production egress excludes account identifiers.
     pub account_uuid: bool,
     /// `OTEL_METRICS_INCLUDE_ENTRYPOINT` (default `false`).
     pub entrypoint: bool,
@@ -396,14 +382,13 @@ pub struct MetricsInclude {
 }
 
 impl MetricsInclude {
-    /// Binary `C4h` defaults, used when [`ENV_ENABLE_TELEMETRY`] is on but the
-    /// individual include vars are unset.
+    /// Product defaults used when individual dimension hints are unset.
     #[must_use]
     pub const fn defaults() -> Self {
         MetricsInclude {
-            session_id: true,
+            session_id: false,
             version: false,
-            account_uuid: true,
+            account_uuid: false,
             entrypoint: false,
             resource_attributes: true,
         }
@@ -509,6 +494,9 @@ pub struct OtlpExporterConfig {
     pub kind: ExporterKind,
     /// Resolved OTLP endpoint (per-signal ?? generic), if any.
     pub endpoint: Option<String>,
+    /// A signal-specific HTTP endpoint is used verbatim. A generic endpoint
+    /// is a base URL and receives the `/v1/<signal>` suffix.
+    pub endpoint_is_signal_specific: bool,
     /// Resolved transport protocol (per-signal ?? generic ?? spec default).
     pub protocol: OtlpProtocol,
     /// Resolved static headers (per-signal ?? generic), parsed to a map.
@@ -532,27 +520,8 @@ pub struct OtlpExporterConfig {
 impl OtlpExporterConfig {
     fn from_lookup_with_source(signal: Signal, get: &impl Fn(&str) -> Option<ConfigValue>) -> Self {
         let infix = signal.otlp_infix();
-        // Per-signal-first, then generic fallback (binary `?? / ||` precedence).
-        //
-        // 2.1.217 managed-settings nuance: when the GENERIC endpoint is owned by
-        // managed policy, lower-scope per-signal endpoint overrides must not
-        // redirect one signal away from the managed collector. Preserve standard
-        // per-signal precedence for all non-managed cases, and for same-source
-        // managed signal-specific overrides.
         let per_then_generic = |suffix: &str, generic: &str| -> Option<ConfigValue> {
-            let per = get(&format!("OTEL_EXPORTER_OTLP_{infix}_{suffix}"));
-            let generic = get(generic);
-            match (per, generic) {
-                (Some(per), Some(generic))
-                    if suffix == "ENDPOINT"
-                        && generic.source == ConfigValueSource::Managed
-                        && per.source != ConfigValueSource::Managed =>
-                {
-                    Some(generic)
-                }
-                (Some(per), _) => Some(per),
-                (None, generic) => generic,
-            }
+            get(&format!("OTEL_EXPORTER_OTLP_{infix}_{suffix}")).or_else(|| get(generic))
         };
 
         let kind = ExporterKind::parse(
@@ -593,10 +562,30 @@ impl OtlpExporterConfig {
             Signal::Traces => None,
         };
 
+        // Managed generic endpoints override lower-scope per-signal values.
+        // Preserve which setting won: HTTP treats a generic URL as a base,
+        // while an explicit signal URL is already complete.
+        let per_endpoint = get(&format!("OTEL_EXPORTER_OTLP_{infix}_ENDPOINT"));
+        let generic_endpoint = get(ENV_OTLP_ENDPOINT);
+        let endpoint_is_signal_specific = match (&per_endpoint, &generic_endpoint) {
+            (Some(per), Some(generic)) => {
+                generic.source != ConfigValueSource::Managed
+                    || per.source == ConfigValueSource::Managed
+            }
+            (Some(_), None) => true,
+            _ => false,
+        };
+        let endpoint = if endpoint_is_signal_specific {
+            per_endpoint
+        } else {
+            generic_endpoint
+        };
+
         OtlpExporterConfig {
             signal,
             kind,
-            endpoint: per_then_generic("ENDPOINT", ENV_OTLP_ENDPOINT).map(|v| v.value),
+            endpoint: endpoint.map(|v| v.value),
+            endpoint_is_signal_specific,
             protocol,
             headers,
             certificate: get(ENV_OTLP_CERTIFICATE).map(|v| v.value),
@@ -615,11 +604,9 @@ impl OtlpExporterConfig {
     }
 }
 
-/// Parse an `OTEL_EXPORTER_OTLP_HEADERS`-style comma list of `k=v` pairs,
-/// byte-faithful to the binary `s7u()`:
-/// `for(let r of t.split(",")){let[n,...o]=r.split("=");if(n&&o.length>0)
-/// e[n.trim()]=o.join("=").trim()}`. Values may contain `=`; empty keys and
-/// value-less entries are dropped.
+/// Parse the standard percent-encoded OTLP `key=value` header list. Decode
+/// after splitting so encoded commas/equals remain part of a value. A `+`
+/// is literal (URI encoding, not form encoding). Invalid headers are dropped.
 #[must_use]
 pub fn parse_otlp_headers(raw: Option<&str>) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
@@ -628,17 +615,43 @@ pub fn parse_otlp_headers(raw: Option<&str>) -> BTreeMap<String, String> {
     };
     for part in raw.split(',') {
         let mut it = part.splitn(2, '=');
-        let key = it.next().unwrap_or("");
+        let key = it.next().unwrap_or("").trim();
         // `o.length>0` ⇒ there must be an `=` producing a value segment.
         let Some(value) = it.next() else {
             continue;
         };
-        if key.is_empty() {
+        let (Some(key), Some(value)) = (
+            decode_header_component(key),
+            decode_header_component(value.trim()),
+        ) else {
+            continue;
+        };
+        if reqwest::header::HeaderName::from_bytes(key.as_bytes()).is_err()
+            || reqwest::header::HeaderValue::from_str(&value).is_err()
+        {
             continue;
         }
-        out.insert(key.trim().to_string(), value.trim().to_string());
+        out.insert(key, value);
     }
     out
+}
+
+fn decode_header_component(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = char::from(*bytes.get(index + 1)?).to_digit(16)?;
+            let low = char::from(*bytes.get(index + 2)?).to_digit(16)?;
+            decoded.push((high * 16 + low) as u8);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
 }
 
 /// The full parsed OTEL monitoring config.
@@ -646,7 +659,7 @@ pub fn parse_otlp_headers(raw: Option<&str>) -> BTreeMap<String, String> {
 pub struct OtelConfig {
     /// Master gate ([`ENV_ENABLE_TELEMETRY`] truthy).
     pub enabled: bool,
-    /// Additional explicit opt-in required for trace export.
+    /// Legacy diagnostic preference; standard trace export only needs `enabled`.
     pub enhanced_telemetry: bool,
     /// Metrics exporter transport config.
     pub metrics: OtlpExporterConfig,
@@ -716,11 +729,20 @@ impl OtelConfig {
     /// Parse config from a lookup that also reports value provenance.
     #[must_use]
     pub fn from_lookup_with_source(get: impl Fn(&str) -> Option<ConfigValue>) -> Self {
+        let privacy_disabled = [
+            "DISABLE_TELEMETRY",
+            "LINGXI_DISABLE_NONESSENTIAL_TRAFFIC",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        ]
+        .iter()
+        .any(|key| get(key).is_some_and(|value| !value.value.is_empty()))
+            || get("DO_NOT_TRACK").is_some_and(|value| env_truthy(&value.value));
         OtelConfig {
-            enabled: bool_env(
-                get(ENV_ENABLE_TELEMETRY).as_ref().map(|v| v.value.as_str()),
-                false,
-            ),
+            enabled: !privacy_disabled
+                && bool_env(
+                    get(ENV_ENABLE_TELEMETRY).as_ref().map(|v| v.value.as_str()),
+                    false,
+                ),
             enhanced_telemetry: bool_env(
                 get(ENV_ENHANCED_TELEMETRY_BETA)
                     .as_ref()
@@ -816,6 +838,21 @@ mod tests {
     }
 
     #[test]
+    fn privacy_veto_wins_over_enabled_configuration() {
+        for key in [
+            "DO_NOT_TRACK",
+            "DISABLE_TELEMETRY",
+            "LINGXI_DISABLE_NONESSENTIAL_TRAFFIC",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        ] {
+            let config = OtelConfig::from_lookup(|name| {
+                (name == ENV_ENABLE_TELEMETRY || name == key).then(|| "true".to_string())
+            });
+            assert!(!config.enabled, "{key} must disable all three signals");
+        }
+    }
+
+    #[test]
     fn enhanced_telemetry_requires_explicit_truthy_beta_gate() {
         let unset = OtelConfig::from_lookup(lookup(&[(ENV_ENABLE_TELEMETRY, "1")]));
         assert!(!unset.enhanced_telemetry);
@@ -890,6 +927,8 @@ mod tests {
         assert_eq!(cfg.metrics.endpoint.as_deref(), Some("http://managed:4318"));
         assert_eq!(cfg.logs.endpoint.as_deref(), Some("http://managed:4318"));
         assert_eq!(cfg.traces.endpoint.as_deref(), Some("http://managed:4318"));
+        assert!(!cfg.traces.endpoint_is_signal_specific);
+        assert!(!cfg.logs.endpoint_is_signal_specific);
     }
 
     #[test]
@@ -906,10 +945,35 @@ mod tests {
             _ => None,
         });
         assert_eq!(cfg.metrics.endpoint.as_deref(), Some("http://managed:4318"));
+        assert!(cfg.traces.endpoint_is_signal_specific);
+        assert!(!cfg.metrics.endpoint_is_signal_specific);
         assert_eq!(
             cfg.traces.endpoint.as_deref(),
             Some("http://managed-traces:4317")
         );
+    }
+
+    #[test]
+    fn headers_decode_uri_values_without_form_or_double_decoding() {
+        let headers = parse_otlp_headers(Some(
+            "Authorization=Bearer%20abc,token=a%2Cb%3Dc%2Bz,plus=a+b,percent=%2520",
+        ));
+        assert_eq!(
+            headers.get("Authorization").map(String::as_str),
+            Some("Bearer abc")
+        );
+        assert_eq!(headers.get("token").map(String::as_str), Some("a,b=c+z"));
+        assert_eq!(headers.get("plus").map(String::as_str), Some("a+b"));
+        assert_eq!(headers.get("percent").map(String::as_str), Some("%20"));
+    }
+
+    #[test]
+    fn malformed_and_injected_headers_are_rejected() {
+        let headers = parse_otlp_headers(Some(
+            "bad=%GG,injection=a%0D%0Ab,broken=%2,bad%20key=x,ok=value",
+        ));
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers.get("ok").map(String::as_str), Some("value"));
     }
 
     #[test]
@@ -924,11 +988,11 @@ mod tests {
     }
 
     #[test]
-    fn metrics_include_defaults_match_binary_c4h() {
+    fn metrics_include_defaults_exclude_identity() {
         let d = MetricsInclude::defaults();
-        assert!(d.session_id);
+        assert!(!d.session_id);
         assert!(!d.version);
-        assert!(d.account_uuid);
+        assert!(!d.account_uuid);
         assert!(!d.entrypoint);
         assert!(d.resource_attributes);
     }

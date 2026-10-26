@@ -322,9 +322,11 @@ impl ToolScheduler {
         let actor_terminated = Arc::new(tokio::sync::Notify::new());
         #[cfg(test)]
         let actor_terminated_task = Arc::clone(&actor_terminated);
+        let trace_context = telemetry::otel::capture_current_trace_context();
         tokio::spawn(lingxi_core::host::model_safety::bind_current_model_safety(
             async move {
-                actor.run().await;
+                telemetry::otel::with_trace_context_future(trace_context.as_ref(), actor.run())
+                    .await;
                 #[cfg(test)]
                 actor_terminated_task.notify_one();
             },
@@ -881,10 +883,17 @@ impl Actor {
         ));
         let (started_tx, started_rx) = oneshot::channel();
         let dispatch = Arc::clone(&self.dispatch);
+        let trace_context = telemetry::otel::capture_current_trace_context();
         self.tasks
             .spawn(lingxi_core::host::model_safety::bind_current_model_safety(
                 async move {
-                    let dispatch_future = async move { dispatch(call).await };
+                    let dispatch_future = async move {
+                        telemetry::otel::with_trace_context_future(
+                            trace_context.as_ref(),
+                            dispatch(call),
+                        )
+                        .await
+                    };
                     let mut dispatch_future =
                         Box::pin(std::panic::AssertUnwindSafe(dispatch_future).catch_unwind());
                     let mut started_tx = Some(started_tx);
@@ -1508,6 +1517,46 @@ mod tests {
             CancellationToken::new(),
             Arc::new(tokio::sync::Mutex::new(())),
         )
+    }
+
+    #[tokio::test]
+    async fn tool_dispatch_preserves_turn_trace_across_actor_and_task_spawns() {
+        let parent = telemetry::otel::SerializedTraceContext {
+            traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
+            tracestate: None,
+        };
+        let captured = Arc::new(Mutex::new(None));
+        let observed = Arc::clone(&captured);
+        let dispatch: ToolDispatch = Arc::new(move |call| {
+            let observed = Arc::clone(&observed);
+            Box::pin(async move {
+                tokio::task::yield_now().await;
+                *observed.lock().unwrap() = telemetry::otel::capture_current_trace_context();
+                result(&call.id)
+            })
+        });
+        let (session_root, publication_lock) = test_session_generation();
+        let mut scheduler = telemetry::otel::with_trace_context(Some(&parent), || {
+            ToolScheduler::spawn(
+                dispatch,
+                1,
+                None,
+                None,
+                session_root,
+                publication_lock,
+                None,
+            )
+        });
+        // Admission happens after the parent has left the caller's scope.
+        // Both the scheduler actor and its separately spawned task must retain it.
+        bounded(scheduler.add(owned_call("toolu-trace")))
+            .await
+            .unwrap();
+        bounded(scheduler.wait_for_progress()).await.unwrap();
+        assert_eq!(bounded(scheduler.take_ready()).await.unwrap().len(), 1);
+        bounded(scheduler.finish_normal()).await.unwrap();
+        assert_eq!(*captured.lock().unwrap(), Some(parent));
+        assert!(telemetry::otel::capture_current_trace_context().is_none());
     }
 
     #[tokio::test]
