@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use plugin::discover_recorded_plugins;
 use plugin::plugin_source_sha256;
@@ -8,6 +9,27 @@ use serde::Serialize;
 use crate::settings_bridge::{apply_patch_source, settings_error_message, SettingsContext};
 use client::protocol::commands::WritableScopeDto;
 use lingxi_core::types::utf16_json::{JsonValueView, Utf16JsonProjection};
+
+/// Safe cleanup decision emitted after a successful uninstall.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginCredentialCleanup {
+    /// Resolved `name@marketplace` identity used by the credential broker.
+    pub plugin_id: String,
+    /// Whether this operation removed the plugin's final installed scope.
+    pub last_scope_removed: bool,
+}
+
+/// User-facing plugin operation result plus optional credential cleanup metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginOperationResult {
+    /// Existing command-style operation message.
+    pub message: String,
+    /// Present only for successful uninstall operations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_cleanup: Option<PluginCredentialCleanup>,
+}
 
 #[derive(Debug, Serialize)]
 struct InstalledPluginRow {
@@ -237,7 +259,8 @@ pub async fn apply_operation(
     context: &SettingsContext,
     revision_sha256: &str,
     payload_json: &str,
-) -> Result<String, String> {
+    credentials: Option<Arc<secret::CredentialManager>>,
+) -> Result<PluginOperationResult, String> {
     let payload = parse_payload(payload_json)?;
     let action = required_string(&payload, "action")?;
     let scope = payload
@@ -267,7 +290,8 @@ pub async fn apply_operation(
     let home = context.paths.lingxi_home.clone();
     let cwd = context.paths.project_dir.clone();
     let plugins_dir = home.join("plugins");
-    match action {
+    let mut credential_cleanup = None;
+    let message = match action {
         "enable" => {
             let plugin = required_string(&payload, "plugin")?;
             crate::plugin_settings::run_enable(plugin, Some(&scope), &home, &cwd)
@@ -311,20 +335,55 @@ pub async fn apply_operation(
                 .get_property("prune")
                 .and_then(JsonValueView::as_bool)
                 .unwrap_or(false);
-            tokio::task::spawn_blocking(move || {
-                crate::plugin_install::run_uninstall(
-                    &plugin,
-                    Some(&scope),
-                    keep_data,
-                    prune,
-                    true,
-                    &plugins_dir,
-                    &home,
-                    &cwd,
-                )
+            if prune {
+                return Err(
+                    "Admin uninstall does not support prune; uninstall each orphaned dependency separately."
+                        .to_string(),
+                );
+            }
+            let outcome = tokio::task::spawn_blocking(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| {
+                        format!("failed to create plugin uninstall runtime: {error}")
+                    })?;
+                if let Some(credentials) = credentials {
+                    runtime.block_on(
+                        crate::plugin_install::run_uninstall_with_credential_factory_outcome(
+                            &plugin,
+                            Some(&scope),
+                            keep_data,
+                            prune,
+                            true,
+                            &plugins_dir,
+                            &home,
+                            &cwd,
+                            None,
+                            || async move { Ok(credentials) },
+                        ),
+                    )
+                } else {
+                    runtime.block_on(crate::plugin_install::run_uninstall_with_bus_outcome(
+                        &plugin,
+                        Some(&scope),
+                        keep_data,
+                        prune,
+                        true,
+                        &plugins_dir,
+                        &home,
+                        &cwd,
+                        None,
+                    ))
+                }
             })
             .await
-            .map_err(|error| format!("plugin uninstall task failed: {error}"))?
+            .map_err(|error| format!("plugin uninstall task failed: {error}"))??;
+            credential_cleanup = Some(PluginCredentialCleanup {
+                plugin_id: outcome.plugin_id,
+                last_scope_removed: outcome.last_scope_removed,
+            });
+            Ok(outcome.message)
         }
         "update" => {
             let plugin = required_string(&payload, "plugin")?.to_string();
@@ -381,7 +440,11 @@ pub async fn apply_operation(
             .map_err(|error| format!("plugin operation task failed: {error}"))?
         }
         other => Err(format!("unsupported plugin operation `{other}`")),
-    }
+    };
+    message.map(|message| PluginOperationResult {
+        message,
+        credential_cleanup,
+    })
 }
 
 pub async fn save_config(
@@ -853,6 +916,76 @@ mod tests {
         )
     }
 
+    struct CredentialTestClock;
+
+    impl lingxi_core::host::Clock for CredentialTestClock {
+        fn now(&self) -> std::time::SystemTime {
+            std::time::SystemTime::UNIX_EPOCH
+        }
+    }
+
+    struct UnusedCredentialHttp;
+
+    impl lingxi_core::host::HttpTransport for UnusedCredentialHttp {
+        fn request<'life0, 'async_trait>(
+            &'life0 self,
+            _request: lingxi_core::types::HttpRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            lingxi_core::types::HttpResponse,
+                            lingxi_core::host::HttpError,
+                        >,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async {
+                Err(lingxi_core::host::HttpError::InvalidRequest(
+                    "plugin-admin credential test does not use HTTP".to_string(),
+                ))
+            })
+        }
+
+        fn stream_sse<'life0, 'async_trait>(
+            &'life0 self,
+            _request: lingxi_core::types::HttpRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            lingxi_core::host::http::SseStream,
+                            lingxi_core::host::HttpError,
+                        >,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async {
+                Err(lingxi_core::host::HttpError::InvalidRequest(
+                    "plugin-admin credential test does not use HTTP".to_string(),
+                ))
+            })
+        }
+    }
+
+    fn in_memory_credentials() -> Arc<secret::CredentialManager> {
+        Arc::new(secret::CredentialManager::new(
+            Arc::new(lingxi_core::host::InMemorySecureStorage::new()),
+            Arc::new(CredentialTestClock),
+            Arc::new(UnusedCredentialHttp),
+        ))
+    }
+
     #[test]
     fn public_catalog_discovers_plugins_from_current_claude_marketplace_format() {
         let tmp = tempfile::tempdir().unwrap();
@@ -997,10 +1130,169 @@ mod tests {
             &context,
             &revision,
             r#"{"action":"uninstall","scope":"user","plugin":"secure@acme"}"#,
+            None,
         )
         .await
         .expect_err("apply needs confirmation");
         assert!(error.contains("confirmed:true"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn admin_uninstall_rejects_prune_without_mutating_state() {
+        let (context, root) = context();
+        install_schema_fixture(&context);
+        let plugins_dir = context.paths.lingxi_home.join("plugins");
+        let registry_path = plugins_dir.join("installed_plugins.json");
+        let mut installed: Value =
+            serde_json::from_slice(&fs::read(&registry_path).unwrap()).expect("registry JSON");
+        installed["plugins"]["helper@acme"] = json!([{
+            "scope": "user",
+            "installPath": plugins_dir.join("cache/acme/helper/1.0.0"),
+            "version": "1.0.0",
+            "autoInstalled": true,
+            "requiredBy": ["secure@acme"]
+        }]);
+        fs::write(&registry_path, serde_json::to_vec(&installed).unwrap()).unwrap();
+        let settings_path = context.paths.lingxi_home.join("settings.json");
+        fs::write(
+            &settings_path,
+            json!({
+                "enabledPlugins": {"secure@acme": true},
+                "pluginConfigs": {"secure@acme": {"options": {"COUNT": 3}}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let before_registry = fs::read(&registry_path).unwrap();
+        let before_settings = fs::read(&settings_path).unwrap();
+        let snapshot = context.snapshot().expect("settings snapshot");
+        let revision = layer_revision(&snapshot.layers, "user").expect("user revision");
+
+        let error = apply_operation(
+            &context,
+            &revision,
+            r#"{"action":"uninstall","scope":"user","plugin":"secure@acme","confirmed":true,"prune":true}"#,
+            None,
+        )
+        .await
+        .expect_err("admin prune is unsupported");
+        assert!(error.contains("uninstall each orphaned dependency separately"));
+        assert_eq!(fs::read(registry_path).unwrap(), before_registry);
+        assert_eq!(fs::read(settings_path).unwrap(), before_settings);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn confirmed_admin_uninstall_clears_sensitive_credentials() {
+        let (context, root) = context();
+        install_schema_fixture(&context);
+        let credentials = in_memory_credentials();
+        credentials
+            .set_plugin_secret("secure@acme", "TOKEN", "admin-secret")
+            .await
+            .expect("store fixture credential");
+        let snapshot = context.snapshot().expect("settings snapshot");
+        let revision = layer_revision(&snapshot.layers, "user").expect("user revision");
+
+        let result = apply_operation(
+            &context,
+            &revision,
+            r#"{"action":"uninstall","scope":"user","plugin":"secure@acme","confirmed":true}"#,
+            Some(credentials.clone()),
+        )
+        .await
+        .expect("confirmed uninstall");
+        assert!(
+            result.message.contains("Successfully uninstalled plugin"),
+            "{}",
+            result.message
+        );
+        assert_eq!(
+            result.credential_cleanup,
+            Some(PluginCredentialCleanup {
+                plugin_id: "secure@acme".to_string(),
+                last_scope_removed: true,
+            })
+        );
+        assert!(
+            credentials
+                .get_plugin_secret("secure@acme", "TOKEN")
+                .await
+                .expect("read deleted credential")
+                .is_none()
+        );
+        let installed: Value = serde_json::from_slice(
+            &fs::read(
+                context
+                    .paths
+                    .lingxi_home
+                    .join("plugins/installed_plugins.json"),
+            )
+            .expect("installed registry"),
+        )
+        .expect("registry JSON");
+        assert!(installed["plugins"].get("secure@acme").is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn admin_uninstall_reports_and_preserves_a_remaining_scope() {
+        let (context, root) = context();
+        install_schema_fixture(&context);
+        let registry_path = context
+            .paths
+            .lingxi_home
+            .join("plugins/installed_plugins.json");
+        let mut installed: Value =
+            serde_json::from_slice(&fs::read(&registry_path).unwrap()).expect("registry JSON");
+        let mut project = installed["plugins"]["secure@acme"][0].clone();
+        project["scope"] = Value::String("project".to_string());
+        project["projectPath"] = Value::String(
+            fs::canonicalize(&context.paths.project_dir)
+                .unwrap()
+                .display()
+                .to_string(),
+        );
+        installed["plugins"]["secure@acme"]
+            .as_array_mut()
+            .unwrap()
+            .push(project);
+        fs::write(&registry_path, serde_json::to_vec(&installed).unwrap()).unwrap();
+
+        let credentials = in_memory_credentials();
+        credentials
+            .set_plugin_secret("secure@acme", "TOKEN", "shared-admin-secret")
+            .await
+            .expect("store fixture credential");
+        let snapshot = context.snapshot().expect("settings snapshot");
+        let revision = layer_revision(&snapshot.layers, "user").expect("user revision");
+
+        let result = apply_operation(
+            &context,
+            &revision,
+            r#"{"action":"uninstall","scope":"user","plugin":"secure@acme","confirmed":true}"#,
+            Some(credentials.clone()),
+        )
+        .await
+        .expect("confirmed uninstall");
+        assert_eq!(
+            result.credential_cleanup,
+            Some(PluginCredentialCleanup {
+                plugin_id: "secure@acme".to_string(),
+                last_scope_removed: false,
+            })
+        );
+        assert!(
+            credentials
+                .get_plugin_secret("secure@acme", "TOKEN")
+                .await
+                .expect("read retained credential")
+                .is_some()
+        );
+        let installed: Value =
+            serde_json::from_slice(&fs::read(&registry_path).unwrap()).expect("registry JSON");
+        assert_eq!(installed["plugins"]["secure@acme"][0]["scope"], "project");
         let _ = fs::remove_dir_all(root);
     }
 

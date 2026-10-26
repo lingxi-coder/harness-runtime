@@ -540,9 +540,18 @@ impl MobileEngineHandle {
                 .await
                 .map(Some),
                 "apply_operation" => match command.revision.as_deref() {
-                    Some(revision) => plugin_admin::apply_operation(settings, revision, payload)
-                        .await
-                        .map(Some),
+                    Some(revision) => plugin_admin::apply_operation(
+                        settings,
+                        revision,
+                        payload,
+                        Some(self.inner.credentials.clone()),
+                    )
+                    .await
+                    .and_then(|result| {
+                        serde_json::to_string(&result)
+                            .map(Some)
+                            .map_err(|error| error.to_string())
+                    }),
                     None => Err("Plugin revision is required.".into()),
                 },
                 "save_config" => match command.revision.as_deref() {

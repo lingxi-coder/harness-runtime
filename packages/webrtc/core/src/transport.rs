@@ -109,6 +109,7 @@ pub struct Transport {
     pub(crate) ready: watch::Receiver<bool>,
     channel: Arc<OnceLock<Arc<dyn DataChannel>>>,
     answerer: bool,
+    file_channel: tokio::sync::Mutex<Option<Arc<dyn DataChannel>>>,
     messages: Option<tokio::sync::mpsc::Receiver<webrtc::data_channel::RTCDataChannelMessage>>,
     closed: bool,
     gather_timeout: Option<Duration>,
@@ -343,6 +344,7 @@ impl Transport {
             ready,
             channel,
             answerer,
+            file_channel: tokio::sync::Mutex::new(None),
             messages: Some(messages),
             closed: false,
             gather_timeout,
@@ -448,6 +450,27 @@ impl Transport {
         .map_or(Ok(AnswerOutcome::TimedOut), |result| {
             result.map(|()| AnswerOutcome::Ready)
         })
+    }
+
+    /// Create the independent reliable, ordered bulk-file channel before
+    /// `offer()`. The caller owns polling/flow control; RPC readiness and the
+    /// existing receive queue are unaffected. Only data-only offerers may use
+    /// this API. Closing the session closes both channels.
+    pub async fn open_file_channel(&self) -> Result<Arc<dyn DataChannel>> {
+        if self.closed || !self.data_only || self.answerer {
+            return Err("file channel requires a data-only offerer");
+        }
+        let mut slot = self.file_channel.lock().await;
+        if let Some(channel) = slot.as_ref() {
+            return Ok(channel.clone());
+        }
+        let channel = self
+            .connection
+            .create_data_channel("lingxi-files", None)
+            .await
+            .map_err(|_| "failed to create file channel")?;
+        *slot = Some(channel.clone());
+        Ok(channel)
     }
 
     /// Sends a binary fragment without JSON or UTF-8 conversion. Maximum 16 KiB.
@@ -762,3 +785,30 @@ impl Drop for Transport {
 #[cfg(test)]
 #[path = "transport_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod file_channel_tests {
+    use super::*;
+    #[tokio::test]
+    async fn file_channel_is_separate_idempotent_and_data_only() {
+        let mut config = crate::SessionConfig::data_only(crate::IceConfig::default());
+        config.gather_timeout = Some(Duration::from_millis(50));
+        let mut session = Transport::with_config(config).await.unwrap();
+        let first = session.open_file_channel().await.unwrap();
+        let second = session.open_file_channel().await.unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.label().await.unwrap(), "lingxi-files");
+        assert!(first.ordered().await.unwrap());
+        assert!(!Arc::ptr_eq(session.channel.get().unwrap(), &first));
+        let offer = session.offer().await.unwrap();
+        assert!(offer.contains("m=application"));
+        assert!(!offer.contains("m=audio"));
+        session.close().await.unwrap();
+        assert!(session.open_file_channel().await.is_err());
+        let mut config = crate::SessionConfig::data_only(crate::IceConfig::default());
+        config.answerer = true;
+        let mut answerer = Transport::with_config(config).await.unwrap();
+        assert!(answerer.open_file_channel().await.is_err());
+        answerer.close().await.unwrap();
+    }
+}
