@@ -932,6 +932,16 @@ G7_PLUGIN_INTEROP_ALLOWANCES = (
         (("CLAUDE_PLUGIN_MANIFEST_DIR", 2),), True,
     ),
     (
+        "crates/configuration-admin/src/plugin_install.rs", "fn",
+        "write_claude_sensitive_schema",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 2),), True,
+    ),
+    (
+        "crates/configuration-admin/src/plugin_install.rs", "fn",
+        "failed_sensitive_install_restores_previous_credential",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 1),), True,
+    ),
+    (
         "crates/configuration-admin/src/plugin_marketplace.rs", "fn",
         "add_directory_reads_current_claude_marketplace_layout",
         (("CLAUDE_PLUGIN_MANIFEST_DIR", 1),), True,
@@ -1783,6 +1793,15 @@ SELFTEST_FILES = {
         'fn env_snapshot() { let old = std::env::var("CLAUDE_PLUGIN_ROOT"); }\n'
         'fn unrelated_env_read() { let current = std::env::var("CLAUDE_PLUGIN_ROOT"); }\n'
     ),
+    "crates/st/plugin_install.rs": (
+        'fn write_claude_sensitive_schema() {\n'
+        '    let plugin_manifest_dir = branding::CLAUDE_PLUGIN_MANIFEST_DIR;\n'
+        '    let marketplace_manifest_dir = branding::CLAUDE_PLUGIN_MANIFEST_DIR;\n'
+        '}\n'
+        'fn failed_sensitive_install_restores_previous_credential() {\n'
+        '    let manifest = branding::CLAUDE_PLUGIN_MANIFEST_DIR;\n'
+        '}\n'
+    ),
     # G7 的两个**必须静默**的对照。
     "crates/st/neg_comment.rs": '// oracle spells it CLAUDE_PLUGIN_ROOT / CLAUDE_PROJECT_DIR\n',
     "crates/st/neg_reponame.rs": 'fn f() { let r = "anthropics/claude-plugins-official"; }\n',
@@ -1838,6 +1857,10 @@ SELFTEST_CASES = [
     ("G7 sees an import token in its adapter and an unrelated fixture",
      [("G7", "crates/st/plugin_interop.rs", "CLAUDE_PLUGIN_", 1),
       ("G7", "crates/st/plugin_interop.rs", "CLAUDE_PLUGIN_", 2)], []),
+    ("G7 sees both manifest markers in the sensitive-schema fixture",
+     [("G7", "crates/st/plugin_install.rs", "CLAUDE_PLUGIN_", 2),
+      ("G7", "crates/st/plugin_install.rs", "CLAUDE_PLUGIN_", 3),
+      ("G7", "crates/st/plugin_install.rs", "CLAUDE_PLUGIN_", 6)], []),
     ("G2 sees plugin environment snapshots before the narrow test allowance",
      [("G2", "crates/st/plugin_interop.rs", "CLAUDE_PLUGIN_ROOT", 3),
       ("G2", "crates/st/plugin_interop.rs", "CLAUDE_PLUGIN_ROOT", 4)], []),
@@ -1946,6 +1969,61 @@ def run_selftest():
             failures.append(f"plugin interop: valid exact adapter allowance failed: {exc}")
         if not any("plugin interop:" in failure for failure in failures):
             print("  ok   plugin interop allowance is item/token scoped")
+
+        synthetic_sensitive_fixtures = (
+            (
+                "crates/st/plugin_install.rs", "fn", "write_claude_sensitive_schema",
+                (("CLAUDE_PLUGIN_MANIFEST_DIR", 2),), True,
+            ),
+            (
+                "crates/st/plugin_install.rs", "fn",
+                "failed_sensitive_install_restores_previous_credential",
+                (("CLAUDE_PLUGIN_MANIFEST_DIR", 1),), True,
+            ),
+        )
+        synthetic_sensitive_needles = {
+            "crates/st/plugin_install.rs": frozenset({"CLAUDE_PLUGIN_"}),
+        }
+        try:
+            fixture_filtered = apply_plugin_interop_allowances(
+                tmp, findings, synthetic_sensitive_fixtures,
+                synthetic_sensitive_needles,
+            )
+            if _selftest_matches(
+                fixture_filtered, "G7", "crates/st/plugin_install.rs",
+                "CLAUDE_PLUGIN_",
+            ):
+                failures.append(
+                    "sensitive schema fixture: exact two-marker allowance was not suppressed"
+                )
+        except PluginInteropBoundaryError as exc:
+            failures.append(f"sensitive schema fixture: valid allowance failed: {exc}")
+        if not any("sensitive schema fixture:" in failure for failure in failures):
+            print("  ok   sensitive schema fixture allowance is exact-item and count scoped")
+
+        sensitive_fixture_path = os.path.join(tmp, "crates/st/plugin_install.rs")
+        with open(sensitive_fixture_path, encoding="utf-8") as fh:
+            original_sensitive_fixture = fh.read()
+        with open(sensitive_fixture_path, "w", encoding="utf-8") as fh:
+            fh.write(
+                original_sensitive_fixture
+                + 'fn unrelated_fixture() { let root = branding::CLAUDE_PLUGIN_MANIFEST_DIR; }\n'
+            )
+        sensitive_fixture_findings = scan(
+            tmp, paths=("crates/st/plugin_install.rs",)
+        )
+        try:
+            apply_plugin_interop_allowances(
+                tmp, sensitive_fixture_findings,
+                synthetic_sensitive_fixtures, synthetic_sensitive_needles,
+            )
+            failures.append(
+                "sensitive schema fixture: out-of-item marker did not fail closed"
+            )
+        except PluginInteropBoundaryError:
+            print("  ok   sensitive schema fixture allowance rejects out-of-item markers")
+        with open(sensitive_fixture_path, "w", encoding="utf-8") as fh:
+            fh.write(original_sensitive_fixture)
 
         interop_path = os.path.join(tmp, "crates/st/plugin_interop.rs")
         with open(interop_path, encoding="utf-8") as fh:
