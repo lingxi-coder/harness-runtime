@@ -13,6 +13,7 @@
   const acceptedTtlMs = 7 * 24 * 60 * 60 * 1000;
   const maxPendingRecords = 32;
   const maxPendingStorageBytes = 100 * 1024 * 1024;
+  const maxReportedMissingWakeRuns = 32;
   const pendingStore = 'pending';
   const pendingDbName = 'lingxi-local-app-agui-' + config.appId;
   const obsoletePendingDbName = 'lingxi-local-app-agent-' + config.appId;
@@ -20,6 +21,7 @@
   const inFlight = new Map();
   const handoffWaiters = new Map();
   const restoringWakeRuns = new Set();
+  const reportedMissingWakeRuns = new Set();
   const chatIds = new Set();
   const chatMessageIds = new Map();
   const recoveryState = {status: 'checking'};
@@ -209,12 +211,16 @@
       const tx = db.transaction(pendingStore, 'readwrite');
       const store = tx.objectStore(pendingStore);
       const cursorRequest = store.openCursor();
+      const readyRunIds = config.hostPlatform === 'ios'
+        ? new URL(location.href).searchParams.getAll('__lingxi_ready') : [];
+      const protectedWakeKey = readyRunIds.length === 1 && readyRunIds[0]
+        ? requestKey(readyRunIds[0]) : null;
       let expired = 0;
       cursorRequest.onsuccess = () => {
         const cursor = cursorRequest.result;
         if (!cursor) return;
         const record = cursor.value;
-        if (record?.appId === config.appId && recordExpired(record)) {
+        if (record?.appId === config.appId && record.key !== protectedWakeKey && recordExpired(record)) {
           cursor.delete();
           expired++;
         }
@@ -331,9 +337,13 @@
       const tx = db.transaction(pendingStore, 'readwrite');
       const store = tx.objectStore(pendingStore);
       const request = store.get(key);
-      let claimed = null;
+      let outcome = {status: 'ineligible'};
       request.onsuccess = () => {
         const record = request.result;
+        if (record === undefined) {
+          outcome = {status: 'missing'};
+          return;
+        }
         if (record && recordExpired(record)) {
           store.delete(key);
           return;
@@ -344,10 +354,10 @@
           record.sendingAt = Date.now();
           record.storageBytes = recordBytes(record);
           store.put(record);
-          claimed = record;
+          outcome = {status: 'claimed', record};
         }
       };
-      tx.oncomplete = () => { db.close(); resolve(claimed); };
+      tx.oncomplete = () => { db.close(); resolve(outcome); };
       tx.onerror = () => { db.close(); reject(makeError('Could not restore the saved Agent run.', 'storage_unavailable', tx.error)); };
       tx.onabort = () => { db.close(); reject(makeError('Could not restore the saved Agent run.', 'storage_unavailable', tx.error)); };
     });
@@ -695,9 +705,30 @@
       // Keep the native-return marker in the address until IndexedDB has
       // completed the ownership claim. A transient open/transaction failure
       // can then be retried by the next pageshow or visibilitychange event.
-      const record = await claimPending(requestKey(runId), runId);
+      const outcome = await claimPending(requestKey(runId), runId).catch(error => {
+        if (error && typeof error === 'object') error.runId = runId;
+        throw error;
+      });
+      if (outcome.status === 'missing') {
+        const error = makeError(
+          'The saved Agent request is not available in this browser storage context. Return to the original tab or reopen this handoff in a browser context that shares its storage.',
+          'pending_request_missing');
+        error.runId = runId;
+        handoffWaiters.get(runId)?.reject(error);
+        if (!reportedMissingWakeRuns.has(runId)) {
+          if (reportedMissingWakeRuns.size >= maxReportedMissingWakeRuns) {
+            reportedMissingWakeRuns.delete(reportedMissingWakeRuns.values().next().value);
+          }
+          reportedMissingWakeRuns.add(runId);
+          window.dispatchEvent(new CustomEvent('localApp:agent-handoff-error', {
+            detail: {runId, code: error.code, message: error.message}
+          }));
+        }
+        return;
+      }
       consumeWakeMarker(runId);
-      if (!record) return;
+      if (outcome.status !== 'claimed') return;
+      const record = outcome.record;
       try {
         const accepted = await submitRecord(record);
         handoffWaiters.get(runId)?.resolve(accepted);

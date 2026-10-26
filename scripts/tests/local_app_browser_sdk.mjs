@@ -11,7 +11,7 @@ const bundle = readFileSync(new URL('../../packages/local-app-agui/dist/browser.
 const source = readFileSync(new URL('../../crates/runtime/src/mobile/unified_local_apps/browser_sdk.js', import.meta.url), 'utf8');
 const recoverySource = readFileSync(new URL('../../crates/runtime/src/mobile/unified_local_apps/recovery_sw.js', import.meta.url), 'utf8');
 
-function fakeIndexedDb() {
+function fakeIndexedDb({databaseName = 'lingxi-local-app-agui-app-one', pendingRecords = []} = {}) {
   const databases = new Map();
   const getCounts = new Map();
   let nextGetFailure = null;
@@ -121,7 +121,12 @@ function fakeIndexedDb() {
           const stores = new Map();
           db = {
             get objectStoreNames() { return {contains: storeName => stores.has(storeName)}; },
-            createObjectStore(storeName) { stores.set(storeName, new Map()); },
+            createObjectStore(storeName) {
+              const records = storeName === 'pending' && name === databaseName
+                ? new Map(pendingRecords.map(record => [record.key, record])) : new Map();
+              stores.set(storeName, records);
+            },
+            stores,
             transaction(storeName) {
               const current = transactionFor(stores, storeName);
               current.transaction.objectStore = () => current.store;
@@ -136,6 +141,9 @@ function fakeIndexedDb() {
         request.onsuccess?.();
       });
       return request;
+    },
+    deleteRecord(name, storeName, key) {
+      return databases.get(name)?.stores.get(storeName)?.delete(key) ?? false;
     },
     deleteDatabase(name) {
       const request = {};
@@ -194,7 +202,7 @@ function runEvents(runInput, result = 'answer') {
   ];
 }
 
-function browser({child = false, existing = false, hostPlatform = 'android'} = {}) {
+function browser({child = false, existing = false, hostPlatform = 'android', pendingRecords = [], initialWakeRunId} = {}) {
   const requests = [];
   const inputs = [];
   const listeners = [];
@@ -203,7 +211,7 @@ function browser({child = false, existing = false, hostPlatform = 'android'} = {
   const window = eventTarget();
   window.top = child ? {} : window;
   window.isSecureContext = true;
-  const indexedDb = fakeIndexedDb();
+  const indexedDb = fakeIndexedDb({pendingRecords});
   window.indexedDB = indexedDb;
   if (existing) window.localApp = {desktop: true};
 
@@ -212,6 +220,9 @@ function browser({child = false, existing = false, hostPlatform = 'android'} = {
     href: 'http://127.0.0.1:24131/__run/epoch-one/index.html',
     assign(url) { this.href = url; }
   };
+  if (initialWakeRunId) {
+    location.href += `?__lingxi_ready=${encodeURIComponent(initialWakeRunId)}`;
+  }
   const document = eventTarget();
   document.visibilityState = 'visible';
   document.body = {children: [], append(inputElement) { this.children.push(inputElement); }};
@@ -347,6 +358,98 @@ test('iOS wake stores the full RunAgentInput and retries only after runId callba
   assert(!b.location.href.includes('__lingxi_ready='));
 });
 
+test('iOS wake reports a missing request without posting and leaves other run waiters intact',
+  {timeout: 5000}, async () => {
+  const b = browser({hostPlatform: 'ios'});
+  const otherInput = b.input(input({runId: 'other-run'}));
+  const otherPromise = b.api.agent.run(otherInput);
+  let otherSettled = false;
+  void otherPromise.then(() => { otherSettled = true; }, () => { otherSettled = true; });
+  await waitFor(() => new URL(b.location.href).searchParams.get('runId') === otherInput.runId,
+    'Other run wake link was not requested.');
+
+  const errors = [];
+  const ready = [];
+  let otherReturnRequested = false;
+  b.window.addEventListener('localApp:agent-handoff-error', event => errors.push(event.detail));
+  b.window.addEventListener('localApp:agent-handoff-ready', event => ready.push(event.detail));
+  try {
+    b.simulateWakeReturn('missing-run');
+    await waitFor(() => errors.length === 1, 'A missing pending record did not dispatch the handoff error.');
+    assert.equal(errors[0].code, 'pending_request_missing');
+    assert.equal(errors[0].runId, 'missing-run');
+    assert.match(errors[0].message, /original tab|shares its storage/);
+    assert.equal(new URL(b.location.href).searchParams.get('__lingxi_ready'), 'missing-run');
+    assert.equal(ready.length, 0);
+    assert.equal(otherSettled, false);
+    assert.equal(b.requests.filter(request => request.envelope.method === 'agent.tasks.start').length, 0);
+
+    b.window.dispatchEvent({type: 'pageshow'});
+    b.document.dispatchEvent({type: 'visibilitychange'});
+    b.window.dispatchEvent({type: 'pageshow'});
+    await b.flush();
+    assert.equal(errors.length, 1);
+    assert.equal(new URL(b.location.href).searchParams.get('__lingxi_ready'), 'missing-run');
+    assert.equal(otherSettled, false);
+    otherReturnRequested = true;
+    b.simulateWakeReturn(otherInput.runId);
+  } finally {
+    if (!otherReturnRequested) {
+      b.simulateWakeReturn(otherInput.runId);
+      await otherPromise.catch(() => {});
+    }
+  }
+
+  const result = await otherPromise;
+  const otherStart = b.requests.filter(request => request.envelope.method === 'agent.tasks.start');
+  assert.equal(otherStart.length, 1);
+  assert.equal(otherStart[0].envelope.args.input.runId, otherInput.runId);
+  assert.equal(result.result, 'answer');
+  assert.equal(ready.length, 1);
+  assert.equal(errors.length, 1);
+  assert.equal(otherSettled, true);
+});
+
+test('iOS wake preserves existing terminal, expired, and scope-mismatched record behavior',
+  {timeout: 5000}, async () => {
+  const now = Date.now();
+  const cases = [
+    {label: 'accepted', state: 'accepted'},
+    {label: 'sending', state: 'sending'},
+    {label: 'uncertain', state: 'uncertain'},
+    {label: 'rejected', state: 'rejected'},
+    {label: 'expired', state: 'waking', createdAt: now - 25 * 60 * 60 * 1000},
+    {label: 'scope-mismatched', state: 'waking', revision: 2}
+  ];
+  for (const item of cases) {
+    const runId = `existing-${item.label}`;
+    const timestamp = Date.now();
+    const record = {
+      key: `app-one:3:${runId}`, appId: 'app-one', revision: item.revision ?? 3, runId, state: item.state,
+      createdAt: item.createdAt ?? timestamp, ...(item.state === 'accepted' ? {acceptedAt: timestamp} : {})
+    };
+    const b = browser({hostPlatform: 'ios', pendingRecords: [record], initialWakeRunId: runId});
+    const errors = [];
+    const ready = [];
+    b.window.addEventListener('localApp:agent-handoff-error', event => errors.push(event.detail));
+    b.window.addEventListener('localApp:agent-handoff-ready', event => ready.push(event.detail));
+
+    await waitFor(() => !new URL(b.location.href).searchParams.has('__lingxi_ready'),
+      `The ${item.label} record did not preserve its existing marker semantics.`);
+    assert.equal(errors.length, 0, `${item.label} must not be misreported as missing.`);
+    assert.equal(ready.length, 0);
+    assert.equal(b.requests.filter(request => request.envelope.method === 'agent.tasks.start').length, 0);
+    if (item.label === 'expired') {
+      assert.equal(b.indexedDb.deleteRecord('lingxi-local-app-agui-app-one', 'pending', record.key), false,
+        'An expired row must still be deleted after its matching wake claim completes.');
+    }
+    if (item.label === 'scope-mismatched') {
+      assert.equal(b.indexedDb.deleteRecord('lingxi-local-app-agui-app-one', 'pending', record.key), true,
+        'A scope-mismatched row must keep its existing non-claim behavior.');
+    }
+  }
+});
+
 test('iOS wake preserves its marker across an IDB failure, coalesces retries, and keeps current URL state',
   {timeout: 5000}, async () => {
   const b = browser({hostPlatform: 'ios'});
@@ -359,12 +462,6 @@ test('iOS wake preserves its marker across an IDB failure, coalesces retries, an
   const ready = [];
   b.window.addEventListener('localApp:agent-handoff-error', event => errors.push(event.detail));
   b.window.addEventListener('localApp:agent-handoff-ready', event => ready.push(event.detail));
-  b.simulateWakeReturn('not-the-pending-run');
-  await waitFor(() => !new URL(b.location.href).searchParams.has('__lingxi_ready'),
-    'A missing pending record did not consume its wake marker.');
-  assert.equal(errors.length, 0);
-  assert.equal(ready.length, 0);
-  assert.equal(b.requests.filter(request => request.envelope.method === 'agent.tasks.start').length, 0);
 
   const key = 'app-one:3:run-one';
   const getsBeforeRestore = b.indexedDb.getCount(key);
@@ -373,6 +470,7 @@ test('iOS wake preserves its marker across an IDB failure, coalesces retries, an
   await waitFor(() => errors.length === 1, 'IDB claim failure did not dispatch the handoff error.');
 
   assert.equal(errors[0].code, 'storage_unavailable');
+  assert.equal(errors[0].runId, runInput.runId);
   assert.equal(new URL(b.location.href).searchParams.get('__lingxi_ready'), runInput.runId);
   assert.equal(b.indexedDb.getCount(key), getsBeforeRestore + 1);
   assert.equal(b.requests.filter(request => request.envelope.method === 'agent.tasks.start').length, 0);

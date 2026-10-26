@@ -146,6 +146,14 @@ model request. Identical input with the same `runId` is idempotent; changed inpu
 under that ID is rejected. Do not use the retired prompt/attachments/requestId
 or custom state-event protocol. Old Agent records are discarded, not converted.
 
+Treat an immediate `tasks.get` `task_not_found` as a lookup miss, not a model
+outcome. Keep the exact saved input and `runId`; retry only read-only lookup or
+reconnection, never `run` or Chat `send`. Await `connectAgent` or the task-event
+subscription until the standard terminal `RUN_FINISHED` or `RUN_ERROR` event;
+a history refresh or running-state snapshot is not completion. After successful
+completion, validate any structured `RunAgentResult.result` against the declared
+`outputSchema` and app-specific rules before side effects.
+
 The creating chat can call `LocalApp({"action":"agent_catalog"})` to discover
 exact public tool IDs. Discovery grants nothing. Declare tool and Skill IDs in
 the release, get native grants, then request them only in
@@ -173,6 +181,12 @@ code keeps the standard run contract. No path promises indefinite execution or
 automatic replay. Stop/revocation/release replacement cancel work; default limits
 are one active task per App, 20 turns and ten minutes, and an App may only lower
 native limits. Background Agent permission is separate from process permission.
+Listen for `localApp:agent-handoff-error`. When `detail.code` is
+`pending_request_missing`, use its `runId` to explain that this browser storage
+context cannot access the saved input; direct the user to the original tab or a
+browser context that shares its storage. Never resend or replace the `runId`
+automatically, label it a model failure, or infer a browser brand or private mode.
+A new request requires the user's explicit choice after reviewing the input.
 
 Use the current Local App Builder examples for one-shot file understanding and
 persistent attachment Chat. Keep business validation and explicit user save
