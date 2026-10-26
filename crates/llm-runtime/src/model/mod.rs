@@ -13,6 +13,7 @@ pub mod overflow;
 pub mod prompt_too_long;
 pub mod rate_limit;
 pub mod request_timeout;
+pub(crate) mod request_trace;
 pub mod retry;
 pub mod retry_scope;
 pub mod stream_recovery;
