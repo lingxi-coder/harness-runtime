@@ -17,6 +17,9 @@
 // line.
 #![allow(missing_docs)]
 
+#[cfg(test)]
+pub(crate) static TEST_POLICY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub mod bus;
 pub mod error;
 pub mod feature_flags;

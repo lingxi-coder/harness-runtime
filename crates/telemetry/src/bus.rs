@@ -62,9 +62,11 @@ impl AnalyticsBus {
     /// `tengu_*` telemetry egress.
     pub async fn log_event(&self, name: &str, metadata: LogEventMetadata) {
         if self.killswitch.is_active() {
+            self.pending.lock().await.clear();
             return;
         }
         if lingxi_core::host::traffic_mode::is_telemetry_disabled() {
+            self.pending.lock().await.clear();
             return;
         }
         mirror_analytics_event(name, &metadata);
@@ -80,12 +82,21 @@ impl AnalyticsBus {
         }
     }
 
-    /// Attach a sink and drain pending events through it in FIFO order.
+    /// Attach an internal analytics sink and drain pending events in FIFO order.
+    /// Network sinks must also enforce their export policy; this bus preserves
+    /// internal capture independently of the default-off OTel master switch.
+    /// Privacy vetoes discard pending events so opting back in cannot replay them.
     pub async fn attach_sink(&self, sink: Arc<dyn AnalyticsSink>) {
         *self.sink.write().await = Some(sink.clone());
         // Drain pending.
         let mut pending = self.pending.lock().await;
         while let Some(e) = pending.pop_front() {
+            if self.killswitch.is_active()
+                || lingxi_core::host::traffic_mode::is_telemetry_disabled()
+            {
+                pending.clear();
+                break;
+            }
             sink.log_event(&e.name, e.metadata).await;
         }
     }
@@ -159,12 +170,11 @@ mod tests {
     use super::*;
     use crate::sink::LogEventMetadata;
     use crate::sinks::InMemorySink;
-    use std::sync::Mutex;
+    use crate::TEST_POLICY_LOCK as ENV_LOCK;
 
     /// `DISABLE_TELEMETRY` is process-global; serialize the gate cases. No other
     /// test in this crate's unit-test binary drives the bus (the sink tests call
     /// sinks directly), so the window where the var is set is confined here.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn clear() {
         for v in [
@@ -201,6 +211,23 @@ mod tests {
         main.log_event("main_event", LogEventMetadata::default())
             .await;
         assert_eq!(main_sink.events().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn privacy_veto_discards_pending_events_before_sink_attach() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        clear();
+        let bus = AnalyticsBus::new();
+        bus.log_event("before_opt_out", LogEventMetadata::default())
+            .await;
+        assert_eq!(bus.pending.lock().await.len(), 1);
+        std::env::set_var("DO_NOT_TRACK", "1");
+        let sink = Arc::new(InMemorySink::new());
+        bus.attach_sink(sink.clone()).await;
+        clear();
+        bus.attach_sink(sink.clone()).await;
+        assert!(bus.pending.lock().await.is_empty());
+        assert!(sink.events().await.is_empty());
     }
 
     /// With telemetry enabled (clean env) events reach the sink; once the

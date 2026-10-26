@@ -67,6 +67,7 @@ fn server_hello_roundtrip() {
 #[test]
 fn bridge_request_roundtrip() {
     let r = BridgeRequest {
+        trace_context: None,
         id: 7,
         method: "run_turn".into(),
         params: projection(r#"{"text":"hi"}"#),
@@ -76,6 +77,25 @@ fn bridge_request_roundtrip() {
         r#"{"id":7,"method":"run_turn","params":{"text":"hi"}}"#
     );
     assert_eq!(roundtrip(&r), r);
+}
+
+#[test]
+fn request_trace_context_is_transport_metadata_and_preserves_command_source() {
+    let frame: Frame = serde_json::from_str(
+        r#"{"type":"request","payload":{"id":8,"method":"command","trace_context":{"traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01","tracestate":"vendor=value"},"params":{"type":"send_message","text":"\ud800"}}}"#,
+    ).unwrap();
+    let Frame::Request(request) = &frame else {
+        panic!("request expected")
+    };
+    let parent = request.trace_context.as_ref().unwrap();
+    assert_eq!(
+        parent.traceparent,
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+    );
+    assert_eq!(parent.tracestate.as_deref(), Some("vendor=value"));
+    let encoded = serde_json::to_string(&frame).unwrap();
+    assert!(encoded.contains(r#""text":"\ud800""#));
+    assert_eq!(roundtrip(&frame), frame);
 }
 
 #[test]
@@ -134,6 +154,7 @@ fn bridge_protocol_version_is_0_2_0() {
 #[test]
 fn frame_request_round_trips() {
     let f = Frame::Request(BridgeRequest {
+        trace_context: None,
         id: 11,
         method: "submit".into(),
         params: projection(r#"{"type":"send_prompt","text":"hi"}"#),
@@ -288,6 +309,7 @@ fn approve_and_deny_computer_access_commands_match_exact_wire_shape() {
     // `params` is the serialized `ClientCommand`), the SAME envelope
     // `ApprovePermission`/`DenyPermission` use.
     let framed = Frame::Request(BridgeRequest {
+        trace_context: None,
         id: 1,
         method: "submit".into(),
         params: projection(&serde_json::to_string(&approve).unwrap()),
