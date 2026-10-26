@@ -13,29 +13,38 @@ const recoverySource = readFileSync(new URL('../../crates/runtime/src/mobile/uni
 
 function fakeIndexedDb() {
   const databases = new Map();
+  const getCounts = new Map();
+  let nextGetFailure = null;
+  let nextGetGate = null;
 
   function transactionFor(stores, storeName) {
     let pending = 0;
     let completed = false;
-    const transaction = {oncomplete: null, onerror: null, onabort: null};
+    let aborted = false;
+    const transaction = {oncomplete: null, onerror: null, onabort: null, error: null};
     const maybeComplete = () => {
-      if (pending !== 0 || completed) return;
+      if (pending !== 0 || completed || aborted) return;
       setImmediate(() => {
-        if (pending !== 0 || completed) return;
+        if (pending !== 0 || completed || aborted) return;
         completed = true;
         transaction.oncomplete?.();
       });
     };
     const schedule = (request, operation) => {
       pending++;
-      setImmediate(() => {
+      setImmediate(async () => {
         try {
-          request.result = operation();
-          request.onsuccess?.();
+          request.result = await operation();
+          if (!aborted) request.onsuccess?.();
         } catch (error) {
-          request.error = error;
-          request.onerror?.();
-          transaction.onerror?.();
+          if (!aborted) {
+            aborted = true;
+            request.error = error;
+            transaction.error = error;
+            request.onerror?.();
+            transaction.onerror?.();
+            transaction.onabort?.();
+          }
         } finally {
           pending--;
           maybeComplete();
@@ -47,7 +56,23 @@ function fakeIndexedDb() {
     return {
       transaction,
       store: {
-        get(key) { return schedule({}, () => records.get(key)); },
+        get(key) {
+          return schedule({}, async () => {
+            getCounts.set(key, (getCounts.get(key) || 0) + 1);
+            if (nextGetFailure) {
+              const error = nextGetFailure;
+              nextGetFailure = null;
+              throw error;
+            }
+            if (nextGetGate) {
+              const gate = nextGetGate;
+              nextGetGate = null;
+              gate.startedResolve();
+              await gate.releasePromise;
+            }
+            return records.get(key);
+          });
+        },
         add(value) {
           return schedule({}, () => {
             if (records.has(value.key)) throw new Error('Key already exists');
@@ -77,6 +102,16 @@ function fakeIndexedDb() {
   }
 
   return {
+    failNextGet() { nextGetFailure = new Error('Injected IndexedDB read failure.'); },
+    holdNextGet() {
+      let startedResolve;
+      let releaseResolve;
+      const started = new Promise(resolve => { startedResolve = resolve; });
+      const releasePromise = new Promise(resolve => { releaseResolve = resolve; });
+      nextGetGate = {startedResolve, releasePromise};
+      return {started, release: releaseResolve};
+    },
+    getCount(key) { return getCounts.get(key) || 0; },
     open(name) {
       const request = {};
       setImmediate(() => {
@@ -140,6 +175,14 @@ function input({threadId = 'thread-one', runId = 'run-one', content = [userMessa
   return {threadId, runId, messages: content};
 }
 
+async function waitFor(predicate, message) {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.fail(message);
+}
+
 function runEvents(runInput, result = 'answer') {
   return [
     {type: 'RUN_STARTED', threadId: runInput.threadId, runId: runInput.runId, protocolVersion: '1.0'},
@@ -160,7 +203,8 @@ function browser({child = false, existing = false, hostPlatform = 'android'} = {
   const window = eventTarget();
   window.top = child ? {} : window;
   window.isSecureContext = true;
-  window.indexedDB = fakeIndexedDb();
+  const indexedDb = fakeIndexedDb();
+  window.indexedDB = indexedDb;
   if (existing) window.localApp = {desktop: true};
 
   const location = {
@@ -190,7 +234,7 @@ function browser({child = false, existing = false, hostPlatform = 'android'} = {
   }};
   const history = {state: null, replaceState(_state, _title, url) { location.href = new URL(url, location.href).href; }};
   const context = vm.createContext({
-    window, location, document, navigator, history, console, URL,
+    window, location, document, navigator, history, console, URL, URLSearchParams,
     CustomEvent: BrowserCustomEvent,
     indexedDB: window.indexedDB,
     File,
@@ -230,7 +274,7 @@ function browser({child = false, existing = false, hostPlatform = 'android'} = {
   vm.runInContext(source.replace('__LINGXI_APP_CONFIGURATION__', JSON.stringify(config)), context);
 
   return {
-    api: window.localApp, requests, inputs, listeners, location, window,
+    api: window.localApp, requests, inputs, listeners, location, window, document, history, indexedDb,
     input: value => parseInPage(JSON.stringify(value)),
     async flush() { await new Promise(setImmediate); await new Promise(setImmediate); },
     simulateWakeReturn(runId) {
@@ -301,6 +345,71 @@ test('iOS wake stores the full RunAgentInput and retries only after runId callba
   assert.deepEqual(JSON.parse(JSON.stringify(start.envelope.args.input.messages)), JSON.parse(JSON.stringify(runInput.messages)));
   assert.equal(result.result, 'answer');
   assert(!b.location.href.includes('__lingxi_ready='));
+});
+
+test('iOS wake preserves its marker across an IDB failure, coalesces retries, and keeps current URL state',
+  {timeout: 5000}, async () => {
+  const b = browser({hostPlatform: 'ios'});
+  const runInput = b.input(input());
+  const resultPromise = b.api.agent.run(runInput);
+  void resultPromise.catch(() => {});
+  await waitFor(() => b.location.href.startsWith('lingxi://'), 'iOS wake link was not requested.');
+
+  const errors = [];
+  const ready = [];
+  b.window.addEventListener('localApp:agent-handoff-error', event => errors.push(event.detail));
+  b.window.addEventListener('localApp:agent-handoff-ready', event => ready.push(event.detail));
+  b.simulateWakeReturn('not-the-pending-run');
+  await waitFor(() => !new URL(b.location.href).searchParams.has('__lingxi_ready'),
+    'A missing pending record did not consume its wake marker.');
+  assert.equal(errors.length, 0);
+  assert.equal(ready.length, 0);
+  assert.equal(b.requests.filter(request => request.envelope.method === 'agent.tasks.start').length, 0);
+
+  const key = 'app-one:3:run-one';
+  const getsBeforeRestore = b.indexedDb.getCount(key);
+  b.indexedDb.failNextGet();
+  b.simulateWakeReturn(runInput.runId);
+  await waitFor(() => errors.length === 1, 'IDB claim failure did not dispatch the handoff error.');
+
+  assert.equal(errors[0].code, 'storage_unavailable');
+  assert.equal(new URL(b.location.href).searchParams.get('__lingxi_ready'), runInput.runId);
+  assert.equal(b.indexedDb.getCount(key), getsBeforeRestore + 1);
+  assert.equal(b.requests.filter(request => request.envelope.method === 'agent.tasks.start').length, 0);
+
+  const gate = b.indexedDb.holdNextGet();
+  b.window.dispatchEvent({type: 'pageshow'});
+  b.document.dispatchEvent({type: 'visibilitychange'});
+  b.window.dispatchEvent({type: 'pageshow'});
+  await gate.started;
+  assert.equal(b.indexedDb.getCount(key), getsBeforeRestore + 2);
+
+  b.history.replaceState(null, '', '/__run/epoch-one/other.html?keep=preserved&__lingxi_ready=run-one#return');
+  b.window.dispatchEvent({type: 'pageshow'});
+  b.document.dispatchEvent({type: 'visibilitychange'});
+  await b.flush();
+  assert.equal(b.indexedDb.getCount(key), getsBeforeRestore + 2);
+  gate.release();
+
+  const result = await resultPromise;
+  const starts = b.requests.filter(request => request.envelope.method === 'agent.tasks.start');
+  assert.equal(starts.length, 1);
+  assert.equal(starts[0].envelope.args.input.runId, 'run-one');
+  assert.deepEqual(JSON.parse(JSON.stringify(starts[0].envelope.args.input.messages)),
+    JSON.parse(JSON.stringify(runInput.messages)));
+  assert.equal(result.result, 'answer');
+  assert.equal(ready.length, 1);
+  assert.equal(errors.length, 1);
+
+  const currentUrl = new URL(b.location.href);
+  assert.equal(currentUrl.searchParams.has('__lingxi_ready'), false);
+  assert.equal(currentUrl.searchParams.get('keep'), 'preserved');
+  assert.equal(currentUrl.pathname, '/__run/epoch-one/other.html');
+  assert.equal(currentUrl.hash, '#return');
+  b.window.dispatchEvent({type: 'pageshow'});
+  b.document.dispatchEvent({type: 'visibilitychange'});
+  await b.flush();
+  assert.equal(b.requests.filter(request => request.envelope.method === 'agent.tasks.start').length, 1);
 });
 
 test('file picker and run-scoped service helpers remain available', async () => {

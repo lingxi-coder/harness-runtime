@@ -19,6 +19,7 @@
   const pendingPrefix = config.appId + ':' + config.revision + ':';
   const inFlight = new Map();
   const handoffWaiters = new Map();
+  const restoringWakeRuns = new Set();
   const chatIds = new Set();
   const chatMessageIds = new Map();
   const recoveryState = {status: 'checking'};
@@ -683,22 +684,49 @@
     const url = new URL(location.href);
     const readyRunIds = url.searchParams.getAll('__lingxi_ready');
     if (!readyRunIds.length) return;
-    url.searchParams.delete('__lingxi_ready');
-    history.replaceState(history.state, '', `${url.pathname}${url.search}${url.hash}`);
-    if (config.hostPlatform !== 'ios' || readyRunIds.length !== 1 || !readyRunIds[0]) return;
-    const runId = readyRunIds[0];
-    const record = await claimPending(requestKey(runId), runId);
-    if (!record) return;
-    try {
-      const accepted = await submitRecord(record);
-      handoffWaiters.get(runId)?.resolve(accepted);
-      window.dispatchEvent(new CustomEvent('localApp:agent-handoff-ready', {detail: {runId, ...accepted}}));
-    } catch (error) {
-      handoffWaiters.get(runId)?.reject(error);
-      window.dispatchEvent(new CustomEvent('localApp:agent-handoff-error', {
-        detail: {runId, code: error.code || 'host_unavailable', message: error.message}
-      }));
+    if (config.hostPlatform !== 'ios' || readyRunIds.length !== 1 || !readyRunIds[0]) {
+      consumeWakeMarker();
+      return;
     }
+    const runId = readyRunIds[0];
+    if (restoringWakeRuns.has(runId)) return;
+    restoringWakeRuns.add(runId);
+    try {
+      // Keep the native-return marker in the address until IndexedDB has
+      // completed the ownership claim. A transient open/transaction failure
+      // can then be retried by the next pageshow or visibilitychange event.
+      const record = await claimPending(requestKey(runId), runId);
+      consumeWakeMarker(runId);
+      if (!record) return;
+      try {
+        const accepted = await submitRecord(record);
+        handoffWaiters.get(runId)?.resolve(accepted);
+        window.dispatchEvent(new CustomEvent('localApp:agent-handoff-ready', {detail: {runId, ...accepted}}));
+      } catch (error) {
+        handoffWaiters.get(runId)?.reject(error);
+        window.dispatchEvent(new CustomEvent('localApp:agent-handoff-error', {
+          detail: {runId, code: error.code || 'host_unavailable', message: error.message}
+        }));
+      }
+    } finally {
+      restoringWakeRuns.delete(runId);
+    }
+  }
+
+  function consumeWakeMarker(runId) {
+    const currentUrl = new URL(location.href);
+    const params = new URLSearchParams();
+    let removed = false;
+    for (const [name, value] of currentUrl.searchParams) {
+      if (name === '__lingxi_ready' && (runId === undefined || value === runId)) {
+        removed = true;
+        continue;
+      }
+      params.append(name, value);
+    }
+    if (!removed) return;
+    currentUrl.search = params.toString();
+    history.replaceState(history.state, '', `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`);
   }
 
   function serviceUrl(name, path = '/') {
