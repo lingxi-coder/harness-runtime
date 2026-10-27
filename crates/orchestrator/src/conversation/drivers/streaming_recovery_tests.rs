@@ -34,7 +34,7 @@ impl sidequery::SideQueryClient for CountingSideClient {
 async fn fixture(
     root: &std::path::Path,
     event: &str,
-    reject: bool,
+    admission_error: Option<hooks::RecoveryAdmissionError>,
 ) -> (
     ConversationOrchestrator,
     Arc<MockStreamingApiClient>,
@@ -116,12 +116,9 @@ async fn fixture(
     let observed = admissions.clone();
     orch.set_tool_dispatch_recovery_guard(Arc::new(move || {
         observed.fetch_add(1, Ordering::SeqCst);
-        if reject {
-            Err(hooks::RecoveryAdmissionError::Failure(
-                "admission failed".into(),
-            ))
-        } else {
-            Ok(None)
+        match &admission_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(None),
         }
     }));
     (orch, streaming, api, side, admissions, output)
@@ -130,8 +127,14 @@ async fn fixture(
 #[tokio::test]
 async fn prompt_section_admission_failure_never_opens_a_provider() {
     let root = tempfile::tempdir().unwrap();
-    let (orch, streaming, api, side, admissions, _) =
-        fixture(root.path(), "prompt.section", true).await;
+    let (orch, streaming, api, side, admissions, _) = fixture(
+        root.path(),
+        "prompt.section",
+        Some(hooks::RecoveryAdmissionError::Failure(
+            "admission failed".into(),
+        )),
+    )
+    .await;
     let result = orch.run_turn_streaming("hello").await;
     assert!(
         matches!(result, Err(OrchestratorError::Internal(message)) if message == "admission failed")
@@ -145,8 +148,14 @@ async fn prompt_section_admission_failure_never_opens_a_provider() {
 #[tokio::test]
 async fn prompt_context_admission_failure_stops_compaction_provider() {
     let root = tempfile::tempdir().unwrap();
-    let (orch, streaming, api, side, admissions, _) =
-        fixture(root.path(), "prompt.context", true).await;
+    let (orch, streaming, api, side, admissions, _) = fixture(
+        root.path(),
+        "prompt.context",
+        Some(hooks::RecoveryAdmissionError::Failure(
+            "admission failed".into(),
+        )),
+    )
+    .await;
     let result = orch.run_turn_streaming("hello").await;
     assert!(
         matches!(result, Err(OrchestratorError::Internal(message)) if message == "admission failed")
@@ -160,7 +169,7 @@ async fn prompt_context_admission_failure_stops_compaction_provider() {
     // admission succeeds; otherwise the zero-call assertion would be vacuous.
     let control_root = tempfile::tempdir().unwrap();
     let (control, _, _, control_side, control_admissions, _) =
-        fixture(control_root.path(), "prompt.context", false).await;
+        fixture(control_root.path(), "prompt.context", None).await;
     let _ = control.run_turn_streaming("hello").await;
     assert!(control_admissions.load(Ordering::SeqCst) > 0);
     assert!(control_side.0.load(Ordering::SeqCst) > 0);
@@ -170,13 +179,12 @@ async fn prompt_context_admission_failure_stops_compaction_provider() {
 async fn interrupted_admission_propagates_without_provider_error_or_rejection() {
     for event in ["prompt.section", "prompt.context"] {
         let root = tempfile::tempdir().unwrap();
-        let (orch, streaming, api, side, admissions, output) =
-            fixture(root.path(), event, false).await;
-        let observed = admissions.clone();
-        orch.set_tool_dispatch_recovery_guard(Arc::new(move || {
-            observed.fetch_add(1, Ordering::SeqCst);
-            Err(hooks::RecoveryAdmissionError::Interrupted)
-        }));
+        let (orch, streaming, api, side, admissions, output) = fixture(
+            root.path(),
+            event,
+            Some(hooks::RecoveryAdmissionError::Interrupted),
+        )
+        .await;
         let initial_assistant_count = orch
             .session()
             .lock()
@@ -188,8 +196,8 @@ async fn interrupted_admission_propagates_without_provider_error_or_rejection() 
 
         let result = orch.run_turn_streaming("hello").await;
         assert!(
-            matches!(result, Err(OrchestratorError::RecoveryInterrupted)),
-            "{event} must propagate the typed interruption"
+            matches!(&result, Err(OrchestratorError::RecoveryInterrupted)),
+            "{event} must propagate the typed interruption: {result:?}"
         );
         assert!(admissions.load(Ordering::SeqCst) > 0);
         assert!(streaming.captured_calls().await.is_empty());

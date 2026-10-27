@@ -61,7 +61,7 @@ fn queued_mod_output_keeps_origin_when_next_mobile_turn_is_active() {
           on('turn.complete', async ($, event) => {
             await $.fs.write('mod-a-started', event.turnId);
             while (!(await $.fs.exists('mod-a-release'))) {
-              await new Promise(resolve => setTimeout(resolve, 10));
+              await $.clock.sleep(10);
             }
             $.ui.log('old log', { to: 'transcript' });
             $.ui.toast('old toast');

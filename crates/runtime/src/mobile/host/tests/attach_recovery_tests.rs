@@ -1288,6 +1288,18 @@ fn another_handle_cannot_report_absent_or_cancel_a_received_submission() {
     first.runtime().block_on(async {
         let session_id = first.active_session_id();
         first
+            .inner
+            .session_writer
+            .append_mobile_empty_session(&session_id, "pending submission", &first.session_cwd())
+            .await
+            .unwrap();
+        first
+            .inner
+            .session_writer
+            .append_session_mode(first.inner.session_mode.as_str())
+            .await
+            .unwrap();
+        first
             .ensure_reserved_session_identity(&session_id)
             .await
             .unwrap();
@@ -1472,6 +1484,18 @@ fn cold_claimed_batch_cancel_never_stops_a_different_live_turn() {
         let first = engine(tmp.path(), Arc::new(AttachBarrierListener::default()));
         let session = first.active_session_id();
         first.runtime().block_on(async {
+            first
+                .inner
+                .session_writer
+                .append_mobile_empty_session(&session, "claimed batch", &first.session_cwd())
+                .await
+                .unwrap();
+            first
+                .inner
+                .session_writer
+                .append_session_mode(first.inner.session_mode.as_str())
+                .await
+                .unwrap();
             first
                 .ensure_reserved_session_identity(&session)
                 .await
