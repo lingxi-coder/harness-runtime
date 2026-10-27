@@ -4934,7 +4934,11 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                     .ok()
                     .flatten()
             });
-        with_dispatch_execution_lease(execution_lease, with_dispatch_work_lease(work_lease, async move {
+        // The Mod dispatch state machine is large. Box it before passing it
+        // through the task-local scopes, so each scope carries a pointer rather
+        // than copying the entire future on its polling stack. Construction
+        // does not poll it; both leases are still installed when it runs.
+        with_dispatch_execution_lease(execution_lease, with_dispatch_work_lease(work_lease, super::boxed_turn_future(|| async move {
         // This is the real streaming dispatch entry: after executor admission but
         // before hook lookup, permission waits, or any tool-call completion. The
         // scheduler Add barrier matches Native W1 at this point.
@@ -5659,7 +5663,7 @@ pub(crate) fn dispatch_tool_uses_tracked_deferred_with_facts<'a>(
                 });
         }
         Ok(all)
-        })).await
+        }))).await
     })
 }
 
