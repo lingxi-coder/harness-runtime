@@ -229,7 +229,13 @@ async fn typed_bash_preaccept_disconnect_closes_gate_and_reaps_child() {
 
 async fn run_supervisor_fixture(role: &str, marker: &str) {
     use std::os::unix::fs::PermissionsExt;
-    let directory = tempfile::tempdir().unwrap();
+    // The supervisor requires the output root to be exactly owner-only.
+    // Request private permissions at creation, then restore any bits masked by umask.
+    let directory = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let executable = std::env::current_exe().unwrap();
     let wrapper = directory.path().join("supervisor-bootstrap");
     let quoted = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
