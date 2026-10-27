@@ -76,6 +76,118 @@ use super::{
     SharedCredentialStack, TaskRegistryWorkflowLauncher, TeammateStatusFanout, TEAMMATE_POOL_CAP,
 };
 
+fn create_task_output_directory(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("task output directory has no parent"))?;
+        let leaf = path
+            .file_name()
+            .ok_or_else(|| std::io::Error::other("task output directory has no name"))?;
+        std::fs::create_dir_all(parent)?;
+        lingxi_core::host::rooted_fs::ensure_private_directory(
+            parent,
+            std::path::Path::new(leaf),
+            lingxi_core::host::rooted_fs::PRIVATE_DIR_MODE,
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
+#[cfg(all(test, windows))]
+mod task_output_directory_tests {
+    use super::create_task_output_directory;
+    use lingxi_core::host::rooted_fs;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn owner_and_dacl(path: &Path) -> String {
+        let output = Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "(Get-Acl -LiteralPath $env:LINGXI_TEST_TASK_SECURITY_PATH).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Owner -bor [System.Security.AccessControl.AccessControlSections]::Access)",
+            ])
+            .env("LINGXI_TEST_TASK_SECURITY_PATH", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    #[test]
+    fn task_output_directory_is_private_on_first_creation_and_preserves_existing_acl() {
+        let parent = tempfile::tempdir().unwrap();
+        let output = parent.path().join("project/session/tasks");
+        create_task_output_directory(&output).unwrap();
+
+        // Compare the actual directory descriptor with a freshly created
+        // rooted-fs private directory using the same process token.
+        rooted_fs::ensure_private_directory(
+            parent.path(),
+            Path::new("reference"),
+            rooted_fs::PRIVATE_DIR_MODE,
+        )
+        .unwrap();
+        let secure = owner_and_dacl(&parent.path().join("reference"));
+        assert_eq!(owner_and_dacl(&output), secure);
+
+        std::fs::write(output.join("preserved"), "output").unwrap();
+        let identity = rooted_fs::root_identity(&output).unwrap();
+        create_task_output_directory(&output).unwrap();
+        assert_eq!(rooted_fs::root_identity(&output).unwrap(), identity);
+        assert_eq!(owner_and_dacl(&output), secure);
+        assert_eq!(
+            std::fs::read_to_string(output.join("preserved")).unwrap(),
+            "output"
+        );
+    }
+
+    #[test]
+    fn task_output_directory_does_not_rewrite_an_existing_public_acl() {
+        let parent = tempfile::tempdir().unwrap();
+        let output = parent.path().join("project/session/tasks");
+        std::fs::create_dir_all(&output).unwrap();
+        let grant = Command::new("icacls.exe")
+            .arg(&output)
+            .args(["/grant", "*S-1-1-0:F"])
+            .output()
+            .unwrap();
+        assert!(
+            grant.status.success(),
+            "{}",
+            String::from_utf8_lossy(&grant.stderr)
+        );
+        let before = owner_and_dacl(&output);
+        assert!(
+            before.contains(";;;WD)") || before.contains(";;;S-1-1-0)"),
+            "{before}"
+        );
+        std::fs::write(output.join("preserved"), "output").unwrap();
+        let identity = rooted_fs::root_identity(&output).unwrap();
+
+        create_task_output_directory(&output).unwrap();
+        assert_eq!(rooted_fs::root_identity(&output).unwrap(), identity);
+        assert_eq!(owner_and_dacl(&output), before);
+        assert_eq!(
+            std::fs::read_to_string(output.join("preserved")).unwrap(),
+            "output"
+        );
+    }
+}
+
 /// Rebuild the slash-command MCP partition from the same generation-checked
 /// connection snapshot that serves prompts/get. Holding both read/write guards
 /// while projecting prevents a concurrent plugin disable from restoring a
@@ -3518,9 +3630,10 @@ pub async fn build_with_credential_stack(
     // sit beside the session's other per-session state instead of under a uuid
     // that exists nowhere else in the process.
     let task_output_dir = session_task_output_dir(&cwd, &main_session_uuid);
-    // Eagerly create the dir (claude-code `ensureOutputDir`'s `mkdir(recursive)`)
-    // so the very first spool `allocate` (exclusive create) finds its parent.
-    if let Err(e) = std::fs::create_dir_all(&task_output_dir) {
+    // Eagerly create the dir so the first exclusive spool allocation finds it.
+    // On Windows the leaf needs the same private descriptor the supervisor
+    // validates later; opening an existing leaf never rewrites its ACL.
+    if let Err(e) = create_task_output_directory(&task_output_dir) {
         tracing::warn!(
             target: "harness_runtime::desktop::tasks",
             dir = %task_output_dir.display(),

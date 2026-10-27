@@ -833,7 +833,7 @@ mod tests {
     #[tokio::test]
     async fn full_stdout_and_empty_stdin_are_cancelled_and_joined() -> io::Result<()> {
         let (input_read, _input_write) = std::io::pipe()?;
-        let (output_read, output_write) = std::io::pipe()?;
+        let (mut output_read, output_write) = std::io::pipe()?;
         let (_input, mut output, mut shutdown) =
             from_owned_handles(owned(&input_read)?, owned(&output_write)?)?;
         drop(input_read);
@@ -848,7 +848,14 @@ mod tests {
             loop {
                 let available = pipe_bytes_available(&output_read)?;
                 if available >= 4096 {
-                    return Ok(output_read);
+                    // Peeked bytes may belong to the outstanding WriteFile and
+                    // disappear when it is cancelled. Consume a real prefix
+                    // while the write is still pending, so the test proves a
+                    // partial frame was delivered without assuming that the
+                    // remaining, unread bytes survive cancellation.
+                    let mut emitted = vec![0; 4096];
+                    output_read.read_exact(&mut emitted)?;
+                    return Ok((output_read, emitted));
                 }
                 if std::time::Instant::now() >= deadline {
                     return Err(io::Error::new(
@@ -859,16 +866,41 @@ mod tests {
                 thread::sleep(RETRY_INTERVAL);
             }
         });
-        let mut output_read = tokio::time::timeout(Duration::from_secs(6), probe).await???;
+        let (mut output_read, mut emitted) =
+            tokio::time::timeout(Duration::from_secs(6), probe).await???;
+        assert_eq!(emitted, vec![b'x'; 4096]);
         assert!(!write.is_finished(), "large write must still be in flight");
+        assert_eq!(
+            shutdown.output.phase.load(Ordering::SeqCst),
+            ENTERING_IO,
+            "stdout worker must still be entering or blocked in I/O"
+        );
+        assert_eq!(
+            shutdown.last_stdout_completion(),
+            Some(StdoutCompletion::Pending)
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while shutdown.input.phase.load(Ordering::SeqCst) != ENTERING_IO {
+                tokio::time::sleep(RETRY_INTERVAL).await;
+            }
+        })
+        .await?;
         shutdown.shutdown(Duration::from_secs(5)).await?;
         let result = tokio::time::timeout(Duration::from_secs(5), write).await??;
         assert!(
             result.is_err(),
             "cancelled output must not be accepted as a complete frame"
         );
-        assert!(shutdown.last_stdout_completion().is_some());
-        let mut emitted = Vec::new();
+        assert!(matches!(
+            shutdown.last_stdout_completion(),
+            Some(
+                StdoutCompletion::NotStarted
+                    | StdoutCompletion::Written(_)
+                    | StdoutCompletion::Failed { .. }
+            )
+        ));
+        assert!(shutdown.input.thread.is_none());
+        assert!(shutdown.output.thread.is_none());
         output_read.read_to_end(&mut emitted)?;
         assert!(!emitted.is_empty());
         assert!(emitted.iter().all(|byte| *byte == b'x'));

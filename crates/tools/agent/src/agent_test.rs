@@ -4706,14 +4706,15 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
             previous_session,
             "test".into(),
         )));
+        // A main-loop context uses the live session, without the immutable
+        // origin id that is supplied to nested subagent invocations.
+        let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+        ctx.options.model_profile = Some("anthropic".into());
+        ctx.session = Some(session.clone());
         // Model the live-session switch that can happen after a context was
         // built: call_fusion must read the current state, not a stale id
         // captured by request construction.
         session.lock().await.session_id = switched_session;
-
-        let mut ctx = fresh_fusion_ctx_with_registry(Arc::new(ToolRegistry::new()));
-        ctx.options.model_profile = Some("anthropic".into());
-        ctx.session = Some(session);
         tool.call(
             serde_json::json!({
                 "description": "deliberate",
@@ -4740,6 +4741,58 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 .as_slice(),
             &[Some(switched_session)],
             "the run must be prepared under the session live at dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn fusion_nested_calls_keep_their_trusted_origin_over_a_live_session() {
+        let fusion = Arc::new(CapturingFusion {
+            requests: std::sync::Mutex::new(Vec::new()),
+            sessions: std::sync::Mutex::new(Vec::new()),
+        });
+        let tool = AgentTool::new(wired_ctx(
+            arc_mock_spawner(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ))
+        .with_test_fusion(fusion.clone());
+        let nested_origin = lingxi_core::types::SessionId::new();
+        let capability_origin = lingxi_core::types::SessionId::new();
+        let unrelated_live = lingxi_core::types::SessionId::new();
+        for with_capability in [false, true] {
+            let mut ctx = fresh_ctx_with_registry(Arc::new(ToolRegistry::new()));
+            ctx.options.model_profile = Some("anthropic".into());
+            ctx.origin_session_id = Some(nested_origin);
+            ctx.session = Some(Arc::new(tokio::sync::Mutex::new(
+                lingxi_core::SessionState::empty(unrelated_live, "test".into()),
+            )));
+            if with_capability {
+                ctx.session_origin = Some(Arc::new(TestSessionOrigin {
+                    session_id: capability_origin,
+                    root: "/workspace".into(),
+                }));
+            }
+            tool.call(
+                serde_json::json!({
+                    "description": "deliberate",
+                    "prompt": "review this",
+                    "subagent_type": "fusion"
+                }),
+                ctx,
+                fresh_tx(),
+            )
+            .await
+            .expect("nested fusion call");
+        }
+        assert_eq!(
+            fusion
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_slice(),
+            &[Some(nested_origin), Some(capability_origin)],
+            "an immutable nested origin and then the host capability must take priority"
         );
     }
 

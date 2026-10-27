@@ -1184,10 +1184,15 @@ enum FakePanel {
     MalformedReport,
     Fail,
     Hang,
+    /// Hold a scripted outcome until each participating panel has reached
+    /// this barrier. Hanging panels emit their allocation receipt first.
+    FailAfterBarrier(Arc<tokio::sync::Barrier>),
+    HangAfterBarrier(Arc<tokio::sync::Barrier>),
     /// Fails at the SPAWN layer (`Err(SubagentSpawnError)`), distinct from
     /// `Fail` which is a terminal `SubagentResult::Failed` — used to exercise
     /// the pool-admission early-abort path (G004).
     SpawnErr,
+    SpawnErrAfterBarrier(Arc<tokio::sync::Barrier>),
     /// [Finding 25] Mirrors `runner.rs`'s `!terminated_cleanly` arm: the
     /// subagent loop ran out of `max_turns` without ever capturing a valid
     /// `StructuredOutput`, so it reports `Completed` (not `Failed`) with
@@ -1316,7 +1321,9 @@ impl FakeSpawner {
         let script = self.by_model.lock().unwrap().remove(&model);
         if !matches!(
             script,
-            Some(FakePanel::SpawnErr) | Some(FakePanel::SlowSpawnErr)
+            Some(FakePanel::SpawnErr)
+                | Some(FakePanel::SpawnErrAfterBarrier(_))
+                | Some(FakePanel::SlowSpawnErr)
         ) {
             Self::emit_allocated(&observer, &request).await;
         }
@@ -1332,12 +1339,29 @@ impl FakeSpawner {
                 std::future::pending::<()>().await;
                 unreachable!()
             }
+            Some(FakePanel::HangAfterBarrier(barrier)) => {
+                barrier.wait().await;
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+            Some(FakePanel::FailAfterBarrier(barrier)) => {
+                barrier.wait().await;
+                Ok(SubagentResult::Failed {
+                    agent_id: AgentId::new(),
+                    reason: "panel failed".into(),
+                    usage: SubagentUsage::default(),
+                })
+            }
             Some(FakePanel::Fail) | None => Ok(SubagentResult::Failed {
                 agent_id: AgentId::new(),
                 reason: "panel failed".into(),
                 usage: SubagentUsage::default(),
             }),
             Some(FakePanel::SpawnErr) => Err(SubagentSpawnError::PoolFull),
+            Some(FakePanel::SpawnErrAfterBarrier(barrier)) => {
+                barrier.wait().await;
+                Err(SubagentSpawnError::PoolFull)
+            }
             Some(FakePanel::FailedWithUsage { input, output }) => Ok(SubagentResult::Failed {
                 agent_id: AgentId::new(),
                 reason: "provider error after billed turns".into(),
@@ -6329,9 +6353,19 @@ async fn a_pool_full_spawn_error_aborts_the_still_running_sibling() {
     let mut config = test_config();
     config.min_successful_panels = 2;
     config.panel_total_timeout_ms = 5_000;
+    // The rejection must occur after the sibling's allocation receipt, not
+    // merely after both tasks were scheduled. Otherwise not_dispatched is the
+    // correct classification for a sibling still waiting for pool admission.
+    let allocated = Arc::new(tokio::sync::Barrier::new(2));
     let map = HashMap::from([
-        ("claude-sonnet-5".into(), FakePanel::SpawnErr),
-        ("gpt-5.6-terra".into(), FakePanel::Hang),
+        (
+            "claude-sonnet-5".into(),
+            FakePanel::SpawnErrAfterBarrier(allocated.clone()),
+        ),
+        (
+            "gpt-5.6-terra".into(),
+            FakePanel::HangAfterBarrier(allocated),
+        ),
     ]);
     let spawner = FakeSpawner::new(map);
     let wall_started = std::time::Instant::now();
@@ -6428,10 +6462,20 @@ async fn early_abort_seals_on_the_callers_effective_partial_ok_not_just_config()
         "the settings-level default must stay true so this scenario is only \
          reachable through the caller-supplied effective value"
     );
+    let allocated = Arc::new(tokio::sync::Barrier::new(3));
     let map = HashMap::from([
-        ("claude-sonnet-5".into(), FakePanel::Fail),
-        ("gpt-5.6-terra".into(), FakePanel::Hang),
-        ("deepseek-v4-pro".into(), FakePanel::Hang),
+        (
+            "claude-sonnet-5".into(),
+            FakePanel::FailAfterBarrier(allocated.clone()),
+        ),
+        (
+            "gpt-5.6-terra".into(),
+            FakePanel::HangAfterBarrier(allocated.clone()),
+        ),
+        (
+            "deepseek-v4-pro".into(),
+            FakePanel::HangAfterBarrier(allocated),
+        ),
     ]);
     let spawner = FakeSpawner::new(map);
     let wall_started = std::time::Instant::now();
@@ -6522,10 +6566,20 @@ async fn end_to_end_run_seals_on_request_level_no_partial_even_though_config_par
         "config.partial_ok must stay at its default true so the seal below \
          can only be coming from the request-level opt-out"
     );
+    let allocated = Arc::new(tokio::sync::Barrier::new(3));
     let map = HashMap::from([
-        ("claude-sonnet-5".into(), FakePanel::Fail),
-        ("gpt-5.6-terra".into(), FakePanel::Hang),
-        ("deepseek-v4-pro".into(), FakePanel::Hang),
+        (
+            "claude-sonnet-5".into(),
+            FakePanel::FailAfterBarrier(allocated.clone()),
+        ),
+        (
+            "gpt-5.6-terra".into(),
+            FakePanel::HangAfterBarrier(allocated.clone()),
+        ),
+        (
+            "deepseek-v4-pro".into(),
+            FakePanel::HangAfterBarrier(allocated),
+        ),
     ]);
     let spawner = FakeSpawner::new(map);
     let side = ScriptedAnalyst::new(AnalystMode::PickFirst, vec![]);

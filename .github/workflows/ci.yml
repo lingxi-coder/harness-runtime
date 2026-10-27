@@ -430,6 +430,44 @@ jobs:
               throw "Required native Windows test did not pass: $test"
             }
           }
+      - name: Test Windows task output directory security
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 45
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:RUNNER_TEMP 'windows-task-output-directory-tests.log'
+          cargo test --locked -p harness-runtime --no-default-features --features desktop --lib desktop::assembly::task_output_directory_tests 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $required = @(
+            'desktop::assembly::task_output_directory_tests::task_output_directory_is_private_on_first_creation_and_preserves_existing_acl',
+            'desktop::assembly::task_output_directory_tests::task_output_directory_does_not_rewrite_an_existing_public_acl'
+          )
+          foreach ($test in $required) {
+            $pattern = '^test ' + [regex]::Escape($test) + ' \.\.\. ok$'
+            if (-not (Select-String -Path $log -Quiet -Pattern $pattern)) {
+              throw "Required Windows task directory test did not pass: $test"
+            }
+          }
+          if (-not (Select-String -Path $log -Quiet -Pattern '^test result: ok\. 2 passed; 0 failed; 0 ignored;')) {
+            throw 'Windows task directory tests did not complete with two passing tests'
+          }
+          $pathLog = Join-Path $env:RUNNER_TEMP 'windows-task-output-path-tests.log'
+          cargo test --locked -p harness-runtime --no-default-features --features desktop --lib desktop::tests::task_output_ 2>&1 | Tee-Object -FilePath $pathLog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($test in @(
+            'desktop::tests::task_output_dir_defaults_to_the_platform_temp_root',
+            'desktop::tests::task_output_temp_root_preserves_explicit_override'
+          )) {
+            $pattern = '^test ' + [regex]::Escape($test) + ' \.\.\. ok$'
+            if (-not (Select-String -Path $pathLog -Quiet -Pattern $pattern)) {
+              throw "Required Windows task output path test did not pass: $test"
+            }
+          }
+          # The third case is the helper invoked in isolated subprocesses.
+          if (-not (Select-String -Path $pathLog -Quiet -Pattern '^test result: ok\. 3 passed; 0 failed; 0 ignored;')) {
+            throw 'Windows task output path tests did not complete with three passing cases'
+          }
 
   harness-ios:
     name: Harness iOS (${{ matrix.target }})

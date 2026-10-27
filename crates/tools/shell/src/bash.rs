@@ -8009,7 +8009,7 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_arming_waits_for_withdrawal_before_background_request_returns() {
-        use lingxi_core::host::task_registry::{TaskBackgroundReason, TaskBackgrounder};
+        use lingxi_core::host::task_registry::TaskBackgroundReason;
 
         for request_before_disarm in [false, true] {
             let gate = Arc::new(ForegroundRegistrationGate::default());
@@ -8393,9 +8393,7 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_background_request_reports_real_ack_outcome() {
-        use lingxi_core::host::task_registry::{
-            TaskBackgroundOutcome, TaskBackgroundReason, TaskBackgrounder,
-        };
+        use lingxi_core::host::task_registry::{TaskBackgroundOutcome, TaskBackgroundReason};
 
         struct ForegroundAckRunner {
             fail_ack: bool,
@@ -9516,6 +9514,12 @@ mod tests {
             ctx.session_cwd
                 .swap(std::path::PathBuf::from("/tmp"), ctx.trusted_dirs());
             ctx.sandbox_runner = runner.clone();
+            // This synchronous fixture never detaches a real child, and thus
+            // can safely satisfy the sandbox lifetime-guard contract.
+            ctx.process = Arc::new(CapturingRunner {
+                out: ok_output(),
+                last_args: Default::default(),
+            });
             let tool = BashTool::new(ctx);
             let mut call_ctx = use_ctx();
             call_ctx.cwd = agent_cwd.clone();
@@ -9532,6 +9536,7 @@ mod tests {
                 "agent_cwd={agent_cwd:?}"
             );
             assert!(!calls[0].allow_write.iter().any(|p| p == "."));
+            assert_eq!(runner.cleanups.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
     }
 
@@ -9546,7 +9551,11 @@ mod tests {
         ctx.sandbox_runtime.excluded_commands = vec![];
         ctx.session_cwd
             .swap(std::path::PathBuf::from("/tmp"), ctx.trusted_dirs());
-        ctx.sandbox_runner = runner;
+        ctx.sandbox_runner = runner.clone();
+        ctx.process = Arc::new(CapturingRunner {
+            out: ok_output(),
+            last_args: Default::default(),
+        });
         let tool = BashTool::new(ctx);
         let res = tool
             .call(source_json!({"command": "echo hi"}), use_ctx(), fresh_tx())
@@ -9560,6 +9569,60 @@ mod tests {
         assert!(model_text(&res.model_content)
             .unwrap()
             .contains("<sandbox_violations>"));
+        assert_eq!(runner.cleanups.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn sandbox_refuses_unretained_resources_before_foreground_run() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct NoGuardRunner(Arc<AtomicUsize>);
+        #[async_trait]
+        impl ProcessRunner for NoGuardRunner {
+            fn supports_foreground_backgrounding(&self) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(ok_output())
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err(ProcessError::Unsupported)
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let sandbox = Arc::new(RecordingSandboxRunner::default());
+        let registry = Arc::new(RecordingRegistry::default());
+        let mut ctx = shell_test_ctx(ok_output());
+        ctx.sandbox_available = true;
+        ctx.sandbox_runtime.excluded_commands = vec![];
+        ctx.sandbox_runner = sandbox.clone();
+        ctx.task_registry = Some(registry.clone());
+        ctx.process = Arc::new(NoGuardRunner(calls.clone()));
+        let error = BashTool::new(ctx)
+            .call(source_json!({"command": "echo hi"}), use_ctx(), fresh_tx())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ToolError::InvalidInput(reason)
+                if reason.string_at("") == Some("This runner cannot retain sandbox resources for a background process")
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(sandbox.cleanups.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.discarded.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

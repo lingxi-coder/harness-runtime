@@ -6376,14 +6376,20 @@ fn lingxi_temp_dir_name() -> String {
 }
 
 /// Base Claude temp dir for the task spool — port of `getClaudeTempDir`
-/// (`permissions/filesystem.ts:331-346`): `$LINGXI_TMPDIR || /tmp`, joined
-/// with [`lingxi_temp_dir_name`]. (claude resolves symlinks; the spool path only
-/// needs to be writable + session-unique, so the realpath step is omitted.)
+/// (`permissions/filesystem.ts:331-346`): `$LINGXI_TMPDIR`, or the system
+/// temp directory on Windows and `/tmp` elsewhere, joined with
+/// [`lingxi_temp_dir_name`]. The spool path retains the configured spelling.
 /// Distinct from the sandbox-seed [`lingxi_temp_dir`] (which returns the
 /// realpath-resolved, trailing-separator String form).
 fn lingxi_temp_dir_path() -> std::path::PathBuf {
     let base = std::env::var_os("LINGXI_TMPDIR").map_or_else(
-        || std::path::PathBuf::from("/tmp"),
+        || {
+            if cfg!(windows) {
+                std::env::temp_dir()
+            } else {
+                std::path::PathBuf::from("/tmp")
+            }
+        },
         std::path::PathBuf::from,
     );
     base.join(lingxi_temp_dir_name())

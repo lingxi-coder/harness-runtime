@@ -117,12 +117,21 @@ impl OwnedProcess {
     /// Each attempt has bounded waits; successful return is cleanup proof, not
     /// proof that this particular signal caused an exit.
     pub async fn terminate_and_reap(&mut self) -> Result<ExitStatus, ProcessError> {
+        self.terminate_and_reap_after_signal(std::future::ready(()))
+            .await
+    }
+
+    async fn terminate_and_reap_after_signal(
+        &mut self,
+        after_signal: impl std::future::Future<Output = ()>,
+    ) -> Result<ExitStatus, ProcessError> {
         let signal = match &self.job {
             Some(job) => job.terminate(),
             // Assignment failed while the sole initial thread was suspended;
             // therefore no payload code or descendants have run.
             None => self.child.start_kill().map_err(io_error),
         };
+        after_signal.await;
         let waited = tokio::time::timeout(CLEANUP_WAIT, self.child.wait())
             .await
             .map_err(|_| ProcessError::Io("owned child wait timed out".into()))
@@ -618,13 +627,17 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
+        // Retain this exact process object before termination; a PID can be
+        // reused after its last handle is closed.
+        let descendant = super::super::supervisor_native::hold_process_handle_for_test(pid)
+            .expect("open descendant process");
         assert_eq!(
-            super::super::supervisor_native::process_is_alive(pid),
+            super::super::supervisor_native::process_handle_is_alive_for_test(&descendant),
             Some(true)
         );
         owner.terminate_and_reap().await.unwrap();
         assert_eq!(
-            super::super::supervisor_native::process_is_alive(pid),
+            super::super::supervisor_native::process_handle_is_alive_for_test(&descendant),
             Some(false)
         );
     }
@@ -636,16 +649,20 @@ mod tests {
         wait_for_file(&dir.path().join("ready")).await;
         gate.cancel();
         assert!(gate.is_cancelled());
-        let held = super::super::supervisor_native::hold_process_handle_for_test(
-            owner.child.id().unwrap(),
-        )
-        .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), owner.terminate_and_reap())
-                .await
-                .is_err()
-        );
-        drop(held);
+        // Pause precisely after the termination request, rather than relying
+        // on an external process handle to keep Job accounting nonzero.
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let mut cleanup = Box::pin(owner.terminate_and_reap_after_signal(async move {
+            reached_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        }));
+        tokio::select! {
+            result = &mut cleanup => panic!("cleanup completed before cancellation: {result:?}"),
+            reached = tokio::time::timeout(Duration::from_secs(5), reached_rx) => {
+                reached.expect("cleanup did not reach the cancellation barrier").unwrap();
+            }
+        }
+        drop(cleanup);
         tokio::time::timeout(Duration::from_secs(15), owner.terminate_and_reap())
             .await
             .unwrap()
@@ -696,10 +713,15 @@ mod tests {
             assert!(error.spawn_group_empty_verified);
             return;
         }
-        if case == "stdio" {
+        if case == "stdio" || case == "stdio_leak_control" {
             supervisor_gate::make_standard_handles_inheritable_for_test().unwrap();
         }
         initialize_helper_job().unwrap();
+        if case == "stdio_leak_control" {
+            // Positive control: undo protection before spawning this fixture so
+            // the parent can prove its pipe probe detects a real leaked reader.
+            supervisor_gate::make_standard_handles_inheritable_for_test().unwrap();
+        }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -715,7 +737,7 @@ mod tests {
                 "descendant" => leader_exit_does_not_release_descendants().await,
                 "retry" => cancelled_cleanup_can_be_retried().await,
                 "crash" => helper_crash_fixture().await,
-                "stdio" => standard_handle_isolation_fixture().await,
+                "stdio" | "stdio_leak_control" => standard_handle_isolation_fixture().await,
                 _ => panic!("unknown owned job helper case"),
             }
         });
@@ -795,60 +817,72 @@ mod tests {
 
     #[tokio::test]
     async fn payload_does_not_inherit_helper_standard_control_handles() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut helper = Command::new(std::env::current_exe().unwrap())
-            .args([HELPER_TEST, "--exact", "--nocapture"])
-            .env("OWNED_JOB_HELPER_CASE", "stdio")
-            .env("OWNED_JOB_TEST_DIR", dir.path())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let mut input = helper.stdin.take().unwrap();
-        let mut stdout = helper.stdout.take().unwrap();
-        let mut stderr = helper.stderr.take().unwrap();
-        wait_for_file(&dir.path().join("helper.ready")).await;
-        let pid: u32 = std::fs::read_to_string(dir.path().join("owned.pid"))
-            .unwrap()
-            .parse()
-            .unwrap();
-        let held = super::super::supervisor_native::hold_process_handle_for_test(pid).unwrap();
-        assert_eq!(
-            super::super::supervisor_native::process_is_alive(pid),
-            Some(true)
-        );
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let (out_result, err_result) = tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))
-        })
-        .await
-        .expect("payload inherited a helper output control handle");
-        out_result.unwrap();
-        err_result.unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_secs(5), input.write_all(b"x"))
-                .await
-                .expect("helper input write hung")
-                .is_err(),
-            "payload inherited helper input"
-        );
-        assert!(helper.try_wait().unwrap().is_none());
-        assert_eq!(
-            super::super::supervisor_native::process_is_alive(pid),
-            Some(true)
-        );
-        helper.kill().await.unwrap();
-        helper.wait().await.unwrap();
-        tokio::time::timeout(Duration::from_secs(15), async {
-            while super::super::supervisor_native::process_is_alive(pid) != Some(false) {
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        for (case, expect_leaked_input) in [("stdio", false), ("stdio_leak_control", true)] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut helper = Command::new(std::env::current_exe().unwrap())
+                .args([HELPER_TEST, "--exact", "--nocapture"])
+                .env("OWNED_JOB_HELPER_CASE", case)
+                .env("OWNED_JOB_TEST_DIR", dir.path())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let mut input = helper.stdin.take().unwrap();
+            let mut stdout = helper.stdout.take().unwrap();
+            let mut stderr = helper.stderr.take().unwrap();
+            wait_for_file(&dir.path().join("helper.ready")).await;
+            let pid: u32 = std::fs::read_to_string(dir.path().join("owned.pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let held = super::super::supervisor_native::hold_process_handle_for_test(pid).unwrap();
+            assert_eq!(
+                super::super::supervisor_native::process_handle_is_alive_for_test(&held),
+                Some(true)
+            );
+            if !expect_leaked_input {
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+                let (out_result, err_result) =
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                        tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err))
+                    })
+                    .await
+                    .expect("payload inherited a helper output control handle");
+                out_result.unwrap();
+                err_result.unwrap();
             }
-        })
-        .await
-        .expect("payload survived isolated helper termination");
-        drop(held);
+            // On Windows Tokio buffers ChildStdin writes on a blocking worker:
+            // write_all can succeed before WriteFile observes a broken pipe.
+            let write_result = tokio::time::timeout(Duration::from_secs(5), async {
+                input.write_all(b"x").await?;
+                input.flush().await
+            })
+            .await
+            .expect("helper input write or flush hung");
+            assert_eq!(
+                write_result.is_ok(),
+                expect_leaked_input,
+                "unexpected helper input inheritance for {case}: {write_result:?}"
+            );
+            assert!(helper.try_wait().unwrap().is_none());
+            assert_eq!(
+                super::super::supervisor_native::process_handle_is_alive_for_test(&held),
+                Some(true)
+            );
+            helper.kill().await.unwrap();
+            helper.wait().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                while super::super::supervisor_native::process_handle_is_alive_for_test(&held)
+                    != Some(false)
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("payload survived isolated helper termination");
+        }
     }
 }

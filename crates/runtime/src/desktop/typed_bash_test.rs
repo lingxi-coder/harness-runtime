@@ -308,7 +308,9 @@ async fn preaccept_disconnect(directory: &std::path::Path) {
     })
     .await
     .unwrap();
-    let nonce = lingxi_core::types::ToolUseId::new().to_string();
+    // The supervisor protocol requires a 48-character capability. Tool-use
+    // IDs have a different format and are rejected before the child starts.
+    let nonce = "a".repeat(48);
     let cmd = command("printf ran > preaccept-payload.started", directory);
     let request = serde_json::json!({
         "request": "Start", "command": cmd.inner(), "tag": cmd.tag(),

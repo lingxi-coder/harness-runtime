@@ -187,10 +187,10 @@ fn trimmed(stdout: &[u8]) -> String {
 
 /// A private copy of a checkout's index, so `git add -A` can stage the whole
 /// working tree without touching the index the user (or panel) sees. Seeded
-/// from the real index only to reuse its stat cache; an empty start gives the
-/// same tree. Removed on drop.
+/// from the real index, or HEAD if the real index is absent. Removed on drop.
 struct TempIndex {
     path: PathBuf,
+    directory: PathBuf,
 }
 
 impl TempIndex {
@@ -198,13 +198,108 @@ impl TempIndex {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let source =
             trimmed(&git_stdout(checkout, &["rev-parse", "--git-path", "index"], None).await?);
-        let path = std::env::temp_dir().join(format!(
-            "worktree-index-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = tokio::fs::copy(checkout.join(source), &path).await;
-        Ok(Self { path })
+        // Reserve an isolated directory before creating any index or lock,
+        // so stale files or another process cannot be overwritten or deleted.
+        let directory = loop {
+            let candidate = std::env::temp_dir().join(format!(
+                "worktree-index-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            #[cfg(unix)]
+            let builder = {
+                let mut builder = tokio::fs::DirBuilder::new();
+                builder.mode(0o700);
+                builder
+            };
+            #[cfg(not(unix))]
+            let builder = tokio::fs::DirBuilder::new();
+            match builder.create(&candidate).await {
+                Ok(()) => break candidate,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(WorktreeError::Io(e.to_string())),
+            }
+        };
+        let index = Self {
+            path: directory.join("index"),
+            directory,
+        };
+        let source = checkout.join(source);
+        match tokio::fs::File::open(&source).await {
+            Ok(mut source_file) => {
+                // Git uses the index mtime to decide whether a stat-cache hit
+                // is racily clean and must be checked against the file's
+                // contents. A normal copy gets a newer mtime and can make a
+                // same-size edit appear clean, silently omitting it. Read the
+                // metadata and bytes through the same handle so an atomic
+                // replacement of the source cannot mix two index versions.
+                let metadata = source_file
+                    .metadata()
+                    .await
+                    .map_err(|e| WorktreeError::Io(e.to_string()))?;
+                let modified = metadata
+                    .modified()
+                    .map_err(|e| WorktreeError::Io(e.to_string()))?;
+                let mut file = tokio::fs::File::create(&index.path)
+                    .await
+                    .map_err(|e| WorktreeError::Io(e.to_string()))?;
+                tokio::io::copy(&mut source_file, &mut file)
+                    .await
+                    .map_err(|e| WorktreeError::Io(e.to_string()))?;
+                let after = source_file
+                    .metadata()
+                    .await
+                    .map_err(|e| WorktreeError::Io(e.to_string()))?;
+                let changed = metadata.len() != after.len()
+                    || modified
+                        != after
+                            .modified()
+                            .map_err(|e| WorktreeError::Io(e.to_string()))?;
+                #[cfg(unix)]
+                let changed = {
+                    use std::os::unix::fs::MetadataExt;
+                    changed
+                        || metadata.ctime() != after.ctime()
+                        || metadata.ctime_nsec() != after.ctime_nsec()
+                };
+                if changed {
+                    return Err(WorktreeError::Io(
+                        "Git index changed while copying; retry the operation".into(),
+                    ));
+                }
+                file.set_times(tokio::fs::FileTimes::new().set_modified(modified))
+                    .await
+                    .map_err(|e| WorktreeError::Io(e.to_string()))?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // An existing checkout can lose its index as well as an
+                // unborn repository having none. Seed tracked files from
+                // HEAD so tracked-but-ignored files are not dropped by add.
+                let head = git_in(
+                    checkout,
+                    &["rev-parse", "--verify", "--quiet", "HEAD"],
+                    None,
+                )
+                .await?;
+                let tree = if head.status.success() {
+                    "HEAD"
+                } else {
+                    // A malformed or detached HEAD is not an unborn branch.
+                    // Do not turn a broken repository into an empty snapshot.
+                    let symbolic = git_in(checkout, &["symbolic-ref", "-q", "HEAD"], None).await?;
+                    if !symbolic.status.success() {
+                        return Err(WorktreeError::Git(format!(
+                            "Cannot initialize a missing index from HEAD: {}",
+                            String::from_utf8_lossy(&symbolic.stderr).trim()
+                        )));
+                    }
+                    "--empty"
+                };
+                git_stdout(checkout, &["read-tree", tree], Some(&index.path)).await?;
+            }
+            Err(e) => return Err(WorktreeError::Io(e.to_string())),
+        }
+        Ok(index)
     }
 
     /// Stage everything in `checkout` except the managed worktrees.
@@ -226,6 +321,7 @@ impl Drop for TempIndex {
         let mut lock = self.path.clone().into_os_string();
         lock.push(".lock");
         let _ = std::fs::remove_file(lock);
+        let _ = std::fs::remove_dir(&self.directory);
     }
 }
 
@@ -1598,6 +1694,110 @@ mod snapshot_tests {
             std::fs::read(fresh.path.join("bin.dat")).unwrap(),
             [0u8, 159, 146, 150]
         );
+    }
+
+    #[tokio::test]
+    async fn patch_keeps_same_size_edits_when_the_source_index_is_racy() {
+        let (_tmp, dir) = repo().await;
+        let manager = PosixWorktreeManager::new(dir.clone());
+        let base = manager.snapshot_base(LIMITS).await.unwrap();
+        let wt = manager
+            .create_worktree("fusion-racy-patch", Some(&base.commit), &[])
+            .await
+            .unwrap();
+        // This Git configuration is supported on filesystems with coarser
+        // timestamp resolution. It gives the source index a racily-clean
+        // entry without relying on a sleep or scheduler timing.
+        git(&wt.path, &["config", "core.checkStat", "minimal"]).await;
+        git(&wt.path, &["config", "core.trustctime", "false"]).await;
+        let then = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    - 3,
+            );
+        let set_modified = |path: &Path| {
+            std::fs::File::open(path)
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(then))
+                .unwrap();
+        };
+        let file = wt.path.join("keep.txt");
+        set_modified(&file);
+        git(&wt.path, &["add", "keep.txt"]).await;
+        let index_path = wt.path.join(
+            git(&wt.path, &["rev-parse", "--git-path", "index"])
+                .await
+                .trim(),
+        );
+        std::fs::write(&file, "one\nTWO\n").unwrap();
+        set_modified(&file);
+        set_modified(&index_path);
+        let original_index = std::fs::read(&index_path).unwrap();
+
+        let patch = manager.worktree_patch(&wt, &base.commit).await.unwrap();
+
+        assert!(patch.diff.contains("-two\n"), "{}", patch.diff);
+        assert!(patch.diff.contains("+TWO\n"), "{}", patch.diff);
+        assert_eq!(patch.files.len(), 1);
+        assert_eq!(patch.files[0].path, "keep.txt");
+        assert_eq!(std::fs::read(index_path).unwrap(), original_index);
+    }
+
+    #[tokio::test]
+    async fn missing_index_seeds_tracked_ignored_files_from_head() {
+        let (_tmp, dir) = repo().await;
+        std::fs::write(dir.join("tracked.log"), "tracked despite ignore\n").unwrap();
+        git(&dir, &["add", "-f", "tracked.log"]).await;
+        git(&dir, &["commit", "-qm", "track ignored file"]).await;
+        let source_index = dir.join(".git/index");
+        std::fs::remove_file(&source_index).unwrap();
+
+        let index = TempIndex::seeded_from(&dir).await.unwrap();
+        index.add_all(&dir).await.unwrap();
+        let diff = git_stdout(
+            &dir,
+            &["diff", "--cached", "--name-only", "HEAD"],
+            Some(&index.path),
+        )
+        .await
+        .unwrap();
+        assert!(diff.is_empty(), "{}", String::from_utf8_lossy(&diff));
+        assert!(!source_index.exists(), "the user's index stays absent");
+        let private_dir = index.directory.clone();
+        drop(index);
+        assert!(!private_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn missing_index_in_an_unborn_repository_starts_empty() {
+        let tmp = TempDir::new().unwrap();
+        let dir = std::fs::canonicalize(tmp.path()).unwrap();
+        git(&dir, &["init", "-q", "-b", "main"]).await;
+        std::fs::write(dir.join("new.txt"), "new\n").unwrap();
+
+        let index = TempIndex::seeded_from(&dir).await.unwrap();
+        index.add_all(&dir).await.unwrap();
+        let files = git_stdout(&dir, &["ls-files", "--cached"], Some(&index.path))
+            .await
+            .unwrap();
+        assert_eq!(files, b"new.txt\n");
+        assert!(!dir.join(".git/index").exists());
+    }
+
+    #[tokio::test]
+    async fn missing_index_does_not_hide_a_corrupt_head() {
+        let (_tmp, dir) = repo().await;
+        std::fs::remove_file(dir.join(".git/index")).unwrap();
+        std::fs::write(dir.join(".git/refs/heads/main"), "invalid-ref\n").unwrap();
+
+        assert!(matches!(
+            TempIndex::seeded_from(&dir).await,
+            Err(WorktreeError::Git(_))
+        ));
+        assert!(!dir.join(".git/index").exists());
     }
 
     #[tokio::test]

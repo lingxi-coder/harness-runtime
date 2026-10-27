@@ -233,6 +233,11 @@ fn io_error(error: std::io::Error) -> ProcessError {
     ProcessError::Io(error.to_string())
 }
 
+#[cfg(all(test, windows))]
+tokio::task_local! {
+    static TEST_JOB_VERIFICATION_BLOCKED: std::sync::Arc<std::sync::atomic::AtomicBool>;
+}
+
 #[derive(Default)]
 struct DrainDeadline {
     at: Option<tokio::time::Instant>,
@@ -244,11 +249,23 @@ struct DrainDeadline {
     verify_supervised_stop: bool,
     #[cfg(windows)]
     job: Option<super::supervisor_gate::CommandJob>,
+    #[cfg(all(test, windows))]
+    test_job_verification_blocked: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 async fn verify_stopped_job(deadline: &DrainDeadline) -> Result<(), ProcessError> {
     if !deadline.strict_host && !deadline.verify_lease {
         return Ok(());
+    }
+    #[cfg(all(test, windows))]
+    if deadline
+        .test_job_verification_blocked
+        .as_ref()
+        .is_some_and(|blocked| blocked.load(std::sync::atomic::Ordering::SeqCst))
+    {
+        return Err(ProcessError::Io(
+            "injected payload job verification failure".into(),
+        ));
     }
     #[cfg(windows)]
     {
@@ -864,6 +881,10 @@ pub(super) async fn run(
             .background_task()
             .and_then(|binding| binding.on_exit.as_ref())
             .is_some_and(|sink| sink.requires_verified_supervised_stop()),
+        #[cfg(all(test, windows))]
+        test_job_verification_blocked: TEST_JOB_VERIFICATION_BLOCKED
+            .try_with(std::sync::Arc::clone)
+            .ok(),
         ..DrainDeadline::default()
     };
     // A strict foreground error must not drop the only owner of an unverified
@@ -1123,7 +1144,7 @@ pub(super) async fn run(
         };
         if let Some(status) = exited_status {
             guard.0 = None;
-            if let Ok(result) = tokio::time::timeout(
+            if let Ok(Err(error)) = tokio::time::timeout(
                 std::time::Duration::from_millis(50),
                 drain(
                     &mut child,
@@ -1137,9 +1158,7 @@ pub(super) async fn run(
             )
             .await
             {
-                if let Err(error) = result {
-                    fail_foreground!(error);
-                }
+                fail_foreground!(error);
             }
             if deadline.strict_host && deadline.terminated {
                 if let Err(error) = terminate_and_reap(&deadline, &mut child, &mut guard).await {
@@ -1470,6 +1489,18 @@ mod native_background_stop_tests {
     use std::sync::{Arc, Mutex};
     use tokio::sync::Notify;
 
+    const REDIRECTED_FIXTURE: &str =
+        "process::background::native_background_stop_tests::redirected_descendant_fixture";
+    type ExitProof = (Option<i32>, Option<bool>, bool);
+
+    struct ReleaseOnDrop(std::path::PathBuf);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::write(self.0.join("release"), "release");
+            let _ = std::fs::write(self.0.join("leader.release"), "release");
+        }
+    }
+
     #[derive(Default)]
     struct Sink {
         stop: Arc<Notify>,
@@ -1488,7 +1519,7 @@ mod native_background_stop_tests {
         output: Mutex<String>,
         exits: Mutex<Vec<Option<i32>>>,
         known: Mutex<Vec<(Option<i32>, bool)>>,
-        proofs: Mutex<Vec<(Option<i32>, Option<bool>, bool)>>,
+        proofs: Mutex<Vec<ExitProof>>,
         failures: Mutex<Vec<String>>,
     }
 
@@ -1656,6 +1687,95 @@ mod native_background_stop_tests {
         })
     }
 
+    fn redirected_descendant_command(
+        dir: &std::path::Path,
+        sink: Arc<Sink>,
+        strict: bool,
+    ) -> SandboxedCommand {
+        SandboxedCommand::__new_sandboxed(
+            ProcessCommand {
+                command: std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                args: vec![
+                    REDIRECTED_FIXTURE.into(),
+                    "--exact".into(),
+                    "--nocapture".into(),
+                ],
+                cwd: Some(dir.to_path_buf()),
+                env: std::collections::HashMap::from([
+                    ("BACKGROUND_REDIRECTED_FIXTURE_ROLE".into(), "leader".into()),
+                    (
+                        "BACKGROUND_REDIRECTED_FIXTURE_DIR".into(),
+                        dir.to_string_lossy().into_owned(),
+                    ),
+                ]),
+                stdin: None,
+                timeout: Some(std::time::Duration::from_secs(60)),
+            },
+            SandboxedTag::BypassAuditedWithReason {
+                reason: "isolated redirected descendant fixture".into(),
+            },
+        )
+        .with_process_owner(strict.then(|| format!("host-tool:test-{}", dir.display())))
+        .with_require_group_cleanup_on_exit(strict)
+        .with_background_task(BackgroundTaskBinding {
+            task_id: "native-background-stop".into(),
+            output_path: dir.join("output"),
+            on_exit: Some(sink),
+            on_demand: None,
+        })
+        .with_auto_background_on_timeout(false)
+    }
+
+    // This fixture deliberately leaves its child running after the leader
+    // exits; the parent test holds and verifies the child's process handle.
+    #[allow(clippy::zombie_processes)]
+    #[test]
+    fn redirected_descendant_fixture() {
+        let Some(role) = std::env::var_os("BACKGROUND_REDIRECTED_FIXTURE_ROLE") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("BACKGROUND_REDIRECTED_FIXTURE_DIR").unwrap(),
+        );
+        if role == "child" {
+            std::fs::write(dir.join("descendant.ready"), "ready").unwrap();
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while !dir.join("release").exists() && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(dir.join("release").exists(), "child was not released");
+            std::fs::write(dir.join("descendant.completed"), "done").unwrap();
+            return;
+        }
+        assert_eq!(role, "leader");
+        // Redirecting the child's standard streams is insufficient on Windows:
+        // an inheritable handle can survive as a non-standard handle. Clear the
+        // leader's inherited pipe handles before spawning its redirected child.
+        super::super::supervisor_gate::protect_standard_handles().unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([REDIRECTED_FIXTURE, "--exact", "--nocapture"])
+            .env("BACKGROUND_REDIRECTED_FIXTURE_ROLE", "child")
+            .env("BACKGROUND_REDIRECTED_FIXTURE_DIR", &dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        std::fs::write(dir.join("descendant.pid"), child.id().to_string()).unwrap();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !dir.join("descendant.ready").exists() {
+            assert!(std::time::Instant::now() < until, "child did not start");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        while !dir.join("leader.release").exists() {
+            assert!(std::time::Instant::now() < until, "leader was not released");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     async fn descendant_pid(dir: &std::path::Path) -> u32 {
         tokio::time::timeout(std::time::Duration::from_secs(20), async {
             loop {
@@ -1682,6 +1802,20 @@ mod native_background_stop_tests {
         })
         .await
         .expect("process survived the payload job stop");
+    }
+
+    async fn held_exited(handle: &std::os::windows::io::OwnedHandle) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                match super::super::supervisor_native::process_handle_is_alive_for_test(handle) {
+                    Some(false) => break,
+                    Some(true) => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+                    None => panic!("could not query held process handle"),
+                }
+            }
+        })
+        .await
+        .expect("held process survived the payload job stop");
     }
 
     #[tokio::test]
@@ -1825,41 +1959,26 @@ mod native_background_stop_tests {
 
     #[tokio::test]
     async fn supervised_leader_and_group_proofs_follow_actual_job_cleanup() {
-        struct ReleaseOnDrop(std::path::PathBuf);
-        impl Drop for ReleaseOnDrop {
-            fn drop(&mut self) {
-                let _ = std::fs::write(&self.0, "release");
-            }
-        }
-        let script = r#"
-            $childScript = 'Set-Content -LiteralPath $env:BACKGROUND_FIXTURE_READY -Value yes; for ($i=0; $i -lt 600 -and !(Test-Path -LiteralPath $env:BACKGROUND_FIXTURE_RELEASE); $i++) { Start-Sleep -Milliseconds 100 }'
-            $child = Start-Process -FilePath powershell.exe -NoNewWindow -PassThru `
-                -RedirectStandardOutput $env:BACKGROUND_FIXTURE_CHILD_OUT `
-                -RedirectStandardError $env:BACKGROUND_FIXTURE_CHILD_ERR `
-                -ArgumentList '-NoProfile','-NonInteractive','-Command',$childScript
-            [System.IO.File]::WriteAllText($env:BACKGROUND_FIXTURE_PID_FILE, [string]$child.Id)
-            while (!(Test-Path -LiteralPath $env:BACKGROUND_FIXTURE_READY)) { Start-Sleep -Milliseconds 10 }
-            [Console]::Out.Write('payload')
-            exit 0
-        "#;
         for strict in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let _release = ReleaseOnDrop(dir.path().join("release"));
+            let _release = ReleaseOnDrop(dir.path().to_path_buf());
             let sink = Arc::new(Sink::default());
-            let command = command_with_script(
-                dir.path(),
-                sink.clone(),
-                std::time::Duration::from_secs(60),
-                script,
-            )
-            .with_process_owner(None)
-            .with_require_group_cleanup_on_exit(strict);
+            let command = redirected_descendant_command(dir.path(), sink.clone(), strict)
+                .with_process_owner(None);
             let ForegroundOutcome::MovedToBackground(handle) =
                 run(&command, None, true).await.unwrap().outcome
             else {
                 panic!("explicit background command was not handed off");
             };
             let descendant = descendant_pid(dir.path()).await;
+            let held_descendant =
+                super::super::supervisor_native::hold_process_handle_for_test(descendant)
+                    .expect("open descendant process handle");
+            assert_eq!(
+                super::super::supervisor_native::process_handle_is_alive_for_test(&held_descendant),
+                Some(true)
+            );
+            std::fs::write(dir.path().join("leader.release"), "release").unwrap();
             tokio::time::timeout(std::time::Duration::from_secs(30), sink.terminal.notified())
                 .await
                 .expect("leader completion was not reported");
@@ -1870,16 +1989,31 @@ mod native_background_stop_tests {
             assert!(sink.failures.lock().unwrap().is_empty());
             if !strict {
                 assert_eq!(
-                    super::super::supervisor_native::process_is_alive(descendant),
+                    super::super::supervisor_native::process_handle_is_alive_for_test(
+                        &held_descendant
+                    ),
                     Some(true)
                 );
                 std::fs::write(dir.path().join("release"), "release").unwrap();
+            } else {
+                assert_eq!(
+                    super::super::supervisor_native::process_handle_is_alive_for_test(
+                        &held_descendant
+                    ),
+                    Some(false)
+                );
+                assert!(!dir.path().join("descendant.completed").exists());
             }
             exited(handle.pid).await;
-            exited(descendant).await;
+            held_exited(&held_descendant).await;
+            if !strict {
+                assert!(dir.path().join("descendant.completed").exists());
+            }
         }
     }
 
+    // The leader must exit before the inherited-pipe child is stopped.
+    #[allow(clippy::zombie_processes)]
     #[test]
     fn inherited_pipe_fixture() {
         const TEST: &str =
@@ -1952,6 +2086,9 @@ mod native_background_stop_tests {
             panic!("explicit background command was not handed off");
         };
         let descendant = descendant_pid(dir.path()).await;
+        let held_descendant =
+            super::super::supervisor_native::hold_process_handle_for_test(descendant)
+                .expect("open descendant process handle");
         tokio::time::timeout(std::time::Duration::from_secs(20), async {
             while super::super::supervisor_native::process_is_alive(handle.pid) != Some(false) {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1960,7 +2097,7 @@ mod native_background_stop_tests {
         .await
         .expect("leader did not exit before stop");
         assert_eq!(
-            super::super::supervisor_native::process_is_alive(descendant),
+            super::super::supervisor_native::process_handle_is_alive_for_test(&held_descendant),
             Some(true)
         );
         assert!(sink.proofs.lock().unwrap().is_empty());
@@ -1970,7 +2107,11 @@ mod native_background_stop_tests {
             .expect("stop after leader exit must verify its Job");
         assert_eq!(*sink.proofs.lock().unwrap(), [(Some(0), None, true)]);
         assert!(sink.failures.lock().unwrap().is_empty());
-        exited(descendant).await;
+        assert_eq!(
+            super::super::supervisor_native::process_handle_is_alive_for_test(&held_descendant),
+            Some(false)
+        );
+        held_exited(&held_descendant).await;
     }
 
     #[tokio::test]
@@ -1992,10 +2133,11 @@ mod native_background_stop_tests {
         exited(handle.pid).await;
         exited(descendant).await;
         assert!(sink.exits.lock().unwrap().is_empty());
-        let failures = sink.failures.lock().unwrap();
-        assert_eq!(failures.len(), 1);
-        assert!(failures[0].contains("injected output flush failure"));
-        drop(failures);
+        {
+            let failures = sink.failures.lock().unwrap();
+            assert_eq!(failures.len(), 1);
+            assert!(failures[0].contains("injected output flush failure"));
+        }
         tokio::time::timeout(
             std::time::Duration::from_secs(15),
             sink.cleanup_notified.notified(),
@@ -2007,27 +2149,44 @@ mod native_background_stop_tests {
 
     #[tokio::test]
     async fn unverified_background_cleanup_retries_before_signalling_verified() {
+        struct Lease(Arc<AtomicBool>);
+        impl Drop for Lease {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
         let dir = tempfile::tempdir().unwrap();
         let sink = Arc::new(Sink::default());
-        let command = command(dir.path(), sink.clone());
-        let ForegroundOutcome::MovedToBackground(handle) =
-            run(&command, None, true).await.unwrap().outcome
+        let released = Arc::new(AtomicBool::new(false));
+        let command =
+            command(dir.path(), sink.clone()).with_lifetime_guard(Lease(released.clone()));
+        let verification_blocked = Arc::new(AtomicBool::new(true));
+        let ForegroundOutcome::MovedToBackground(handle) = TEST_JOB_VERIFICATION_BLOCKED
+            .scope(verification_blocked.clone(), run(&command, None, true))
+            .await
+            .unwrap()
+            .outcome
         else {
             panic!("explicit background command was not handed off");
         };
+        drop(command);
         let descendant = descendant_pid(dir.path()).await;
-        // A live external process handle prevents Job accounting from reaching
-        // zero even after termination. Keep it past the first bounded wait.
-        let held = super::super::supervisor_native::hold_process_handle_for_test(handle.pid)
-            .expect("open supervisor process handle");
+        let held_descendant =
+            super::super::supervisor_native::hold_process_handle_for_test(descendant)
+                .expect("open descendant process handle");
         sink.stop.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(20), sink.terminal.notified())
             .await
             .expect("initial unverified cleanup failure was not reported");
         assert!(sink.exits.lock().unwrap().is_empty());
         assert_eq!(sink.failures.lock().unwrap().len(), 1);
+        assert!(
+            sink.failures.lock().unwrap()[0].contains("injected payload job verification failure")
+        );
         assert_eq!(sink.cleanups.load(Ordering::SeqCst), 0);
-        drop(held);
+        assert!(!released.load(Ordering::SeqCst));
+        verification_blocked.store(false, Ordering::SeqCst);
         tokio::time::timeout(
             std::time::Duration::from_secs(20),
             sink.cleanup_notified.notified(),
@@ -2035,7 +2194,13 @@ mod native_background_stop_tests {
         .await
         .expect("retry never reported verified cleanup");
         assert_eq!(sink.cleanups.load(Ordering::SeqCst), 1);
-        exited(descendant).await;
+        assert!(released.load(Ordering::SeqCst));
+        assert_eq!(
+            super::super::supervisor_native::process_handle_is_alive_for_test(&held_descendant),
+            Some(false)
+        );
+        exited(handle.pid).await;
+        held_exited(&held_descendant).await;
     }
 
     #[tokio::test]
@@ -2049,6 +2214,19 @@ mod native_background_stop_tests {
             panic!("explicit background command was not handed off");
         };
         let descendant = descendant_pid(dir.path()).await;
+        let held_leader = super::super::supervisor_native::hold_process_handle_for_test(handle.pid)
+            .expect("open leader process handle");
+        let held_descendant =
+            super::super::supervisor_native::hold_process_handle_for_test(descendant)
+                .expect("open descendant process handle");
+        assert_eq!(
+            super::super::supervisor_native::process_handle_is_alive_for_test(&held_leader),
+            Some(true)
+        );
+        assert_eq!(
+            super::super::supervisor_native::process_handle_is_alive_for_test(&held_descendant),
+            Some(true)
+        );
         sink.stop.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(15), sink.terminal.notified())
             .await
@@ -2056,11 +2234,11 @@ mod native_background_stop_tests {
         assert_eq!(sink.exits.lock().unwrap().len(), 1);
         assert!(sink.failures.lock().unwrap().is_empty());
         assert_eq!(
-            super::super::supervisor_native::process_is_alive(handle.pid),
+            super::super::supervisor_native::process_handle_is_alive_for_test(&held_leader),
             Some(false)
         );
         assert_eq!(
-            super::super::supervisor_native::process_is_alive(descendant),
+            super::super::supervisor_native::process_handle_is_alive_for_test(&held_descendant),
             Some(false)
         );
     }
@@ -2228,25 +2406,16 @@ mod native_background_stop_tests {
     #[tokio::test]
     async fn foreground_stop_during_final_flush_reaps_detached_descendant() {
         let dir = tempfile::tempdir().unwrap();
+        let _release = ReleaseOnDrop(dir.path().to_path_buf());
         let sink = Arc::new(Sink::default());
         sink.pause_flush.store(true, Ordering::SeqCst);
-        let template = command(dir.path(), sink.clone());
-        let mut process = template.inner().clone();
-        process.args[3] = r#"
-            $ErrorActionPreference = 'Stop'
-            $child = Start-Process -FilePath powershell.exe -NoNewWindow -PassThru `
-                -RedirectStandardOutput $env:BACKGROUND_FIXTURE_CHILD_OUT `
-                -RedirectStandardError $env:BACKGROUND_FIXTURE_CHILD_ERR `
-                -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60'
-            [System.IO.File]::WriteAllText($env:BACKGROUND_FIXTURE_PID_FILE, [string]$child.Id)
-        "#
-        .into();
-        let command = SandboxedCommand::__new_sandboxed(process, template.tag().clone())
-            .with_process_owner(template.process_owner().map(str::to_owned))
-            .with_background_task(template.background_task().unwrap().clone())
-            .with_auto_background_on_timeout(false);
+        let command = redirected_descendant_command(dir.path(), sink.clone(), true);
         let task = tokio::spawn(async move { run(&command, None, false).await });
         let descendant = descendant_pid(dir.path()).await;
+        let held_descendant =
+            super::super::supervisor_native::hold_process_handle_for_test(descendant)
+                .expect("open descendant process handle");
+        std::fs::write(dir.path().join("leader.release"), "release").unwrap();
         tokio::time::timeout(
             std::time::Duration::from_secs(20),
             sink.flush_started.notified(),
@@ -2254,11 +2423,11 @@ mod native_background_stop_tests {
         .await
         .expect("foreground output flush did not start");
         assert_eq!(
-            super::super::supervisor_native::process_is_alive(descendant),
+            super::super::supervisor_native::process_handle_is_alive_for_test(&held_descendant),
             Some(true)
         );
         sink.stop.notify_one();
-        exited(descendant).await;
+        held_exited(&held_descendant).await;
         assert!(!task.is_finished(), "accepted flush must settle after stop");
         sink.flush_resume.notify_one();
         let result = tokio::time::timeout(std::time::Duration::from_secs(15), task)
@@ -2268,29 +2437,25 @@ mod native_background_stop_tests {
         assert!(
             matches!(result, Err(ProcessError::Io(message)) if message == "supervisor command cancelled")
         );
+        assert!(!dir.path().join("descendant.completed").exists());
     }
 
     #[tokio::test]
     async fn strict_foreground_completion_reaps_redirected_descendant() {
         let dir = tempfile::tempdir().unwrap();
+        let _release = ReleaseOnDrop(dir.path().to_path_buf());
         let sink = Arc::new(Sink::default());
-        let template = command(dir.path(), sink.clone());
-        let mut process = template.inner().clone();
-        process.args[3] = r#"
-            $ErrorActionPreference = 'Stop'
-            $child = Start-Process -FilePath powershell.exe -NoNewWindow -PassThru `
-                -RedirectStandardOutput $env:BACKGROUND_FIXTURE_CHILD_OUT `
-                -RedirectStandardError $env:BACKGROUND_FIXTURE_CHILD_ERR `
-                -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 60'
-            [System.IO.File]::WriteAllText($env:BACKGROUND_FIXTURE_PID_FILE, [string]$child.Id)
-        "#
-        .into();
-        let command = SandboxedCommand::__new_sandboxed(process, template.tag().clone())
-            .with_process_owner(template.process_owner().map(str::to_owned))
-            .with_background_task(template.background_task().unwrap().clone())
-            .with_auto_background_on_timeout(false);
+        let command = redirected_descendant_command(dir.path(), sink.clone(), true);
         let task = tokio::spawn(async move { run(&command, None, false).await });
         let descendant = descendant_pid(dir.path()).await;
+        let held_descendant =
+            super::super::supervisor_native::hold_process_handle_for_test(descendant)
+                .expect("open descendant process handle");
+        assert_eq!(
+            super::super::supervisor_native::process_handle_is_alive_for_test(&held_descendant),
+            Some(true)
+        );
+        std::fs::write(dir.path().join("leader.release"), "release").unwrap();
         let result = tokio::time::timeout(std::time::Duration::from_secs(20), task)
             .await
             .expect("strict foreground completion did not settle")
@@ -2299,7 +2464,12 @@ mod native_background_stop_tests {
         assert!(
             matches!(result.outcome, ForegroundOutcome::Completed(output) if !output.timed_out)
         );
-        exited(descendant).await;
+        assert_eq!(
+            super::super::supervisor_native::process_handle_is_alive_for_test(&held_descendant),
+            Some(false)
+        );
+        assert!(!dir.path().join("descendant.completed").exists());
+        held_exited(&held_descendant).await;
     }
 
     #[tokio::test]

@@ -216,9 +216,9 @@ impl CommandJob {
         Ok(())
     }
 
-    /// Confirm that all processes assigned to this payload job have exited and
-    /// their process references have been released. TerminateJobObject itself
-    /// only initiates termination and is not a job-wide completion barrier.
+    /// Wait until the Job's accounting reports no remaining active processes.
+    /// TerminateJobObject itself only initiates termination and is not a
+    /// job-wide completion barrier.
     pub(super) async fn wait_empty(&self) -> Result<(), ProcessError> {
         wait_until_empty(std::time::Duration::from_secs(5), || {
             self.active_processes()
@@ -518,7 +518,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn payload_job_empty_wait_requires_release_of_process_references() {
+    async fn payload_job_empty_wait_tracks_a_live_process() {
         let mut command = tokio::process::Command::new("cmd.exe");
         command
             .args(["/D", "/S", "/C", "more"])
@@ -535,15 +535,25 @@ mod tests {
         assert!(!raw.is_null());
         let held_process = unsafe { OwnedHandle::from_raw_handle(raw) };
         release(suspended_thread(&child).unwrap()).unwrap();
+        assert_eq!(
+            unsafe { WaitForSingleObject(held_process.as_raw_handle(), 0) },
+            258
+        );
+        // A genuinely live member, rather than a handle to an exited process,
+        // must prevent a zero-accounting result.
+        let timeout = wait_until_empty(Duration::from_millis(50), || job.active_processes())
+            .await
+            .unwrap_err();
+        assert!(timeout.to_string().contains("active processes"));
         job.terminate().unwrap();
         tokio::time::timeout(Duration::from_secs(5), child.wait())
             .await
             .unwrap()
             .unwrap();
-        let timeout = wait_until_empty(Duration::from_millis(50), || job.active_processes())
-            .await
-            .unwrap_err();
-        assert!(timeout.to_string().contains("active processes"));
+        assert_eq!(
+            unsafe { WaitForSingleObject(held_process.as_raw_handle(), 0) },
+            0
+        );
         drop(held_process);
         job.wait_empty().await.unwrap();
     }
