@@ -23,6 +23,7 @@ jobs:
           python3 scripts/checks/check_brand_leaks.py --selftest
           python3 scripts/tests/test_dependency_rules.py
           python3 third_party/xcap-macos/test-audit-upstream.py
+          python3 packages/webrtc/vendor/test-audit-nix-upstream.py
       - name: Verify every gate and the trigger chain
         run: python3 scripts/tests/test_gate_triggers.py
 
@@ -255,6 +256,9 @@ jobs:
         run: cargo audit --deny warnings
       - name: Audit the embedded WebRTC workspace
         run: cargo audit --deny warnings --file packages/webrtc/Cargo.lock
+      - name: Audit the original nix dependency
+        working-directory: packages/webrtc
+        run: python3 vendor/audit-nix-upstream.py
       - name: Audit vendored xcap's upstream registry identity
         run: python3 third_party/xcap-macos/audit-upstream.py
       - name: cargo vet

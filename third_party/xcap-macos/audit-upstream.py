@@ -11,6 +11,10 @@ import sys
 import tempfile
 import urllib.request
 
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import registry_audit
+
 
 VERSION = "0.5.2"
 ARCHIVE_SHA256 = "d8c280bc7ebbb756eb06816efc2b16d63f85d7ef6c10dcc09bb612503cd78964"
@@ -57,23 +61,10 @@ def audit(workspace, archive=None):
             [sys.executable, str(package_root / "verify-upstream.py"), "--archive", str(source)],
             check=True,
         )
-        # cargo-audit reads only this lock, so unused Linux dependencies from the
-        # upstream cross-platform manifest are not imported into the audit graph.
-        lock = directory / "Cargo.lock"
-        lock.write_text(
-            'version = 4\n\n[[package]]\nname = "xcap"\n'
-            f'version = "{VERSION}"\n'
-            'source = "registry+https://github.com/rust-lang/crates.io-index"\n'
-            f'checksum = "{ARCHIVE_SHA256}"\n',
-            encoding="utf-8",
-        )
-        # cargo-audit prefers the current directory's config over the user's
-        # global config. Use an empty ignore list for this upstream-only check.
-        config = directory / ".cargo/audit.toml"
-        config.parent.mkdir()
-        config.write_text("[advisories]\nignore = []\n", encoding="utf-8")
+        # Audit only xcap's registry identity; workspace dependencies are
+        # still checked by the complete workspace cargo-audit step.
         print(f"Auditing crates.io xcap {VERSION} itself; workspace dependencies are audited separately", flush=True)
-        subprocess.run(["cargo", "audit", "--deny", "warnings", "--file", str(lock)], cwd=directory, check=True)
+        registry_audit.audit([("xcap", VERSION, ARCHIVE_SHA256)], directory)
 
 
 if __name__ == "__main__":

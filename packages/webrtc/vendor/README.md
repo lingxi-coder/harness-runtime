@@ -6,6 +6,13 @@ are macOS-only, matching libc availability; the private GetCString helper has th
 SYSPROTO_CONTROL nor UTUN_OPT_IFNAME. The dependency arrives via rtc-shared.
 No constants are fabricated and no replacement WebRTC stack is introduced.
 
+`audit-nix-upstream.py` checks the locked Cargo identity, the original archive
+checksum, every retained source, the exact four cfg changes, and a separate
+crates.io nix 0.31.3 advisory audit. Cargo's full workspace audit and cargo-vet
+remain necessary: Git and path identities alone are not matched to the
+registry's RustSec advisories, and the iOS patch requires its own review. See `NIX-REVIEW.md` for the
+reviewed source differences and their platform scope.
+
 
 # webrtc TURN close
 
