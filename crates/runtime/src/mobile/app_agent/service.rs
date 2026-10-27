@@ -4,19 +4,19 @@ use super::*;
 use crate::mobile::unified_local_apps::MobileLocalAppServiceHandle;
 use lingxi_core::{
     host::{permission_gate::PermissionDecision, CostSnapshot},
-    types::ToolUseId,
+    types::{ConversationMessage, MessageId, ToolUseId},
 };
 use local_app::v2::agent::{
     AgentStore, AttachmentMetadata, ChatMessageMetadata, ChatRole, ChatState, ChatStore, Input,
-    Owner, Settings, State, TaskResult,
+    Owner, ProtocolEventPage, Settings, State, TaskResult,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::Path,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Weak,
     },
 };
@@ -158,21 +158,87 @@ struct Control {
     chat_persisted: watch::Sender<Option<Result<(), String>>>,
     chat_commit: AsyncMutex<Option<oneshot::Receiver<()>>>,
     attachment_metadata: Vec<AttachmentMetadata>,
-    assistant_message_id: AsyncMutex<Option<String>>,
-    protocol_message: AsyncMutex<ProtocolMessageState>,
+    assistant_message_ids: AsyncMutex<HashSet<MessageId>>,
+    assistant_display_text: AsyncMutex<HashMap<MessageId, String>>,
     protocol_events_failed: AtomicBool,
+    native_output: NativeOutputProgress,
     text: AsyncMutex<String>,
     model_failed: AtomicBool,
     model_failure: Mutex<Option<String>>,
     timed_out: AtomicBool,
     usage: AsyncMutex<Option<Value>>,
 }
+// JSON numbers remain exact in both the JavaScript bridge and the native host.
+const MAX_NATIVE_OUTPUT_BYTES: u64 = 9_007_199_254_740_991;
+
 #[derive(Default)]
-struct ProtocolMessageState {
-    message_id: Option<String>,
-    open: bool,
-    pending_text: String,
+struct NativeOutputProgress {
+    bytes: AtomicU64,
+    pending_high_surrogates: Mutex<HashSet<u32>>,
 }
+
+impl NativeOutputProgress {
+    fn add(&self, bytes: u64) {
+        let _ = self
+            .bytes
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(current.saturating_add(bytes).min(MAX_NATIVE_OUTPUT_BYTES))
+            });
+    }
+
+    fn observe(&self, block_index: u32, units: &[u16]) {
+        if units.is_empty() {
+            return;
+        }
+        let Ok(mut pending) = self.pending_high_surrogates.lock() else {
+            return;
+        };
+        let mut bytes = 0u64;
+        for &unit in units {
+            if pending.remove(&block_index) {
+                if (0xdc00..=0xdfff).contains(&unit) {
+                    bytes = bytes.saturating_add(4);
+                    continue;
+                }
+                // Match UTF-8 encoding of a JavaScript string with a lone unit.
+                bytes = bytes.saturating_add(3);
+            }
+            bytes = bytes.saturating_add(match unit {
+                0..=0x7f => 1,
+                0x80..=0x7ff => 2,
+                0xd800..=0xdbff => {
+                    pending.insert(block_index);
+                    0
+                }
+                _ => 3,
+            });
+        }
+        self.add(bytes);
+    }
+
+    fn finish_block(&self, block_index: u32) {
+        if self
+            .pending_high_surrogates
+            .lock()
+            .is_ok_and(|mut pending| pending.remove(&block_index))
+        {
+            self.add(3);
+        }
+    }
+
+    fn finish_all(&self) {
+        if let Ok(mut pending) = self.pending_high_surrogates.lock() {
+            let bytes = (pending.len() as u64).saturating_mul(3);
+            pending.clear();
+            self.add(bytes);
+        }
+    }
+
+    fn bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
+    }
+}
+
 enum Reply {
     Permission(oneshot::Sender<bool>),
     Question(oneshot::Sender<Vec<(Utf16JsonProjection, Utf16JsonProjection)>>),
@@ -397,7 +463,14 @@ impl Control {
     where
         F: std::future::Future<Output = Result<(TaskResult, Value), String>>,
     {
-        let (result, usage) = query.await?;
+        // Dropping the local query future on revocation lets the task reach its
+        // terminal state even when the provider never completes the request.
+        // Cancellation wins when both branches are ready in the same poll.
+        let (result, usage) = tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => return Err("cancelled".into()),
+            result = query => result?,
+        };
         self.store
             .set_completed_model_turns(&self.owner, &self.id, 1)
             .map_err(|_| "task_storage_failed")?;
@@ -405,7 +478,7 @@ impl Control {
         Ok((result, usage))
     }
 
-    async fn append_protocol_event(&self, event: Value) -> Result<(), String> {
+    fn append_protocol_event(&self, event: Value) -> Result<(), String> {
         let Some(_) = self.protocol_thread_id else {
             return Ok(());
         };
@@ -423,63 +496,124 @@ impl Control {
         }
     }
 
-    async fn close_protocol_message(&self, fallback_text: Option<&str>) -> Result<(), String> {
-        let Some(thread_id) = &self.protocol_thread_id else {
+    // Only a successfully committed task may publish its one accepted answer.
+    // The same value is stored in chat history and emitted to the pinned SDK.
+    fn publish_accepted_result(&self, result: &TaskResult) -> Result<(), String> {
+        if self.protocol_thread_id.is_none() {
             return Ok(());
-        };
-        let mut state = self.protocol_message.lock().await;
-        if state.open {
-            if !state.pending_text.is_empty() {
-                let delta = std::mem::take(&mut state.pending_text);
-                self.append_protocol_event(json!({
-                    "type":"TEXT_MESSAGE_CONTENT",
-                    "messageId":state.message_id.as_deref().unwrap_or_default(),
-                    "delta":delta
-                }))
-                .await?;
-            }
-            let id = state.message_id.clone().unwrap_or_default();
-            state.open = false;
-            return self
-                .append_protocol_event(json!({"type":"TEXT_MESSAGE_END","messageId":id}))
-                .await;
         }
-        let text = if state.pending_text.is_empty() {
-            fallback_text.unwrap_or_default().to_owned()
+        let message_id = result
+            .message_id
+            .as_deref()
+            .ok_or("chat_message_identity_missing")?;
+        if let Some(chat_id) = &self.chat_id {
+            let message = json!({"id":message_id,"role":"assistant","content":result.text});
+            self.chats
+                .record_protocol_message(chat_id, &self.id, &message)
+                .map_err(|_| "chat_storage_unavailable")?;
+        }
+        self.append_protocol_event(json!({
+            "type":"TEXT_MESSAGE_START", "messageId":message_id, "role":"assistant"
+        }))?;
+        // Keep each event below the serialized 3 MiB limit even when every
+        // byte requires JSON escaping. Never split a UTF-8 character.
+        // Empty deltas are valid and preserve structured-only messages.
+        const CHUNK_BYTES: usize = 256 * 1024;
+        if result.text.is_empty() {
+            self.append_protocol_event(json!({
+                "type":"TEXT_MESSAGE_CONTENT", "messageId":message_id, "delta":""
+            }))?;
         } else {
-            std::mem::take(&mut state.pending_text)
-        };
-        if text.is_empty() {
-            return Ok(());
+            let mut start = 0;
+            while start < result.text.len() {
+                let mut end = start.saturating_add(CHUNK_BYTES).min(result.text.len());
+                while !result.text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                self.append_protocol_event(json!({
+                    "type":"TEXT_MESSAGE_CONTENT", "messageId":message_id,
+                    "delta":&result.text[start..end]
+                }))?;
+                start = end;
+            }
         }
-        let message_id = format!("msg_{}", uuid::Uuid::new_v4());
         self.append_protocol_event(json!({
-            "type":"TEXT_MESSAGE_START",
-            "messageId":message_id,
-            "role":"assistant"
+            "type":"TEXT_MESSAGE_END", "messageId":message_id
         }))
-        .await?;
-        self.append_protocol_event(json!({
-            "type":"TEXT_MESSAGE_CONTENT",
-            "messageId":message_id,
-            "delta":text
-        }))
-        .await?;
-        self.append_protocol_event(json!({
-            "type":"TEXT_MESSAGE_END",
-            "messageId":message_id
-        }))
-        .await?;
-        let _ = thread_id;
-        Ok(())
     }
 
-    fn revoke(&self) {
+    fn commit_terminal(
+        &self,
+        state: State,
+        output: Option<TaskResult>,
+        usage: Option<Value>,
+        error: Option<String>,
+    ) -> Result<(local_app::v2::agent::Task, bool), String> {
+        self.store
+            .with_protocol_commit(|| {
+                // This check is inside the same guard as durable cancellation and
+                // success commit. It also covers direct parent-token revocation.
+                let (state, output, error) =
+                    if state == State::Succeeded && self.cancel.is_cancelled() {
+                        (State::Cancelled, None, Some("cancelled".into()))
+                    } else {
+                        (state, output, error)
+                    };
+                let task = self
+                    .store
+                    .update(&self.owner, &self.id, state, output, usage, error)
+                    .map_err(|_| "agent_storage_unavailable")?;
+                let mut event_storage_failed = if task.state == State::Succeeded {
+                    match task.result.as_ref() {
+                        Some(result) => self.publish_accepted_result(result).is_err(),
+                        None => true,
+                    }
+                } else {
+                    false
+                };
+                if !event_storage_failed {
+                    if let Some(thread_id) = &self.protocol_thread_id {
+                        if let Some(event) = protocol_terminal_event(&task, thread_id) {
+                            event_storage_failed = self
+                                .store
+                                .append_event(&self.owner, &self.id, event)
+                                .is_err();
+                        }
+                    }
+                }
+                if event_storage_failed {
+                    let _ = self.store.interrupt_after_protocol_failure(
+                        &self.owner,
+                        &self.id,
+                        "protocol_event_storage_failed",
+                    );
+                }
+                Ok((task, event_storage_failed))
+            })
+            .map_err(|_| "agent_storage_unavailable")?
+    }
+
+    fn native_output_for(&self, owner: &Owner, revision: u64) -> u64 {
+        if self.owner.app_id == owner.app_id
+            && self.owner.release_digest == owner.release_digest
+            && self.revision == revision
+        {
+            self.native_output.bytes()
+        } else {
+            0
+        }
+    }
+
+    fn revoke_lease(&self) {
         if let Ok(lease) = self.lease.lock() {
             if let Some(lease) = lease.as_ref() {
                 lease.revoke();
             }
         }
+    }
+
+    fn revoke(&self) {
+        self.revoke_lease();
         self.cancel.cancel();
     }
 
@@ -554,6 +688,15 @@ impl PermissionGate for Control {
 }
 #[async_trait::async_trait]
 impl OutputStream for Control {
+    fn wants_model_output_progress(&self) -> bool {
+        true
+    }
+    fn note_model_output_delta(&self, block_index: u32, units: &[u16]) {
+        self.native_output.observe(block_index, units);
+    }
+    fn finish_model_output_block(&self, block_index: u32) {
+        self.native_output.finish_block(block_index);
+    }
     fn note_model_error_kind(&self, kind: &'static str) {
         if let Ok(mut failure) = self.model_failure.lock() {
             *failure = Some(format!("model_{kind}"));
@@ -561,42 +704,43 @@ impl OutputStream for Control {
     }
     async fn emit_text(&self, text: &Utf16JsonProjection) {
         if let Some(text) = text.string_at("") {
-            let delta = text.to_owned();
             let mut output = self.text.lock().await;
-            if output.len() + delta.len() > 1024 * 1024 {
+            if output.len() + text.len() > 1024 * 1024 {
                 self.model_failed.store(true, Ordering::Release);
                 self.revoke();
             } else {
-                output.push_str(&delta);
-                drop(output);
-                if self.protocol_thread_id.is_some() && !delta.is_empty() {
-                    let mut state = self.protocol_message.lock().await;
-                    if state.open {
-                        let message_id = state.message_id.clone().unwrap_or_default();
-                        let _ = self
-                            .append_protocol_event(json!({
-                                "type":"TEXT_MESSAGE_CONTENT",
-                                "messageId":message_id,
-                                "delta":delta
-                            }))
-                            .await;
-                    } else {
-                        state.pending_text.push_str(&delta);
-                    }
-                }
+                // Keep the existing run-level bound, but do not publish
+                // tentative model text: an accepted fallback may retract it.
+                output.push_str(text);
             }
         }
     }
-    async fn emit_assistant_message_identity(&self, message_id: &lingxi_core::types::MessageId) {
-        let id = message_id.to_string();
-        *self.assistant_message_id.lock().await = Some(id.clone());
+    async fn observe_assistant_display_text(
+        &self,
+        message_id: &MessageId,
+        text: &Utf16JsonProjection,
+    ) {
+        if let Some(display_text) = text.string_at("") {
+            self.assistant_display_text
+                .lock()
+                .await
+                .insert(*message_id, display_text.to_owned());
+        } else {
+            // An unrepresentable managed display override must never fall back
+            // to publishing the unfiltered transcript content.
+            self.model_failed.store(true, Ordering::Release);
+            self.revoke();
+        }
+    }
+    async fn emit_assistant_message_identity(&self, message_id: &MessageId) {
+        self.assistant_message_ids.lock().await.insert(*message_id);
         if let Some(chat_id) = &self.chat_id {
             if self
                 .chats
                 .record_message(
                     chat_id,
                     ChatMessageMetadata {
-                        message_id: id.clone(),
+                        message_id: message_id.to_string(),
                         run_id: self.id.clone(),
                         role: ChatRole::Assistant,
                         created_at: now_millis(),
@@ -607,37 +751,6 @@ impl OutputStream for Control {
             {
                 self.model_failed.store(true, Ordering::Release);
                 self.revoke();
-            }
-        }
-        if self.protocol_thread_id.is_some() {
-            let mut state = self.protocol_message.lock().await;
-            if state.open && state.message_id.as_deref() != Some(&id) {
-                let previous = state.message_id.clone().unwrap_or_default();
-                state.open = false;
-                let _ = self
-                    .append_protocol_event(json!({"type":"TEXT_MESSAGE_END","messageId":previous}))
-                    .await;
-            }
-            if !state.open {
-                state.message_id = Some(id.clone());
-                state.open = true;
-                let _ = self
-                    .append_protocol_event(json!({
-                        "type":"TEXT_MESSAGE_START",
-                        "messageId":id,
-                        "role":"assistant"
-                    }))
-                    .await;
-                if !state.pending_text.is_empty() {
-                    let pending = std::mem::take(&mut state.pending_text);
-                    let _ = self
-                        .append_protocol_event(json!({
-                            "type":"TEXT_MESSAGE_CONTENT",
-                            "messageId":id,
-                            "delta":pending
-                        }))
-                        .await;
-                }
             }
         }
     }
@@ -1276,9 +1389,10 @@ impl AppAgentHost {
             chat_persisted: chat_persisted_tx,
             chat_commit: AsyncMutex::new(if is_chat { Some(chat_commit_rx) } else { None }),
             attachment_metadata,
-            assistant_message_id: AsyncMutex::new(None),
-            protocol_message: AsyncMutex::new(ProtocolMessageState::default()),
+            assistant_message_ids: AsyncMutex::new(HashSet::new()),
+            assistant_display_text: AsyncMutex::new(HashMap::new()),
             protocol_events_failed: AtomicBool::new(false),
+            native_output: NativeOutputProgress::default(),
             text: AsyncMutex::new(String::new()),
             model_failed: AtomicBool::new(false),
             model_failure: Mutex::new(None),
@@ -1486,12 +1600,32 @@ impl AppAgentHost {
         } else {
             result
         };
-        let fallback_text = result.as_ref().ok().map(|(result, _)| result.text.as_str());
-        if control.close_protocol_message(fallback_text).await.is_err() {
+        if let Ok((task_result, _)) = &result {
+            if let Err(error) = validate_task_result(task_result) {
+                result = Err(error);
+            }
+        }
+        control.native_output.finish_all();
+        let observed_bytes = control.native_output.bytes();
+        if observed_bytes > 0
+            && control
+                .store
+                .record_native_output_bytes(&owner, &id, control.revision, observed_bytes)
+                .is_err()
+            && result
+                .as_ref()
+                .err()
+                .is_none_or(|error| error != "tool_cleanup_incomplete")
+        {
             result = Err("agent_storage_unavailable".into());
         }
+        if result.is_ok() && control.cancel.is_cancelled() {
+            result = Err("cancelled".into());
+        }
         control.report_chat_persisted(result.as_ref().map(|_| ()).map_err(|error| error.clone()));
-        control.revoke();
+        // End tool authority immediately, while retaining the external cancel
+        // signal for the finalization guard's last cancellation check.
+        control.revoke_lease();
         control.interaction.lock().await.take();
         let recorded_usage = control.usage.lock().await.clone();
         let (state, output, usage, error) = match result {
@@ -1504,24 +1638,9 @@ impl AppAgentHost {
         // A failed foreground reap keeps admission occupied. Do not release the
         // app or remove its workspace while a tool may still have effects.
         if error.as_deref() != Some("tool_cleanup_incomplete") {
-            if let Ok(task) = control
-                .store
-                .update(&owner, &id, state, output, usage, error)
+            if let Ok((_task, event_storage_failed)) =
+                control.commit_terminal(state, output, usage, error)
             {
-                let mut event_storage_failed = false;
-                if let Some(thread_id) = &control.protocol_thread_id {
-                    if let Some(event) = protocol_terminal_event(&task, thread_id) {
-                        event_storage_failed =
-                            control.store.append_event(&owner, &id, event).is_err();
-                    }
-                }
-                if event_storage_failed {
-                    let _ = control.store.interrupt_after_protocol_failure(
-                        &owner,
-                        &id,
-                        "protocol_event_storage_failed",
-                    );
-                }
                 self.active.lock().await.remove(&id);
                 if let Some(chat_id) = &control.chat_id {
                     if event_storage_failed {
@@ -1542,6 +1661,7 @@ impl AppAgentHost {
                 Some("tool_cleanup_incomplete".into()),
             );
         }
+        control.revoke();
         control.finished.store(true, Ordering::Release);
         control.done.notify_waiters();
     }
@@ -1573,9 +1693,14 @@ impl AppAgentHost {
                     None,
                 )
                 .map_err(|_| "task_storage_failed")?;
-            return control
+            let (mut result, usage) = control
                 .run_stateless_query(self.factory.query_stateless(admission, &input))
-                .await;
+                .await?;
+            if control.protocol_thread_id.is_some() {
+                // A stateless side query has no canonical conversation message.
+                result.message_id = Some(format!("msg_{}", uuid::Uuid::new_v4()));
+            }
+            return Ok((result, usage));
         }
         let prepared = crate::app_agent_input::prepare(&input).await?;
         let (question_tx, mut question_rx) =
@@ -1726,6 +1851,16 @@ impl AppAgentHost {
             .user_message_id
             .as_deref()
             .and_then(lingxi_core::types::MessageId::parse_prefixed);
+        // Snapshot before the run, including any persisted user row, so old
+        // assistant messages can never become this run's public result.
+        let baseline_assistant_ids: HashSet<MessageId> = session
+            .orchestrator
+            .snapshot_history()
+            .await
+            .into_iter()
+            .filter(|message| matches!(message, ConversationMessage::Assistant { .. }))
+            .map(|message| message.id())
+            .collect();
         let outcome = session
             .orchestrator
             .run_turn_streaming_with_cancel_projected_content(
@@ -1791,20 +1926,16 @@ impl AppAgentHost {
         }
         let cost = session.orchestrator.snapshot_cost().await;
         let usage = usage_value(&cost);
-        let text = control.text.lock().await.clone();
-        let assistant_message_id = control.assistant_message_id.lock().await.clone();
-        if control.chat_id.is_some() && assistant_message_id.is_none() {
-            return Err("chat_message_identity_missing".into());
-        }
-        if let (Some(chat_id), Some(message_id)) =
-            (control.chat_id.as_deref(), assistant_message_id.as_deref())
-        {
-            let message = json!({"id":message_id,"role":"assistant","content":text});
-            control
-                .chats
-                .record_protocol_message(chat_id, &control.id, &message)
-                .map_err(|_| "chat_storage_unavailable")?;
-        }
+        let final_history = session.orchestrator.snapshot_history().await;
+        let observed_ids = control.assistant_message_ids.lock().await;
+        let display_text = control.assistant_display_text.lock().await;
+        let (message_id, text) = accepted_assistant_projection(
+            &final_history,
+            &baseline_assistant_ids,
+            &observed_ids,
+            &display_text,
+        )?;
+        let assistant_message_id = Some(message_id);
         let result = TaskResult {
             text,
             output,
@@ -1812,14 +1943,6 @@ impl AppAgentHost {
             chat_id: control.chat_id.clone(),
             message_id: assistant_message_id,
         };
-        if serde_json::to_value(&result)
-            .map_err(|_| "invalid_output")?
-            .to_string()
-            .len()
-            > 2 * 1024 * 1024
-        {
-            return Err("result_too_large".into());
-        }
         Ok((result, usage))
     }
     async fn cancel_ids(&self, ids: &[String]) {
@@ -2034,7 +2157,21 @@ impl AppAgentHost {
                     .store
                     .protocol_events(&owner, run_id, after_sequence)
                     .map_err(|_| "agent_events_unavailable")?;
-                serde_json::to_value(page).map_err(|_| "agent_events_unavailable".into())
+                let task_id = state
+                    .store
+                    .task_id_for_request(&owner, run_id)
+                    .map_err(|_| "agent_events_unavailable")?;
+                let active = self.active.lock().await.get(&task_id).cloned();
+                let active_bytes =
+                    active.map_or(0, |control| control.native_output_for(&owner, revision));
+                // Read after the active lookup. Finalization saves before removal,
+                // so this order cannot miss the hand-off between the two sources.
+                let saved_bytes = state
+                    .store
+                    .native_output_bytes_for_request(&owner, run_id, revision)
+                    .map_err(|_| "agent_events_unavailable")?
+                    .unwrap_or(0);
+                native_events_value(page, active_bytes, saved_bytes)
             }
             "tasks.list" => {
                 reject_unknown(&request, &["op", "appId", "revision", "requestId"])?;
@@ -2558,6 +2695,62 @@ fn protocol_terminal_event(task: &local_app::v2::agent::Task, thread_id: &str) -
     }
 }
 
+// The native history is authoritative for acceptance and fallback retraction.
+// Identity callbacks constrain this selection to responses from this run.
+fn accepted_assistant_projection(
+    history: &[ConversationMessage],
+    baseline_ids: &HashSet<MessageId>,
+    observed_ids: &HashSet<MessageId>,
+    display_text: &HashMap<MessageId, String>,
+) -> Result<(String, String), String> {
+    history
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            ConversationMessage::Assistant { id, .. }
+                if !baseline_ids.contains(id) && observed_ids.contains(id) =>
+            {
+                Some((
+                    id.to_string(),
+                    display_text
+                        .get(id)
+                        .cloned()
+                        .unwrap_or_else(|| message.text_content()),
+                ))
+            }
+            _ => None,
+        })
+        .ok_or_else(|| "chat_message_identity_missing".into())
+}
+
+// Both stateless and session paths share the existing serialized result cap.
+// Together with bounded text-event chunks this leaves room for the terminal
+// event in the 8 MiB / 10,000-event durable AG-UI log.
+fn validate_task_result(result: &TaskResult) -> Result<(), String> {
+    if serde_json::to_value(result)
+        .map_err(|_| "invalid_output")?
+        .to_string()
+        .len()
+        > 2 * 1024 * 1024
+    {
+        return Err("result_too_large".into());
+    }
+    Ok(())
+}
+
+fn native_events_value(
+    page: ProtocolEventPage,
+    active_bytes: u64,
+    saved_bytes: u64,
+) -> Result<Value, String> {
+    let mut response = serde_json::to_value(page).map_err(|_| "agent_events_unavailable")?;
+    let bytes = active_bytes.max(saved_bytes).min(MAX_NATIVE_OUTPUT_BYTES);
+    if bytes > 0 {
+        response["nativeOutputBytes"] = json!(bytes);
+    }
+    Ok(response)
+}
+
 fn public_task_value(
     task: &local_app::v2::agent::Task,
     thread_id: String,
@@ -2853,6 +3046,10 @@ mod progress_tests {
     use super::*;
 
     fn running_control(root: &Path) -> Control {
+        running_control_with_protocol(root, false)
+    }
+
+    fn running_control_with_protocol(root: &Path, protocol: bool) -> Control {
         let app_id = format!("a{}", "6".repeat(32));
         std::fs::create_dir_all(root.join(&app_id)).unwrap();
         let state = AppAgentState::open(root, &app_id).unwrap();
@@ -2870,11 +3067,14 @@ mod progress_tests {
             .store
             .configure(owner.clone(), Some(settings))
             .unwrap();
-        let input: Input = serde_json::from_value(json!({
+        let mut input: Input = serde_json::from_value(json!({
             "requestId":"progress-run",
             "prompt":"check progress"
         }))
         .unwrap();
+        if protocol {
+            input.protocol_thread_id = Some("progress-thread".into());
+        }
         let admission = state.store.admit(&owner, &input, &[]).unwrap();
         let id = admission.task.run_id;
         state
@@ -2882,12 +3082,12 @@ mod progress_tests {
             .update(&owner, &id, State::Running, None, None, None)
             .unwrap();
         let (chat_persisted, _) = watch::channel(None);
-        Control {
+        let control = Control {
             owner,
             revision: 1,
             request_id: input.request_id,
             id,
-            protocol_thread_id: None,
+            protocol_thread_id: input.protocol_thread_id,
             protocol_parent_run_id: None,
             cancel: CancellationToken::new(),
             finished: AtomicBool::new(false),
@@ -2901,15 +3101,145 @@ mod progress_tests {
             chat_persisted,
             chat_commit: AsyncMutex::new(None),
             attachment_metadata: Vec::new(),
-            assistant_message_id: AsyncMutex::new(None),
-            protocol_message: AsyncMutex::new(ProtocolMessageState::default()),
+            assistant_message_ids: AsyncMutex::new(HashSet::new()),
+            assistant_display_text: AsyncMutex::new(HashMap::new()),
             protocol_events_failed: AtomicBool::new(false),
+            native_output: NativeOutputProgress::default(),
             text: AsyncMutex::new(String::new()),
             model_failed: AtomicBool::new(false),
             model_failure: Mutex::new(None),
             timed_out: AtomicBool::new(false),
             usage: AsyncMutex::new(None),
+        };
+        if protocol {
+            control.store.append_event(
+                &control.owner,
+                &control.id,
+                json!({"type":"RUN_STARTED","threadId":"progress-thread","runId":"progress-run"}),
+            ).unwrap();
         }
+        control
+    }
+
+    #[test]
+    fn ending_tool_authority_keeps_external_cancel_observable_until_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let control = running_control(root.path());
+        let lease = SessionToolGrantLease::new(SessionToolPolicy::default());
+        let captured = lease.clone();
+        *control.lease.lock().unwrap() = Some(lease);
+        control.revoke_lease();
+        assert!(captured.is_revoked());
+        assert!(!control.cancel.is_cancelled());
+        control.revoke();
+        assert!(control.cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn native_output_progress_counts_real_utf16_deltas_without_public_output() {
+        let root = tempfile::tempdir().unwrap();
+        let control = running_control(root.path());
+        assert!(control.wants_model_output_progress());
+        control
+            .emit_text(&Utf16JsonProjection::from("aggregate"))
+            .await;
+        assert_eq!(
+            control.native_output.bytes(),
+            0,
+            "whole-body emissions are not stream deltas"
+        );
+        control.note_model_output_delta(0, &[]);
+        assert_eq!(control.native_output.bytes(), 0);
+        control.note_model_output_delta(0, &"A汉".encode_utf16().collect::<Vec<_>>());
+        assert_eq!(control.native_output.bytes(), 4);
+        control.note_model_output_delta(0, &[0xd83d]);
+        control.note_model_output_delta(1, &[0xd800]);
+        assert_eq!(
+            control.native_output.bytes(),
+            4,
+            "a high surrogate alone is not yet counted"
+        );
+        control.note_model_output_delta(0, &[0xde42]);
+        assert_eq!(
+            control.native_output.bytes(),
+            8,
+            "split emoji is four UTF-8 bytes"
+        );
+        control.finish_model_output_block(1);
+        assert_eq!(
+            control.native_output.bytes(),
+            11,
+            "a lone unit encodes as U+FFFD"
+        );
+        control.note_model_output_delta(2, &[0xd800]);
+        control.native_output.finish_all();
+        assert_eq!(control.native_output.bytes(), 14);
+        control
+            .native_output
+            .bytes
+            .store(MAX_NATIVE_OUTPUT_BYTES - 1, Ordering::Relaxed);
+        control.note_model_output_delta(3, &[0x61, 0x62, 0x63]);
+        assert_eq!(control.native_output.bytes(), MAX_NATIVE_OUTPUT_BYTES);
+    }
+
+    #[tokio::test]
+    async fn native_only_counter_advances_on_same_event_sequence_and_survives_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let control = running_control_with_protocol(root.path(), true);
+        let public = control
+            .store
+            .protocol_events(&control.owner, "progress-run", 0)
+            .unwrap();
+        let before = native_events_value(public.clone(), 0, 0).unwrap();
+        assert!(before.get("nativeOutputBytes").is_none());
+        control.note_model_output_delta(1, &"hello".encode_utf16().collect::<Vec<_>>());
+        let again = control
+            .store
+            .protocol_events(&control.owner, "progress-run", 0)
+            .unwrap();
+        let live = native_events_value(
+            again.clone(),
+            control.native_output_for(&control.owner, 1),
+            0,
+        )
+        .unwrap();
+        assert_eq!(again.sequence, public.sequence);
+        assert_eq!(live["nativeOutputBytes"], 5);
+        assert!(serde_json::to_value(&again)
+            .unwrap()
+            .get("nativeOutputBytes")
+            .is_none());
+        assert!(public_task_value(
+            &control.store.get(&control.owner, &control.id).unwrap(),
+            "progress-thread".into()
+        )
+        .unwrap()
+        .get("nativeOutputBytes")
+        .is_none());
+        assert_eq!(control.native_output_for(&control.owner, 2), 0);
+        let mut wrong_owner = control.owner.clone();
+        wrong_owner.release_digest = "3".repeat(64);
+        assert_eq!(control.native_output_for(&wrong_owner, 1), 0);
+        assert!(control
+            .store
+            .native_output_bytes_for_request(&wrong_owner, "progress-run", 1)
+            .is_err());
+        control
+            .store
+            .record_native_output_bytes(
+                &control.owner,
+                &control.id,
+                1,
+                control.native_output.bytes(),
+            )
+            .unwrap();
+        let saved = control
+            .store
+            .native_output_bytes_for_request(&control.owner, "progress-run", 1)
+            .unwrap()
+            .unwrap();
+        let after_removal = native_events_value(again, 0, saved).unwrap();
+        assert_eq!(after_removal["nativeOutputBytes"], 5);
     }
 
     #[tokio::test]
@@ -2976,6 +3306,81 @@ mod progress_tests {
                 .get("progress")
                 .is_none());
         }
+    }
+
+    struct QueryDropNotice(Arc<AtomicBool>);
+
+    impl Drop for QueryDropNotice {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn stateless_query_cancellation_drops_pending_future_without_progress() {
+        let root = tempfile::tempdir().unwrap();
+        let control = Arc::new(running_control(root.path()));
+        let before = control.store.get(&control.owner, &control.id).unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let notice = QueryDropNotice(dropped.clone());
+        let (started_tx, started_rx) = oneshot::channel();
+        let running = control.clone();
+        let task = tokio::spawn(async move {
+            running
+                .run_stateless_query(async move {
+                    let _notice = notice;
+                    started_tx.send(()).unwrap();
+                    std::future::pending::<Result<(TaskResult, Value), String>>().await
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        control.revoke();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .expect("cancellation must end the local query")
+            .unwrap();
+        assert_eq!(result.unwrap_err(), "cancelled");
+        assert!(dropped.load(Ordering::Acquire));
+        let after = control.store.get(&control.owner, &control.id).unwrap();
+        assert_eq!(after.sequence, before.sequence);
+        assert_eq!(after.progress, None);
+        assert_eq!(*control.usage.lock().await, None);
+    }
+
+    #[tokio::test]
+    async fn stateless_query_cancelled_before_poll_wins_over_ready_query() {
+        let root = tempfile::tempdir().unwrap();
+        let control = running_control(root.path());
+        let before = control.store.get(&control.owner, &control.id).unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let polled = Arc::new(AtomicBool::new(false));
+        let notice = QueryDropNotice(dropped.clone());
+        let query_polled = polled.clone();
+        control.revoke();
+        let result = control
+            .run_stateless_query(async move {
+                let _notice = notice;
+                query_polled.store(true, Ordering::Release);
+                Ok((
+                    TaskResult {
+                        text: "answer".into(),
+                        output: None,
+                        attachments: Vec::new(),
+                        chat_id: None,
+                        message_id: None,
+                    },
+                    json!({"outputTokens": 1}),
+                ))
+            })
+            .await;
+        assert_eq!(result.unwrap_err(), "cancelled");
+        assert!(dropped.load(Ordering::Acquire));
+        assert!(!polled.load(Ordering::Acquire));
+        let after = control.store.get(&control.owner, &control.id).unwrap();
+        assert_eq!(after.sequence, before.sequence);
+        assert_eq!(after.progress, None);
+        assert_eq!(*control.usage.lock().await, None);
     }
 
     #[tokio::test]
@@ -3052,6 +3457,488 @@ mod progress_tests {
                     .is_none());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod accepted_projection_tests {
+    use super::*;
+    use lingxi_core::types::ContentBlock;
+
+    fn assistant(id: MessageId, text: &str) -> ConversationMessage {
+        ConversationMessage::Assistant {
+            id,
+            content: vec![ContentBlock::Text {
+                text: text.into(),
+                citations: None,
+            }],
+            stop_reason: Some("end_turn".into()),
+            resumable: None,
+            per_turn_effort: None,
+        }
+    }
+
+    fn setup() -> (tempfile::TempDir, AppAgentState, Control, Value, String) {
+        let root = tempfile::tempdir().unwrap();
+        let app_id = format!("a{}", "6".repeat(32));
+        std::fs::create_dir_all(root.path().join(&app_id)).unwrap();
+        let state = AppAgentState::open(root.path(), &app_id).unwrap();
+        let owner = Owner {
+            app_id,
+            release_digest: "2".repeat(64),
+            invocation_id: "projection-test".into(),
+        };
+        let settings: Settings = serde_json::from_value(json!({
+            "model":{"providerId":"provider","modelId":"model"},
+            "tools":{},"skills":[],"background":false,"maxTurns":4,"timeoutMs":30000
+        }))
+        .unwrap();
+        state
+            .store
+            .configure(owner.clone(), Some(settings))
+            .unwrap();
+        let chat = state
+            .chats
+            .create(None, &uuid::Uuid::new_v4().to_string())
+            .unwrap();
+        let user = json!({"id":"user-1","role":"user","content":"hello"});
+        let input = json!({"threadId":chat.chat_id,"runId":"public-run-1","protocolVersion":"1.0","messages":[user.clone()]});
+        let (normalized, chat_id) =
+            normalize_page_run_input(&state, input, Some(&chat.chat_id)).unwrap();
+        let admission = state
+            .store
+            .admit_scoped(
+                &owner,
+                &normalized.input,
+                &[],
+                &[],
+                chat_id.as_deref(),
+                true,
+            )
+            .unwrap();
+        let id = admission.task.run_id;
+        state.chats.start_turn(&chat.chat_id, &id).unwrap();
+        state
+            .chats
+            .record_protocol_message(&chat.chat_id, &id, &user)
+            .unwrap();
+        state
+            .store
+            .update(&owner, &id, State::Running, None, None, None)
+            .unwrap();
+        state.store.append_event(&owner, &id, json!({
+            "type":"RUN_STARTED", "protocolVersion":"1.0", "threadId":chat.chat_id,"runId":"public-run-1"
+        })).unwrap();
+        let (chat_persisted, _) = watch::channel(None);
+        let control = Control {
+            owner,
+            revision: 1,
+            request_id: "public-run-1".into(),
+            id,
+            protocol_thread_id: Some(chat.chat_id.clone()),
+            protocol_parent_run_id: None,
+            cancel: CancellationToken::new(),
+            finished: AtomicBool::new(false),
+            done: Notify::new(),
+            lease: Mutex::new(None),
+            interaction: AsyncMutex::new(None),
+            store: state.store.clone(),
+            chats: state.chats.clone(),
+            chat_id: Some(chat.chat_id.clone()),
+            user_message_id: None,
+            chat_persisted,
+            chat_commit: AsyncMutex::new(None),
+            attachment_metadata: Vec::new(),
+            assistant_message_ids: AsyncMutex::new(HashSet::new()),
+            assistant_display_text: AsyncMutex::new(HashMap::new()),
+            protocol_events_failed: AtomicBool::new(false),
+            native_output: NativeOutputProgress::default(),
+            text: AsyncMutex::new(String::new()),
+            model_failed: AtomicBool::new(false),
+            model_failure: Mutex::new(None),
+            timed_out: AtomicBool::new(false),
+            usage: AsyncMutex::new(None),
+        };
+        (root, state, control, user, chat.chat_id)
+    }
+
+    fn result(
+        chat_id: &str,
+        message_id: String,
+        text: String,
+        output: Option<Value>,
+    ) -> TaskResult {
+        TaskResult {
+            text,
+            output,
+            attachments: Vec::new(),
+            chat_id: Some(chat_id.into()),
+            message_id: Some(message_id),
+        }
+    }
+
+    // Mirrors the SDK's standard text event reduction. The pinned SDK is also
+    // exercised independently by official-sdk-behavior.test.mjs.
+    fn sdk_text_messages(events: &[Value]) -> Vec<Value> {
+        let mut messages: Vec<Value> = Vec::new();
+        for event in events {
+            local_app::v2::agent::protocol::validate_event(event).unwrap();
+            match event["type"].as_str().unwrap() {
+                "RUN_STARTED" | "RUN_FINISHED" | "RUN_ERROR" => {}
+                "TEXT_MESSAGE_START" => messages.push(json!({
+                    "id":event["messageId"],"role":"assistant","content":""
+                })),
+                "TEXT_MESSAGE_CONTENT" => {
+                    let id = event["messageId"].as_str().unwrap();
+                    let message = messages
+                        .iter_mut()
+                        .find(|message| message["id"] == id)
+                        .unwrap();
+                    let content = message["content"].as_str().unwrap().to_owned()
+                        + event["delta"].as_str().unwrap();
+                    message["content"] = json!(content);
+                }
+                "TEXT_MESSAGE_END" => {
+                    assert!(messages
+                        .iter()
+                        .any(|message| message["id"] == event["messageId"]));
+                }
+                other => panic!("unexpected public event: {other}"),
+            }
+        }
+        messages
+    }
+
+    #[tokio::test]
+    async fn successful_projection_matches_sdk_chat_history_and_next_turn() {
+        let (_root, state, control, user, chat_id) = setup();
+        let old = MessageId::new();
+        let first = MessageId::new();
+        let retracted = MessageId::new();
+        let accepted = MessageId::new();
+        let unobserved = MessageId::new();
+        for (id, text) in [
+            (old, "old"),
+            (first, "pretool"),
+            (retracted, "draft"),
+            (accepted, "answer"),
+        ] {
+            control.emit_text(&Utf16JsonProjection::from(text)).await;
+            control.emit_assistant_message_identity(&id).await;
+        }
+        let page = state
+            .store
+            .protocol_events(&control.owner, "public-run-1", 0)
+            .unwrap();
+        assert_eq!(
+            page.events.len(),
+            1,
+            "no tentative public output before success"
+        );
+        let mut final_assistant = assistant(accepted, "accepted ");
+        if let ConversationMessage::Assistant { content, .. } = &mut final_assistant {
+            content.push(ContentBlock::ToolUse {
+                id: ToolUseId::new(),
+                name: "Read".into(),
+                input: Utf16JsonProjection::from_serde_value(&json!({"private":"secret"})).unwrap(),
+                provider_id: None,
+            });
+            content.push(ContentBlock::ProviderContent {
+                protocol: "anthropic_messages".into(),
+                value: Utf16JsonProjection::from_serde_value(
+                    &json!({"type":"text","text":"answer"}),
+                )
+                .unwrap(),
+            });
+        }
+        let history = vec![
+            assistant(old, "old"),
+            assistant(first, "pretool"),
+            ConversationMessage::user(MessageId::new(), "private tool/user text".into()),
+            final_assistant,
+            assistant(unobserved, "not accepted"),
+        ];
+        let baseline = HashSet::from([old]);
+        let observed = control.assistant_message_ids.lock().await.clone();
+        let (message_id, text) = accepted_assistant_projection(
+            &history,
+            &baseline,
+            &observed,
+            &*control.assistant_display_text.lock().await,
+        )
+        .unwrap();
+        assert_eq!(message_id, accepted.to_string());
+        assert_eq!(text, "accepted answer");
+        let expected = result(&chat_id, message_id.clone(), text.clone(), None);
+        let (task, failed) = control
+            .commit_terminal(State::Succeeded, Some(expected.clone()), None, None)
+            .unwrap();
+        assert!(!failed);
+        assert_eq!(task.result.as_ref(), Some(&expected));
+        let events = state
+            .store
+            .protocol_events(&control.owner, "public-run-1", 0)
+            .unwrap();
+        let mut sdk_history = vec![user];
+        sdk_history.extend(sdk_text_messages(&events.events));
+        let canonical = state
+            .chats
+            .protocol_history_page(&chat_id, None, 100)
+            .unwrap();
+        assert_eq!(sdk_history, canonical.messages);
+        assert_eq!(
+            sdk_history[1],
+            json!({"id":message_id,"role":"assistant","content":text})
+        );
+        let next = json!({"threadId":chat_id,"runId":"public-run-2","protocolVersion":"1.0",
+            "messages":sdk_history.into_iter().chain(std::iter::once(json!({"id":"user-2","role":"user","content":"next"}))).collect::<Vec<_>>()});
+        assert!(normalize_page_run_input(&state, next, Some(&chat_id)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn structured_only_empty_text_has_one_consistent_assistant_message() {
+        let (_root, state, control, user, chat_id) = setup();
+        let id = MessageId::new();
+        control.emit_assistant_message_identity(&id).await;
+        let history = vec![ConversationMessage::Assistant {
+            id,
+            content: vec![],
+            stop_reason: Some("end_turn".into()),
+            resumable: None,
+            per_turn_effort: None,
+        }];
+        let observed = control.assistant_message_ids.lock().await.clone();
+        let (message_id, text) = accepted_assistant_projection(
+            &history,
+            &HashSet::new(),
+            &observed,
+            &*control.assistant_display_text.lock().await,
+        )
+        .unwrap();
+        assert_eq!(text, "");
+        let expected = result(&chat_id, message_id, text, Some(json!({"value":7})));
+        let (task, failed) = control
+            .commit_terminal(State::Succeeded, Some(expected.clone()), None, None)
+            .unwrap();
+        assert!(!failed);
+        assert_eq!(task.result, Some(expected));
+        let page = state
+            .store
+            .protocol_events(&control.owner, "public-run-1", 0)
+            .unwrap();
+        assert!(page
+            .events
+            .iter()
+            .any(|event| event["type"] == "TEXT_MESSAGE_CONTENT" && event["delta"] == ""));
+        let mut sdk_history = vec![user];
+        sdk_history.extend(sdk_text_messages(&page.events));
+        assert_eq!(
+            sdk_history,
+            state
+                .chats
+                .protocol_history_page(&chat_id, None, 100)
+                .unwrap()
+                .messages
+        );
+    }
+
+    #[test]
+    fn serialized_result_cap_applies_to_stateless_and_session_results() {
+        for chat_id in [None, Some("chat".into())] {
+            let mut result = TaskResult {
+                text: "x".repeat(2 * 1024 * 1024 - 1024),
+                output: None,
+                attachments: Vec::new(),
+                chat_id,
+                message_id: Some("message".into()),
+            };
+            assert!(validate_task_result(&result).is_ok());
+            result.text.push_str(&"x".repeat(2048));
+            assert_eq!(
+                validate_task_result(&result).unwrap_err(),
+                "result_too_large"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn final_content_chunks_preserve_utf8_and_fit_event_limits() {
+        let (_root, state, control, user, chat_id) = setup();
+        let id = MessageId::new();
+        let text = format!("{}🙂{}", "\0".repeat(260_000), "汉".repeat(90_000));
+        let expected = result(&chat_id, id.to_string(), text.clone(), None);
+        validate_task_result(&expected).unwrap();
+        let (task, failed) = control
+            .commit_terminal(State::Succeeded, Some(expected.clone()), None, None)
+            .unwrap();
+        assert!(!failed);
+        assert_eq!(task.result, Some(expected));
+        let page = state
+            .store
+            .protocol_events(&control.owner, "public-run-1", 0)
+            .unwrap();
+        let contents: Vec<_> = page
+            .events
+            .iter()
+            .filter(|event| event["type"] == "TEXT_MESSAGE_CONTENT")
+            .collect();
+        assert!(contents.len() > 1);
+        assert!(contents
+            .iter()
+            .all(|event| serde_json::to_vec(event).unwrap().len() < 3 * 1024 * 1024));
+        let serialized_log_bytes: usize = page
+            .events
+            .iter()
+            .map(|event| serde_json::to_vec(event).unwrap().len() + 64)
+            .sum();
+        assert!(serialized_log_bytes < 8 * 1024 * 1024);
+        assert!(page.events.len() < 10_000);
+        assert_eq!(page.events.last().unwrap()["type"], "RUN_FINISHED");
+        let mut sdk_history = vec![user];
+        sdk_history.extend(sdk_text_messages(&page.events));
+        assert_eq!(sdk_history[1]["content"], text);
+        assert_eq!(
+            sdk_history,
+            state
+                .chats
+                .protocol_history_page(&chat_id, None, 100)
+                .unwrap()
+                .messages
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_display_override_is_bound_to_surviving_identity_everywhere() {
+        let (_root, state, control, user, chat_id) = setup();
+        let removed = MessageId::new();
+        let accepted = MessageId::new();
+        control
+            .observe_assistant_display_text(&removed, &Utf16JsonProjection::from("stale display"))
+            .await;
+        control.emit_assistant_message_identity(&removed).await;
+        control
+            .observe_assistant_display_text(&accepted, &Utf16JsonProjection::from("[redacted]"))
+            .await;
+        control.emit_assistant_message_identity(&accepted).await;
+        let history = vec![assistant(accepted, "secret that must not be published")];
+        let observed = control.assistant_message_ids.lock().await.clone();
+        let (id, text) = accepted_assistant_projection(
+            &history,
+            &HashSet::new(),
+            &observed,
+            &*control.assistant_display_text.lock().await,
+        )
+        .unwrap();
+        assert_eq!(id, accepted.to_string());
+        assert_eq!(text, "[redacted]");
+        let expected = result(&chat_id, id.clone(), text, None);
+        let (task, failed) = control
+            .commit_terminal(State::Succeeded, Some(expected.clone()), None, None)
+            .unwrap();
+        assert!(!failed);
+        assert_eq!(task.result, Some(expected));
+        let events = state
+            .store
+            .protocol_events(&control.owner, "public-run-1", 0)
+            .unwrap();
+        let mut sdk_history = vec![user];
+        sdk_history.extend(sdk_text_messages(&events.events));
+        assert_eq!(
+            sdk_history,
+            state
+                .chats
+                .protocol_history_page(&chat_id, None, 100)
+                .unwrap()
+                .messages
+        );
+        assert!(!serde_json::to_string(&sdk_history)
+            .unwrap()
+            .contains("secret"));
+        assert!(!serde_json::to_string(&events.events)
+            .unwrap()
+            .contains("secret"));
+
+        // A later valid empty override is meaningful and must replace the
+        // previous value rather than exposing the original transcript.
+        control
+            .observe_assistant_display_text(&accepted, &Utf16JsonProjection::from(""))
+            .await;
+        let (_, empty) = accepted_assistant_projection(
+            &history,
+            &HashSet::new(),
+            &observed,
+            &*control.assistant_display_text.lock().await,
+        )
+        .unwrap();
+        assert_eq!(empty, "");
+    }
+
+    #[tokio::test]
+    async fn cancellation_failure_and_commit_race_never_publish_drafts() {
+        for (kind, final_state) in [
+            ("cancelled", State::Cancelled),
+            ("error", State::Failed),
+            ("race", State::Cancelled),
+            ("parent-token", State::Cancelled),
+        ] {
+            let (_root, state, control, user, chat_id) = setup();
+            let id = MessageId::new();
+            control.emit_text(&Utf16JsonProjection::from("draft")).await;
+            control.emit_assistant_message_identity(&id).await;
+            if kind == "race" {
+                state
+                    .store
+                    .request_cancel(&control.owner, &control.id)
+                    .unwrap();
+            }
+            if kind == "parent-token" {
+                control.cancel.cancel();
+            }
+            let (requested, output, error) = match kind {
+                "race" | "parent-token" => (
+                    State::Succeeded,
+                    Some(result(&chat_id, id.to_string(), "draft".into(), None)),
+                    None,
+                ),
+                "error" => (State::Failed, None, Some("model_error".into())),
+                _ => (State::Cancelled, None, Some("cancelled".into())),
+            };
+            let (task, failed) = control
+                .commit_terminal(requested, output, None, error)
+                .unwrap();
+            assert!(!failed);
+            assert_eq!(task.state, final_state);
+            assert!(task.result.is_none());
+            let page = state
+                .store
+                .protocol_events(&control.owner, "public-run-1", 0)
+                .unwrap();
+            assert_eq!(page.events.len(), 2);
+            assert!(sdk_text_messages(&page.events).is_empty());
+            assert_eq!(
+                state
+                    .chats
+                    .protocol_history_page(&chat_id, None, 100)
+                    .unwrap()
+                    .messages,
+                vec![user]
+            );
+        }
+    }
+
+    #[test]
+    fn assistant_identity_must_be_current_observed_and_survive_final_snapshot() {
+        let old = MessageId::new();
+        let retracted = MessageId::new();
+        let unobserved = MessageId::new();
+        let baseline = HashSet::from([old]);
+        let observed = HashSet::from([old, retracted]);
+        let history = vec![assistant(old, "old"), assistant(unobserved, "unobserved")];
+        assert_eq!(
+            accepted_assistant_projection(&history, &baseline, &observed, &HashMap::new())
+                .unwrap_err(),
+            "chat_message_identity_missing"
+        );
     }
 }
 

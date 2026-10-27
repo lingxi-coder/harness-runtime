@@ -248,6 +248,39 @@ pub async fn dispatch_event(
                 | LlmContentBlock::CacheEdits { .. } => BlockKind::Other,
             };
             acc.start_block(index, kind)?;
+            if output.wants_model_output_progress() {
+                output.finish_model_output_block(index);
+                // Some providers send real visible text in the start frame.
+                // Tool-call initial `{}` is only a placeholder and is excluded.
+                match &content_block {
+                    LlmContentBlock::Text { text, .. } => {
+                        let units: Vec<u16> = text.encode_utf16().collect();
+                        if !units.is_empty() {
+                            output.note_model_output_delta(index, &units);
+                        }
+                    }
+                    LlmContentBlock::TextJsUtf16 {
+                        utf16_code_units, ..
+                    } => {
+                        if !utf16_code_units.is_empty() {
+                            output.note_model_output_delta(index, utf16_code_units);
+                        }
+                    }
+                    LlmContentBlock::ProviderContent { protocol, value }
+                        if protocol == "anthropic_messages"
+                            && value.string_at("/type").as_deref() == Some("text") =>
+                    {
+                        if let Some(units) = value
+                            .payload_at("/text")
+                            .and_then(|text| text.root_string_code_units())
+                            .filter(|units| !units.is_empty())
+                        {
+                            output.note_model_output_delta(index, &units);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             if !suppress_live_text {
                 match &content_block {
                     LlmContentBlock::Text { text, .. } if !text.is_empty() => {
@@ -306,6 +339,10 @@ pub async fn dispatch_event(
             match delta {
                 HistoryContentDelta::TextDelta { text } => {
                     acc.append_text(index, &text)?;
+                    if output.wants_model_output_progress() && !text.is_empty() {
+                        let units: Vec<u16> = text.encode_utf16().collect();
+                        output.note_model_output_delta(index, &units);
+                    }
                     // Stream the token to the output sink RIGHT NOW.
                     // This is the key M5-04 behavior: tokens are
                     // surfaced as they arrive, not buffered per-block.
@@ -326,6 +363,9 @@ pub async fn dispatch_event(
                     utf16_code_units,
                 } => {
                     acc.append_text_utf16(index, &utf16_code_units)?;
+                    if output.wants_model_output_progress() && !utf16_code_units.is_empty() {
+                        output.note_model_output_delta(index, &utf16_code_units);
+                    }
                     if !suppress_live_text {
                         let text_projection = Utf16JsonProjection::root_string(
                             text.clone(),
@@ -337,6 +377,9 @@ pub async fn dispatch_event(
                 }
                 HistoryContentDelta::InputJsonDelta { partial_json } => {
                     acc.append_json(index, &partial_json)?;
+                    if output.wants_model_output_progress() && !partial_json.is_empty() {
+                        output.note_model_output_delta(index, partial_json.utf16_code_units());
+                    }
                 }
                 HistoryContentDelta::ThinkingDelta { thinking } => {
                     acc.append_text(index, &thinking)?;
@@ -379,6 +422,9 @@ pub async fn dispatch_event(
                 output.emit_stream_event(&event_json, false).await;
             }
             let completed = acc.stop_block(index)?;
+            if output.wants_model_output_progress() {
+                output.finish_model_output_block(index);
+            }
             if !matches!(&completed, CompletedBlock::Skipped) {
                 output.note_response_timing(
                     lingxi_core::host::orchestrator::ResponseTimingEvent::AssistantMessage,
@@ -713,10 +759,21 @@ mod tests {
     struct ExactTextOutput {
         text: std::sync::Mutex<Option<Utf16JsonProjection>>,
         chunks: tokio::sync::Mutex<Vec<Utf16JsonProjection>>,
+        observed: std::sync::Mutex<Vec<(u32, Vec<u16>)>>,
+        finished_blocks: std::sync::Mutex<Vec<u32>>,
     }
 
     #[async_trait::async_trait]
     impl OutputStream for ExactTextOutput {
+        fn wants_model_output_progress(&self) -> bool {
+            true
+        }
+        fn note_model_output_delta(&self, index: u32, units: &[u16]) {
+            self.observed.lock().unwrap().push((index, units.to_vec()));
+        }
+        fn finish_model_output_block(&self, index: u32) {
+            self.finished_blocks.lock().unwrap().push(index);
+        }
         async fn emit_text(&self, text: &Utf16JsonProjection) {
             self.chunks.lock().await.push(text.clone());
             *self.text.lock().expect("captured output text") = Some(text.clone());
@@ -741,6 +798,209 @@ mod tests {
         }
 
         async fn emit_end_turn(&self, _: &str, _: &lingxi_core::host::CostSnapshot) {}
+    }
+
+    #[tokio::test]
+    async fn initial_text_frames_are_observed_once_without_tool_placeholders() {
+        let mut acc = BlockAccumulator::new();
+        let capture = Arc::new(ExactTextOutput::default());
+        let output: Arc<dyn OutputStream> = capture.clone();
+        for (index, content_block) in [
+            (
+                0,
+                LlmContentBlock::Text {
+                    text: "start".into(),
+                    cache_control: None,
+                    citations: None,
+                },
+            ),
+            (
+                1,
+                LlmContentBlock::TextJsUtf16 {
+                    text: "�".into(),
+                    utf16_code_units: vec![0xd83d],
+                    cache_control: None,
+                    citations: None,
+                },
+            ),
+            (
+                2,
+                LlmContentBlock::ProviderContent {
+                    protocol: "anthropic_messages".into(),
+                    value: JsonPayload::parse(r#"{"type":"text","text":"汉"}"#).unwrap(),
+                },
+            ),
+            (
+                3,
+                LlmContentBlock::ToolCall {
+                    id: "tool-1".into(),
+                    name: "Read".into(),
+                    input: JsonPayload::parse("{}").unwrap(),
+                },
+            ),
+        ] {
+            dispatch_event(
+                HistoryEvent::ContentBlockStart {
+                    index,
+                    content_block,
+                },
+                &mut acc,
+                &output,
+                true,
+                false,
+            )
+            .await
+            .unwrap();
+        }
+        dispatch_event(
+            HistoryEvent::ContentBlockDelta {
+                index: 1,
+                delta: HistoryContentDelta::TextJsUtf16Delta {
+                    text: "�".into(),
+                    utf16_code_units: vec![0xde42],
+                },
+            },
+            &mut acc,
+            &output,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *capture.observed.lock().unwrap(),
+            vec![
+                (0, "start".encode_utf16().collect()),
+                (1, vec![0xd83d]),
+                (2, "汉".encode_utf16().collect()),
+                (1, vec![0xde42]),
+            ]
+        );
+        assert!(
+            capture.chunks.lock().await.is_empty(),
+            "display suppression is independent of observation"
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_text_and_json_deltas_are_observed_with_exact_block_units() {
+        let mut acc = BlockAccumulator::new();
+        let capture = Arc::new(ExactTextOutput::default());
+        let output: Arc<dyn OutputStream> = capture.clone();
+        dispatch_event(
+            HistoryEvent::ContentBlockStart {
+                index: 0,
+                content_block: LlmContentBlock::Text {
+                    text: String::new(),
+                    cache_control: None,
+                    citations: None,
+                },
+            },
+            &mut acc,
+            &output,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        dispatch_event(
+            HistoryEvent::ContentBlockDelta {
+                index: 0,
+                delta: HistoryContentDelta::TextDelta {
+                    text: "A汉".into()
+                },
+            },
+            &mut acc,
+            &output,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        for unit in [0xd83d, 0xde42] {
+            dispatch_event(
+                HistoryEvent::ContentBlockDelta {
+                    index: 0,
+                    delta: HistoryContentDelta::TextJsUtf16Delta {
+                        text: String::from_utf16_lossy(&[unit]),
+                        utf16_code_units: vec![unit],
+                    },
+                },
+                &mut acc,
+                &output,
+                true,
+                false,
+            )
+            .await
+            .unwrap();
+        }
+        dispatch_event(
+            HistoryEvent::ContentBlockStart {
+                index: 1,
+                content_block: LlmContentBlock::ToolCall {
+                    id: "tool-1".into(),
+                    name: "Read".into(),
+                    input: JsonPayload::parse("{}").unwrap(),
+                },
+            },
+            &mut acc,
+            &output,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        dispatch_event(
+            HistoryEvent::ContentBlockDelta {
+                index: 1,
+                delta: HistoryContentDelta::InputJsonDelta {
+                    partial_json: lingxi_llm_client::protocol::JsonPayloadFragment::from_text(
+                        "{\"n\":1}",
+                    ),
+                },
+            },
+            &mut acc,
+            &output,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let invalid = dispatch_event(
+            HistoryEvent::ContentBlockDelta {
+                index: 99,
+                delta: HistoryContentDelta::TextDelta {
+                    text: "ignored".into(),
+                },
+            },
+            &mut acc,
+            &output,
+            false,
+            false,
+        )
+        .await;
+        assert!(invalid.is_err());
+        for index in [0, 1] {
+            dispatch_event(
+                HistoryEvent::ContentBlockStop { index },
+                &mut acc,
+                &output,
+                false,
+                false,
+            )
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            *capture.observed.lock().unwrap(),
+            vec![
+                (0, "A汉".encode_utf16().collect()),
+                (0, vec![0xd83d]),
+                (0, vec![0xde42]),
+                (1, "{\"n\":1}".encode_utf16().collect()),
+            ]
+        );
+        assert_eq!(*capture.finished_blocks.lock().unwrap(), vec![0, 1, 0, 1]);
     }
 
     #[tokio::test]

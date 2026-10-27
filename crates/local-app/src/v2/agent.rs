@@ -7,7 +7,7 @@ pub use chat_store::{ChatListPage, ChatMessageMetadata, ChatStore};
 
 use super::AppError;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -21,6 +21,7 @@ const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_TOTAL_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 const MAX_ATTACHMENT_BASE64_BYTES: usize = ((MAX_ATTACHMENT_BYTES + 2) / 3) * 4;
 const MAX_PROTOCOL_EVENT_LOG_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_NATIVE_OUTPUT_BYTES: u64 = 9_007_199_254_740_991;
 const MAX_PROTOCOL_EVENT_PAGE: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -323,7 +324,16 @@ struct Record {
     protocol_thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     protocol_input_digest: Option<String>,
+    // Trusted-host observation only: never serialized as part of the public Task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_output: Option<NativeOutputObservation>,
     task: Task,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeOutputObservation {
+    revision: u64,
+    bytes: u64,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -343,6 +353,9 @@ struct Ledger {
 pub struct AgentStore {
     path: PathBuf,
     events_root: PathBuf,
+    // Serialize final publication with task/event reads, cancellation and
+    // grant/admission changes. Never hold this lock across an async await.
+    protocol_commit: Mutex<()>,
     ledger: Mutex<Ledger>,
 }
 /// Newly accepted tasks execute exactly once; duplicates only return a snapshot.
@@ -711,6 +724,7 @@ impl AgentStore {
         let store = Self {
             path,
             events_root,
+            protocol_commit: Mutex::new(()),
             ledger: Mutex::new(ledger),
         };
         {
@@ -829,6 +843,17 @@ impl AgentStore {
         *ledger = next;
         Ok(result)
     }
+    /// Serialize a synchronous host finalization with readers and cancellation.
+    /// The closure may call update/append_event, but must not call methods
+    /// which acquire this same guard or perform any async work.
+    pub fn with_protocol_commit<T>(&self, commit: impl FnOnce() -> T) -> Result<T, AppError> {
+        let _guard = self
+            .protocol_commit
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
+        Ok(commit())
+    }
+
     /// Trusted native settings UI only. A changed grant invalidates every task
     /// lease immediately; the executor must cancel and reap returned run IDs.
     pub fn configure(
@@ -836,6 +861,10 @@ impl AgentStore {
         owner: Owner,
         settings: Option<Settings>,
     ) -> Result<Vec<String>, AppError> {
+        let _commit = self
+            .protocol_commit
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
         owner.validate()?;
         if let Some(s) = &settings {
             s.validate()?;
@@ -902,6 +931,10 @@ impl AgentStore {
         chat_id: Option<&str>,
         allow_new: bool,
     ) -> Result<Admission, AppError> {
+        let _commit = self
+            .protocol_commit
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
         owner.validate()?;
         validate_input(input)?;
         if chat_id
@@ -1002,6 +1035,7 @@ impl AgentStore {
                     chat_id: chat_id.map(str::to_owned),
                     protocol_thread_id: input.protocol_thread_id.clone(),
                     protocol_input_digest: input.protocol_input_digest.clone(),
+                    native_output: None,
                     task: task.clone(),
                 },
             );
@@ -1015,6 +1049,10 @@ impl AgentStore {
         })
     }
     pub fn get(&self, owner: &Owner, id: &str) -> Result<Task, AppError> {
+        let _commit = self
+            .protocol_commit
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
         owner.validate()?;
         let ledger = self
             .ledger
@@ -1198,6 +1236,10 @@ impl AgentStore {
         run_id: &str,
         after_sequence: u64,
     ) -> Result<ProtocolEventPage, AppError> {
+        let _commit = self
+            .protocol_commit
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
         owner.validate()?;
         let ledger = self
             .ledger
@@ -1310,6 +1352,10 @@ impl AgentStore {
         cursor: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Task>, AppError> {
+        let _commit = self
+            .protocol_commit
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
         let ledger = self
             .ledger
             .lock()
@@ -1354,6 +1400,10 @@ impl AgentStore {
     }
     /// Cancel intent is durable; admission stays occupied until foreground reap.
     pub fn request_cancel(&self, owner: &Owner, id: &str) -> Result<(), AppError> {
+        let _commit = self
+            .protocol_commit
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
         self.change(|ledger| {
             let record = ledger
                 .runs
@@ -1389,6 +1439,60 @@ impl AgentStore {
             Ok(())
         })
     }
+    /// Persist a trusted-host model-stream observation once the executor has stopped.
+    /// It does not alter the public task, its sequence, or the AG-UI event log.
+    pub fn record_native_output_bytes(
+        &self,
+        owner: &Owner,
+        id: &str,
+        revision: u64,
+        bytes: u64,
+    ) -> Result<(), AppError> {
+        if bytes == 0 || bytes > MAX_NATIVE_OUTPUT_BYTES {
+            return Err(invalid("invalid native output byte count"));
+        }
+        self.change(|ledger| {
+            let record = ledger
+                .runs
+                .get_mut(id)
+                .filter(|record| record.owner == *owner)
+                .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
+            if record.task.state.terminal() {
+                return Err(invalid("Agent task already ended"));
+            }
+            record.native_output = Some(NativeOutputObservation { revision, bytes });
+            Ok(())
+        })
+    }
+
+    /// Retrieve only the host-private observation for an owner-scoped public run ID.
+    pub fn native_output_bytes_for_request(
+        &self,
+        owner: &Owner,
+        run_id: &str,
+        revision: u64,
+    ) -> Result<Option<u64>, AppError> {
+        owner.validate()?;
+        let ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let record = ledger
+            .runs
+            .values()
+            .find(|record| {
+                record.owner.app_id == owner.app_id
+                    && record.owner.release_digest == owner.release_digest
+                    && record.task.request_id == run_id
+            })
+            .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
+        Ok(record
+            .native_output
+            .as_ref()
+            .filter(|observation| observation.revision == revision)
+            .map(|observation| observation.bytes.min(MAX_NATIVE_OUTPUT_BYTES)))
+    }
+
     /// Publish a confirmed completed-model-turn count when the executor knows it.
     pub fn set_completed_model_turns(
         &self,

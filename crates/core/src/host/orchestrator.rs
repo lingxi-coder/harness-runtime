@@ -4165,6 +4165,19 @@ pub enum ResponseTimingEvent {
 
 #[async_trait]
 pub trait OutputStream: Send + Sync {
+    /// Whether this sink observes raw model-output progress for trusted host UI.
+    /// This observation is separate from published messages and token accounting.
+    fn wants_model_output_progress(&self) -> bool {
+        false
+    }
+
+    /// Observe exact UTF-16 units from a validated provider text or JSON delta.
+    /// `block_index` identifies the current provider block within one stream.
+    fn note_model_output_delta(&self, _block_index: u32, _units: &[u16]) {}
+
+    /// Finish a provider block or reset a reused block index in a new stream.
+    fn finish_model_output_block(&self, _block_index: u32) {}
+
     /// Observe receipt before any asynchronous presentation or output delivery.
     /// RequestStarted marks the admitted SDK transport dispatch; sinks may
     /// retain the first fact across every request in one external query.
@@ -4178,6 +4191,15 @@ pub trait OutputStream: Send + Sync {
     }
     /// Emit a session-scoped SDK `system/task_started` or `task_updated` frame.
     async fn emit_task_lifecycle(&self, _event: &Utf16JsonProjection) {}
+
+    /// Observe the already-computed managed display text for one assistant.
+    /// This does not re-run the hook or publish a message by itself.
+    async fn observe_assistant_display_text(
+        &self,
+        _message_id: &crate::types::MessageId,
+        _text: &Utf16JsonProjection,
+    ) {
+    }
 
     /// Identify the assistant response immediately before its completion boundary.
     async fn emit_assistant_message_identity(&self, _message_id: &crate::types::MessageId) {}

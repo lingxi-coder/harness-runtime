@@ -3240,6 +3240,9 @@ impl StreamingTurnDriver<'_> {
                     .await
                     .map(hooks::ExactHookText::into_projection)
                     .unwrap_or(joined_projection);
+                orch.output
+                    .observe_assistant_display_text(&assistant_id, &on_screen)
+                    .await;
                 orch.output.emit_text(&on_screen).await;
             }
         }

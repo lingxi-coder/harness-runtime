@@ -606,11 +606,9 @@ fn native_interaction_phases_are_durable_sequenced_and_cleared_on_terminal() {
         store.get(&owner(), &run.run_id).unwrap().sequence,
         pending.sequence
     );
-    assert!(
-        store
-            .set_phase(&owner(), &run.run_id, Some("approve_any_tool"))
-            .is_err()
-    );
+    assert!(store
+        .set_phase(&owner(), &run.run_id, Some("approve_any_tool"))
+        .is_err());
     let finished = store
         .update(&owner(), &run.run_id, State::Cancelled, None, None, None)
         .unwrap();
@@ -683,18 +681,16 @@ fn protocol_events_are_schema_valid_durable_ordered_and_owner_scoped() {
             serde_json::json!({"type":"RUN_FINISHED","threadId":"thread-1","runId":"request-1"}),
         )
         .is_err());
-    assert!(
-        store
-            .protocol_events(
-                &Owner {
-                    app_id: format!("a{}", "3".repeat(32)),
-                    ..owner()
-                },
-                "request-1",
-                0,
-            )
-            .is_err()
-    );
+    assert!(store
+        .protocol_events(
+            &Owner {
+                app_id: format!("a{}", "3".repeat(32)),
+                ..owner()
+            },
+            "request-1",
+            0,
+        )
+        .is_err());
 }
 
 #[test]
@@ -725,4 +721,180 @@ fn host_restart_ends_protocol_stream_as_error_not_success() {
             .state,
         State::Interrupted
     );
+}
+
+#[test]
+fn native_output_is_private_bounded_owner_scoped_and_durable() {
+    let (dir, store) = store();
+    let mut run_input = input();
+    run_input.protocol_thread_id = Some("thread-native".into());
+    let task = store.admit(&owner(), &run_input, &[]).unwrap().task;
+    store
+        .update(&owner(), &task.run_id, State::Running, None, None, None)
+        .unwrap();
+    store
+        .append_event(
+            &owner(),
+            &task.run_id,
+            serde_json::json!({
+                "type":"RUN_STARTED","threadId":"thread-native","runId":"request-1"
+            }),
+        )
+        .unwrap();
+    let task_before = store.get(&owner(), &task.run_id).unwrap();
+    let page_before = store.protocol_events(&owner(), "request-1", 0).unwrap();
+    assert_eq!(
+        store
+            .native_output_bytes_for_request(&owner(), "request-1", 7)
+            .unwrap(),
+        None
+    );
+    assert!(store
+        .record_native_output_bytes(&owner(), &task.run_id, 7, 0)
+        .is_err());
+    assert!(store
+        .record_native_output_bytes(&owner(), &task.run_id, 7, MAX_NATIVE_OUTPUT_BYTES + 1)
+        .is_err());
+    store
+        .record_native_output_bytes(&owner(), &task.run_id, 7, 17)
+        .unwrap();
+    assert_eq!(
+        store
+            .native_output_bytes_for_request(&owner(), "request-1", 7)
+            .unwrap(),
+        Some(17)
+    );
+    assert_eq!(
+        store
+            .native_output_bytes_for_request(&owner(), "request-1", 8)
+            .unwrap(),
+        None
+    );
+    let task_after = store.get(&owner(), &task.run_id).unwrap();
+    let page_after = store.protocol_events(&owner(), "request-1", 0).unwrap();
+    assert_eq!(task_before.sequence, task_after.sequence);
+    assert_eq!(
+        serde_json::to_value(task_before).unwrap(),
+        serde_json::to_value(task_after).unwrap()
+    );
+    assert_eq!(page_before, page_after);
+    assert!(serde_json::to_value(&page_after)
+        .unwrap()
+        .get("nativeOutputBytes")
+        .is_none());
+    let other_release = Owner {
+        release_digest: "3".repeat(64),
+        ..owner()
+    };
+    assert!(store
+        .native_output_bytes_for_request(&other_release, "request-1", 7)
+        .is_err());
+    assert!(store
+        .record_native_output_bytes(&other_release, &task.run_id, 7, 3)
+        .is_err());
+    store
+        .update(
+            &owner(),
+            &task.run_id,
+            State::Cancelled,
+            None,
+            None,
+            Some("cancelled".into()),
+        )
+        .unwrap();
+    store.append_event(&owner(), &task.run_id, serde_json::json!({
+        "type":"RUN_FINISHED","threadId":"thread-native","runId":"request-1","outcome":{"type":"cancelled"}
+    })).unwrap();
+    assert!(store
+        .record_native_output_bytes(&owner(), &task.run_id, 7, 18)
+        .is_err());
+    let reopened = AgentStore::open(dir.path()).unwrap();
+    assert_eq!(
+        reopened
+            .native_output_bytes_for_request(&owner(), "request-1", 7)
+            .unwrap(),
+        Some(17)
+    );
+    {
+        let mut ledger = reopened.ledger.lock().unwrap();
+        ledger.runs.get_mut(&task.run_id).unwrap().native_output = Some(NativeOutputObservation {
+            revision: 7,
+            bytes: u64::MAX,
+        });
+        reopened.persist(&ledger).unwrap();
+    }
+    let reopened_invalid = AgentStore::open(dir.path()).unwrap();
+    assert_eq!(
+        reopened_invalid
+            .native_output_bytes_for_request(&owner(), "request-1", 7)
+            .unwrap(),
+        Some(MAX_NATIVE_OUTPUT_BYTES)
+    );
+}
+
+#[test]
+fn protocol_finalization_blocks_readers_until_terminal_event_is_durable() {
+    use std::{
+        sync::{mpsc, Arc},
+        thread,
+        time::Duration,
+    };
+    let (_dir, store) = store();
+    let store = Arc::new(store);
+    let mut input = input();
+    input.protocol_thread_id = Some("barrier-thread".into());
+    let run = store.admit(&owner(), &input, &[]).unwrap().task;
+    store
+        .update(&owner(), &run.run_id, State::Running, None, None, None)
+        .unwrap();
+    store
+        .append_event(
+            &owner(),
+            &run.run_id,
+            serde_json::json!({
+                "type":"RUN_STARTED","threadId":"barrier-thread","runId":"request-1"
+            }),
+        )
+        .unwrap();
+    let (updated_tx, updated_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let writer_store = store.clone();
+    let run_id = run.run_id.clone();
+    let writer = thread::spawn(move || {
+        writer_store.with_protocol_commit(|| {
+            writer_store.update(&owner(), &run_id, State::Cancelled, None, None, Some("cancelled".into())).unwrap();
+            updated_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            writer_store.append_event(&owner(), &run_id, serde_json::json!({
+                "type":"RUN_FINISHED","threadId":"barrier-thread","runId":"request-1","outcome":{"type":"cancelled"}
+            })).unwrap();
+        }).unwrap();
+    });
+    updated_rx.recv().unwrap();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let (observed_tx, observed_rx) = mpsc::channel();
+    let reader_store = store.clone();
+    let reader_id = run.run_id.clone();
+    let reader = thread::spawn(move || {
+        ready_tx.send(()).unwrap();
+        let status = reader_store.get(&owner(), &reader_id).unwrap();
+        let page = reader_store
+            .protocol_events(&owner(), "request-1", 0)
+            .unwrap();
+        observed_tx.send((status, page)).unwrap();
+    });
+    ready_rx.recv().unwrap();
+    assert!(
+        matches!(
+            observed_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ),
+        "readers must not observe terminal status before its event is published"
+    );
+    release_tx.send(()).unwrap();
+    let (status, page) = observed_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(status.state, State::Cancelled);
+    assert_eq!(page.events.last().unwrap()["type"], "RUN_FINISHED");
+    writer.join().unwrap();
+    reader.join().unwrap();
 }
