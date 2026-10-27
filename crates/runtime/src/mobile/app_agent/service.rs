@@ -16,7 +16,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, Ordering},
         Weak,
     },
 };
@@ -161,7 +161,6 @@ struct Control {
     assistant_message_id: AsyncMutex<Option<String>>,
     protocol_message: AsyncMutex<ProtocolMessageState>,
     protocol_events_failed: AtomicBool,
-    completed_model_turns: AtomicU32,
     text: AsyncMutex<String>,
     model_failed: AtomicBool,
     model_failure: Mutex<Option<String>>,
@@ -394,6 +393,18 @@ fn remove_known_agent_directory(path: &Path) -> Result<(), String> {
 }
 
 impl Control {
+    async fn run_stateless_query<F>(&self, query: F) -> Result<(TaskResult, Value), String>
+    where
+        F: std::future::Future<Output = Result<(TaskResult, Value), String>>,
+    {
+        let (result, usage) = query.await?;
+        self.store
+            .set_completed_model_turns(&self.owner, &self.id, 1)
+            .map_err(|_| "task_storage_failed")?;
+        *self.usage.lock().await = Some(usage.clone());
+        Ok((result, usage))
+    }
+
     async fn append_protocol_event(&self, event: Value) -> Result<(), String> {
         let Some(_) = self.protocol_thread_id else {
             return Ok(());
@@ -641,15 +652,8 @@ impl OutputStream for Control {
     ) {
     }
     async fn emit_end_turn(&self, _: &str, _: &CostSnapshot) {
-        let completed = self.completed_model_turns.fetch_add(1, Ordering::AcqRel) + 1;
-        if self
-            .store
-            .set_completed_model_turns(&self.owner, &self.id, completed)
-            .is_err()
-        {
-            self.model_failed.store(true, Ordering::Release);
-            self.revoke();
-        }
+        // This callback reports an orchestration terminal outcome, including
+        // cancellation and errors, not a confirmed completed model turn.
     }
     async fn emit_terminal_api_error(&self, status: Option<u16>, kind: &str, stop_reason: &str) {
         // Native-only diagnostics: never log provider bodies, prompts or keys,
@@ -1275,7 +1279,6 @@ impl AppAgentHost {
             assistant_message_id: AsyncMutex::new(None),
             protocol_message: AsyncMutex::new(ProtocolMessageState::default()),
             protocol_events_failed: AtomicBool::new(false),
-            completed_model_turns: AtomicU32::new(0),
             text: AsyncMutex::new(String::new()),
             model_failed: AtomicBool::new(false),
             model_failure: Mutex::new(None),
@@ -1570,13 +1573,9 @@ impl AppAgentHost {
                     None,
                 )
                 .map_err(|_| "task_storage_failed")?;
-            let (result, usage) = self.factory.query_stateless(admission, &input).await?;
-            control
-                .store
-                .set_completed_model_turns(&control.owner, &control.id, 1)
-                .map_err(|_| "task_storage_failed")?;
-            *control.usage.lock().await = Some(usage.clone());
-            return Ok((result, usage));
+            return control
+                .run_stateless_query(self.factory.query_stateless(admission, &input))
+                .await;
         }
         let prepared = crate::app_agent_input::prepare(&input).await?;
         let (question_tx, mut question_rx) =
@@ -2847,6 +2846,213 @@ fn now_millis() -> u64 {
 
 fn usage_value(cost: &CostSnapshot) -> Value {
     json!({"inputTokens":cost.input_tokens,"outputTokens":cost.output_tokens,"costUsd":cost.total_usd,"costEstimated":!cost.unknown_models,"turns":cost.api_calls})
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    fn running_control(root: &Path) -> Control {
+        let app_id = format!("a{}", "6".repeat(32));
+        std::fs::create_dir_all(root.join(&app_id)).unwrap();
+        let state = AppAgentState::open(root, &app_id).unwrap();
+        let owner = Owner {
+            app_id,
+            release_digest: "2".repeat(64),
+            invocation_id: "progress-test".into(),
+        };
+        let settings: Settings = serde_json::from_value(json!({
+            "model":{"providerId":"provider","modelId":"model"},
+            "tools":{},"skills":[],"background":false,"maxTurns":4,"timeoutMs":30000
+        }))
+        .unwrap();
+        state
+            .store
+            .configure(owner.clone(), Some(settings))
+            .unwrap();
+        let input: Input = serde_json::from_value(json!({
+            "requestId":"progress-run",
+            "prompt":"check progress"
+        }))
+        .unwrap();
+        let admission = state.store.admit(&owner, &input, &[]).unwrap();
+        let id = admission.task.run_id;
+        state
+            .store
+            .update(&owner, &id, State::Running, None, None, None)
+            .unwrap();
+        let (chat_persisted, _) = watch::channel(None);
+        Control {
+            owner,
+            revision: 1,
+            request_id: input.request_id,
+            id,
+            protocol_thread_id: None,
+            protocol_parent_run_id: None,
+            cancel: CancellationToken::new(),
+            finished: AtomicBool::new(false),
+            done: Notify::new(),
+            lease: Mutex::new(None),
+            interaction: AsyncMutex::new(None),
+            store: state.store,
+            chats: state.chats,
+            chat_id: None,
+            user_message_id: None,
+            chat_persisted,
+            chat_commit: AsyncMutex::new(None),
+            attachment_metadata: Vec::new(),
+            assistant_message_id: AsyncMutex::new(None),
+            protocol_message: AsyncMutex::new(ProtocolMessageState::default()),
+            protocol_events_failed: AtomicBool::new(false),
+            text: AsyncMutex::new(String::new()),
+            model_failed: AtomicBool::new(false),
+            model_failure: Mutex::new(None),
+            timed_out: AtomicBool::new(false),
+            usage: AsyncMutex::new(None),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_terminal_callbacks_leave_model_progress_unknown() {
+        let cases = [
+            ("end_turn", State::Succeeded, None, 1),
+            ("aborted_streaming", State::Cancelled, Some("cancelled"), 1),
+            ("model_error", State::Failed, Some("model_error"), 1),
+            (
+                "budget_exhausted",
+                State::Failed,
+                Some("budget_exhausted"),
+                1,
+            ),
+            // Multiple callbacks and a multi-call cost snapshot must not be
+            // mistaken for reliable per-model-turn completion events.
+            ("end_turn", State::Succeeded, None, 3),
+        ];
+        for (reason, terminal, error, callbacks) in cases {
+            let root = tempfile::tempdir().unwrap();
+            let control = running_control(root.path());
+            let before = control.store.get(&control.owner, &control.id).unwrap();
+            if terminal == State::Cancelled {
+                control.cancel.cancel();
+            }
+            if reason == "model_error" {
+                control
+                    .emit_terminal_api_error(Some(503), "server_error", reason)
+                    .await;
+            }
+            let cost = CostSnapshot {
+                api_calls: 4,
+                ..CostSnapshot::default()
+            };
+            for _ in 0..callbacks {
+                control.emit_end_turn(reason, &cost).await;
+            }
+            let running = control.store.get(&control.owner, &control.id).unwrap();
+            assert_eq!(running.progress, None, "{reason}");
+            assert_eq!(running.sequence, before.sequence, "{reason}");
+            assert!(public_task_value(&running, "thread".into())
+                .unwrap()
+                .get("progress")
+                .is_none());
+            assert_eq!(
+                control.model_failed.load(Ordering::Acquire),
+                reason == "model_error"
+            );
+            let finished = control
+                .store
+                .update(
+                    &control.owner,
+                    &control.id,
+                    terminal.clone(),
+                    None,
+                    None,
+                    error.map(str::to_owned),
+                )
+                .unwrap();
+            assert_eq!(finished.state, terminal);
+            assert_eq!(finished.progress, None, "{reason}");
+            assert!(public_task_value(&finished, "thread".into())
+                .unwrap()
+                .get("progress")
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn stateless_progress_is_published_only_after_a_successful_query() {
+        for succeeds in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let control = Arc::new(running_control(root.path()));
+            let before = control.store.get(&control.owner, &control.id).unwrap();
+            let (started_tx, started_rx) = oneshot::channel();
+            let (result_tx, result_rx) = oneshot::channel();
+            let running = control.clone();
+            let task = tokio::spawn(async move {
+                running
+                    .run_stateless_query(async move {
+                        started_tx.send(()).unwrap();
+                        result_rx.await.unwrap()
+                    })
+                    .await
+            });
+            started_rx.await.unwrap();
+            let pending = control.store.get(&control.owner, &control.id).unwrap();
+            assert_eq!(pending.progress, None);
+            assert_eq!(pending.sequence, before.sequence);
+
+            let expected_result = TaskResult {
+                text: "answer".into(),
+                output: None,
+                attachments: Vec::new(),
+                chat_id: None,
+                message_id: None,
+            };
+            let expected_usage = json!({"inputTokens":3,"outputTokens":2});
+            result_tx
+                .send(if succeeds {
+                    Ok((expected_result.clone(), expected_usage.clone()))
+                } else {
+                    Err("model_error".to_owned())
+                })
+                .unwrap();
+            let result = task.await.unwrap();
+            let observed = control.store.get(&control.owner, &control.id).unwrap();
+            if succeeds {
+                let (answer, usage) = result.unwrap();
+                assert_eq!(answer, expected_result);
+                assert_eq!(usage, expected_usage);
+                let progress = observed.progress.as_ref().unwrap();
+                assert_eq!(progress.completed_model_turns, 1);
+                assert_eq!(progress.turn_limit, 4);
+                assert_eq!(observed.sequence, before.sequence + 1);
+                assert_eq!(*control.usage.lock().await, Some(usage.clone()));
+                let public = public_task_value(&observed, "thread".into()).unwrap();
+                assert_eq!(public["progress"]["completedModelTurns"], 1);
+                assert_eq!(public["progress"]["turnLimit"], 4);
+                let finished = control
+                    .store
+                    .update(
+                        &control.owner,
+                        &control.id,
+                        State::Succeeded,
+                        Some(answer),
+                        Some(usage),
+                        None,
+                    )
+                    .unwrap();
+                assert_eq!(finished.progress, observed.progress);
+            } else {
+                assert_eq!(result.unwrap_err(), "model_error");
+                assert_eq!(observed.progress, None);
+                assert_eq!(observed.sequence, before.sequence);
+                assert_eq!(*control.usage.lock().await, None);
+                assert!(public_task_value(&observed, "thread".into())
+                    .unwrap()
+                    .get("progress")
+                    .is_none());
+            }
+        }
+    }
 }
 
 #[cfg(test)]

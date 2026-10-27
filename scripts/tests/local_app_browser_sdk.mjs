@@ -112,6 +112,9 @@ function fakeIndexedDb({databaseName = 'lingxi-local-app-agui-app-one', pendingR
       return {started, release: releaseResolve};
     },
     getCount(key) { return getCounts.get(key) || 0; },
+    getRecord(name, storeName, key) {
+      return structuredClone(databases.get(name)?.stores.get(storeName)?.get(key));
+    },
     open(name) {
       const request = {};
       setImmediate(() => {
@@ -191,6 +194,41 @@ async function waitFor(predicate, message) {
   assert.fail(message);
 }
 
+function fakeClock() {
+  let now = 0;
+  let nextId = 1;
+  const timers = new Map();
+  return {
+    setTimeout(callback, delay) {
+      const id = nextId++;
+      timers.set(id, {callback, at: now + delay});
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+    advance(ms) {
+      const target = now + ms;
+      for (;;) {
+        const next = [...timers.entries()].filter(([, timer]) => timer.at <= target)
+          .sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+        if (!next) break;
+        const [id, timer] = next;
+        now = timer.at;
+        timers.delete(id);
+        timer.callback();
+      }
+      now = target;
+    },
+    pending() { return [...timers.values()].map(timer => timer.at - now).sort((a, b) => a - b); }
+  };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((onResolve, onReject) => { resolve = onResolve; reject = onReject; });
+  return {promise, resolve, reject};
+}
+
 function runEvents(runInput, result = 'answer') {
   return [
     {type: 'RUN_STARTED', threadId: runInput.threadId, runId: runInput.runId, protocolVersion: '1.0'},
@@ -202,7 +240,7 @@ function runEvents(runInput, result = 'answer') {
   ];
 }
 
-function browser({child = false, existing = false, hostPlatform = 'android', pendingRecords = [], initialWakeRunId} = {}) {
+function browser({child = false, existing = false, hostPlatform = 'android', pendingRecords = [], initialWakeRunId, clock} = {}) {
   const requests = [];
   const inputs = [];
   const listeners = [];
@@ -244,6 +282,7 @@ function browser({child = false, existing = false, hostPlatform = 'android', pen
     ready: Promise.resolve({scope: `${location.origin}/`})
   }};
   const history = {state: null, replaceState(_state, _title, url) { location.href = new URL(url, location.href).href; }};
+  let fetchHandler;
   const context = vm.createContext({
     window, location, document, navigator, history, console, URL, URLSearchParams,
     CustomEvent: BrowserCustomEvent,
@@ -253,19 +292,20 @@ function browser({child = false, existing = false, hostPlatform = 'android', pen
     TextEncoder,
     btoa: globalThis.btoa,
     AbortController,
-    setTimeout,
-    clearTimeout,
+    setTimeout: clock?.setTimeout || setTimeout,
+    clearTimeout: clock?.clearTimeout || clearTimeout,
     setInterval: () => 1,
     fetch: async (url, options) => {
       const envelope = JSON.parse(options.body);
       const request = {url, options, envelope};
       requests.push(request);
+      if (fetchHandler) return fetchHandler(request);
       const {method, args} = envelope;
       let value = {};
-      if (method === 'agent.tasks.start') {
+      if (method === 'agent.tasks.start' || method === 'agent.chats.send') {
         value = {runId: args.input.runId};
       } else if (method === 'agent.tasks.events') {
-        const submitted = requests.find(candidate => candidate.envelope.method === 'agent.tasks.start');
+        const submitted = requests.find(candidate => ['agent.tasks.start', 'agent.chats.send'].includes(candidate.envelope.method));
         const runInput = submitted?.envelope.args.input || {threadId: 'thread-one', runId: args.runId};
         value = {events: runEvents(runInput, 'answer'), sequence: 5};
       } else if (method === 'agent.chats.create') {
@@ -287,6 +327,7 @@ function browser({child = false, existing = false, hostPlatform = 'android', pen
   return {
     api: window.localApp, requests, inputs, listeners, location, window, document, history, indexedDb,
     input: value => parseInPage(JSON.stringify(value)),
+    setFetchHandler(handler) { fetchHandler = handler; },
     async flush() { await new Promise(setImmediate); await new Promise(setImmediate); },
     simulateWakeReturn(runId) {
       location.href = `${location.origin}/__run/epoch-one/index.html?__lingxi_ready=${encodeURIComponent(runId)}`;
@@ -334,6 +375,276 @@ test('cold official client reconnect reads events without starting a model run',
   assert.equal(result.newMessages.length, 1);
   assert.equal(b.requests.some(request => request.envelope.method === 'agent.tasks.start'), false);
   assert.deepEqual(b.requests.map(request => request.envelope.method), ['agent.tasks.events']);
+});
+
+test('all six read-only facade calls time out waiting for headers after five seconds', async () => {
+  const cases = [
+    ['agent.tasks.get', b => b.api.agent.tasks.get('run-one')],
+    ['agent.tasks.list', b => b.api.agent.tasks.list()],
+    ['agent.tasks.events', b => b.api.agent.tasks.events(b.input({runId: 'run-one'}))],
+    ['agent.chats.get', b => b.api.agent.chats.open('chat-one')],
+    ['agent.chats.list', b => b.api.agent.chats.list()],
+    ['agent.chats.history', (_b, handle) => handle.history()]
+  ];
+  for (const [method, call] of cases) {
+    const clock = fakeClock();
+    const b = browser({clock});
+    await b.flush();
+    const handle = method === 'agent.chats.history' ? await b.api.agent.chats.open('chat-one') : null;
+    const fetchResult = deferred();
+    b.setFetchHandler(() => fetchResult.promise); // Ignores abort, like a stalled transport.
+    const promise = call(b, handle);
+    let settled = false;
+    void promise.then(() => { settled = true; }, () => { settled = true; });
+    const request = b.requests.at(-1);
+    assert.equal(request.envelope.method, method);
+    assert.deepEqual(clock.pending(), [5000]);
+    clock.advance(4999);
+    await b.flush();
+    assert.equal(settled, false, method);
+    clock.advance(1);
+    await assert.rejects(promise, error => {
+      assert.equal(error.code, 'host_unavailable');
+      assert.equal(error.definitive, undefined);
+      assert.equal(error.message, 'LingXi is unavailable or paused; open LingXi to reconnect.');
+      return true;
+    });
+    assert.equal(request.options.signal.aborted, true, method);
+    assert.deepEqual(clock.pending(), []);
+    fetchResult.reject(new TypeError('late fetch failure'));
+    await b.flush(); // The losing fetch rejection must remain handled.
+  }
+});
+
+test('read-only deadline covers a stalled JSON body and cleans up after a late rejection', async () => {
+  const clock = fakeClock();
+  const b = browser({clock, hostPlatform: 'ios'});
+  await b.flush();
+  const initialUrl = b.location.href;
+  const body = deferred();
+  let bodyStarted = false;
+  b.setFetchHandler(() => ({ok: true, json: () => { bodyStarted = true; return body.promise; }}));
+  const promise = b.api.agent.tasks.get('run-one');
+  let settled = false;
+  void promise.then(() => { settled = true; }, () => { settled = true; });
+  await waitFor(() => bodyStarted, 'The response body was not requested.');
+  const request = b.requests.at(-1);
+  assert.deepEqual(clock.pending(), [5000]);
+  clock.advance(4999);
+  await b.flush();
+  assert.equal(settled, false);
+  clock.advance(1);
+  await assert.rejects(promise, error => error.code === 'host_unavailable' && error.definitive === undefined);
+  assert.equal(request.options.signal.aborted, true);
+  assert.deepEqual(clock.pending(), []);
+  b.window.dispatchEvent({type: 'pageshow'});
+  b.document.dispatchEvent({type: 'visibilitychange'});
+  await b.flush();
+  assert.equal(b.requests.length, 1);
+  assert.equal(b.location.href, initialUrl, 'A read-only timeout must not wake LingXi.');
+  body.reject(new TypeError('late body failure'));
+  await b.flush();
+});
+
+test('an immediate abort rejection cannot replace the timeout error', async () => {
+  for (const phase of ['headers', 'body']) {
+    const clock = fakeClock();
+    const b = browser({clock});
+    await b.flush();
+    let bodyStarted = false;
+    b.setFetchHandler(request => {
+      const aborted = new Promise((_, reject) => {
+        request.options.signal.addEventListener('abort', () => reject(new SyntaxError('abort')), {once: true});
+      });
+      if (phase === 'headers') return aborted;
+      return {ok: true, json: () => { bodyStarted = true; return aborted; }};
+    });
+    const promise = b.api.agent.tasks.get('run-one');
+    if (phase === 'body') await waitFor(() => bodyStarted, 'The response body was not requested.');
+    clock.advance(5000);
+    await assert.rejects(promise, error => error.code === 'host_unavailable' && error.definitive === undefined);
+    assert.equal(b.requests.at(-1).options.signal.aborted, true);
+    assert.deepEqual(clock.pending(), []);
+    await b.flush();
+  }
+});
+
+test('a body completed before the deadline releases its timer without aborting', async () => {
+  const clock = fakeClock();
+  const b = browser({clock});
+  await b.flush();
+  const body = deferred();
+  let bodyStarted = false;
+  b.setFetchHandler(() => ({ok: true, json: () => { bodyStarted = true; return body.promise; }}));
+  const promise = b.api.agent.tasks.get('run-one');
+  await waitFor(() => bodyStarted, 'The response body was not requested.');
+  clock.advance(4999);
+  assert.deepEqual(clock.pending(), [1]);
+  body.resolve(b.input({ok: true, value: {state: 'idle'}}));
+  assert.equal((await promise).state, 'idle');
+  assert.deepEqual(clock.pending(), []);
+  clock.advance(120000);
+  assert.equal(b.requests.at(-1).options.signal.aborted, false);
+});
+
+test('completed bodies and every response error release the request timer', async () => {
+  const scenarios = [
+    {name: 'success', response: b => ({ok: true, json: async () => b.input({ok: true, value: {state: 'idle'}})})},
+    {name: 'invalid JSON', response: () => ({ok: true, json: async () => { throw new SyntaxError('bad JSON'); }}), code: 'invalid_host_response'},
+    {name: 'body transport failure', response: () => ({ok: true, json: async () => { throw new TypeError('stream failed'); }}), code: 'host_unavailable'},
+    {name: 'fetch transport failure', response: () => { throw new TypeError('network failed'); }, code: 'host_unavailable'},
+    {name: 'HTTP error', response: () => ({ok: false}), code: 'host_unavailable', definitive: true, aborted: true},
+    {name: 'host error', response: b => ({ok: true, json: async () => b.input({ok: false, error: {code: 'denied', message: 'Denied'}})}), code: 'denied', definitive: true}
+  ];
+  for (const scenario of scenarios) {
+    const clock = fakeClock();
+    const b = browser({clock});
+    await b.flush();
+    b.setFetchHandler(() => scenario.response(b));
+    const promise = b.api.agent.tasks.get('run-one');
+    if (scenario.code) {
+      await assert.rejects(promise, error => {
+        assert.equal(error.code, scenario.code, scenario.name);
+        assert.equal(error.definitive, scenario.definitive, scenario.name);
+        return true;
+      });
+    } else {
+      assert.equal((await promise).state, 'idle');
+    }
+    assert.deepEqual(clock.pending(), [], scenario.name);
+    assert.equal(b.requests.at(-1).options.signal.aborted, scenario.aborted || false, scenario.name);
+    clock.advance(120000);
+    assert.equal(b.requests.at(-1).options.signal.aborted, scenario.aborted || false, scenario.name);
+  }
+});
+
+test('mutating control calls keep their 120-second budget', async () => {
+  const cases = [
+    ['agent.tasks.cancel', b => b.api.agent.tasks.cancel('run-one')],
+    ['agent.chats.create', b => b.api.agent.chats.create()],
+    ['agent.chats.archive', b => b.api.agent.chats.archive('chat-one')],
+    ['agent.chats.delete', b => b.api.agent.chats.delete('chat-one')],
+    ['agent.chats.cancel', (_b, handle) => handle.cancel()]
+  ];
+  for (const [method, call] of cases) {
+    const clock = fakeClock();
+    const b = browser({clock});
+    await b.flush();
+    const handle = method === 'agent.chats.cancel' ? await b.api.agent.chats.open('chat-one') : null;
+    b.setFetchHandler(() => new Promise(() => {}));
+    const promise = call(b, handle);
+    let settled = false;
+    void promise.then(() => { settled = true; }, () => { settled = true; });
+    assert.equal(b.requests.at(-1).envelope.method, method);
+    assert.deepEqual(clock.pending(), [120000]);
+    clock.advance(5000);
+    await b.flush();
+    assert.equal(settled, false, method);
+    assert.deepEqual(clock.pending(), [115000]);
+    clock.advance(115000);
+    await assert.rejects(promise, error => error.code === 'host_unavailable' && error.definitive === undefined);
+    assert.equal(b.requests.at(-1).options.signal.aborted, true);
+    assert.deepEqual(clock.pending(), []);
+  }
+});
+
+test('large task and chat submissions preserve pending input for an explicit same-ID retry', async () => {
+  for (const method of ['agent.tasks.start', 'agent.chats.send']) {
+    const clock = fakeClock();
+    const b = browser({clock});
+    await b.flush();
+    const chat = method === 'agent.chats.send' ? await b.api.agent.chats.open('chat-one') : null;
+    const attachment = await b.api.agent.file(new File([new Uint8Array(1024 * 1024).fill(0x61)], 'document.txt', {type: 'text/plain'}));
+    const runInput = b.input(input({
+      threadId: chat ? chat.id : 'thread-one', runId: 'same-run',
+      content: [{id: 'user-one', role: 'user', content: [attachment]}]
+    }));
+    const body = deferred();
+    const initialUrl = b.location.href;
+    const initialRequests = b.requests.length;
+    b.setFetchHandler(() => ({ok: true, json: () => body.promise}));
+    const submit = () => chat ? chat.send(runInput) : b.api.agent.tasks.start(runInput);
+    const promise = submit();
+    let settled = false;
+    void promise.then(() => { settled = true; }, () => { settled = true; });
+    await waitFor(() => b.requests.length > initialRequests, `${method} was not submitted.`);
+    const request = b.requests.at(-1);
+    assert.equal(request.envelope.method, method);
+    assert.ok(request.options.body.length > 1024 * 1024);
+    assert.deepEqual(clock.pending(), [120000]);
+    clock.advance(5000);
+    await b.flush();
+    assert.equal(settled, false, method);
+    assert.deepEqual(clock.pending(), [115000]);
+    clock.advance(115000);
+    await assert.rejects(promise, error => {
+      assert.equal(error.code, 'host_unavailable');
+      assert.equal(error.definitive, undefined);
+      assert.match(error.message, /saved for an explicit retry/);
+      return true;
+    });
+    assert.equal(request.options.signal.aborted, true);
+    assert.deepEqual(clock.pending(), []);
+    const key = 'app-one:3:same-run';
+    const saved = b.indexedDb.getRecord('lingxi-local-app-agui-app-one', 'pending', key);
+    assert.equal(saved.state, 'uncertain');
+    assert.equal(saved.runId, runInput.runId);
+    assert.equal(saved.threadId, runInput.threadId);
+    assert.equal(saved.method, method);
+    assert.ok(saved.fingerprint);
+    assert.deepEqual(saved.input, request.envelope.args.input);
+    b.window.dispatchEvent({type: 'pageshow'});
+    b.document.dispatchEvent({type: 'visibilitychange'});
+    await b.flush();
+    assert.equal(b.requests.length, initialRequests + 1, 'Timeout must not automatically retry or create a task.');
+    assert.equal(b.location.href, initialUrl, 'Timeout must not automatically wake LingXi.');
+
+    b.setFetchHandler(null);
+    const result = await submit();
+    if (chat) assert.equal(result.result, 'answer');
+    else assert.equal(result.runId, runInput.runId);
+    const attempts = b.requests.filter(item => item.envelope.method === method);
+    assert.equal(attempts.length, 2);
+    assert.deepEqual(attempts[1].envelope, attempts[0].envelope);
+    assert.equal(b.requests.filter(item => item.envelope.method === 'agent.tasks.start').length,
+      method === 'agent.tasks.start' ? 2 : 0);
+    const accepted = b.indexedDb.getRecord('lingxi-local-app-agui-app-one', 'pending', key);
+    assert.equal(accepted.state, 'accepted');
+    assert.equal(accepted.fingerprint, saved.fingerprint);
+    assert.equal(accepted.runId, saved.runId);
+    assert.equal(accepted.threadId, saved.threadId);
+    assert.equal(b.location.href, initialUrl);
+    body.reject(new TypeError('late submission body failure'));
+    await b.flush();
+  }
+});
+
+test('submission failures keep definitive rejections distinct from uncertain input', async () => {
+  const cases = [
+    {name: 'HTTP failure', response: () => ({ok: false}), code: 'host_unavailable', state: 'rejected', definitive: true},
+    {name: 'host rejection', response: b => ({ok: true, json: async () => b.input({ok: false, error: {code: 'denied'}})}), code: 'denied', state: 'rejected', definitive: true},
+    {name: 'invalid JSON', response: () => ({ok: true, json: async () => { throw new SyntaxError('bad JSON'); }}), code: 'invalid_host_response', state: 'uncertain'},
+    {name: 'body transport failure', response: () => ({ok: true, json: async () => { throw new TypeError('stream failed'); }}), code: 'host_unavailable', state: 'uncertain'}
+  ];
+  for (const item of cases) {
+    const clock = fakeClock();
+    const b = browser({clock});
+    await b.flush();
+    b.setFetchHandler(() => item.response(b));
+    const runInput = b.input(input({runId: 'failed-run'}));
+    await assert.rejects(b.api.agent.tasks.start(runInput), error => {
+      assert.equal(error.code, item.code, item.name);
+      assert.equal(error.definitive, item.definitive, item.name);
+      return true;
+    });
+    const saved = b.indexedDb.getRecord('lingxi-local-app-agui-app-one', 'pending', 'app-one:3:failed-run');
+    assert.equal(saved.state, item.state, item.name);
+    assert.equal(saved.runId, runInput.runId);
+    assert.equal(saved.threadId, runInput.threadId);
+    assert.equal(b.requests.length, 1);
+    assert.deepEqual(clock.pending(), []);
+    if (item.state === 'uncertain') assert.deepEqual(saved.input, b.requests[0].envelope.args.input);
+  }
 });
 
 test('iOS wake stores the full RunAgentInput and retries only after runId callback', async () => {

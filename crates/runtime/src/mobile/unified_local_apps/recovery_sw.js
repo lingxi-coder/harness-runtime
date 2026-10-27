@@ -115,12 +115,37 @@ else{
     }
     event.respondWith((async () => {
       let reason;
+      const controller = new AbortController();
+      let timer;
+      let onAbort;
       try {
-        const response = await fetch(request);
+        const networkSignal = AbortSignal.any([request.signal, controller.signal]);
+        const aborted = new Promise((_, reject) => {
+          onAbort = () => {
+            reject();
+            controller.abort();
+          };
+          request.signal.addEventListener('abort', onAbort, {once: true});
+          if (request.signal.aborted) onAbort();
+        });
+        const deadline = new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            reject();
+            controller.abort();
+          }, 5000);
+        });
+        const network = (async () => {
+          if (networkSignal.aborted) throw new Error('Navigation aborted.');
+          return fetch(request, {signal: networkSignal});
+        })();
+        const response = await Promise.race([aborted, deadline, network]);
         if (response.ok || response.status < 400) return response;
         reason = response.status;
       } catch (_) {
         reason = 'network_error';
+      } finally {
+        clearTimeout(timer);
+        request.signal.removeEventListener('abort', onAbort);
       }
       return recoveryResponse(request, reason);
     })());

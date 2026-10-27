@@ -190,7 +190,7 @@ pub struct TaskResult {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskProgress {
-    /// Observed Harness end-turn callbacks; a count, not a completion percent.
+    /// Confirmed completed model turns, when known; not a completion percent.
     pub completed_model_turns: u32,
     /// Configured turn ceiling, not an estimate of total work.
     pub turn_limit: u32,
@@ -1389,7 +1389,7 @@ impl AgentStore {
             Ok(())
         })
     }
-    /// Publish a real completed-turn count from the Harness end-turn callback.
+    /// Publish a confirmed completed-model-turn count when the executor knows it.
     pub fn set_completed_model_turns(
         &self,
         owner: &Owner,

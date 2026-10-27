@@ -18,6 +18,10 @@
   const pendingDbName = 'lingxi-local-app-agui-' + config.appId;
   const obsoletePendingDbName = 'lingxi-local-app-agent-' + config.appId;
   const pendingPrefix = config.appId + ':' + config.revision + ':';
+  const readOnlyMethods = new Set([
+    'agent.tasks.get', 'agent.tasks.list', 'agent.tasks.events',
+    'agent.chats.get', 'agent.chats.list', 'agent.chats.history'
+  ]);
   const inFlight = new Map();
   const handoffWaiters = new Map();
   const restoringWakeRuns = new Set();
@@ -369,41 +373,63 @@
       throw makeError('The AG-UI request exceeds the 116 MiB transport limit.', 'invalid_input');
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 120000);
-    let response;
+    const isSubmission = method === 'agent.tasks.start' || method === 'agent.chats.send';
+    const unavailableMessage = isSubmission
+      ? 'LingXi is unavailable or paused. The run is saved for an explicit retry.'
+      : 'LingXi is unavailable or paused; open LingXi to reconnect.';
+    let timer;
+    const deadline = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        // Settle the deadline before aborting: an abort may synchronously
+        // reject fetch or body reading, but the timeout remains a soft error.
+        reject(makeError(unavailableMessage, 'host_unavailable'));
+        controller.abort();
+      }, readOnlyMethods.has(method) ? 5000 : 120000);
+    });
     try {
-      response = await fetch(base + '__host/agent', {
-        method: 'POST',
-        credentials: 'omit',
-        cache: 'no-store',
-        redirect: 'error',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-LingXi-App-Request': '1'
-        },
-        body,
-        signal: controller.signal
-      });
-    } catch (cause) {
-      throw makeError('LingXi is unavailable or paused. The run is saved for an explicit retry.', 'host_unavailable', cause);
+      return await Promise.race([deadline, (async () => {
+        let response;
+        try {
+          response = await fetch(base + '__host/agent', {
+            method: 'POST',
+            credentials: 'omit',
+            cache: 'no-store',
+            redirect: 'error',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-LingXi-App-Request': '1'
+            },
+            body,
+            signal: controller.signal
+          });
+        } catch (cause) {
+          throw makeError(unavailableMessage, 'host_unavailable', cause);
+        }
+        if (!response.ok) {
+          controller.abort();
+          const error = makeError('The application run is unavailable. Return to LingXi to resume.', 'host_unavailable');
+          error.definitive = true;
+          throw error;
+        }
+        let result;
+        try { result = await response.json(); }
+        catch (cause) {
+          if (cause?.name === 'SyntaxError') {
+            throw makeError('The host returned an invalid Agent response.', 'invalid_host_response', cause);
+          }
+          throw makeError(unavailableMessage, 'host_unavailable', cause);
+        }
+        if (!result?.ok) {
+          const detail = result?.error || {};
+          const error = makeError(detail.message || 'Agent request failed.', detail.code || 'agent_error');
+          error.definitive = true;
+          throw error;
+        }
+        return result.value;
+      })()]);
     } finally {
       clearTimeout(timer);
     }
-    if (!response.ok) {
-      const error = makeError('The application run is unavailable. Return to LingXi to resume.', 'host_unavailable');
-      error.definitive = true;
-      throw error;
-    }
-    let result;
-    try { result = await response.json(); }
-    catch (cause) { throw makeError('The host returned an invalid Agent response.', 'invalid_host_response', cause); }
-    if (!result?.ok) {
-      const detail = result?.error || {};
-      const error = makeError(detail.message || 'Agent request failed.', detail.code || 'agent_error');
-      error.definitive = true;
-      throw error;
-    }
-    return result.value;
   }
 
   function requestKey(runId) { return pendingPrefix + runId; }
