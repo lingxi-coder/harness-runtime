@@ -1,0 +1,16 @@
+{
+  "type": "media_service_request",
+  "request": {
+    "request_id": "service-1",
+    "action": {
+      "type": "execute",
+      "operation": {
+        "type": "sources",
+        "kind": "audio",
+        "usage": "transcribe"
+      },
+      "timeout_budget_ms": 1000,
+      "max_payload_bytes": 1024
+    }
+  }
+}

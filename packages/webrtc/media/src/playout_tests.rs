@@ -242,7 +242,7 @@ fn real_decoder_renders_current_rtp_and_rejects_pre_epoch_arrivals() {
         drop(playout);
         assert!(!buffers.failed.load(Ordering::Acquire));
         buffers.set_speaker_disabled(/*disabled*/ false).unwrap();
-        let sink = Sink::new(port.writer());
+        let sink = Sink::new_playback(port.writer());
         assert!(
             sink.imp()
                 .render(&gst::Buffer::from_slice(f32::NAN.to_le_bytes()))

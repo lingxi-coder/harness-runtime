@@ -1,5 +1,6 @@
 //! Native realtime Agent tool policy, history, cancellation and budget regressions.
 use async_trait::async_trait;
+use base64::Engine as _;
 use futures::StreamExt;
 use lingxi_core::host::{PermissionDecision, PermissionGate};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -67,12 +68,37 @@ fn history_preserves_tool_identity_and_rejects_unimportable_media() {
     let mut unmatched = history.clone();
     unmatched.remove(1);
     assert!(realtime_history(&unmatched).is_err());
+
+    let historical_image = vec![ConversationMessage::User {
+        id: MessageId::new(),
+        content: vec![ContentBlock::Image {
+            source: lingxi_core::types::ImageSource::Base64 {
+                media_type: "image/png".into(),
+                data: VISUAL_TEST_PNG_BASE64.into(),
+            },
+        }],
+        is_meta: false,
+        is_compact_summary: false,
+        is_visible_in_transcript_only: false,
+        api_message_override: None,
+        interrupted_by_shutdown: None,
+        refused_message_id: None,
+        origin: None,
+        turn_origin: None,
+        turn_companion: None,
+        usage_limit_note: None,
+    }];
+    let error = realtime_history(&historical_image).unwrap_err().to_string();
+    assert!(error.contains("historical image content"));
 }
 struct FixtureTool {
     name: &'static str,
     calls: Arc<AtomicUsize>,
     completion: Option<Arc<tokio::sync::Notify>>,
+    metadata: ToolExecutionMetadata,
 }
+const VISUAL_TEST_PNG_BASE64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j4YkAAAAASUVORK5CYII=";
 #[async_trait]
 impl Tool for FixtureTool {
     fn name(&self) -> &str {
@@ -103,6 +129,12 @@ impl Tool for FixtureTool {
     }
     fn is_read_only(&self, _: &Utf16JsonProjection) -> bool {
         false
+    }
+    fn execution_metadata(&self, _: &Utf16JsonProjection) -> ToolExecutionMetadata {
+        self.metadata.clone()
+    }
+    fn catalog_execution_metadata(&self) -> ToolExecutionMetadata {
+        self.metadata.clone()
     }
     async fn validate_input(
         &self,
@@ -145,9 +177,20 @@ impl Tool for FixtureTool {
         if let Some(completion) = &self.completion {
             completion.notified().await;
         }
+        let (data, model_content) = if self.name == "media_capture" {
+            (
+                json!({
+                    "type": "image",
+                    "file": {"base64": VISUAL_TEST_PNG_BASE64, "type": "image/png"},
+                }),
+                Some("[Image attached for visual analysis.]".into()),
+            )
+        } else {
+            (json!({"content":"completed"}), None)
+        };
         Ok(ToolCallResult {
-            data: Utf16JsonProjection::from_serde_value(&json!({"content":"completed"})).unwrap(),
-            model_content: None,
+            data: Utf16JsonProjection::from_serde_value(&data).unwrap(),
+            model_content,
             new_messages: vec![],
             context_modifier: None,
             mcp_meta: None,
@@ -190,11 +233,20 @@ async fn fixture_with_completion(
 ) -> (Arc<ConversationOrchestrator>, Arc<AtomicUsize>) {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut registry = ToolRegistry::new();
-    for name in ["fixture", "voice", "speech"] {
+    for (name, resources) in [
+        ("fixture", vec![]),
+        ("media_record", vec![MediaResource::Microphone]),
+        ("media_play", vec![MediaResource::Speaker]),
+        ("media_capture", vec![MediaResource::Camera]),
+        ("media_observe", vec![]),
+    ] {
         registry.register_builtin(Arc::new(FixtureTool {
             name,
             calls: calls.clone(),
             completion: completion.clone(),
+            metadata: ToolExecutionMetadata {
+                exclusive_media_resources: resources,
+            },
         }));
     }
     let orch = Arc::new(ConversationOrchestrator::new(
@@ -209,6 +261,33 @@ async fn fixture_with_completion(
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::path::PathBuf::from("/work/realtime"),
+    ));
+    orch.session().lock().await.model_profile = Some("exact-profile".into());
+    (orch, calls)
+}
+async fn visual_fixture(gate: Arc<Gate>) -> (Arc<ConversationOrchestrator>, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut registry = ToolRegistry::new();
+    registry.register_builtin(Arc::new(FixtureTool {
+        name: "media_capture",
+        calls: calls.clone(),
+        completion: None,
+        metadata: ToolExecutionMetadata {
+            exclusive_media_resources: vec![MediaResource::Camera],
+        },
+    }));
+    let orch = Arc::new(ConversationOrchestrator::new(
+        orchestrator::OrchestratorConfig {
+            interactive_permissions: true,
+            ..Default::default()
+        },
+        Arc::new(MockApiClient::new(vec![])),
+        Arc::new(registry),
+        noop_hook_executor(),
+        gate,
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::path::PathBuf::from("/work/realtime-visual"),
     ));
     orch.session().lock().await.model_profile = Some("exact-profile".into());
     (orch, calls)
@@ -290,6 +369,63 @@ impl RealtimeCodec for Codec {
         }])
     }
 }
+
+#[derive(Default)]
+struct CapturedMediaInputs {
+    order: std::sync::Mutex<Vec<String>>,
+    images: std::sync::Mutex<Vec<(String, Vec<u8>)>>,
+    tool_outputs: std::sync::Mutex<Vec<String>>,
+}
+
+struct ImageRecordingCodec(Arc<CapturedMediaInputs>);
+
+impl RealtimeCodec for ImageRecordingCodec {
+    fn capabilities(&self) -> RealtimeCapabilities {
+        Codec.capabilities()
+    }
+
+    fn encode(&self, input: &RealtimeInput) -> Result<Vec<RealtimeFrame>, RealtimeError> {
+        match input {
+            RealtimeInput::Image { data, mime_type } => {
+                self.0.order.lock().unwrap().push("image".into());
+                self.0
+                    .images
+                    .lock()
+                    .unwrap()
+                    .push((mime_type.clone(), data.as_ref().to_vec()));
+            }
+            RealtimeInput::ToolResult { output, .. } => {
+                self.0.order.lock().unwrap().push("tool_result".into());
+                self.0
+                    .tool_outputs
+                    .lock()
+                    .unwrap()
+                    .push(format!("{output:?}"));
+            }
+            RealtimeInput::ContinueResponse => {
+                self.0.order.lock().unwrap().push("continue".into());
+            }
+            _ => self.0.order.lock().unwrap().push("other".into()),
+        }
+        Ok(vec![RealtimeFrame::text(format!("{input:?}"))])
+    }
+
+    fn decode(&self, frame: RealtimeFrame) -> Result<Vec<RealtimeEvent>, RealtimeError> {
+        let RealtimeFrame::Text(bytes) = frame else {
+            panic!("fixture")
+        };
+        let kind = String::from_utf8(bytes.to_vec()).unwrap();
+        Ok(vec![match kind.as_str() {
+            "image-tool" => RealtimeEvent::ToolCall {
+                call_id: "image-call".into(),
+                name: "media_capture".into(),
+                arguments: json!({}),
+            },
+            _ => RealtimeEvent::SessionReady,
+        }])
+    }
+}
+
 struct Sink(Arc<std::sync::Mutex<Vec<String>>>);
 #[async_trait]
 impl RealtimeSink for Sink {
@@ -339,6 +475,18 @@ async fn connection() -> (
     futures::channel::mpsc::UnboundedSender<Result<RealtimeFrame, RealtimeError>>,
     Arc<std::sync::Mutex<Vec<String>>>,
 ) {
+    connection_with_codec(Arc::new(Codec)).await
+}
+
+async fn connection_with_codec(
+    codec: Arc<dyn RealtimeCodec>,
+) -> (
+    RealtimeControl,
+    RealtimeEvents,
+    tokio::task::JoinHandle<Result<(), RealtimeError>>,
+    futures::channel::mpsc::UnboundedSender<Result<RealtimeFrame, RealtimeError>>,
+    Arc<std::sync::Mutex<Vec<String>>>,
+) {
     let (tx, rx) = futures::channel::mpsc::unbounded();
     let sent = Arc::new(std::sync::Mutex::new(vec![]));
     let transport = Transport {
@@ -352,7 +500,7 @@ async fn connection() -> (
             headers: vec![],
             max_frame_bytes: 1024,
         },
-        Arc::new(Codec),
+        codec,
         RealtimeLimits::default(),
     )
     .await
@@ -390,6 +538,7 @@ async fn realtime_tool_loop_keeps_idle_paused_during_permission_and_uses_common_
                     max_duration: Duration::from_secs(2),
                     ..Default::default()
                 },
+                false,
                 cancel,
             )
             .await
@@ -450,6 +599,7 @@ async fn realtime_deadline_is_absolute_and_provider_tool_cancel_preserves_permis
                     max_duration: Duration::from_millis(40),
                     ..Default::default()
                 },
+                false,
                 CancellationToken::new(),
             )
             .await
@@ -485,7 +635,7 @@ async fn realtime_deadline_is_absolute_and_provider_tool_cancel_preserves_permis
 }
 
 #[tokio::test]
-async fn current_catalog_removes_recursive_audio_and_permission_denial_never_executes_tool() {
+async fn current_catalog_filters_media_resources_and_permission_denial_never_executes_tool() {
     let gate = Arc::new(Gate {
         calls: AtomicUsize::new(0),
         deny: true,
@@ -495,8 +645,12 @@ async fn current_catalog_removes_recursive_audio_and_permission_denial_never_exe
     let (orch, calls) = fixture(gate.clone()).await;
     let prepared = orch.prepare_realtime_agent().await.unwrap();
     assert_eq!(prepared.profile_name.as_deref(), Some("exact-profile"));
-    assert_eq!(prepared.tools.len(), 1);
-    assert_eq!(prepared.tools[0]["name"], "fixture");
+    let names = prepared
+        .tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["fixture", "media_capture", "media_observe"]);
     let (control, events, driver, events_tx, sent) = connection().await;
     let (_inputs_tx, inputs) = mpsc::channel(4);
     let (output, _rx) = mpsc::channel(16);
@@ -512,6 +666,7 @@ async fn current_catalog_removes_recursive_audio_and_permission_denial_never_exe
                 inputs,
                 output,
                 RealtimeAgentLimits::default(),
+                false,
                 cancel,
             )
             .await
@@ -532,6 +687,129 @@ async fn current_catalog_removes_recursive_audio_and_permission_denial_never_exe
     assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
     let _ = driver.await;
     assert_eq!(orch.snapshot_history().await.len(), 2);
+}
+
+#[tokio::test]
+async fn visual_tool_result_sends_real_image_bytes_after_tool_result() {
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
+    let (orch, calls) = visual_fixture(gate).await;
+    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let captured = Arc::new(CapturedMediaInputs::default());
+    let (control, events, driver, events_tx, _) =
+        connection_with_codec(Arc::new(ImageRecordingCodec(captured.clone()))).await;
+    let (_inputs_tx, inputs) = mpsc::channel(4);
+    let (output, _output_rx) = mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let task = tokio::spawn({
+        let orch = orch.clone();
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                RealtimeAgentLimits::default(),
+                true,
+                cancel,
+            )
+            .await
+        }
+    });
+    events_tx
+        .unbounded_send(Ok(RealtimeFrame::text("image-tool")))
+        .unwrap();
+    wait_until(
+        || captured.images.lock().unwrap().len() == 1,
+        "tool image reaches realtime codec",
+    )
+    .await;
+    wait_until(
+        || captured.order.lock().unwrap().len() >= 3,
+        "tool result, image, and continuation reach realtime codec in order",
+    )
+    .await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let order = captured.order.lock().unwrap().clone();
+    assert_eq!(order, ["tool_result", "image", "continue"]);
+    let images = captured.images.lock().unwrap();
+    let (mime_type, bytes) = &images[0];
+    assert_eq!(mime_type, "image/png");
+    assert_eq!(
+        bytes,
+        &base64::engine::general_purpose::STANDARD
+            .decode(VISUAL_TEST_PNG_BASE64)
+            .unwrap()
+    );
+    let tool_output = captured.tool_outputs.lock().unwrap();
+    assert!(!tool_output[0].contains(VISUAL_TEST_PNG_BASE64));
+    assert!(tool_output[0].contains("image_input"));
+
+    let history = orch.snapshot_history().await;
+    let persisted_image = history.iter().find_map(|message| match message {
+        ConversationMessage::User { content, .. } => content.iter().find_map(|block| match block {
+            ContentBlock::ToolResult {
+                content_blocks: Some(content_blocks),
+                ..
+            } => content_blocks.string_at("/0/source/data"),
+            _ => None,
+        }),
+        _ => None,
+    });
+    assert_eq!(persisted_image, Some(VISUAL_TEST_PNG_BASE64));
+
+    cancel.cancel();
+    assert_eq!(task.await.unwrap().unwrap(), RealtimeAgentEnd::Cancelled);
+    let _ = driver.await;
+}
+
+#[tokio::test]
+async fn visual_tool_result_fails_when_realtime_provider_has_no_image_input() {
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: None,
+        approved: AtomicBool::new(false),
+    });
+    let (orch, _) = visual_fixture(gate).await;
+    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let captured = Arc::new(CapturedMediaInputs::default());
+    let (control, events, driver, events_tx, _) =
+        connection_with_codec(Arc::new(ImageRecordingCodec(captured.clone()))).await;
+    let (_inputs_tx, inputs) = mpsc::channel(4);
+    let (output, _output_rx) = mpsc::channel(16);
+    let task = tokio::spawn(async move {
+        orch.run_realtime_agent(
+            prepared,
+            control,
+            events,
+            inputs,
+            output,
+            RealtimeAgentLimits::default(),
+            false,
+            CancellationToken::new(),
+        )
+        .await
+    });
+    events_tx
+        .unbounded_send(Ok(RealtimeFrame::text("image-tool")))
+        .unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("does not support image input"));
+    assert!(captured.images.lock().unwrap().is_empty());
+    let _ = driver.await;
 }
 
 #[tokio::test]
@@ -559,6 +837,7 @@ async fn realtime_transcripts_commit_after_playback_ack_and_skip_interrupted_aud
                 inputs,
                 output,
                 RealtimeAgentLimits::default(),
+                false,
                 cancel,
             )
             .await
@@ -638,6 +917,7 @@ async fn absolute_deadline_closes_audio_but_waits_for_block_tool_and_persists_re
                     max_duration: Duration::from_millis(40),
                     ..Default::default()
                 },
+                false,
                 CancellationToken::new(),
             )
             .await
@@ -763,6 +1043,7 @@ async fn separate_realtime_tool_calls_do_not_overlap_mutation_batches() {
                 inputs,
                 output,
                 Default::default(),
+                false,
                 cancel,
             )
             .await

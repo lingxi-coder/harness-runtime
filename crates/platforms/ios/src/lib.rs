@@ -48,10 +48,10 @@ pub struct IosPlatformInputs {
     pub brand_profile: mobile_linux_api::BrandRuntimeProfile,
     /// The app's writable sandbox container root.
     pub app_sandbox_root: PathBuf,
-    /// Native camera (Swift impl).
-    pub camera: Arc<dyn CameraControl>,
-    /// Unified app-scoped device audio service (Swift impl).
-    pub audio: Arc<dyn AudioService>,
+    /// Native camera (Swift impl), when available to this host.
+    pub camera: Option<Arc<dyn CameraControl>>,
+    /// Unified app-scoped device audio service (Swift impl), when available.
+    pub audio: Option<Arc<dyn AudioService>>,
     /// Native share sheet (Swift impl).
     pub share: Arc<dyn SharingService>,
     /// Native system notifications (Swift impl), when wired. `None` keeps the
@@ -97,8 +97,8 @@ pub struct IosPlatform {
     process: Arc<dyn ProcessRunner>,
     sandbox: Arc<dyn Sandbox>,
     worktree: Arc<dyn WorktreeManager>,
-    camera: Arc<dyn CameraControl>,
-    audio: Arc<dyn AudioService>,
+    camera: Option<Arc<dyn CameraControl>>,
+    audio: Option<Arc<dyn AudioService>>,
     share: Arc<dyn SharingService>,
     notifications: Option<Arc<dyn NotificationService>>,
     clipboard: Option<Arc<dyn Clipboard>>,
@@ -440,10 +440,10 @@ impl Platform for IosPlatform {
         self.worktree.clone()
     }
     fn camera(&self) -> Option<Arc<dyn CameraControl>> {
-        Some(self.camera.clone())
+        self.camera.clone()
     }
     fn audio_service(&self) -> Option<Arc<dyn AudioService>> {
-        Some(self.audio.clone())
+        self.audio.clone()
     }
     fn share(&self) -> Option<Arc<dyn SharingService>> {
         Some(self.share.clone())
@@ -551,8 +551,8 @@ mod tests {
         IosPlatformInputs {
             brand_profile: mobile_linux_api::BrandRuntimeProfile::default(),
             app_sandbox_root: root.to_path_buf(),
-            camera: Arc::new(StubCamera),
-            audio: Arc::new(StubAudio),
+            camera: Some(Arc::new(StubCamera)),
+            audio: Some(Arc::new(StubAudio)),
             share: Arc::new(StubShare),
             notifications: None,
             clipboard: None,
@@ -568,6 +568,81 @@ mod tests {
             stable_workspace_id: Some("abc".to_string()),
             additional_workspace_mounts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn platform_retains_supplied_camera_and_audio() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let platform_inputs = inputs(temp.path(), None);
+        let camera = platform_inputs.camera.clone().unwrap();
+        let audio = platform_inputs.audio.clone().unwrap();
+        let platform = IosPlatform::new(platform_inputs);
+        assert!(Arc::ptr_eq(&camera, &platform.camera().unwrap()));
+        assert!(Arc::ptr_eq(&audio, &platform.audio_service().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn platform_without_media_preserves_filesystem_and_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("workspace")).expect("workspace");
+        let runtime: Arc<dyn MobileLinuxRuntime> =
+            Arc::new(UnavailableMobileLinuxRuntime::unavailable(
+                SandboxBackend::IosIsh,
+                MobileLinuxRuntimeMode::Legacy,
+                "ios",
+                "arm64",
+                "test runtime",
+            ));
+        let mut platform_inputs = inputs(temp.path(), Some(runtime.clone()));
+        platform_inputs.camera = None;
+        platform_inputs.audio = None;
+        let platform = IosPlatform::new(platform_inputs);
+
+        assert!(platform.camera().is_none());
+        assert!(platform.audio_service().is_none());
+        assert!(platform.share().is_some());
+        assert!(Arc::ptr_eq(&runtime, &platform.mobile_linux().unwrap()));
+        let path = temp.path().join("available.txt");
+        let path = path.to_str().expect("UTF-8 temp path");
+        platform
+            .filesystem()
+            .write_file(path, "file works")
+            .await
+            .unwrap();
+        assert_eq!(
+            platform
+                .filesystem()
+                .read_file(path, None, None)
+                .await
+                .unwrap()
+                .content,
+            "file works"
+        );
+
+        // The mobile-linux adapter and guest-path fence remain active too.
+        let runtime: Arc<dyn MobileLinuxRuntime> =
+            Arc::new(UnavailableMobileLinuxRuntime::unavailable(
+                SandboxBackend::IosIsh,
+                MobileLinuxRuntimeMode::MobileLinux,
+                "ios",
+                "arm64",
+                "test runtime",
+            ));
+        let mut platform_inputs = inputs(temp.path(), Some(runtime.clone()));
+        platform_inputs.camera = None;
+        platform_inputs.audio = None;
+        let platform = IosPlatform::new(platform_inputs);
+        assert!(platform.camera().is_none());
+        assert!(platform.audio_service().is_none());
+        assert!(Arc::ptr_eq(&runtime, &platform.mobile_linux().unwrap()));
+        assert_eq!(platform.sandbox().backend(), SandboxBackend::IosIsh);
+        assert!(matches!(
+            platform
+                .filesystem()
+                .read_file("/tmp/not-host-backed", None, None)
+                .await,
+            Err(FsError::PermissionDenied(_))
+        ));
     }
 
     #[test]

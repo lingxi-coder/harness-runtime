@@ -44,6 +44,10 @@ mod provider_services;
 mod restoration;
 mod side_chat;
 
+pub use audio_context::MediaSessionContext;
+pub use audio_realtime_owner::MediaAgentHandoffRequest;
+pub use orchestrator::{MediaConversationAttachment, RealtimeAgentSessionIo};
+
 pub use assembly::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
 };
@@ -274,6 +278,12 @@ pub struct MobileRuntime {
     pub app_agent_factory: Arc<super::app_agent::AppAgentFactory>,
     /// Product region captured with the running model client.
     pub provider_region: llm_runtime::Region,
+    /// App-scoped media facade shared by tools, UI and remote media callers.
+    pub media_service: Option<Arc<dyn media_api::MediaService>>,
+    /// Host adapter for Conversation-intent media sessions.
+    pub(crate) media_conversation_attachment: Option<Arc<dyn MediaConversationAttachment>>,
+    /// Identity-bound queue for deferred media Agent continuation.
+    pub(crate) media_agent_handoffs: Arc<MobileMediaAgentHandoffQueue>,
     /// Shared settings baseline used by both the Mod reader and the public
     /// settings context attached to the engine handle.
     pub(super) settings_active:
@@ -765,6 +775,7 @@ fn mobile_reload_skills_handler(
     lingxi_home: std::path::PathBuf,
     home: std::path::PathBuf,
     device_skill_tools: Vec<String>,
+    media_tools: Arc<ToolRegistry>,
     workflow_tool: Arc<tool_workflow::WorkflowTool>,
     workflow_command_snapshot: Arc<crate::workflow_catalog::WorkflowCommandSnapshot>,
     additional_roots: Vec<std::path::PathBuf>,
@@ -792,7 +803,11 @@ fn mobile_reload_skills_handler(
         true,
         Arc::new(move |reg| {
             crate::mobile::register_mobile_bundled_prompt_commands(reg);
-            crate::mobile::device_skills::register_mobile_device_skills(reg, &device_skill_tools);
+            crate::mobile::device_skills::register_mobile_device_skills_with_tools(
+                reg,
+                &device_skill_tools,
+                Some(media_tools.clone()),
+            );
             workflow_finalizer(reg);
         }),
     )
@@ -1223,9 +1238,45 @@ impl MobileRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if previous_session_id != next_session_id {
+            if let Some(pending) = self
+                .media_agent_handoffs
+                .clear_for_session(&previous_session_id)
+            {
+                if let Some(service) = self.media_service.as_ref() {
+                    crate::media_handoff::stop_media_session(
+                        service,
+                        &pending.request.session,
+                        media_api::MediaOwner::Session {
+                            session_id: previous_session_id.clone(),
+                        },
+                    )
+                    .await;
+                } else {
+                    tracing::warn!(
+                        session_id = %previous_session_id,
+                        "discarded pending media conversation handoff without a media service for cleanup"
+                    );
+                }
+            }
+            if let Some(service) = self.media_service.as_ref() {
+                let stopped = crate::media_handoff::stop_media_owner_resources(
+                    service,
+                    media_api::MediaOwner::Session {
+                        session_id: previous_session_id.clone(),
+                    },
+                )
+                .await;
+                if stopped > 0 {
+                    tracing::debug!(
+                        session_id = %previous_session_id,
+                        stopped,
+                        "stopped active media resources for the retired mobile session"
+                    );
+                }
+            }
             if let Some(audio) = self.mcp_tool_context.audio.as_ref() {
                 let owner = AudioOwner::Session {
-                    session_id: previous_session_id,
+                    session_id: previous_session_id.clone(),
                 };
                 if let Err(error) = end_mobile_audio_owner(
                     audio,
@@ -1317,15 +1368,78 @@ impl Drop for MobileEngineHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        let active_turn = self
+            .active_cancel
+            .try_lock()
+            .ok()
+            .and_then(|active| active.clone());
+        if let Some(turn) = active_turn.as_ref() {
+            turn.cancel.cancel();
+        }
+        let active_cancel = self.active_cancel.clone();
+        let media_service = self.inner.media_service.clone();
+        let media_agent_handoffs = self.inner.media_agent_handoffs.clone();
         let lsp_registry = self.inner.lsp_registry.clone();
         let session_cron = self.session_cron.clone();
         let side_chats = self.side_chats.clone();
         let orchestrator = self.inner.orchestrator.clone();
         orchestrator.cancel_idle_compaction();
         mobile_automation_runtime().spawn(async move {
+            // Cancel an in-flight model/tool request before the owner sweep.
+            // The process-lifetime runtime remains available after this
+            // handle's runtime begins shutting down, so waiting here never
+            // blocks the native thread that called Drop.
+            let active_turn = match active_turn {
+                Some(turn) => Some(turn),
+                None => tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    active_cancel.lock().await.clone()
+                })
+                .await
+                .ok()
+                .flatten(),
+            };
+            if let Some(turn) = active_turn {
+                turn.cancel.cancel();
+                if tokio::time::timeout(crate::media_handoff::CLEANUP_BUDGET, turn.wait_completed())
+                    .await
+                    .is_err()
+                {
+                    if let Some(task) = turn.take_task_handle() {
+                        task.abort();
+                    }
+                }
+            }
             orchestrator.shutdown_idle_compaction().await;
             if let Err(error) = side_chats.shutdown().await {
                 tracing::warn!(%error, "mobile side chat teardown did not finish");
+            }
+            if let Some(pending) = media_agent_handoffs.clear_for_session(&current_session_id) {
+                if let Some(service) = media_service.as_ref() {
+                    crate::media_handoff::stop_media_session(
+                        service,
+                        &pending.request.session,
+                        media_api::MediaOwner::Session {
+                            session_id: current_session_id.clone(),
+                        },
+                    )
+                    .await;
+                }
+            }
+            if let Some(service) = media_service.as_ref() {
+                let stopped = crate::media_handoff::stop_media_owner_resources(
+                    service,
+                    media_api::MediaOwner::Session {
+                        session_id: current_session_id.clone(),
+                    },
+                )
+                .await;
+                if stopped > 0 {
+                    tracing::debug!(
+                        session_id = %current_session_id,
+                        stopped,
+                        "stopped active media resources during mobile engine disposal"
+                    );
+                }
             }
             if let Some(audio_service) = audio_service {
                 let mut audio_owners = vec![AudioOwner::Session {
@@ -2251,6 +2365,9 @@ struct ActiveTurn {
     /// Set before the terminal event is forwarded to the foreign listener.
     /// Any subsequent live-turn event is stale and must be discarded.
     terminal_emitted: AtomicBool,
+    /// Ordinary terminal event held until a requested media continuation has
+    /// either started or been rejected by the current turn owner.
+    deferred_terminal: StdMutex<Option<ClientEvent>>,
     completion: Notify,
 }
 
@@ -2984,6 +3101,7 @@ impl ActiveTurn {
             completed: AtomicBool::new(false),
             quiescing: AtomicBool::new(false),
             terminal_emitted: AtomicBool::new(false),
+            deferred_terminal: StdMutex::new(None),
             completion: Notify::new(),
         }
     }
@@ -3050,6 +3168,332 @@ impl ActiveTurn {
     fn is_quiescing(&self) -> bool {
         self.quiescing.load(Ordering::Acquire)
     }
+
+    fn defer_terminal(&self, event: ClientEvent) {
+        let mut deferred = self
+            .deferred_terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if deferred.is_none() {
+            *deferred = Some(event);
+        }
+    }
+
+    fn take_deferred_terminal(&self) -> Option<ClientEvent> {
+        self.deferred_terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+}
+
+type PendingMediaAgentHandoff = crate::media_handoff::MediaHandoffInvocation;
+
+/// One pending main-thread media conversation takeover. It is bound to the
+/// active session and exact tool-use row returned by a trusted host callback.
+#[derive(Default)]
+pub(crate) struct MobileMediaAgentHandoffQueue {
+    session_id: StdMutex<Option<Arc<StdMutex<String>>>>,
+    state: StdMutex<MediaAgentHandoffQueueState>,
+    next_claim_generation: AtomicU64,
+    attachment: StdMutex<Option<Arc<dyn MediaConversationAttachment>>>,
+}
+
+#[derive(Default)]
+struct MediaAgentHandoffQueueState {
+    pending: Option<PendingMediaAgentHandoff>,
+    in_progress_session: Option<(String, u64)>,
+}
+
+impl MobileMediaAgentHandoffQueue {
+    fn set_attachment(&self, attachment: Option<Arc<dyn MediaConversationAttachment>>) {
+        *self
+            .attachment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = attachment;
+    }
+
+    fn supported_modes(&self) -> Vec<media_api::MediaSessionMode> {
+        let attachment = self
+            .attachment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        attachment.map_or_else(Vec::new, |attachment| {
+            attachment
+                .supported_modes()
+                .into_iter()
+                .filter(|mode| *mode != media_api::MediaSessionMode::Video)
+                .collect()
+        })
+    }
+
+    fn supported_modes_for_context(
+        &self,
+        capability_context: &orchestrator::MediaAgentCapabilityContext,
+    ) -> Vec<media_api::MediaSessionMode> {
+        if self.current_session_id().ok().as_deref() != Some(capability_context.session_id.as_str())
+        {
+            return Vec::new();
+        }
+        let attachment = self
+            .attachment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        attachment.map_or_else(Vec::new, |attachment| {
+            attachment
+                .supported_modes_for_session(capability_context)
+                .into_iter()
+                .filter(|mode| {
+                    *mode != media_api::MediaSessionMode::Video
+                        && attachment.supports_mode(capability_context, *mode)
+                })
+                .collect()
+        })
+    }
+
+    fn supports_mode(
+        &self,
+        capability_context: &orchestrator::MediaAgentCapabilityContext,
+        mode: media_api::MediaSessionMode,
+    ) -> bool {
+        if mode == media_api::MediaSessionMode::Video {
+            return false;
+        }
+        if self.current_session_id().ok().as_deref() != Some(capability_context.session_id.as_str())
+        {
+            return false;
+        }
+        let attachment = self
+            .attachment
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        attachment.is_some_and(|attachment| attachment.supports_mode(&capability_context, mode))
+    }
+
+    fn bind_session(&self, session_id: Arc<StdMutex<String>>) {
+        *self
+            .session_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id);
+    }
+
+    fn current_session_id(&self) -> Result<String, String> {
+        let session_cell = self
+            .session_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| "media handoff has no active session owner".to_owned())?;
+        let session_id = session_cell
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if session_id.is_empty() {
+            return Err("media handoff has no active session owner".to_owned());
+        }
+        Ok(session_id)
+    }
+
+    fn has_pending_for_session(&self, session_id: &str) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.session_id == session_id)
+            || state
+                .in_progress_session
+                .as_ref()
+                .is_some_and(|(active, _)| active == session_id)
+    }
+
+    fn take_for_turn(&self, session_id: &str) -> Option<(PendingMediaAgentHandoff, u64)> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match state.pending.as_ref() {
+            Some(request) if request.session_id == session_id => {
+                let pending = state.pending.take();
+                let generation = self
+                    .next_claim_generation
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1)
+                    .max(1);
+                state.in_progress_session = Some((session_id.to_owned(), generation));
+                pending.map(|pending| (pending, generation))
+            }
+            // The queue has one slot and one current-session binding. A stale
+            // request can never be consumed by another session, so discard it
+            // rather than blocking a future Conversation request forever.
+            Some(_) => {
+                state.pending = None;
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn clear_for_session(&self, session_id: &str) -> Option<PendingMediaAgentHandoff> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pending = if state
+            .pending
+            .as_ref()
+            .is_some_and(|request| request.session_id == session_id)
+        {
+            state.pending.take()
+        } else {
+            None
+        };
+        if state
+            .in_progress_session
+            .as_ref()
+            .is_some_and(|(active, _)| active == session_id)
+        {
+            state.in_progress_session = None;
+        }
+        pending
+    }
+
+    fn finish_for_session(&self, session_id: &str, generation: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.in_progress_session.as_ref() == Some(&(session_id.to_owned(), generation)) {
+            state.in_progress_session = None;
+        }
+    }
+}
+
+struct MediaAgentHandoffClaim {
+    queue: Arc<MobileMediaAgentHandoffQueue>,
+    session_id: String,
+    generation: u64,
+}
+
+impl Drop for MediaAgentHandoffClaim {
+    fn drop(&mut self) {
+        self.queue
+            .finish_for_session(&self.session_id, self.generation);
+    }
+}
+
+impl tool_api::MediaAgentHandoffHandle for MobileMediaAgentHandoffQueue {
+    fn supported_modes(&self) -> Vec<media_api::MediaSessionMode> {
+        MobileMediaAgentHandoffQueue::supported_modes(self)
+    }
+
+    fn supported_modes_for_context(
+        &self,
+        capability_context: &orchestrator::MediaAgentCapabilityContext,
+    ) -> Vec<media_api::MediaSessionMode> {
+        MobileMediaAgentHandoffQueue::supported_modes_for_context(self, capability_context)
+    }
+
+    fn supports_mode(
+        &self,
+        capability_context: &orchestrator::MediaAgentCapabilityContext,
+        mode: media_api::MediaSessionMode,
+    ) -> bool {
+        MobileMediaAgentHandoffQueue::supports_mode(self, capability_context, mode)
+    }
+
+    fn request(
+        &self,
+        invocation: &tool_api::ToolUseContext,
+        capability_context: &orchestrator::MediaAgentCapabilityContext,
+        request: tool_api::MediaAgentHandoffRequest,
+    ) -> Result<(), String> {
+        if invocation.is_scheduled_turn {
+            return Err("media conversation handoff is unavailable during scheduled turns".into());
+        }
+        if !self.supports_mode(capability_context, request.mode) {
+            return Err(format!(
+                "media conversation mode {:?} is not supported by this host attachment",
+                request.mode
+            ));
+        }
+        if invocation.agent_id.is_some()
+            || invocation.origin_session_id.is_some()
+            || invocation.depth != 0
+        {
+            return Err("media conversation handoff is available only to the main Agent".into());
+        }
+        if invocation.session.is_none() {
+            return Err("media conversation handoff has no trusted session context".into());
+        }
+        let assistant_message_id = invocation
+            .assistant_message_id
+            .clone()
+            .ok_or_else(|| "media handoff is not attached to an active Agent turn".to_owned())?;
+        let tool_use_id = invocation
+            .tool_use_id
+            .clone()
+            .ok_or_else(|| "media handoff is not attached to a tool call".to_owned())?;
+        let assistant_message = crate::media_handoff::capture_assistant_message(
+            invocation,
+            &assistant_message_id,
+            &tool_use_id,
+        )?;
+        let session_id = self.current_session_id()?;
+        if capability_context.session_id != session_id {
+            return Err("media conversation handoff belongs to a different active session".into());
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.pending.is_some() || state.in_progress_session.is_some() {
+            return Err("another media conversation handoff is already pending".into());
+        }
+        state.pending = Some(PendingMediaAgentHandoff {
+            session_id,
+            capability_context: capability_context.clone(),
+            assistant_message_id,
+            assistant_message,
+            tool_use_id,
+            request,
+        });
+        Ok(())
+    }
+}
+
+async fn continue_media_agent_handoff(
+    orchestrator: Arc<ConversationOrchestrator>,
+    turn: Arc<ActiveTurn>,
+    handoffs: Arc<MobileMediaAgentHandoffQueue>,
+    service: Option<Arc<dyn media_api::MediaService>>,
+    attachment: Option<Arc<dyn MediaConversationAttachment>>,
+    ordinary_turn_succeeded: bool,
+) -> Result<Option<orchestrator::RealtimeAgentEnd>, orchestrator::OrchestratorError> {
+    let pending = handoffs.take_for_turn(&turn.session_id);
+    let Some((pending, claim_generation)) = pending else {
+        return Ok(None);
+    };
+    let _claim = MediaAgentHandoffClaim {
+        queue: handoffs,
+        session_id: turn.session_id.clone(),
+        generation: claim_generation,
+    };
+    crate::media_handoff::continue_media_handoff(
+        orchestrator,
+        pending,
+        &turn.session_id,
+        turn.cancel.clone(),
+        service,
+        attachment,
+        ordinary_turn_succeeded,
+    )
+    .await
 }
 
 /// Mobile-only lifecycle guard around the foreign listener. The core protocol
@@ -3061,6 +3505,7 @@ struct TurnLifecycleListener {
     inner: Arc<dyn ClientEventListener>,
     active_turn: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
     durable_turns: Option<Arc<DurableTurnStore>>,
+    media_agent_handoffs: Option<Arc<MobileMediaAgentHandoffQueue>>,
 }
 
 impl TurnLifecycleListener {
@@ -3072,6 +3517,7 @@ impl TurnLifecycleListener {
             inner,
             active_turn,
             durable_turns: None,
+            media_agent_handoffs: None,
         }
     }
 
@@ -3084,6 +3530,21 @@ impl TurnLifecycleListener {
             inner,
             active_turn,
             durable_turns: Some(durable_turns),
+            media_agent_handoffs: None,
+        }
+    }
+
+    fn new_durable_with_media_handoffs(
+        inner: Arc<dyn ClientEventListener>,
+        active_turn: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
+        durable_turns: Arc<DurableTurnStore>,
+        media_agent_handoffs: Arc<MobileMediaAgentHandoffQueue>,
+    ) -> Self {
+        Self {
+            inner,
+            active_turn,
+            durable_turns: Some(durable_turns),
+            media_agent_handoffs: Some(media_agent_handoffs),
         }
     }
 
@@ -3145,6 +3606,31 @@ impl TurnLifecycleListener {
 impl ClientEventListener for TurnLifecycleListener {
     async fn on_event(&self, mut event: ClientEvent) {
         let active = self.active_turn.lock().await.clone();
+        if let (Some(turn), ClientEvent::TurnEnded { .. }) = (active.as_ref(), &event) {
+            let handoff_pending = self
+                .media_agent_handoffs
+                .as_ref()
+                .is_some_and(|handoffs| handoffs.has_pending_for_session(&turn.session_id));
+            if handoff_pending
+                && !turn.is_quiescing()
+                && !turn.terminal_emitted.load(Ordering::Acquire)
+            {
+                let mut deferred = event.clone();
+                if turn.cancel.is_cancelled() {
+                    if let ClientEvent::TurnEnded {
+                        outcome,
+                        stop_reason,
+                        ..
+                    } = &mut deferred
+                    {
+                        *outcome = TurnOutcomeDto::Cancelled;
+                        *stop_reason = Some("cancelled".to_string());
+                    }
+                }
+                turn.defer_terminal(deferred);
+                return;
+            }
+        }
         let is_live_turn_payload = Self::is_live_turn_payload(&event);
         let should_forward = match &mut event {
             ClientEvent::TurnEnded {
@@ -3512,6 +3998,12 @@ impl MobileEngineHandle {
         self.runtime
             .as_ref()
             .expect("engine runtime is present while the handle is live")
+    }
+
+    /// Return the app-scoped media facade used by tools and native UI callers.
+    #[must_use]
+    pub fn media_service(&self) -> Option<Arc<dyn media_api::MediaService>> {
+        self.inner.media_service.clone()
     }
 
     /// The identity of the handle-owned tokio runtime (F3-07), as a stable
@@ -5692,12 +6184,6 @@ impl MobileEngineHandle {
             }
         }
 
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "[turn-diagnostic] turn started client_turn_id={}",
-            turn_id.map_or_else(|| "none".to_string(), |id| id.to_string())
-        );
-
         let wrapper = TurnEventEmitter::new(self.event_sink.clone());
         self.inner.message_output.reset_message_buffer().await;
         wrapper.emit_turn_started(turn_id).await;
@@ -5711,6 +6197,9 @@ impl MobileEngineHandle {
         let task_turn = turn.clone();
         let loop_scheduler = self.inner.wakeup_scheduler.get().cloned();
         let cancel_reason = self.cancel_reason.clone();
+        let media_agent_handoffs = self.inner.media_agent_handoffs.clone();
+        let media_service = self.inner.media_service.clone();
+        let media_conversation_attachment = self.inner.media_conversation_attachment.clone();
         let task = self.runtime().spawn(async move {
             let result = match queued_inputs {
                 Some(inputs) => {
@@ -5732,16 +6221,90 @@ impl MobileEngineHandle {
                     .await;
             }
 
-            #[cfg(debug_assertions)]
-            eprintln!(
-                "[turn-diagnostic] turn future returned cancelled={} result_ok={}",
-                task_turn.cancel.is_cancelled(),
-                result.is_ok()
-            );
+            let (media_handoff_end, media_handoff_error) = match continue_media_agent_handoff(
+                orch.clone(),
+                task_turn.clone(),
+                media_agent_handoffs,
+                media_service,
+                media_conversation_attachment,
+                result.is_ok(),
+            )
+            .await
+            {
+                Ok(end) => (end, None),
+                Err(error) => {
+                    message_output.reset_message_buffer().await;
+                    sink.emit(client::adapter::map_orchestrator_error(&error))
+                        .await;
+                    (None, Some(error))
+                }
+            };
+            let deferred_terminal = task_turn.take_deferred_terminal();
 
             if let Some(scheduler) = &loop_scheduler {
                 settle_mobile_loop_turn(&orch, scheduler, &task_turn.cancel, &cancel_reason, true)
                     .await;
+            }
+            if let Some(end) = media_handoff_end {
+                let (outcome, stop_reason) = match end {
+                    orchestrator::RealtimeAgentEnd::Cancelled => (
+                        client::protocol::events::TurnOutcomeDto::Cancelled,
+                        "cancelled",
+                    ),
+                    orchestrator::RealtimeAgentEnd::Closed => (
+                        client::protocol::events::TurnOutcomeDto::EndTurn,
+                        "media_realtime_closed",
+                    ),
+                    orchestrator::RealtimeAgentEnd::Deadline => (
+                        client::protocol::events::TurnOutcomeDto::EndTurn,
+                        "media_realtime_deadline",
+                    ),
+                    orchestrator::RealtimeAgentEnd::Idle => (
+                        client::protocol::events::TurnOutcomeDto::EndTurn,
+                        "media_realtime_idle",
+                    ),
+                    orchestrator::RealtimeAgentEnd::ToolStopped => (
+                        client::protocol::events::TurnOutcomeDto::EndTurn,
+                        "media_realtime_tool_stopped",
+                    ),
+                };
+                sink.emit(ClientEvent::TurnEnded {
+                    outcome,
+                    stop_reason: Some(stop_reason.into()),
+                    cost: client::adapter::lowering::lower_cost_snapshot(
+                        &orch.snapshot_cost_real().await,
+                    ),
+                })
+                .await;
+            } else if !task_turn.terminal_emitted.load(Ordering::Acquire) {
+                // A requested handoff can be cleaned up without entering
+                // realtime (ordinary turn failure/cancellation). In that
+                // case restore the terminal event held by the lifecycle gate
+                // so the client still leaves its running state exactly once.
+                if let Some(mut event @ ClientEvent::TurnEnded { .. }) = deferred_terminal {
+                    let terminal_cost = client::adapter::lowering::lower_cost_snapshot(
+                        &orch.snapshot_cost_real().await,
+                    );
+                    if let ClientEvent::TurnEnded {
+                        outcome,
+                        stop_reason,
+                        cost,
+                    } = &mut event
+                    {
+                        if task_turn.cancel.is_cancelled() {
+                            *outcome = client::protocol::events::TurnOutcomeDto::Cancelled;
+                            *stop_reason = Some("cancelled".into());
+                        } else if media_handoff_error.is_some() {
+                            *outcome = client::protocol::events::TurnOutcomeDto::EndTurn;
+                            *stop_reason = Some("media_handoff_error".into());
+                        } else if result.is_err() {
+                            *outcome = client::protocol::events::TurnOutcomeDto::EndTurn;
+                            *stop_reason = Some("error".into());
+                        }
+                        *cost = terminal_cost;
+                    }
+                    sink.emit(event).await;
+                }
             }
             let mut active = active_cancel.lock().await;
             if active
@@ -7693,6 +8256,19 @@ impl MobileEngineHandle {
                 self.emit_mod_ui_client_operation_result(request_id, operation)
                     .await
             }
+            ClientCommand::MediaServiceRequest { request }
+                if request.validate().is_err() =>
+            {
+                Err(ClientError::Rejected {
+                    message: "media service request failed validation".into(),
+                })
+            }
+            ClientCommand::MediaServiceRequest { .. }
+            | ClientCommand::MediaDeviceResponse { .. }
+            | ClientCommand::MediaConnectionResponse { .. }
+            | ClientCommand::MediaControlResponse { .. } => Err(ClientError::Rejected {
+                message: "host-private media transport is not accepted by the mobile session command path".into(),
+            }),
             command => Box::pin(self.submit_impl(command)).await,
         }
     }
@@ -9006,6 +9582,10 @@ mod tests;
 #[cfg(test)]
 #[path = "host/tests/mobile_provider_allowlist_tests.rs"]
 mod mobile_provider_allowlist_tests;
+
+#[cfg(test)]
+#[path = "host/tests/media_owner_cleanup_tests.rs"]
+mod media_owner_cleanup_tests;
 
 /// The Anthropic profile's exact-id registry — what `/model` (and every client
 /// model picker riding `ClientEvent::ModelList`) can route under "anthropic".

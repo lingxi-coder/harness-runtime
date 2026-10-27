@@ -5,10 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# Mobile-exclusive builtin tools (camera / audio / notification /
-# clipboard / share), folded from the former one-crate-per-tool split. Pure Rust
-# — each routes to an `Arc<dyn …Control>` capability in BuiltinToolContext
-# (Swift/Kotlin impl injected via UniFFI). Linked only by engine-mobile.
+# Mobile-exclusive builtin tools (notification / clipboard / share / personal
+# data), folded from the former one-crate-per-tool split. Media tools live in
+# `tool-media` and are shared by desktop and mobile.
 
 [dependencies]
 mobile-linux-api.workspace = true
@@ -23,8 +22,6 @@ once_cell = "1"
 url = "2"
 
 [dev-dependencies]
-base64 = "=0.22.1"
-image = { version = "=0.24.9", default-features = false, features = ["jpeg"] }
 tool-api = { path = "../../tool-api", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tokio-util.workspace = true

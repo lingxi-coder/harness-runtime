@@ -30,7 +30,7 @@ fn queued_audio_survives_a_pause_before_the_next_buffer() {
                 .build(),
         )
         .build();
-    let sink = Sink::new(port.writer());
+    let sink = Sink::new_playback(port.writer());
     let pipeline = gst::Pipeline::new();
     pipeline
         .add_many([source.upcast_ref::<gst::Element>(), sink.upcast_ref()])
@@ -83,7 +83,7 @@ fn unexpected_flush_cancels_a_blocked_speaker_write() {
     ));
     buffers.set_speaker_disabled(/*disabled*/ false).unwrap();
     let port = PlaybackPort::new(buffers.clone(), /*rate*/ 48_000);
-    let sink = Sink::new(port.writer());
+    let sink = Sink::new_playback(port.writer());
     sink.set_state(gst::State::Playing).unwrap();
     let capacity = if cfg!(target_os = "linux") {
         4_800

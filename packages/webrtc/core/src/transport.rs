@@ -12,6 +12,7 @@ use std::sync::{
 use std::time::Duration;
 
 use futures::future::BoxFuture;
+use rtc::rtp_transceiver::rtp_sender::RtpCodecKind;
 use tokio::sync::Notify;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -25,6 +26,7 @@ use webrtc::peer_connection::RTCIceCandidateInit;
 use webrtc::peer_connection::RTCIceGatheringState;
 use webrtc::peer_connection::RTCPeerConnectionState;
 use webrtc::peer_connection::RTCSessionDescription;
+use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit};
 
 const WAIT: Duration = Duration::from_secs(/*secs*/ 15);
 const MAX_REMOTE_CANDIDATES: usize = 32;
@@ -108,6 +110,7 @@ pub struct Transport {
     observer: JoinHandle<()>,
     pub(crate) ready: watch::Receiver<bool>,
     channel: Arc<OnceLock<Arc<dyn DataChannel>>>,
+    data_channel: bool,
     answerer: bool,
     file_channel: tokio::sync::Mutex<Option<Arc<dyn DataChannel>>>,
     messages: Option<tokio::sync::mpsc::Receiver<webrtc::data_channel::RTCDataChannelMessage>>,
@@ -123,7 +126,7 @@ pub struct Transport {
 
 impl Transport {
     fn remote_candidate_limit(&self) -> usize {
-        if self.camera.is_some() {
+        if self.video_incoming.is_some() {
             MAX_VIDEO_REMOTE_CANDIDATES
         } else {
             MAX_REMOTE_CANDIDATES
@@ -163,6 +166,9 @@ impl Transport {
         config.validate()?;
         let crate::SessionConfig {
             bind_addresses: addresses,
+            data_channel,
+            audio,
+            video_direction,
             video,
             answerer,
             ice,
@@ -174,20 +180,26 @@ impl Transport {
             mdns,
         } = config;
         let configuration = ice.configuration()?;
-        let (mut media, audio) = if data_only {
-            (webrtc::peer_connection::MediaEngine::default(), None)
+        let audio_enabled = audio && !data_only;
+        let (mut media, audio_track) = if audio_enabled {
+            let (media, audio_track) = crate::audio_track::AudioTrack::new()?;
+            (media, Some(audio_track))
         } else {
-            let (media, audio) = crate::audio_track::AudioTrack::new()?;
-            (media, Some(audio))
+            (webrtc::peer_connection::MediaEngine::default(), None)
         };
-        let (incoming, ingress, video_incoming) = if video {
+        let video_send = video && video_direction.sends();
+        let video_receive = video && video_direction.receives();
+        if video_receive && !video_send {
+            crate::video_track::VideoTrack::register_codec(&mut media)?;
+        }
+        let (incoming, ingress, video_incoming) = if video_receive {
             let (audio, ingress, video) = crate::incoming::Incoming::with_video();
             (audio, ingress, Some(video))
         } else {
             let (audio, ingress) = crate::incoming::Incoming::new();
             (audio, ingress, None)
         };
-        let camera = if video {
+        let camera = if video_send {
             Some(crate::video_track::VideoTrack::new(
                 &mut media,
                 crate::VideoSource::Camera,
@@ -195,7 +207,7 @@ impl Transport {
         } else {
             None
         };
-        let screen = if video {
+        let screen = if video_send {
             Some(crate::video_track::VideoTrack::new(
                 &mut media,
                 crate::VideoSource::Screen,
@@ -231,7 +243,7 @@ impl Transport {
                 .with_setting_engine(settings)
                 .with_handler(Arc::new(Events(
                     gathered.clone(),
-                    answerer.then_some(accepted_tx),
+                    (answerer && data_channel).then_some(accepted_tx),
                     AtomicBool::new(false),
                     state_tx,
                 )))
@@ -243,20 +255,48 @@ impl Transport {
                 .await
                 .map_err(|_| "failed to create voice peer")?,
         );
-        if let Some(audio) = &audio
+        if let Some(audio) = &audio_track
             && connection.add_track(audio.track.clone()).await.is_err()
         {
             let _ = timeout(Duration::from_secs(/*secs*/ 2), connection.close()).await;
             return Err("failed to attach voice track");
         }
-        for track in [&camera, &screen].into_iter().flatten() {
-            if connection.add_track(track.track.clone()).await.is_err() {
+        if video_send {
+            let direction = if video_receive {
+                RTCRtpTransceiverDirection::Sendrecv
+            } else {
+                RTCRtpTransceiverDirection::Sendonly
+            };
+            for track in [&camera, &screen].into_iter().flatten() {
+                let init = RTCRtpTransceiverInit {
+                    direction,
+                    ..Default::default()
+                };
+                if connection
+                    .add_transceiver_from_track(track.track.clone(), Some(init))
+                    .await
+                    .is_err()
+                {
+                    let _ = connection.close().await;
+                    return Err("video transceiver attachment failed");
+                }
+            }
+        } else if video_receive {
+            let init = RTCRtpTransceiverInit {
+                direction: RTCRtpTransceiverDirection::Recvonly,
+                ..Default::default()
+            };
+            if connection
+                .add_transceiver_from_kind(RtpCodecKind::Video, Some(init))
+                .await
+                .is_err()
+            {
                 let _ = connection.close().await;
-                return Err("video track attachment failed");
+                return Err("video receive transceiver attachment failed");
             }
         }
         let channel = Arc::new(OnceLock::new());
-        if !answerer {
+        if data_channel && !answerer {
             let created = match connection
                 .create_data_channel("lingxi-agent", /*options*/ None)
                 .await
@@ -270,7 +310,8 @@ impl Transport {
             let _ = channel.set(created);
         }
         let (sender, ready) = watch::channel(false);
-        let (message_tx, messages) = tokio::sync::mpsc::channel(receive_queue);
+        let (message_tx, received_messages) = tokio::sync::mpsc::channel(receive_queue);
+        let messages = data_channel.then_some(received_messages);
         let overflowed = Arc::new(AtomicBool::new(false));
         let overflow_flag = overflowed.clone();
         let mut peer_state = state.clone();
@@ -291,7 +332,7 @@ impl Transport {
                 let event = tokio::select! {
                     event = observed.poll() => event,
                     _ = async {
-                        if data_only {
+                        if data_only || !data_channel {
                             let _ = peer_state
                                 .wait_for(|s| {
                                     matches!(
@@ -337,15 +378,16 @@ impl Transport {
         });
         Ok(Self {
             incoming,
-            audio,
+            audio: audio_track,
             connection,
             gathered,
             observer,
             ready,
             channel,
+            data_channel,
             answerer,
             file_channel: tokio::sync::Mutex::new(None),
-            messages: Some(messages),
+            messages,
             closed: false,
             gather_timeout,
             data_only,
@@ -439,12 +481,21 @@ impl Transport {
                     .await
                     .map_err(|_| "failed to apply voice candidate")?;
             }
-            self.ready
-                .clone()
-                .wait_for(|ready| *ready)
-                .await
-                .map(|_| ())
-                .map_err(|_| "voice event channel closed")
+            if self.data_channel {
+                self.ready
+                    .clone()
+                    .wait_for(|ready| *ready)
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| "voice event channel closed")
+            } else {
+                self.state
+                    .clone()
+                    .wait_for(|state| *state == RTCPeerConnectionState::Connected)
+                    .await
+                    .map(|_| ())
+                    .map_err(|_| "media peer closed before connecting")
+            }
         })
         .await
         .map_or(Ok(AnswerOutcome::TimedOut), |result| {
@@ -580,15 +631,33 @@ impl Transport {
     }
 
     pub async fn wait_ready(&self) -> Result<()> {
-        timeout(WAIT, self.ready.clone().wait_for(|ready| *ready))
+        if self.data_channel {
+            timeout(WAIT, self.ready.clone().wait_for(|ready| *ready))
+                .await
+                .map_err(|_| "channel readiness timed out")?
+                .map(|_| ())
+                .map_err(|_| "channel closed")
+        } else {
+            timeout(
+                WAIT,
+                self.state
+                    .clone()
+                    .wait_for(|state| *state == RTCPeerConnectionState::Connected),
+            )
             .await
-            .map_err(|_| "channel readiness timed out")?
+            .map_err(|_| "media peer readiness timed out")?
             .map(|_| ())
-            .map_err(|_| "channel closed")
+            .map_err(|_| "media peer closed")
+        }
     }
 
     pub fn is_ready(&self) -> bool {
-        !self.closed && *self.ready.borrow()
+        !self.closed
+            && if self.data_channel {
+                *self.ready.borrow()
+            } else {
+                *self.state.borrow() == RTCPeerConnectionState::Connected
+            }
     }
 
     /// Channel readiness: `true` once `lingxi-agent` is open, `false` after it closes,

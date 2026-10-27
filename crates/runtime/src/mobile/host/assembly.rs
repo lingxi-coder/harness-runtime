@@ -48,8 +48,8 @@ use super::{
     provider_model_catalog_from_listings, rebuild_mobile_prompt_dispatch_cache,
     resolve_default_model_ref, settings_commands, settle_mobile_loop_turn, ActiveTurn,
     MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle, MobileMcpReloadJob,
-    MobileMsgQueueInput, MobileOAuthManager, MobileRuntime, MobileSessionAgentObserver,
-    MobileWakeupDelivery, TurnLifecycleListener, MOBILE_CRON_HANDLES,
+    MobileMediaAgentHandoffQueue, MobileMsgQueueInput, MobileOAuthManager, MobileRuntime,
+    MobileSessionAgentObserver, MobileWakeupDelivery, TurnLifecycleListener, MOBILE_CRON_HANDLES,
 };
 
 // Recompute from admitted mobile settings for each plugin-owner connect. This
@@ -313,6 +313,7 @@ pub async fn build_mobile_inner(
         permission_sink,
         streaming_override,
         None,
+        None,
     )
     .await
 }
@@ -325,6 +326,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     permission_sink: Arc<dyn PermissionRequestSink>,
     streaming_override: Option<Arc<dyn StreamingApiClient>>,
     ask_user_question_tx: Option<tokio::sync::mpsc::Sender<tool_ui::AskUserQuestionExchange>>,
+    media_agent_handoffs: Option<Arc<MobileMediaAgentHandoffQueue>>,
 ) -> Result<MobileRuntime, MobileBuildError> {
     let mut cfg = cfg;
     if cfg.app_agent_host {
@@ -457,6 +459,18 @@ pub(super) async fn build_mobile_inner_with_ask(
     // The LIVE current-session uuid, updated on every New/Resume/Clear
     // retarget. Model input is never trusted for it.
     let active_session_uuid = Arc::new(std::sync::Mutex::new(main_session_uuid.clone()));
+    let media_conversation_attachment = (!cfg.app_agent_host)
+        .then(|| cfg.media_conversation_attachment.clone())
+        .flatten();
+    // Bind the host handle from the long-lived attachment, not a build-time
+    // capability snapshot. Product providers/settings may be registered after
+    // runtime construction; the tool schema and dispatch both query this same
+    // attachment dynamically once the active session context is available.
+    let can_handoff_media_conversation =
+        media_agent_handoffs.is_some() && media_conversation_attachment.is_some();
+    let media_agent_handoffs = media_agent_handoffs.unwrap_or_default();
+    media_agent_handoffs.bind_session(active_session_uuid.clone());
+    media_agent_handoffs.set_attachment(media_conversation_attachment);
     // The plans directory derivation is shared with the orchestrator's plan-mode
     // reminder rather than re-derived here, so the path the model is told to
     // write, the path the permission carve-out allows, and the path
@@ -2141,6 +2155,13 @@ pub(super) async fn build_mobile_inner_with_ask(
         lsp_registry: Some(plugin_lsp_registry.clone()),
         camera: platform.camera(),
         audio: platform.audio_service(),
+        media: if cfg.app_agent_host {
+            None
+        } else {
+            cfg.media_service.clone()
+        },
+        media_agent_handoff: can_handoff_media_conversation
+            .then(|| media_agent_handoffs.clone() as Arc<dyn tool_api::MediaAgentHandoffHandle>),
         audio_recording_handles: Arc::new(
             tokio::sync::Mutex::new(std::collections::HashMap::new()),
         ),
@@ -3004,7 +3025,11 @@ pub(super) async fn build_mobile_inner_with_ask(
         )
         .await;
         crate::mobile::register_mobile_bundled_prompt_commands(&mut reg);
-        crate::mobile::device_skills::register_mobile_device_skills(&mut reg, &device_skill_tools);
+        crate::mobile::device_skills::register_mobile_device_skills_with_tools(
+            &mut reg,
+            &device_skill_tools,
+            Some(tools.clone()),
+        );
     }
     // `/workflows`: mobile cannot open the TUI picker, so bind the shared
     // command handler to the same live registry that powers workflow tools and
@@ -3037,6 +3062,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         cfg.lingxi_home.clone(),
         cwd.clone(),
         device_skill_tools.clone(),
+        tools.clone(),
         workflow_tool.clone(),
         workflow_command_snapshot.clone(),
         Vec::new(),
@@ -3190,6 +3216,7 @@ pub(super) async fn build_mobile_inner_with_ask(
                 cfg.lingxi_home.clone(),
                 cwd.clone(),
                 device_skill_tools.clone(),
+                tools.clone(),
                 workflow_tool.clone(),
                 workflow_command_snapshot.clone(),
                 Vec::new(),
@@ -3269,6 +3296,7 @@ pub(super) async fn build_mobile_inner_with_ask(
         config_home: cfg.lingxi_home.clone(),
         home: cfg.lingxi_home.parent().unwrap_or(&cfg.cwd).to_path_buf(),
         device_skill_tools: device_skill_tools.clone(),
+        media_tools: tools.clone(),
         workflow_tool: workflow_tool.clone(),
         workflow_commands: workflow_command_snapshot.clone(),
     };
@@ -3283,6 +3311,17 @@ pub(super) async fn build_mobile_inner_with_ask(
         side_chat_factory,
         app_agent_factory,
         provider_region,
+        media_service: if cfg.app_agent_host {
+            None
+        } else {
+            cfg.media_service.clone()
+        },
+        media_conversation_attachment: if cfg.app_agent_host {
+            None
+        } else {
+            cfg.media_conversation_attachment.clone()
+        },
+        media_agent_handoffs,
         settings_active: mod_settings_active,
         settings_managed: mod_settings_managed,
         audio_services,
@@ -3458,9 +3497,14 @@ fn build_mobile_engine_on_worker(
     // Taken before the wrap: the gate below is what a connection-scoped notice
     // has to get past, so it cannot be reached through the wrapped listener.
     let connection_sink = ListenerSink::arc(listener.clone());
-    let lifecycle_listener: Arc<dyn ClientEventListener> = Arc::new(
-        TurnLifecycleListener::new_durable(listener, active_cancel.clone(), durable_turns.clone()),
-    );
+    let media_agent_handoffs = Arc::new(MobileMediaAgentHandoffQueue::default());
+    let lifecycle_listener: Arc<dyn ClientEventListener> =
+        Arc::new(TurnLifecycleListener::new_durable_with_media_handoffs(
+            listener,
+            active_cancel.clone(),
+            durable_turns.clone(),
+            media_agent_handoffs.clone(),
+        ));
 
     // `build_mobile` is async; drive it on the owned runtime so any spawned work
     // it does is owned by this handle's runtime, not an ambient one.
@@ -3474,6 +3518,7 @@ fn build_mobile_engine_on_worker(
             permission_sink,
             streaming_override,
             Some(ask_user_question_tx.clone()),
+            Some(media_agent_handoffs),
         ))
         .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
     let initial_session_key = runtime.block_on(async {

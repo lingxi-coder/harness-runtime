@@ -1,10 +1,3 @@
-//! Encoded recording payload returned by the unified [`AudioService`].
+//! Transitional re-exports for the canonical standalone media API.
 
-/// A finished recording.
-#[derive(Debug, Clone, PartialEq)]
-pub struct VoiceRecording {
-    /// Encoded audio bytes.
-    pub audio_bytes: Vec<u8>,
-    /// MIME type of `audio_bytes` (e.g. `"audio/m4a"`).
-    pub mime_type: String,
-}
+pub use media_api::voice::*;

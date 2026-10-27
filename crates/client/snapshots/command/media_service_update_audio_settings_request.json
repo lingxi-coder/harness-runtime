@@ -1,0 +1,10 @@
+{
+  "type": "media_service_request",
+  "request": {
+    "request_id": "settings-1",
+    "action": {
+      "type": "update_audio_settings",
+      "configuration_json": "{\"version\":4,\"vendor_extension\":{\"future_field\":true}}"
+    }
+  }
+}

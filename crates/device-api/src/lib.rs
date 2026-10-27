@@ -1,12 +1,12 @@
-//! `device-api` — what a host's device can do, as traits and plain data.
+//! `device-api` — non-media device capabilities and compatibility re-exports.
 //!
-//! The camera, the location fix, notifications, the clipboard, sharing, device
-//! status, haptics, deep links, the calendar, contacts and the audio service
-//! (recording, transcription, speech). A platform implements the ones it has
-//! and the engine's tools call through them. The crate has no workspace
-//! dependencies, so naming a camera never means compiling the engine.
+//! Location, notifications, the clipboard, sharing, device status, haptics,
+//! deep links, the calendar, and contacts live here. The standalone `media-api`
+//! crate owns audio, camera, speech, and common media contracts; this crate
+//! keeps transitional module re-exports for existing device integrations.
 //!
-//! The engine's `core::host` re-exports every module here under its old path.
+//! The engine's `core::host` re-exports modules from both crates under stable
+//! host paths while consumers migrate to `media-api` directly.
 
 #![forbid(unsafe_code)]
 // Documentation debt, not a decision that docs do not matter: these modules

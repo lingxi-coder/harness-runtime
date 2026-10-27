@@ -75,6 +75,7 @@ use client::protocol::listings::{
     SessionAgentMessageRowDto, SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto,
     SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
+use client::protocol::media::*;
 use client::protocol::message::{MessageBlockDto, MessageDto};
 use client::protocol::permission::{
     PermissionKindDto, PermissionRequest, PermissionResolutionDto, PermissionResolved,
@@ -1145,6 +1146,7 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                     },
                     initiator: None,
                     timeout_budget_ms: Some(1_000),
+                    route_policy: None,
                     max_payload_bytes: 12_533_760,
                     operation: AudioOperationDto::Listen {
                         language: Some("zh-CN".to_string()),
@@ -1242,6 +1244,132 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 join: RefusalContinuationJoinDto::Exact,
                 replaces_uuids: vec!["assistant-row-0".into()],
                 display_salvage_text: true,
+            },
+        ),
+        (
+            "event/media_connection_request.json",
+            ClientEvent::MediaConnectionRequest {
+                request: MediaConnectionRequestDto {
+                    request_id: "connection-1".into(),
+                    connection_id: "route-1".into(),
+                    session_id: "session-1".into(),
+                    media_session_ref: MediaSessionRefDto {
+                        id: "media-session-1".into(),
+                    },
+                    operation_id: MediaOperationIdDto {
+                        id: "operation-1".into(),
+                        generation: 1,
+                        service_epoch: 2,
+                    },
+                    owner: MediaOwnerDto::Session {
+                        session_id: "session-1".into(),
+                    },
+                    mode: MediaSessionModeDto::Audio,
+                    intent: MediaSessionIntentDto::Observation,
+                    audio_source: None,
+                    video_source: None,
+                    description: MediaSessionDescriptionDto {
+                        kind: MediaSessionDescriptionTypeDto::Offer,
+                        sdp: "v=0\\r\\n".into(),
+                    },
+                },
+            },
+        ),
+        (
+            "event/media_device_request.json",
+            ClientEvent::MediaDeviceRequest {
+                request: MediaDeviceRequestEnvelopeDto {
+                    request_id: "device-1".into(),
+                    request: MediaDeviceRequestDto::Open {
+                        request: MediaDeviceOpenRequestDto {
+                            identity: MediaOperationIdDto {
+                                id: "operation-2".into(),
+                                generation: 2,
+                                service_epoch: 2,
+                            },
+                            owner: MediaOwnerDto::Session {
+                                session_id: "session-1".into(),
+                            },
+                            initiator: None,
+                            timeout_budget_ms: Some(1000),
+                            max_payload_bytes: 1024,
+                            request: MediaSessionRequestDto {
+                                mode: MediaSessionModeDto::Audio,
+                                intent: MediaSessionIntentDto::Observation,
+                                audio_source: Some(MediaSourceRefDto { id: "mic-1".into() }),
+                                video_source: None,
+                            },
+                        },
+                    },
+                },
+            },
+        ),
+        (
+            "event/media_service_response.json",
+            ClientEvent::MediaServiceResponse {
+                response: MediaServiceResponseDto {
+                    request_id: "service-1".into(),
+                    result: Some(MediaServiceResultDto::Operation {
+                        operation_id: MediaOperationIdDto {
+                            id: "operation-1".into(),
+                            generation: 1,
+                            service_epoch: 2,
+                        },
+                        result: MediaResultDto::Sources { sources: Vec::new() },
+                    }),
+                    error: None,
+                },
+            },
+        ),
+        (
+            "event/media_service_settings_updated_response.json",
+            ClientEvent::MediaServiceResponse {
+                response: MediaServiceResponseDto {
+                    request_id: "settings-1".into(),
+                    result: Some(MediaServiceResultDto::SettingsUpdated),
+                    error: None,
+                },
+            },
+        ),
+        (
+            "event/media_service_connection_updated_response.json",
+            ClientEvent::MediaServiceResponse {
+                response: MediaServiceResponseDto {
+                    request_id: "route-1".into(),
+                    result: Some(MediaServiceResultDto::ConnectionUpdated),
+                    error: None,
+                },
+            },
+        ),
+        (
+            "event/media_control_request.json",
+            ClientEvent::MediaControlRequest {
+                request: MediaControlRequestDto {
+                    request_id: "control-1".into(),
+                    connection_id: "route-1".into(),
+                    media_session_ref: MediaSessionRefDto {
+                        id: "media-session-1".into(),
+                    },
+                    generation: 4,
+                    action: MediaControlActionDto::FlushAudio {
+                        target_sequence: 10,
+                        target_sample_frames: 9600,
+                    },
+                },
+            },
+        ),
+        (
+            "event/media_control_close_request.json",
+            ClientEvent::MediaControlRequest {
+                request: MediaControlRequestDto {
+                    request_id: "control-close-1".into(),
+                    connection_id: "route-1".into(),
+                    media_session_ref: MediaSessionRefDto {
+                        id: "media-session-1".into(),
+                    },
+                    generation: 4,
+                    action: MediaControlActionDto::Close,
+                },
             },
         ),
     ]
@@ -1766,6 +1894,144 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                     }],
                     max_payload_bytes: 12_533_760,
                 },
+            },
+        ),
+        (
+            "command/media_connection_response.json",
+            ClientCommand::MediaConnectionResponse {
+                response: MediaConnectionResponseDto {
+                    request_id: "connection-1".into(),
+                    connection_id: "route-1".into(),
+                    media_session_ref: MediaSessionRefDto {
+                        id: "media-session-1".into(),
+                    },
+                    description: Some(MediaSessionDescriptionDto {
+                        kind: MediaSessionDescriptionTypeDto::Answer,
+                        sdp: "v=0\\r\\n".into(),
+                    }),
+                    error: None,
+                },
+            },
+        ),
+        (
+            "command/media_device_response.json",
+            ClientCommand::MediaDeviceResponse {
+                response: MediaDeviceResponseDto {
+                    request_id: "device-1".into(),
+                    result: MediaDeviceResultDto::Opened {
+                        lease: MediaDeviceLeaseDto {
+                            lease_id: "lease-1".into(),
+                        },
+                    },
+                },
+            },
+        ),
+        (
+            "command/media_service_execute_request.json",
+            ClientCommand::MediaServiceRequest {
+                request: MediaServiceRequestDto {
+                    request_id: "service-1".into(),
+                    action: MediaServiceActionDto::Execute {
+                        operation: MediaOperationDto::Sources {
+                            kind: Some(MediaKindDto::Audio),
+                            usage: Some(MediaSourceUsageDto::Transcribe),
+                        },
+                        timeout_budget_ms: Some(1000),
+                        max_payload_bytes: Some(1024),
+                    },
+                },
+            },
+        ),
+        (
+            "command/media_service_read_request.json",
+            ClientCommand::MediaServiceRequest {
+                request: MediaServiceRequestDto {
+                    request_id: "service-read-1".into(),
+                    action: MediaServiceActionDto::ReadMedia {
+                        media_ref: "asset-1".into(),
+                    },
+                },
+            },
+        ),
+        (
+            "command/media_service_cancel_request.json",
+            ClientCommand::MediaServiceRequest {
+                request: MediaServiceRequestDto {
+                    request_id: "service-cancel-1".into(),
+                    action: MediaServiceActionDto::Cancel {
+                        operation_id: MediaOperationIdDto {
+                            id: "operation-1".into(),
+                            generation: 1,
+                            service_epoch: 2,
+                        },
+                    },
+                },
+            },
+        ),
+        (
+            "command/media_service_update_audio_settings_request.json",
+            ClientCommand::MediaServiceRequest {
+                request: MediaServiceRequestDto {
+                    request_id: "settings-1".into(),
+                    action: MediaServiceActionDto::UpdateAudioSettings {
+                        configuration_json:
+                            r#"{"version":4,"vendor_extension":{"future_field":true}}"#
+                                .into(),
+                    },
+                },
+            },
+        ),
+        (
+            "command/media_service_register_connection_request.json",
+            ClientCommand::MediaServiceRequest {
+                request: MediaServiceRequestDto {
+                    request_id: "route-1".into(),
+                    action: MediaServiceActionDto::RegisterConnection {
+                        connection_id: "approved-route".into(),
+                        label: "Approved screen and audio route".into(),
+                        supported_modes: vec![MediaSessionModeDto::AudioVideo],
+                        source_kinds: vec![
+                            MediaSourceKindDto::Microphone,
+                            MediaSourceKindDto::Screen,
+                        ],
+                    },
+                },
+            },
+        ),
+        (
+            "command/media_service_unregister_connection_request.json",
+            ClientCommand::MediaServiceRequest {
+                request: MediaServiceRequestDto {
+                    request_id: "route-2".into(),
+                    action: MediaServiceActionDto::UnregisterConnection {
+                        connection_id: "approved-route".into(),
+                    },
+                },
+            },
+        ),
+        (
+            "command/media_control_response.json",
+            ClientCommand::MediaControlResponse {
+                response: MediaControlResponseDto {
+                    request_id: "control-1".into(),
+                    connection_id: "route-1".into(),
+                    media_session_ref: MediaSessionRefDto {
+                        id: "media-session-1".into(),
+                    },
+                    generation: 4,
+                    receipt: Some(MediaRenderReceiptDto {
+                        accepted_sample_frames: 0,
+                        played_sample_frames: 9600,
+                        rendered_at_unix_ms: Some(1_234_567),
+                    }),
+                    error: None,
+                },
+            },
+        ),
+        (
+            "command/update_media_session_modes.json",
+            ClientCommand::UpdateMediaSessionModes {
+                modes: vec![MediaSessionModeDto::Audio],
             },
         ),
     ]

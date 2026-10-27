@@ -79,6 +79,10 @@ use crate::adapter::sink::ClientEventSink;
 #[derive(Clone)]
 pub struct AdapterOutputStream {
     sink: Arc<dyn ClientEventSink>,
+    /// Optional host-owned gate for a deferred same-turn continuation. When
+    /// installed, the final TurnEnded frame can be held until the driver has
+    /// drained a queued media handoff under the current turn owner.
+    terminal_deferrer: Option<Arc<dyn TurnTerminalDeferrer>>,
     /// Ordered blocks for the API response currently being streamed. The
     /// orchestrator calls `emit_message_boundary` after persistence and before
     /// any terminal `emit_end_turn`, making this the production message-level
@@ -100,6 +104,16 @@ pub struct AdapterOutputStream {
     /// stays `Send + Sync` without churning the async signatures.
     pending:
         Arc<std::sync::Mutex<std::collections::VecDeque<(String, (String, Utf16JsonProjection))>>>,
+}
+
+/// Host hook that can retain a terminal event until a same-turn continuation
+/// finishes. Returning `true` means the event was consumed and must not reach
+/// the connection sink yet.
+pub trait TurnTerminalDeferrer: Send + Sync {
+    /// Store `event` when a continuation is pending. Implementations must be
+    /// synchronous and bounded; this is called while the orchestrator is
+    /// emitting the terminal boundary.
+    fn defer_turn_ended(&self, event: ClientEvent) -> bool;
 }
 
 #[derive(Default)]
@@ -318,9 +332,19 @@ impl AdapterOutputStream {
     pub fn new(sink: Arc<dyn ClientEventSink>) -> Self {
         Self {
             sink,
+            terminal_deferrer: None,
             message_blocks: Arc::new(tokio::sync::Mutex::new(MessageBuffer::default())),
             pending: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         }
+    }
+
+    /// Hold a `TurnEnded` emitted by the orchestrator while a host-owned
+    /// continuation is queued. The driver must later emit one terminal event
+    /// after the continuation completes or is cleaned up.
+    #[must_use]
+    pub fn with_turn_terminal_deferrer(mut self, deferrer: Arc<dyn TurnTerminalDeferrer>) -> Self {
+        self.terminal_deferrer = Some(deferrer);
+        self
     }
 
     async fn emit_all(&self, events: Vec<ClientEvent>) {
@@ -975,13 +999,18 @@ impl OutputStream for AdapterOutputStream {
             })
             .await;
 
-        self.sink
-            .emit(ClientEvent::TurnEnded {
-                outcome: Self::outcome_for(stop_reason),
-                stop_reason: Some(stop_reason.to_string()),
-                cost: cost_dto,
-            })
-            .await;
+        let terminal = ClientEvent::TurnEnded {
+            outcome: Self::outcome_for(stop_reason),
+            stop_reason: Some(stop_reason.to_string()),
+            cost: cost_dto,
+        };
+        if !self
+            .terminal_deferrer
+            .as_ref()
+            .is_some_and(|deferrer| deferrer.defer_turn_ended(terminal.clone()))
+        {
+            self.sink.emit(terminal).await;
+        }
     }
 
     async fn emit_compaction_started(&self) {

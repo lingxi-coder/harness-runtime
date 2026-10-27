@@ -484,6 +484,8 @@ pub async fn resolve_subagent_tools_with_handback(
         &resolved,
         &PromptOptions {
             include_examples: true,
+            session_id: None,
+            is_scheduled_turn: false,
             model: child_selection.map(|selection| selection.model.clone()),
             model_profile: child_selection.and_then(|selection| selection.model_profile.clone()),
             workflow_authoring_available: false,

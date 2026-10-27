@@ -1337,6 +1337,14 @@ fn current_contract_index() -> ContractIndex {
         "ClientCommand::UpdateAudioCapabilities.capabilities",
         "AudioCapabilitySnapshotDto",
     );
+    put(
+        "ClientCommand::UpdateMediaSessionModes",
+        "update_media_session_modes",
+    );
+    put(
+        "ClientCommand::UpdateMediaSessionModes.modes",
+        "Vec<MediaSessionModeDto>",
+    );
 
     put("AudioErrorKindDto::PermissionDenied", "permission_denied");
     put("AudioErrorKindDto::Busy", "busy");
@@ -2018,6 +2026,707 @@ fn current_contract_index() -> ContractIndex {
     put("CoordinatorWorkerDto.agent_type", "String");
     put("CoordinatorWorkerDto.status", "String");
 
+    // ── media.rs — canonical app media and host-private bridge contracts ──
+    put(
+        "ClientCommand::MediaConnectionResponse",
+        "media_connection_response",
+    );
+    put(
+        "ClientCommand::MediaConnectionResponse.response",
+        "MediaConnectionResponseDto",
+    );
+    put(
+        "ClientCommand::MediaDeviceResponse",
+        "media_device_response",
+    );
+    put(
+        "ClientCommand::MediaDeviceResponse.response",
+        "MediaDeviceResponseDto",
+    );
+    put(
+        "ClientCommand::MediaServiceRequest",
+        "media_service_request",
+    );
+    put(
+        "ClientCommand::MediaServiceRequest.request",
+        "MediaServiceRequestDto",
+    );
+    put(
+        "ClientCommand::MediaControlResponse",
+        "media_control_response",
+    );
+    put(
+        "ClientCommand::MediaControlResponse.response",
+        "MediaControlResponseDto",
+    );
+    put(
+        "ClientEvent::MediaConnectionRequest",
+        "media_connection_request",
+    );
+    put(
+        "ClientEvent::MediaConnectionRequest.request",
+        "MediaConnectionRequestDto",
+    );
+    put("ClientEvent::MediaDeviceRequest", "media_device_request");
+    put(
+        "ClientEvent::MediaDeviceRequest.request",
+        "MediaDeviceRequestEnvelopeDto",
+    );
+    put(
+        "ClientEvent::MediaServiceResponse",
+        "media_service_response",
+    );
+    put(
+        "ClientEvent::MediaServiceResponse.response",
+        "MediaServiceResponseDto",
+    );
+    put("ClientEvent::MediaControlRequest", "media_control_request");
+    put(
+        "ClientEvent::MediaControlRequest.request",
+        "MediaControlRequestDto",
+    );
+
+    put("MediaOperationIdDto.id", "String");
+    put("MediaOperationIdDto.generation", "u64");
+    put("MediaOperationIdDto.service_epoch", "u64");
+    put("MediaOwnerDto::Session", "session");
+    put("MediaOwnerDto::Session.session_id", "String");
+    put("MediaOwnerDto::Ui", "ui");
+    put("MediaOwnerDto::Ui.instance_id", "String");
+    put("MediaOwnerDto::System", "system");
+    put("MediaOwnerDto::System.instance_id", "String");
+    put("MediaInitiatorDto.agent_id", "Option<String>");
+    put("MediaInitiatorDto.tool_use_id", "Option<String>");
+    put("MediaInitiatorDto.request_id", "Option<String>");
+    for (variant, tag) in [("Audio", "audio"), ("Image", "image"), ("Video", "video")] {
+        put(&format!("MediaKindDto::{variant}"), tag);
+    }
+    for (variant, tag) in [
+        ("Microphone", "microphone"),
+        ("Camera", "camera"),
+        ("Screen", "screen"),
+        ("Speaker", "speaker"),
+        ("Library", "library"),
+        ("Remote", "remote"),
+    ] {
+        put(&format!("MediaSourceKindDto::{variant}"), tag);
+    }
+    for (variant, tag) in [
+        ("Capture", "capture"),
+        ("Record", "record"),
+        ("Transcribe", "transcribe"),
+        ("Play", "play"),
+        ("Speak", "speak"),
+        ("Session", "session"),
+        ("ReadImage", "read_image"),
+    ] {
+        put(&format!("MediaSourceUsageDto::{variant}"), tag);
+    }
+    for (variant, tag) in [
+        ("Sources", "sources"),
+        ("Status", "status"),
+        ("Capture", "capture"),
+        ("Record", "record"),
+        ("Transcribe", "transcribe"),
+        ("Synthesize", "synthesize"),
+        ("Play", "play"),
+        ("Speak", "speak"),
+        ("SessionStart", "session_start"),
+        ("SessionUpdate", "session_update"),
+        ("Observe", "observe"),
+        ("Wait", "wait"),
+        ("Stop", "stop"),
+    ] {
+        put(&format!("MediaOperationKindDto::{variant}"), tag);
+    }
+    for (variant, tag) in [
+        ("Ready", "ready"),
+        ("NeedsPermission", "needs_permission"),
+        ("Busy", "busy"),
+        ("MissingModel", "missing_model"),
+        ("Unavailable", "unavailable"),
+    ] {
+        put(&format!("MediaReadinessStateDto::{variant}"), tag);
+    }
+    put(
+        "MediaOperationReadinessDto.operation",
+        "MediaOperationKindDto",
+    );
+    put("MediaOperationReadinessDto.state", "MediaReadinessStateDto");
+    put("MediaCapabilitiesDto.service_epoch", "u64");
+    put("MediaCapabilitiesDto.support_revision", "u64");
+    put(
+        "MediaCapabilitiesDto.supported_operations",
+        "Vec<MediaOperationKindDto>",
+    );
+    put(
+        "MediaCapabilitiesDto.supported_media_kinds",
+        "Vec<MediaKindDto>",
+    );
+    put(
+        "MediaCapabilitiesDto.readiness",
+        "Vec<MediaOperationReadinessDto>",
+    );
+    put("MediaCapabilitiesDto.max_payload_bytes", "u64");
+    put("MediaSourceRefDto.id", "String");
+    put("MediaSessionRefDto.id", "String");
+    put("MediaResourceRefDto::Source", "source");
+    put("MediaResourceRefDto::Source.source", "MediaSourceRefDto");
+    put("MediaResourceRefDto::Recording", "recording");
+    put("MediaResourceRefDto::Recording.recording_id", "String");
+    put("MediaResourceRefDto::Session", "session");
+    put("MediaResourceRefDto::Session.session_id", "String");
+    put("MediaResourceRefDto::Media", "media");
+    put("MediaResourceRefDto::Media.media_ref", "String");
+    put("MediaResourceRefDto::Operation", "operation");
+    put(
+        "MediaResourceRefDto::Operation.operation_id",
+        "MediaOperationIdDto",
+    );
+    put("MediaSourceDto.reference", "MediaSourceRefDto");
+    put("MediaSourceDto.kind", "MediaSourceKindDto");
+    put("MediaSourceDto.media_kind", "Option<MediaKindDto>");
+    put("MediaSourceDto.label", "String");
+    put("MediaSourceDto.usages", "Vec<MediaSourceUsageDto>");
+    put(
+        "MediaSourceDto.supported_operations",
+        "Vec<MediaOperationKindDto>",
+    );
+    put("MediaSourceDto.is_default", "bool");
+    put("MediaMetadataDto.kind", "MediaKindDto");
+    put("MediaMetadataDto.mime_type", "String");
+    put("MediaMetadataDto.byte_len", "u64");
+    put("MediaMetadataDto.captured_at_unix_ms", "Option<u64>");
+    put("MediaMetadataDto.duration_ms", "Option<u64>");
+    put("MediaMetadataDto.width_px", "Option<u32>");
+    put("MediaMetadataDto.height_px", "Option<u32>");
+    put("MediaMetadataDto.sample_rate_hz", "Option<u32>");
+    put("MediaMetadataDto.channels", "Option<u16>");
+    put("MediaAssetDto.media_ref", "String");
+    put("MediaAssetDto.metadata", "MediaMetadataDto");
+    put("MediaCaptureOptionsDto.max_duration_ms", "Option<u64>");
+    put("MediaCaptureOptionsDto.max_dimension_px", "Option<u32>");
+    put("MediaCaptureOptionsDto.jpeg_quality", "Option<f32>");
+    put("MediaRecordOptionsDto.max_duration_ms", "Option<u64>");
+    put("MediaRecordOptionsDto.mime_type", "Option<String>");
+    put("MediaTranscriptionInputDto::LiveSource", "live_source");
+    put(
+        "MediaTranscriptionInputDto::LiveSource.source",
+        "MediaSourceRefDto",
+    );
+    put("MediaTranscriptionInputDto::StoredMedia", "stored_media");
+    put(
+        "MediaTranscriptionInputDto::StoredMedia.media_ref",
+        "String",
+    );
+    put("MediaSessionModeDto::Audio", "audio");
+    put("MediaSessionModeDto::Video", "video");
+    put("MediaSessionModeDto::AudioVideo", "audio_video");
+    put("MediaSessionIntentDto::Observation", "observation");
+    put("MediaSessionIntentDto::Conversation", "conversation");
+    put("MediaSessionRequestDto.mode", "MediaSessionModeDto");
+    put("MediaSessionRequestDto.intent", "MediaSessionIntentDto");
+    put(
+        "MediaSessionRequestDto.audio_source",
+        "Option<MediaSourceRefDto>",
+    );
+    put(
+        "MediaSessionRequestDto.video_source",
+        "Option<MediaSourceRefDto>",
+    );
+    put("MediaSessionUpdateDto::SetEnabled", "set_enabled");
+    put("MediaSessionUpdateDto::SetEnabled.kind", "MediaKindDto");
+    put("MediaSessionUpdateDto::SetEnabled.enabled", "bool");
+    put("MediaSessionUpdateDto::SelectSource", "select_source");
+    put("MediaSessionUpdateDto::SelectSource.kind", "MediaKindDto");
+    put(
+        "MediaSessionUpdateDto::SelectSource.source",
+        "MediaSourceRefDto",
+    );
+    put(
+        "MediaSessionUpdateDto::SetPlaybackGain",
+        "set_playback_gain",
+    );
+    put("MediaSessionUpdateDto::SetPlaybackGain.gain", "f32");
+    put("MediaSessionStateDto::Preparing", "preparing");
+    put("MediaSessionStateDto::Ready", "ready");
+    put("MediaSessionStateDto::Reconnecting", "reconnecting");
+    put("MediaSessionStateDto::Ended", "ended");
+    put("MediaSessionStateDto::Failed", "failed");
+    put("MediaSessionStatusDto.state", "MediaSessionStateDto");
+    put("MediaSessionStatusDto.audio_enabled", "bool");
+    put("MediaSessionStatusDto.video_enabled", "bool");
+    put("MediaOperationRequestDto.identity", "MediaOperationIdDto");
+    put("MediaOperationRequestDto.owner", "MediaOwnerDto");
+    put(
+        "MediaOperationRequestDto.initiator",
+        "Option<MediaInitiatorDto>",
+    );
+    put("MediaOperationRequestDto.timeout_budget_ms", "Option<u64>");
+    put("MediaOperationRequestDto.max_payload_bytes", "u64");
+    put("MediaOperationRequestDto.operation", "MediaOperationDto");
+    put("MediaOperationDto::Sources", "sources");
+    put("MediaOperationDto::Sources.kind", "Option<MediaKindDto>");
+    put(
+        "MediaOperationDto::Sources.usage",
+        "Option<MediaSourceUsageDto>",
+    );
+    put("MediaOperationDto::Status", "status");
+    put(
+        "MediaOperationDto::Status.target",
+        "Option<MediaResourceRefDto>",
+    );
+    put("MediaOperationDto::Capture", "capture");
+    put("MediaOperationDto::Capture.source", "MediaSourceRefDto");
+    put(
+        "MediaOperationDto::Capture.options",
+        "MediaCaptureOptionsDto",
+    );
+    put("MediaOperationDto::Record", "record");
+    put("MediaOperationDto::Record.source", "MediaSourceRefDto");
+    put("MediaOperationDto::Record.options", "MediaRecordOptionsDto");
+    put("MediaOperationDto::Transcribe", "transcribe");
+    put(
+        "MediaOperationDto::Transcribe.input",
+        "MediaTranscriptionInputDto",
+    );
+    put("MediaOperationDto::Transcribe.language", "Option<String>");
+    for variant in ["Synthesize", "Speak"] {
+        let tag = if variant == "Speak" {
+            "speak"
+        } else {
+            "synthesize"
+        };
+        put(&format!("MediaOperationDto::{variant}"), tag);
+        put(&format!("MediaOperationDto::{variant}.text"), "String");
+        put(
+            &format!("MediaOperationDto::{variant}.language"),
+            "Option<String>",
+        );
+        put(&format!("MediaOperationDto::{variant}.rate"), "Option<f32>");
+        put(
+            &format!("MediaOperationDto::{variant}.voice"),
+            "Option<String>",
+        );
+    }
+    put("MediaOperationDto::Play", "play");
+    put("MediaOperationDto::Play.media_ref", "String");
+    put(
+        "MediaOperationDto::Play.source",
+        "Option<MediaSourceRefDto>",
+    );
+    put("MediaOperationDto::SessionStart", "session_start");
+    put(
+        "MediaOperationDto::SessionStart.request",
+        "MediaSessionRequestDto",
+    );
+    put("MediaOperationDto::SessionUpdate", "session_update");
+    put("MediaOperationDto::SessionUpdate.session_id", "String");
+    put(
+        "MediaOperationDto::SessionUpdate.update",
+        "MediaSessionUpdateDto",
+    );
+    put("MediaOperationDto::Observe", "observe");
+    put("MediaOperationDto::Observe.target", "MediaResourceRefDto");
+    put("MediaOperationDto::Observe.after_sequence", "Option<u64>");
+    put("MediaOperationDto::Observe.limit", "u16");
+    put("MediaOperationDto::Wait", "wait");
+    put("MediaOperationDto::Wait.target", "MediaResourceRefDto");
+    put("MediaOperationDto::Wait.after_sequence", "Option<u64>");
+    put("MediaOperationDto::Wait.timeout_ms", "u64");
+    put("MediaOperationDto::Wait.limit", "u16");
+    put("MediaOperationDto::Stop", "stop");
+    put("MediaOperationDto::Stop.target", "MediaResourceRefDto");
+    put("MediaResultDto::Sources", "sources");
+    put("MediaResultDto::Sources.sources", "Vec<MediaSourceDto>");
+    put("MediaResultDto::Status", "status");
+    put(
+        "MediaResultDto::Status.resources",
+        "Vec<MediaResourceStatusDto>",
+    );
+    put("MediaResultDto::Captured", "captured");
+    put("MediaResultDto::Captured.asset", "MediaAssetDto");
+    put("MediaResultDto::RecordingStarted", "recording_started");
+    put("MediaResultDto::RecordingStarted.recording_id", "String");
+    put("MediaResultDto::RecordingStopped", "recording_stopped");
+    put("MediaResultDto::RecordingStopped.recording_id", "String");
+    put("MediaResultDto::RecordingStopped.asset", "MediaAssetDto");
+    put("MediaResultDto::Transcript", "transcript");
+    put("MediaResultDto::Transcript.text", "String");
+    put("MediaResultDto::Transcript.language", "Option<String>");
+    put("MediaResultDto::Transcript.confidence", "Option<f32>");
+    put("MediaResultDto::Synthesized", "synthesized");
+    put("MediaResultDto::Synthesized.asset", "MediaAssetDto");
+    put("MediaResultDto::PlaybackCompleted", "playback_completed");
+    put("MediaResultDto::PlaybackCompleted.duration_ms", "u64");
+    put("MediaResultDto::SpeechCompleted", "speech_completed");
+    put("MediaResultDto::SpeechCompleted.duration_ms", "u64");
+    put("MediaResultDto::SessionStarted", "session_started");
+    put("MediaResultDto::SessionStarted.session_id", "String");
+    put(
+        "MediaResultDto::SessionStarted.status",
+        "MediaSessionStatusDto",
+    );
+    put("MediaResultDto::SessionUpdated", "session_updated");
+    put("MediaResultDto::SessionUpdated.session_id", "String");
+    put(
+        "MediaResultDto::SessionUpdated.status",
+        "MediaSessionStatusDto",
+    );
+    put("MediaResultDto::Events", "events");
+    put("MediaResultDto::Events.batch", "MediaEventBatchDto");
+    put("MediaResultDto::Stopped", "stopped");
+    put("MediaResultDto::Stopped.resource", "MediaResourceRefDto");
+    put("MediaServiceActionDto::Execute", "execute");
+    put(
+        "MediaServiceActionDto::Execute.operation",
+        "MediaOperationDto",
+    );
+    put(
+        "MediaServiceActionDto::Execute.timeout_budget_ms",
+        "Option<u64>",
+    );
+    put(
+        "MediaServiceActionDto::Execute.max_payload_bytes",
+        "Option<u64>",
+    );
+    put("MediaServiceActionDto::ReadMedia", "read_media");
+    put("MediaServiceActionDto::ReadMedia.media_ref", "String");
+    put("MediaServiceActionDto::Cancel", "cancel");
+    put(
+        "MediaServiceActionDto::Cancel.operation_id",
+        "MediaOperationIdDto",
+    );
+    put(
+        "MediaServiceActionDto::UpdateAudioSettings",
+        "update_audio_settings",
+    );
+    put(
+        "MediaServiceActionDto::UpdateAudioSettings.configuration_json",
+        "String",
+    );
+    put(
+        "MediaServiceActionDto::RegisterConnection",
+        "register_connection",
+    );
+    put(
+        "MediaServiceActionDto::RegisterConnection.connection_id",
+        "String",
+    );
+    put("MediaServiceActionDto::RegisterConnection.label", "String");
+    put(
+        "MediaServiceActionDto::RegisterConnection.supported_modes",
+        "Vec<MediaSessionModeDto>",
+    );
+    put(
+        "MediaServiceActionDto::RegisterConnection.source_kinds",
+        "Vec<MediaSourceKindDto>",
+    );
+    put(
+        "MediaServiceActionDto::UnregisterConnection",
+        "unregister_connection",
+    );
+    put(
+        "MediaServiceActionDto::UnregisterConnection.connection_id",
+        "String",
+    );
+    put("MediaServiceRequestDto.request_id", "String");
+    put("MediaServiceRequestDto.action", "MediaServiceActionDto");
+    put("MediaServiceResultDto::Operation", "operation");
+    put(
+        "MediaServiceResultDto::Operation.operation_id",
+        "MediaOperationIdDto",
+    );
+    put("MediaServiceResultDto::Operation.result", "MediaResultDto");
+    put("MediaServiceResultDto::Content", "content");
+    put("MediaServiceResultDto::Content.content", "MediaContentDto");
+    put("MediaServiceResultDto::Cancelled", "cancelled");
+    put("MediaServiceResultDto::SettingsUpdated", "settings_updated");
+    put(
+        "MediaServiceResultDto::ConnectionUpdated",
+        "connection_updated",
+    );
+    put("MediaServiceResponseDto.request_id", "String");
+    put(
+        "MediaServiceResponseDto.result",
+        "Option<MediaServiceResultDto>",
+    );
+    put("MediaServiceResponseDto.error", "Option<MediaErrorDto>");
+    put("MediaResourceStatusDto.resource", "MediaResourceRefDto");
+    put("MediaResourceStatusDto.state", "MediaResourceStateDto");
+    put("MediaResourceStatusDto.started_at_unix_ms", "Option<u64>");
+    put("MediaResourceStatusDto.updated_at_unix_ms", "Option<u64>");
+    for (variant, tag) in [
+        ("Ready", "ready"),
+        ("Active", "active"),
+        ("Stopping", "stopping"),
+        ("Completed", "completed"),
+        ("Failed", "failed"),
+    ] {
+        put(&format!("MediaResourceStateDto::{variant}"), tag);
+    }
+    put("MediaEventBatchDto.target", "MediaResourceRefDto");
+    put("MediaEventBatchDto.events", "Vec<MediaEventDto>");
+    put("MediaEventBatchDto.next_sequence", "Option<u64>");
+    put("MediaEventBatchDto.dropped_before_cursor", "bool");
+    put("MediaEventDto.sequence", "u64");
+    put("MediaEventDto.occurred_at_unix_ms", "u64");
+    put("MediaEventDto.target", "MediaResourceRefDto");
+    put("MediaEventDto.operation_id", "Option<MediaOperationIdDto>");
+    put("MediaEventDto.kind", "MediaEventKindDto");
+    put("MediaEventKindDto::StateChanged", "state_changed");
+    put(
+        "MediaEventKindDto::StateChanged.resource",
+        "MediaResourceRefDto",
+    );
+    put(
+        "MediaEventKindDto::StateChanged.state",
+        "MediaResourceStateDto",
+    );
+    put("MediaEventKindDto::Frame", "frame");
+    put("MediaEventKindDto::Frame.source", "MediaSourceRefDto");
+    put("MediaEventKindDto::Frame.asset", "MediaAssetDto");
+    put("MediaEventKindDto::Transcript", "transcript");
+    put("MediaEventKindDto::Transcript.text", "String");
+    put("MediaEventKindDto::Transcript.language", "Option<String>");
+    put("MediaEventKindDto::Transcript.confidence", "Option<f32>");
+    put("MediaEventKindDto::Error", "error");
+    put("MediaEventKindDto::Error.kind", "MediaErrorKindDto");
+    put("MediaEventKindDto::Error.message", "String");
+    put("MediaContentDto.media_ref", "String");
+    put("MediaContentDto.metadata", "MediaMetadataDto");
+    put("MediaContentDto.bytes", "Vec<u8>");
+    put("MediaErrorDto.kind", "MediaErrorKindDto");
+    put("MediaErrorDto.message", "String");
+    for (variant, tag) in [
+        ("PermissionDenied", "permission_denied"),
+        ("Busy", "busy"),
+        ("Cancelled", "cancelled"),
+        ("Timeout", "timeout"),
+        ("NoData", "no_data"),
+        ("NotFound", "not_found"),
+        ("Unavailable", "unavailable"),
+        ("Unsupported", "unsupported"),
+        ("ModelMissing", "model_missing"),
+        ("InvalidRequest", "invalid_request"),
+        ("ProcessingFailed", "processing_failed"),
+        ("NativeFailure", "native_failure"),
+        ("StoreFailure", "store_failure"),
+        ("MediaTooLarge", "media_too_large"),
+    ] {
+        put(&format!("MediaErrorKindDto::{variant}"), tag);
+    }
+    put("MediaDeviceOpenRequestDto.identity", "MediaOperationIdDto");
+    put("MediaDeviceOpenRequestDto.owner", "MediaOwnerDto");
+    put(
+        "MediaDeviceOpenRequestDto.initiator",
+        "Option<MediaInitiatorDto>",
+    );
+    put("MediaDeviceOpenRequestDto.timeout_budget_ms", "Option<u64>");
+    put("MediaDeviceOpenRequestDto.max_payload_bytes", "u64");
+    put(
+        "MediaDeviceOpenRequestDto.request",
+        "MediaSessionRequestDto",
+    );
+    put("MediaDeviceLeaseDto.lease_id", "String");
+    put("MediaPcmFrameDto.sample_rate_hz", "u32");
+    put("MediaPcmFrameDto.channels", "u16");
+    put("MediaPcmFrameDto.pcm16le", "Vec<u8>");
+    put("MediaVideoFrameDto::Rgba8", "rgba8");
+    put("MediaVideoFrameDto::Rgba8.width_px", "u32");
+    put("MediaVideoFrameDto::Rgba8.height_px", "u32");
+    put("MediaVideoFrameDto::Rgba8.stride_bytes", "u32");
+    put("MediaVideoFrameDto::Rgba8.bytes", "Vec<u8>");
+    put("MediaVideoFrameDto::I420", "i420");
+    put("MediaVideoFrameDto::I420.width_px", "u32");
+    put("MediaVideoFrameDto::I420.height_px", "u32");
+    put("MediaVideoFrameDto::I420.y_stride_bytes", "u32");
+    put("MediaVideoFrameDto::I420.u_stride_bytes", "u32");
+    put("MediaVideoFrameDto::I420.v_stride_bytes", "u32");
+    put("MediaVideoFrameDto::I420.y", "Vec<u8>");
+    put("MediaVideoFrameDto::I420.u", "Vec<u8>");
+    put("MediaVideoFrameDto::I420.v", "Vec<u8>");
+    put("MediaFramePayloadDto::Audio", "audio");
+    put("MediaFramePayloadDto::Audio.frame", "MediaPcmFrameDto");
+    put("MediaFramePayloadDto::Video", "video");
+    put("MediaFramePayloadDto::Video.frame", "MediaVideoFrameDto");
+    put("MediaFrameDto.source", "MediaSourceRefDto");
+    put("MediaFrameDto.sequence", "u64");
+    put("MediaFrameDto.captured_at_unix_ms", "u64");
+    put("MediaFrameDto.payload", "MediaFramePayloadDto");
+    put("MediaRenderReceiptDto.accepted_sample_frames", "u32");
+    put("MediaRenderReceiptDto.played_sample_frames", "u32");
+    put("MediaRenderReceiptDto.rendered_at_unix_ms", "Option<u64>");
+    put("MediaDeviceUpdateRequestDto.lease_id", "String");
+    put(
+        "MediaDeviceUpdateRequestDto.update",
+        "MediaSessionUpdateDto",
+    );
+    put("MediaDeviceAudioWriteRequestDto.lease_id", "String");
+    put("MediaDeviceAudioWriteRequestDto.frame", "MediaPcmFrameDto");
+    put("MediaDeviceVideoWriteRequestDto.lease_id", "String");
+    put(
+        "MediaDeviceVideoWriteRequestDto.frame",
+        "MediaVideoFrameDto",
+    );
+    put("MediaDeviceAudioControlRequestDto.lease_id", "String");
+    for (variant, tag) in [
+        ("Open", "open"),
+        ("NextInput", "next_input"),
+        ("WriteAudio", "write_audio"),
+        ("WriteVideo", "write_video"),
+        ("FlushAudio", "flush_audio"),
+        ("InterruptAudio", "interrupt_audio"),
+        ("Update", "update"),
+        ("Stop", "stop"),
+    ] {
+        put(&format!("MediaDeviceRequestDto::{variant}"), tag);
+    }
+    put(
+        "MediaDeviceRequestDto::Open.request",
+        "MediaDeviceOpenRequestDto",
+    );
+    put("MediaDeviceRequestDto::NextInput.lease_id", "String");
+    put(
+        "MediaDeviceRequestDto::WriteAudio.request",
+        "MediaDeviceAudioWriteRequestDto",
+    );
+    put(
+        "MediaDeviceRequestDto::WriteVideo.request",
+        "MediaDeviceVideoWriteRequestDto",
+    );
+    put(
+        "MediaDeviceRequestDto::FlushAudio.request",
+        "MediaDeviceAudioControlRequestDto",
+    );
+    put(
+        "MediaDeviceRequestDto::InterruptAudio.request",
+        "MediaDeviceAudioControlRequestDto",
+    );
+    put(
+        "MediaDeviceRequestDto::Update.request",
+        "MediaDeviceUpdateRequestDto",
+    );
+    put("MediaDeviceRequestDto::Stop.lease_id", "String");
+    put("MediaDeviceRequestEnvelopeDto.request_id", "String");
+    put(
+        "MediaDeviceRequestEnvelopeDto.request",
+        "MediaDeviceRequestDto",
+    );
+    put("MediaDeviceResponseDto.request_id", "String");
+    put("MediaDeviceResponseDto.result", "MediaDeviceResultDto");
+    put("MediaDeviceResultDto::Opened", "opened");
+    put("MediaDeviceResultDto::Opened.lease", "MediaDeviceLeaseDto");
+    put("MediaDeviceResultDto::Input", "input");
+    put("MediaDeviceResultDto::Input.frame", "Option<MediaFrameDto>");
+    put("MediaDeviceResultDto::AudioWritten", "audio_written");
+    put(
+        "MediaDeviceResultDto::AudioWritten.receipt",
+        "MediaRenderReceiptDto",
+    );
+    put("MediaDeviceResultDto::AudioFlushed", "audio_flushed");
+    put(
+        "MediaDeviceResultDto::AudioFlushed.receipt",
+        "MediaRenderReceiptDto",
+    );
+    put(
+        "MediaDeviceResultDto::AudioInterrupted",
+        "audio_interrupted",
+    );
+    put(
+        "MediaDeviceResultDto::AudioInterrupted.receipt",
+        "MediaRenderReceiptDto",
+    );
+    put("MediaDeviceResultDto::VideoWritten", "video_written");
+    put("MediaDeviceResultDto::Updated", "updated");
+    put(
+        "MediaDeviceResultDto::Updated.status",
+        "MediaSessionStatusDto",
+    );
+    put("MediaDeviceResultDto::Stopped", "stopped");
+    put("MediaDeviceResultDto::Error", "error");
+    put("MediaDeviceResultDto::Error.error", "MediaErrorDto");
+    put("MediaSessionDescriptionTypeDto::Offer", "offer");
+    put("MediaSessionDescriptionTypeDto::Answer", "answer");
+    put(
+        "MediaSessionDescriptionDto.kind",
+        "MediaSessionDescriptionTypeDto",
+    );
+    put("MediaSessionDescriptionDto.sdp", "String");
+    put("MediaConnectionRequestDto.request_id", "String");
+    put("MediaConnectionRequestDto.connection_id", "String");
+    put("MediaConnectionRequestDto.session_id", "String");
+    put(
+        "MediaConnectionRequestDto.media_session_ref",
+        "MediaSessionRefDto",
+    );
+    put(
+        "MediaConnectionRequestDto.operation_id",
+        "MediaOperationIdDto",
+    );
+    put("MediaConnectionRequestDto.owner", "MediaOwnerDto");
+    put("MediaConnectionRequestDto.mode", "MediaSessionModeDto");
+    put("MediaConnectionRequestDto.intent", "MediaSessionIntentDto");
+    put(
+        "MediaConnectionRequestDto.audio_source",
+        "Option<MediaSourceRefDto>",
+    );
+    put(
+        "MediaConnectionRequestDto.video_source",
+        "Option<MediaSourceRefDto>",
+    );
+    put(
+        "MediaConnectionRequestDto.description",
+        "MediaSessionDescriptionDto",
+    );
+    put("MediaConnectionResponseDto.request_id", "String");
+    put("MediaConnectionResponseDto.connection_id", "String");
+    put(
+        "MediaConnectionResponseDto.media_session_ref",
+        "MediaSessionRefDto",
+    );
+    put(
+        "MediaConnectionResponseDto.description",
+        "Option<MediaSessionDescriptionDto>",
+    );
+    put("MediaConnectionResponseDto.error", "Option<MediaErrorDto>");
+    put("MediaControlActionDto::FlushAudio", "flush_audio");
+    put("MediaControlActionDto::FlushAudio.target_sequence", "u64");
+    put(
+        "MediaControlActionDto::FlushAudio.target_sample_frames",
+        "u64",
+    );
+    put("MediaControlActionDto::InterruptAudio", "interrupt_audio");
+    put(
+        "MediaControlActionDto::InterruptAudio.target_sequence",
+        "u64",
+    );
+    put(
+        "MediaControlActionDto::InterruptAudio.target_sample_frames",
+        "u64",
+    );
+    put("MediaControlActionDto::Close", "close");
+    put("MediaControlRequestDto.request_id", "String");
+    put("MediaControlRequestDto.connection_id", "String");
+    put(
+        "MediaControlRequestDto.media_session_ref",
+        "MediaSessionRefDto",
+    );
+    put("MediaControlRequestDto.generation", "u64");
+    put("MediaControlRequestDto.action", "MediaControlActionDto");
+    put("MediaControlResponseDto.request_id", "String");
+    put("MediaControlResponseDto.connection_id", "String");
+    put(
+        "MediaControlResponseDto.media_session_ref",
+        "MediaSessionRefDto",
+    );
+    put("MediaControlResponseDto.generation", "u64");
+    put(
+        "MediaControlResponseDto.receipt",
+        "Option<MediaRenderReceiptDto>",
+    );
+    put("MediaControlResponseDto.error", "Option<MediaErrorDto>");
+
     ix
 }
 
@@ -2384,6 +3093,7 @@ fn contract_index_covers_every_dto() {
         MemoryTierDto, ModelContextBudgetDto, SessionAgentMessageRowDto, SessionAgentSummaryDto,
         SessionRowDto, SkillDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
     };
+    use client::protocol::media::*;
     use client::protocol::message::{MessageBlockDto, MessageDto};
     use client::protocol::permission::{
         PermissionKindDto, PermissionRequest, PermissionResolved, PermissionResponseDto,
@@ -2561,6 +3271,7 @@ fn contract_index_covers_every_dto() {
                 },
                 initiator: None,
                 timeout_budget_ms: None,
+                route_policy: None,
                 max_payload_bytes: 0,
                 operation: AudioOperationDto::Status { handle: None },
             },
@@ -2579,6 +3290,78 @@ fn contract_index_covers_every_dto() {
                 supported_operations: Vec::new(),
                 readiness: Vec::new(),
                 max_payload_bytes: 0,
+            },
+        },
+        ClientEvent::MediaConnectionRequest {
+            request: MediaConnectionRequestDto {
+                request_id: String::new(),
+                connection_id: String::new(),
+                session_id: String::new(),
+                media_session_ref: MediaSessionRefDto { id: String::new() },
+                operation_id: MediaOperationIdDto {
+                    id: String::new(),
+                    generation: 0,
+                    service_epoch: 0,
+                },
+                owner: MediaOwnerDto::Session {
+                    session_id: String::new(),
+                },
+                mode: MediaSessionModeDto::Audio,
+                intent: MediaSessionIntentDto::Observation,
+                audio_source: None,
+                video_source: None,
+                description: MediaSessionDescriptionDto {
+                    kind: MediaSessionDescriptionTypeDto::Offer,
+                    sdp: String::new(),
+                },
+            },
+        },
+        ClientEvent::MediaDeviceRequest {
+            request: MediaDeviceRequestEnvelopeDto {
+                request_id: String::new(),
+                request: MediaDeviceRequestDto::Open {
+                    request: MediaDeviceOpenRequestDto {
+                        identity: MediaOperationIdDto {
+                            id: String::new(),
+                            generation: 0,
+                            service_epoch: 0,
+                        },
+                        owner: MediaOwnerDto::Session {
+                            session_id: String::new(),
+                        },
+                        initiator: None,
+                        timeout_budget_ms: None,
+                        max_payload_bytes: 0,
+                        request: MediaSessionRequestDto {
+                            mode: MediaSessionModeDto::Audio,
+                            intent: MediaSessionIntentDto::Observation,
+                            audio_source: None,
+                            video_source: None,
+                        },
+                    },
+                },
+            },
+        },
+        ClientEvent::MediaServiceResponse {
+            response: MediaServiceResponseDto {
+                request_id: String::new(),
+                result: None,
+                error: Some(MediaErrorDto {
+                    kind: MediaErrorKindDto::Unsupported,
+                    message: String::new(),
+                }),
+            },
+        },
+        ClientEvent::MediaControlRequest {
+            request: MediaControlRequestDto {
+                request_id: String::new(),
+                connection_id: String::new(),
+                media_session_ref: MediaSessionRefDto { id: String::new() },
+                generation: 0,
+                action: MediaControlActionDto::FlushAudio {
+                    target_sequence: 0,
+                    target_sample_frames: 0,
+                },
             },
         },
         ClientEvent::UserTranscriptRowIdentity {
@@ -2835,6 +3618,45 @@ fn contract_index_covers_every_dto() {
                 max_payload_bytes: 0,
             },
         },
+        ClientCommand::MediaConnectionResponse {
+            response: MediaConnectionResponseDto {
+                request_id: String::new(),
+                connection_id: String::new(),
+                media_session_ref: MediaSessionRefDto { id: String::new() },
+                description: None,
+                error: Some(MediaErrorDto {
+                    kind: MediaErrorKindDto::Unavailable,
+                    message: String::new(),
+                }),
+            },
+        },
+        ClientCommand::MediaDeviceResponse {
+            response: MediaDeviceResponseDto {
+                request_id: String::new(),
+                result: MediaDeviceResultDto::Stopped,
+            },
+        },
+        ClientCommand::MediaServiceRequest {
+            request: MediaServiceRequestDto {
+                request_id: String::new(),
+                action: MediaServiceActionDto::ReadMedia {
+                    media_ref: String::new(),
+                },
+            },
+        },
+        ClientCommand::MediaControlResponse {
+            response: MediaControlResponseDto {
+                request_id: String::new(),
+                connection_id: String::new(),
+                media_session_ref: MediaSessionRefDto { id: String::new() },
+                generation: 1,
+                receipt: None,
+                error: Some(MediaErrorDto {
+                    kind: MediaErrorKindDto::Unavailable,
+                    message: String::new(),
+                }),
+            },
+        },
         ClientCommand::UiRender {
             request_id: String::new(),
             request_json: String::new(),
@@ -2886,6 +3708,7 @@ fn contract_index_covers_every_dto() {
             request_id: String::new(),
             operation_json: String::new(),
         },
+        ClientCommand::UpdateMediaSessionModes { modes: Vec::new() },
     ];
     // Every operation result and error variant must remain constructible.
     let _audio_results: Vec<AudioOperationResultDto> = vec![
@@ -2972,6 +3795,641 @@ fn contract_index_covers_every_dto() {
     let _audio_readiness_entry = AudioOperationReadinessDto {
         operation: AudioOperationKindDto::Listen,
         state: AudioReadinessStateDto::Busy,
+    };
+    let media_operation_id = MediaOperationIdDto {
+        id: String::new(),
+        generation: 1,
+        service_epoch: 1,
+    };
+    let media_source_ref = MediaSourceRefDto {
+        id: "source".into(),
+    };
+    let media_session_ref = MediaSessionRefDto {
+        id: "session".into(),
+    };
+    let media_owner = MediaOwnerDto::Session {
+        session_id: "session".into(),
+    };
+    let media_metadata = MediaMetadataDto {
+        kind: MediaKindDto::Audio,
+        mime_type: "audio/wav".into(),
+        byte_len: 0,
+        captured_at_unix_ms: None,
+        duration_ms: None,
+        width_px: None,
+        height_px: None,
+        sample_rate_hz: Some(24_000),
+        channels: Some(1),
+    };
+    let media_asset = MediaAssetDto {
+        media_ref: "asset".into(),
+        metadata: media_metadata.clone(),
+    };
+    let media_target = MediaResourceRefDto::Session {
+        session_id: "session".into(),
+    };
+    let media_session_status = MediaSessionStatusDto {
+        state: MediaSessionStateDto::Ready,
+        audio_enabled: true,
+        video_enabled: false,
+    };
+    let media_session_request = MediaSessionRequestDto {
+        mode: MediaSessionModeDto::Audio,
+        intent: MediaSessionIntentDto::Conversation,
+        audio_source: Some(media_source_ref.clone()),
+        video_source: None,
+    };
+    let media_event = MediaEventDto {
+        sequence: 1,
+        occurred_at_unix_ms: 1,
+        target: media_target.clone(),
+        operation_id: Some(media_operation_id.clone()),
+        kind: MediaEventKindDto::StateChanged {
+            resource: media_target.clone(),
+            state: MediaResourceStateDto::Active,
+        },
+    };
+    let media_event_batch = MediaEventBatchDto {
+        target: media_target.clone(),
+        events: vec![media_event.clone()],
+        next_sequence: Some(1),
+        dropped_before_cursor: false,
+    };
+    let media_error = MediaErrorDto {
+        kind: MediaErrorKindDto::Unavailable,
+        message: String::new(),
+    };
+    let _media_capabilities = MediaCapabilitiesDto {
+        service_epoch: 1,
+        support_revision: 1,
+        supported_operations: vec![MediaOperationKindDto::Sources],
+        supported_media_kinds: vec![MediaKindDto::Audio],
+        readiness: vec![MediaOperationReadinessDto {
+            operation: MediaOperationKindDto::Sources,
+            state: MediaReadinessStateDto::Ready,
+        }],
+        max_payload_bytes: 1024,
+    };
+    let _media_sources = [
+        MediaSourceKindDto::Microphone,
+        MediaSourceKindDto::Camera,
+        MediaSourceKindDto::Screen,
+        MediaSourceKindDto::Speaker,
+        MediaSourceKindDto::Library,
+        MediaSourceKindDto::Remote,
+    ];
+    let _media_usages = [
+        MediaSourceUsageDto::Capture,
+        MediaSourceUsageDto::Record,
+        MediaSourceUsageDto::Transcribe,
+        MediaSourceUsageDto::Play,
+        MediaSourceUsageDto::Speak,
+        MediaSourceUsageDto::Session,
+        MediaSourceUsageDto::ReadImage,
+    ];
+    let _media_operation_kinds = [
+        MediaOperationKindDto::Sources,
+        MediaOperationKindDto::Status,
+        MediaOperationKindDto::Capture,
+        MediaOperationKindDto::Record,
+        MediaOperationKindDto::Transcribe,
+        MediaOperationKindDto::Synthesize,
+        MediaOperationKindDto::Play,
+        MediaOperationKindDto::Speak,
+        MediaOperationKindDto::SessionStart,
+        MediaOperationKindDto::SessionUpdate,
+        MediaOperationKindDto::Observe,
+        MediaOperationKindDto::Wait,
+        MediaOperationKindDto::Stop,
+    ];
+    let _media_readiness_states = [
+        MediaReadinessStateDto::Ready,
+        MediaReadinessStateDto::NeedsPermission,
+        MediaReadinessStateDto::Busy,
+        MediaReadinessStateDto::MissingModel,
+        MediaReadinessStateDto::Unavailable,
+    ];
+    let _media_source = MediaSourceDto {
+        reference: media_source_ref.clone(),
+        kind: MediaSourceKindDto::Microphone,
+        media_kind: Some(MediaKindDto::Audio),
+        label: String::new(),
+        usages: Vec::new(),
+        supported_operations: Vec::new(),
+        is_default: false,
+    };
+    let _media_capture_options = MediaCaptureOptionsDto {
+        max_duration_ms: None,
+        max_dimension_px: None,
+        jpeg_quality: None,
+    };
+    let _media_record_options = MediaRecordOptionsDto {
+        max_duration_ms: None,
+        mime_type: None,
+    };
+    let _media_transcription_inputs = [
+        MediaTranscriptionInputDto::LiveSource {
+            source: media_source_ref.clone(),
+        },
+        MediaTranscriptionInputDto::StoredMedia {
+            media_ref: "asset".into(),
+        },
+    ];
+    let _media_modes = [
+        MediaSessionModeDto::Audio,
+        MediaSessionModeDto::Video,
+        MediaSessionModeDto::AudioVideo,
+    ];
+    let _media_intents = [
+        MediaSessionIntentDto::Observation,
+        MediaSessionIntentDto::Conversation,
+    ];
+    let _media_updates = [
+        MediaSessionUpdateDto::SetEnabled {
+            kind: MediaKindDto::Audio,
+            enabled: true,
+        },
+        MediaSessionUpdateDto::SelectSource {
+            kind: MediaKindDto::Audio,
+            source: media_source_ref.clone(),
+        },
+        MediaSessionUpdateDto::SetPlaybackGain { gain: 1.0 },
+    ];
+    let _media_states = [
+        MediaSessionStateDto::Preparing,
+        MediaSessionStateDto::Ready,
+        MediaSessionStateDto::Reconnecting,
+        MediaSessionStateDto::Ended,
+        MediaSessionStateDto::Failed,
+    ];
+    let _media_operation_request = MediaOperationRequestDto {
+        identity: media_operation_id.clone(),
+        owner: media_owner.clone(),
+        initiator: Some(MediaInitiatorDto {
+            agent_id: None,
+            tool_use_id: None,
+            request_id: None,
+        }),
+        timeout_budget_ms: None,
+        max_payload_bytes: 1024,
+        operation: MediaOperationDto::Sources {
+            kind: None,
+            usage: None,
+        },
+    };
+    let _media_operations = vec![
+        MediaOperationDto::Sources {
+            kind: None,
+            usage: None,
+        },
+        MediaOperationDto::Status {
+            target: Some(media_target.clone()),
+        },
+        MediaOperationDto::Capture {
+            source: media_source_ref.clone(),
+            options: MediaCaptureOptionsDto {
+                max_duration_ms: None,
+                max_dimension_px: None,
+                jpeg_quality: None,
+            },
+        },
+        MediaOperationDto::Record {
+            source: media_source_ref.clone(),
+            options: MediaRecordOptionsDto {
+                max_duration_ms: None,
+                mime_type: None,
+            },
+        },
+        MediaOperationDto::Transcribe {
+            input: MediaTranscriptionInputDto::LiveSource {
+                source: media_source_ref.clone(),
+            },
+            language: None,
+        },
+        MediaOperationDto::Synthesize {
+            text: String::new(),
+            language: None,
+            rate: None,
+            voice: None,
+        },
+        MediaOperationDto::Play {
+            media_ref: "asset".into(),
+            source: None,
+        },
+        MediaOperationDto::Speak {
+            text: String::new(),
+            language: None,
+            rate: None,
+            voice: None,
+        },
+        MediaOperationDto::SessionStart {
+            request: media_session_request.clone(),
+        },
+        MediaOperationDto::SessionUpdate {
+            session_id: "session".into(),
+            update: MediaSessionUpdateDto::SetEnabled {
+                kind: MediaKindDto::Audio,
+                enabled: true,
+            },
+        },
+        MediaOperationDto::Observe {
+            target: media_target.clone(),
+            after_sequence: None,
+            limit: 1,
+        },
+        MediaOperationDto::Wait {
+            target: media_target.clone(),
+            after_sequence: None,
+            timeout_ms: 1,
+            limit: 1,
+        },
+        MediaOperationDto::Stop {
+            target: media_target.clone(),
+        },
+    ];
+    let _media_results = vec![
+        MediaResultDto::Sources {
+            sources: Vec::new(),
+        },
+        MediaResultDto::Status {
+            resources: Vec::new(),
+        },
+        MediaResultDto::Captured {
+            asset: media_asset.clone(),
+        },
+        MediaResultDto::RecordingStarted {
+            recording_id: String::new(),
+        },
+        MediaResultDto::RecordingStopped {
+            recording_id: String::new(),
+            asset: media_asset.clone(),
+        },
+        MediaResultDto::Transcript {
+            text: String::new(),
+            language: None,
+            confidence: None,
+        },
+        MediaResultDto::Synthesized {
+            asset: media_asset.clone(),
+        },
+        MediaResultDto::PlaybackCompleted { duration_ms: 0 },
+        MediaResultDto::SpeechCompleted { duration_ms: 0 },
+        MediaResultDto::SessionStarted {
+            session_id: String::new(),
+            status: media_session_status.clone(),
+        },
+        MediaResultDto::SessionUpdated {
+            session_id: String::new(),
+            status: media_session_status.clone(),
+        },
+        MediaResultDto::Events {
+            batch: media_event_batch.clone(),
+        },
+        MediaResultDto::Stopped {
+            resource: media_target.clone(),
+        },
+    ];
+    let _media_service_actions = [
+        MediaServiceActionDto::Execute {
+            operation: MediaOperationDto::Sources {
+                kind: None,
+                usage: None,
+            },
+            timeout_budget_ms: None,
+            max_payload_bytes: None,
+        },
+        MediaServiceActionDto::ReadMedia {
+            media_ref: String::new(),
+        },
+        MediaServiceActionDto::Cancel {
+            operation_id: media_operation_id.clone(),
+        },
+    ];
+    let _media_service_request = MediaServiceRequestDto {
+        request_id: String::new(),
+        action: MediaServiceActionDto::ReadMedia {
+            media_ref: String::new(),
+        },
+    };
+    let _media_service_results = [
+        MediaServiceResultDto::Operation {
+            operation_id: media_operation_id.clone(),
+            result: MediaResultDto::Stopped {
+                resource: media_target.clone(),
+            },
+        },
+        MediaServiceResultDto::Content {
+            content: MediaContentDto {
+                media_ref: String::new(),
+                metadata: media_metadata.clone(),
+                bytes: Vec::new(),
+            },
+        },
+        MediaServiceResultDto::Cancelled,
+    ];
+    let _media_service_response = MediaServiceResponseDto {
+        request_id: String::new(),
+        result: Some(MediaServiceResultDto::Cancelled),
+        error: None,
+    };
+    let _media_resource_states = [
+        MediaResourceStateDto::Ready,
+        MediaResourceStateDto::Active,
+        MediaResourceStateDto::Stopping,
+        MediaResourceStateDto::Completed,
+        MediaResourceStateDto::Failed,
+    ];
+    let _media_resource_status = MediaResourceStatusDto {
+        resource: media_target.clone(),
+        state: MediaResourceStateDto::Ready,
+        started_at_unix_ms: None,
+        updated_at_unix_ms: None,
+    };
+    let _media_event_kinds = [
+        MediaEventKindDto::StateChanged {
+            resource: media_target.clone(),
+            state: MediaResourceStateDto::Ready,
+        },
+        MediaEventKindDto::Frame {
+            source: media_source_ref.clone(),
+            asset: media_asset.clone(),
+        },
+        MediaEventKindDto::Transcript {
+            text: String::new(),
+            language: None,
+            confidence: None,
+        },
+        MediaEventKindDto::Error {
+            kind: MediaErrorKindDto::Unavailable,
+            message: String::new(),
+        },
+    ];
+    let _media_content = MediaContentDto {
+        media_ref: String::new(),
+        metadata: media_metadata.clone(),
+        bytes: Vec::new(),
+    };
+    let _media_error_kinds = [
+        MediaErrorKindDto::PermissionDenied,
+        MediaErrorKindDto::Busy,
+        MediaErrorKindDto::Cancelled,
+        MediaErrorKindDto::Timeout,
+        MediaErrorKindDto::NoData,
+        MediaErrorKindDto::NotFound,
+        MediaErrorKindDto::Unavailable,
+        MediaErrorKindDto::Unsupported,
+        MediaErrorKindDto::ModelMissing,
+        MediaErrorKindDto::InvalidRequest,
+        MediaErrorKindDto::ProcessingFailed,
+        MediaErrorKindDto::NativeFailure,
+        MediaErrorKindDto::StoreFailure,
+        MediaErrorKindDto::MediaTooLarge,
+    ];
+    let _media_errors = media_error.clone();
+    let _media_pcm = MediaPcmFrameDto {
+        sample_rate_hz: 24_000,
+        channels: 1,
+        pcm16le: Vec::new(),
+    };
+    let _media_video_frames = [
+        MediaVideoFrameDto::Rgba8 {
+            width_px: 1,
+            height_px: 1,
+            stride_bytes: 4,
+            bytes: Vec::new(),
+        },
+        MediaVideoFrameDto::I420 {
+            width_px: 1,
+            height_px: 1,
+            y_stride_bytes: 1,
+            u_stride_bytes: 1,
+            v_stride_bytes: 1,
+            y: Vec::new(),
+            u: Vec::new(),
+            v: Vec::new(),
+        },
+    ];
+    let _media_frame_payloads = [
+        MediaFramePayloadDto::Audio(MediaPcmFrameDto {
+            sample_rate_hz: 24_000,
+            channels: 1,
+            pcm16le: Vec::new(),
+        }),
+        MediaFramePayloadDto::Video(MediaVideoFrameDto::Rgba8 {
+            width_px: 1,
+            height_px: 1,
+            stride_bytes: 4,
+            bytes: Vec::new(),
+        }),
+    ];
+    let _media_frame = MediaFrameDto {
+        source: media_source_ref.clone(),
+        sequence: 0,
+        captured_at_unix_ms: 0,
+        payload: MediaFramePayloadDto::Audio(MediaPcmFrameDto {
+            sample_rate_hz: 24_000,
+            channels: 1,
+            pcm16le: Vec::new(),
+        }),
+    };
+    let _media_receipt = MediaRenderReceiptDto {
+        accepted_sample_frames: 0,
+        played_sample_frames: 0,
+        rendered_at_unix_ms: None,
+    };
+    let _media_device_update = MediaDeviceUpdateRequestDto {
+        lease_id: String::new(),
+        update: MediaSessionUpdateDto::SetEnabled {
+            kind: MediaKindDto::Audio,
+            enabled: false,
+        },
+    };
+    let _media_device_audio_write = MediaDeviceAudioWriteRequestDto {
+        lease_id: String::new(),
+        frame: MediaPcmFrameDto {
+            sample_rate_hz: 24_000,
+            channels: 1,
+            pcm16le: Vec::new(),
+        },
+    };
+    let _media_device_video_write = MediaDeviceVideoWriteRequestDto {
+        lease_id: String::new(),
+        frame: MediaVideoFrameDto::Rgba8 {
+            width_px: 1,
+            height_px: 1,
+            stride_bytes: 4,
+            bytes: Vec::new(),
+        },
+    };
+    let _media_device_audio_control = MediaDeviceAudioControlRequestDto {
+        lease_id: String::new(),
+    };
+    let _media_device_requests = [
+        MediaDeviceRequestDto::Open {
+            request: MediaDeviceOpenRequestDto {
+                identity: media_operation_id.clone(),
+                owner: media_owner.clone(),
+                initiator: None,
+                timeout_budget_ms: None,
+                max_payload_bytes: 0,
+                request: media_session_request.clone(),
+            },
+        },
+        MediaDeviceRequestDto::NextInput {
+            lease_id: String::new(),
+        },
+        MediaDeviceRequestDto::WriteAudio {
+            request: MediaDeviceAudioWriteRequestDto {
+                lease_id: String::new(),
+                frame: MediaPcmFrameDto {
+                    sample_rate_hz: 1,
+                    channels: 1,
+                    pcm16le: Vec::new(),
+                },
+            },
+        },
+        MediaDeviceRequestDto::WriteVideo {
+            request: MediaDeviceVideoWriteRequestDto {
+                lease_id: String::new(),
+                frame: MediaVideoFrameDto::Rgba8 {
+                    width_px: 1,
+                    height_px: 1,
+                    stride_bytes: 4,
+                    bytes: Vec::new(),
+                },
+            },
+        },
+        MediaDeviceRequestDto::FlushAudio {
+            request: MediaDeviceAudioControlRequestDto {
+                lease_id: String::new(),
+            },
+        },
+        MediaDeviceRequestDto::InterruptAudio {
+            request: MediaDeviceAudioControlRequestDto {
+                lease_id: String::new(),
+            },
+        },
+        MediaDeviceRequestDto::Update {
+            request: MediaDeviceUpdateRequestDto {
+                lease_id: String::new(),
+                update: MediaSessionUpdateDto::SetEnabled {
+                    kind: MediaKindDto::Audio,
+                    enabled: true,
+                },
+            },
+        },
+        MediaDeviceRequestDto::Stop {
+            lease_id: String::new(),
+        },
+    ];
+    let _media_device_request = MediaDeviceRequestEnvelopeDto {
+        request_id: String::new(),
+        request: MediaDeviceRequestDto::Stop {
+            lease_id: String::new(),
+        },
+    };
+    let _media_device_results = [
+        MediaDeviceResultDto::Opened {
+            lease: MediaDeviceLeaseDto {
+                lease_id: String::new(),
+            },
+        },
+        MediaDeviceResultDto::Input { frame: None },
+        MediaDeviceResultDto::AudioWritten {
+            receipt: MediaRenderReceiptDto {
+                accepted_sample_frames: 0,
+                played_sample_frames: 0,
+                rendered_at_unix_ms: None,
+            },
+        },
+        MediaDeviceResultDto::AudioFlushed {
+            receipt: MediaRenderReceiptDto {
+                accepted_sample_frames: 0,
+                played_sample_frames: 0,
+                rendered_at_unix_ms: None,
+            },
+        },
+        MediaDeviceResultDto::AudioInterrupted {
+            receipt: MediaRenderReceiptDto {
+                accepted_sample_frames: 0,
+                played_sample_frames: 0,
+                rendered_at_unix_ms: None,
+            },
+        },
+        MediaDeviceResultDto::VideoWritten,
+        MediaDeviceResultDto::Updated {
+            status: media_session_status.clone(),
+        },
+        MediaDeviceResultDto::Stopped,
+        MediaDeviceResultDto::Error {
+            error: media_error.clone(),
+        },
+    ];
+    let _media_device_response = MediaDeviceResponseDto {
+        request_id: String::new(),
+        result: MediaDeviceResultDto::Stopped,
+    };
+    let _media_description_types = [
+        MediaSessionDescriptionTypeDto::Offer,
+        MediaSessionDescriptionTypeDto::Answer,
+    ];
+    let _media_description = MediaSessionDescriptionDto {
+        kind: MediaSessionDescriptionTypeDto::Offer,
+        sdp: String::new(),
+    };
+    let _media_connection_request = MediaConnectionRequestDto {
+        request_id: String::new(),
+        connection_id: String::new(),
+        session_id: String::new(),
+        media_session_ref: media_session_ref.clone(),
+        operation_id: media_operation_id.clone(),
+        owner: media_owner.clone(),
+        mode: MediaSessionModeDto::Audio,
+        intent: MediaSessionIntentDto::Observation,
+        audio_source: None,
+        video_source: None,
+        description: MediaSessionDescriptionDto {
+            kind: MediaSessionDescriptionTypeDto::Offer,
+            sdp: String::new(),
+        },
+    };
+    let _media_connection_response = MediaConnectionResponseDto {
+        request_id: String::new(),
+        connection_id: String::new(),
+        media_session_ref: media_session_ref.clone(),
+        description: Some(MediaSessionDescriptionDto {
+            kind: MediaSessionDescriptionTypeDto::Answer,
+            sdp: String::new(),
+        }),
+        error: None,
+    };
+    let _media_control_actions = [
+        MediaControlActionDto::FlushAudio {
+            target_sequence: 0,
+            target_sample_frames: 0,
+        },
+        MediaControlActionDto::InterruptAudio {
+            target_sequence: 0,
+            target_sample_frames: 0,
+        },
+    ];
+    let _media_control_request = MediaControlRequestDto {
+        request_id: String::new(),
+        connection_id: String::new(),
+        media_session_ref: media_session_ref.clone(),
+        generation: 1,
+        action: MediaControlActionDto::FlushAudio {
+            target_sequence: 0,
+            target_sample_frames: 0,
+        },
+    };
+    let _media_control_response = MediaControlResponseDto {
+        request_id: String::new(),
+        connection_id: String::new(),
+        media_session_ref,
+        generation: 1,
+        receipt: None,
+        error: Some(media_error),
     };
     let _mcp_scope = WritableScopeDto::User;
     let _settings_destination = WritableScopeDto::User;

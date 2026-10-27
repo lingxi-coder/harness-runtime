@@ -1,0 +1,10 @@
+{
+  "type": "media_service_request",
+  "request": {
+    "request_id": "service-read-1",
+    "action": {
+      "type": "read_media",
+      "media_ref": "asset-1"
+    }
+  }
+}

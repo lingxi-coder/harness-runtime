@@ -1,0 +1,31 @@
+{
+  "type": "media_device_request",
+  "request": {
+    "request_id": "device-1",
+    "request": {
+      "type": "open",
+      "request": {
+        "identity": {
+          "id": "operation-2",
+          "generation": 2,
+          "service_epoch": 2
+        },
+        "owner": {
+          "type": "session",
+          "session_id": "session-1"
+        },
+        "initiator": null,
+        "timeout_budget_ms": 1000,
+        "max_payload_bytes": 1024,
+        "request": {
+          "mode": "audio",
+          "intent": "observation",
+          "audio_source": {
+            "id": "mic-1"
+          },
+          "video_source": null
+        }
+      }
+    }
+  }
+}

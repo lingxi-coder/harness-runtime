@@ -1,0 +1,10 @@
+{
+  "type": "media_service_request",
+  "request": {
+    "request_id": "route-2",
+    "action": {
+      "type": "unregister_connection",
+      "connection_id": "approved-route"
+    }
+  }
+}

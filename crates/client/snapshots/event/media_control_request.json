@@ -1,0 +1,16 @@
+{
+  "type": "media_control_request",
+  "request": {
+    "request_id": "control-1",
+    "connection_id": "route-1",
+    "media_session_ref": {
+      "id": "media-session-1"
+    },
+    "generation": 4,
+    "action": {
+      "type": "flush_audio",
+      "target_sequence": 10,
+      "target_sample_frames": 9600
+    }
+  }
+}

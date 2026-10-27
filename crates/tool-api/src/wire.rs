@@ -136,7 +136,7 @@ pub fn locale_cmp(a: &str, b: &str) -> Ordering {
 /// the same text claude-code places in the API tool definition's `description`).
 pub async fn tool_to_wire(tool: &dyn Tool, opts: &PromptOptions) -> SourceToolWireDefinition {
     let input_schema = tool
-        .input_schema_snapshot()
+        .input_schema_snapshot_for_prompt(opts)
         .unwrap_or_else(|| tool.input_schema().clone());
     SourceToolWireDefinition {
         name: tool.name().to_owned(),
@@ -381,6 +381,8 @@ mod tests {
 
     fn opts() -> PromptOptions {
         PromptOptions {
+            is_scheduled_turn: false,
+            session_id: None,
             include_examples: true,
             model: None,
             model_profile: None,

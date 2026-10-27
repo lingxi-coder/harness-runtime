@@ -7,6 +7,7 @@
 //! reshape (individual `Arc<dyn Platform>` handles, no god-object) will
 //! eventually slim this surface.
 
+use crate::context::MediaAgentHandoffHandle;
 use crate::host_git_root_cache::HostGitRootCache;
 use crate::read_file_state::ReadFileStateMap;
 use crate::sandbox_runner::SandboxRunner;
@@ -38,6 +39,7 @@ use lingxi_core::host::subagent_spawn::SubagentSpawner;
 use lingxi_core::host::task_registry::TaskRegistryHandle;
 use lingxi_core::host::worktree::WorktreeManager;
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
+use media_api::MediaService;
 use permission::PermissionMode;
 use sandbox::runtime_config::{Platform, SandboxRuntimeConfig};
 use std::path::PathBuf;
@@ -245,6 +247,10 @@ pub struct BuiltinToolContext {
     /// Unified per-device audio service. The audio tools, the app adapter,
     /// and Computer Use audio routes share this app-scoped service.
     pub audio: Option<Arc<dyn AudioService>>,
+    /// Unified host-controlled media service used by cross-platform media tools.
+    pub media: Option<Arc<dyn MediaService>>,
+    /// Deferred native-Agent attachment for conversation-intent media sessions.
+    pub media_agent_handoff: Option<Arc<dyn MediaAgentHandoffHandle>>,
     /// Host-managed recording handles for public voice start/stop actions.
     /// Keyed by stable owner so a later call from another tool-use identity
     /// can stop only that owner's recording.

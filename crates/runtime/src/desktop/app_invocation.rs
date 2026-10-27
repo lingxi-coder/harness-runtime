@@ -451,6 +451,9 @@ pub(super) fn enforce_app_config(config: &mut DesktopConfig) -> Result<(), AppIn
     config.inline_visualization = false;
     config.local_apps = false;
     config.audio = None;
+    config.media_service = None;
+    config.media_conversation_attachment = None;
+    config.media_agent_handoffs = None;
     config.default_model_explicit = true;
     config.default_model_env_pinned = false;
     config.fallback_model = None;
@@ -530,6 +533,65 @@ mod tests {
     use lingxi_core::host::OrchestratorHandle as _;
     use std::sync::Arc;
 
+    struct TestMediaService;
+
+    #[async_trait::async_trait]
+    impl media_api::MediaService for TestMediaService {
+        fn capabilities(&self) -> media_api::MediaCapabilities {
+            media_api::MediaCapabilities {
+                service_epoch: 1,
+                support_revision: 1,
+                supported_operations: vec![media_api::MediaOperationKind::Capture],
+                supported_media_kinds: vec![media_api::MediaKind::Image],
+                readiness: Vec::new(),
+                max_payload_bytes: 1024,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _: media_api::MediaOperationContext,
+            _: media_api::MediaOperation,
+        ) -> Result<media_api::MediaResult, media_api::MediaError> {
+            Err(media_api::MediaError::new(
+                media_api::MediaErrorKind::Unavailable,
+                "test",
+            ))
+        }
+
+        async fn read_media(
+            &self,
+            _: media_api::MediaOperationContext,
+            _: media_api::MediaRef,
+        ) -> Result<media_api::MediaContent, media_api::MediaError> {
+            Err(media_api::MediaError::new(
+                media_api::MediaErrorKind::Unavailable,
+                "test",
+            ))
+        }
+
+        async fn cancel(
+            &self,
+            _: media_api::MediaOperationId,
+        ) -> Result<(), media_api::MediaError> {
+            Ok(())
+        }
+    }
+
+    struct TestMediaAttachment;
+
+    #[async_trait::async_trait]
+    impl orchestrator::MediaConversationAttachment for TestMediaAttachment {
+        async fn open(
+            &self,
+            _: tool_api::MediaAgentHandoffRequest,
+            _: orchestrator::RealtimeAgentContext,
+            _: Arc<dyn media_api::MediaAudioChannel>,
+        ) -> Result<orchestrator::RealtimeAgentSessionIo, String> {
+            Err("test attachment is never opened".into())
+        }
+    }
+
     fn profile() -> AppInvocationProfile {
         AppInvocationProfile::new(
             AppInvocationIdentity {
@@ -582,6 +644,77 @@ mod tests {
         assert!(!config.enable_automation_scheduler && config.fallback_model.is_none());
         assert!(config.routing.is_none());
         assert!(config.disable_slash_commands && config.strict_mcp_config);
+    }
+
+    #[test]
+    fn app_isolation_clears_media_while_preserving_granted_mcp_lease() {
+        let media: Arc<dyn media_api::MediaService> = Arc::new(TestMediaService);
+        let attachment: Arc<dyn orchestrator::MediaConversationAttachment> =
+            Arc::new(TestMediaAttachment);
+        let queue = Arc::new(super::super::DesktopMediaAgentHandoffQueue::default());
+        let mut host = config();
+        host.media_service = Some(media.clone());
+        host.media_conversation_attachment = Some(attachment.clone());
+        host.media_agent_handoffs = Some(queue.clone());
+        enforce_app_config(&mut host).unwrap();
+        assert!(host.media_service.is_some());
+        assert!(host.media_conversation_attachment.is_some());
+        assert!(host.media_agent_handoffs.is_some());
+
+        let mcp = tool_api::McpToolIdentity {
+            server_config_id: "server".into(),
+            config_revision: "revision".into(),
+            raw_tool_name: "lookup".into(),
+            definition_fingerprint: "definition".into(),
+        };
+        let mut profile = profile();
+        profile.tool_policy.builtin_tools.insert("Read".into());
+        profile.tool_policy.mcp_tools.insert(mcp.clone());
+        let mut isolated = prepare_app_config(host, profile).unwrap();
+        assert!(isolated.media_service.is_none());
+        assert!(isolated.media_conversation_attachment.is_none());
+        assert!(isolated.media_agent_handoffs.is_none());
+        let lease = isolated.session_tool_grant_lease.clone().unwrap();
+        assert!(lease.allows_builtin("Read"));
+        assert!(lease.allows_mcp(&mcp));
+        assert!(!lease.allows_builtin("media_capture"));
+
+        // Even a captured media tool from the host cannot bypass a lease that
+        // separately authorizes an MCP tool.
+        let mut ctx = tool_api::test_support::shell_test_ctx(mobile_linux_api::ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        ctx.media = Some(media.clone());
+        let mut registry = tool_api::ToolRegistry::new();
+        tool_media::register_all(&mut registry, ctx);
+        let captured = registry.find_by_name("media_capture").unwrap();
+        registry.set_session_tool_policy(lease.clone());
+        assert!(registry.find_by_name("media_capture").is_none());
+        assert!(registry
+            .check_session_tool_access(captured.as_ref())
+            .is_err());
+        assert!(registry
+            .available_tools(&tool_api::ToolStaticContext::default())
+            .iter()
+            .all(|tool| tool.name() != "media_capture"));
+
+        // Assembly re-enforces isolation without replacing the revocable lease.
+        isolated.media_service = Some(media);
+        isolated.media_conversation_attachment = Some(attachment);
+        isolated.media_agent_handoffs = Some(queue);
+        enforce_app_config(&mut isolated).unwrap();
+        assert!(isolated.media_service.is_none());
+        assert!(isolated.media_conversation_attachment.is_none());
+        assert!(isolated.media_agent_handoffs.is_none());
+        lease.revoke();
+        assert!(isolated
+            .session_tool_grant_lease
+            .as_ref()
+            .unwrap()
+            .is_revoked());
     }
 
     #[test]

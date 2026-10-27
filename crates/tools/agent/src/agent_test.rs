@@ -356,6 +356,7 @@ mod tests {
 
     fn fresh_ctx_with_registry(registry: Arc<ToolRegistry>) -> ToolUseContext {
         ToolUseContext {
+            is_scheduled_turn: false,
             available_tool_names: None,
             agent_spawn_provenance: Default::default(),
             options: ToolUseOptions {
@@ -2431,6 +2432,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         let prompt = prompt_display(
             tool.prompt(&tool_api::tool_trait::PromptOptions {
+                is_scheduled_turn: false,
+                session_id: None,
                 include_examples: false,
                 model: LEAN_MODEL.map(str::to_string),
                 model_profile: None,
@@ -2545,6 +2548,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let tool = AgentTool::new(bctx).with_test_fusion(fusion.clone());
         let prompt = prompt_display(
             tool.prompt(&tool_api::tool_trait::PromptOptions {
+                is_scheduled_turn: false,
+                session_id: None,
                 include_examples: false,
                 model: LEAN_MODEL.map(str::to_string),
                 model_profile: None,
@@ -7566,6 +7571,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let tool = AgentTool::new(bctx);
         let prompt = prompt_display(
             tool.prompt(&PromptOptions {
+                is_scheduled_turn: false,
+                session_id: None,
                 include_examples: true,
                 model: None,
                 model_profile: None,
@@ -7614,6 +7621,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         ));
         let prompt = prompt_display(
             tool.prompt(&PromptOptions {
+                is_scheduled_turn: false,
+                session_id: None,
                 include_examples: true,
                 model: None,
                 model_profile: None,
@@ -7687,6 +7696,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         let tool = AgentTool::new(bctx);
         let prompt = prompt_display(
             tool.prompt(&PromptOptions {
+                is_scheduled_turn: false,
+                session_id: None,
                 include_examples: true,
                 model: None,
                 model_profile: None,
@@ -7761,6 +7772,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
         }));
         let prompt = prompt_display(
             tool.prompt(&PromptOptions {
+                is_scheduled_turn: false,
+                session_id: None,
                 include_examples: true,
                 model: None,
                 model_profile: None,

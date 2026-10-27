@@ -3,7 +3,7 @@
 //! Routes to `ctx.notifications` (`Arc<dyn NotificationService>`). `None` on
 //! desktop; mobile composition roots wire a native Swift / Kotlin impl via
 //! `UniFFI`. Engine-driven: the model posts a local system notification (the
-//! analog of the camera/voice/share seams) — there is no user-facing UI
+//! analog of the native share service seam) — there is no user-facing UI
 //! affordance. The single action is `post` (title, body, optional tag).
 
 use async_trait::async_trait;

@@ -1,0 +1,17 @@
+{
+  "type": "media_control_response",
+  "response": {
+    "request_id": "control-1",
+    "connection_id": "route-1",
+    "media_session_ref": {
+      "id": "media-session-1"
+    },
+    "generation": 4,
+    "receipt": {
+      "accepted_sample_frames": 0,
+      "played_sample_frames": 9600,
+      "rendered_at_unix_ms": 1234567
+    },
+    "error": null
+  }
+}

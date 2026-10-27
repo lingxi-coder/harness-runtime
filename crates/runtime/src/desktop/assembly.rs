@@ -4555,6 +4555,16 @@ pub async fn build_with_credential_stack(
     // bridge's one `AudioBridge`), not two independent reads of `cfg` that a
     // later edit could let drift apart.
     let desktop_audio = cfg.audio.clone();
+    let desktop_media = cfg.media_service.clone();
+    let desktop_media_attachment = cfg.media_conversation_attachment.clone();
+    let desktop_media_handoffs = cfg.media_agent_handoffs.clone();
+    if let Some(handoffs) = desktop_media_handoffs.as_ref() {
+        handoffs.set_attachment(desktop_media_attachment.clone());
+    }
+    let desktop_media_agent_handoff = desktop_media_handoffs
+        .as_ref()
+        .filter(|_| desktop_media.is_some() && desktop_media_attachment.is_some())
+        .map(|handoffs| handoffs.clone() as Arc<dyn tool_api::MediaAgentHandoffHandle>);
     let tool_ctx = BuiltinToolContext {
         host_git_root_cache: cfg.host_git_root_cache.clone(),
         side_chat: false,
@@ -4707,6 +4717,8 @@ pub async fn build_with_credential_stack(
         // Device audio. Only bridge connections inject the one service; tools
         // and host-managed voice handles share it.
         audio: desktop_audio.as_ref().map(|audio| audio.service.clone()),
+        media: desktop_media.clone(),
+        media_agent_handoff: desktop_media_agent_handoff,
         audio_recording_handles: Arc::new(
             tokio::sync::Mutex::new(std::collections::HashMap::new()),
         ),
@@ -6370,6 +6382,7 @@ pub async fn build_with_credential_stack(
         shared_command_registry.clone(),
         workflow_tool.clone(),
         workflow_command_snapshot.clone(),
+        tools.clone(),
     )
     .await?;
     let insights_availability = command_api::builtins::InsightsCommandAvailability {
@@ -7511,6 +7524,8 @@ pub async fn build_with_credential_stack(
         workflow_events: Some(workflow_event_rx),
         tools: runtime_tools,
         audio: desktop_audio,
+        media: desktop_media,
+        media_agent_handoffs: desktop_media_handoffs,
     })
 }
 

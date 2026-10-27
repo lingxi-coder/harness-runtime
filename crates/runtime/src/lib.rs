@@ -17,21 +17,25 @@ pub use provider_config::startup_catalog::{CatalogPlatform, StartupCatalog};
 
 #[cfg(feature = "engine")]
 pub mod api;
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+mod media_handoff;
+#[cfg(any(feature = "desktop", feature = "mobile"))]
+pub(crate) mod media_skill;
 #[cfg(feature = "engine")]
 pub use api::{
     CancellationToken, ConversationMessage, CostSnapshot, HandleError, Harness, HarnessBuilder,
     LifecycleService, OutputStream, RunInput, SessionHandle, SessionId, SessionService,
     ShutdownReport, TurnOutcome,
 };
-pub mod models;
 /// Shared bounded Local App Agent attachment decoding for desktop and mobile.
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 pub mod app_agent_input;
 /// Shared immutable Local App Skill verification and workspace materialization.
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 pub mod app_agent_skills;
-/// Unified audio composition usable without a conversation engine.
-pub use audio_runtime as audio;
+pub mod models;
+/// Unified media composition usable without a conversation engine.
+pub use media_runtime as media;
 
 #[cfg(any(feature = "desktop", feature = "mobile"))]
 mod bundled_skills_policy;

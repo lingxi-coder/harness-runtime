@@ -6,14 +6,13 @@ use base64::Engine;
 use client::protocol::audio::{
     AudioCapabilitySnapshotDto, AudioErrorDto, AudioErrorKindDto, AudioInitiatorDto,
     AudioOperationDto, AudioOperationIdDto, AudioOperationKindDto, AudioOperationRequestDto,
-    AudioOperationResultDto, AudioOwnerDto, AudioReadinessStateDto, MAX_AUDIO_PAYLOAD_BYTES,
-    MAX_AUDIO_SAMPLE_RATE_HZ,
+    AudioOperationResultDto, AudioOperationRoutePolicyDto, AudioOwnerDto, AudioReadinessStateDto,
+    MAX_AUDIO_PAYLOAD_BYTES, MAX_AUDIO_SAMPLE_RATE_HZ,
 };
 use lingxi_core::host::audio::{
     AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioInitiator, AudioOperation,
     AudioOperationContext, AudioOperationId, AudioOperationKind, AudioOperationReadiness,
-    AudioOperationSuccess, AudioOwner, AudioReadinessState, AudioRecordingHandle, AudioService,
-    AudioStatus,
+    AudioOperationSuccess, AudioOwner, AudioReadinessState, AudioService, AudioStatus,
 };
 use lingxi_core::host::{SttTranscript, TtsAudio, VoiceRecording};
 use std::sync::Arc;
@@ -50,12 +49,12 @@ pub fn from_native_audio_service(callback: Arc<dyn NativeAudioService>) -> Arc<d
 /// `owner` binds the tool catalog to a trusted current session when supplied.
 pub fn from_unified_audio_services(
     callback: Arc<dyn NativeAudioService>,
-    offline: Vec<audio_runtime::OfflineAudioBackend>,
-    cloud_host: Option<Arc<dyn audio_runtime::CloudAudioHost>>,
-    settings: audio_runtime::AudioRoutingSettings,
+    offline: Vec<media_runtime::OfflineAudioBackend>,
+    cloud_host: Option<Arc<dyn media_runtime::CloudAudioHost>>,
+    settings: media_runtime::AudioRoutingSettings,
     owner: Option<AudioOwner>,
 ) -> Arc<dyn AudioService> {
-    let service = Arc::new(audio_runtime::UnifiedAudioService::new(
+    let service = Arc::new(media_runtime::UnifiedAudioService::new(
         from_native_audio_service(callback),
         offline,
         cloud_host,
@@ -78,16 +77,12 @@ struct NativeAudioServiceAdapter {
     callback: Arc<dyn NativeAudioService>,
 }
 
-#[async_trait]
-impl AudioService for NativeAudioServiceAdapter {
-    fn capabilities(&self) -> AudioCapabilitySnapshot {
-        capabilities_from_dto(self.callback.capabilities())
-    }
-
-    async fn execute(
+impl NativeAudioServiceAdapter {
+    async fn execute_with_policy(
         &self,
         context: AudioOperationContext,
         operation: AudioOperation,
+        route_policy: Option<AudioOperationRoutePolicyDto>,
     ) -> Result<AudioOperationSuccess, AudioError> {
         let capabilities = self.capabilities_for(&context.owner);
         if context.identity.service_epoch != capabilities.service_epoch {
@@ -161,6 +156,7 @@ impl AudioService for NativeAudioServiceAdapter {
             owner: owner_to_dto(&context.owner),
             initiator: context.initiator.as_ref().map(initiator_to_dto),
             timeout_budget_ms: context.timeout_budget_ms,
+            route_policy,
             max_payload_bytes,
             operation: operation_to_dto(operation),
         };
@@ -185,6 +181,34 @@ impl AudioService for NativeAudioServiceAdapter {
             cancel_on_drop.armed = false;
         }
         converted
+    }
+}
+
+#[async_trait]
+impl AudioService for NativeAudioServiceAdapter {
+    fn capabilities(&self) -> AudioCapabilitySnapshot {
+        capabilities_from_dto(self.callback.capabilities())
+    }
+
+    async fn execute(
+        &self,
+        context: AudioOperationContext,
+        operation: AudioOperation,
+    ) -> Result<AudioOperationSuccess, AudioError> {
+        self.execute_with_policy(context, operation, None).await
+    }
+
+    async fn execute_host_configured_local(
+        &self,
+        context: AudioOperationContext,
+        operation: AudioOperation,
+    ) -> Result<AudioOperationSuccess, AudioError> {
+        self.execute_with_policy(
+            context,
+            operation,
+            Some(AudioOperationRoutePolicyDto::HostConfiguredLocalOnly),
+        )
+        .await
     }
 
     async fn cancel(&self, identity: AudioOperationId) -> Result<(), AudioError> {
@@ -274,9 +298,9 @@ fn operation_to_dto(value: AudioOperation) -> AudioOperationDto {
             sample_rate_hz,
             format,
         },
-        AudioOperation::StopRecording { handle } => {
-            AudioOperationDto::StopRecording { handle: handle.0 }
-        }
+        AudioOperation::StopRecording { handle } => AudioOperationDto::StopRecording {
+            handle: handle.0 .0,
+        },
         AudioOperation::Listen { language } => AudioOperationDto::Listen { language },
         AudioOperation::Synthesize {
             text,
@@ -301,7 +325,7 @@ fn operation_to_dto(value: AudioOperation) -> AudioOperationDto {
             voice,
         },
         AudioOperation::Status { handle } => AudioOperationDto::Status {
-            handle: handle.map(|handle| handle.0),
+            handle: handle.map(|handle| handle.0 .0),
         },
         AudioOperation::EndOwner => AudioOperationDto::EndOwner,
     }
@@ -363,7 +387,7 @@ fn operation_result_from_dto(
                 ));
             }
             Ok(AudioOperationSuccess::RecordingStarted {
-                handle: AudioRecordingHandle(handle),
+                handle: media_api::RecordingRef(media_api::RecordingId(handle)),
             })
         }
         AudioOperationResultDto::Recording {
@@ -659,7 +683,7 @@ mod tests {
         assert!(matches!(
             result,
             AudioOperationSuccess::RecordingStarted { handle }
-                if handle.0 == "recording-1"
+                if handle.0 .0 == "recording-1"
         ));
         tokio::task::yield_now().await;
         assert_eq!(fake.cancelled.load(Ordering::SeqCst), 0);

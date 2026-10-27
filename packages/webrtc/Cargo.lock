@@ -1647,6 +1647,7 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-audio",
  "gstreamer-video",
+ "gstreamer-video-sys",
  "lingxi-webrtc-core",
  "opus",
  "pkg-config",

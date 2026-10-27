@@ -77,6 +77,8 @@ impl SideChatFactory for MobileSideChatFactory {
         ctx.mcp_token_counter = None;
         ctx.camera = None;
         ctx.audio = None;
+        ctx.media = None;
+        ctx.media_agent_handoff = None;
         ctx.audio_recording_handles = Arc::new(Mutex::new(HashMap::new()));
         ctx.share = None;
         ctx.notifications = None;

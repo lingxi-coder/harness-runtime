@@ -15,6 +15,39 @@ use thiserror::Error;
 use crate::context::ToolUseContext;
 use crate::progress::ToolProgressSender;
 
+/// A host resource that a media-backed tool invocation needs exclusively.
+///
+/// Native realtime owns the microphone and speaker for the lifetime of its
+/// session, while camera operations can remain available alongside it. Keeping
+/// the claims on the registered tool lets callers apply the same conflict
+/// policy without relying on model-facing tool names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MediaResource {
+    /// Live microphone capture or input.
+    Microphone,
+    /// Camera or photo-library capture/observation.
+    Camera,
+    /// Live audio playback.
+    Speaker,
+}
+
+/// Narrow execution-time metadata used to arbitrate live media resources.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolExecutionMetadata {
+    /// Exclusive resources required by this specific invocation.
+    pub exclusive_media_resources: Vec<MediaResource>,
+}
+
+impl ToolExecutionMetadata {
+    /// Whether this invocation conflicts with an already-held media resource.
+    #[must_use]
+    pub fn conflicts_with(&self, held: &[MediaResource]) -> bool {
+        self.exclusive_media_resources
+            .iter()
+            .any(|required| held.contains(required))
+    }
+}
+
 /// The four source facts Native `Mx` checks before exposing a wrapped V1
 /// tool through `$.tool.call`. A wrapper is hidden only when the tool declares
 /// every fact with the matching Native type.
@@ -99,6 +132,17 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Owned schema snapshot for the exact request being built. Tools whose
+    /// schema depends on the selected session route can use the same trusted
+    /// model/profile snapshot as their prompt without reading live session
+    /// state synchronously.
+    fn input_schema_snapshot_for_prompt(
+        &self,
+        _options: &PromptOptions,
+    ) -> Option<Utf16JsonProjection> {
+        self.input_schema_snapshot()
+    }
+
     /// Authoritative source facts used by the pre-row streamed-input repair.
     /// `Unknown` is not equivalent to an absent schema or an absent exemption
     /// callback. Production registration and dispatch must reject it instead
@@ -123,6 +167,13 @@ pub trait Tool: Send + Sync {
     /// invalidated before reusing serialized schemas.
     fn input_schema_revision(&self) -> Option<String> {
         None
+    }
+
+    /// Revision corresponding to [`Self::input_schema_snapshot_for_prompt`].
+    /// The default preserves the static/live revision behavior for existing
+    /// tools.
+    fn input_schema_revision_for_prompt(&self, _options: &PromptOptions) -> Option<String> {
+        self.input_schema_revision()
     }
 
     /// Provider-native desktop adaptation for this registered tool, when supported.
@@ -394,6 +445,25 @@ pub trait Tool: Send + Sync {
     /// this specific input. Read-only tools typically return `true`.
     fn is_concurrency_safe(&self, input: &Utf16JsonProjection) -> bool;
 
+    /// Resources required by this invocation, derived from trusted tool input.
+    ///
+    /// This is deliberately limited to host media arbitration. Tools without
+    /// native media requirements keep the empty default; media tools should
+    /// conservatively report every resource selected by their typed input.
+    fn execution_metadata(&self, _input: &Utf16JsonProjection) -> ToolExecutionMetadata {
+        ToolExecutionMetadata::default()
+    }
+
+    /// Input-independent media resources required by every valid invocation.
+    ///
+    /// Catalog builders use this conservative common requirement before a
+    /// model has chosen an input. Multi-mode tools should return only resources
+    /// shared by all valid modes, then report the selected resources from
+    /// [`Self::execution_metadata`] at dispatch time.
+    fn catalog_execution_metadata(&self) -> ToolExecutionMetadata {
+        ToolExecutionMetadata::default()
+    }
+
     /// Whether this invocation is read-only with respect to the workspace.
     fn is_read_only(&self, input: &Utf16JsonProjection) -> bool;
 
@@ -584,6 +654,13 @@ pub struct BashPrecommitSkills {
 pub struct PromptOptions {
     /// Whether to include illustrative examples in the prompt.
     pub include_examples: bool,
+    /// Trusted session whose current model route is producing this tool
+    /// definition. `None` is used for child-agent requests that do not own the
+    /// host conversation session.
+    pub session_id: Option<lingxi_core::types::SessionId>,
+    /// Whether this definition is for a host-scheduled turn. Interactive-only
+    /// capabilities use this to avoid advertising unsupported continuations.
+    pub is_scheduled_turn: bool,
     /// The session (or subagent) model id the wire `tools` array is being
     /// built for. claude-code calls `prompt({model})` per tool, and some
     /// prompts are model-gated — TodoWrite selects the short `FWd` vs. long

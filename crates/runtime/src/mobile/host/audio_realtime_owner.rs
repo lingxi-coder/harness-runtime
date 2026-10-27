@@ -6,6 +6,7 @@ use orchestrator::{
     RealtimeAgentLimits,
 };
 use tokio::sync::{mpsc, oneshot};
+pub use tool_api::MediaAgentHandoffRequest;
 
 impl MobileEngineHandle {
     /// Run native audio under the same owner as an ordinary streamed Agent turn.
@@ -51,6 +52,7 @@ impl MobileEngineHandle {
                 inputs,
                 output,
                 limits,
+                false,
                 audio_cancel.clone(),
             );
             tokio::pin!(run);

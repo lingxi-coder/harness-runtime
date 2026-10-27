@@ -72,6 +72,16 @@ pub struct AudioInitiatorDto {
     pub request_id: Option<String>,
 }
 
+/// Host-owned execution boundary carried to the native adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(rename_all = "snake_case")]
+pub enum AudioOperationRoutePolicyDto {
+    /// Resolve only the app's local System/Offline v4 route. Reject if the
+    /// current operation snapshot selects a cloud Provider route.
+    HostConfiguredLocalOnly,
+}
+
 /// One host-created audio request, including the skew-safe remaining time and
 /// payload bound the native collector must honor.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,6 +98,9 @@ pub struct AudioOperationRequestDto {
     /// monotonic deadline by each receiving process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_budget_ms: Option<u64>,
+    /// Optional execution constraint selected by the shared host router.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_policy: Option<AudioOperationRoutePolicyDto>,
     /// Maximum raw audio bytes that may be collected or returned.
     pub max_payload_bytes: u64,
     /// Requested operation.

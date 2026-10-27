@@ -93,6 +93,8 @@ impl SideChatFactory for DesktopSideChatFactory {
         ctx.task_lifecycle_hooks = None;
         ctx.camera = None;
         ctx.audio = None;
+        ctx.media = None;
+        ctx.media_agent_handoff = None;
         ctx.share = None;
         ctx.notifications = None;
         ctx.clipboard = None;

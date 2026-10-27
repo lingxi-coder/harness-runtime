@@ -93,9 +93,10 @@ pub use client::protocol::listings::{
 pub use host::{
     build_mobile, build_mobile_engine, build_mobile_engine_inner, build_mobile_inner,
     parse_mobile_provider_config_json, CronDueOccurrenceDto, CronFireStatusDto, CronTaskDto,
-    FiredCronJobDto, MobileBuildError, MobileConfig, MobileCronStoreHandle, MobileEngineError,
-    MobileEngineHandle, MobileOAuthSessionDto, MobileOAuthStateDto, MobileRuntime,
-    MobileSessionDiscoveryScope, ProviderCatalogEntryDto, ProviderConnectionTestDto,
+    FiredCronJobDto, MediaAgentHandoffRequest, MediaConversationAttachment, MediaSessionContext,
+    MobileBuildError, MobileConfig, MobileCronStoreHandle, MobileEngineError, MobileEngineHandle,
+    MobileOAuthSessionDto, MobileOAuthStateDto, MobileRuntime, MobileSessionDiscoveryScope,
+    ProviderCatalogEntryDto, ProviderConnectionTestDto, RealtimeAgentSessionIo,
 };
 #[cfg(feature = "mobile")]
 pub use session::jsonl::SessionMode as MobileSessionMode;
@@ -147,7 +148,7 @@ impl Default for MobileEngineConfig {
 }
 
 /// Assemble the mobile builtin **tool** registry from a freshly-built
-/// [`BuiltinToolContext`] (whose `camera`/`voice`/`share` handles come from the
+/// [`BuiltinToolContext`] (whose `media`/`share` handles come from the
 /// mobile `Platform`).
 #[must_use]
 pub fn mobile_tool_registry(ctx: BuiltinToolContext) -> ToolRegistry {
@@ -158,9 +159,19 @@ pub fn mobile_tool_registry(ctx: BuiltinToolContext) -> ToolRegistry {
 
 #[cfg(feature = "mobile")]
 pub(crate) const MOBILE_CHAT_TOOL_ALLOWLIST: &[&str] = &[
-    "camera",
-    "voice",
-    "speech",
+    "media_sources",
+    "media_status",
+    "media_capture",
+    "media_record",
+    "media_transcribe",
+    "media_synthesize",
+    "media_play",
+    "media_speak",
+    "media_session_start",
+    "media_session_update",
+    "media_observe",
+    "media_wait",
+    "media_stop",
     "notification",
     "clipboard",
     "share",
@@ -276,9 +287,11 @@ fn register_mobile_non_skill_tools_with_ask_resolver(
         Some(resolver) => tool_ui::register_all_with_ask_resolver(reg, ctx.clone(), resolver),
         None => tool_ui::register_all(reg, ctx.clone()),
     }
-    // ----- mobile-exclusive tools ------------------------------------------
-    // camera / audio / notification / clipboard / share, folded into
-    // the single `tool-mobile` crate.
+    // ----- media and mobile-exclusive tools --------------------------------
+    // Media operations share the same app-scoped facade across platforms.
+    tool_media::register_all(reg, ctx.clone());
+    // The remaining mobile-only device tools (notifications, clipboard,
+    // sharing, and contacts) stay in `tool-mobile`.
     tool_mobile::register_all(reg, ctx.clone());
     // P3/P4: mobile shell tool. The composition root pre-gates it so a selected
     // but unavailable mobile-linux runtime never silently falls back to legacy.

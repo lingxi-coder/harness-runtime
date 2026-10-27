@@ -57,6 +57,12 @@ const BUILTINS: &[&str] = &[
     "AskUserQuestion",
     "ToolSearch",
 ];
+
+fn clear_app_media_capabilities(context: &mut BuiltinToolContext) {
+    context.media = None;
+    context.media_agent_handoff = None;
+}
+
 impl AppAgentFactory {
     pub(crate) async fn catalog(&self) -> Result<Value, String> {
         use sha2::Digest;
@@ -333,6 +339,9 @@ impl AppAgentFactory {
         context.lsp_registry = None;
         context.camera = None;
         context.audio = None;
+        // Clear these before cloning the context into either builtins or MCP
+        // tools, even if this factory came from an ordinary media-enabled host.
+        clear_app_media_capabilities(&mut context);
         context.share = None;
         context.notifications = None;
         context.clipboard = None;
@@ -526,6 +535,117 @@ fn app_supports_deferred_tool_search(protocol: Option<llm_runtime::ProtocolFamil
 #[cfg(test)]
 mod discovery_tests {
     use super::*;
+
+    struct TestMediaService;
+
+    #[async_trait::async_trait]
+    impl media_api::MediaService for TestMediaService {
+        fn capabilities(&self) -> media_api::MediaCapabilities {
+            media_api::MediaCapabilities {
+                service_epoch: 1,
+                support_revision: 1,
+                supported_operations: vec![media_api::MediaOperationKind::Capture],
+                supported_media_kinds: vec![media_api::MediaKind::Image],
+                readiness: Vec::new(),
+                max_payload_bytes: 1024,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _: media_api::MediaOperationContext,
+            _: media_api::MediaOperation,
+        ) -> Result<media_api::MediaResult, media_api::MediaError> {
+            Err(media_api::MediaError::new(
+                media_api::MediaErrorKind::Unavailable,
+                "test",
+            ))
+        }
+
+        async fn read_media(
+            &self,
+            _: media_api::MediaOperationContext,
+            _: media_api::MediaRef,
+        ) -> Result<media_api::MediaContent, media_api::MediaError> {
+            Err(media_api::MediaError::new(
+                media_api::MediaErrorKind::Unavailable,
+                "test",
+            ))
+        }
+
+        async fn cancel(
+            &self,
+            _: media_api::MediaOperationId,
+        ) -> Result<(), media_api::MediaError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn app_context_removes_media_from_builtin_and_mcp_clones() {
+        let mut host = tool_api::test_support::shell_test_ctx(mobile_linux_api::ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        host.media = Some(Arc::new(TestMediaService));
+        host.media_agent_handoff = Some(Arc::new(
+            crate::mobile::host::MobileMediaAgentHandoffQueue::default(),
+        ));
+        let session_id = SessionId::new();
+        host.session_id = Some(session_id);
+        let mut host_registry = ToolRegistry::new();
+        tool_media::register_all(&mut host_registry, host.clone());
+        assert!(host_registry.find_by_name("media_capture").is_some());
+
+        let mut app = host.clone();
+        clear_app_media_capabilities(&mut app);
+        let mcp_context = app.clone();
+        assert!(app.media.is_none() && app.media_agent_handoff.is_none());
+        assert!(mcp_context.media.is_none() && mcp_context.media_agent_handoff.is_none());
+        assert_eq!(app.session_id, Some(session_id));
+        assert!(host.media.is_some() && host.media_agent_handoff.is_some());
+        let mut app_registry = ToolRegistry::new();
+        tool_media::register_all(&mut app_registry, app);
+        assert!(app_registry.find_registered("media_capture").is_none());
+
+        let identity = tool_api::McpToolIdentity {
+            server_config_id: "server".into(),
+            config_revision: "revision".into(),
+            raw_tool_name: "lookup".into(),
+            definition_fingerprint: "definition".into(),
+        };
+        let mcp_tool = Arc::new(
+            tool_mcp::MCPTool::new_for_tool(
+                mcp_context,
+                "mcp__server__lookup".into(),
+                "lookup".into(),
+                Utf16JsonProjection::parse(r#"{"type":"object"}"#).unwrap(),
+                None,
+                None,
+                None,
+                true,
+                false,
+            )
+            .with_capability_identity(identity.clone()),
+        );
+        app_registry.register_mcp_tools(lingxi_core::types::McpConnectionId::new(), vec![mcp_tool]);
+        let mut policy = SessionToolPolicy::default();
+        policy.mcp_tools.insert(identity.clone());
+        let lease = SessionToolGrantLease::new(policy);
+        app_registry.set_session_tool_policy(lease.clone());
+        assert!(lease.allows_mcp(&identity));
+        assert!(app_registry.find_by_name("mcp__server__lookup").is_some());
+        assert!(!lease.allows_builtin("media_capture"));
+        assert!(app_registry.find_by_name("media_capture").is_none());
+        let advertised = app_registry.available_tools(&tool_api::ToolStaticContext::default());
+        assert!(advertised
+            .iter()
+            .any(|tool| tool.name() == "mcp__server__lookup"));
+        assert!(advertised.iter().all(|tool| tool.name() != "media_capture"));
+    }
+
     #[test]
     fn app_discovery_is_bound_to_the_selected_wire_protocol() {
         use llm_runtime::ProtocolFamily::*;

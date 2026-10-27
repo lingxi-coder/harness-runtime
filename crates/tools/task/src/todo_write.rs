@@ -1291,12 +1291,16 @@ mod tests {
         let (tool, _sink, _session, _use_ctx) = make_tool_and_session();
         // No model threaded ⇒ `Dh(undefined)` is false ⇒ UWd (env override aside).
         let opts = PromptOptions {
+            is_scheduled_turn: false,
+            session_id: None,
             include_examples: false,
             model: None,
             model_profile: None,
             ..Default::default()
         };
         let with_model = |m: &str| PromptOptions {
+            is_scheduled_turn: false,
+            session_id: None,
             include_examples: false,
             model: Some(m.to_string()),
             model_profile: None,

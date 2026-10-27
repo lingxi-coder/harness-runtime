@@ -20,7 +20,7 @@ pub mod turn;
 pub use ask_user_question_broker::AskUserQuestionBroker;
 pub use computer_access_broker::{ComputerAccessBroker, ComputerAccessRequestSink};
 pub use listener::{ClientEventListener, ListenerSink};
-pub use output_stream::AdapterOutputStream;
+pub use output_stream::{AdapterOutputStream, TurnTerminalDeferrer};
 pub use permission_gate::{
     AdapterPermissionGate, PermissionRequestSink, DEFAULT_PERMISSION_TIMEOUT,
 };

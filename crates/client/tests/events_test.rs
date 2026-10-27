@@ -615,6 +615,7 @@ fn audio_request_round_trips_on_the_wire() {
             },
             initiator: None,
             timeout_budget_ms: Some(1_000),
+            route_policy: None,
             max_payload_bytes: 12_533_760,
             operation: AudioOperationDto::Listen {
                 language: Some("zh-CN".into()),

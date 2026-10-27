@@ -295,6 +295,7 @@ pub static HOME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 #[must_use]
 pub fn fresh_ctx() -> ToolUseContext {
     ToolUseContext {
+        is_scheduled_turn: false,
         available_tool_names: None,
         agent_spawn_provenance: Default::default(),
         native_query_depth: None,
@@ -876,6 +877,8 @@ pub fn ctx_for_file_tools(
         lsp_registry: None,
         camera: None,
         audio: None,
+        media: None,
+        media_agent_handoff: None,
         audio_recording_handles: Arc::new(
             tokio::sync::Mutex::new(std::collections::HashMap::new()),
         ),
@@ -954,6 +957,8 @@ pub fn shell_test_ctx(out: ProcessOutput) -> super::BuiltinToolContext {
         lsp_registry: None,
         camera: None,
         audio: None,
+        media: None,
+        media_agent_handoff: None,
         audio_recording_handles: Arc::new(
             tokio::sync::Mutex::new(std::collections::HashMap::new()),
         ),

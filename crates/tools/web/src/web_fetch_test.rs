@@ -615,6 +615,8 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let tool = WebFetchTool::new(ctx);
         let long_opts = PromptOptions::default();
         let short_opts = PromptOptions {
+            is_scheduled_turn: false,
+            session_id: None,
             include_examples: false,
             model: Some("claude-opus-4-8".into()),
             model_profile: None,
@@ -668,6 +670,8 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let short = root_text(
             &tool
                 .prompt(&PromptOptions {
+                    is_scheduled_turn: false,
+                    session_id: None,
                     include_examples: false,
                     model: Some("claude-opus-4-8".into()),
                     model_profile: None,

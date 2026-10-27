@@ -20,6 +20,7 @@ pub(super) struct MobileWorkspaceCatalog {
     pub config_home: PathBuf,
     pub home: PathBuf,
     pub device_skill_tools: Vec<String>,
+    pub media_tools: std::sync::Arc<tool_api::ToolRegistry>,
     pub workflow_tool: std::sync::Arc<tool_workflow::WorkflowTool>,
     pub workflow_commands: std::sync::Arc<crate::workflow_catalog::WorkflowCommandSnapshot>,
 }
@@ -35,6 +36,7 @@ impl MobileWorkspaceCatalog {
             self.config_home.clone(),
             self.home.clone(),
             self.device_skill_tools.clone(),
+            self.media_tools.clone(),
             self.workflow_tool.clone(),
             self.workflow_commands.clone(),
             roots.to_vec(),
@@ -60,6 +62,7 @@ impl MobileWorkspaceCatalog {
                 self.config_home.clone(),
                 self.home.clone(),
                 self.device_skill_tools.clone(),
+                self.media_tools.clone(),
                 self.workflow_tool.clone(),
                 self.workflow_commands.clone(),
                 roots.to_vec(),

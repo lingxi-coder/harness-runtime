@@ -19,6 +19,7 @@ async-trait.workspace = true
 branding.workspace = true
 mobile-linux-api.workspace = true
 device-api = { workspace = true }
+media-api.workspace = true
 jsonrpc = { path = "../jsonrpc" }
 json-projection.workspace = true
 mcp-wire = { workspace = true }

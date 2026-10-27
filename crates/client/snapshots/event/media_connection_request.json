@@ -1,0 +1,28 @@
+{
+  "type": "media_connection_request",
+  "request": {
+    "request_id": "connection-1",
+    "connection_id": "route-1",
+    "session_id": "session-1",
+    "media_session_ref": {
+      "id": "media-session-1"
+    },
+    "operation_id": {
+      "id": "operation-1",
+      "generation": 1,
+      "service_epoch": 2
+    },
+    "owner": {
+      "type": "session",
+      "session_id": "session-1"
+    },
+    "mode": "audio",
+    "intent": "observation",
+    "audio_source": null,
+    "video_source": null,
+    "description": {
+      "kind": "offer",
+      "sdp": "v=0\\r\\n"
+    }
+  }
+}

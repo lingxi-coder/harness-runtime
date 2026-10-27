@@ -1,0 +1,10 @@
+{
+  "type": "media_service_response",
+  "response": {
+    "request_id": "route-1",
+    "result": {
+      "type": "connection_updated"
+    },
+    "error": null
+  }
+}

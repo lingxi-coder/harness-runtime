@@ -104,12 +104,15 @@ pub mod agent_processes;
 pub mod agent_statistics;
 pub mod agent_view;
 pub mod android_ui;
-// The device facilities (camera, location, audio, ...) are traits and plain data in
-// `device-api`, which out-of-tree services name too; the old module paths stay.
+// Non-media device facilities are traits and plain data in `device-api`;
+// audio, camera, and speech contracts live in the standalone `media-api`.
+// Stable host module paths remain while consumers migrate directly.
 pub use device_api::{
-    audio, calendar, camera, clipboard, contacts, deep_link, device_status, haptics, location,
-    notification, share, stt, tts, voice,
+    calendar, clipboard, contacts, deep_link, device_status, haptics, location, notification, share,
 };
+// Canonical media contracts live in their standalone API crate. `device-api`
+// retains temporary module re-exports for direct legacy consumers.
+pub use media_api::{audio, camera, stt, tts, voice};
 pub mod auth;
 pub mod backgrounding;
 pub mod bg_session_forker;

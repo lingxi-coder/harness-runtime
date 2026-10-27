@@ -1286,6 +1286,7 @@ mod tests {
 
     fn fresh_ctx() -> ToolUseContext {
         ToolUseContext {
+            is_scheduled_turn: false,
             available_tool_names: None,
             agent_spawn_provenance: Default::default(),
             native_query_depth: None,

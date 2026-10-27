@@ -1,0 +1,12 @@
+{
+  "type": "media_device_response",
+  "response": {
+    "request_id": "device-1",
+    "result": {
+      "type": "opened",
+      "lease": {
+        "lease_id": "lease-1"
+      }
+    }
+  }
+}

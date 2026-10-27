@@ -13,9 +13,7 @@
 //! concrete handles; library crates stay `#[cfg]`-free.
 
 use crate::host::android_ui::AndroidUiAutomation;
-use crate::host::audio::AudioService;
 use crate::host::calendar::CalendarProvider;
-use crate::host::camera::CameraControl;
 use crate::host::clipboard::Clipboard;
 use crate::host::clock::Clock;
 use crate::host::computer_control::ComputerControl;
@@ -32,6 +30,8 @@ use crate::host::sandbox::Sandbox;
 use crate::host::secure_storage::SecureStorage;
 use crate::host::share::SharingService;
 use crate::host::worktree::WorktreeManager;
+use media_api::audio::AudioService;
+use media_api::camera::CameraControl;
 use mobile_linux_api::MobileLinuxRuntime;
 use std::sync::Arc;
 

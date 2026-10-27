@@ -3,7 +3,7 @@
 //! Routes to `ctx.clipboard` (`Arc<dyn Clipboard>`). `None` on desktop; mobile
 //! composition roots wire a native Swift / Kotlin impl via `UniFFI`. Engine-
 //! driven: the model reads/writes the system clipboard (the analog of the
-//! camera/voice/share seams) — there is no user-facing UI affordance. The two
+//! native OS service seams) — there is no user-facing UI affordance. The two
 //! actions are `set` (write `text`) and `get` (read the current contents).
 
 use async_trait::async_trait;

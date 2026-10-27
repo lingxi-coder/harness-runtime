@@ -122,6 +122,7 @@ impl ToolInvoker for RegistryToolInvoker {
             return Ok(());
         };
         let ctx = crate::context::ToolUseContext {
+            is_scheduled_turn: false,
             available_tool_names: None,
             options: crate::context::ToolUseOptions {
                 debug: false,
@@ -334,6 +335,7 @@ impl RegistryToolInvoker {
                 .as_ref()
                 .clone(),
             None => crate::context::ToolUseContext {
+                is_scheduled_turn: false,
                 available_tool_names: ctx.available_tool_names.clone(),
                 options: crate::context::ToolUseOptions {
                     debug: false,
