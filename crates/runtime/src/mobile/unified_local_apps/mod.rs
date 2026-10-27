@@ -75,7 +75,8 @@ pub(super) struct ActiveRun {
     pub cancel: CancellationToken,
     pub agent_access: Mutex<CancellationToken>,
     pub handles: AsyncMutex<Vec<mobile_linux_api::LinuxProcessHandle>>,
-    pub gateway: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
+    pub gateway: AsyncMutex<Option<tokio::task::JoinHandle<Result<(), std::io::ErrorKind>>>>,
+    pub gateway_failure: Mutex<Option<std::io::ErrorKind>>,
     pub listener: AsyncMutex<Option<Arc<tokio::net::TcpListener>>>,
     pub committed: AtomicBool,
     pub cleanup_complete: AtomicBool,
@@ -88,6 +89,32 @@ pub(super) struct ActiveRun {
     pub lifecycle: AsyncMutex<()>,
     pub previous: Mutex<Option<Arc<ActiveRun>>>,
     pub execution_lease: Mutex<Option<super::linux_maintenance::AppExecutionLease>>,
+}
+
+enum GatewayHealth {
+    Starting,
+    Healthy,
+    Failed(Option<std::io::ErrorKind>),
+}
+
+async fn gateway_health(run: &ActiveRun) -> GatewayHealth {
+    let gateway = run.gateway.lock().await;
+    let failure = *run.gateway_failure.lock().unwrap();
+    if failure.is_some() {
+        GatewayHealth::Failed(failure)
+    } else if gateway.as_ref().is_some_and(|task| task.is_finished()) {
+        GatewayHealth::Failed(None)
+    } else if gateway.is_none() {
+        GatewayHealth::Starting
+    } else {
+        GatewayHealth::Healthy
+    }
+}
+
+#[cfg(test)]
+pub(super) struct GatewayStartGate {
+    pub entered: Arc<tokio::sync::Notify>,
+    pub release: Arc<tokio::sync::Notify>,
 }
 
 struct AppOperation {
@@ -105,6 +132,10 @@ pub struct MobileLocalAppServiceHandle {
     target: Mutex<Target>,
     active: AsyncMutex<HashMap<String, Arc<ActiveRun>>>,
     operations: Mutex<HashMap<String, Arc<AppOperation>>>,
+    #[cfg(test)]
+    gateway_acceptor: Mutex<Option<gateway::AcceptFactory>>,
+    #[cfg(test)]
+    gateway_start_gate: Mutex<Option<GatewayStartGate>>,
 }
 
 impl MobileLocalAppServiceHandle {
@@ -228,6 +259,10 @@ impl MobileLocalAppServiceHandle {
             }),
             active: AsyncMutex::new(HashMap::new()),
             operations: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            gateway_acceptor: Mutex::new(None),
+            #[cfg(test)]
+            gateway_start_gate: Mutex::new(None),
         });
         instances.insert(config_home, service.clone());
         Ok(service)
@@ -458,18 +493,7 @@ impl MobileLocalAppServiceHandle {
     async fn transition(self: &Arc<Self>, request: Value) -> Result<Value, ServiceError> {
         let op = required(&request, "op")?;
         let id = required(&request, "appId")?;
-        let operation = self
-            .operations
-            .lock()
-            .unwrap()
-            .entry(id.into())
-            .or_insert_with(|| {
-                Arc::new(AppOperation {
-                    serial: AsyncMutex::new(()),
-                    cancellation: Mutex::new(CancellationToken::new()),
-                })
-            })
-            .clone();
+        let operation = self.operation(id);
         let cancellation = {
             let mut current = operation.cancellation.lock().unwrap();
             if !matches!(op, "start" | "resume") {
@@ -517,6 +541,85 @@ impl MobileLocalAppServiceHandle {
                 .await
             }
         }
+    }
+
+    fn operation(&self, app_id: &str) -> Arc<AppOperation> {
+        self.operations
+            .lock()
+            .unwrap()
+            .entry(app_id.to_owned())
+            .or_insert_with(|| {
+                Arc::new(AppOperation {
+                    serial: AsyncMutex::new(()),
+                    cancellation: Mutex::new(CancellationToken::new()),
+                })
+            })
+            .clone()
+    }
+
+    pub(super) async fn gateway_failed(
+        self: &Arc<Self>,
+        app_id: String,
+        run: Arc<ActiveRun>,
+        error_kind: std::io::ErrorKind,
+    ) {
+        let operation = self.operation(&app_id);
+        let _serial = operation.serial.lock().await;
+        if run.cancel.is_cancelled() {
+            return;
+        }
+        let is_current = self
+            .active
+            .lock()
+            .await
+            .get(&app_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &run));
+        if !is_current || run.record.lock().unwrap().phase != RunPhase::Running {
+            return;
+        }
+        {
+            let mut record = run.record.lock().unwrap();
+            record.phase = RunPhase::Stopping;
+            record.services.clear();
+            record.error = Some(format!("gateway_accept_failed:{error_kind:?}"));
+            *run.url.lock().unwrap() = String::new();
+        }
+        let _ = self.stop_chain(&app_id, run, RunPhase::Failed, false).await;
+    }
+
+    async fn cleanup_failed_gateway(
+        &self,
+        app_id: &str,
+        run: Arc<ActiveRun>,
+        health: GatewayHealth,
+    ) -> Result<(), ServiceError> {
+        let failure = match health {
+            GatewayHealth::Failed(Some(kind)) => format!("gateway_accept_failed:{kind:?}"),
+            GatewayHealth::Failed(None) => {
+                let gateway_task = { run.gateway.lock().await.take() };
+                match gateway_task {
+                    Some(task) => match task.await {
+                        Ok(Err(kind)) => format!("gateway_accept_failed:{kind:?}"),
+                        Ok(Ok(())) => "gateway_stopped_unexpectedly".into(),
+                        Err(error) if error.is_cancelled() => "gateway_task_aborted".into(),
+                        Err(_) => "gateway_task_panicked".into(),
+                    },
+                    None => "gateway_handle_missing".into(),
+                }
+            }
+            GatewayHealth::Starting => "gateway_start_incomplete".into(),
+            GatewayHealth::Healthy => return Ok(()),
+        };
+        {
+            let mut record = run.record.lock().unwrap();
+            record.phase = RunPhase::Stopping;
+            record.services.clear();
+            record.error = Some(failure);
+            *run.url.lock().unwrap() = String::new();
+        }
+        self.stop_chain(app_id, run, RunPhase::Failed, false)
+            .await
+            .map(|_| ())
     }
 
     async fn library_request(&self, request: Value) -> Result<Value, ServiceError> {
@@ -846,23 +949,58 @@ impl MobileLocalAppServiceHandle {
                 target: release.manifest.schema_version(),
             }));
         }
-        let mut active = self.active.lock().await;
         let mut previous = None;
-        if let Some(run) = active.get(app_id) {
+        loop {
+            let current = self.active.lock().await.get(app_id).cloned();
+            let Some(run) = current else { break };
             let r = run.record.lock().unwrap().clone();
-            if !rebuild && r.revision == release.revision && r.phase == RunPhase::Running {
-                return Ok(
-                    json!({"run":r,"url":run.url.lock().unwrap().clone(),"origin":format!("http://127.0.0.1:{}",record.origin_port)}),
-                );
-            }
-            if r.phase == RunPhase::Running {
-                previous = Some(run.clone());
-            } else {
+            if r.phase != RunPhase::Running {
                 return Err(ServiceError::new(
                     "busy",
                     "an application transition is already in progress",
                 ));
             }
+            if run.cancel.is_cancelled() {
+                return Err(ServiceError::new(
+                    "cancelled",
+                    "the existing application run is stopping",
+                ));
+            }
+            match gateway_health(&run).await {
+                GatewayHealth::Failed(health) => {
+                    // The old listener may still be bound while a failed
+                    // accept task unwinds. Reap before binding that port.
+                    self.cleanup_failed_gateway(app_id, run, GatewayHealth::Failed(health))
+                        .await?;
+                    continue;
+                }
+                GatewayHealth::Starting => {
+                    // A Running record is committed only after its gateway
+                    // handle is stored. Do not reuse its URL during startup.
+                    return Err(ServiceError::new(
+                        "gatewayStarting",
+                        "the application gateway is starting; retry the open action",
+                    ));
+                }
+                GatewayHealth::Healthy => {}
+            }
+            if !rebuild && r.revision == release.revision {
+                match gateway_health(&run).await {
+                    GatewayHealth::Healthy => {}
+                    GatewayHealth::Failed(_) => continue,
+                    GatewayHealth::Starting => {
+                        return Err(ServiceError::new(
+                            "gatewayStarting",
+                            "the application gateway is starting; retry the open action",
+                        ));
+                    }
+                }
+                return Ok(
+                    json!({"run":r,"url":run.url.lock().unwrap().clone(),"origin":format!("http://127.0.0.1:{}",record.origin_port)}),
+                );
+            }
+            previous = Some(run);
+            break;
         }
         let library = self.library.clone();
         let id = app_id.to_owned();
@@ -887,6 +1025,7 @@ impl MobileLocalAppServiceHandle {
             cancel: cancellation,
             handles: AsyncMutex::new(Vec::new()),
             gateway: AsyncMutex::new(None),
+            gateway_failure: Mutex::new(None),
             listener: AsyncMutex::new(None),
             committed: AtomicBool::new(false),
             cleanup_complete: AtomicBool::new(false),
@@ -900,6 +1039,7 @@ impl MobileLocalAppServiceHandle {
             previous: Mutex::new(previous),
             execution_lease: Mutex::new(None),
         });
+        let mut active = self.active.lock().await;
         active.insert(app_id.to_owned(), run.clone());
         drop(active);
         let owner = self.clone();
@@ -922,7 +1062,16 @@ impl MobileLocalAppServiceHandle {
         let result = self.prepare_and_launch(&preparation, run.clone()).await;
         drop_guard.disarm();
         match result {
-            Ok(value) => Ok(value),
+            Ok(value) => match gateway_health(&run).await {
+                GatewayHealth::Healthy => Ok(value),
+                health => {
+                    let _ = self.cleanup_failed_gateway(app_id, run, health).await;
+                    Err(ServiceError::new(
+                        "gatewayFailed",
+                        "the application gateway failed before startup completed",
+                    ))
+                }
+            },
             Err(error) => {
                 let stopped_by_host = {
                     let _lifecycle = run.lifecycle.lock().await;
