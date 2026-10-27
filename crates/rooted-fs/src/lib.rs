@@ -59,6 +59,14 @@ pub struct RootIdentity {
     file: u64,
 }
 
+impl RootIdentity {
+    /// Filesystem or volume containing this opened object.
+    #[must_use]
+    pub fn volume(&self) -> u64 {
+        self.volume
+    }
+}
+
 /// Identity of this opened file, without following its current pathname.
 pub fn opened_file_identity(file: &std::fs::File) -> Result<RootIdentity, FsError> {
     #[cfg(unix)]

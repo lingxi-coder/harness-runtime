@@ -363,6 +363,9 @@ jobs:
           }
       - name: Check desktop runtime against the native platform
         run: cargo check --locked -p harness-runtime --no-default-features --features desktop
+      - name: Test Windows volume identity and junction targets
+        if: runner.os == 'Windows'
+        run: cargo test --locked -p tool-skill --lib native_path_device -- --nocapture
 
   harness-ios:
     name: Harness iOS (${{ matrix.target }})

@@ -1438,21 +1438,7 @@ fn native_home_is_automount() -> bool {
         if has_home_entry {
             return Ok(true);
         }
-        let home = match std::fs::metadata("/home") {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
-            Err(_) => return Err(()),
-        };
-        // Native Dt does not catch the /Users stat; any failure escapes Ft's
-        // outer try/catch and therefore must not be memoized.
-        let users = std::fs::metadata("/Users").map_err(|_| ())?;
-        match (
-            native_metadata_device(&home),
-            native_metadata_device(&users),
-        ) {
-            (Some(home), Some(users)) => Ok(home != users),
-            _ => Err(()),
-        }
+        native_home_uses_separate_device(native_path_device)
     })();
 
     match result {
@@ -1464,21 +1450,46 @@ fn native_home_is_automount() -> bool {
     }
 }
 
+fn native_home_uses_separate_device(
+    mut device_for_path: impl FnMut(&Path) -> std::io::Result<u64>,
+) -> Result<bool, ()> {
+    let home = match device_for_path(Path::new("/home")) {
+        Ok(device) => device,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(_) => return Err(()),
+    };
+    // Native Dt does not catch the /Users stat; any failure escapes Ft's
+    // outer try/catch and therefore must not be memoized.
+    let users = device_for_path(Path::new("/Users")).map_err(|_| ())?;
+    Ok(home != users)
+}
+
 #[cfg(unix)]
-fn native_metadata_device(metadata: &std::fs::Metadata) -> Option<u64> {
+fn native_path_device(path: &Path) -> std::io::Result<u64> {
     use std::os::unix::fs::MetadataExt;
-    Some(metadata.dev())
+    Ok(std::fs::metadata(path)?.dev())
 }
 
 #[cfg(windows)]
-fn native_metadata_device(metadata: &std::fs::Metadata) -> Option<u64> {
-    use std::os::windows::fs::MetadataExt;
-    metadata.volume_serial_number().map(u64::from)
+fn native_path_device(path: &Path) -> std::io::Result<u64> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // Open directories with no requested data access. As with metadata(), do
+    // not set OPEN_REPARSE_POINT: the volume must identify the target of a
+    // junction or symlink rather than the volume containing the link itself.
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    let file = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    lingxi_core::host::rooted_fs::opened_file_identity(&file)
+        .map(|identity| identity.volume())
+        .map_err(std::io::Error::other)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn native_metadata_device(_metadata: &std::fs::Metadata) -> Option<u64> {
-    None
+fn native_path_device(_path: &Path) -> std::io::Result<u64> {
+    Err(std::io::Error::other("file identity unsupported"))
 }
 
 fn native_path_units(path: &Path) -> Vec<u16> {
@@ -1859,6 +1870,87 @@ mod tests {
             units
         );
         assert_eq!(source.string_units("").as_deref(), Some(units.as_slice()));
+    }
+
+    #[test]
+    fn native_home_device_comparison_preserves_fail_closed_behavior() {
+        let devices = |home: std::io::Result<u64>, users: std::io::Result<u64>| {
+            let mut values = [home, users].into_iter();
+            native_home_uses_separate_device(|_| values.next().unwrap())
+        };
+
+        assert_eq!(devices(Ok(7), Ok(7)), Ok(false));
+        assert_eq!(devices(Ok(7), Ok(8)), Ok(true));
+        assert_eq!(
+            devices(Err(std::io::ErrorKind::NotFound.into()), Ok(7)),
+            Ok(true)
+        );
+        assert_eq!(
+            devices(Err(std::io::ErrorKind::PermissionDenied.into()), Ok(7)),
+            Err(())
+        );
+        assert_eq!(
+            devices(Ok(7), Err(std::io::ErrorKind::NotFound.into())),
+            Err(())
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn native_path_device_reads_the_volume_of_existing_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let root_device = native_path_device(root.path()).unwrap();
+        assert_eq!(native_path_device(&child).unwrap(), root_device);
+        assert_eq!(
+            native_path_device(&root.path().join("missing"))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::NotFound
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_path_device_follows_a_directory_junction() {
+        use std::os::windows::fs::MetadataExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        let junction = root.path().join("junction");
+        std::fs::create_dir(&target).unwrap();
+        let output = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mklink /J failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        assert_ne!(
+            std::fs::symlink_metadata(&junction)
+                .unwrap()
+                .file_attributes()
+                & FILE_ATTRIBUTE_REPARSE_POINT,
+            0
+        );
+        assert_eq!(
+            native_path_device(&junction).unwrap(),
+            native_path_device(&target).unwrap()
+        );
+        // A dangling junction must fail: opening the reparse point itself
+        // instead of following it would incorrectly keep returning its volume.
+        std::fs::remove_dir(&target).unwrap();
+        assert_eq!(
+            native_path_device(&junction).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 
     #[derive(Default)]
