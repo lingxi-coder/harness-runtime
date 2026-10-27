@@ -97,6 +97,19 @@ jobs:
         # earlier failure for exactly this reason.
         run: cargo test --locked --workspace --all-features --no-fail-fast
 
+  webrtc-source-review:
+    # The embedded workspace has its own lock and vet store, independent of
+    # the root workspace's source-review result.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Install cargo-vet
+        run: cargo install cargo-vet --locked --version '^0.10'
+      - name: Check embedded WebRTC source reviews
+        working-directory: packages/webrtc
+        run: cargo vet check --locked
+
   webrtc-tests:
     # packages/webrtc is a separate workspace, so root --workspace tests do
     # not run its transport, media, mobile or test-server unit tests.
