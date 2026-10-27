@@ -53,6 +53,29 @@ function transportFor(pages, {state = 'running'} = {}) {
   };
 }
 
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return {promise, resolve};
+}
+
+function journalTransport(log, {pageSize = 128, state = 'succeeded'} = {}) {
+  const starts = [];
+  const eventRequests = [];
+  const statusRequests = [];
+  return {
+    starts, eventRequests, statusRequests,
+    async start(input) { starts.push(input); return {runId: input.runId}; },
+    async events(request) {
+      eventRequests.push({...request});
+      const cursor = request.afterSequence ?? 0;
+      const events = log.slice(cursor, cursor + pageSize);
+      return {events, sequence: cursor + events.length};
+    },
+    async status(request) { statusRequests.push({...request}); return {state}; },
+  };
+}
+
 test('official schemas validate RunAgentInput, BaseEvent and a real image File part', async () => {
   const bytes = new Uint8Array(1024);
   bytes[0] = 0x89;
@@ -251,9 +274,148 @@ test('the convenience result path rejects cancelled, interrupted and failed runs
 
 test('a terminal task without a terminal AG-UI event rejects instead of resolving as success', async () => {
   const input = runInput();
-  const transport = transportFor([{events: [started(input.threadId, input.runId)], sequence: 0}], {state: 'succeeded'});
+  const transport = transportFor([
+    {events: [started(input.threadId, input.runId)], sequence: 1},
+    {events: [], sequence: 1},
+  ], {state: 'succeeded'});
   const client = createLocalAppAgent({transport, threadId: input.threadId, pollIntervalMs: 10});
   await assert.rejects(client.runInput(input), /without a terminal AG-UI event/);
+  assert.deepEqual(transport.eventRequests, [{runId: input.runId}, {runId: input.runId, afterSequence: 1}]);
+  assert.equal(transport.starts.length, 1);
+});
+
+test('terminal status after a stale event page drains the same run from its cursor', async () => {
+  const input = runInput();
+  const log = [started(input.threadId, input.runId)];
+  const transport = journalTransport(log);
+  const statusEntered = deferred();
+  const releaseStatus = deferred();
+  transport.status = async request => {
+    transport.statusRequests.push({...request});
+    statusEntered.resolve();
+    await releaseStatus.promise;
+    return {state: 'succeeded'};
+  };
+  const client = createLocalAppAgent({transport, threadId: input.threadId, pollIntervalMs: 10});
+  const pending = client.runInput(input);
+  await statusEntered.promise;
+  // The previous event response was captured already. Commit the completed
+  // journal before allowing the separate status request to observe success.
+  log.push(
+    {type: 'TEXT_MESSAGE_START', messageId: 'assistant-1', role: 'assistant'},
+    {type: 'TEXT_MESSAGE_CONTENT', messageId: 'assistant-1', delta: 'answer'},
+    {type: 'TEXT_MESSAGE_END', messageId: 'assistant-1'},
+    finished(input.threadId, input.runId, {type: 'success'}, 'done'),
+  );
+  releaseStatus.resolve();
+  const result = await pending;
+  assert.equal(result.result, 'done');
+  assert.deepEqual(result.newMessages, [{id: 'assistant-1', role: 'assistant', content: 'answer'}]);
+  assert.deepEqual(transport.eventRequests, [{runId: input.runId}, {runId: input.runId, afterSequence: 1}]);
+  assert.equal(transport.starts.length, 1);
+  assert.equal(transport.statusRequests.length, 1);
+});
+
+test('terminal status after an old empty page rereads the unchanged cursor', async () => {
+  const input = runInput();
+  const log = [started(input.threadId, input.runId)];
+  const transport = journalTransport(log);
+  const secondStatusEntered = deferred();
+  const releaseStatus = deferred();
+  transport.status = async request => {
+    transport.statusRequests.push({...request});
+    if (transport.statusRequests.length === 1) return {state: 'running'};
+    secondStatusEntered.resolve();
+    await releaseStatus.promise;
+    return {state: 'succeeded'};
+  };
+  const client = createLocalAppAgent({transport, threadId: input.threadId, pollIntervalMs: 10});
+  const pending = client.runInput(input);
+  await secondStatusEntered.promise;
+  // The second events request returned [] at sequence 1. Commit the terminal
+  // only after that old page, before the status request returns succeeded.
+  log.push(finished(input.threadId, input.runId, {type: 'success'}, 'after-empty'));
+  releaseStatus.resolve();
+  const result = await pending;
+  assert.equal(result.result, 'after-empty');
+  assert.deepEqual(transport.eventRequests, [
+    {runId: input.runId},
+    {runId: input.runId, afterSequence: 1},
+    {runId: input.runId, afterSequence: 1},
+  ]);
+  assert.equal(transport.starts.length, 1);
+  assert.equal(transport.statusRequests.length, 2);
+});
+
+test('terminal drain handles more than 128 pages without restarting the model', async () => {
+  const input = runInput();
+  const log = [
+    started(input.threadId, input.runId),
+    {type: 'TEXT_MESSAGE_START', messageId: 'assistant-many', role: 'assistant'},
+    ...Array.from({length: 128}, () => ({type: 'TEXT_MESSAGE_CONTENT', messageId: 'assistant-many', delta: 'x'})),
+    {type: 'TEXT_MESSAGE_END', messageId: 'assistant-many'},
+    finished(input.threadId, input.runId),
+  ];
+  const transport = journalTransport(log, {pageSize: 1});
+  const client = createLocalAppAgent({transport, threadId: input.threadId, pollIntervalMs: 10});
+  const result = await client.runInput(input);
+  assert.equal(result.newMessages[0].content, 'x'.repeat(128));
+  assert.equal(transport.eventRequests.length, log.length);
+  assert.deepEqual(transport.eventRequests.map(request => request.afterSequence),
+    [undefined, ...Array.from({length: log.length - 1}, (_, index) => index + 1)]);
+  assert.equal(transport.starts.length, 1);
+  assert.equal(transport.statusRequests.length, 1);
+});
+
+test('terminal drain is bounded even if a broken host produces endless pages', async () => {
+  const input = runInput();
+  const log = [started(input.threadId, input.runId), ...Array.from({length: 10_000}, () => ({
+    type: 'CUSTOM', name: 'fixture', value: {},
+  }))];
+  const transport = journalTransport(log);
+  const client = createLocalAppAgent({transport, threadId: input.threadId, pollIntervalMs: 10});
+  await assert.rejects(client.runInput(input), /more than 10000 AG-UI events/);
+  assert.equal(transport.starts.length, 1);
+  assert.equal(transport.statusRequests.length, 1);
+});
+
+test('terminal drain preserves cancellation and read-only reconnect semantics', async t => {
+  for (const reconnect of [false, true]) {
+    await t.test(reconnect ? 'read-only reconnect' : 'new run', async () => {
+      const input = runInput();
+      const log = [
+        started(input.threadId, input.runId),
+        finished(input.threadId, input.runId, {type: 'cancelled'}, undefined),
+      ];
+      const transport = journalTransport(log, {pageSize: 1, state: 'cancelled'});
+      const client = createLocalAppAgent({transport, threadId: input.threadId, pollIntervalMs: 10});
+      if (reconnect) {
+        let outcome;
+        await client.connectAgent({runId: input.runId}, {onRunFinishedEvent: params => { outcome = params.outcome; }});
+        assert.equal(outcome, 'cancelled');
+        assert.equal(transport.starts.length, 0);
+      } else {
+        await assert.rejects(client.runInput(input), error => error.code === 'run_cancelled');
+        assert.equal(transport.starts.length, 1);
+      }
+      assert.deepEqual(transport.eventRequests, [{runId: input.runId}, {runId: input.runId, afterSequence: 1}]);
+      assert.equal(transport.statusRequests.length, 1);
+    });
+  }
+});
+
+test('terminal drain rejects invalid pages before delivering their terminal event', async () => {
+  const input = runInput();
+  const transport = transportFor([
+    {events: [started(input.threadId, input.runId)], sequence: 1},
+    {events: [finished(input.threadId, input.runId), {type: 'CUSTOM', name: 'late', value: {}}], sequence: 3},
+  ], {state: 'succeeded'});
+  const client = createLocalAppAgent({transport, threadId: input.threadId, pollIntervalMs: 10});
+  const delivered = [];
+  await assert.rejects(client.runInput(input, {onEvent: ({event}) => delivered.push(event.type)}),
+    /events after an AG-UI terminal event/);
+  assert.deepEqual(delivered, ['RUN_STARTED']);
+  assert.equal(transport.starts.length, 1);
 });
 
 test('unsupported stateless history fails before the host transport starts', async () => {

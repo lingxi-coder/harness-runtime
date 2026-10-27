@@ -6,6 +6,8 @@ import {validateEvent, validateRunAgentInput} from './validators.js';
 export const LOCAL_APP_EXTENSION_KEY = 'com.lingxi.localApp';
 export const AG_UI_PROTOCOL_VERSION = '1.0';
 const MAX_EVENT_PAGE_EVENTS = 128;
+const MAX_RUN_EVENTS = 10_000;
+const MAX_TERMINAL_DRAIN_PAGES = 10_000;
 
 function isRecord(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -193,6 +195,9 @@ function eventStream({input, transport, start, knownMessageIds, persistentChat, 
 
     const poll = async () => {
       let afterSequence;
+      let observedEvents = 0;
+      let terminalStatusObserved = false;
+      let terminalDrainPages = 0;
       try {
         if (start) {
           const accepted = await transport.start(input, {knownMessageIds, persistentChat});
@@ -202,11 +207,19 @@ function eventStream({input, transport, start, knownMessageIds, persistentChat, 
           onAccepted?.();
         }
         while (active && !controller.signal.aborted) {
+          if (terminalStatusObserved && terminalDrainPages >= MAX_TERMINAL_DRAIN_PAGES) {
+            throw new TypeError('The host returned too many AG-UI event pages without a terminal event.');
+          }
           const request = {runId: input.runId};
           if (afterSequence !== undefined) request.afterSequence = afterSequence;
           const page = await transport.events(request, {signal: controller.signal});
           if (!active || controller.signal.aborted) return;
+          if (terminalStatusObserved) terminalDrainPages++;
           const events = validateEventPage(page, afterSequence);
+          observedEvents += events.length;
+          if (observedEvents > MAX_RUN_EVENTS) {
+            throw new TypeError('The host returned more than ' + MAX_RUN_EVENTS + ' AG-UI events in one run.');
+          }
           let terminalIndex = -1;
           for (let index = 0; index < events.length; index++) {
             const event = events[index];
@@ -215,23 +228,36 @@ function eventStream({input, transport, start, knownMessageIds, persistentChat, 
                 throw new TypeError('The host returned an event for a different AG-UI run.');
               }
             }
-            if (event.type === 'RUN_FINISHED' || event.type === 'RUN_ERROR') terminalIndex = index;
-            subscriber.next(event);
-          }
-          if (terminalIndex >= 0) {
-            if (terminalIndex !== events.length - 1) {
-              throw new TypeError('The host returned events after an AG-UI terminal event.');
+            if (event.type === 'RUN_FINISHED' || event.type === 'RUN_ERROR') {
+              if (index !== events.length - 1) {
+                throw new TypeError('The host returned events after an AG-UI terminal event.');
+              }
+              terminalIndex = index;
             }
+          }
+          for (const event of events) subscriber.next(event);
+          if (terminalIndex >= 0) {
             subscriber.complete();
             return;
           }
-          if (typeof transport.status === 'function') {
-            const task = await transport.status({runId: input.runId});
-            if (terminalTask(task)) {
+          afterSequence = page.sequence;
+          // Status and events are separate requests. A terminal status may
+          // describe events committed after the page just read: drain from its
+          // cursor until the terminal event or an empty, stable tail page.
+          if (terminalStatusObserved) {
+            if (events.length === 0) {
               throw new TypeError('The host task ended without a terminal AG-UI event.');
             }
+            continue;
           }
-          afterSequence = page.sequence;
+          if (typeof transport.status === 'function') {
+            const task = await transport.status({runId: input.runId});
+            if (!active || controller.signal.aborted) return;
+            if (terminalTask(task)) {
+              terminalStatusObserved = true;
+              continue;
+            }
+          }
           await delay(pollIntervalMs, controller.signal, setTimeout);
         }
       } catch (error) {
