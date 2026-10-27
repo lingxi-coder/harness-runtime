@@ -26,7 +26,7 @@ STREAM_EXCEPTIONS = {
 # Rust external test modules do not have an in-file `#[cfg(test)]`. Skip only
 # this exact source when its crate root explicitly declares it under cfg(test).
 TEST_MODULE_ROOTS = {
-    "crates/audio-runtime/src/tests.rs": "crates/audio-runtime/src/lib.rs",
+    "crates/media-runtime/src/audio/tests.rs": "crates/media-runtime/src/audio/mod.rs",
 }
 TEST_MODULE_DECLARATION = re.compile(
     r"(?m)^[ \t]*#\[cfg\([ \t]*test[ \t]*\)\][ \t]*\r?\n"
@@ -210,7 +210,7 @@ def main():
         assert not runtime_findings('pub struct ExecutionUsage { report: sdk::UsageReport }')
         assert not runtime_findings('pub use sdk::protocol::Usage;')
         assert findings('fn parse() { headers.get("x-claudeai-window-limit"); }')
-        test_module = "crates/audio-runtime/src/tests.rs"
+        test_module = "crates/media-runtime/src/audio/tests.rs"
         explicit_test_declaration = "#[cfg(test)]\nmod tests;\n"
         assert is_declared_test_module(test_module, module_source=explicit_test_declaration)
         assert not is_declared_test_module(test_module, module_source="mod tests;\n")
