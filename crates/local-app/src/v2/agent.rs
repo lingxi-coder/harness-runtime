@@ -3,7 +3,7 @@
 //! from persisted records. All methods are synchronous; call off the UI thread.
 mod chat_store;
 pub mod protocol;
-pub use chat_store::{ChatMessageMetadata, ChatStore};
+pub use chat_store::{ChatListPage, ChatMessageMetadata, ChatStore};
 
 use super::AppError;
 use serde::{Deserialize, Serialize};
@@ -233,6 +233,17 @@ pub struct Task {
     pub usage: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<TaskError>,
+}
+
+/// App/release-scoped task page returned to the mobile Agent host. Cursor
+/// tokens are the opaque public request IDs of the last included task; hosts
+/// translate them back to private store IDs before reading the next page.
+#[derive(Clone, Debug)]
+pub struct TaskListPage {
+    /// Tasks in the current stable-order page.
+    pub tasks: Vec<Task>,
+    /// Public request ID of the last task when another page is available.
+    pub next_cursor: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1266,6 +1277,39 @@ impl AgentStore {
         if !(1..=100).contains(&limit) {
             return Err(invalid("invalid task list limit"));
         }
+        self.list_rows(owner, cursor, limit)
+    }
+    /// Return one public-cursor page while preserving the stable store order.
+    /// `cursor` is a request ID, never a private task-ledger path or key.
+    pub fn list_page(
+        &self,
+        owner: &Owner,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<TaskListPage, AppError> {
+        owner.validate()?;
+        if !(1..=100).contains(&limit) {
+            return Err(invalid("invalid task list limit"));
+        }
+        let private_cursor = cursor
+            .map(|request_id| self.task_id_for_request(owner, request_id))
+            .transpose()?;
+        let mut tasks = self.list_rows(owner, private_cursor.as_deref(), limit + 1)?;
+        let has_more = tasks.len() > limit;
+        tasks.truncate(limit);
+        let next_cursor = if has_more {
+            tasks.last().map(|task| task.request_id.clone())
+        } else {
+            None
+        };
+        Ok(TaskListPage { tasks, next_cursor })
+    }
+    fn list_rows(
+        &self,
+        owner: &Owner,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Task>, AppError> {
         let ledger = self
             .ledger
             .lock()

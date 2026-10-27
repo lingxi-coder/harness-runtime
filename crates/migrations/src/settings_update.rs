@@ -155,37 +155,313 @@ pub fn update_settings_source_with_before_publish<F>(
 where
     F: FnOnce(),
 {
+    with_settings_file_lock(path, |target| {
+        let mut source = read_settings_source(target)?;
+        for (key, value) in updates {
+            match value {
+                Some(value) => source
+                    .set_field(&key, value)
+                    .map_err(|error| format!("Failed to update settings field `{key}`: {error}"))?,
+                None => {
+                    source = remove_settings_source_field(&source, &key).map_err(|error| {
+                        format!("Failed to remove settings field `{key}`: {error}")
+                    })?;
+                }
+            }
+        }
+        let serialized = source.to_pretty_json_string().map_err(|error| {
+            format!(
+                "Failed to serialize settings for {}: {error}",
+                target.display()
+            )
+        })?;
+        before_publish();
+        write_settings_atomic(target, (serialized + "\n").as_bytes())
+            .map_err(|error| format!("Failed to write settings to {}: {error}", target.display()))
+    })
+}
+
+/// Receipt for one source-preserving settings mutation. Rollback restores the
+/// exact prior bytes if this mutation is still the latest write; otherwise it
+/// applies a compare-and-swap reverse delta to the current raw JSON so later
+/// writers' values survive.
+#[derive(Debug, Clone)]
+pub struct SettingsUpdateReceipt {
+    target: PathBuf,
+    before_bytes: Option<Vec<u8>>,
+    after_bytes: Vec<u8>,
+    before_source: Utf16JsonProjection,
+    after_source: Utf16JsonProjection,
+}
+
+/// Transform the latest raw settings source under the shared settings locks
+/// and return a rollback receipt for the exact mutation made by `transform`.
+/// A no-op transform does not write the file and returns `None`.
+pub fn transform_settings_source_with_receipt<F>(
+    path: &Path,
+    transform: F,
+) -> Result<Option<SettingsUpdateReceipt>, String>
+where
+    F: FnOnce(&mut Utf16JsonProjection) -> Result<(), String>,
+{
+    with_settings_file_lock(path, |target| {
+        let before_bytes = match std::fs::read(target) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to read raw settings from {}: {error}",
+                    target.display()
+                ));
+            }
+        };
+        let mut after_source = read_settings_source(target)?;
+        let before_source = after_source.clone();
+        transform(&mut after_source)?;
+        if source_values_equal(&before_source, &after_source) {
+            return Ok(None);
+        }
+        let serialized = after_source.to_pretty_json_string().map_err(|error| {
+            format!(
+                "Failed to serialize settings for {}: {error}",
+                target.display()
+            )
+        })?;
+        let after_bytes = (serialized + "\n").into_bytes();
+        write_settings_atomic(target, &after_bytes).map_err(|error| {
+            format!("Failed to write settings to {}: {error}", target.display())
+        })?;
+        Ok(Some(SettingsUpdateReceipt {
+            target: target.to_path_buf(),
+            before_bytes,
+            after_bytes,
+            before_source,
+            after_source,
+        }))
+    })
+}
+
+/// Roll back a mutation receipt under the same process and file locks as
+/// settings writers. If later writes changed the file, restore only values
+/// that still match this receipt's after-state, merging object deltas through
+/// the raw UTF-16 projection.
+pub fn rollback_settings_update(receipt: &SettingsUpdateReceipt) -> Result<bool, String> {
+    with_settings_file_lock(&receipt.target, |target| {
+        let current_bytes = match std::fs::read(target) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => {
+                return Err(format!(
+                    "Failed to read raw settings from {}: {error}",
+                    target.display()
+                ));
+            }
+        };
+        if current_bytes.as_deref() == Some(receipt.after_bytes.as_slice()) {
+            match &receipt.before_bytes {
+                Some(bytes) => write_settings_atomic(target, bytes).map_err(|error| {
+                    format!(
+                        "Failed to restore settings at {}: {error}",
+                        target.display()
+                    )
+                })?,
+                None => match std::fs::remove_file(target) {
+                    Ok(()) => {
+                        if let Some(parent) = target.parent() {
+                            sync_parent_if_supported(parent).map_err(|error| {
+                                format!(
+                                    "Failed to restore settings at {}: {error}",
+                                    target.display()
+                                )
+                            })?;
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+                    Err(error) => {
+                        return Err(format!(
+                            "Failed to restore settings at {}: {error}",
+                            target.display()
+                        ));
+                    }
+                },
+            }
+            return Ok(true);
+        }
+
+        // A missing file is a later writer's full-file deletion. Preserve it.
+        if current_bytes.is_none() {
+            return Ok(false);
+        }
+        let current_source = read_settings_source(target)?;
+        let restored = rollback_source_delta(
+            Some(&current_source),
+            Some(&receipt.before_source),
+            Some(&receipt.after_source),
+        )?;
+        let Some(restored) = restored else {
+            return Ok(false);
+        };
+        if source_values_equal(&current_source, &restored) {
+            return Ok(false);
+        }
+        let serialized = restored.to_pretty_json_string().map_err(|error| {
+            format!(
+                "Failed to serialize restored settings for {}: {error}",
+                target.display()
+            )
+        })?;
+        write_settings_atomic(target, (serialized + "\n").as_bytes()).map_err(|error| {
+            format!(
+                "Failed to restore settings at {}: {error}",
+                target.display()
+            )
+        })?;
+        Ok(true)
+    })
+}
+
+fn source_values_equal(left: &Utf16JsonProjection, right: &Utf16JsonProjection) -> bool {
+    match (left.to_json_string(), right.to_json_string()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn rollback_source_delta<'a>(
+    current: Option<&'a Utf16JsonProjection>,
+    before: Option<&'a Utf16JsonProjection>,
+    after: Option<&'a Utf16JsonProjection>,
+) -> Result<Option<Utf16JsonProjection>, String> {
+    if optional_source_values_equal(before, after) {
+        return Ok(current.cloned());
+    }
+    if optional_source_values_equal(current, after) {
+        return Ok(before.cloned());
+    }
+    // A later writer may remove a parent object after this receipt's update.
+    // Keep that deletion instead of rebuilding the old subtree from `before`.
+    if current.is_none() && after.is_some() {
+        return Ok(None);
+    }
+    // An explicit empty object is also a later clear when it differs from
+    // this receipt's after-state (including an absent after-state). Do not
+    // resurrect fields deleted afterward.
+    if current
+        .and_then(Utf16JsonProjection::object_entries)
+        .is_some_and(|entries| entries.is_empty())
+    {
+        return Ok(current.cloned());
+    }
+
+    let before_entries = before.and_then(Utf16JsonProjection::object_entries);
+    let after_entries = after.and_then(Utf16JsonProjection::object_entries);
+    let current_entries = current.and_then(Utf16JsonProjection::object_entries);
+    let can_merge_objects = (before.is_none() || before_entries.is_some())
+        && (after.is_none() || after_entries.is_some())
+        && (current.is_none() || current_entries.is_some())
+        && (before_entries.is_some() || after_entries.is_some());
+    if !can_merge_objects {
+        return Ok(current.cloned());
+    }
+
+    let mut keys: Vec<Vec<u16>> = Vec::new();
+    // Keep the latest writer's key order, adding only restored missing keys.
+    for entries in [current_entries, before_entries, after_entries]
+        .into_iter()
+        .flatten()
+    {
+        for entry in entries {
+            if !keys.iter().any(|key| key == entry.code_units) {
+                keys.push(entry.code_units.to_vec());
+            }
+        }
+    }
+    let mut restored_entries = Vec::new();
+    for key in keys {
+        let before_value = source_object_value(before, &key)?;
+        let after_value = source_object_value(after, &key)?;
+        let current_value = source_object_value(current, &key)?;
+        if let Some(value) = rollback_source_delta(
+            current_value.as_ref(),
+            before_value.as_ref(),
+            after_value.as_ref(),
+        )? {
+            restored_entries.push((key, value));
+        }
+    }
+    if restored_entries.is_empty() && before.is_none() {
+        return Ok(None);
+    }
+    Utf16JsonProjection::object_units(restored_entries)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn source_object_value(
+    source: Option<&Utf16JsonProjection>,
+    key: &[u16],
+) -> Result<Option<Utf16JsonProjection>, String> {
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    if !source
+        .object_entries()
+        .is_some_and(|entries| entries.iter().any(|entry| entry.code_units == key))
+    {
+        return Ok(None);
+    }
+    source
+        .subprojection_property_units(key)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn optional_source_values_equal(
+    left: Option<&Utf16JsonProjection>,
+    right: Option<&Utf16JsonProjection>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => source_values_equal(left, right),
+        _ => false,
+    }
+}
+
+fn with_settings_file_lock<T, F>(path: &Path, operation: F) -> Result<T, String>
+where
+    F: FnOnce(&Path) -> Result<T, String>,
+{
     let target = crate::global_config::resolve_write_target(path);
     let path_lock = settings_path_lock(&target);
     let _guard = path_lock
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("Failed to create {}: {error}", parent.display()))?;
     }
-    let mut source = read_settings_source(&target)?;
-    for (key, value) in updates {
-        match value {
-            Some(value) => source
-                .set_field(&key, value)
-                .map_err(|error| format!("Failed to update settings field `{key}`: {error}"))?,
-            None => {
-                source = remove_settings_source_field(&source, &key)
-                    .map_err(|error| format!("Failed to remove settings field `{key}`: {error}"))?;
-            }
-        }
-    }
-    let serialized = source.to_pretty_json_string().map_err(|error| {
-        format!(
-            "Failed to serialize settings for {}: {error}",
-            target.display()
-        )
-    })?;
-    before_publish();
-    write_settings_atomic(&target, (serialized + "\n").as_bytes())
-        .map_err(|error| format!("Failed to write settings to {}: {error}", target.display()))
+    let mut lock_name = std::ffi::OsString::from(".");
+    lock_name.push(
+        target
+            .file_name()
+            .ok_or("Settings path needs a file name")?,
+    );
+    lock_name.push(".lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(target.with_file_name(lock_name))
+        .map_err(|error| {
+            format!(
+                "Failed to open settings lock for {}: {error}",
+                target.display()
+            )
+        })?;
+    fs2::FileExt::lock_exclusive(&lock_file)
+        .map_err(|error| format!("Failed to lock settings {}: {error}", target.display()))?;
+    operation(&target)
 }
 
 fn remove_settings_source_field(
@@ -668,6 +944,34 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
 
+    fn source_field(source: &Utf16JsonProjection, field: &str) -> Utf16JsonProjection {
+        source
+            .subprojection_property_units(&field.encode_utf16().collect::<Vec<_>>())
+            .expect("fixture source field")
+    }
+
+    fn remove_secret_option_receipt(path: &Path, plugin: &str) -> SettingsUpdateReceipt {
+        transform_settings_source_with_receipt(path, |source| {
+            let mut configs = source_field(source, "pluginConfigs");
+            let mut plugin_config = source_field(&configs, plugin);
+            let mut options = source_field(&plugin_config, "options");
+            options
+                .remove_field("TOKEN")
+                .map_err(|error| error.to_string())?;
+            plugin_config
+                .set_field("options", options)
+                .map_err(|error| error.to_string())?;
+            configs
+                .set_field(plugin, plugin_config)
+                .map_err(|error| error.to_string())?;
+            source
+                .set_field("pluginConfigs", configs)
+                .map_err(|error| error.to_string())
+        })
+        .unwrap()
+        .expect("secret option removal receipt")
+    }
+
     #[test]
     fn paths_for_sources() {
         let t = temp_config();
@@ -801,6 +1105,303 @@ mod tests {
         let source = read_settings_source(&path).unwrap();
         assert!(source.get_property("hooks").is_none());
         assert_eq!(source.string_units("/opaque/value"), Some(vec![0xDFFF]));
+    }
+
+    #[test]
+    fn settings_receipt_restores_exact_bytes_when_uncontended() {
+        let t = temp_config();
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = b" {\"opaque\":{\"value\":\"\\ud800\"},\"enabledPlugins\":{}}\n";
+        std::fs::write(&path, original).unwrap();
+
+        let receipt = transform_settings_source_with_receipt(&path, |source| {
+            let mut enabled = source_field(source, "enabledPlugins");
+            enabled
+                .set_field("secure@acme", Utf16JsonProjection::parse("true").unwrap())
+                .map_err(|error| error.to_string())?;
+            source
+                .set_field("enabledPlugins", enabled)
+                .map_err(|error| error.to_string())
+        })
+        .unwrap()
+        .expect("mutation receipt");
+
+        assert_ne!(std::fs::read(&path).unwrap(), original);
+        assert!(rollback_settings_update(&receipt).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn settings_receipt_merge_preserves_interleaved_nested_writes() {
+        let t = temp_config();
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"enabledPlugins":{"secure@acme":true,"other@acme":true},"pluginConfigs":{"secure@acme":{"options":{"TOKEN":"old-token","KEEP":"old-value"},"mcpServers":{"server":{"url":"old-url"}}},"other@acme":{"options":{"REGION":"old-region"}}},"opaque":{"value":"\ud800"}}"#,
+        )
+        .unwrap();
+
+        let receipt = transform_settings_source_with_receipt(&path, |source| {
+            let mut enabled = source_field(source, "enabledPlugins");
+            enabled
+                .remove_field("secure@acme")
+                .map_err(|error| error.to_string())?;
+            source
+                .set_field("enabledPlugins", enabled)
+                .map_err(|error| error.to_string())?;
+            let mut configs = source_field(source, "pluginConfigs");
+            configs
+                .remove_field("secure@acme")
+                .map_err(|error| error.to_string())?;
+            source
+                .set_field("pluginConfigs", configs)
+                .map_err(|error| error.to_string())
+        })
+        .unwrap()
+        .expect("uninstall settings receipt");
+
+        // A separate settings writer commits while the plugin operation is
+        // pending. It adds a new option under the same plugin and updates a
+        // different plugin's settings after the uninstall's snapshot.
+        let mut latest = read_settings_source(&path).unwrap();
+        let mut enabled = source_field(&latest, "enabledPlugins");
+        enabled
+            .set_field("other@acme", Utf16JsonProjection::parse("false").unwrap())
+            .unwrap();
+        latest.set_field("enabledPlugins", enabled).unwrap();
+        let mut configs = source_field(&latest, "pluginConfigs");
+        let secure =
+            Utf16JsonProjection::parse(r#"{"options":{"NEW_TOKEN":"concurrent-token"}}"#).unwrap();
+        let mut other = source_field(&configs, "other@acme");
+        let mut other_options = source_field(&other, "options");
+        other_options
+            .set_field(
+                "REGION",
+                Utf16JsonProjection::parse(r#""concurrent-region""#).unwrap(),
+            )
+            .unwrap();
+        other.set_field("options", other_options).unwrap();
+        configs.set_field("secure@acme", secure).unwrap();
+        configs.set_field("other@acme", other).unwrap();
+        latest.set_field("pluginConfigs", configs).unwrap();
+        update_settings_source_with_before_publish(
+            &path,
+            vec![
+                (
+                    "enabledPlugins".to_string(),
+                    Some(source_field(&latest, "enabledPlugins")),
+                ),
+                (
+                    "pluginConfigs".to_string(),
+                    Some(source_field(&latest, "pluginConfigs")),
+                ),
+            ],
+            || {},
+        )
+        .unwrap();
+
+        assert!(rollback_settings_update(&receipt).unwrap());
+        let restored = read_settings_source(&path).unwrap();
+        assert_eq!(
+            restored
+                .at_pointer("/enabledPlugins/secure@acme")
+                .unwrap()
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            restored
+                .at_pointer("/enabledPlugins/other@acme")
+                .unwrap()
+                .as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            restored.string_at("/pluginConfigs/secure@acme/options/TOKEN"),
+            Some("old-token")
+        );
+        assert_eq!(
+            restored.string_at("/pluginConfigs/secure@acme/options/KEEP"),
+            Some("old-value")
+        );
+        assert_eq!(
+            restored.string_at("/pluginConfigs/secure@acme/options/NEW_TOKEN"),
+            Some("concurrent-token")
+        );
+        assert_eq!(
+            restored.string_at("/pluginConfigs/secure@acme/mcpServers/server/url"),
+            Some("old-url")
+        );
+        assert_eq!(
+            restored.string_at("/pluginConfigs/other@acme/options/REGION"),
+            Some("concurrent-region")
+        );
+        assert_eq!(restored.string_units("/opaque/value"), Some(vec![0xd800]));
+    }
+
+    #[test]
+    fn settings_receipt_does_not_recreate_plugin_config_deleted_later() {
+        let t = temp_config();
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"pluginConfigs":{"p":{"options":{"TOKEN":"old-secret","KEEP":"keep"}},"other":{"options":{"REGION":"stay"}}}}"#,
+        )
+        .unwrap();
+        let receipt = remove_secret_option_receipt(&path, "p");
+
+        let mut latest = read_settings_source(&path).unwrap();
+        let mut configs = source_field(&latest, "pluginConfigs");
+        configs.remove_field("p").unwrap();
+        latest.set_field("pluginConfigs", configs).unwrap();
+        update_settings_source_with_before_publish(
+            &path,
+            vec![(
+                "pluginConfigs".to_string(),
+                Some(source_field(&latest, "pluginConfigs")),
+            )],
+            || {},
+        )
+        .unwrap();
+
+        let latest_bytes = std::fs::read(&path).unwrap();
+        assert!(!rollback_settings_update(&receipt).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), latest_bytes);
+        let restored = read_settings_source(&path).unwrap();
+        assert!(restored.at_pointer("/pluginConfigs/p").is_none());
+        assert_eq!(
+            restored.string_at("/pluginConfigs/other/options/REGION"),
+            Some("stay")
+        );
+    }
+
+    #[test]
+    fn settings_receipt_preserves_empty_plugin_config_recreated_after_removal() {
+        let t = temp_config();
+        let path = settings_path(WritableScope::User, &t.home, &t.project);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"pluginConfigs":{"p":{"options":{"TOKEN":"old-secret","KEEP":"keep"}},"other":{"options":{"REGION":"stay"}}}}"#,
+        )
+        .unwrap();
+        let receipt = transform_settings_source_with_receipt(&path, |source| {
+            let mut configs = source_field(source, "pluginConfigs");
+            configs
+                .remove_field("p")
+                .map_err(|error| error.to_string())?;
+            source
+                .set_field("pluginConfigs", configs)
+                .map_err(|error| error.to_string())
+        })
+        .unwrap()
+        .expect("whole plugin configuration removal receipt");
+
+        let mut latest = read_settings_source(&path).unwrap();
+        let mut configs = source_field(&latest, "pluginConfigs");
+        configs
+            .set_field("p", Utf16JsonProjection::object(Vec::new()).unwrap())
+            .unwrap();
+        latest.set_field("pluginConfigs", configs).unwrap();
+        update_settings_source_with_before_publish(
+            &path,
+            vec![(
+                "pluginConfigs".to_string(),
+                Some(source_field(&latest, "pluginConfigs")),
+            )],
+            || {},
+        )
+        .unwrap();
+
+        let latest_bytes = std::fs::read(&path).unwrap();
+        assert!(!rollback_settings_update(&receipt).unwrap());
+        assert_eq!(std::fs::read(&path).unwrap(), latest_bytes);
+        let restored = read_settings_source(&path).unwrap();
+        assert_eq!(
+            restored
+                .subprojection("/pluginConfigs/p")
+                .unwrap()
+                .object_entries()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert!(
+            restored
+                .at_pointer("/pluginConfigs/p/options/TOKEN")
+                .is_none()
+        );
+        assert_eq!(
+            restored.string_at("/pluginConfigs/other/options/REGION"),
+            Some("stay")
+        );
+    }
+
+    #[test]
+    fn settings_receipt_does_not_recreate_deleted_or_cleared_options() {
+        for clear_to_empty_object in [false, true] {
+            let t = temp_config();
+            let path = settings_path(WritableScope::User, &t.home, &t.project);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                r#"{"pluginConfigs":{"p":{"options":{"TOKEN":"old-secret","KEEP":"keep"},"mcpServers":{"server":{"url":"stay"}}}}}"#,
+            )
+            .unwrap();
+            let receipt = remove_secret_option_receipt(&path, "p");
+
+            let mut latest = read_settings_source(&path).unwrap();
+            let mut configs = source_field(&latest, "pluginConfigs");
+            let mut plugin_config = source_field(&configs, "p");
+            if clear_to_empty_object {
+                plugin_config
+                    .set_field("options", Utf16JsonProjection::object(Vec::new()).unwrap())
+                    .unwrap();
+            } else {
+                plugin_config.remove_field("options").unwrap();
+            }
+            configs.set_field("p", plugin_config).unwrap();
+            latest.set_field("pluginConfigs", configs).unwrap();
+            update_settings_source_with_before_publish(
+                &path,
+                vec![(
+                    "pluginConfigs".to_string(),
+                    Some(source_field(&latest, "pluginConfigs")),
+                )],
+                || {},
+            )
+            .unwrap();
+
+            let latest_bytes = std::fs::read(&path).unwrap();
+            assert!(!rollback_settings_update(&receipt).unwrap());
+            assert_eq!(std::fs::read(&path).unwrap(), latest_bytes);
+            let restored = read_settings_source(&path).unwrap();
+            assert!(
+                restored
+                    .at_pointer("/pluginConfigs/p/options/TOKEN")
+                    .is_none()
+            );
+            assert_eq!(
+                restored.string_at("/pluginConfigs/p/mcpServers/server/url"),
+                Some("stay")
+            );
+            if clear_to_empty_object {
+                assert_eq!(
+                    restored
+                        .subprojection("/pluginConfigs/p/options")
+                        .unwrap()
+                        .object_entries()
+                        .unwrap()
+                        .len(),
+                    0
+                );
+            } else {
+                assert!(restored.at_pointer("/pluginConfigs/p/options").is_none());
+            }
+        }
     }
 
     #[test]

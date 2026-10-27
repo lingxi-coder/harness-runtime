@@ -1,6 +1,7 @@
 //! Marketplace catalog resolution + plugin materialization (Stage 2 install).
 //!
-//! A marketplace is a git repo whose `.lingxi-plugin/marketplace.json` lists
+//! A marketplace is a git repo whose native `.lingxi-plugin/marketplace.json`
+//! or current upstream `.claude-plugin/marketplace.json` lists
 //! installable plugins. Installing `plugin@marketplace` clones the catalog into
 //! `<plugins>/marketplaces/<name>/`, finds the entry, and materializes that
 //! plugin's tree into the versioned cache the discovery loader resolves.
@@ -14,7 +15,7 @@ use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// The `.lingxi-plugin/marketplace.json` catalog.
+/// A current-format marketplace catalog.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MarketplaceIndex {
     /// Marketplace name.
@@ -213,7 +214,7 @@ impl MarketplaceManager {
     }
 
     /// Clone (or refresh) the marketplace git repo at `url` into
-    /// `marketplaces/<name>/` and parse its `.lingxi-plugin/marketplace.json`.
+    /// `marketplaces/<name>/` and parse its marketplace metadata file.
     /// Returns the parsed index + the clone directory.
     pub async fn resolve_index_via_git(
         &self,
@@ -252,9 +253,8 @@ impl MarketplaceManager {
             .map_err(|e| format!("Failed to clone marketplace repository: {e}"))?
             .map_err(|e| format!("Failed to clone marketplace repository: {e}"))?;
 
-        let index_path = clone_dir
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("marketplace.json");
+        let index_path = branding::marketplace_manifest_path(&clone_dir)
+            .map_err(|error| format!("Failed to inspect marketplace file path: {error}"))?;
         let raw = tokio::fs::read_to_string(&index_path)
             .await
             .map_err(|_| format!("Marketplace file not found at {}", index_path.display()))?;
@@ -428,6 +428,61 @@ mod tests {
             MarketplaceManager::plugin_dir_in_clone(Path::new("/tmp/clone"), &index.plugins[0])
                 .expect_err("unsafe source must still be rejected");
         assert!(err.contains("outside the cache directory"), "got: {err}");
+    }
+
+    #[test]
+    fn current_upstream_marketplace_source_shapes_parse_without_fetching() {
+        use MarketplacePluginExternalSource::{GitSubdir, Url};
+        use MarketplacePluginSource::{Relative, Structured};
+
+        // Current upstream examples: ora/webmcp uses the marketplace root;
+        // nekuda-ai/webmcp-kit uses a pinned monorepo subdirectory; the
+        // Anthropic catalog mixes in-repository and git-backed entries.
+        let ora: MarketplaceIndex = serde_json::from_str(
+            r#"{"name":"ora","owner":{"name":"ora"},"plugins":[{"name":"webmcp","source":"./"}]}"#,
+        )
+        .expect("ora marketplace fixture");
+        assert!(matches!(ora.plugins[0].source.as_ref(), Some(Relative(path)) if path == "./"));
+        assert_eq!(
+            MarketplaceManager::plugin_dir_in_clone(Path::new("/tmp/ora"), &ora.plugins[0])
+                .unwrap(),
+            Path::new("/tmp/ora/.")
+        );
+
+        let nekuda: MarketplaceIndex = serde_json::from_str(
+            r#"{"name":"nekuda","owner":{"name":"Nekuda AI"},"plugins":[{"name":"webmcp-kit","source":{"source":"git-subdir","url":"https://github.com/nekuda-ai/webmcp-kit.git","path":"plugin","ref":"v0.10.0"}}]}"#,
+        )
+        .expect("nekuda marketplace fixture");
+        match nekuda.plugins[0].source.as_ref() {
+            Some(Structured(GitSubdir {
+                git_ref, path, url, ..
+            })) => {
+                assert_eq!(git_ref.as_deref(), Some("v0.10.0"));
+                assert_eq!(path, "plugin");
+                assert_eq!(url, "https://github.com/nekuda-ai/webmcp-kit.git");
+            }
+            other => panic!("expected pinned git-subdir source, got {other:?}"),
+        }
+
+        let official: MarketplaceIndex = serde_json::from_str(
+            r#"{"name":"claude-plugins-official","owner":{"name":"Anthropic"},"plugins":[{"name":"relative-a","source":"./plugins/relative-a"},{"name":"relative-b","source":"./plugins/relative-b"},{"name":"subdir","source":{"source":"git-subdir","url":"https://github.com/anthropics/claude-plugins-official.git","path":"plugins/subdir","ref":"main"}},{"name":"external","source":{"source":"url","url":"https://github.com/anthropics/remote-plugin.git","ref":"v1.2.3"}}]}"#,
+        )
+        .expect("Anthropic official marketplace fixture");
+        assert_eq!(official.plugins.len(), 4);
+        assert!(
+            matches!(official.plugins[0].source.as_ref(), Some(Relative(path)) if path == "./plugins/relative-a")
+        );
+        assert!(
+            matches!(official.plugins[1].source.as_ref(), Some(Relative(path)) if path == "./plugins/relative-b")
+        );
+        assert!(matches!(
+            official.plugins[2].source.as_ref(),
+            Some(Structured(GitSubdir { .. }))
+        ));
+        assert!(matches!(
+            official.plugins[3].source.as_ref(),
+            Some(Structured(Url { .. }))
+        ));
     }
 
     /// The oracle: one entry with an unrecognized/invalid `source` becomes an

@@ -204,18 +204,25 @@ fn scope_project_path(scope: WritableScope, cwd: &Path) -> Option<String> {
     }
 }
 
-fn record_dependencies(record: &Value, owner_id: &str) -> Vec<String> {
+fn record_dependencies(record: &Value, owner_id: &str, plugins_dir: &Path) -> Vec<String> {
     let Some(path) = record.get("installPath").and_then(Value::as_str) else {
         return Vec::new();
     };
-    let dependencies = std::fs::read_to_string(
-        Path::new(path)
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("plugin.json"),
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    .and_then(|manifest| manifest.get("dependencies").cloned());
+    let plugin_root = Path::new(path);
+    let manifest_path = branding::plugin_manifest_path(plugin_root);
+    let manifest = match manifest_path {
+        Ok(manifest_path) => match std::fs::symlink_metadata(&manifest_path) {
+            Ok(_) => std::fs::read_to_string(manifest_path)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                crate::plugin_install::marketplace_entry_for_plugin_id(plugins_dir, owner_id)
+            }
+            Err(_) => None,
+        },
+        Err(_) => None,
+    };
+    let dependencies = manifest.and_then(|manifest| manifest.get("dependencies").cloned());
     let owner_marketplace = marketplace_of(owner_id).unwrap_or("");
     plugin::parse_dependencies(dependencies.as_ref())
         .unwrap_or_default()
@@ -227,6 +234,7 @@ fn record_dependencies(record: &Value, owner_id: &str) -> Vec<String> {
 fn collect_dependencies(
     db: &Value,
     id: &str,
+    plugins_dir: &Path,
     scope: WritableScope,
     project_path: &Option<String>,
     seen: &mut HashSet<String>,
@@ -237,8 +245,8 @@ fn collect_dependencies(
     let Some(record) = installed_record(db, id, scope, project_path) else {
         return;
     };
-    for dependency in record_dependencies(record, id) {
-        collect_dependencies(db, &dependency, scope, project_path, seen);
+    for dependency in record_dependencies(record, id, plugins_dir) {
+        collect_dependencies(db, &dependency, plugins_dir, scope, project_path, seen);
     }
 }
 
@@ -354,7 +362,15 @@ pub fn run_enable(
     let installed = installed_plugins(home);
     let project_path = scope_project_path(scope, cwd);
     let mut enable = HashSet::new();
-    collect_dependencies(&installed, &id, scope, &project_path, &mut enable);
+    let plugins_dir = home.join("plugins");
+    collect_dependencies(
+        &installed,
+        &id,
+        &plugins_dir,
+        scope,
+        &project_path,
+        &mut enable,
+    );
     enable.insert(id.clone());
     let mut map = read_enabled(&path);
     for plugin_id in enable {

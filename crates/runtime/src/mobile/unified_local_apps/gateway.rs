@@ -3,6 +3,7 @@
 use std::{
     collections::BTreeMap,
     fs::{self, DirBuilder},
+    future::Future,
     io::{Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
     sync::{Arc, Weak},
@@ -17,9 +18,15 @@ use tokio_util::sync::CancellationToken;
 
 const MAX_HEAD: usize = 32 * 1024;
 const MAX_AGENT_BODY: usize = 116 * 1024 * 1024;
+const MAX_AGENT_CONTROL_BODY: usize = 32 * 1024;
 const MAX_AGENT_JSON_DEPTH: usize = 128;
+const MAX_STATIC_HTML_TRANSFORM_BYTES: u64 = 4 * 1024 * 1024;
+const WEBMCP_SCRIPT_ROUTE: &str = "__host/webmcp.js";
 // Serialize large full-input transfers across Apps to bound inline file memory.
 static AGENT_REQUESTS: Semaphore = Semaphore::const_new(1);
+// Small polling and cancellation requests stay available while a large or slow
+// Agent input is being admitted. Their count and body size bound their memory.
+static AGENT_CONTROL_REQUESTS: Semaphore = Semaphore::const_new(8);
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -309,6 +316,19 @@ fn is_page_method_allowed(method: &str) -> bool {
     )
 }
 
+fn is_small_control_method(method: &str) -> bool {
+    matches!(
+        method,
+        "agent.tasks.get"
+            | "agent.tasks.list"
+            | "agent.tasks.cancel"
+            | "agent.tasks.events"
+            | "agent.chats.get"
+            | "agent.chats.list"
+            | "agent.chats.cancel"
+    )
+}
+
 fn is_agent_json_content_type(value: &[u8]) -> bool {
     value.eq_ignore_ascii_case(b"application/json")
 }
@@ -328,7 +348,559 @@ fn browser_sdk_script(configuration: &str) -> String {
     script
 }
 
-async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
+fn encode_path_segment(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+fn find_tag_end(html: &str, start: usize) -> Option<usize> {
+    let mut quote = None;
+    for (offset, byte) in html.as_bytes().iter().copied().enumerate().skip(start) {
+        match (quote, byte) {
+            (Some(active), value) if active == value => quote = None,
+            (Some(_), _) => {}
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'>') => return Some(offset + 1),
+            (None, _) => {}
+        }
+    }
+    None
+}
+
+struct HtmlTag {
+    name_start: usize,
+    name_end: usize,
+    end: usize,
+    closing: bool,
+    declaration: bool,
+}
+
+fn is_html_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0c' | b'\r')
+}
+
+fn is_html_whitespace_char(character: char) -> bool {
+    matches!(character, ' ' | '\t' | '\n' | '\u{000c}' | '\r')
+}
+
+fn trim_html_whitespace(value: &str) -> &str {
+    value.trim_matches(is_html_whitespace_char)
+}
+
+fn next_html_tag(html: &str, lower: &str, mut cursor: usize) -> Option<HtmlTag> {
+    let bytes = lower.as_bytes();
+    loop {
+        let offset = lower[cursor..].find('<')?;
+        let start = cursor + offset;
+        if lower[start..].starts_with("<!--") {
+            let close = lower[start + 4..].find("-->")?;
+            cursor = start + 4 + close + 3;
+            continue;
+        }
+        let mut name_start = start + 1;
+        let declaration = bytes
+            .get(name_start)
+            .is_some_and(|byte| matches!(*byte, b'!' | b'?'));
+        if declaration {
+            name_start += 1;
+        }
+        let closing = !declaration && bytes.get(name_start) == Some(&b'/');
+        if closing {
+            name_start += 1;
+        }
+        if !declaration && !bytes.get(name_start).is_some_and(u8::is_ascii_alphabetic) {
+            cursor = start + 1;
+            continue;
+        }
+        let mut name_end = name_start;
+        while bytes
+            .get(name_end)
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b':'))
+        {
+            name_end += 1;
+        }
+        let boundary = bytes.get(name_end).copied();
+        if !declaration
+            && !boundary.is_some_and(|byte| is_html_whitespace(byte) || matches!(byte, b'/' | b'>'))
+        {
+            // Skip the malformed/start-like token as one attribute-bearing tag,
+            // so a '<head>' substring inside it cannot become an insertion point.
+            cursor = find_tag_end(html, start).unwrap_or(start + 1);
+            continue;
+        }
+        let end = find_tag_end(html, start)?;
+        return Some(HtmlTag {
+            name_start,
+            name_end,
+            end,
+            closing,
+            declaration,
+        });
+    }
+}
+
+fn skip_raw_text_element(html: &str, lower: &str, after_opening_tag: usize, name: &str) -> usize {
+    if name == "plaintext" {
+        return html.len();
+    }
+    if name == "script" {
+        return skip_script_element(html, lower, after_opening_tag);
+    }
+    let closing = format!("</{name}");
+    let mut cursor = after_opening_tag;
+    while let Some(offset) = lower[cursor..].find(&closing) {
+        let start = cursor + offset;
+        let boundary = lower.as_bytes().get(start + closing.len()).copied();
+        if boundary.is_some_and(|byte| is_html_whitespace(byte) || matches!(byte, b'/' | b'>')) {
+            return find_tag_end(html, start).unwrap_or(html.len());
+        }
+        cursor = start + closing.len();
+    }
+    html.len()
+}
+
+fn is_html_tag_boundary(byte: u8) -> bool {
+    is_html_whitespace(byte) || matches!(byte, b'/' | b'>')
+}
+
+fn skip_script_element(html: &str, lower: &str, after_opening_tag: usize) -> usize {
+    let bytes = lower.as_bytes();
+    let mut state = 0_u8; // script data, escaped, or double escaped
+    let mut cursor = after_opening_tag;
+    while cursor < bytes.len() {
+        let rest = &bytes[cursor..];
+        if state != 0 && rest.starts_with(b"-->") {
+            state = 0;
+            cursor += 3;
+            continue;
+        }
+        if state == 0 && rest.starts_with(b"<!--") {
+            state = 1;
+            cursor += 4;
+            continue;
+        }
+        if state == 2
+            && rest.starts_with(b"</script")
+            && bytes
+                .get(cursor + 8)
+                .copied()
+                .is_some_and(is_html_tag_boundary)
+        {
+            state = 1;
+            cursor += 8;
+            continue;
+        }
+        if state != 2
+            && rest.starts_with(b"</script")
+            && bytes
+                .get(cursor + 8)
+                .copied()
+                .is_some_and(is_html_tag_boundary)
+        {
+            return find_tag_end(html, cursor).unwrap_or(html.len());
+        }
+        if state == 1
+            && rest.starts_with(b"<script")
+            && bytes
+                .get(cursor + 7)
+                .copied()
+                .is_some_and(is_html_tag_boundary)
+        {
+            state = 2;
+            cursor += 7;
+            continue;
+        }
+        cursor += 1;
+    }
+    html.len()
+}
+
+fn next_raw_text_cursor(html: &str, lower: &str, tag: &HtmlTag) -> usize {
+    if !tag.closing && !tag.declaration {
+        let name = &lower[tag.name_start..tag.name_end];
+        if matches!(
+            name,
+            "script"
+                | "style"
+                | "textarea"
+                | "title"
+                | "noscript"
+                | "iframe"
+                | "xmp"
+                | "noembed"
+                | "noframes"
+                | "plaintext"
+        ) {
+            return skip_raw_text_element(html, lower, tag.end, name);
+        }
+    }
+    tag.end
+}
+
+fn skip_template_element(html: &str, lower: &str, after_opening_tag: usize) -> usize {
+    let mut depth = 1_usize;
+    let mut cursor = after_opening_tag;
+    while let Some(tag) = next_html_tag(html, lower, cursor) {
+        if !tag.declaration && lower[tag.name_start..tag.name_end].eq("template") {
+            if tag.closing {
+                depth -= 1;
+                if depth == 0 {
+                    return tag.end;
+                }
+            } else {
+                depth += 1;
+            }
+        }
+        // Unlike the outer scanner, this cursor must see nested template tags
+        // so it can match their closing tags. It still skips comments and raw
+        // text, where a template-looking substring is not a tag token.
+        cursor = next_raw_text_cursor(html, lower, &tag);
+    }
+    html.len()
+}
+
+fn next_tag_cursor(html: &str, lower: &str, tag: &HtmlTag) -> usize {
+    if !tag.closing && !tag.declaration && lower[tag.name_start..tag.name_end].eq("template") {
+        return skip_template_element(html, lower, tag.end);
+    }
+    next_raw_text_cursor(html, lower, tag)
+}
+
+fn is_webmcp_script_source(value: &str, expected: &str) -> bool {
+    let path = trim_html_whitespace(value)
+        .split(|character| matches!(character, '?' | '#'))
+        .next()
+        .unwrap_or("");
+    path == expected || path == "/__host/webmcp.js"
+}
+
+fn base_href_may_override_origin(href: &str) -> bool {
+    // Mobile pages use an HTTP loopback origin. A custom-scheme sentinel has
+    // a fresh opaque Origin on each comparison, even for a relative URL.
+    let document_base = url::Url::parse("http://local-app.invalid/index.html")
+        .expect("static Local App URL is valid");
+    let Ok(candidate) = document_base.join(trim_html_whitespace(href)) else {
+        return false;
+    };
+    if matches!(candidate.scheme(), "data" | "javascript") {
+        return false;
+    }
+    candidate.origin() != document_base.origin()
+}
+
+#[derive(Default)]
+struct ScriptAttributes<'a> {
+    source: Option<&'a str>,
+    script_type: Option<&'a str>,
+    href: Option<&'a str>,
+    asynchronous: bool,
+    defer: bool,
+    no_module: bool,
+    integrity: bool,
+}
+
+fn script_attributes(attributes: &str) -> ScriptAttributes<'_> {
+    let mut result = ScriptAttributes::default();
+    let mut seen_source = false;
+    let mut seen_type = false;
+    let mut seen_href = false;
+    let mut seen_async = false;
+    let mut seen_defer = false;
+    let mut seen_no_module = false;
+    let mut seen_integrity = false;
+    let mut cursor = 0;
+    while cursor < attributes.len() {
+        while let Some(character) = attributes[cursor..].chars().next() {
+            if !is_html_whitespace_char(character) && character != '/' {
+                break;
+            }
+            cursor += character.len_utf8();
+        }
+        let name_start = cursor;
+        while let Some(character) = attributes[cursor..].chars().next() {
+            if is_html_whitespace_char(character) || matches!(character, '=' | '/' | '>') {
+                break;
+            }
+            cursor += character.len_utf8();
+        }
+        if cursor == name_start {
+            if let Some(character) = attributes[cursor..].chars().next() {
+                cursor += character.len_utf8();
+            }
+            continue;
+        }
+        let name = &attributes[name_start..cursor];
+        while let Some(character) = attributes[cursor..].chars().next() {
+            if !is_html_whitespace_char(character) {
+                break;
+            }
+            cursor += character.len_utf8();
+        }
+        let value = if attributes.as_bytes().get(cursor) == Some(&b'=') {
+            cursor += 1;
+            while let Some(character) = attributes[cursor..].chars().next() {
+                if !is_html_whitespace_char(character) {
+                    break;
+                }
+                cursor += character.len_utf8();
+            }
+            match attributes[cursor..].chars().next() {
+                Some(quote @ ('\'' | '"')) => {
+                    cursor += 1;
+                    let value_start = cursor;
+                    while let Some(character) = attributes[cursor..].chars().next() {
+                        if character == quote {
+                            break;
+                        }
+                        cursor += character.len_utf8();
+                    }
+                    let value = &attributes[value_start..cursor];
+                    if cursor < attributes.len() {
+                        cursor += quote.len_utf8();
+                    }
+                    value
+                }
+                Some(_) => {
+                    let value_start = cursor;
+                    while let Some(character) = attributes[cursor..].chars().next() {
+                        if is_html_whitespace_char(character) || character == '>' {
+                            break;
+                        }
+                        cursor += character.len_utf8();
+                    }
+                    &attributes[value_start..cursor]
+                }
+                None => "",
+            }
+        } else {
+            ""
+        };
+        if name.eq_ignore_ascii_case("src") && !seen_source {
+            result.source = Some(value);
+            seen_source = true;
+        } else if name.eq_ignore_ascii_case("type") && !seen_type {
+            result.script_type = Some(value);
+            seen_type = true;
+        } else if name.eq_ignore_ascii_case("href") && !seen_href {
+            result.href = Some(value);
+            seen_href = true;
+        } else if name.eq_ignore_ascii_case("async") && !seen_async {
+            result.asynchronous = true;
+            seen_async = true;
+        } else if name.eq_ignore_ascii_case("defer") && !seen_defer {
+            result.defer = true;
+            seen_defer = true;
+        } else if name.eq_ignore_ascii_case("nomodule") && !seen_no_module {
+            result.no_module = true;
+            seen_no_module = true;
+        } else if name.eq_ignore_ascii_case("integrity") && !seen_integrity {
+            result.integrity = true;
+            seen_integrity = true;
+        }
+    }
+    result
+}
+
+fn is_classic_script(attributes: &ScriptAttributes<'_>) -> bool {
+    let Some(script_type) = attributes.script_type else {
+        return true;
+    };
+    let mime = trim_html_whitespace(
+        trim_html_whitespace(script_type)
+            .split(';')
+            .next()
+            .unwrap_or(""),
+    );
+    mime.is_empty()
+        || [
+            "application/ecmascript",
+            "application/javascript",
+            "application/x-ecmascript",
+            "application/x-javascript",
+            "text/ecmascript",
+            "text/javascript",
+            "text/javascript1.0",
+            "text/javascript1.1",
+            "text/javascript1.2",
+            "text/javascript1.3",
+            "text/javascript1.4",
+            "text/javascript1.5",
+            "text/jscript",
+            "text/livescript",
+            "text/x-ecmascript",
+            "text/x-javascript",
+        ]
+        .iter()
+        .any(|candidate| mime.eq_ignore_ascii_case(candidate))
+}
+
+fn may_run_before_later_host_script(attributes: &ScriptAttributes<'_>) -> bool {
+    if attributes
+        .script_type
+        .is_some_and(|value| trim_html_whitespace(value).eq_ignore_ascii_case("module"))
+    {
+        return attributes.asynchronous;
+    }
+    if !is_classic_script(attributes) {
+        return false;
+    }
+    if attributes.source.is_none() {
+        return true;
+    }
+    attributes.asynchronous || attributes.no_module || !attributes.defer
+}
+
+fn reliable_host_script(attributes: &ScriptAttributes<'_>) -> bool {
+    attributes.source.is_some()
+        && is_classic_script(attributes)
+        && !attributes.asynchronous
+        && !attributes.defer
+        && !attributes.no_module
+        && !attributes.integrity
+}
+
+fn has_existing_webmcp_script(html: &str, expected: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    let mut cursor = 0;
+    let mut earlier_blocking_application_script = false;
+    let mut base_href_seen = false;
+    let mut base_overrides_origin = false;
+    while let Some(tag) = next_html_tag(html, &lower, cursor) {
+        let name = &lower[tag.name_start..tag.name_end];
+        if !tag.closing && !tag.declaration && name == "base" {
+            let href = script_attributes(&html[tag.name_end..tag.end.saturating_sub(1)]).href;
+            if !base_href_seen {
+                if let Some(href) = href {
+                    base_href_seen = true;
+                    base_overrides_origin = base_href_may_override_origin(href);
+                }
+            }
+        } else if !tag.closing && !tag.declaration && name == "script" {
+            let attributes = script_attributes(&html[tag.name_end..tag.end.saturating_sub(1)]);
+            let host_script = attributes.source.is_some_and(|value| {
+                !base_overrides_origin && is_webmcp_script_source(value, expected)
+            });
+            if host_script
+                && reliable_host_script(&attributes)
+                && !earlier_blocking_application_script
+            {
+                return true;
+            }
+            if !host_script && may_run_before_later_host_script(&attributes) {
+                earlier_blocking_application_script = true;
+            }
+        }
+        cursor = next_tag_cursor(html, &lower, &tag);
+    }
+    false
+}
+
+fn find_leading_doctype_end(html: &str) -> Option<usize> {
+    let lower = html.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(tag) = next_html_tag(html, &lower, cursor) {
+        if tag.declaration && lower[tag.name_start..tag.name_end].eq("doctype") {
+            let tag_start = tag.name_start.saturating_sub(2);
+            return is_leading_html_preamble(&html[..tag_start]).then_some(tag.end);
+        }
+        if !tag.declaration {
+            return None;
+        }
+        cursor = next_tag_cursor(html, &lower, &tag);
+    }
+    None
+}
+
+fn is_leading_html_preamble(value: &str) -> bool {
+    let mut cursor = if value.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        0
+    };
+    let bytes = value.as_bytes();
+    while cursor < bytes.len() {
+        if is_html_whitespace(bytes[cursor]) {
+            cursor += 1;
+            continue;
+        }
+        if bytes[cursor..].starts_with(b"<!--") {
+            let Some(end) = value[cursor + 4..].find("-->") else {
+                return false;
+            };
+            cursor += 4 + end + 3;
+            continue;
+        }
+        if bytes[cursor..].starts_with(b"<?") || bytes[cursor..].starts_with(b"<!") {
+            let Some(end) = bytes[cursor + 2..].iter().position(|byte| *byte == b'>') else {
+                return false;
+            };
+            cursor += 2 + end + 1;
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+fn inject_webmcp_script(html: &str, run_id: &str) -> Option<String> {
+    let run_id = encode_path_segment(run_id);
+    let source = format!("/__run/{run_id}/{WEBMCP_SCRIPT_ROUTE}");
+    if has_existing_webmcp_script(html, &source) {
+        return None;
+    }
+    let script = format!("<script src=\"{source}\" data-lingxi-webmcp></script>");
+    let doctype_end = find_leading_doctype_end(html);
+    let insert_at = doctype_end.unwrap_or_else(|| {
+        if html.starts_with('\u{feff}') {
+            '\u{feff}'.len_utf8()
+        } else {
+            0
+        }
+    });
+    let mut injected = String::with_capacity(html.len() + script.len());
+    injected.push_str(&html[..insert_at]);
+    injected.push_str(&script);
+    injected.push_str(&html[insert_at..]);
+    Some(injected)
+}
+
+async fn serve(socket: TcpStream, route: &Route) -> std::io::Result<()> {
+    serve_with_agent_dispatch(
+        socket,
+        route,
+        &AGENT_REQUESTS,
+        &AGENT_CONTROL_REQUESTS,
+        |host, run_id, method, arguments| async move {
+            let owner = host.owner.upgrade()?;
+            Some(
+                owner
+                    .agent_page_json(host.app_id, run_id, method, arguments)
+                    .await,
+            )
+        },
+    )
+    .await
+}
+
+async fn serve_with_agent_dispatch<F, Fut>(
+    mut socket: TcpStream,
+    route: &Route,
+    agent_requests: &Semaphore,
+    agent_control_requests: &Semaphore,
+    dispatch: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce(BrowserHost, String, String, String) -> Fut,
+    Fut: Future<Output = Option<String>>,
+{
     let mut bytes = Vec::with_capacity(4096);
     let head_end = loop {
         if let Some(index) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
@@ -410,7 +982,11 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
                 String::new()
             };
             let relative = target.trim_start_matches('/');
-            let target = if relative == "__local_app_sdk.js" {
+            let path = relative.split('?').next().unwrap_or(relative);
+            let target = if matches!(
+                path,
+                "__local_app_sdk.js" | "__host/sdk.js" | "__host/recovery-sw.js" | WEBMCP_SCRIPT_ROUTE
+            ) {
                 relative.to_owned()
             } else if relative.is_empty() || relative.starts_with('?') {
                 format!("{}{relative}", route.entry)
@@ -427,6 +1003,7 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
         )
         .await;
     };
+    let relative_path = relative.split('?').next().unwrap_or(relative);
     // Reject request-smuggling ambiguity before opening any upstream socket.
     let lengths: Vec<_> = request
         .headers
@@ -457,7 +1034,7 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
     }
     // Reserved routes are handled before any user application service. The
     // caller cannot select an app, run, model, permission mode or host operation.
-    if relative == "__local_app_sdk.js" || relative == "__host/sdk.js" {
+    if relative_path == "__local_app_sdk.js" || relative_path == "__host/sdk.js" {
         if method != "GET" && method != "HEAD" {
             return error(&mut socket, 405, "SDK accepts GET and HEAD").await;
         }
@@ -472,7 +1049,21 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
         }
         return Ok(());
     }
-    if relative == "__host/recovery-sw.js" {
+    if relative_path == WEBMCP_SCRIPT_ROUTE {
+        if method != "GET" && method != "HEAD" {
+            return error(&mut socket, 405, "WebMCP polyfill accepts GET and HEAD").await;
+        }
+        let Some(_host) = &route.host else {
+            return error(&mut socket, 503, "application host unavailable").await;
+        };
+        let script = include_str!("../../../../../packages/local-app-webmcp/dist/webmcp-polyfill.iife.js");
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/javascript; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}\r\n", script.len(), security_headers(route)).as_bytes()).await?;
+        if method == "GET" {
+            socket.write_all(script.as_bytes()).await?;
+        }
+        return Ok(());
+    }
+    if relative_path == "__host/recovery-sw.js" {
         if method != "GET" && method != "HEAD" {
             return error(&mut socket, 405, "recovery worker accepts GET and HEAD").await;
         }
@@ -541,12 +1132,30 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
             Some(length) if length <= MAX_AGENT_BODY => length,
             _ => return error(&mut socket, 413, "Agent request too large").await,
         };
-        let Ok(_upload_permit) = AGENT_REQUESTS.try_acquire() else {
-            return error(&mut socket, 429, "application host is busy; retry later").await;
-        };
         if length == 0 {
             return error(&mut socket, 400, "invalid request body").await;
         }
+        let small_body = length <= MAX_AGENT_CONTROL_BODY;
+        let mut control_permit = if small_body {
+            match agent_control_requests.try_acquire() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    return error(&mut socket, 429, "application host is busy; retry later").await;
+                }
+            }
+        } else {
+            None
+        };
+        let mut heavy_permit = if small_body {
+            None
+        } else {
+            match agent_requests.try_acquire() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    return error(&mut socket, 429, "application host is busy; retry later").await;
+                }
+            }
+        };
         let prefix = &bytes[head_end..];
         let spool = match tokio::time::timeout(
             Duration::from_secs(30),
@@ -580,18 +1189,37 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
             )
             .await;
         }
-        let Some((host, owner)) = route
-            .host
-            .as_ref()
-            .and_then(|host| host.owner.upgrade().map(|owner| (host, owner)))
-        else {
+        let control_method = is_small_control_method(&input.method);
+        if control_method && !small_body {
+            return error(&mut socket, 413, "Agent control request too large").await;
+        }
+        let _heavy_permit = if control_method {
+            None
+        } else {
+            let permit = match heavy_permit.take() {
+                Some(permit) => permit,
+                None => match agent_requests.try_acquire() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        return error(&mut socket, 429, "application host is busy; retry later")
+                            .await;
+                    }
+                },
+            };
+            // The body was bounded and parsed while holding the control lane;
+            // after taking the heavy lane, only its one request can retain an
+            // arbitrary-size input across the awaited native handoff.
+            drop(control_permit.take());
+            Some(permit)
+        };
+        let Some(host) = route.host.as_ref().cloned() else {
             return error(&mut socket, 503, "application host unavailable").await;
         };
         let PageRequest { method, args } = input;
         let arguments = String::from(Box::<str>::from(args));
-        let result = owner
-            .agent_page_json(host.app_id.clone(), route.run_id.clone(), method, arguments)
-            .await;
+        let Some(result) = dispatch(host, route.run_id.clone(), method, arguments).await else {
+            return error(&mut socket, 503, "application host unavailable").await;
+        };
         socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n\r\n", result.len()).as_bytes()).await?;
         return socket.write_all(result.as_bytes()).await;
     }
@@ -692,20 +1320,38 @@ async fn serve(mut socket: TcpStream, route: &Route) -> std::io::Result<()> {
     if !metadata.is_file() {
         return error(&mut socket, 404, "asset not found").await;
     }
-    let content_type = match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
-        "html" | "htm" => "text/html; charset=utf-8",
-        "js" | "mjs" => "text/javascript; charset=utf-8",
-        "css" => "text/css; charset=utf-8",
-        "json" => "application/json",
-        "svg" => "image/svg+xml",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "wasm" => "application/wasm",
-        "ico" => "image/x-icon",
-        "woff2" => "font/woff2",
-        _ => "application/octet-stream",
+    let extension = file.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let is_html = extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm");
+    let content_type = if is_html {
+        "text/html; charset=utf-8"
+    } else {
+        match extension {
+            "js" | "mjs" => "text/javascript; charset=utf-8",
+            "css" => "text/css; charset=utf-8",
+            "json" => "application/json",
+            "svg" => "image/svg+xml",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            "wasm" => "application/wasm",
+            "ico" => "image/x-icon",
+            "woff2" => "font/woff2",
+            _ => "application/octet-stream",
+        }
     };
+    if is_html && metadata.len() <= MAX_STATIC_HTML_TRANSFORM_BYTES {
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file_handle.read_to_end(&mut bytes).await?;
+        let body = std::str::from_utf8(&bytes)
+            .ok()
+            .and_then(|html| inject_webmcp_script(html, &route.run_id))
+            .map_or(bytes, |html| html.into_bytes());
+        socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}\r\n", body.len(), security_headers(route)).as_bytes()).await?;
+        if method == "GET" {
+            socket.write_all(&body).await?;
+        }
+        return Ok(());
+    }
     socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n{}\r\n", metadata.len(), security_headers(route)).as_bytes()).await?;
     if method == "GET" {
         tokio::io::copy(&mut file_handle, &mut socket).await?;
@@ -864,7 +1510,22 @@ fn confined_file(root: &Path, raw: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    async fn exchange(port: u16, bytes: Vec<u8>) -> Vec<u8> {
+
+    #[test]
+    fn relative_base_preserves_the_mobile_http_origin() {
+        for href in ["/assets/", "./assets/", "../assets/", "", "#fragment"] {
+            assert!(!base_href_may_override_origin(href), "{href}");
+        }
+        for href in [
+            "https://other.example/",
+            "lingxi-app://current/custom/",
+            "mailto:x",
+        ] {
+            assert!(base_href_may_override_origin(href), "{href}");
+        }
+    }
+
+    pub(super) async fn exchange(port: u16, bytes: Vec<u8>) -> Vec<u8> {
         let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
             .await
             .unwrap();
@@ -915,6 +1576,101 @@ mod tests {
             .await;
             assert!(String::from_utf8_lossy(&response).starts_with(&format!("HTTP/1.1 {expected}")));
         }
+        cancel.cancel();
+        task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn static_html_receives_run_scoped_webmcp_and_non_html_stays_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("index.html"),
+            "<!doctype html><html><head data-note=\"left>right\"><script id=\"app-start\"></script></head><body></body></html>",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("UPPER.HTML"),
+            "<!doctype html><script id=\"app-start\"></script>",
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("asset.js"), "window.asset = true;").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = CancellationToken::new();
+        let task = spawn(
+            listener,
+            Route {
+                host: None,
+                run_id: "current-run".into(),
+                root: temp.path().into(),
+                spool_dir: temp.path().into(),
+                entry: "index.html".into(),
+                entry_service: None,
+                services: BTreeMap::new(),
+                port,
+                capabilities: vec![],
+                cancel: cancel.clone(),
+            },
+        );
+
+        let response = String::from_utf8(
+            exchange(
+                port,
+                format!(
+                    "GET /__run/current-run/ HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+                )
+                .into_bytes(),
+            )
+            .await,
+        )
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("Content-Security-Policy:"));
+        assert!(response.contains("script-src 'self'"));
+        let body = response.split_once("\r\n\r\n").unwrap().1;
+        let script = "<script src=\"/__run/current-run/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        assert_eq!(body.matches("data-lingxi-webmcp").count(), 1);
+        assert!(body.find(script).unwrap() < body.find("id=\"app-start\"").unwrap());
+        assert!(response.contains(&format!("Content-Length: {}\r\n", body.len())));
+
+        let response = String::from_utf8(
+            exchange(
+                port,
+                format!(
+                    "GET /__run/current-run/UPPER.HTML HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+                )
+                .into_bytes(),
+            )
+            .await,
+        )
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.contains("Content-Type: text/html; charset=utf-8"));
+        let body = response.split_once("\r\n\r\n").unwrap().1;
+        assert!(body.find("webmcp.js").unwrap() < body.find("id=\"app-start\"").unwrap());
+
+        let response = String::from_utf8(
+            exchange(
+                port,
+                format!(
+                    "GET /__run/current-run/asset.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+                )
+                .into_bytes(),
+            )
+            .await,
+        )
+        .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.ends_with("window.asset = true;"));
+        assert!(!response.contains("data-lingxi-webmcp"));
+
+        let stale = exchange(
+            port,
+            format!("GET /__run/old-run/__host/webmcp.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n")
+                .into_bytes(),
+        )
+        .await;
+        assert!(String::from_utf8_lossy(&stale).starts_with("HTTP/1.1 410"));
         cancel.cancel();
         task.await.unwrap();
     }
@@ -1220,8 +1976,194 @@ mod absolute_path_tests {
                 assert!(response.contains("Location: /__run/current/dist/assets/app.js?q=1"));
             }
         }
+        let response = super::tests::exchange(
+            port,
+            format!(
+                "GET /__host/webmcp.js?cache=1 HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nReferer: http://127.0.0.1:{port}/__run/current/dist/index.html\r\n\r\n"
+            )
+            .into_bytes(),
+        )
+        .await;
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 307"));
+        assert!(response.contains("Location: /__run/current/__host/webmcp.js?cache=1"));
         cancel.cancel();
         task.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod webmcp_injection_tests {
+    use super::*;
+
+    #[test]
+    fn script_injection_handles_head_without_head_and_duplicate_source() {
+        let with_head = "<!doctype html><html><head data-note=\"left>right\"><script id=\"app-start\"></script></head><body></body></html>";
+        let injected = inject_webmcp_script(with_head, "run-1").unwrap();
+        let script = "<script src=\"/__run/run-1/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        assert_eq!(injected.matches("data-lingxi-webmcp").count(), 1);
+        assert!(injected.find(script).unwrap() < injected.find("id=\"app-start\"").unwrap());
+
+        let no_head = "<!doctype html><script id=\"app-start\"></script>";
+        let injected = inject_webmcp_script(no_head, "run-2").unwrap();
+        assert!(injected.starts_with("<!doctype html><script src=\"/__run/run-2/__host/webmcp.js\""));
+        assert!(injected.find("webmcp.js").unwrap() < injected.find("id=\"app-start\"").unwrap());
+
+        let no_document_tags = "<script id=\"app-start\"></script>";
+        let injected = inject_webmcp_script(no_document_tags, "run-3").unwrap();
+        assert!(injected.starts_with("<script src=\"/__run/run-3/__host/webmcp.js\""));
+
+        let already_loaded = "<html><head><script src=\"/__host/webmcp.js?cache=1\"></script></head></html>";
+        assert!(inject_webmcp_script(already_loaded, "run-4").is_none());
+
+        let current_run_loaded = "<script src=\"/__run/run-5/__host/webmcp.js\"></script>";
+        assert!(inject_webmcp_script(current_run_loaded, "run-5").is_none());
+
+        let late_head = "<!doctype html><script id=\"app-start\"></script><head></head>";
+        let late_head_injected = inject_webmcp_script(late_head, "run-11").unwrap();
+        let late_head_script =
+            "<script src=\"/__run/run-11/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        let doctype_end = "<!doctype html>".len();
+        assert!(late_head_injected.starts_with(&format!(
+            "{}{}",
+            &late_head[..doctype_end],
+            late_head_script
+        )));
+        assert!(
+            late_head_injected.find(late_head_script).unwrap()
+                < late_head_injected.find("id=\"app-start\"").unwrap()
+        );
+
+        let vt_prefix = "\u{000b}<!doctype html><script id=\"app-start\"></script>";
+        let vt_injected = inject_webmcp_script(vt_prefix, "run-16").unwrap();
+        assert!(vt_injected.starts_with("<script src=\"/__run/run-16/__host/webmcp.js\""));
+    }
+
+    #[test]
+    fn comments_and_script_or_style_strings_do_not_suppress_injection() {
+        let html = "<!doctype html><!-- data-lingxi-webmcp <script src=\"/__host/webmcp.js\"></script> --><script>const fake='<script src=\"/__run/run-6/__host/webmcp.js\">'; const marker='data-lingxi-webmcp';</script><style>body::after{content:'__host/webmcp.js'}</style><p>app</p>";
+        let injected = inject_webmcp_script(html, "run-6").unwrap();
+        let script = "<script src=\"/__run/run-6/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        assert_eq!(injected.matches(script).count(), 1);
+        assert!(injected.find(script).unwrap() < injected.find("<script>const fake").unwrap());
+    }
+
+    #[test]
+    fn pseudo_head_in_attributes_and_raw_text_are_not_insertion_points_or_duplicates() {
+        let html = "<!doctype html><!-- <head><script src=\"/__host/webmcp.js\"></script></head> --><div title=\"<head>\" data-route=\"/__run/run-7/__host/webmcp.js\"></div><script>const fakeHead='<head>'; const fakeSource='/__run/run-7/__host/webmcp.js';</script><style>.fake::after{content:'<head>'}</style><p>app</p>";
+        let injected = inject_webmcp_script(html, "run-7").unwrap();
+        let script = "<script src=\"/__run/run-7/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        let doctype_end = "<!doctype html>".len();
+        assert!(injected.starts_with(&format!("{}{}", &html[..doctype_end], script)));
+        assert_eq!(injected.matches(script).count(), 1);
+
+        // A script-looking URL in an unrelated actual script path is not the
+        // host resource and must not suppress run-scoped injection.
+        let unrelated = "<script src=\"/other/__run/run-7/__host/webmcp.js\"></script>";
+        assert!(inject_webmcp_script(unrelated, "run-7").is_some());
+    }
+
+    #[test]
+    fn template_content_and_inert_raw_text_do_not_suppress_or_capture_injection() {
+        let html = "<!doctype html><template><template><!-- </template><head> --><script>const fake='</template><head><script src=\"/__host/webmcp.js\">';</script><head><script src=\"/__host/webmcp.js\"></script></head></template></template><noscript><head><script src=\"/__host/webmcp.js\"></script></head></noscript><script id=\"app-start\"></script>";
+        let injected = inject_webmcp_script(html, "run-8").unwrap();
+        let script = "<script src=\"/__run/run-8/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        let doctype_end = "<!doctype html>".len();
+        assert!(injected.starts_with(&format!("{}{}", &html[..doctype_end], script)));
+        assert_eq!(injected.matches("data-lingxi-webmcp").count(), 1);
+        assert!(injected.find(script).unwrap() < injected.find("id=\"app-start\"").unwrap());
+
+        let minimal = "<!doctype html><template><head></head><p>x</p></template><script id=\"app-start\"></script>";
+        let minimal_injected = inject_webmcp_script(minimal, "run-10").unwrap();
+        let minimal_script =
+            "<script src=\"/__run/run-10/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        assert!(minimal_injected.starts_with(&format!(
+            "{}{}",
+            &minimal[..doctype_end],
+            minimal_script
+        )));
+        assert!(
+            minimal_injected.find(minimal_script).unwrap()
+                < minimal_injected.find("id=\"app-start\"").unwrap()
+        );
+
+        let template_only_script = "<!doctype html><template><script src=\"/__host/webmcp.js\"></script></template><script id=\"app-start\"></script>";
+        assert!(inject_webmcp_script(template_only_script, "run-9").is_some());
+
+        let double_escaped_script = "<!doctype html><script><!--<script></script><head><script src=\"/__host/webmcp.js\"></script></script><script id=\"app-start\"></script>";
+        let double_escaped_injected =
+            inject_webmcp_script(double_escaped_script, "run-12").unwrap();
+        let double_escaped_host =
+            "<script src=\"/__run/run-12/__host/webmcp.js\" data-lingxi-webmcp></script>";
+        assert!(double_escaped_injected.starts_with(&format!(
+            "{}{}",
+            &double_escaped_script[..doctype_end],
+            double_escaped_host
+        )));
+        assert!(
+            double_escaped_injected.find(double_escaped_host).unwrap()
+                < double_escaped_injected.find("id=\"app-start\"").unwrap()
+        );
+
+        let invalid_whitespace = "<!doctype html><script\u{00a0}src=\"/__host/webmcp.js\"></script><script\u{000b}src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>";
+        assert!(inject_webmcp_script(invalid_whitespace, "run-15").is_some());
+    }
+
+    #[test]
+    fn only_an_early_blocking_classic_first_src_counts_as_preloaded_webmcp() {
+        let root = "/__host/webmcp.js";
+        for markup in [
+            "<script type=\"application/json\" src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script async src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script defer src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script type=\"module\" src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script type=\"text/javascript\u{00a0}\" src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script type=\"text/javascript\u{000b}\" src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<base href=\"https://other.example/\"><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script src=\"/other.js\" src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script id=\"app-start\"></script><script src=\"/__host/webmcp.js\"></script>",
+            "<script async src=\"/app.js\"></script><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+            "<script type=\"module\" async src=\"/app.js\"></script><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>",
+        ] {
+            let html = format!("<!doctype html>{markup}");
+            assert!(inject_webmcp_script(&html, "run-13").is_some(), "{markup}");
+        }
+        let already_blocking = format!(
+            "<!doctype html><script src=\"{root}\"></script><script id=\"app-start\"></script>"
+        );
+        assert!(inject_webmcp_script(&already_blocking, "run-14").is_none());
+
+        for ignored_base in [
+            "<base href=\"data:text/html,\"><script src=\"/__host/webmcp.js\"></script>",
+            "<base href=\"javascript:alert(1)\"><script src=\"/__host/webmcp.js\"></script>",
+            "<base href=\"http[\"><script src=\"/__host/webmcp.js\"></script>",
+        ] {
+            let html = format!("<!doctype html>{ignored_base}<script id=\"app-start\"></script>");
+            assert!(inject_webmcp_script(&html, "run-14").is_none(), "{ignored_base}");
+        }
+
+        for first_base in [
+            "data:text/html,",
+            "javascript:alert(1)",
+            "http://[",
+        ] {
+            let html = format!(
+                "<!doctype html><base href=\"{first_base}\"><base href=\"https://example.invalid/assets/\"><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>"
+            );
+            assert!(inject_webmcp_script(&html, "run-15").is_none(), "{first_base}");
+        }
+
+        for valid_override in [
+            "mailto:x",
+            "about:blank",
+            "lingxi-app://app/custom/",
+            "foo:opaque",
+        ] {
+            let html = format!(
+                "<!doctype html><base href=\"{valid_override}\"><script src=\"/__host/webmcp.js\"></script><script id=\"app-start\"></script>"
+            );
+            assert!(inject_webmcp_script(&html, "run-16").is_some(), "{valid_override}");
+        }
     }
 }
 
@@ -1460,5 +2402,373 @@ mod agent_json_tests {
         assert!(host_adapter >= bundle.len());
         assert!(script[bundle.len()..].contains("installBrowserAgent"));
         assert!(!script.contains("__LINGXI_APP_CONFIGURATION__"));
+    }
+}
+
+#[cfg(test)]
+mod agent_control_lane_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::task::JoinSet;
+
+    struct TestAdmission {
+        heavy: Semaphore,
+        control: Semaphore,
+    }
+
+    struct DelayedAgent {
+        chat_started: tokio::sync::Notify,
+        release_chat: Semaphore,
+        delay_events: AtomicBool,
+        events_started: AtomicUsize,
+        eight_events_started: tokio::sync::Notify,
+        release_events: Semaphore,
+        cancelled: AtomicBool,
+        dispatch_count: AtomicUsize,
+    }
+
+    impl DelayedAgent {
+        fn new() -> Self {
+            Self {
+                chat_started: tokio::sync::Notify::new(),
+                release_chat: Semaphore::new(0),
+                delay_events: AtomicBool::new(false),
+                events_started: AtomicUsize::new(0),
+                eight_events_started: tokio::sync::Notify::new(),
+                release_events: Semaphore::new(0),
+                cancelled: AtomicBool::new(false),
+                dispatch_count: AtomicUsize::new(0),
+            }
+        }
+
+        async fn dispatch(
+            &self,
+            host: BrowserHost,
+            run_id: String,
+            method: String,
+            arguments: String,
+        ) -> Option<String> {
+            if host.app_id != "authorized-app" || run_id != "epoch" {
+                return None;
+            }
+            self.dispatch_count.fetch_add(1, Ordering::SeqCst);
+            let arguments: serde_json::Value = serde_json::from_str(&arguments).ok()?;
+            let value = match method.as_str() {
+                "agent.chats.send" => {
+                    if arguments["chatId"] != "chat-1" || arguments["input"]["runId"] != "run-1" {
+                        return None;
+                    }
+                    self.chat_started.notify_one();
+                    self.release_chat.acquire().await.ok()?.forget();
+                    serde_json::json!({"runId":"run-1"})
+                }
+                "agent.tasks.get" => {
+                    if arguments["runId"] != "run-1" {
+                        return None;
+                    }
+                    serde_json::json!({
+                        "runId":"run-1",
+                        "state":if self.cancelled.load(Ordering::SeqCst) {"cancelled"} else {"running"}
+                    })
+                }
+                "agent.tasks.events" => {
+                    if arguments["runId"] != "run-1" {
+                        return None;
+                    }
+                    if self.delay_events.load(Ordering::SeqCst) {
+                        let started = self.events_started.fetch_add(1, Ordering::SeqCst) + 1;
+                        if started == 8 {
+                            self.eight_events_started.notify_one();
+                        }
+                        self.release_events.acquire().await.ok()?.forget();
+                    }
+                    serde_json::json!({"events":[],"sequence":1})
+                }
+                "agent.tasks.list" => serde_json::json!({"tasks":[]}),
+                "agent.tasks.cancel" => {
+                    if arguments["runId"] != "run-1" {
+                        return None;
+                    }
+                    self.cancelled.store(true, Ordering::SeqCst);
+                    serde_json::Value::Null
+                }
+                _ => return None,
+            };
+            Some(serde_json::json!({"ok":true,"value":value}).to_string())
+        }
+    }
+
+    fn spawn_test_gateway(
+        listener: TcpListener,
+        route: Route,
+        admission: Arc<TestAdmission>,
+        agent: Arc<DelayedAgent>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let listener = Arc::new(listener);
+            let route = Arc::new(route);
+            let permits = Arc::new(Semaphore::new(32));
+            loop {
+                let socket = tokio::select! {
+                    _ = route.cancel.cancelled() => break,
+                    accepted = listener.accept() => match accepted {
+                        Ok((socket, peer)) if peer.ip().is_loopback() => socket,
+                        Ok(_) => continue,
+                        Err(_) => break,
+                    },
+                };
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    continue;
+                };
+                let route = route.clone();
+                let admission = admission.clone();
+                let agent = agent.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    tokio::select! {
+                        _ = route.cancel.cancelled() => {},
+                        _ = serve_with_agent_dispatch(
+                            socket,
+                            &route,
+                            &admission.heavy,
+                            &admission.control,
+                            move |host, run_id, method, arguments| {
+                                let agent = agent.clone();
+                                async move { agent.dispatch(host, run_id, method, arguments).await }
+                            },
+                        ) => {},
+                    }
+                });
+            }
+        })
+    }
+
+    async fn post_body(port: u16, origin: &str, body: &str) -> String {
+        let mut socket = TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        socket
+            .write_all(
+                format!(
+                    "POST /__run/epoch/__host/agent HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {origin}\r\nReferer: http://127.0.0.1:{port}/__run/epoch/index.html\r\nContent-Type: application/json\r\nX-LingXi-App-Request: 1\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut output = Vec::new();
+        let read_result =
+            tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut output))
+                .await
+                .unwrap();
+        if let Err(error) = read_result {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+            assert!(
+                !output.is_empty(),
+                "connection reset before the gateway response arrived"
+            );
+        }
+        String::from_utf8(output).unwrap()
+    }
+
+    async fn post_json(port: u16, method: &str, args: serde_json::Value) -> String {
+        post_body(
+            port,
+            &format!("http://127.0.0.1:{port}"),
+            &serde_json::json!({"method":method,"args":args}).to_string(),
+        )
+        .await
+    }
+
+    fn status(response: &str) -> u16 {
+        response
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+
+    fn json_body(response: &str) -> serde_json::Value {
+        serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
+    }
+
+    #[tokio::test]
+    async fn slow_chat_send_keeps_bounded_control_requests_live_and_rejects_oversized_controls() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp_root = temp.path().canonicalize().unwrap();
+        let spool_path = temp_root.join("host-owned-agent-spool");
+        ensure_host_directory(&spool_path, true).unwrap();
+        let spool_dir = spool_path.canonicalize().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = CancellationToken::new();
+        let route = Route {
+            host: Some(BrowserHost {
+                owner: Weak::new(),
+                app_id: "authorized-app".into(),
+                name: "Test App".into(),
+                revision: 1,
+                platform: "android".into(),
+            }),
+            run_id: "epoch".into(),
+            root: temp.path().into(),
+            spool_dir: spool_dir.clone(),
+            entry: "index.html".into(),
+            entry_service: None,
+            services: BTreeMap::new(),
+            port,
+            capabilities: Vec::new(),
+            cancel: cancel.clone(),
+        };
+        let admission = Arc::new(TestAdmission {
+            heavy: Semaphore::new(1),
+            control: Semaphore::new(8),
+        });
+        let agent = Arc::new(DelayedAgent::new());
+        let server = spawn_test_gateway(listener, route, admission, agent.clone());
+
+        let chat_send = tokio::spawn(post_json(
+            port,
+            "agent.chats.send",
+            serde_json::json!({
+                "chatId":"chat-1",
+                "input":{"runId":"run-1"}
+            }),
+        ));
+        if tokio::time::timeout(Duration::from_secs(2), agent.chat_started.notified())
+            .await
+            .is_err()
+        {
+            if chat_send.is_finished() {
+                panic!(
+                    "chat.send did not reach dispatch: {}",
+                    chat_send.await.unwrap()
+                );
+            }
+            panic!("chat.send remained pending without entering dispatch");
+        }
+        assert!(!chat_send.is_finished());
+
+        let get = post_json(
+            port,
+            "agent.tasks.get",
+            serde_json::json!({"runId":"run-1"}),
+        )
+        .await;
+        assert_eq!(status(&get), 200);
+        assert_eq!(json_body(&get)["value"]["state"], "running");
+        let events = post_json(
+            port,
+            "agent.tasks.events",
+            serde_json::json!({"runId":"run-1","afterSequence":0}),
+        )
+        .await;
+        assert_eq!(status(&events), 200);
+        assert_eq!(json_body(&events)["value"]["sequence"], 1);
+        let list = post_json(port, "agent.tasks.list", serde_json::json!({"limit":10})).await;
+        assert_eq!(status(&list), 200);
+        assert_eq!(json_body(&list)["value"]["tasks"], serde_json::json!([]));
+        let cancel_response = post_json(
+            port,
+            "agent.tasks.cancel",
+            serde_json::json!({"runId":"run-1"}),
+        )
+        .await;
+        assert_eq!(status(&cancel_response), 200);
+        assert_eq!(
+            json_body(&cancel_response)["value"],
+            serde_json::Value::Null
+        );
+        let cancelled = post_json(
+            port,
+            "agent.tasks.get",
+            serde_json::json!({"runId":"run-1"}),
+        )
+        .await;
+        assert_eq!(status(&cancelled), 200);
+        assert_eq!(json_body(&cancelled)["value"]["state"], "cancelled");
+
+        let competing_heavy = serde_json::json!({
+            "method":"agent.tasks.start",
+            "args":{"input":{"padding":"x".repeat(MAX_AGENT_CONTROL_BODY)}}
+        })
+        .to_string();
+        assert!(competing_heavy.len() > MAX_AGENT_CONTROL_BODY);
+        let competing_response =
+            post_body(port, &format!("http://127.0.0.1:{port}"), &competing_heavy).await;
+        assert_eq!(status(&competing_response), 429);
+        assert_eq!(std::fs::read_dir(&spool_dir).unwrap().count(), 0);
+
+        let call_count = agent.dispatch_count.load(Ordering::SeqCst);
+        let unauthorized_body = serde_json::json!({
+            "method":"agent.tasks.events",
+            "args":{"runId":"run-1","padding":"x".repeat(MAX_AGENT_CONTROL_BODY)}
+        })
+        .to_string();
+        assert!(unauthorized_body.len() > MAX_AGENT_CONTROL_BODY);
+        let unauthorized = post_body(port, "https://untrusted.example", &unauthorized_body).await;
+        assert_eq!(status(&unauthorized), 403);
+        assert_eq!(agent.dispatch_count.load(Ordering::SeqCst), call_count);
+        assert_eq!(std::fs::read_dir(&spool_dir).unwrap().count(), 0);
+
+        agent.delay_events.store(true, Ordering::SeqCst);
+        let mut event_requests = JoinSet::new();
+        for _ in 0..9 {
+            event_requests.spawn(post_json(
+                port,
+                "agent.tasks.events",
+                serde_json::json!({"runId":"run-1","afterSequence":0}),
+            ));
+        }
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            agent.eight_events_started.notified(),
+        )
+        .await
+        .unwrap();
+        let saturated = tokio::time::timeout(Duration::from_secs(2), event_requests.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(status(&saturated), 429);
+        assert_eq!(agent.events_started.load(Ordering::SeqCst), 8);
+        agent.release_events.add_permits(8);
+        let mut released_control_responses = 0;
+        while let Some(result) = event_requests.join_next().await {
+            assert_eq!(status(&result.unwrap()), 200);
+            released_control_responses += 1;
+        }
+        assert_eq!(released_control_responses, 8);
+
+        agent.release_chat.add_permits(1);
+        let chat_response = chat_send.await.unwrap();
+        assert_eq!(status(&chat_response), 200);
+        assert_eq!(json_body(&chat_response)["value"]["runId"], "run-1");
+
+        let dispatch_count = agent.dispatch_count.load(Ordering::SeqCst);
+        let oversized_control = serde_json::json!({
+            "method":"agent.tasks.events",
+            "args":{"runId":"run-1","padding":"x".repeat(MAX_AGENT_CONTROL_BODY)}
+        })
+        .to_string();
+        assert!(oversized_control.len() > MAX_AGENT_CONTROL_BODY);
+        let oversized = post_body(
+            port,
+            &format!("http://127.0.0.1:{port}"),
+            &oversized_control,
+        )
+        .await;
+        assert_eq!(status(&oversized), 413);
+        assert_eq!(agent.dispatch_count.load(Ordering::SeqCst), dispatch_count);
+        assert_eq!(std::fs::read_dir(&spool_dir).unwrap().count(), 0);
+
+        cancel.cancel();
+        server.await.unwrap();
     }
 }

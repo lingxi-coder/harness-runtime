@@ -10,6 +10,7 @@ use local_app::v2::agent::{
     AgentStore, AttachmentMetadata, ChatMessageMetadata, ChatRole, ChatState, ChatStore, Input,
     Owner, Settings, State, TaskResult,
 };
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -913,23 +914,7 @@ impl AppAgentHost {
                 let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(50) as usize;
                 let cursor = args.get("cursor").and_then(Value::as_str);
                 let state = self.app_state(app)?;
-                let private_cursor = cursor
-                    .map(|cursor| state.store.task_id_for_request(&owner, cursor))
-                    .transpose()
-                    .map_err(|_| "invalid_task_list")?;
-                let tasks = state
-                    .store
-                    .list(&owner, private_cursor.as_deref(), limit)
-                    .map_err(|_| "invalid_task_list")?;
-                let mut summaries = Vec::with_capacity(tasks.len());
-                for task in &tasks {
-                    let thread_id = state
-                        .store
-                        .thread_id_for_request(&owner, &task.request_id)
-                        .map_err(|_| "invalid_task_list")?;
-                    summaries.push(public_task_value(task, thread_id)?);
-                }
-                Ok(json!({"tasks":summaries}))
+                task_inventory_page(&state, &owner, cursor, limit)
             }
             "agent.tasks.cancel" => {
                 let id = only_run_id(&args)?;
@@ -987,13 +972,7 @@ impl AppAgentHost {
                     .and_then(Value::as_bool)
                     .unwrap_or(false);
                 let state = self.app_state(app)?;
-                serde_json::to_value(
-                    state
-                        .chats
-                        .list(cursor, limit, include_archived)
-                        .map_err(|_| "invalid_chat_list")?,
-                )
-                .map_err(|_| "invalid_chat_list".into())
+                chat_inventory_page(&state, cursor, limit, include_archived)
             }
             "agent.chats.archive" | "agent.chats.delete" => {
                 let chat_id = required_string(&args, "chatId")?;
@@ -2605,6 +2584,219 @@ fn public_task_value(
     // The private TaskResult remains available only to trusted native views.
     // Public result content is reconstructed from standard AG-UI events.
     Ok(value)
+}
+
+fn task_inventory_page(
+    state: &AppAgentState,
+    owner: &Owner,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<Value, String> {
+    let page = state
+        .store
+        .list_page(owner, cursor, limit)
+        .map_err(|_| "invalid_task_list")?;
+    let mut summaries = Vec::with_capacity(page.tasks.len());
+    for task in &page.tasks {
+        let thread_id = state
+            .store
+            .thread_id_for_request(owner, &task.request_id)
+            .map_err(|_| "invalid_task_list")?;
+        summaries.push(public_task_value(task, thread_id)?);
+    }
+    public_inventory_page("tasks", summaries, page.next_cursor)
+}
+
+fn chat_inventory_page(
+    state: &AppAgentState,
+    cursor: Option<&str>,
+    limit: usize,
+    include_archived: bool,
+) -> Result<Value, String> {
+    let page = state
+        .chats
+        .list_page(cursor, limit, include_archived)
+        .map_err(|_| "invalid_chat_list")?;
+    public_inventory_page("chats", page.chats, page.next_cursor)
+}
+
+fn public_inventory_page<T: Serialize>(
+    field: &str,
+    items: Vec<T>,
+    next_cursor: Option<String>,
+) -> Result<Value, String> {
+    let mut page = serde_json::Map::new();
+    page.insert(
+        field.to_owned(),
+        serde_json::to_value(items).map_err(|_| "invalid_agent_list")?,
+    );
+    if let Some(cursor) = next_cursor {
+        page.insert("nextCursor".into(), Value::String(cursor));
+    }
+    Ok(Value::Object(page))
+}
+
+#[cfg(test)]
+mod inventory_page_tests {
+    use super::*;
+
+    fn make_owner(app_id: &str, release_digest: &str) -> Owner {
+        Owner {
+            app_id: app_id.into(),
+            release_digest: release_digest.into(),
+            invocation_id: "inventory-page-test".into(),
+        }
+    }
+
+    fn settings() -> Settings {
+        serde_json::from_value(json!({
+            "model":{"providerId":"provider","modelId":"model"},
+            "tools":{},"skills":[],"background":false,"maxTurns":4,"timeoutMs":30000
+        }))
+        .unwrap()
+    }
+
+    fn admit_succeeded(state: &AppAgentState, owner: &Owner, request_id: &str) {
+        let input: Input = serde_json::from_value(json!({
+            "requestId":request_id,
+            "protocolThreadId":format!("thread-{request_id}"),
+            "prompt":"page test",
+            "attachments":[]
+        }))
+        .unwrap();
+        let admission = state.store.admit(owner, &input, &[]).unwrap();
+        state
+            .store
+            .update(
+                owner,
+                &admission.task.run_id,
+                State::Succeeded,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn host_task_inventory_returns_two_scoped_public_pages() {
+        let root = tempfile::tempdir().unwrap();
+        let app_id = format!("a{}", "1".repeat(32));
+        std::fs::create_dir_all(root.path().join(&app_id)).unwrap();
+        let state = AppAgentState::open(root.path(), &app_id).unwrap();
+        let owner = make_owner(&app_id, &"2".repeat(64));
+        state
+            .store
+            .configure(owner.clone(), Some(settings()))
+            .unwrap();
+        for index in 0..3 {
+            admit_succeeded(&state, &owner, &format!("request-{index}"));
+        }
+
+        let other_release = make_owner(&app_id, &"3".repeat(64));
+        state
+            .store
+            .configure(other_release.clone(), Some(settings()))
+            .unwrap();
+        admit_succeeded(&state, &other_release, "other-release-request");
+
+        let other_app_id = format!("a{}", "4".repeat(32));
+        std::fs::create_dir_all(root.path().join(&other_app_id)).unwrap();
+        let other_app = AppAgentState::open(root.path(), &other_app_id).unwrap();
+        let other_app_owner = make_owner(&other_app_id, &"2".repeat(64));
+        other_app
+            .store
+            .configure(other_app_owner.clone(), Some(settings()))
+            .unwrap();
+        admit_succeeded(&other_app, &other_app_owner, "other-app-request");
+
+        let all = state.store.list(&owner, None, 100).unwrap();
+        let first = task_inventory_page(&state, &owner, None, 2).unwrap();
+        let first_tasks = first["tasks"].as_array().unwrap();
+        assert_eq!(first_tasks.len(), 2);
+        assert_eq!(
+            first["nextCursor"].as_str(),
+            Some(all[1].request_id.as_str())
+        );
+        assert_eq!(
+            first_tasks[0]["runId"].as_str(),
+            Some(all[0].request_id.as_str())
+        );
+        assert_eq!(
+            first_tasks[1]["runId"].as_str(),
+            Some(all[1].request_id.as_str())
+        );
+
+        let second = task_inventory_page(&state, &owner, first["nextCursor"].as_str(), 2).unwrap();
+        let second_tasks = second["tasks"].as_array().unwrap();
+        assert_eq!(second_tasks.len(), 1);
+        assert_eq!(
+            second_tasks[0]["runId"].as_str(),
+            Some(all[2].request_id.as_str())
+        );
+        assert!(second.get("nextCursor").is_none());
+        assert!(all
+            .iter()
+            .all(|task| task.request_id != "other-release-request"));
+        assert!(all
+            .iter()
+            .all(|task| task.request_id != "other-app-request"));
+    }
+
+    #[test]
+    fn host_chat_inventory_returns_named_filtered_pages_without_duplicates() {
+        let root = tempfile::tempdir().unwrap();
+        let app_id = format!("a{}", "5".repeat(32));
+        std::fs::create_dir_all(root.path().join(&app_id)).unwrap();
+        let state = AppAgentState::open(root.path(), &app_id).unwrap();
+        let chats = (0..5)
+            .map(|index| {
+                state
+                    .chats
+                    .create(
+                        Some(&format!("chat-{index}")),
+                        &uuid::Uuid::new_v4().to_string(),
+                    )
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        state.chats.archive(&chats[2].chat_id).unwrap();
+        let expected = state.chats.list(None, 100, false).unwrap();
+
+        let first = chat_inventory_page(&state, None, 2, false).unwrap();
+        let first_chats = first["chats"].as_array().unwrap();
+        assert_eq!(first_chats.len(), 2);
+        assert_eq!(
+            first_chats[0]["chatId"].as_str(),
+            Some(expected[0].chat_id.as_str())
+        );
+        assert_eq!(
+            first_chats[1]["chatId"].as_str(),
+            Some(expected[1].chat_id.as_str())
+        );
+        assert_eq!(
+            first["nextCursor"].as_str(),
+            Some(expected[1].chat_id.as_str())
+        );
+
+        let second = chat_inventory_page(&state, first["nextCursor"].as_str(), 2, false).unwrap();
+        let second_chats = second["chats"].as_array().unwrap();
+        assert_eq!(second_chats.len(), 2);
+        assert_eq!(
+            second_chats[0]["chatId"].as_str(),
+            Some(expected[2].chat_id.as_str())
+        );
+        assert_eq!(
+            second_chats[1]["chatId"].as_str(),
+            Some(expected[3].chat_id.as_str())
+        );
+        assert!(second.get("nextCursor").is_none());
+        assert!(!expected.iter().any(|chat| chat.chat_id == chats[2].chat_id));
+
+        let archived = chat_inventory_page(&state, None, 100, true).unwrap();
+        assert_eq!(archived["chats"].as_array().unwrap().len(), 5);
+        assert!(archived.get("nextCursor").is_none());
+    }
 }
 
 fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {

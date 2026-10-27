@@ -162,6 +162,61 @@ pub(super) async fn get(port: u16, path: &str) -> String {
     socket.read_to_end(&mut bytes).await.unwrap();
     String::from_utf8(bytes).unwrap()
 }
+
+#[tokio::test]
+async fn external_browser_static_html_loads_the_run_scoped_webmcp_resource_first() {
+    let (dir, service) = service();
+    let source = dir.path().join("webmcp-static");
+    std::fs::create_dir_all(source.join("dist")).unwrap();
+    std::fs::write(
+        source.join("dist/index.html"),
+        "<!doctype html><html><head><title>Local App</title><script id=\"app-start\"></script></head><body></body></html>",
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("lingxi-app.json"),
+        json!({
+            "schema":2,
+            "name":"WebMCP static app",
+            "entry":{"type":"static","path":"dist/index.html"},
+            "targets":[{"platform":"ios","environment":"web"}]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let published = service
+        .request_value(json!({"op":"publish","expectedRevision":0,"sourcePath":source}))
+        .await
+        .unwrap();
+    let id = published["record"]["appId"].as_str().unwrap();
+    let port = published["record"]["originPort"].as_u64().unwrap() as u16;
+    let launch = service
+        .request_value(json!({"op":"start","appId":id}))
+        .await
+        .unwrap();
+    let run_id = launch["run"]["runId"].as_str().unwrap();
+
+    let page = get(port, &format!("/__run/{run_id}/dist/index.html")).await;
+    assert!(page.starts_with("HTTP/1.1 200 OK"));
+    assert!(page.contains("Content-Security-Policy:"));
+    assert!(page.contains("script-src 'self'"));
+    let html = page.split_once("\r\n\r\n").unwrap().1;
+    let script = format!(
+        "<script src=\"/__run/{run_id}/__host/webmcp.js\" data-lingxi-webmcp></script>"
+    );
+    assert_eq!(html.matches("data-lingxi-webmcp").count(), 1);
+    assert!(html.find(&script).unwrap() < html.find("id=\"app-start\"").unwrap());
+
+    let resource = get(port, &format!("/__run/{run_id}/__host/webmcp.js")).await;
+    assert!(resource.starts_with("HTTP/1.1 200 OK"));
+    assert!(resource.contains("Content-Type: text/javascript; charset=utf-8"));
+    assert!(resource.contains("SPDX-License-Identifier: Apache-2.0"));
+    assert!(resource.contains("document.modelContext"));
+
+    let stale = get(port, "/__run/old-run/__host/webmcp.js").await;
+    assert!(stale.starts_with("HTTP/1.1 410"));
+}
+
 #[tokio::test]
 async fn static_app_runs_without_linux_and_restart_keeps_origin_but_revokes_epoch() {
     let (dir, service) = service();

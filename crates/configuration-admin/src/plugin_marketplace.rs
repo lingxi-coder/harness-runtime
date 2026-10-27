@@ -706,9 +706,12 @@ fn add_directory(
     cwd: &Path,
 ) -> Result<String, String> {
     // From here the "Adding marketplace…" progress prefix is part of the line.
-    let manifest_path = abs
-        .join(branding::PLUGIN_MANIFEST_DIR)
-        .join("marketplace.json");
+    let manifest_path = branding::marketplace_manifest_path(abs).map_err(|error| {
+        format!(
+            "Adding marketplace…✘ Failed to add marketplace: Could not inspect marketplace file at {}: {error}",
+            abs.display()
+        )
+    })?;
     let raw = std::fs::read_to_string(&manifest_path).map_err(|_| {
         format!(
             "Adding marketplace…✘ Failed to add marketplace: Marketplace file not found at {}",
@@ -1625,6 +1628,65 @@ mod tests {
             user["extraKnownMarketplaces"]["mymkt"],
             json!({"source": {"source": "directory", "path": abs}})
         );
+    }
+
+    #[test]
+    fn add_directory_reads_current_claude_marketplace_layout() {
+        let e = full_env();
+        std::fs::remove_dir_all(e.market.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        let manifest_dir = e.market.join(branding::CLAUDE_PLUGIN_MANIFEST_DIR);
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::write(
+            manifest_dir.join("marketplace.json"),
+            r#"{"name":"ora","owner":{"name":"ora"},"plugins":[{"name":"webmcp","source":"./"}]}"#,
+        )
+        .unwrap();
+
+        let source = e.market.to_string_lossy().to_string();
+        let msg = run_add(&source, None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+
+        assert!(msg.contains("Successfully added marketplace: ora"));
+        let registry = registry_of(&e);
+        assert_eq!(registry["ora"]["source"]["source"], json!("directory"));
+        assert_eq!(
+            registry["ora"]["installLocation"],
+            json!(std::fs::canonicalize(&e.market)
+                .unwrap()
+                .display()
+                .to_string())
+        );
+    }
+
+    #[test]
+    fn add_directory_prefers_native_marketplace_and_does_not_fallback_when_it_is_corrupt() {
+        let e = full_env();
+        let upstream_dir = e.market.join(branding::CLAUDE_PLUGIN_MANIFEST_DIR);
+        std::fs::create_dir_all(&upstream_dir).unwrap();
+        std::fs::write(
+            upstream_dir.join("marketplace.json"),
+            r#"{"name":"ora","owner":{"name":"ora"},"plugins":[]}"#,
+        )
+        .unwrap();
+        let source = e.market.to_string_lossy().to_string();
+
+        // Both are valid: the LingXi-native file has explicit precedence.
+        run_add(&source, None, &[], &e.plugins, &e.home, &e.cwd).unwrap();
+        assert!(registry_of(&e).get("mymkt").is_some());
+        assert!(registry_of(&e).get("ora").is_none());
+
+        // Once the selected native file is corrupt, the valid upstream file
+        // must not silently replace it.
+        std::fs::write(
+            e.market
+                .join(branding::PLUGIN_MANIFEST_DIR)
+                .join("marketplace.json"),
+            b"{ malformed native marketplace",
+        )
+        .unwrap();
+        let error = run_add(&source, None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect_err("a corrupt native marketplace file must fail closed");
+        assert!(error.contains("Failed to parse marketplace file"));
+        assert!(!error.contains("ora"));
     }
 
     /// §8: marketplace ingestion previously never called the name gate at

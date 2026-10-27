@@ -13,7 +13,7 @@
   G4  注释自称 claude-code 源码引用却拼作 LINGXI_*（假引用）
   G5  冻结清单里存在目标已消失的条目（死豁免 = 清单在腐烂）
   G6  branding 里存在未被 NAMESPACE_VALUES 覆盖的 pub const（清单覆盖对账）
-  G7  Claude 侧 plugin 标识符**到达**本仓库（整行判据，不要求字符串字面量）
+  G7  Claude plugin 标识符出现在导入边界之外（整行判据，不要求字符串字面量）
 
 用法:
   check_brand_leaks.py                      # 与 baseline 比对，有差异则 exit 1
@@ -223,13 +223,18 @@ CLAUDE_NEEDLES = [
     r"CLAUDE\.md",
 ]
 
-# G7 —— Claude 侧 plugin 标识符**到达**本仓库（P0a.0）。
+# G7 —— Claude 侧 plugin 标识符出现在导入边界之外。
 #
-# 这条规则的方向与 G3 相反：不是 LingXi 值漏出去，而是
-# oracle 的 plugin 标识符进来 —— `.claude-plugin` 目录名、`${CLAUDE_PLUGIN_ROOT}`
-# / `${CLAUDE_PLUGIN_DATA}` / `${CLAUDE_PLUGIN_OPTION_<KEY>}` 插值语法、
-# `${CLAUDE_PROJECT_DIR}`。实测：改动前这四类全部 exit 0 静默（G1 的 needle 表
-# 里没有它们，G2 只认 `env::var(...)` 的**调用**形状，G3 是 LingXi 侧的值）。
+# 这条规则的方向与 G3 相反：不是 LingXi 值漏出去，而是当前 Claude plugin
+# 格式的标识符进入本仓库。元数据目录名 `.claude-plugin`、`${CLAUDE_PLUGIN_ROOT}` /
+# `${CLAUDE_PLUGIN_DATA}` / `${CLAUDE_PLUGIN_OPTION_<KEY>}` 与
+# `${CLAUDE_PROJECT_DIR}` 是互操作入口必须识别的外部语法。
+#
+# 互操作只批准在 `G7_PLUGIN_INTEROP_ALLOWANCES` 中逐项列出的 Rust 常量、适配
+# 函数和输入 fixture：每项锁定路径、item 名、精确 token 和命中数；改名、增减或
+# 把同类 marker 放到同文件的其他位置都会失败。`G7_PLUGIN_INTEROP_BOUNDARY_NEEDLES`
+# 还会逐文件查找这些 needle，阻止旧的文件级 baseline 吞掉边界外的新到达。
+# 已存在的 manager baseline key 继续保留，只对新增的适配 item 做精确计数审计。
 #
 # ⚠️ **为什么不是把它们塞进 CLAUDE_NEEDLES/G1 就完事**——G1 的判据是「代码行的
 # **字符串字面量内**出现 needle」。那个判据对本族是错的，因为这些标识符到达时
@@ -261,6 +266,7 @@ CLAUDE_NEEDLES = [
 # `_ARRIVING_VS_KEEP` 判据，不是一句注释）：七个保留名没有一个会被本族命中，
 # G7 不会推翻 G2 已裁决的合法例外。
 # 不加进 L1_PATTERNS/G3：G3 管的是 LingXi 值反向出现在 branding 之外，方向相反。
+# 已批准的输入适配点由下方的逐 item allowance 管理，不使用 baseline/frozen 豁免。
 ARRIVING_PLUGIN_NEEDLES = [
     r"\.claude-plugin",
     r"CLAUDE_PLUGIN_",
@@ -807,6 +813,479 @@ def scan(root, exempt=None, paths=None):
     return findings
 
 
+class PluginInteropBoundaryError(ValueError):
+    """A plugin-format import marker escaped its reviewed boundary."""
+
+
+def rust_named_item_ranges(source):
+    """Find uniquely named Rust fn/const item ranges with comments/literals masked."""
+    code = RUST_TOKENS.sub(lambda match: re.sub(r'[^\n]', ' ', match.group()), source)
+    result = []
+    declarations = re.compile(r'\b(?P<kind>fn|const)\s+(?P<name>[A-Za-z_]\w*)')
+    for declaration in declarations.finditer(code):
+        kind = declaration.group("kind")
+        if kind == "fn":
+            opening = code.find("{", declaration.end())
+            semicolon = code.find(";", declaration.end())
+            if opening < 0 or (semicolon >= 0 and semicolon < opening):
+                continue
+            depth = 1
+            end = opening + 1
+            while end < len(code) and depth:
+                if code[end] == "{":
+                    depth += 1
+                elif code[end] == "}":
+                    depth -= 1
+                end += 1
+        else:
+            depth = []
+            end = declaration.end()
+            pairs = {")": "(", "]": "[", "}": "{"}
+            while end < len(code):
+                char = code[end]
+                if char in "([{":
+                    depth.append(char)
+                elif char in ")]}":
+                    if depth and depth[-1] == pairs[char]:
+                        depth.pop()
+                elif char == ";" and not depth:
+                    end += 1
+                    break
+                end += 1
+        first_line = source.count("\n", 0, declaration.start()) + 1
+        last_line = source.count("\n", 0, end) + 1
+        result.append((kind, declaration.group("name"), first_line, last_line))
+    return result
+
+
+G7_INTEROP_TOKEN_PATTERNS = {
+    ".claude-plugin": re.compile(r"\.claude-plugin"),
+    "CLAUDE_PLUGIN_MANIFEST_DIR": re.compile(
+        r"(?<![A-Za-z0-9_])CLAUDE_PLUGIN_MANIFEST_DIR(?![A-Za-z0-9_])"
+    ),
+    "CLAUDE_PLUGIN_ROOT": re.compile(
+        r"(?<![A-Za-z0-9_])CLAUDE_PLUGIN_ROOT(?![A-Za-z0-9_])"
+    ),
+    "CLAUDE_PLUGIN_DATA": re.compile(
+        r"(?<![A-Za-z0-9_])CLAUDE_PLUGIN_DATA(?![A-Za-z0-9_])"
+    ),
+    "CLAUDE_PLUGIN_OPTION_{suffix}": re.compile(
+        r"(?<![A-Za-z0-9_])CLAUDE_PLUGIN_OPTION_\{suffix\}(?![A-Za-z0-9_])"
+    ),
+    "CLAUDE_PLUGIN_OPTION_API_KEY": re.compile(
+        r"(?<![A-Za-z0-9_])CLAUDE_PLUGIN_OPTION_API_KEY(?![A-Za-z0-9_])"
+    ),
+    "CLAUDE_PLUGIN_OPTION_PORT": re.compile(
+        r"(?<![A-Za-z0-9_])CLAUDE_PLUGIN_OPTION_PORT(?![A-Za-z0-9_])"
+    ),
+    "CLAUDE_PROJECT_DIR": re.compile(
+        r"(?<![A-Za-z0-9_])CLAUDE_PROJECT_DIR(?![A-Za-z0-9_])"
+    ),
+}
+
+# G7 compatibility allowances are bound to one exact Rust item and exact
+# upstream token counts. They do not exempt a file or crate. A missing/renamed
+# item, changed token count, or new marker inside one of these items fails
+# closed. Suppressed entries are protocol input handled at the import boundary;
+# keep_findings entries predate this boundary and remain in the existing
+# baseline while still receiving the same strict scope check.
+G7_PLUGIN_INTEROP_ALLOWANCES = (
+    (
+        "crates/branding/src/lib.rs", "const", "CLAUDE_PLUGIN_MANIFEST_DIR",
+        ((".claude-plugin", 1), ("CLAUDE_PLUGIN_MANIFEST_DIR", 1)), True,
+    ),
+    (
+        "crates/branding/src/lib.rs", "fn", "preferred_plugin_metadata_path",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 1),), True,
+    ),
+    (
+        "crates/branding/src/lib.rs", "fn",
+        "plugin_metadata_resolution_prefers_native_and_preserves_selected_path",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 2),), True,
+    ),
+    (
+        "crates/plugin/src/command_source.rs", "fn", "run_command_source",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 1),), True,
+    ),
+    (
+        "crates/plugin/src/command_source.rs", "fn", "is_plugin_content_entry",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 1),), True,
+    ),
+    (
+        "crates/configuration-admin/src/plugin_admin.rs", "fn",
+        "public_catalog_discovers_plugins_from_current_claude_marketplace_format",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 1),), True,
+    ),
+    (
+        "crates/configuration-admin/src/plugin_install.rs", "fn",
+        "install_and_runtime_discovery_preserve_current_claude_plugin_tree",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 2), ("CLAUDE_PLUGIN_ROOT", 1)), True,
+    ),
+    (
+        "crates/configuration-admin/src/plugin_install.rs", "fn",
+        "install_uses_marketplace_manifest_when_claude_plugin_json_is_absent",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 2),), True,
+    ),
+    (
+        "crates/configuration-admin/src/plugin_install.rs", "fn",
+        "update_uses_marketplace_version_when_claude_plugin_json_is_absent",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 2),), True,
+    ),
+    (
+        "crates/configuration-admin/src/plugin_install.rs", "fn",
+        "write_claude_sensitive_schema",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 2),), True,
+    ),
+    (
+        "crates/configuration-admin/src/plugin_install.rs", "fn",
+        "failed_sensitive_install_restores_previous_credential",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 1),), True,
+    ),
+    (
+        "crates/configuration-admin/src/plugin_marketplace.rs", "fn",
+        "add_directory_reads_current_claude_marketplace_layout",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 1),), True,
+    ),
+    (
+        "crates/configuration-admin/src/plugin_marketplace.rs", "fn",
+        "add_directory_prefers_native_marketplace_and_does_not_fallback_when_it_is_corrupt",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 1),), True,
+    ),
+    (
+        "crates/plugin/src/discovery.rs", "const", "CLI_PLUGIN_CONTENT_NAMES",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 1),), True,
+    ),
+    (
+        "crates/plugin/src/discovery.rs", "fn", "protect",
+        (("CLAUDE_PLUGIN_ROOT", 1), ("CLAUDE_PLUGIN_DATA", 1)), True,
+    ),
+    (
+        "crates/plugin/src/discovery.rs", "fn", "restore",
+        (("CLAUDE_PLUGIN_ROOT", 1), ("CLAUDE_PLUGIN_DATA", 1)), True,
+    ),
+    (
+        "crates/plugin/src/discovery.rs", "fn",
+        "current_claude_plugin_layout_loads_default_and_declared_components_verbatim",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 2), ("CLAUDE_PLUGIN_ROOT", 3)), True,
+    ),
+    (
+        "crates/plugin/src/discovery.rs", "fn",
+        "malformed_native_manifest_does_not_fallback_to_a_valid_claude_manifest",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 2),), True,
+    ),
+    (
+        "crates/plugin/src/discovery.rs", "fn",
+        "plugin_mcp_path_tokens_are_not_expanded_from_process_environment",
+        (("CLAUDE_PLUGIN_ROOT", 10), ("CLAUDE_PLUGIN_DATA", 8)), True,
+    ),
+    (
+        "crates/plugin/src/mcpb.rs", "fn",
+        "ensure_manifest_preserves_current_upstream_plugin_json",
+        (("CLAUDE_PLUGIN_MANIFEST_DIR", 1),), True,
+    ),
+    # Instance-scoped manager paths are limited to the helpers that bind a
+    # source plugin's token to its own root/data/project context. Keep the two
+    # older LSP/monitor findings in the unchanged baseline.
+    (
+        "crates/plugin/src/manager.rs", "fn", "plugin_data_reference",
+        (("CLAUDE_PLUGIN_DATA", 1),), True,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn", "text_references_plugin_data",
+        (("CLAUDE_PLUGIN_DATA", 1),), True,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn", "substitute_plugin_instance_text_paths",
+        (("CLAUDE_PLUGIN_ROOT", 1), ("CLAUDE_PLUGIN_DATA", 1),
+         ("CLAUDE_PROJECT_DIR", 1)), True,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn", "substitute_plugin_instance_string_paths",
+        (("CLAUDE_PLUGIN_ROOT", 1), ("CLAUDE_PLUGIN_DATA", 1),
+         ("CLAUDE_PROJECT_DIR", 1)), True,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn", "normalize_plugin_tokens_for_powershell",
+        (("CLAUDE_PLUGIN_ROOT", 1), ("CLAUDE_PLUGIN_DATA", 1),
+         ("CLAUDE_PROJECT_DIR", 1)), True,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn", "substitute_mcp_config",
+        (("CLAUDE_PLUGIN_ROOT", 2), ("CLAUDE_PLUGIN_DATA", 2)), True,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn", "substitute_lsp_config",
+        (("CLAUDE_PLUGIN_ROOT", 2), ("CLAUDE_PLUGIN_DATA", 2),
+         ("CLAUDE_PROJECT_DIR", 2)), False,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn", "monitor_command_with_env",
+        (("CLAUDE_PLUGIN_ROOT", 1), ("CLAUDE_PROJECT_DIR", 1)), False,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn", "apply_user_config_to_hooks",
+        (("CLAUDE_PLUGIN_ROOT", 1), ("CLAUDE_PLUGIN_DATA", 1),
+         ("CLAUDE_PROJECT_DIR", 1), ("CLAUDE_PLUGIN_OPTION_{suffix}", 1)), True,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn",
+        "claude_plugin_mcp_paths_resolve_inside_only_the_owning_server_config",
+        (("CLAUDE_PLUGIN_ROOT", 4), ("CLAUDE_PLUGIN_DATA", 4)), True,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn",
+        "plugin_data_directory_is_created_only_for_a_referencing_mcp_instance",
+        (("CLAUDE_PLUGIN_ROOT", 3), ("CLAUDE_PLUGIN_DATA", 1)), True,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn",
+        "plugin_hooks_bind_paths_and_option_env_only_to_the_owning_hook",
+        (("CLAUDE_PLUGIN_ROOT", 9), ("CLAUDE_PLUGIN_DATA", 7),
+         ("CLAUDE_PROJECT_DIR", 3), ("CLAUDE_PLUGIN_OPTION_API_KEY", 1),
+         ("CLAUDE_PLUGIN_OPTION_PORT", 1)), True,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn",
+        "plugin_prompt_path_binding_preserves_source_and_lone_utf16_units",
+        (("CLAUDE_PLUGIN_ROOT", 1), ("CLAUDE_PLUGIN_DATA", 1),
+         ("CLAUDE_PROJECT_DIR", 1)), True,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn",
+        "powershell_plugin_hook_tokens_reach_existing_env_rewrite",
+        (("CLAUDE_PLUGIN_ROOT", 2), ("CLAUDE_PLUGIN_DATA", 2),
+         ("CLAUDE_PROJECT_DIR", 2)), True,
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn", "empty_ctx_is_noop",
+        (("CLAUDE_PLUGIN_ROOT", 1), ("CLAUDE_PLUGIN_DATA", 1),
+         ("CLAUDE_PROJECT_DIR", 1)), True,
+    ),
+
+)
+
+G7_PLUGIN_INTEROP_BOUNDARY_NEEDLES = {
+    "crates/branding/src/lib.rs": frozenset({r"\.claude-plugin", "CLAUDE_PLUGIN_"}),
+    "crates/plugin/src/command_source.rs": frozenset({"CLAUDE_PLUGIN_"}),
+    "crates/configuration-admin/src/plugin_admin.rs": frozenset({"CLAUDE_PLUGIN_"}),
+    "crates/configuration-admin/src/plugin_install.rs": frozenset({"CLAUDE_PLUGIN_"}),
+    "crates/configuration-admin/src/plugin_marketplace.rs": frozenset({"CLAUDE_PLUGIN_"}),
+    "crates/plugin/src/discovery.rs": frozenset({"CLAUDE_PLUGIN_"}),
+    "crates/plugin/src/manager.rs": frozenset({"CLAUDE_PLUGIN_", "CLAUDE_PROJECT_DIR"}),
+    "crates/plugin/src/mcpb.rs": frozenset({"CLAUDE_PLUGIN_"}),
+}
+
+
+def _scope_marker_occurrences(path, source, item_kind, item_name, exact_tokens):
+    items = [
+        item for item in rust_named_item_ranges(source)
+        if item[0] == item_kind and item[1] == item_name
+    ]
+    if len(items) != 1:
+        raise PluginInteropBoundaryError(
+            f"{path}: expected one Rust {item_kind} {item_name}, found {len(items)}"
+        )
+    _, _, first_line, last_line = items[0]
+    lines = text_lines(source)
+    occurrences = []
+    covered = []
+    counts = {}
+    for lineno in range(first_line, min(last_line, len(lines)) + 1):
+        line = lines[lineno - 1]
+        if is_comment_line(path, line):
+            continue
+        for token in exact_tokens:
+            pattern = G7_INTEROP_TOKEN_PATTERNS.get(token)
+            if pattern is None:
+                raise PluginInteropBoundaryError(
+                    f"{path}: no exact-token matcher is registered for {token!r}"
+                )
+            for match in pattern.finditer(line):
+                counts[token] = counts.get(token, 0) + 1
+                covered.append((lineno, match.start(), match.end(), token))
+        for rx, needle in ARRIVING_COMPILED:
+            for match in rx.finditer(line):
+                if not any(
+                    covered_line == lineno
+                    and start <= match.start()
+                    and match.end() <= end
+                    for covered_line, start, end, _ in covered
+                ):
+                    occurrences.append((lineno, needle, match.group(0)))
+    return items[0], counts, occurrences, covered
+
+
+def apply_plugin_interop_allowances(root, findings, allowances=None,
+                                    strict_needles_by_path=None):
+    """Suppress only exact, count-locked plugin-format tokens in named Rust items."""
+    allowances = (
+        G7_PLUGIN_INTEROP_ALLOWANCES if allowances is None else allowances
+    )
+    strict_needles_by_path = (
+        G7_PLUGIN_INTEROP_BOUNDARY_NEEDLES
+        if strict_needles_by_path is None else strict_needles_by_path
+    )
+    by_path = {}
+    approved = set()
+    seen_scopes = set()
+    for path, kind, name, token_counts, suppress in allowances:
+        scope_key = (path, kind, name)
+        if scope_key in seen_scopes:
+            raise PluginInteropBoundaryError(
+                f"{path}: duplicate interop allowance for {kind} {name}"
+            )
+        seen_scopes.add(scope_key)
+        full = os.path.join(root, path)
+        try:
+            with open(full, encoding="utf-8") as fh:
+                source = fh.read()
+        except OSError as exc:
+            raise PluginInteropBoundaryError(
+                f"required interop boundary source is unavailable: {path}: {exc}"
+            ) from exc
+        expected = dict(token_counts)
+        if len(expected) != len(token_counts) or any(count <= 0 for count in expected.values()):
+            raise PluginInteropBoundaryError(
+                f"{path}: invalid expected token counts for {kind} {name}"
+            )
+        item, actual, unapproved, covered = _scope_marker_occurrences(
+            path, source, kind, name, expected
+        )
+        if actual != expected:
+            raise PluginInteropBoundaryError(
+                f"{path}:{item[2]}-{item[3]} {kind} {name} token-count drift: "
+                f"expected={expected}, actual={actual}"
+            )
+        if unapproved:
+            raise PluginInteropBoundaryError(
+                f"{path}:{item[2]}-{item[3]} {kind} {name} contains unapproved "
+                f"plugin markers: {unapproved}"
+            )
+        by_path.setdefault(path, []).append((item, set(expected), suppress, covered))
+        if suppress:
+            lines = text_lines(source)
+            for lineno, start, end, token in covered:
+                line = lines[lineno - 1]
+                token_needles = {
+                    needle for rx, needle in ARRIVING_COMPILED
+                    if any(
+                        match.start() == start and match.end() <= end
+                        for match in rx.finditer(line)
+                    )
+                }
+                approved.update(
+                    ("G7", path, lineno, needle) for needle in token_needles
+                )
+
+    # Each boundary file has a small, explicit set of G7 needles to police.
+    # A new occurrence outside the named items is an error even if an older
+    # path/needle baseline entry would otherwise hide it.
+    for path, strict_needles in strict_needles_by_path.items():
+        full = os.path.join(root, path)
+        try:
+            with open(full, encoding="utf-8") as fh:
+                source = fh.read()
+        except OSError as exc:
+            raise PluginInteropBoundaryError(
+                f"required interop boundary source is unavailable: {path}: {exc}"
+            ) from exc
+        scopes = by_path.get(path, [])
+        lines = text_lines(source)
+        for lineno, line in enumerate(lines, start=1):
+            if is_comment_line(path, line):
+                continue
+            for rx, needle in ARRIVING_COMPILED:
+                if needle not in strict_needles:
+                    continue
+                for match in rx.finditer(line):
+                    item_allows_match = False
+                    for item, tokens, _, covered in scopes:
+                        if not item[2] <= lineno <= item[3]:
+                            continue
+                        if any(
+                            covered_line == lineno
+                            and start <= match.start()
+                            and match.end() <= end
+                            and token in tokens
+                            for covered_line, start, end, token in covered
+                        ):
+                            item_allows_match = True
+                            break
+                    if not item_allows_match:
+                        raise PluginInteropBoundaryError(
+                            f"{path}:{lineno}: unapproved {needle} marker outside "
+                            "a named import boundary"
+                        )
+    return findings - approved
+
+
+G2_PLUGIN_INTEROP_TEST_ALLOWANCES = (
+    (
+        "crates/plugin/src/discovery.rs", "fn",
+        "plugin_mcp_path_tokens_are_not_expanded_from_process_environment",
+        (("CLAUDE_PLUGIN_ROOT", 1), ("CLAUDE_PLUGIN_DATA", 1)),
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn",
+        "claude_plugin_mcp_paths_resolve_inside_only_the_owning_server_config",
+        (("CLAUDE_PLUGIN_ROOT", 2), ("CLAUDE_PLUGIN_DATA", 2)),
+    ),
+    (
+        "crates/plugin/src/manager.rs", "fn",
+        "plugin_hooks_bind_paths_and_option_env_only_to_the_owning_hook",
+        (("CLAUDE_PLUGIN_ROOT", 2), ("CLAUDE_PLUGIN_DATA", 2)),
+    ),
+)
+
+
+def apply_plugin_env_snapshot_allowances(root, findings, allowances=None):
+    """Keep G2's environment-read rule, except exact save/restore test snapshots."""
+    allowances = (
+        G2_PLUGIN_INTEROP_TEST_ALLOWANCES if allowances is None else allowances
+    )
+    approved = set()
+    for path, kind, name, token_counts in allowances:
+        full = os.path.join(root, path)
+        try:
+            with open(full, encoding="utf-8") as fh:
+                source = fh.read()
+        except OSError as exc:
+            raise PluginInteropBoundaryError(
+                f"required env-snapshot test is unavailable: {path}: {exc}"
+            ) from exc
+        items = [
+            item for item in rust_named_item_ranges(source)
+            if item[0] == kind and item[1] == name
+        ]
+        if len(items) != 1:
+            raise PluginInteropBoundaryError(
+                f"{path}: expected one Rust {kind} {name}, found {len(items)}"
+            )
+        item = items[0]
+        lines = text_lines(source)
+        actual = {}
+        occurrences = []
+        for lineno in range(item[2], min(item[3], len(lines)) + 1):
+            line = lines[lineno - 1]
+            if is_comment_line(path, line):
+                continue
+            for rx in (ENV_READ, ENV_READ_SECOND_ARG):
+                for match in rx.finditer(line):
+                    env_name = match.group(1)
+                    if env_name in KEEP_CLAUDE_ENV:
+                        continue
+                    actual[env_name] = actual.get(env_name, 0) + 1
+                    occurrences.append((lineno, env_name))
+        expected = dict(token_counts)
+        if actual != expected:
+            raise PluginInteropBoundaryError(
+                f"{path}:{item[2]}-{item[3]} test env-read drift: "
+                f"expected={expected}, actual={actual}"
+            )
+        approved.update(("G2", path, lineno, env_name) for lineno, env_name in occurrences)
+    return findings - approved
+
+
 class SourceProvenanceError(ValueError):
     """A source allowance is missing, stale, or broader than its pinned receipt."""
 
@@ -1134,9 +1613,18 @@ def apply_source_allowances(root, findings, provenance_path=None,
 
 
 BRANDING_LIB = "crates/branding/src/lib.rs"
-BRANDING_CONST = re.compile(r"^pub const ([A-Z][A-Z0-9_]*): &str")
+BRANDING_CONST = re.compile(
+    r'^pub const ([A-Z][A-Z0-9_]*): &str(?:\s*=\s*"([^"]*)")?'
+)
 # 故意不属于本产品命名空间的常量。
 G6_ALLOWLIST = {"LEGACY_GLOBAL_CONFIG_FILE"}
+# One external-format import marker lives in branding so plugin metadata can be
+# selected without changing LingXi's own config/cache namespace. Keep its exact
+# value outside NAMESPACE_VALUES: this is an accepted input format, not a
+# LingXi product namespace value.
+G6_EXTERNAL_FORMAT_CONSTANTS = {
+    "CLAUDE_PLUGIN_MANIFEST_DIR": ".claude-plugin",
+}
 
 
 def check_namespace_coverage(root):
@@ -1154,7 +1642,7 @@ def check_namespace_coverage(root):
     for i, line in enumerate(lines, start=1):
         m = BRANDING_CONST.match(line)
         if m:
-            declared.append((m.group(1), i))
+            declared.append((m.group(1), i, m.group(2)))
         if line.startswith("pub const NAMESPACE_VALUES"):
             in_list = True
             continue
@@ -1164,8 +1652,18 @@ def check_namespace_coverage(root):
             else:
                 listed.add(line.strip().rstrip(","))
 
-    for name, lineno in declared:
-        if name in G6_ALLOWLIST or name in listed:
+    for name, lineno, literal in declared:
+        if name in G6_ALLOWLIST:
+            continue
+        external_literal = G6_EXTERNAL_FORMAT_CONSTANTS.get(name)
+        if external_literal is not None:
+            if literal != external_literal or name in listed:
+                findings.add((
+                    "G6", BRANDING_LIB, lineno,
+                    f"{name} external-format value drift",
+                ))
+            continue
+        if name in listed:
             continue
         findings.add(("G6", BRANDING_LIB, lineno, f"{name} not in NAMESPACE_VALUES"))
     return findings
@@ -1280,6 +1778,7 @@ SELFTEST_FILES = {
     "crates/st/g4.rs": '// upstream: process.env.LINGXI_FAKE_CITATION\n',
     "crates/branding/src/lib.rs": (
         'pub const ST_UNLISTED: &str = "x";\n'
+        'pub const CLAUDE_PLUGIN_MANIFEST_DIR: &str = ".claude-plugin";\n'
         'pub const NAMESPACE_VALUES: &[&str] = &[\n];\n'
     ),
     # G7 的四种**不带引号**的到达形态。这四条正是 P0a.0 写作阶段漏掉的洞：
@@ -1288,6 +1787,21 @@ SELFTEST_FILES = {
     "crates/st/SKILL.md": 'Read .claude-plugin/plugin.json first.\n',
     "crates/st/wf.js": 'const r = process.env.CLAUDE_PROJECT_DIR;\n',
     "crates/st/ident.rs": 'const CLAUDE_PLUGIN_MANIFEST_DIR: &str = "manifest";\n',
+    "crates/st/plugin_interop.rs": (
+        'fn adapter() { let root = "${CLAUDE_PLUGIN_ROOT}/bin"; }\n'
+        'fn unrelated_fixture() { let root = "${CLAUDE_PLUGIN_ROOT}/bin"; }\n'
+        'fn env_snapshot() { let old = std::env::var("CLAUDE_PLUGIN_ROOT"); }\n'
+        'fn unrelated_env_read() { let current = std::env::var("CLAUDE_PLUGIN_ROOT"); }\n'
+    ),
+    "crates/st/plugin_install.rs": (
+        'fn write_claude_sensitive_schema() {\n'
+        '    let plugin_manifest_dir = branding::CLAUDE_PLUGIN_MANIFEST_DIR;\n'
+        '    let marketplace_manifest_dir = branding::CLAUDE_PLUGIN_MANIFEST_DIR;\n'
+        '}\n'
+        'fn failed_sensitive_install_restores_previous_credential() {\n'
+        '    let manifest = branding::CLAUDE_PLUGIN_MANIFEST_DIR;\n'
+        '}\n'
+    ),
     # G7 的两个**必须静默**的对照。
     "crates/st/neg_comment.rs": '// oracle spells it CLAUDE_PLUGIN_ROOT / CLAUDE_PROJECT_DIR\n',
     "crates/st/neg_reponame.rs": 'fn f() { let r = "anthropics/claude-plugins-official"; }\n',
@@ -1340,6 +1854,16 @@ SELFTEST_CASES = [
      [("G7", "crates/st/wf.js", "CLAUDE_PROJECT_DIR")], []),
     ("G7 fires on a bare CLAUDE_PLUGIN_* Rust identifier",
      [("G7", "crates/st/ident.rs", "CLAUDE_PLUGIN_")], []),
+    ("G7 sees an import token in its adapter and an unrelated fixture",
+     [("G7", "crates/st/plugin_interop.rs", "CLAUDE_PLUGIN_", 1),
+      ("G7", "crates/st/plugin_interop.rs", "CLAUDE_PLUGIN_", 2)], []),
+    ("G7 sees both manifest markers in the sensitive-schema fixture",
+     [("G7", "crates/st/plugin_install.rs", "CLAUDE_PLUGIN_", 2),
+      ("G7", "crates/st/plugin_install.rs", "CLAUDE_PLUGIN_", 3),
+      ("G7", "crates/st/plugin_install.rs", "CLAUDE_PLUGIN_", 6)], []),
+    ("G2 sees plugin environment snapshots before the narrow test allowance",
+     [("G2", "crates/st/plugin_interop.rs", "CLAUDE_PLUGIN_ROOT", 3),
+      ("G2", "crates/st/plugin_interop.rs", "CLAUDE_PLUGIN_ROOT", 4)], []),
     ("G7 stays silent on comment-line oracle citations",
      [], [("G7", "crates/st/neg_comment.rs", "")]),
     ("G7 stays silent on anthropics/claude-plugins-official (no leading dot)",
@@ -1379,14 +1903,24 @@ def run_selftest():
         entries = parse_frozen(frozen)
         findings = scan(tmp, exemptions_by_path(entries), paths=tuple(SELFTEST_FILES))
         findings |= check_frozen(tmp, frozen, entries)
-        findings |= check_namespace_coverage(tmp)
+        namespace_findings = check_namespace_coverage(tmp)
+        if any(
+            finding[0] == "G6"
+            and "CLAUDE_PLUGIN_MANIFEST_DIR" in finding[3]
+            for finding in namespace_findings
+        ):
+            failures = [
+                "G6 external-format constant was incorrectly required in NAMESPACE_VALUES"
+            ]
+        else:
+            failures = []
+        findings |= namespace_findings
 
         cases = list(SELFTEST_CASES) + [
             ("G5 fires on a frozen entry whose target file is gone",
              [("G5", "frozen.txt", "missing file")], []),
         ]
 
-        failures = []
         # 「探针根本没跑」的守卫：合成树按构造必然产出命中，一个空集合意味着
         # 枚举/读取那一层坏了，而不是「没有违规」。
         if not findings:
@@ -1411,6 +1945,173 @@ def run_selftest():
                     failures.append(f"{name}: expected NO {rule} at {path}, got {sorted(hit)}")
             if not failures or not any(f.startswith(name) for f in failures):
                 print(f"  ok   {name}")
+
+        synthetic_interop = (
+            "crates/st/plugin_interop.rs", "fn", "adapter",
+            (("CLAUDE_PLUGIN_ROOT", 1),), True,
+        )
+        synthetic_needles = {
+            "crates/st/plugin_interop.rs": frozenset({"CLAUDE_PLUGIN_"}),
+        }
+        try:
+            filtered = apply_plugin_interop_allowances(
+                tmp, findings, (synthetic_interop,), {}
+            )
+            if _selftest_matches(
+                filtered, "G7", "crates/st/plugin_interop.rs", "CLAUDE_PLUGIN_", 1
+            ):
+                failures.append("plugin interop: exact adapter token was not suppressed")
+            if not _selftest_matches(
+                filtered, "G7", "crates/st/plugin_interop.rs", "CLAUDE_PLUGIN_", 2
+            ):
+                failures.append("plugin interop: same token outside adapter was suppressed")
+        except PluginInteropBoundaryError as exc:
+            failures.append(f"plugin interop: valid exact adapter allowance failed: {exc}")
+        if not any("plugin interop:" in failure for failure in failures):
+            print("  ok   plugin interop allowance is item/token scoped")
+
+        synthetic_sensitive_fixtures = (
+            (
+                "crates/st/plugin_install.rs", "fn", "write_claude_sensitive_schema",
+                (("CLAUDE_PLUGIN_MANIFEST_DIR", 2),), True,
+            ),
+            (
+                "crates/st/plugin_install.rs", "fn",
+                "failed_sensitive_install_restores_previous_credential",
+                (("CLAUDE_PLUGIN_MANIFEST_DIR", 1),), True,
+            ),
+        )
+        synthetic_sensitive_needles = {
+            "crates/st/plugin_install.rs": frozenset({"CLAUDE_PLUGIN_"}),
+        }
+        try:
+            fixture_filtered = apply_plugin_interop_allowances(
+                tmp, findings, synthetic_sensitive_fixtures,
+                synthetic_sensitive_needles,
+            )
+            if _selftest_matches(
+                fixture_filtered, "G7", "crates/st/plugin_install.rs",
+                "CLAUDE_PLUGIN_",
+            ):
+                failures.append(
+                    "sensitive schema fixture: exact two-marker allowance was not suppressed"
+                )
+        except PluginInteropBoundaryError as exc:
+            failures.append(f"sensitive schema fixture: valid allowance failed: {exc}")
+        if not any("sensitive schema fixture:" in failure for failure in failures):
+            print("  ok   sensitive schema fixture allowance is exact-item and count scoped")
+
+        sensitive_fixture_path = os.path.join(tmp, "crates/st/plugin_install.rs")
+        with open(sensitive_fixture_path, encoding="utf-8") as fh:
+            original_sensitive_fixture = fh.read()
+        with open(sensitive_fixture_path, "w", encoding="utf-8") as fh:
+            fh.write(
+                original_sensitive_fixture
+                + 'fn unrelated_fixture() { let root = branding::CLAUDE_PLUGIN_MANIFEST_DIR; }\n'
+            )
+        sensitive_fixture_findings = scan(
+            tmp, paths=("crates/st/plugin_install.rs",)
+        )
+        try:
+            apply_plugin_interop_allowances(
+                tmp, sensitive_fixture_findings,
+                synthetic_sensitive_fixtures, synthetic_sensitive_needles,
+            )
+            failures.append(
+                "sensitive schema fixture: out-of-item marker did not fail closed"
+            )
+        except PluginInteropBoundaryError:
+            print("  ok   sensitive schema fixture allowance rejects out-of-item markers")
+        with open(sensitive_fixture_path, "w", encoding="utf-8") as fh:
+            fh.write(original_sensitive_fixture)
+
+        interop_path = os.path.join(tmp, "crates/st/plugin_interop.rs")
+        with open(interop_path, encoding="utf-8") as fh:
+            original_interop = fh.read()
+        with open(interop_path, "w", encoding="utf-8") as fh:
+            fh.write(
+                'fn adapter() { let root = "${CLAUDE_PLUGIN_ROOT}"; '
+                'let data = "${CLAUDE_PLUGIN_DATA}"; }\n'
+                'fn unrelated_fixture() { let root = "${CLAUDE_PLUGIN_ROOT}"; }\n'
+                'fn env_snapshot() { let old = std::env::var("CLAUDE_PLUGIN_ROOT"); }\n'
+                'fn unrelated_env_read() { let current = std::env::var("CLAUDE_PLUGIN_ROOT"); }\n'
+            )
+        drift_findings = scan(
+            tmp, paths=("crates/st/plugin_interop.rs",)
+        )
+        try:
+            apply_plugin_interop_allowances(
+                tmp, drift_findings, (synthetic_interop,), synthetic_needles
+            )
+            failures.append("plugin interop: unlisted token inside adapter did not fail closed")
+        except PluginInteropBoundaryError:
+            print("  ok   plugin interop allowance fails closed on boundary drift")
+        with open(interop_path, "w", encoding="utf-8") as fh:
+            fh.write(original_interop)
+
+        synthetic_env_allowance = (
+            (
+                "crates/st/plugin_interop.rs", "fn", "env_snapshot",
+                (("CLAUDE_PLUGIN_ROOT", 1),),
+            ),
+        )
+        try:
+            env_filtered = apply_plugin_env_snapshot_allowances(
+                tmp, findings, synthetic_env_allowance
+            )
+            if _selftest_matches(
+                env_filtered, "G2", "crates/st/plugin_interop.rs",
+                "CLAUDE_PLUGIN_ROOT", 3
+            ):
+                failures.append("plugin env snapshot: approved test read was not suppressed")
+            if not _selftest_matches(
+                env_filtered, "G2", "crates/st/plugin_interop.rs",
+                "CLAUDE_PLUGIN_ROOT", 4
+            ):
+                failures.append("plugin env snapshot: unrelated read was suppressed")
+        except PluginInteropBoundaryError as exc:
+            failures.append(f"plugin env snapshot: valid exact test allowance failed: {exc}")
+        if not any("plugin env snapshot:" in failure for failure in failures):
+            print("  ok   plugin env snapshot allowance is test-item scoped")
+
+        with open(interop_path, "w", encoding="utf-8") as fh:
+            fh.write(
+                'fn env_snapshot() { let old = std::env::var("CLAUDE_PLUGIN_ROOT"); '
+                'let data = std::env::var("CLAUDE_PLUGIN_DATA"); }\n'
+            )
+        env_drift = scan(tmp, paths=("crates/st/plugin_interop.rs",))
+        try:
+            apply_plugin_env_snapshot_allowances(
+                tmp, env_drift, synthetic_env_allowance
+            )
+            failures.append("plugin env snapshot: unlisted env read did not fail closed")
+        except PluginInteropBoundaryError:
+            print("  ok   plugin env snapshot allowance fails closed on boundary drift")
+        with open(interop_path, "w", encoding="utf-8") as fh:
+            fh.write(original_interop)
+
+        branding_path = os.path.join(tmp, BRANDING_LIB)
+        with open(branding_path, encoding="utf-8") as fh:
+            branding_fixture = fh.read()
+        with open(branding_path, "w", encoding="utf-8") as fh:
+            fh.write(branding_fixture.replace(
+                'CLAUDE_PLUGIN_MANIFEST_DIR: &str = ".claude-plugin"',
+                'CLAUDE_PLUGIN_MANIFEST_DIR: &str = ".wrong-plugin-dir"',
+            ))
+        if not any(
+            finding[0] == "G6" and "external-format value drift" in finding[3]
+            for finding in check_namespace_coverage(tmp)
+        ):
+            failures.append("G6 external-format constant drift was not rejected")
+        with open(branding_path, "w", encoding="utf-8") as fh:
+            fh.write(branding_fixture)
+        if not any(
+            "G6 external-format" in failure for failure in failures
+        ):
+            print(
+                "  ok   G6 keeps the exact external marker out of NAMESPACE_VALUES "
+                "and rejects value drift"
+            )
 
         # Provenance-gate tests use a tiny synthetic source module. The manifest
         # digest is injected only here; production always uses the pinned digest
@@ -1638,8 +2339,10 @@ def main():
     frozen_entries = parse_frozen(frozen_path)
     findings = scan(root, exemptions_by_path(frozen_entries))
     try:
+        findings = apply_plugin_interop_allowances(root, findings)
+        findings = apply_plugin_env_snapshot_allowances(root, findings)
         findings = apply_source_allowances(root, findings)
-    except SourceProvenanceError as exc:
+    except (PluginInteropBoundaryError, SourceProvenanceError) as exc:
         raise SystemExit(f"check_brand_leaks: {exc}") from exc
     findings |= check_frozen(root, frozen_path, frozen_entries)
     findings |= check_namespace_coverage(root)

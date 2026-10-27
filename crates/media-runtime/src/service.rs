@@ -204,7 +204,7 @@ struct RuntimeState {
     recording_order: VecDeque<RecordingRef>,
     recording_reservations: usize,
     sessions: HashMap<MediaSessionRef, OwnedSession>,
-    session_reservations: usize,
+    session_reservations: HashMap<MediaOperationId, SessionReservationKind>,
     known_assets: HashMap<MediaRef, OwnedAsset>,
     known_asset_order: VecDeque<MediaRef>,
     events: HashMap<EventKey, OwnedEventBuffer>,
@@ -243,6 +243,7 @@ enum RecordingLifecycle {
 
 struct OwnedSession {
     owner: MediaOwner,
+    origin_operation_id: MediaOperationId,
     session: Arc<dyn MediaSession>,
     audio_channel: Arc<AsyncMutex<Option<Arc<dyn MediaAudioChannel>>>>,
     intent: Option<MediaSessionIntent>,
@@ -252,10 +253,15 @@ struct OwnedSession {
     started_at_unix_ms: u64,
 }
 
-#[derive(Clone, Copy)]
 enum CapacityReservationKind {
     Recording,
-    Session,
+    Session(MediaOperationId),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionReservationKind {
+    Start,
+    Attach,
 }
 
 struct CapacityReservation {
@@ -266,12 +272,12 @@ struct CapacityReservation {
 
 impl CapacityReservation {
     fn commit_locked(&mut self, inner: &mut RuntimeState) {
-        match self.kind {
+        match &self.kind {
             CapacityReservationKind::Recording => {
                 inner.recording_reservations = inner.recording_reservations.saturating_sub(1);
             }
-            CapacityReservationKind::Session => {
-                inner.session_reservations = inner.session_reservations.saturating_sub(1);
+            CapacityReservationKind::Session(identity) => {
+                inner.session_reservations.remove(identity);
             }
         }
         self.active = false;
@@ -284,12 +290,12 @@ impl Drop for CapacityReservation {
             return;
         }
         let mut inner = self.inner.lock().unwrap();
-        match self.kind {
+        match &self.kind {
             CapacityReservationKind::Recording => {
                 inner.recording_reservations = inner.recording_reservations.saturating_sub(1);
             }
-            CapacityReservationKind::Session => {
-                inner.session_reservations = inner.session_reservations.saturating_sub(1);
+            CapacityReservationKind::Session(identity) => {
+                inner.session_reservations.remove(identity);
             }
         }
         self.active = false;
@@ -540,18 +546,34 @@ impl UnifiedMediaService {
         })
     }
 
-    fn reserve_session_slot(&self) -> Result<CapacityReservation, MediaError> {
+    fn reserve_session_slot(
+        &self,
+        identity: &MediaOperationId,
+        kind: SessionReservationKind,
+    ) -> Result<CapacityReservation, MediaError> {
         let mut inner = self.inner.lock().unwrap();
-        if inner.sessions.len() + inner.session_reservations >= MAX_ACTIVE_SESSIONS {
+        if inner.session_reservations.contains_key(identity)
+            || inner
+                .sessions
+                .values()
+                .any(|session| &session.origin_operation_id == identity)
+            || (kind == SessionReservationKind::Attach && inner.active.contains_key(identity))
+        {
+            return Err(MediaError::new(
+                MediaErrorKind::InvalidRequest,
+                "media session operation identity is already in use",
+            ));
+        }
+        if inner.sessions.len() + inner.session_reservations.len() >= MAX_ACTIVE_SESSIONS {
             return Err(MediaError::new(
                 MediaErrorKind::Busy,
                 "too many active media sessions",
             ));
         }
-        inner.session_reservations += 1;
+        inner.session_reservations.insert(identity.clone(), kind);
         Ok(CapacityReservation {
             inner: self.inner.clone(),
-            kind: CapacityReservationKind::Session,
+            kind: CapacityReservationKind::Session(identity.clone()),
             active: true,
         })
     }
@@ -1062,6 +1084,14 @@ impl UnifiedMediaService {
             return Err(MediaError::new(
                 MediaErrorKind::InvalidRequest,
                 "duplicate active media identity",
+            ));
+        }
+        if inner.session_reservations.get(&context.identity)
+            == Some(&SessionReservationKind::Attach)
+        {
+            return Err(MediaError::new(
+                MediaErrorKind::InvalidRequest,
+                "media session operation identity is already in use",
             ));
         }
         inner.active.insert(
@@ -1716,6 +1746,23 @@ impl UnifiedMediaService {
         context: MediaOperationContext,
         request: MediaSessionRequest,
     ) -> Result<MediaResult, MediaError> {
+        // A native connector may return an existing physical lease for the
+        // same identity. Reject the replay before querying or opening it, so
+        // duplicate-reference cleanup cannot stop the registered session.
+        let duplicate_identity = {
+            let inner = self.inner.lock().unwrap();
+            inner.session_reservations.contains_key(&context.identity)
+                || inner
+                    .sessions
+                    .values()
+                    .any(|session| session.origin_operation_id == context.identity)
+        };
+        if duplicate_identity {
+            return Err(MediaError::new(
+                MediaErrorKind::InvalidRequest,
+                "media session already registered for this operation identity",
+            ));
+        }
         let (connector, modes) = self.connector_config();
         let connector = connector.ok_or_else(|| unsupported("no media connector is configured"))?;
         if !modes.contains(&request.mode) {
@@ -1778,7 +1825,8 @@ impl UnifiedMediaService {
             .into_iter()
             .collect();
         let audio_sources = Arc::new(RwLock::new(audio_sources));
-        let reservation = self.reserve_session_slot()?;
+        let reservation =
+            self.reserve_session_slot(&context.identity, SessionReservationKind::Start)?;
         let session: Arc<dyn MediaSession> =
             Arc::from(connector.start_session(context.clone(), request).await?);
         let mut cleanup = UnregisteredSessionLease::new(session.clone(), context.clone());
@@ -1820,6 +1868,7 @@ impl UnifiedMediaService {
                     reference.clone(),
                     OwnedSession {
                         owner: context.owner.clone(),
+                        origin_operation_id: context.identity.clone(),
                         session: session.clone(),
                         audio_channel: Arc::new(AsyncMutex::new(None)),
                         intent: Some(intent),
@@ -2905,7 +2954,7 @@ impl media_api::MediaService for UnifiedMediaService {
                 "stale media service epoch",
             ));
         }
-        match self.reserve_session_slot() {
+        match self.reserve_session_slot(&context.identity, SessionReservationKind::Attach) {
             Ok(reservation) => cleanup.hold_reservation(reservation),
             Err(error) => {
                 cleanup.stop().await;
@@ -2965,6 +3014,7 @@ impl media_api::MediaService for UnifiedMediaService {
                     reference.clone(),
                     OwnedSession {
                         owner: context.owner.clone(),
+                        origin_operation_id: context.identity.clone(),
                         session: session.clone(),
                         audio_channel: Arc::new(AsyncMutex::new(None)),
                         intent: None,

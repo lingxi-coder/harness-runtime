@@ -4,11 +4,11 @@
 //!
 //! install (`<plugin>[@<market>]`):
 //! 1. resolve the marketplace from the `known_marketplaces.json` registry
-//!    (an explicit `@market`, else the first registry whose `marketplace.json`
+//!    (an explicit `@market`, else the first registry whose marketplace file
 //!    lists a plugin of that name);
 //! 2. copy the plugin tree `<installLocation>/<entry.source>` → the versioned
-//!    cache `cache/{market}/{plugin}/{version}/` (version from the plugin's
-//!    `plugin.json`);
+//!    cache `cache/{market}/{plugin}/{version}/` (version from the plugin
+//!    manifest, or the marketplace entry when that optional manifest is absent);
 //! 3. write the v2 `installed_plugins.json` record
 //!    (`plugins["<plugin>@<market>"] = [{scope, installPath, version,
 //!    installedAt, lastUpdated}]`) and set `enabledPlugins[id]=true` at scope.
@@ -27,13 +27,15 @@
 //! written to settings. The synchronous core remains available for deterministic
 //! filesystem tests.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use migrations::settings_update::{
-    read_settings_source, update_settings_source_with_before_publish,
+    SettingsUpdateReceipt, read_settings_source, rollback_settings_update,
+    transform_settings_source_with_receipt,
 };
 use serde_json::{Map, Value};
 use telemetry::{AnalyticsBus, AnalyticsValue, LogEventMetadata};
@@ -753,9 +755,7 @@ async fn materialize_external_plugin_source_with_bus(
 }
 
 fn marketplace_entry(market_root: &Path, name: &str) -> Option<Value> {
-    let manifest = market_root
-        .join(branding::PLUGIN_MANIFEST_DIR)
-        .join("marketplace.json");
+    let manifest = branding::marketplace_manifest_path(market_root).ok()?;
     let raw = std::fs::read_to_string(manifest).ok()?;
     let value: Value = serde_json::from_str(&raw).ok()?;
     let plugins = value.get("plugins").and_then(Value::as_array)?;
@@ -763,6 +763,18 @@ fn marketplace_entry(market_root: &Path, name: &str) -> Option<Value> {
         .iter()
         .find(|p| p.get("name").and_then(Value::as_str) == Some(name))
         .cloned()
+}
+
+pub(crate) fn marketplace_entry_for_plugin_id(
+    plugins_dir: &Path,
+    plugin_id: &str,
+) -> Option<Value> {
+    let (name, marketplace) = split_id(plugin_id);
+    let marketplace = marketplace?;
+    let root = load_registry(plugins_dir)
+        .get(marketplace)
+        .and_then(install_location)?;
+    marketplace_entry(&root, name)
 }
 
 fn resolve_plugin_source(
@@ -854,9 +866,7 @@ async fn resolve_plugin_source_with_bus(
 /// or non-boolean values leave the manifest fallback in control; the
 /// marketplace validator is responsible for surfacing schema type errors.
 fn marketplace_entry_default_enabled(market_root: &Path, name: &str) -> Option<bool> {
-    let manifest = market_root
-        .join(branding::PLUGIN_MANIFEST_DIR)
-        .join("marketplace.json");
+    let manifest = branding::marketplace_manifest_path(market_root).ok()?;
     let raw = std::fs::read_to_string(manifest).ok()?;
     let value: Value = serde_json::from_str(&raw).ok()?;
     value
@@ -870,15 +880,12 @@ fn marketplace_entry_default_enabled(market_root: &Path, name: &str) -> Option<b
 
 /// Manifest-level `defaultEnabled`, whose public-schema default is true.
 fn plugin_default_enabled(plugin_root: &Path) -> bool {
-    std::fs::read_to_string(
-        plugin_root
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("plugin.json"),
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    .and_then(|value| value.get("defaultEnabled").and_then(Value::as_bool))
-    .unwrap_or(true)
+    branding::plugin_manifest_path(plugin_root)
+        .ok()
+        .and_then(|manifest| std::fs::read_to_string(manifest).ok())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| value.get("defaultEnabled").and_then(Value::as_bool))
+        .unwrap_or(true)
 }
 
 /// Recursive directory copy (sync).
@@ -953,6 +960,27 @@ fn source_object_field(source: &Utf16JsonProjection, field: &str) -> Utf16JsonPr
         .unwrap_or_else(empty_source_object)
 }
 
+#[derive(Default)]
+struct SettingsRollbackJournal {
+    receipts: Vec<SettingsUpdateReceipt>,
+}
+
+impl SettingsRollbackJournal {
+    fn record(&mut self, receipt: Option<SettingsUpdateReceipt>) {
+        if let Some(receipt) = receipt {
+            self.receipts.push(receipt);
+        }
+    }
+
+    fn rollback(&self) {
+        for receipt in self.receipts.iter().rev() {
+            if let Err(error) = rollback_settings_update(receipt) {
+                tracing::warn!(%error, "failed to roll back plugin settings delta");
+            }
+        }
+    }
+}
+
 /// Read a scope's `enabledPlugins` map.
 fn read_enabled(scope: WritableScope, home: &Path, cwd: &Path) -> Utf16JsonProjection {
     let settings = read_settings_source(&scope_path(scope, home, cwd))
@@ -968,42 +996,54 @@ fn enabled_plugin_value_is_array(scope: WritableScope, home: &Path, cwd: &Path, 
 
 /// Preserve Native array entries across enabledPlugins writes for the root
 /// plugin and dependency rows in the install closure.
-fn edit_enabled_after_install(
+fn edit_enabled_after_install_with_journal(
     scope: WritableScope,
     home: &Path,
     cwd: &Path,
     id: &str,
     value: Option<bool>,
+    journal: &mut SettingsRollbackJournal,
 ) -> Result<(), String> {
-    if enabled_plugin_value_is_array(scope, home, cwd, id) {
-        return Ok(());
-    }
-    edit_enabled(scope, home, cwd, id, value)
+    update_enabled_entry_with_journal(scope, home, cwd, id, value, true, Some(journal))
 }
 
-/// Set (`Some(true/false)`) or delete (`None`) an `enabledPlugins` entry at scope.
-fn edit_enabled(
+fn update_enabled_entry_with_journal(
     scope: WritableScope,
     home: &Path,
     cwd: &Path,
     id: &str,
     value: Option<bool>,
+    preserve_array: bool,
+    journal: Option<&mut SettingsRollbackJournal>,
 ) -> Result<(), String> {
-    let mut map = read_enabled(scope, home, cwd);
-    match value {
-        Some(b) => {
-            map.set_field(id, source_bool(b))
-                .map_err(|error| error.to_string())?;
+    let path = scope_path(scope, home, cwd);
+    let receipt = transform_settings_source_with_receipt(&path, |settings| {
+        let mut enabled = source_object_field(settings, "enabledPlugins");
+        if preserve_array
+            && enabled
+                .get_property(id)
+                .is_some_and(|value| value.array_len().is_some())
+        {
+            return Ok(());
         }
-        None => {
-            map.remove_field(id).map_err(|error| error.to_string())?;
+        match value {
+            Some(enabled_value) => enabled
+                .set_field(id, source_bool(enabled_value))
+                .map_err(|error| error.to_string())?,
+            None => {
+                enabled
+                    .remove_field(id)
+                    .map_err(|error| error.to_string())?;
+            }
         }
+        settings
+            .set_field("enabledPlugins", enabled)
+            .map_err(|error| error.to_string())
+    })?;
+    if let Some(journal) = journal {
+        journal.record(receipt);
     }
-    update_settings_source_with_before_publish(
-        &scope_path(scope, home, cwd),
-        vec![("enabledPlugins".to_string(), Some(map))],
-        || {},
-    )
+    Ok(())
 }
 
 /// `✘ Failed to <verb> plugin "<arg>": <reason>`.
@@ -1011,19 +1051,41 @@ fn fail(verb: &str, arg: &str, reason: &str) -> String {
     format!("✘ Failed to {verb} plugin \"{arg}\": {reason}")
 }
 
-/// Read a plugin's declared `userConfig` schema (`field → {sensitive, required,
-/// …}`) from its `<root>/.lingxi-plugin/plugin.json`. Missing / malformed ⇒ an
-/// empty map (⇒ any `--config` key is "not declared").
-fn read_user_config_schema(plugin_root: &Path) -> Map<String, Value> {
-    std::fs::read_to_string(
-        plugin_root
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("plugin.json"),
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    .and_then(|v| v.get("userConfig").and_then(Value::as_object).cloned())
-    .unwrap_or_default()
+/// Read a plugin's declared `userConfig` schema from its selected root manifest.
+/// The marketplace entry supplies it only when the root `plugin.json` is
+/// absent. A present malformed manifest never falls back to the entry.
+fn read_user_config_schema(
+    plugin_root: &Path,
+    marketplace_entry: Option<&Value>,
+) -> Map<String, Value> {
+    let Ok(manifest_path) = branding::plugin_manifest_path(plugin_root) else {
+        return Map::new();
+    };
+    match std::fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+            let Ok(canonical_root) = std::fs::canonicalize(plugin_root) else {
+                return Map::new();
+            };
+            let Ok(canonical_manifest) = std::fs::canonicalize(&manifest_path) else {
+                return Map::new();
+            };
+            if !canonical_manifest.starts_with(canonical_root) {
+                return Map::new();
+            }
+            std::fs::read_to_string(canonical_manifest)
+                .ok()
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                .and_then(|value| value.get("userConfig").and_then(Value::as_object).cloned())
+                .unwrap_or_default()
+        }
+        Ok(_) => Map::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => marketplace_entry
+            .and_then(|entry| entry.get("userConfig"))
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
+        Err(_) => Map::new(),
+    }
 }
 
 /// Is a declared userConfig field sensitive (routed to secure storage)?
@@ -1143,36 +1205,51 @@ fn persist_plugin_options(
     schema: &Map<String, Value>,
     pairs: &[ConfigPair],
 ) -> Result<(), String> {
+    persist_plugin_options_with_journal(scope, home, cwd, plugin_key, schema, pairs, None)
+}
+
+fn persist_plugin_options_with_journal(
+    scope: WritableScope,
+    home: &Path,
+    cwd: &Path,
+    plugin_key: &str,
+    schema: &Map<String, Value>,
+    pairs: &[ConfigPair],
+    journal: Option<&mut SettingsRollbackJournal>,
+) -> Result<(), String> {
     let path = scope_path(scope, home, cwd);
-    let settings = read_settings_source(&path).unwrap_or_else(|_| empty_source_object());
-    let mut plugin_configs = source_object_field(&settings, "pluginConfigs");
-    let mut entry = source_object_field(&plugin_configs, plugin_key);
-    let mut options = source_object_field(&entry, "options");
-    for pair in pairs {
-        if field_is_sensitive(schema, &pair.key) {
-            // Never write a secret to plaintext settings; drop any stale copy.
-            options
-                .remove_field(&pair.key)
-                .map_err(|error| error.to_string())?;
-        } else {
-            let value = Utf16JsonProjection::from_serde_value(&pair.value)
-                .map_err(|error| error.to_string())?;
-            options
-                .set_field(&pair.key, value)
-                .map_err(|error| error.to_string())?;
+    let receipt = transform_settings_source_with_receipt(&path, |settings| {
+        let mut plugin_configs = source_object_field(settings, "pluginConfigs");
+        let mut entry = source_object_field(&plugin_configs, plugin_key);
+        let mut options = source_object_field(&entry, "options");
+        for pair in pairs {
+            if field_is_sensitive(schema, &pair.key) {
+                // Never write a secret to plaintext settings; drop any stale copy.
+                options
+                    .remove_field(&pair.key)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                let value = Utf16JsonProjection::from_serde_value(&pair.value)
+                    .map_err(|error| error.to_string())?;
+                options
+                    .set_field(&pair.key, value)
+                    .map_err(|error| error.to_string())?;
+            }
         }
+        entry
+            .set_field("options", options)
+            .map_err(|error| error.to_string())?;
+        plugin_configs
+            .set_field(plugin_key, entry)
+            .map_err(|error| error.to_string())?;
+        settings
+            .set_field("pluginConfigs", plugin_configs)
+            .map_err(|error| error.to_string())
+    })?;
+    if let Some(journal) = journal {
+        journal.record(receipt);
     }
-    entry
-        .set_field("options", options)
-        .map_err(|error| error.to_string())?;
-    plugin_configs
-        .set_field(plugin_key, entry)
-        .map_err(|error| error.to_string())?;
-    update_settings_source_with_before_publish(
-        &path,
-        vec![("pluginConfigs".to_string(), Some(plugin_configs))],
-        || {},
-    )
+    Ok(())
 }
 
 /// The `projectPath` an install record carries at this scope: the realpath of
@@ -1201,6 +1278,105 @@ fn record_matches(rec: &Value, scope: WritableScope, proj: &Option<String>) -> b
         None => true,
         Some(p) => rec.get("projectPath").and_then(Value::as_str) == Some(p.as_str()),
     }
+}
+
+const SENSITIVE_CONFIG_KEYS_FIELD: &str = "sensitiveConfigKeys";
+
+fn sensitive_config_keys_from_schema(schema: &Map<String, Value>) -> BTreeSet<String> {
+    schema
+        .iter()
+        .filter_map(|(key, field)| {
+            field
+                .get("sensitive")
+                .and_then(Value::as_bool)
+                .filter(|sensitive| *sensitive)
+                .map(|_| key.clone())
+        })
+        .collect()
+}
+
+fn stored_sensitive_config_keys(record: &Value) -> BTreeSet<String> {
+    record
+        .get(SENSITIVE_CONFIG_KEYS_FIELD)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|key| !key.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Keep the union of sensitive field names on every scope record for a plugin.
+/// Plugin secrets are namespaced by plugin id, not scope, so removing one
+/// scope must leave enough metadata on the surviving records to clean up the
+/// shared credentials when the last scope is removed.
+fn remember_sensitive_config_keys(
+    installed: &mut Value,
+    plugin_id: &str,
+    additional: &BTreeSet<String>,
+) -> bool {
+    let Some(records) = installed
+        .get_mut("plugins")
+        .and_then(Value::as_object_mut)
+        .and_then(|plugins| plugins.get_mut(plugin_id))
+        .and_then(Value::as_array_mut)
+    else {
+        return false;
+    };
+
+    let mut keys = additional.clone();
+    for record in records.iter() {
+        keys.extend(stored_sensitive_config_keys(record));
+    }
+    if keys.is_empty() {
+        return false;
+    }
+    let encoded = Value::Array(keys.into_iter().map(Value::String).collect());
+    let mut changed = false;
+    for record in records {
+        let Some(record) = record.as_object_mut() else {
+            continue;
+        };
+        if record.get(SENSITIVE_CONFIG_KEYS_FIELD) != Some(&encoded) {
+            record.insert(SENSITIVE_CONFIG_KEYS_FIELD.to_string(), encoded.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn sensitive_config_keys_for_plugin_records(
+    plugins_dir: &Path,
+    installed: &Value,
+    plugin_id: &str,
+    marketplace_entry: Option<&Value>,
+) -> BTreeSet<String> {
+    let Some(records) = installed
+        .get("plugins")
+        .and_then(Value::as_object)
+        .and_then(|plugins| plugins.get(plugin_id))
+        .and_then(Value::as_array)
+    else {
+        return BTreeSet::new();
+    };
+
+    let mut keys = BTreeSet::new();
+    for record in records {
+        keys.extend(stored_sensitive_config_keys(record));
+        let Some(install_path) = record.get("installPath").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(install_path) = confined_cache_record_path(plugins_dir, Path::new(install_path))
+        else {
+            continue;
+        };
+        keys.extend(sensitive_config_keys_from_schema(&read_user_config_schema(
+            &install_path,
+            marketplace_entry,
+        )));
+    }
+    keys
 }
 
 /// `plugin install <plugin[@market]> [--scope] [--config]`.
@@ -1255,10 +1431,33 @@ async fn run_install_async(
     analytics_bus: Option<&Arc<AnalyticsBus>>,
     yes: bool,
 ) -> Result<String, String> {
+    run_install_async_with_credential_updates(
+        arg,
+        scope,
+        config,
+        plugins_dir,
+        home,
+        cwd,
+        analytics_bus,
+        yes,
+        None,
+    )
+    .await
+}
+
+async fn run_install_async_with_credential_updates(
+    arg: &str,
+    scope: Option<&str>,
+    config: &[String],
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+    yes: bool,
+    credential_update: Option<(&secret::CredentialManager, &str, &[(String, String)])>,
+) -> Result<String, String> {
     let parsed_scope = parse_scope(scope)?;
     let telemetry_scope = crate::plugin_telemetry::telemetry_scope(Some(scope_label(parsed_scope)));
-    let settings_path = scope_path(parsed_scope, home, cwd);
-    let previous_settings = std::fs::read(&settings_path).ok();
     let mut installed_tx = match plugin::installed::InstalledRegistryTransaction::begin(plugins_dir)
     {
         Ok(tx) => tx,
@@ -1278,6 +1477,24 @@ async fn run_install_async(
     };
     let previous_db = installed_tx.document().clone();
     let mut created_paths = Vec::new();
+    let mut settings_journal = SettingsRollbackJournal::default();
+    let mut previous_secrets = Vec::new();
+    if let Some((credentials, plugin_key, updates)) = credential_update {
+        for (key, _) in updates {
+            let previous = credentials
+                .get_plugin_secret(plugin_key, key)
+                .await
+                .map_err(|error| format!("Failed to read plugin secret {key}: {error}"))?
+                .map(|secret| secret.expose_secret().clone());
+            previous_secrets.push((key.clone(), previous));
+        }
+        for (index, (key, value)) in updates.iter().enumerate() {
+            if let Err(error) = credentials.set_plugin_secret(plugin_key, key, value).await {
+                rollback_plugin_secrets(credentials, plugin_key, &previous_secrets[..=index]).await;
+                return Err(format!("Failed to store plugin secret {key}: {error}"));
+            }
+        }
+    }
     let result = run_install_inner(
         arg,
         scope,
@@ -1286,6 +1503,7 @@ async fn run_install_async(
         home,
         cwd,
         &mut installed_tx,
+        &mut settings_journal,
         false,
         None,
         &mut Vec::new(),
@@ -1295,10 +1513,12 @@ async fn run_install_async(
     )
     .await;
     if result.is_err() {
+        if let Some((credentials, plugin_key, _)) = credential_update {
+            rollback_plugin_secrets(credentials, plugin_key, &previous_secrets).await;
+        }
         rollback_install_transaction(
             plugins_dir,
-            &settings_path,
-            previous_settings.as_deref(),
+            &settings_journal,
             &installed_tx,
             &previous_db,
             &created_paths,
@@ -1412,10 +1632,6 @@ pub fn rollback_installed_registry(installed_tx: &plugin::installed::InstalledRe
     }
 }
 
-fn strict_settings_source(path: &Path) -> Result<Utf16JsonProjection, String> {
-    read_settings_source(path)
-}
-
 pub fn edit_enabled_strict(
     scope: WritableScope,
     home: &Path,
@@ -1423,27 +1639,29 @@ pub fn edit_enabled_strict(
     id: &str,
     value: Option<bool>,
 ) -> Result<(), String> {
-    let path = scope_path(scope, home, cwd);
-    let settings = strict_settings_source(&path)?;
-    let mut enabled = source_object_field(&settings, "enabledPlugins");
-    match value {
-        Some(enabled_value) => {
-            enabled
-                .set_field(id, source_bool(enabled_value))
-                .map_err(|error| error.to_string())?;
-        }
-        None => {
-            enabled
-                .remove_field(id)
-                .map_err(|error| error.to_string())?;
-        }
-    }
-    update_settings_source_with_before_publish(
-        &path,
-        vec![("enabledPlugins".to_string(), Some(enabled))],
-        || {},
-    )
-    .map_err(|error| error.to_string())
+    edit_enabled_strict_inner(scope, home, cwd, id, value, None)
+}
+
+fn edit_enabled_strict_with_journal(
+    scope: WritableScope,
+    home: &Path,
+    cwd: &Path,
+    id: &str,
+    value: Option<bool>,
+    journal: &mut SettingsRollbackJournal,
+) -> Result<(), String> {
+    edit_enabled_strict_inner(scope, home, cwd, id, value, Some(journal))
+}
+
+fn edit_enabled_strict_inner(
+    scope: WritableScope,
+    home: &Path,
+    cwd: &Path,
+    id: &str,
+    value: Option<bool>,
+    journal: Option<&mut SettingsRollbackJournal>,
+) -> Result<(), String> {
+    update_enabled_entry_with_journal(scope, home, cwd, id, value, false, journal)
 }
 
 fn clear_plugin_config_strict(
@@ -1452,24 +1670,46 @@ fn clear_plugin_config_strict(
     cwd: &Path,
     plugin_key: &str,
 ) -> Result<(), String> {
+    clear_plugin_config_strict_inner(scope, home, cwd, plugin_key, None)
+}
+
+fn clear_plugin_config_strict_with_journal(
+    scope: WritableScope,
+    home: &Path,
+    cwd: &Path,
+    plugin_key: &str,
+    journal: &mut SettingsRollbackJournal,
+) -> Result<(), String> {
+    clear_plugin_config_strict_inner(scope, home, cwd, plugin_key, Some(journal))
+}
+
+fn clear_plugin_config_strict_inner(
+    scope: WritableScope,
+    home: &Path,
+    cwd: &Path,
+    plugin_key: &str,
+    journal: Option<&mut SettingsRollbackJournal>,
+) -> Result<(), String> {
     let path = scope_path(scope, home, cwd);
     if !path.exists() {
         return Ok(());
     }
-    let settings = strict_settings_source(&path)?;
-    let mut plugin_configs = source_object_field(&settings, "pluginConfigs");
-    if plugin_configs.get_property(plugin_key).is_none() {
-        return Ok(());
+    let receipt = transform_settings_source_with_receipt(&path, |settings| {
+        let mut plugin_configs = source_object_field(settings, "pluginConfigs");
+        if plugin_configs.get_property(plugin_key).is_none() {
+            return Ok(());
+        }
+        plugin_configs
+            .remove_field(plugin_key)
+            .map_err(|error| error.to_string())?;
+        settings
+            .set_field("pluginConfigs", plugin_configs)
+            .map_err(|error| error.to_string())
+    })?;
+    if let Some(journal) = journal {
+        journal.record(receipt);
     }
-    plugin_configs
-        .remove_field(plugin_key)
-        .map_err(|error| error.to_string())?;
-    update_settings_source_with_before_publish(
-        &path,
-        vec![("pluginConfigs".to_string(), Some(plugin_configs))],
-        || {},
-    )
-    .map_err(|error| error.to_string())
+    Ok(())
 }
 
 fn canonical_record_install_path(plugins_dir: &Path, record: &Value) -> Option<PathBuf> {
@@ -1621,7 +1861,11 @@ fn stage_and_publish_cache_dir(
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error.to_string());
     }
-    plugin::ensure_plugin_manifest(&staging)?;
+    // The caller validated the selected metadata file before staging. A
+    // missing plugin.json is valid for marketplace plugins whose entry
+    // supplies the manifest fields; `ensure_plugin_manifest` would mistake
+    // that optional-manifest tree for an MCPB bundle and require root
+    // `manifest.json`.
     let canonical_staged = std::fs::canonicalize(&staging)
         .map_err(|error| format!("Failed to resolve staged plugin cache: {error}"))?;
     if canonical_staged.parent() != Some(canonical_parent.as_path()) {
@@ -1658,8 +1902,7 @@ fn stage_and_publish_cache_dir(
 
 fn rollback_install_transaction(
     plugins_dir: &Path,
-    settings_path: &Path,
-    previous_settings: Option<&[u8]>,
+    settings_journal: &SettingsRollbackJournal,
     installed_tx: &plugin::installed::InstalledRegistryTransaction,
     previous_db: &Value,
     created_paths: &[PathBuf],
@@ -1677,7 +1920,7 @@ fn rollback_install_transaction(
             }
         }
     }
-    restore_file(settings_path, previous_settings);
+    settings_journal.rollback();
     rollback_installed_registry(installed_tx);
 }
 
@@ -1690,6 +1933,7 @@ async fn run_install_inner(
     home: &Path,
     cwd: &Path,
     installed_tx: &mut plugin::installed::InstalledRegistryTransaction,
+    settings_journal: &mut SettingsRollbackJournal,
     auto_installed: bool,
     required_by: Option<&str>,
     dependency_stack: &mut Vec<String>,
@@ -1735,6 +1979,23 @@ async fn run_install_inner(
         ));
     };
 
+    // Use the runtime's typed manifest parser before deriving cache identity
+    // or installing user configuration. A present malformed native manifest
+    // must fail here rather than becoming `unknown` or falling back to the
+    // other metadata format.
+    let manifest_version = plugin::discovery::plugin_manifest_version(&plugin_src)
+        .await
+        .map_err(|reason| {
+            format!(
+                "Installing plugin \"{arg}\"...{}",
+                fail("install", arg, &reason)
+            )
+        })?;
+    let marketplace_catalog_entry = registry
+        .get(&market_name)
+        .and_then(install_location)
+        .and_then(|root| marketplace_entry(&root, name));
+
     let full_id = format!("{name}@{market_name}");
     if dependency_stack.contains(&full_id) {
         let mut cycle = dependency_stack.clone();
@@ -1770,6 +2031,7 @@ async fn run_install_inner(
         home,
         cwd,
         installed_tx,
+        settings_journal,
         dependency_stack,
         created_paths,
         analytics_bus,
@@ -1787,22 +2049,31 @@ async fn run_install_inner(
     // marketplace/cache plugins.
     // Done BEFORE materialisation so a bad `--config` aborts without a half
     // install; a no-op when no `--config` was passed (byte-identical to before).
-    let schema = read_user_config_schema(&plugin_src);
+    let schema = read_user_config_schema(&plugin_src, marketplace_catalog_entry.as_ref());
+    let sensitive_config_keys = sensitive_config_keys_from_schema(&schema);
     let config_pairs = parse_config_pairs(config, &schema)?;
     if !config_pairs.is_empty() {
-        persist_plugin_options(scope, home, cwd, &full_id, &schema, &config_pairs)?;
+        persist_plugin_options_with_journal(
+            scope,
+            home,
+            cwd,
+            &full_id,
+            &schema,
+            &config_pairs,
+            Some(settings_journal),
+        )?;
     }
 
-    // Version from the plugin's own manifest.
-    let version = std::fs::read_to_string(
-        plugin_src
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("plugin.json"),
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    .and_then(|v| v.get("version").and_then(Value::as_str).map(String::from))
-    .unwrap_or_else(|| "unknown".to_string());
+    // Version from the selected, typed plugin manifest.
+    let version = manifest_version
+        .or_else(|| {
+            marketplace_catalog_entry
+                .as_ref()
+                .and_then(|entry| entry.get("version"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "unknown".to_string());
 
     let proj = project_path(scope, cwd);
     // Already installed AT THIS (scope, projectPath) slot? A record at a
@@ -1814,6 +2085,11 @@ async fn run_install_inner(
         .and_then(Value::as_array)
         .is_some_and(|a| a.iter().any(|r| record_matches(r, scope, &proj)))
     {
+        let sensitive_keys_changed = remember_sensitive_config_keys(
+            installed_tx.document_mut(),
+            &full_id,
+            &sensitive_config_keys,
+        );
         if auto_installed {
             add_required_by_metadata(
                 installed_tx.document_mut(),
@@ -1822,8 +2098,19 @@ async fn run_install_inner(
                 &proj,
                 required_by,
             );
+        }
+        if auto_installed || sensitive_keys_changed {
             installed_tx.persist()?;
-            edit_enabled_after_install(scope, home, cwd, &full_id, Some(true))?;
+        }
+        if auto_installed {
+            edit_enabled_after_install_with_journal(
+                scope,
+                home,
+                cwd,
+                &full_id,
+                Some(true),
+                settings_journal,
+            )?;
         }
         return Ok(format!(
             "Installing plugin \"{arg}\"...✔ Plugin \"{full_id}\" is already installed (scope: {})",
@@ -1918,10 +2205,15 @@ async fn run_install_inner(
             a.push(Value::Object(record));
         }
     }
+    remember_sensitive_config_keys(
+        installed_tx.document_mut(),
+        &full_id,
+        &sensitive_config_keys,
+    );
     installed_tx
         .persist()
         .map_err(|e| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &e)))?;
-    edit_enabled_after_install(
+    edit_enabled_after_install_with_journal(
         scope,
         home,
         cwd,
@@ -1931,6 +2223,7 @@ async fn run_install_inner(
         } else {
             default_enabled
         }),
+        settings_journal,
     )
     .map_err(|e| format!("Installing plugin \"{arg}\"...{}", fail("install", arg, &e)))?;
 
@@ -1950,6 +2243,7 @@ async fn install_declared_dependencies(
     home: &Path,
     cwd: &Path,
     installed_tx: &mut plugin::installed::InstalledRegistryTransaction,
+    settings_journal: &mut SettingsRollbackJournal,
     dependency_stack: &mut Vec<String>,
     created_paths: &mut Vec<PathBuf>,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
@@ -1961,13 +2255,10 @@ async fn install_declared_dependencies(
         .and_then(install_location)
         .ok_or_else(|| format!("Marketplace \"{owner_marketplace}\" is not available"))?;
     let owner_name = name_of(owner_id);
-    let manifest = std::fs::read_to_string(
-        plugin_source
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("plugin.json"),
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+    let manifest = branding::plugin_manifest_path(plugin_source)
+        .ok()
+        .and_then(|manifest| std::fs::read_to_string(manifest).ok())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
     let entry = marketplace_entry(&market_root, owner_name);
     let manifest_dependencies = plugin::parse_dependencies(
         manifest
@@ -1984,20 +2275,17 @@ async fn install_declared_dependencies(
     if dependencies.is_empty() {
         return Ok(());
     }
-    let cross_market_allow = std::fs::read_to_string(
-        market_root
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("marketplace.json"),
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    .and_then(|value| {
-        value
-            .get("allowCrossMarketplaceDependenciesOn")
-            .and_then(Value::as_array)
-            .cloned()
-    })
-    .unwrap_or_default();
+    let cross_market_allow = branding::marketplace_manifest_path(&market_root)
+        .ok()
+        .and_then(|manifest| std::fs::read_to_string(manifest).ok())
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| {
+            value
+                .get("allowCrossMarketplaceDependenciesOn")
+                .and_then(Value::as_array)
+                .cloned()
+        })
+        .unwrap_or_default();
 
     let enabled_scope = parse_scope(scope)?;
     for (dependency, requirements) in dependencies {
@@ -2019,7 +2307,20 @@ async fn install_declared_dependencies(
             resolve_plugin_source_with_bus(&dependency_id, plugins_dir, analytics_bus, yes)
                 .await?
                 .ok_or_else(|| format!("Plugin dependency \"{dependency_id}\" was not found"))?;
-        let available = plugin_version(&dependency_source);
+        let available = plugin::discovery::plugin_manifest_version(&dependency_source)
+            .await
+            .map_err(|error| {
+                format!("Plugin dependency \"{dependency_id}\" has an invalid manifest: {error}")
+            })?
+            .or_else(|| {
+                marketplace_entry_for_plugin_id(plugins_dir, &dependency_id).and_then(|entry| {
+                    entry
+                        .get("version")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+            })
+            .unwrap_or_else(|| "unknown".to_string());
         let array_enabled = enabled_plugin_value_is_array(enabled_scope, home, cwd, &dependency_id);
         let dependency_project = project_path(enabled_scope, cwd);
         let installed_dependency = installed_tx
@@ -2058,6 +2359,7 @@ async fn install_declared_dependencies(
             home,
             cwd,
             installed_tx,
+            settings_journal,
             true,
             Some(owner_id),
             dependency_stack,
@@ -2148,7 +2450,16 @@ where
         }
         return result;
     };
-    let schema = read_user_config_schema(&plugin_source);
+    plugin::discovery::plugin_manifest_version(&plugin_source)
+        .await
+        .map_err(|reason| {
+            format!(
+                "Installing plugin \"{arg}\"...{}",
+                fail("install", arg, &reason)
+            )
+        })?;
+    let marketplace_entry = marketplace_entry_for_plugin_id(plugins_dir, &plugin_key);
+    let schema = read_user_config_schema(&plugin_source, marketplace_entry.as_ref());
     let pairs = parse_config_pairs(config, &schema)?;
     let sensitive: Vec<&ConfigPair> = pairs
         .iter()
@@ -2175,27 +2486,14 @@ where
     }
 
     let credentials = credential_factory().await?;
-    let mut previous = Vec::with_capacity(sensitive.len());
-    for pair in &sensitive {
-        let old = credentials
-            .get_plugin_secret(&plugin_key, &pair.key)
-            .await
-            .map_err(|error| format!("Failed to read plugin secret {}: {error}", pair.key))?
-            .map(|secret| secret.expose_secret().clone());
-        previous.push((pair.key.clone(), old));
-        if let Err(error) = credentials
-            .set_plugin_secret(&plugin_key, &pair.key, &pair.raw_value)
-            .await
-        {
-            rollback_plugin_secrets(&credentials, &plugin_key, &previous).await;
-            return Err(format!(
-                "Failed to store plugin secret {}: {error}",
-                pair.key
-            ));
-        }
-    }
-
-    let result = run_install_async(
+    let updates: Vec<(String, String)> = sensitive
+        .iter()
+        .map(|pair| (pair.key.clone(), pair.raw_value.clone()))
+        .collect();
+    // Secret writes happen only after the install wrapper has acquired the
+    // installed-registry transaction lock. Final uninstall uses that same
+    // lock while deleting the shared secret namespace and removing records.
+    let result = run_install_async_with_credential_updates(
         arg,
         scope,
         config,
@@ -2204,12 +2502,13 @@ where
         cwd,
         analytics_bus.as_ref(),
         yes,
+        Some((&credentials, &plugin_key, &updates)),
     )
     .await;
-    if result.is_err() {
-        rollback_plugin_secrets(&credentials, &plugin_key, &previous).await;
-    } else if let Some(bus) = analytics_bus {
-        emit_installed_event(bus, arg, plugins_dir).await;
+    if result.is_ok() {
+        if let Some(bus) = analytics_bus {
+            emit_installed_event(bus, arg, plugins_dir).await;
+        }
     }
     result
 }
@@ -2254,6 +2553,33 @@ pub fn run_uninstall(
     ))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PluginUninstallOutcome {
+    pub message: String,
+    pub plugin_id: String,
+    pub last_scope_removed: bool,
+}
+
+async fn begin_uninstall_transaction(
+    plugins_dir: &Path,
+    arg: &str,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<plugin::installed::InstalledRegistryTransaction, String> {
+    match plugin::installed::InstalledRegistryTransaction::begin(plugins_dir) {
+        Ok(tx) => Ok(tx),
+        Err(error) => {
+            crate::plugin_telemetry::emit_plugin_state_file_error(
+                analytics_bus,
+                "uninstall",
+                "transaction_begin",
+                registry_error_kind(&error),
+            )
+            .await;
+            Err(fail("uninstall", arg, &error))
+        }
+    }
+}
+
 pub async fn run_uninstall_with_bus(
     arg: &str,
     scope: Option<&str>,
@@ -2265,26 +2591,137 @@ pub async fn run_uninstall_with_bus(
     cwd: &Path,
     analytics_bus: Option<&Arc<AnalyticsBus>>,
 ) -> Result<String, String> {
+    run_uninstall_with_bus_outcome(
+        arg,
+        scope,
+        keep_data,
+        _prune,
+        _yes,
+        plugins_dir,
+        home,
+        cwd,
+        analytics_bus,
+    )
+    .await
+    .map(|outcome| outcome.message)
+}
+
+pub(crate) async fn run_uninstall_with_bus_outcome(
+    arg: &str,
+    scope: Option<&str>,
+    keep_data: bool,
+    prune: bool,
+    yes: bool,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<PluginUninstallOutcome, String> {
+    let scope_value = parse_scope(scope)?;
+    let mut installed_tx = begin_uninstall_transaction(plugins_dir, arg, analytics_bus).await?;
+    let installed = installed_tx.document().clone();
+    let plugin_key = resolve_uninstall_plugin_key(&installed, arg);
+    let marketplace_entry = marketplace_entry_for_plugin_id(plugins_dir, &plugin_key);
+    let sensitive_keys = sensitive_config_keys_for_plugin_records(
+        plugins_dir,
+        &installed,
+        &plugin_key,
+        marketplace_entry.as_ref(),
+    );
+    let mut outcome = run_uninstall_with_sensitive_config_keys(
+        arg,
+        scope,
+        keep_data,
+        prune,
+        yes,
+        plugins_dir,
+        home,
+        cwd,
+        analytics_bus,
+        &mut installed_tx,
+        &sensitive_keys,
+    )
+    .await?;
+    drop(installed_tx);
+    append_uninstall_suffix(
+        &mut outcome,
+        prune,
+        yes,
+        scope_value,
+        plugins_dir,
+        home,
+        cwd,
+        analytics_bus,
+    )
+    .await?;
+    Ok(outcome)
+}
+
+fn resolve_uninstall_plugin_key(installed: &Value, arg: &str) -> String {
+    let (name, marketplace) = split_id(arg);
+    marketplace.map_or_else(
+        || {
+            installed
+                .get("plugins")
+                .and_then(Value::as_object)
+                .and_then(|plugins| plugins.keys().find(|id| name_of(id) == name).cloned())
+                .unwrap_or_else(|| name.to_string())
+        },
+        |marketplace| format!("{name}@{marketplace}"),
+    )
+}
+
+async fn append_uninstall_suffix(
+    outcome: &mut PluginUninstallOutcome,
+    prune: bool,
+    yes: bool,
+    scope: WritableScope,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+) -> Result<(), String> {
+    if prune {
+        let prune_message = crate::plugin_prune::run_prune_with_bus(
+            false,
+            yes,
+            scope_label(scope),
+            plugins_dir,
+            home,
+            cwd,
+            analytics_bus,
+        )
+        .await?;
+        outcome.message.push('\n');
+        outcome.message.push_str(&prune_message);
+    } else {
+        let project = project_path(scope, cwd);
+        outcome
+            .message
+            .push_str(&uninstall_orphan_suffix(plugins_dir, scope, &project));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_uninstall_with_sensitive_config_keys(
+    arg: &str,
+    scope: Option<&str>,
+    keep_data: bool,
+    _prune: bool,
+    _yes: bool,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+    installed_tx: &mut plugin::installed::InstalledRegistryTransaction,
+    additional_sensitive_keys: &BTreeSet<String>,
+) -> Result<PluginUninstallOutcome, String> {
     let scope = parse_scope(scope)?;
     let telemetry_scope = crate::plugin_telemetry::telemetry_scope(Some(scope_label(scope)));
     let proj = project_path(scope, cwd);
-    let settings_path = scope_path(scope, home, cwd);
-    let previous_settings = std::fs::read(&settings_path).ok();
+    let mut settings_journal = SettingsRollbackJournal::default();
     let (name, market) = split_id(arg);
-    let mut installed_tx = match plugin::installed::InstalledRegistryTransaction::begin(plugins_dir)
-    {
-        Ok(tx) => tx,
-        Err(error) => {
-            crate::plugin_telemetry::emit_plugin_state_file_error(
-                analytics_bus,
-                "uninstall",
-                "transaction_begin",
-                registry_error_kind(&error),
-            )
-            .await;
-            return Err(fail("uninstall", arg, &error));
-        }
-    };
     let result = async {
         // Resolve the full id: explicit `@market`, else the first installed key
         // whose name-part matches.
@@ -2311,6 +2748,10 @@ pub async fn run_uninstall_with_bus(
                 &format!("Plugin \"{full_id}\" not found in installed plugins"),
             ));
         };
+        let mut sensitive_keys = additional_sensitive_keys.clone();
+        for record in records {
+            sensitive_keys.extend(stored_sensitive_config_keys(record));
+        }
 
         // Records at the requested (scope, projectPath) slot. If none, the plugin is
         // installed at some OTHER scope — name it, matching the binary.
@@ -2355,13 +2796,14 @@ pub async fn run_uninstall_with_bus(
                 }
             }
         }
+        remember_sensitive_config_keys(installed_tx.document_mut(), &full_id, &sensitive_keys);
 
         installed_tx
             .persist()
             .map_err(|error| fail("uninstall", arg, &error))?;
-        edit_enabled_strict(scope, home, cwd, &full_id, None)
+        edit_enabled_strict_with_journal(scope, home, cwd, &full_id, None, &mut settings_journal)
             .map_err(|error| fail("uninstall", arg, &error))?;
-        clear_plugin_config_strict(scope, home, cwd, &full_id)
+        clear_plugin_config_strict_with_journal(scope, home, cwd, &full_id, &mut settings_journal)
             .map_err(|error| fail("uninstall", arg, &error))?;
 
         mark_orphaned_cache_paths(&unreferenced_removed_record_paths(
@@ -2369,7 +2811,8 @@ pub async fn run_uninstall_with_bus(
             installed_tx.document(),
             &matching,
         ));
-        if !keep_data && !plugin_has_records(installed_tx.document(), &full_id) {
+        let last_scope_removed = !plugin_has_records(installed_tx.document(), &full_id);
+        if !keep_data && last_scope_removed {
             if let Some(path) = confined_plugin_data_path(plugins_dir, &full_id) {
                 let _ = std::fs::remove_dir_all(path);
             }
@@ -2384,15 +2827,19 @@ pub async fn run_uninstall_with_bus(
         )
         .await;
 
-        Ok(format!(
-            "✔ Successfully uninstalled plugin: {} (scope: {})",
-            name_of(&full_id),
-            scope_label(scope)
-        ))
+        Ok(PluginUninstallOutcome {
+            message: format!(
+                "✔ Successfully uninstalled plugin: {} (scope: {})",
+                name_of(&full_id),
+                scope_label(scope)
+            ),
+            plugin_id: full_id,
+            last_scope_removed,
+        })
     }
     .await;
     if result.is_err() {
-        restore_file(&settings_path, previous_settings.as_deref());
+        settings_journal.rollback();
         rollback_installed_registry(&installed_tx);
     }
     result
@@ -2416,45 +2863,71 @@ where
     F: FnOnce() -> Fut,
     Fut: std::future::Future<Output = Result<Arc<secret::CredentialManager>, String>>,
 {
+    run_uninstall_with_credential_factory_outcome(
+        arg,
+        scope,
+        keep_data,
+        prune,
+        yes,
+        plugins_dir,
+        home,
+        cwd,
+        analytics_bus,
+        credential_factory,
+    )
+    .await
+    .map(|outcome| outcome.message)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_uninstall_with_credential_factory_outcome<F, Fut>(
+    arg: &str,
+    scope: Option<&str>,
+    keep_data: bool,
+    prune: bool,
+    yes: bool,
+    plugins_dir: &Path,
+    home: &Path,
+    cwd: &Path,
+    analytics_bus: Option<&Arc<AnalyticsBus>>,
+    credential_factory: F,
+) -> Result<PluginUninstallOutcome, String>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<Arc<secret::CredentialManager>, String>>,
+{
     let scope_value = parse_scope(scope)?;
     let project = project_path(scope_value, cwd);
-    let installed = load_installed(plugins_dir);
-    let (name, marketplace) = split_id(arg);
-    let plugin_key = marketplace.map_or_else(
-        || {
-            installed
-                .get("plugins")
-                .and_then(Value::as_object)
-                .and_then(|plugins| plugins.keys().find(|id| name_of(id) == name).cloned())
-                .unwrap_or_else(|| name.to_string())
-        },
-        |marketplace| format!("{name}@{marketplace}"),
+    // Hold the installed-registry lock through the last-scope check, secret
+    // deletion, and registry mutation. Otherwise a concurrent install could
+    // add a new scope after this snapshot and have its shared credentials
+    // deleted by the in-flight uninstall.
+    let mut installed_tx = begin_uninstall_transaction(plugins_dir, arg, analytics_bus).await?;
+    let installed = installed_tx.document().clone();
+    let plugin_key = resolve_uninstall_plugin_key(&installed, arg);
+    let marketplace_entry = marketplace_entry_for_plugin_id(plugins_dir, &plugin_key);
+    let sensitive_keys = sensitive_config_keys_for_plugin_records(
+        plugins_dir,
+        &installed,
+        &plugin_key,
+        marketplace_entry.as_ref(),
     );
-    let sensitive_keys: Vec<String> = installed
+    let records = installed
         .get("plugins")
         .and_then(|plugins| plugins.get(&plugin_key))
-        .and_then(Value::as_array)
-        .and_then(|records| {
-            records
+        .and_then(Value::as_array);
+    let removes_last_record = records.is_some_and(|records| {
+        records
+            .iter()
+            .any(|record| record_matches(record, scope_value, &project))
+            && !records
                 .iter()
-                .find(|record| record_matches(record, scope_value, &project))
-        })
-        .and_then(|record| record.get("installPath"))
-        .and_then(Value::as_str)
-        .and_then(|path| confined_cache_record_path(plugins_dir, Path::new(path)))
-        .map(|path| read_user_config_schema(&path))
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|(key, field)| {
-            field
-                .get("sensitive")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-                .then_some(key)
-        })
-        .collect();
-
-    let credential_stack = if sensitive_keys.is_empty() {
+                .any(|record| !record_matches(record, scope_value, &project))
+    });
+    // Credential keys share the plugin identity across user/project/local
+    // records. Keep them while any scope still installs that plugin; only the
+    // final uninstall clears the shared secret namespace.
+    let credential_stack = if !removes_last_record || sensitive_keys.is_empty() {
         None
     } else {
         Some(credential_factory().await?)
@@ -2476,7 +2949,7 @@ where
             }
         }
     }
-    let mut message = match run_uninstall_with_bus(
+    let mut outcome = match run_uninstall_with_sensitive_config_keys(
         arg,
         scope,
         keep_data,
@@ -2486,10 +2959,12 @@ where
         home,
         cwd,
         analytics_bus,
+        &mut installed_tx,
+        &sensitive_keys,
     )
     .await
     {
-        Ok(message) => message,
+        Ok(outcome) => outcome,
         Err(error) => {
             if let Some(stack) = &credential_stack {
                 rollback_plugin_secrets(stack, &plugin_key, &previous_secrets).await;
@@ -2497,33 +2972,22 @@ where
             return Err(error);
         }
     };
-    if prune {
-        let prune_message = crate::plugin_prune::run_prune_with_bus(
-            false,
-            yes,
-            scope_label(scope_value),
-            plugins_dir,
-            home,
-            cwd,
-            analytics_bus,
-        )
-        .await?;
-        message.push('\n');
-        message.push_str(&prune_message);
-    } else {
-        // §22 (oracle `QWn`): without `--prune`, proactively point out any
-        // auto-installed dependency this removal just orphaned, instead of
-        // leaving it silently stranded until the user happens to run
-        // `plugin prune` on their own.
-        message.push_str(&uninstall_orphan_suffix(plugins_dir, scope_value, &project));
-    }
-    Ok(message)
+    drop(installed_tx);
+    append_uninstall_suffix(
+        &mut outcome,
+        prune,
+        yes,
+        scope_value,
+        plugins_dir,
+        home,
+        cwd,
+        analytics_bus,
+    )
+    .await?;
+    Ok(outcome)
 }
 
-/// The trailing text a non-`--prune` `plugin uninstall` appends (oracle
-/// `QWn`): any auto-installed dependency the removal just left unreachable,
-/// or `""` when there is nothing to report. Reads the just-updated installed
-/// DB, so it reflects the POST-removal dependency graph.
+/// The trailing text a non-`--prune` uninstall appends to the message.
 fn uninstall_orphan_suffix(
     plugins_dir: &Path,
     scope: WritableScope,
@@ -2558,7 +3022,6 @@ fn scope_project_path(scope: &str, cwd: &Path) -> Option<PathBuf> {
         None
     }
 }
-
 /// Resolve a full `name@market` id to its marketplace + on-disk plugin source
 /// dir (mirrors `iP`): a bare id (no `@`) or a market/plugin the registry can't
 /// resolve ⇒ `None` (⇒ the caller's `Plugin "<name>" not found`).
@@ -2594,19 +3057,6 @@ async fn resolve_source_with_bus(
     )
     .await?
     .map(|source| (market.to_string(), source)))
-}
-
-/// The version string from a plugin's own manifest (`unknown` when absent).
-fn plugin_version(plugin_src: &Path) -> String {
-    std::fs::read_to_string(
-        plugin_src
-            .join(branding::PLUGIN_MANIFEST_DIR)
-            .join("plugin.json"),
-    )
-    .ok()
-    .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-    .and_then(|v| v.get("version").and_then(Value::as_str).map(String::from))
-    .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// `plugin update <plugin> [--scope]` — re-materialize an installed plugin from
@@ -2804,7 +3254,37 @@ async fn update_inner(
             (idx, ov, op)
         };
 
-        let new_version = plugin_version(&plugin_src);
+        let manifest_version = plugin::discovery::plugin_manifest_version(&plugin_src)
+            .await
+            .map_err(|error| format!("Plugin manifest is invalid: {error}"))?;
+        let marketplace_entry = load_registry(plugins_dir)
+            .get(&market_name)
+            .and_then(install_location)
+            .and_then(|market_root| marketplace_entry(&market_root, split_id(&id).0));
+        let marketplace_version = marketplace_entry
+            .as_ref()
+            .and_then(|entry| entry.get("version").and_then(Value::as_str).map(str::to_owned));
+        let mut updated_sensitive_keys = sensitive_config_keys_from_schema(&read_user_config_schema(
+            &plugin_src,
+            marketplace_entry.as_ref(),
+        ));
+        // Read the previous installed cache before replacing its installPath.
+        // Older registry records may predate `sensitiveConfigKeys`, so the
+        // old manifest is the last durable source for renamed/deleted fields.
+        updated_sensitive_keys.extend(sensitive_config_keys_for_plugin_records(
+            plugins_dir,
+            installed_tx.document(),
+            &id,
+            marketplace_entry.as_ref(),
+        ));
+        let sensitive_keys_changed = remember_sensitive_config_keys(
+            installed_tx.document_mut(),
+            &id,
+            &updated_sensitive_keys,
+        );
+        let new_version = manifest_version
+            .or(marketplace_version)
+            .unwrap_or_else(|| "unknown".to_string());
         let id_name = split_id(&id).0;
         let dest = plugins_dir
             .join("cache")
@@ -2817,6 +3297,10 @@ async fn update_inner(
             && (old_version.as_deref() == Some(new_version.as_str())
                 || old_path.as_deref() == Some(dest_str.as_str()))
         {
+            if sensitive_keys_changed {
+                installed_tx.persist()?;
+                committed = true;
+            }
             return Ok(format!(
                 "{name} is already at the latest version ({new_version})."
             ));
@@ -2936,6 +3420,570 @@ mod tests {
         }
     }
 
+    fn claude_sensitive_env() -> Env {
+        let e = env();
+        std::fs::remove_dir_all(e.market.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        let plugin_root = e.market.join("plugins/hello");
+        std::fs::remove_dir_all(plugin_root.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        write_claude_sensitive_schema(&e, "1.2.3", &["API_TOKEN"]);
+        e
+    }
+
+    fn write_claude_sensitive_schema(e: &Env, version: &str, keys: &[&str]) {
+        let user_config: serde_json::Map<String, Value> = keys
+            .iter()
+            .map(|key| {
+                (
+                    (*key).to_string(),
+                    serde_json::json!({
+                        "type": "string",
+                        "title": key,
+                        "description": "credential",
+                        "sensitive": true
+                    }),
+                )
+            })
+            .collect();
+        let plugin_manifest_dir = e
+            .market
+            .join("plugins/hello")
+            .join(branding::CLAUDE_PLUGIN_MANIFEST_DIR);
+        std::fs::create_dir_all(&plugin_manifest_dir).unwrap();
+        std::fs::write(
+            plugin_manifest_dir.join("plugin.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": "hello",
+                "version": version,
+                "userConfig": user_config.clone()
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let marketplace_manifest_dir = e.market.join(branding::CLAUDE_PLUGIN_MANIFEST_DIR);
+        std::fs::create_dir_all(&marketplace_manifest_dir).unwrap();
+        std::fs::write(
+            marketplace_manifest_dir.join("marketplace.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "name": "mymkt",
+                "owner": {"name": "me"},
+                "plugins": [{
+                    "name": "hello",
+                    "version": version,
+                    "source": "./plugins/hello",
+                    "userConfig": user_config
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    struct CredentialTestClock;
+
+    impl lingxi_core::host::Clock for CredentialTestClock {
+        fn now(&self) -> std::time::SystemTime {
+            std::time::SystemTime::UNIX_EPOCH
+        }
+    }
+
+    struct UnusedCredentialHttp;
+
+    impl lingxi_core::host::HttpTransport for UnusedCredentialHttp {
+        fn request<'life0, 'async_trait>(
+            &'life0 self,
+            _request: lingxi_core::types::HttpRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            lingxi_core::types::HttpResponse,
+                            lingxi_core::host::HttpError,
+                        >,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async {
+                Err(lingxi_core::host::HttpError::InvalidRequest(
+                    "credential tests do not use HTTP".to_string(),
+                ))
+            })
+        }
+
+        fn stream_sse<'life0, 'async_trait>(
+            &'life0 self,
+            _request: lingxi_core::types::HttpRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<
+                        Output = Result<
+                            lingxi_core::host::http::SseStream,
+                            lingxi_core::host::HttpError,
+                        >,
+                    > + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'life0: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async {
+                Err(lingxi_core::host::HttpError::InvalidRequest(
+                    "credential tests do not use HTTP".to_string(),
+                ))
+            })
+        }
+    }
+
+    fn in_memory_credentials() -> Arc<secret::CredentialManager> {
+        Arc::new(secret::CredentialManager::new(
+            Arc::new(lingxi_core::host::InMemorySecureStorage::new()),
+            Arc::new(CredentialTestClock),
+            Arc::new(UnusedCredentialHttp),
+        ))
+    }
+
+    fn credential_test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn uninstall_clears_sensitive_keys_after_schema_change_and_marketplace_removal() {
+        let e = claude_sensitive_env();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        let credentials = in_memory_credentials();
+        let runtime = credential_test_runtime();
+
+        // Simulate a record written before sensitive-key metadata existed.
+        let mut installed = installed_db(&e);
+        installed["plugins"]["hello@mymkt"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(SENSITIVE_CONFIG_KEYS_FIELD);
+        write_current_installed(&e, &installed);
+        runtime
+            .block_on(credentials.set_plugin_secret("hello@mymkt", "API_TOKEN", "old-secret"))
+            .unwrap();
+
+        // Reconfiguring an already-installed legacy record learns the current
+        // schema's key name transactionally, without putting the value in the
+        // installed registry or settings file.
+        let old_config = vec!["API_TOKEN=rotated-secret".to_string()];
+        let install_credentials = credentials.clone();
+        runtime
+            .block_on(run_install_with_credential_factory(
+                "hello@mymkt",
+                Some("user"),
+                true,
+                &old_config,
+                &e.plugins,
+                &e.home,
+                &e.cwd,
+                None,
+                || async move { Ok(install_credentials) },
+            ))
+            .unwrap();
+        let installed = installed_db(&e);
+        assert_eq!(
+            installed["plugins"]["hello@mymkt"][0][SENSITIVE_CONFIG_KEYS_FIELD],
+            serde_json::json!(["API_TOKEN"])
+        );
+        assert!(
+            !std::fs::read_to_string(installed_path(&e.plugins))
+                .unwrap()
+                .contains("rotated-secret")
+        );
+
+        // The catalog changes the sensitive field name. Update retains the
+        // old key name alongside the new schema so both can be cleaned later.
+        write_claude_sensitive_schema(&e, "2.0.0", &["NEW_TOKEN"]);
+        run_update("hello@mymkt", "user", &e.plugins, &e.home, &e.cwd).unwrap();
+        let installed = installed_db(&e);
+        assert_eq!(
+            installed["plugins"]["hello@mymkt"][0][SENSITIVE_CONFIG_KEYS_FIELD],
+            serde_json::json!(["API_TOKEN", "NEW_TOKEN"])
+        );
+
+        let new_config = vec!["NEW_TOKEN=new-secret".to_string()];
+        let install_credentials = credentials.clone();
+        runtime
+            .block_on(run_install_with_credential_factory(
+                "hello@mymkt",
+                Some("user"),
+                true,
+                &new_config,
+                &e.plugins,
+                &e.home,
+                &e.cwd,
+                None,
+                || async move { Ok(install_credentials) },
+            ))
+            .unwrap();
+
+        // Once the marketplace is gone, uninstall must rely on the durable
+        // names and the credential namespace must still be fully cleared.
+        std::fs::remove_dir_all(&e.market).unwrap();
+        let uninstall_credentials = credentials.clone();
+        runtime
+            .block_on(run_uninstall_with_credential_factory(
+                "hello@mymkt",
+                Some("user"),
+                false,
+                false,
+                true,
+                &e.plugins,
+                &e.home,
+                &e.cwd,
+                None,
+                || async move { Ok(uninstall_credentials) },
+            ))
+            .unwrap();
+        assert!(
+            runtime
+                .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            runtime
+                .block_on(credentials.get_plugin_secret("hello@mymkt", "NEW_TOKEN"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(installed_db(&e)["plugins"].get("hello@mymkt").is_none());
+    }
+
+    #[test]
+    fn update_retains_sensitive_keys_from_the_old_cache_schema() {
+        let e = claude_sensitive_env();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        let mut installed = installed_db(&e);
+        installed["plugins"]["hello@mymkt"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove(SENSITIVE_CONFIG_KEYS_FIELD);
+        write_current_installed(&e, &installed);
+
+        let credentials = in_memory_credentials();
+        let runtime = credential_test_runtime();
+        runtime
+            .block_on(credentials.set_plugin_secret("hello@mymkt", "API_TOKEN", "old-secret"))
+            .unwrap();
+
+        // This legacy record has no key-name metadata. Once update changes the
+        // selected source schema, only its old cache manifest can identify the
+        // stale API_TOKEN secret.
+        write_claude_sensitive_schema(&e, "2.0.0", &["NEW_TOKEN"]);
+        run_update("hello@mymkt", "user", &e.plugins, &e.home, &e.cwd).unwrap();
+        assert_eq!(
+            installed_db(&e)["plugins"]["hello@mymkt"][0][SENSITIVE_CONFIG_KEYS_FIELD],
+            serde_json::json!(["API_TOKEN", "NEW_TOKEN"])
+        );
+        runtime
+            .block_on(credentials.set_plugin_secret("hello@mymkt", "NEW_TOKEN", "new-secret"))
+            .unwrap();
+
+        std::fs::remove_dir_all(&e.market).unwrap();
+        let uninstall_credentials = credentials.clone();
+        runtime
+            .block_on(run_uninstall_with_credential_factory(
+                "hello@mymkt",
+                Some("user"),
+                false,
+                false,
+                true,
+                &e.plugins,
+                &e.home,
+                &e.cwd,
+                None,
+                || async move { Ok(uninstall_credentials) },
+            ))
+            .unwrap();
+        assert!(
+            runtime
+                .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            runtime
+                .block_on(credentials.get_plugin_secret("hello@mymkt", "NEW_TOKEN"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn uninstall_keeps_shared_sensitive_secret_until_last_scope_is_removed() {
+        let e = claude_sensitive_env();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        run_install(
+            "hello@mymkt",
+            Some("project"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        let credentials = in_memory_credentials();
+        let runtime = credential_test_runtime();
+        runtime
+            .block_on(credentials.set_plugin_secret("hello@mymkt", "API_TOKEN", "shared"))
+            .unwrap();
+
+        let called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let called_by_factory = called.clone();
+        let credentials_for_factory = credentials.clone();
+        runtime
+            .block_on(run_uninstall_with_credential_factory(
+                "hello@mymkt",
+                Some("user"),
+                false,
+                false,
+                true,
+                &e.plugins,
+                &e.home,
+                &e.cwd,
+                None,
+                move || async move {
+                    called_by_factory.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(credentials_for_factory)
+                },
+            ))
+            .unwrap();
+        assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            runtime
+                .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            installed_db(&e)["plugins"]["hello@mymkt"][0][SENSITIVE_CONFIG_KEYS_FIELD],
+            serde_json::json!(["API_TOKEN"])
+        );
+
+        let uninstall_credentials = credentials.clone();
+        runtime
+            .block_on(run_uninstall_with_credential_factory(
+                "hello@mymkt",
+                Some("project"),
+                false,
+                false,
+                true,
+                &e.plugins,
+                &e.home,
+                &e.cwd,
+                None,
+                || async move { Ok(uninstall_credentials) },
+            ))
+            .unwrap();
+        assert!(
+            runtime
+                .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn failed_sensitive_uninstall_restores_registry_and_credential() {
+        let e = claude_sensitive_env();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+        let credentials = in_memory_credentials();
+        let runtime = credential_test_runtime();
+        runtime
+            .block_on(credentials.set_plugin_secret("hello@mymkt", "API_TOKEN", "recover"))
+            .unwrap();
+        let before_registry = std::fs::read(installed_path(&e.plugins)).unwrap();
+
+        std::fs::remove_file(e.home.join("settings.json")).unwrap();
+        std::fs::create_dir_all(e.home.join("settings.json")).unwrap();
+        let uninstall_credentials = credentials.clone();
+        let error = runtime
+            .block_on(run_uninstall_with_credential_factory(
+                "hello@mymkt",
+                Some("user"),
+                false,
+                false,
+                true,
+                &e.plugins,
+                &e.home,
+                &e.cwd,
+                None,
+                || async move { Ok(uninstall_credentials) },
+            ))
+            .unwrap_err();
+        assert!(error.contains("Failed to uninstall plugin"), "{error}");
+        assert_eq!(
+            std::fs::read(installed_path(&e.plugins)).unwrap(),
+            before_registry,
+            "failed settings update must restore exact installed-registry bytes"
+        );
+        assert_eq!(
+            runtime
+                .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "recover"
+        );
+    }
+
+    #[test]
+    fn failed_sensitive_install_restores_previous_credential() {
+        let e = claude_sensitive_env();
+        let credentials = in_memory_credentials();
+        let runtime = credential_test_runtime();
+        runtime
+            .block_on(credentials.set_plugin_secret("hello@mymkt", "API_TOKEN", "previous"))
+            .unwrap();
+        let plugin_manifest = e
+            .market
+            .join("plugins/hello")
+            .join(branding::CLAUDE_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json");
+
+        let config = vec!["API_TOKEN=replacement".to_string()];
+        let install_credentials = credentials.clone();
+        let manifest_for_factory = plugin_manifest.clone();
+        let error = runtime
+            .block_on(run_install_with_credential_factory(
+                "hello@mymkt",
+                Some("user"),
+                true,
+                &config,
+                &e.plugins,
+                &e.home,
+                &e.cwd,
+                None,
+                || async move {
+                    // The wrapper has already parsed the valid schema before
+                    // initializing credentials. Make its second manifest read
+                    // fail so secret storage is exercised before install rollback.
+                    std::fs::write(manifest_for_factory, b"{invalid json").unwrap();
+                    Ok(install_credentials)
+                },
+            ))
+            .unwrap_err();
+        assert!(error.contains("invalid plugin manifest"), "{error}");
+        assert!(!installed_path(&e.plugins).exists());
+        assert!(!e.home.join("settings.json").exists());
+        assert_eq!(
+            runtime
+                .block_on(credentials.get_plugin_secret("hello@mymkt", "API_TOKEN"))
+                .unwrap()
+                .unwrap()
+                .expose_secret(),
+            "previous"
+        );
+    }
+
+    #[test]
+    fn failed_install_waiting_for_registry_lock_preserves_newer_settings() {
+        let e = env();
+        run_install(
+            "hello@mymkt",
+            Some("user"),
+            &[],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .unwrap();
+
+        // Hold the registry lock while a settings writer publishes a newer
+        // valid document. The failing install starts during that interval and
+        // must not overwrite the settings writer's committed change.
+        let lock = plugin::installed::InstalledRegistryTransaction::begin(&e.plugins).unwrap();
+        let plugins = e.plugins.clone();
+        let home = e.home.clone();
+        let cwd = e.cwd.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            started_tx.send(()).unwrap();
+            runtime.block_on(run_install_async(
+                "hello@mymkt",
+                Some("user"),
+                &["UNKNOWN=value".to_string()],
+                &plugins,
+                &home,
+                &cwd,
+                None,
+                false,
+            ))
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("install worker did not start");
+        thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !worker.is_finished(),
+            "install worker should still be waiting for the held registry lock"
+        );
+
+        let settings_path = e.home.join("settings.json");
+        let mut settings = user_settings(&e);
+        settings["enabledPlugins"]["hello@mymkt"] = Value::Bool(false);
+        let latest_settings = serde_json::to_vec(&settings).unwrap();
+        std::fs::write(&settings_path, &latest_settings).unwrap();
+        drop(lock);
+
+        let error = worker.join().unwrap().unwrap_err();
+        assert!(error.contains("isn't declared"), "{error}");
+        assert_eq!(
+            std::fs::read(settings_path).unwrap(),
+            latest_settings,
+            "failed install rollback must preserve settings written while it waited for the registry lock"
+        );
+    }
+
     fn user_settings(e: &Env) -> Value {
         serde_json::from_str(&std::fs::read_to_string(e.home.join("settings.json")).unwrap())
             .unwrap()
@@ -3032,6 +4080,230 @@ mod tests {
             user_settings(&e)["enabledPlugins"]["hello@mymkt"],
             Value::Bool(true)
         );
+    }
+
+    #[test]
+    fn install_and_runtime_discovery_preserve_current_claude_plugin_tree() {
+        let e = env();
+        std::fs::remove_dir_all(e.market.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        let plugin_manifest_dir = e.market.join(branding::CLAUDE_PLUGIN_MANIFEST_DIR);
+        std::fs::create_dir_all(&plugin_manifest_dir).unwrap();
+        std::fs::create_dir_all(e.market.join("skills/webmcp")).unwrap();
+        std::fs::write(
+            plugin_manifest_dir.join("marketplace.json"),
+            r#"{"name":"ora","owner":{"name":"ora"},"plugins":[{"name":"webmcp","version":"0.10.0","source":"./"}]}"#,
+        )
+        .unwrap();
+        let plugin_json = br#"{"name":"webmcp","version":"0.10.0","skills":"./skills"}"#;
+        std::fs::write(plugin_manifest_dir.join("plugin.json"), plugin_json).unwrap();
+        let skill_body = "# Upstream WebMCP\n\nUse ${CLAUDE_PLUGIN_ROOT}/resources as shipped.\n";
+        let skill_path = e.market.join("skills/webmcp/SKILL.md");
+        std::fs::write(&skill_path, skill_body).unwrap();
+        let install_location = std::fs::canonicalize(&e.market)
+            .unwrap()
+            .display()
+            .to_string();
+        std::fs::write(
+            e.plugins.join("known_marketplaces.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "ora": {
+                    "source": {"source": "directory", "path": install_location.clone()},
+                    "installLocation": install_location
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let message = run_install("webmcp@ora", None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect("temporary Claude-format marketplace installs");
+        assert!(message.contains("Successfully installed plugin: webmcp@ora"));
+
+        let cache = e.plugins.join("cache/ora/webmcp/0.10.0");
+        assert_eq!(
+            std::fs::read(
+                cache
+                    .join(branding::CLAUDE_PLUGIN_MANIFEST_DIR)
+                    .join("plugin.json")
+            )
+            .unwrap(),
+            plugin_json,
+            "the source manifest is copied byte-for-byte"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cache.join("skills/webmcp/SKILL.md")).unwrap(),
+            skill_body
+        );
+        assert!(!cache.join(branding::PLUGIN_MANIFEST_DIR).exists());
+        assert_eq!(
+            installed_db(&e)["plugins"]["webmcp@ora"][0]["version"],
+            "0.10.0"
+        );
+
+        let enabled = std::collections::BTreeMap::from([("webmcp@ora".to_string(), true)]);
+        let context = plugin::PluginDiscoveryContext::new(
+            e.cwd.clone(),
+            e.cwd.clone(),
+            Arc::new(plugin::PluginArchiveSession::new()),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let discovered = runtime.block_on(plugin::discover_enabled_plugins(
+            &e.plugins, &enabled, &context,
+        ));
+        assert_eq!(discovered.len(), 1);
+        let (_id, manifest, install_path) = &discovered[0];
+        assert_eq!(manifest.name, "webmcp");
+        assert_eq!(manifest.version, "0.10.0");
+        assert_eq!(install_path, &cache);
+        assert!(matches!(
+            &manifest.source,
+            plugin::PluginSource::LocalPath { path } if path == &cache
+        ));
+        assert_eq!(std::fs::read_to_string(&skill_path).unwrap(), skill_body);
+    }
+
+    #[test]
+    fn install_uses_marketplace_manifest_when_claude_plugin_json_is_absent() {
+        let e = env();
+        std::fs::remove_dir_all(e.market.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        let manifest_dir = e.market.join(branding::CLAUDE_PLUGIN_MANIFEST_DIR);
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        std::fs::create_dir_all(e.market.join("skills/webmcp")).unwrap();
+        std::fs::write(
+            manifest_dir.join("marketplace.json"),
+            r#"{"name":"ora","owner":{"name":"ora"},"plugins":[{"name":"webmcp","version":"0.10.0","source":"./","skills":"./skills","userConfig":{"tone":{"type":"string","title":"Tone","description":"Response style"}}}]}"#,
+        )
+        .unwrap();
+        let skill_body = "# WebMCP\n\nMarketplace entry supplied this plugin manifest.\n";
+        let skill_path = e.market.join("skills/webmcp/SKILL.md");
+        std::fs::write(&skill_path, skill_body).unwrap();
+        let install_location = std::fs::canonicalize(&e.market)
+            .unwrap()
+            .display()
+            .to_string();
+        std::fs::write(
+            e.plugins.join("known_marketplaces.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "ora": {
+                    "source": {"source": "directory", "path": install_location.clone()},
+                    "installLocation": install_location
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        run_install(
+            "webmcp@ora",
+            None,
+            &["tone=concise".to_string()],
+            &e.plugins,
+            &e.home,
+            &e.cwd,
+        )
+        .expect("the marketplace entry supplies the missing manifest");
+
+        let cache = e.plugins.join("cache/ora/webmcp/0.10.0");
+        assert!(!cache
+            .join(branding::CLAUDE_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json")
+            .exists());
+        assert_eq!(
+            std::fs::read_to_string(cache.join("skills/webmcp/SKILL.md")).unwrap(),
+            skill_body
+        );
+        assert_eq!(
+            user_settings(&e)["pluginConfigs"]["webmcp@ora"]["options"]["tone"],
+            "concise"
+        );
+        assert_eq!(
+            installed_db(&e)["plugins"]["webmcp@ora"][0]["version"],
+            "0.10.0"
+        );
+
+        let enabled = std::collections::BTreeMap::from([("webmcp@ora".to_string(), true)]);
+        let context = plugin::PluginDiscoveryContext::new(
+            e.cwd.clone(),
+            e.cwd.clone(),
+            Arc::new(plugin::PluginArchiveSession::new()),
+        );
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let discovered = runtime.block_on(plugin::discover_enabled_plugins(
+            &e.plugins, &enabled, &context,
+        ));
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].1.name, "webmcp");
+        assert_eq!(discovered[0].1.version, "0.10.0");
+        assert_eq!(discovered[0].1.components.skills.len(), 1);
+        assert_eq!(std::fs::read_to_string(skill_path).unwrap(), skill_body);
+    }
+
+    #[test]
+    fn update_uses_marketplace_version_when_claude_plugin_json_is_absent() {
+        let e = env();
+        std::fs::remove_dir_all(e.market.join(branding::PLUGIN_MANIFEST_DIR)).unwrap();
+        std::fs::remove_dir_all(
+            e.market
+                .join("plugins/hello")
+                .join(branding::PLUGIN_MANIFEST_DIR),
+        )
+        .unwrap();
+        let manifest_dir = e.market.join(branding::CLAUDE_PLUGIN_MANIFEST_DIR);
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        let marketplace_path = manifest_dir.join("marketplace.json");
+        let marketplace = |version: &str| {
+            serde_json::json!({
+                "name": "mymkt",
+                "owner": {"name": "me"},
+                "plugins": [{
+                    "name": "hello",
+                    "version": version,
+                    "source": "./plugins/hello",
+                    "commands": "./commands"
+                }]
+            })
+        };
+        std::fs::write(
+            &marketplace_path,
+            serde_json::to_vec(&marketplace("1.0.0")).unwrap(),
+        )
+        .unwrap();
+
+        run_install("hello@mymkt", None, &[], &e.plugins, &e.home, &e.cwd)
+            .expect("marketplace entry can install a plugin without plugin.json");
+        assert_eq!(
+            installed_db(&e)["plugins"]["hello@mymkt"][0]["version"],
+            "1.0.0"
+        );
+
+        std::fs::write(
+            &marketplace_path,
+            serde_json::to_vec(&marketplace("2.0.0")).unwrap(),
+        )
+        .unwrap();
+        let message = run_update("hello@mymkt", "user", &e.plugins, &e.home, &e.cwd)
+            .expect("update falls back to the marketplace entry version");
+        assert!(message.contains("updated from 1.0.0 to 2.0.0"));
+        assert_eq!(
+            installed_db(&e)["plugins"]["hello@mymkt"][0]["version"],
+            "2.0.0"
+        );
+        let updated_cache = e.plugins.join("cache/mymkt/hello/2.0.0");
+        assert!(updated_cache.join("commands/hi.md").exists());
+        assert!(!updated_cache
+            .join(branding::PLUGIN_MANIFEST_DIR)
+            .join("plugin.json")
+            .exists());
+        assert!(!updated_cache
+            .join(branding::CLAUDE_PLUGIN_MANIFEST_DIR)
+            .join("plugin.json")
+            .exists());
     }
 
     #[test]
@@ -3816,8 +5088,8 @@ mod tests {
         );
     }
 
-    /// Overwrite the marketplace `hello` plugin's manifest to declare the given
-    /// `userConfig` object (JSON), so `--config` has a schema to validate against.
+    /// Overwrite the marketplace `hello` plugin's manifest with a valid
+    /// `userConfig` schema for `--config` behavior tests.
     fn set_user_config(e: &Env, user_config_json: &str) {
         let p = e
             .market
@@ -3882,7 +5154,10 @@ mod tests {
     #[test]
     fn install_config_persists_nonsensitive_options() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"description":"","sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         run_install(
             "hello@mymkt",
             None,
@@ -4061,7 +5336,7 @@ mod tests {
         let e = env();
         set_user_config(
             &e,
-            r#"{"RETRIES":{"type":"number"},"ENABLED":{"type":"boolean"}}"#,
+            r#"{"RETRIES":{"type":"number","title":"Retries","description":""},"ENABLED":{"type":"boolean","title":"Enabled","description":""}}"#,
         );
         run_install(
             "hello@mymkt",
@@ -4080,7 +5355,10 @@ mod tests {
     #[test]
     fn install_config_rejects_invalid_scalar_before_materialization() {
         let e = env();
-        set_user_config(&e, r#"{"ENABLED":{"type":"boolean"}}"#);
+        set_user_config(
+            &e,
+            r#"{"ENABLED":{"type":"boolean","title":"Enabled","description":""}}"#,
+        );
         let error = run_install(
             "hello@mymkt",
             None,
@@ -4102,7 +5380,7 @@ mod tests {
         let e = env();
         set_user_config(
             &e,
-            r#"{"API_KEY":{"description":"","sensitive":true},"REGION":{"sensitive":false}}"#,
+            r#"{"API_KEY":{"type":"string","title":"API key","description":"","sensitive":true},"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
         );
         run_install(
             "hello@mymkt",
@@ -4122,7 +5400,10 @@ mod tests {
     #[test]
     fn install_config_malformed_errors() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         let err = run_install(
             "hello@mymkt",
             None,
@@ -4141,7 +5422,10 @@ mod tests {
     #[test]
     fn install_config_undeclared_key_errors() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         let err = run_install(
             "hello@mymkt",
             None,
@@ -4160,7 +5444,10 @@ mod tests {
     #[test]
     fn install_config_empty_value_errors() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         let err = run_install(
             "hello@mymkt",
             None,
@@ -4179,7 +5466,10 @@ mod tests {
     #[test]
     fn uninstall_clears_plugin_config() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         run_install(
             "hello@mymkt",
             None,
@@ -4270,6 +5560,120 @@ mod tests {
         assert!(source
             .at_pointer("/pluginConfigs/other@mymkt/options/keep")
             .is_some());
+    }
+
+    #[test]
+    fn settings_journal_rollback_preserves_interleaved_nested_plugin_updates() {
+        let e = env();
+        let path = scope_path(WritableScope::User, &e.home, &e.cwd);
+        std::fs::write(
+            &path,
+            r#"{"enabledPlugins":{"hello@mymkt":true,"other@mymkt":true},"pluginConfigs":{"hello@mymkt":{"options":{"REGION":"old","KEEP":"old"},"mcpServers":{"server":{"input":"\ud800"}}},"other@mymkt":{"options":{"REGION":"old-other"}}},"opaque":{"value":"\udfff"}}"#,
+        )
+        .unwrap();
+        let mut schema = Map::new();
+        schema.insert(
+            "REGION".to_string(),
+            serde_json::json!({"sensitive": false, "type": "string"}),
+        );
+        let pairs = vec![ConfigPair {
+            key: "REGION".into(),
+            value: Value::String("west".into()),
+            raw_value: "west".into(),
+        }];
+        let mut journal = SettingsRollbackJournal::default();
+        persist_plugin_options_with_journal(
+            WritableScope::User,
+            &e.home,
+            &e.cwd,
+            "hello@mymkt",
+            &schema,
+            &pairs,
+            Some(&mut journal),
+        )
+        .unwrap();
+
+        // A migration/settings writer commits after the plugin mutation but
+        // before the enclosing operation fails and rolls back.
+        let mut latest = read_settings_source(&path).unwrap();
+        let mut enabled = source_object_field(&latest, "enabledPlugins");
+        enabled
+            .set_field("other@mymkt", source_bool(false))
+            .unwrap();
+        latest.set_field("enabledPlugins", enabled).unwrap();
+        let mut configs = source_object_field(&latest, "pluginConfigs");
+        let mut hello = source_object_field(&configs, "hello@mymkt");
+        let mut hello_options = source_object_field(&hello, "options");
+        hello_options
+            .set_field(
+                "KEEP",
+                Utf16JsonProjection::parse(r#""concurrent-keep""#).unwrap(),
+            )
+            .unwrap();
+        hello_options
+            .set_field(
+                "NEW_TOKEN",
+                Utf16JsonProjection::parse(r#""concurrent-token""#).unwrap(),
+            )
+            .unwrap();
+        hello.set_field("options", hello_options).unwrap();
+        configs.set_field("hello@mymkt", hello).unwrap();
+        let mut other = source_object_field(&configs, "other@mymkt");
+        let mut other_options = source_object_field(&other, "options");
+        other_options
+            .set_field(
+                "REGION",
+                Utf16JsonProjection::parse(r#""concurrent-other""#).unwrap(),
+            )
+            .unwrap();
+        other.set_field("options", other_options).unwrap();
+        configs.set_field("other@mymkt", other).unwrap();
+        latest.set_field("pluginConfigs", configs).unwrap();
+        migrations::settings_update::update_settings_source_with_before_publish(
+            &path,
+            vec![
+                (
+                    "enabledPlugins".to_string(),
+                    Some(source_object_field(&latest, "enabledPlugins")),
+                ),
+                (
+                    "pluginConfigs".to_string(),
+                    Some(source_object_field(&latest, "pluginConfigs")),
+                ),
+            ],
+            || {},
+        )
+        .unwrap();
+
+        journal.rollback();
+        let restored = read_settings_source(&path).unwrap();
+        assert_eq!(
+            restored.string_at("/pluginConfigs/hello@mymkt/options/REGION"),
+            Some("old")
+        );
+        assert_eq!(
+            restored.string_at("/pluginConfigs/hello@mymkt/options/KEEP"),
+            Some("concurrent-keep")
+        );
+        assert_eq!(
+            restored.string_at("/pluginConfigs/hello@mymkt/options/NEW_TOKEN"),
+            Some("concurrent-token")
+        );
+        assert_eq!(
+            restored.string_at("/pluginConfigs/other@mymkt/options/REGION"),
+            Some("concurrent-other")
+        );
+        assert_eq!(
+            restored.string_units("/pluginConfigs/hello@mymkt/mcpServers/server/input"),
+            Some(vec![0xd800])
+        );
+        assert_eq!(restored.string_units("/opaque/value"), Some(vec![0xdfff]));
+        assert_eq!(
+            restored
+                .at_pointer("/enabledPlugins/other@mymkt")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
     }
 
     #[test]
@@ -4366,7 +5770,10 @@ mod tests {
     #[test]
     fn install_config_rejected_for_project_scope() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         let err = run_install(
             "hello@mymkt",
             Some("project"),
@@ -4385,7 +5792,10 @@ mod tests {
     #[test]
     fn install_config_rejected_for_local_scope() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         let err = run_install(
             "hello@mymkt",
             Some("local"),
@@ -4404,7 +5814,10 @@ mod tests {
     #[test]
     fn install_config_persists_with_explicit_user_scope() {
         let e = env();
-        set_user_config(&e, r#"{"REGION":{"description":"","sensitive":false}}"#);
+        set_user_config(
+            &e,
+            r#"{"REGION":{"type":"string","title":"Region","description":"","sensitive":false}}"#,
+        );
         run_install(
             "hello@mymkt",
             Some("user"),

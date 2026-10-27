@@ -253,8 +253,9 @@ async fn selected_cold_snapshot_is_hydrated_before_session_start_appends() {
         "initialUserMessage":"selected-hook-prompt"
     }});
     let command = format!(
-        "cat > '{}'; printf '%s\\n%s\\n' \"$LINGXI_PROJECT_DIR\" \"$PWD\" > '{}'; printf '%s\\n' '{}'",
+        "cat > '{}'; printf '%s\\n%s\\n' \"${project_dir_env}\" \"$PWD\" > '{}'; printf '%s\\n' '{}'",
         input_path.display(), environment_path.display(), response,
+        project_dir_env = branding::PROJECT_DIR_ENV,
     );
     let definitions = hooks::parse_hooks_from_settings_json(
         &serde_json::json!({"hooks":{"SessionStart":[{"hooks":[{
@@ -372,8 +373,10 @@ async fn remount_loads_target_project_settings_but_retains_original_hook_project
     let target = root.path().join("target");
     for (path, label) in [(&launch, "A"), (&target, "B")] {
         std::fs::create_dir_all(path.join(branding::DOT_DIR)).unwrap();
-        let command =
-            format!("printf '{label}-hook\\n%s\\n%s\\n' \"$LINGXI_PROJECT_DIR\" \"$PWD\"");
+        let command = format!(
+            "printf '{label}-hook\\n%s\\n%s\\n' \"${project_dir_env}\" \"$PWD\"",
+            project_dir_env = branding::PROJECT_DIR_ENV,
+        );
         std::fs::write(
             path.join(branding::DOT_DIR).join("settings.json"),
             serde_json::to_string(&serde_json::json!({

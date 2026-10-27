@@ -702,6 +702,46 @@ impl MediaConnector for FakeConnector {
     }
 }
 
+/// Like a native adapter, returns the same physical session for a repeated
+/// open key while that lease is alive.
+#[derive(Default)]
+struct IdempotentConnector {
+    source_calls: AtomicUsize,
+    open_calls: AtomicUsize,
+    sessions: std::sync::Mutex<HashMap<MediaOperationId, FakeSession>>,
+}
+
+#[async_trait]
+impl MediaConnector for IdempotentConnector {
+    fn id(&self) -> MediaConnectorId {
+        MediaConnectorId::from("idempotent")
+    }
+
+    async fn sources(
+        &self,
+        _context: MediaOperationContext,
+    ) -> Result<Vec<MediaSource>, MediaError> {
+        self.source_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(Vec::new())
+    }
+
+    async fn start_session(
+        &self,
+        context: MediaOperationContext,
+        _request: MediaSessionRequest,
+    ) -> Result<Box<dyn MediaSession>, MediaError> {
+        self.open_calls.fetch_add(1, Ordering::SeqCst);
+        let mut sessions = self.sessions.lock().unwrap();
+        let session = sessions.entry(context.identity.clone()).or_insert_with(|| {
+            FakeSession::new(MediaSessionRef(MediaSessionId::from(format!(
+                "idempotent-{}",
+                context.identity.id
+            ))))
+        });
+        Ok(Box::new(session.clone()))
+    }
+}
+
 fn video_remote_source() -> MediaSource {
     MediaSource {
         reference: MediaSourceRef(MediaSourceId::from("remote:camera")),
@@ -1590,6 +1630,365 @@ async fn attached_session_audio_bridge_projects_declared_input_audio_sources() {
 }
 
 #[tokio::test]
+async fn replayed_start_preserves_the_live_idempotent_lease_after_history_eviction() {
+    let connector = Arc::new(IdempotentConnector::default());
+    let runtime = service(FakeAudio::new(), false, Some(connector.clone()));
+    let session_owner = owner("idempotent-start");
+    let start_context = context(session_owner.clone(), 500);
+    let request = session_request(MediaSessionMode::Audio, MediaSessionIntent::Conversation);
+    let result = runtime
+        .execute(
+            start_context.clone(),
+            MediaOperation::SessionStart {
+                request: request.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    let MediaResult::SessionStarted { session, .. } = result else {
+        panic!("first session start")
+    };
+    let original = connector.sessions.lock().unwrap()[&start_context.identity].clone();
+
+    let replay = runtime
+        .execute(
+            start_context.clone(),
+            MediaOperation::SessionStart {
+                request: request.clone(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(original.stop_count.load(Ordering::SeqCst), 0);
+    assert_eq!(replay.kind, MediaErrorKind::InvalidRequest);
+    assert_eq!(connector.source_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(connector.open_calls.load(Ordering::SeqCst), 1);
+
+    // The start identity is still valid as the context of an unrelated call.
+    let status = runtime
+        .execute(
+            start_context.clone(),
+            MediaOperation::Status {
+                target: Some(MediaResourceRef::Session(session.clone())),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(status, MediaResult::Status { resources } if resources[0].state == MediaResourceState::Active)
+    );
+
+    // The same generation with a fresh UUID is a different operation.
+    let fresh_context = context(session_owner.clone(), 500);
+    assert_ne!(fresh_context.identity, start_context.identity);
+    let fresh = runtime
+        .execute(
+            fresh_context,
+            MediaOperation::SessionStart {
+                request: request.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(
+        matches!(fresh, MediaResult::SessionStarted { session: fresh_session, .. } if fresh_session != session)
+    );
+    assert_eq!(connector.source_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(connector.open_calls.load(Ordering::SeqCst), 2);
+
+    for generation in 0..=MAX_OPERATION_HISTORY {
+        runtime
+            .execute(
+                context(session_owner.clone(), generation as u64 + 1_000),
+                MediaOperation::Status {
+                    target: Some(MediaResourceRef::Session(session.clone())),
+                },
+            )
+            .await
+            .unwrap();
+    }
+    assert!(!runtime
+        .inner
+        .lock()
+        .unwrap()
+        .operation_status
+        .contains_key(&start_context.identity));
+
+    let mut replay_context = start_context.clone();
+    replay_context.owner = owner("other-owner");
+    let replay = runtime
+        .execute(replay_context, MediaOperation::SessionStart { request })
+        .await
+        .unwrap_err();
+    assert_eq!(replay.kind, MediaErrorKind::InvalidRequest);
+    assert_eq!(connector.source_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(connector.open_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(original.stop_count.load(Ordering::SeqCst), 0);
+    assert_eq!(original.status().state, MediaSessionState::Preparing);
+}
+
+#[tokio::test]
+async fn start_rejects_an_attached_sessions_origin_identity_before_open() {
+    let connector = Arc::new(IdempotentConnector::default());
+    let runtime = service(FakeAudio::new(), false, Some(connector.clone()));
+    let attach_context = context(owner("attached-origin"), 501);
+    let incoming = FakeSession::new(MediaSessionRef(MediaSessionId::from("incoming-origin")));
+    runtime
+        .attach_session(attach_context.clone(), Box::new(incoming.clone()))
+        .await
+        .unwrap();
+    let source_calls = connector.source_calls.load(Ordering::SeqCst);
+
+    let replay = runtime
+        .execute(
+            attach_context,
+            MediaOperation::SessionStart {
+                request: session_request(MediaSessionMode::Audio, MediaSessionIntent::Conversation),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(replay.kind, MediaErrorKind::InvalidRequest);
+    assert_eq!(connector.source_calls.load(Ordering::SeqCst), source_calls);
+    assert_eq!(connector.open_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(incoming.stop_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn stopped_session_releases_its_origin_identity_for_a_later_start() {
+    let connector = FakeConnector::new("stopped-origin", vec![]);
+    let runtime = service(FakeAudio::new(), false, Some(connector.clone()));
+    let start_context = context(owner("stopped-origin"), 502);
+    let request = session_request(MediaSessionMode::Audio, MediaSessionIntent::Conversation);
+    let first = runtime
+        .execute(
+            start_context.clone(),
+            MediaOperation::SessionStart {
+                request: request.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    let MediaResult::SessionStarted { session, .. } = first else {
+        panic!("first session start")
+    };
+    let original = connector.latest_session();
+
+    // Reusing the identity for Stop is valid, and removes the live session.
+    runtime
+        .execute(
+            start_context.clone(),
+            MediaOperation::Stop {
+                target: MediaResourceRef::Session(session.clone()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(original.stop_count.load(Ordering::SeqCst), 1);
+    let restarted = runtime
+        .execute(start_context, MediaOperation::SessionStart { request })
+        .await
+        .unwrap();
+    assert!(
+        matches!(restarted, MediaResult::SessionStarted { session: next, .. } if next != session)
+    );
+}
+
+#[tokio::test]
+async fn overlap_attach_first_blocks_same_identity_start_until_cleanup() {
+    let connector = FakeConnector::new("attach-first", vec![]);
+    connector.pending_sources.store(true, Ordering::SeqCst);
+    let runtime = service(FakeAudio::new(), false, Some(connector.clone()));
+    let attach_context = context(owner("attach-first"), 503);
+    let incoming = FakeSession::new(MediaSessionRef(MediaSessionId::from("attach-first")));
+    incoming.pending_stop.store(true, Ordering::SeqCst);
+    let task_runtime = runtime.clone();
+    let task_context = attach_context.clone();
+    let task_session = incoming.clone();
+    let attach = tokio::spawn(async move {
+        task_runtime
+            .attach_session(task_context, Box::new(task_session))
+            .await
+    });
+    let source_gate =
+        tokio::time::timeout(Duration::from_secs(1), connector.sources_started.acquire())
+            .await
+            .expect("attach reached the source catalog")
+            .expect("source semaphore remains open");
+    source_gate.forget();
+
+    let request = session_request(MediaSessionMode::Audio, MediaSessionIntent::Conversation);
+    let duplicate = tokio::time::timeout(
+        Duration::from_secs(1),
+        runtime.execute(
+            attach_context.clone(),
+            MediaOperation::SessionStart {
+                request: request.clone(),
+            },
+        ),
+    )
+    .await
+    .expect("duplicate start is rejected before querying the connector")
+    .unwrap_err();
+    assert_eq!(duplicate.kind, MediaErrorKind::InvalidRequest);
+    assert_eq!(connector.next_id.load(Ordering::SeqCst), 1);
+    let second_incoming =
+        FakeSession::new(MediaSessionRef(MediaSessionId::from("attach-duplicate")));
+    let duplicate_attach = runtime
+        .attach_session(attach_context.clone(), Box::new(second_incoming.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(duplicate_attach.kind, MediaErrorKind::InvalidRequest);
+    assert_eq!(second_incoming.stop_count.load(Ordering::SeqCst), 1);
+    assert_eq!(incoming.stop_count.load(Ordering::SeqCst), 0);
+
+    connector.pending_sources.store(false, Ordering::SeqCst);
+    let fresh = runtime
+        .execute(
+            context(owner("attach-first"), 504),
+            MediaOperation::SessionStart {
+                request: request.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(fresh, MediaResult::SessionStarted { .. }));
+
+    attach.abort();
+    let _ = attach.await;
+    let stop_gate = tokio::time::timeout(Duration::from_secs(1), incoming.stop_started.acquire())
+        .await
+        .expect("cancelled attach began cleanup")
+        .expect("stop semaphore remains open");
+    stop_gate.forget();
+    let duplicate = runtime
+        .execute(
+            attach_context.clone(),
+            MediaOperation::SessionStart {
+                request: request.clone(),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(duplicate.kind, MediaErrorKind::InvalidRequest);
+    assert_eq!(connector.next_id.load(Ordering::SeqCst), 2);
+
+    incoming.stop_release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(1), incoming.stop_completed.notified())
+        .await
+        .expect("attach cleanup finishes");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while runtime.inner.lock().unwrap().session_reservations.len() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("attach reservation is released after cleanup");
+    assert!(matches!(
+        runtime
+            .execute(attach_context, MediaOperation::SessionStart { request })
+            .await
+            .unwrap(),
+        MediaResult::SessionStarted { .. }
+    ));
+}
+
+#[tokio::test]
+async fn attach_rejects_the_origin_identity_of_an_existing_session() {
+    let connector = FakeConnector::new("attach-registered", vec![]);
+    let runtime = service(FakeAudio::new(), false, Some(connector));
+    let attach_context = context(owner("attach-registered"), 507);
+    let original = FakeSession::new(MediaSessionRef(MediaSessionId::from("registered-original")));
+    runtime
+        .attach_session(attach_context.clone(), Box::new(original.clone()))
+        .await
+        .unwrap();
+    assert!(runtime
+        .inner
+        .lock()
+        .unwrap()
+        .session_reservations
+        .is_empty());
+
+    let duplicate = FakeSession::new(MediaSessionRef(MediaSessionId::from(
+        "registered-duplicate",
+    )));
+    let error = runtime
+        .attach_session(attach_context, Box::new(duplicate.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, MediaErrorKind::InvalidRequest);
+    assert_eq!(duplicate.stop_count.load(Ordering::SeqCst), 1);
+    assert_eq!(original.stop_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn overlap_start_first_blocks_same_identity_attach_before_reservation() {
+    let connector = FakeConnector::new("start-first", vec![]);
+    connector.pending_sources.store(true, Ordering::SeqCst);
+    let runtime = service(FakeAudio::new(), false, Some(connector.clone()));
+    let start_context = context(owner("start-first"), 505);
+    let task_runtime = runtime.clone();
+    let task_context = start_context.clone();
+    let start = tokio::spawn(async move {
+        task_runtime
+            .execute(
+                task_context,
+                MediaOperation::SessionStart {
+                    request: session_request(
+                        MediaSessionMode::Audio,
+                        MediaSessionIntent::Conversation,
+                    ),
+                },
+            )
+            .await
+    });
+    let source_gate =
+        tokio::time::timeout(Duration::from_secs(1), connector.sources_started.acquire())
+            .await
+            .expect("start reached the source catalog before reserving a slot")
+            .expect("source semaphore remains open");
+    source_gate.forget();
+
+    let incoming = FakeSession::new(MediaSessionRef(MediaSessionId::from("duplicate-incoming")));
+    let duplicate = tokio::time::timeout(
+        Duration::from_secs(1),
+        runtime.attach_session(start_context.clone(), Box::new(incoming.clone())),
+    )
+    .await
+    .expect("duplicate attach is rejected before querying the connector")
+    .unwrap_err();
+    assert_eq!(duplicate.kind, MediaErrorKind::InvalidRequest);
+    assert_eq!(incoming.stop_count.load(Ordering::SeqCst), 1);
+    assert_eq!(incoming.registration_count.load(Ordering::SeqCst), 0);
+
+    connector.pending_sources.store(false, Ordering::SeqCst);
+    let fresh = FakeSession::new(MediaSessionRef(MediaSessionId::from("fresh-incoming")));
+    runtime
+        .attach_session(context(owner("start-first"), 506), Box::new(fresh.clone()))
+        .await
+        .unwrap();
+    assert_eq!(fresh.registration_count.load(Ordering::SeqCst), 1);
+    start.abort();
+    let _ = start.await;
+    assert!(matches!(
+        runtime
+            .execute(
+                start_context,
+                MediaOperation::SessionStart {
+                    request: session_request(
+                        MediaSessionMode::Audio,
+                        MediaSessionIntent::Conversation
+                    ),
+                },
+            )
+            .await
+            .unwrap(),
+        MediaResult::SessionStarted { .. }
+    ));
+}
+
+#[tokio::test]
 async fn concurrent_started_and_attached_sessions_share_reserved_capacity() {
     let audio = FakeAudio::new();
     let connector = FakeConnector::new("rtc-capacity", vec![]);
@@ -1644,7 +2043,7 @@ async fn concurrent_started_and_attached_sessions_share_reserved_capacity() {
         .unwrap_err();
     assert_eq!(full.kind, MediaErrorKind::Busy);
     assert_eq!(
-        runtime.inner.lock().unwrap().session_reservations,
+        runtime.inner.lock().unwrap().session_reservations.len(),
         MAX_ACTIVE_SESSIONS
     );
 
@@ -1652,7 +2051,7 @@ async fn concurrent_started_and_attached_sessions_share_reserved_capacity() {
         start.abort();
         let _ = start.await;
     }
-    assert_eq!(runtime.inner.lock().unwrap().session_reservations, 0);
+    assert_eq!(runtime.inner.lock().unwrap().session_reservations.len(), 0);
 
     connector.pending_start.store(false, Ordering::SeqCst);
     connector.fail_next_start.store(true, Ordering::SeqCst);
@@ -1666,7 +2065,7 @@ async fn concurrent_started_and_attached_sessions_share_reserved_capacity() {
         .await
         .unwrap_err();
     assert_eq!(failed.kind, MediaErrorKind::NativeFailure);
-    assert_eq!(runtime.inner.lock().unwrap().session_reservations, 0);
+    assert_eq!(runtime.inner.lock().unwrap().session_reservations.len(), 0);
 
     let recovered = runtime
         .execute(
@@ -1678,7 +2077,7 @@ async fn concurrent_started_and_attached_sessions_share_reserved_capacity() {
         .await
         .unwrap();
     assert!(matches!(recovered, MediaResult::SessionStarted { .. }));
-    assert_eq!(runtime.inner.lock().unwrap().session_reservations, 0);
+    assert_eq!(runtime.inner.lock().unwrap().session_reservations.len(), 0);
 }
 
 #[tokio::test]
@@ -1699,7 +2098,7 @@ async fn cancelled_attach_stops_incoming_session_and_releases_reservation() {
         .expect("attach reached the source catalog await")
         .expect("source semaphore remains open");
     started.forget();
-    assert_eq!(runtime.inner.lock().unwrap().session_reservations, 1);
+    assert_eq!(runtime.inner.lock().unwrap().session_reservations.len(), 1);
 
     attach.abort();
     let _ = attach.await;
@@ -1710,7 +2109,7 @@ async fn cancelled_attach_stops_incoming_session_and_releases_reservation() {
     assert_eq!(incoming.registration_count.load(Ordering::SeqCst), 0);
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if runtime.inner.lock().unwrap().session_reservations == 0 {
+            if runtime.inner.lock().unwrap().session_reservations.len() == 0 {
                 break;
             }
             tokio::task::yield_now().await;
@@ -1736,11 +2135,13 @@ async fn cancelled_started_session_validation_keeps_slot_until_cleanup_finishes(
             .collect(),
     );
     let runtime = service(FakeAudio::new(), false, Some(connector.clone()));
+    let start_context = context(owner("session-cleanup"), 711);
     let task_runtime = runtime.clone();
+    let task_context = start_context.clone();
     let start = tokio::spawn(async move {
         task_runtime
             .execute(
-                context(owner("session-cleanup"), 711),
+                task_context,
                 MediaOperation::SessionStart {
                     request: session_request(
                         MediaSessionMode::Audio,
@@ -1775,7 +2176,26 @@ async fn cancelled_started_session_validation_keeps_slot_until_cleanup_finishes(
         .expect("dropped start schedules session cleanup")
         .expect("stop semaphore remains open");
     retry.forget();
-    assert_eq!(runtime.inner.lock().unwrap().session_reservations, 1);
+    assert_eq!(runtime.inner.lock().unwrap().session_reservations.len(), 1);
+    let duplicate_start = runtime
+        .execute(
+            start_context.clone(),
+            MediaOperation::SessionStart {
+                request: session_request(MediaSessionMode::Audio, MediaSessionIntent::Conversation),
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(duplicate_start.kind, MediaErrorKind::InvalidRequest);
+    assert_eq!(connector.sessions.lock().unwrap().len(), 1);
+    let duplicate_session =
+        FakeSession::new(MediaSessionRef(MediaSessionId::from("cleanup-duplicate")));
+    let duplicate_attach = runtime
+        .attach_session(start_context, Box::new(duplicate_session.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(duplicate_attach.kind, MediaErrorKind::InvalidRequest);
+    assert_eq!(duplicate_session.stop_count.load(Ordering::SeqCst), 1);
 
     session.stop_release.add_permits(1);
     tokio::time::timeout(Duration::from_secs(1), session.stop_completed.notified())
@@ -1783,7 +2203,7 @@ async fn cancelled_started_session_validation_keeps_slot_until_cleanup_finishes(
         .expect("session cleanup completes");
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if runtime.inner.lock().unwrap().session_reservations == 0 {
+            if runtime.inner.lock().unwrap().session_reservations.len() == 0 {
                 break;
             }
             tokio::task::yield_now().await;

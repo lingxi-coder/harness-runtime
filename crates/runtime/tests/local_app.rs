@@ -45,9 +45,17 @@ fn body(registry: &CommandRegistry) -> Option<Utf16JsonProjection> {
     Some(prompt.build(&Utf16JsonProjection::from("")))
 }
 
+fn canonical_body(shell_tool: Option<&str>) -> String {
+    let markdown = local_app::skill::skill_markdown(shell_tool);
+    markdown
+        .split_once("\n---\n")
+        .map(|(_, body)| body.trim_start().to_owned())
+        .expect("canonical Local App skill has frontmatter")
+}
+
 async fn assert_assembled_tool_saves_current_visualization(
     orchestrator: &orchestrator::ConversationOrchestrator,
-    _fs: Arc<dyn FileSystem>,
+    fs: Arc<dyn FileSystem>,
     config_home: &Path,
     desktop: bool,
 ) {
@@ -205,22 +213,16 @@ fn configure_local_app_test_permission(config_home: &Path) {
 #[test]
 fn skill_follows_the_tool_and_names_the_host_shell() {
     let mut registry = CommandRegistry::new();
-    register_skill(&mut registry, &names(&["Read", "Bash"]), "Bash");
+    register_skill(&mut registry, &names(&["Read", "Bash"]), Some("Bash"));
     assert!(body(&registry).is_none(), "no tool, no skill");
 
-    register_skill(&mut registry, &names(&["LocalApp", "Bash"]), "Bash");
-    assert!(body(&registry)
-        .unwrap()
-        .string_at("")
-        .unwrap()
-        .contains("with `Bash`"));
+    register_skill(&mut registry, &names(&["LocalApp", "Bash"]), Some("Bash"));
+    let bash_body = body(&registry).unwrap().string_at("").unwrap().to_owned();
+    assert_eq!(bash_body, canonical_body(Some("Bash")));
 
-    register_skill(&mut registry, &names(&["LocalApp"]), "Shell");
-    assert!(body(&registry)
-        .unwrap()
-        .string_at("")
-        .unwrap()
-        .contains("with `Shell`"));
+    register_skill(&mut registry, &names(&["LocalApp", "Shell"]), Some("Shell"));
+    let mobile_body = body(&registry).unwrap().string_at("").unwrap().to_owned();
+    assert_eq!(mobile_body, canonical_body(Some("Shell")));
     assert_eq!(
         registry
             .list_all()
@@ -231,14 +233,28 @@ fn skill_follows_the_tool_and_names_the_host_shell() {
         "re-registration replaces instead of stacking"
     );
 
-    register_skill(&mut registry, &names(&["Read"]), "Shell");
+    register_skill(&mut registry, &names(&["Read"]), Some("Shell"));
     assert!(body(&registry).is_none(), "the skill leaves with the tool");
+
+    register_skill(&mut registry, &names(&["LocalApp"]), None);
+    let no_shell_body = body(&registry).unwrap().string_at("").unwrap().to_owned();
+    assert_eq!(no_shell_body, canonical_body(None));
+    register_skill(&mut registry, &names(&["LocalApp"]), Some("Shell"));
+    assert_eq!(
+        body(&registry).unwrap().string_at("").unwrap(),
+        canonical_body(None)
+    );
+    let command = registry
+        .resolve(&Utf16JsonProjection::from(local_app::skill::SKILL_NAME))
+        .unwrap();
+    assert_eq!(command.loaded_from.as_deref(), Some("local-app"));
+    assert!(command.skill_root.is_none());
 }
 
 #[tokio::test]
 async fn desktop_assembly_passes_shared_visualizations_to_local_app() {
     let home = tempfile::tempdir().unwrap();
-    let cwd = home.path().to_path_buf();
+    let cwd = home.path().canonicalize().unwrap();
     let config_home = cwd.join(".lingxi");
     configure_local_app_test_permission(&config_home);
     let mut cfg = harness_runtime::desktop::DesktopConfig::default();
@@ -278,7 +294,10 @@ async fn desktop_assembly_passes_shared_visualizations_to_local_app() {
 #[tokio::test]
 async fn mobile_assembly_passes_shared_visualizations_to_local_app() {
     let home = tempfile::tempdir().unwrap();
-    let cwd = home.path().to_path_buf();
+    // Mobile config lives under a brand user's Linux home. A random .tmp*
+    // directory is not a valid Linux username.
+    let cwd = home.path().canonicalize().unwrap().join("test-brand-user");
+    std::fs::create_dir(&cwd).unwrap();
     let config_home = cwd.join(".lingxi");
     configure_local_app_test_permission(&config_home);
     let mut cfg = harness_runtime::mobile::test_support::test_config(&cwd);

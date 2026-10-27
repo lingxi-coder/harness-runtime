@@ -1,23 +1,25 @@
 ---
 name: local-app
-description: Build and publish a device-local schema-2 app, including camera input or independent host Agent tasks when needed.
+description: Build and maintain device-local schema-2 apps with interactive WebMCP tools or independent host Agent tasks when useful.
 session-modes: chat, code
 ---
 
 # Local apps
 
-Use the `LocalApp` tool to publish an app into the user's device library. Desktop, Android and iOS use schema 2, independent of the creating conversation. The tool schema and the current host's capabilities are authoritative.
+Create an application project, publish it into this device's Apps library, and verify the published application. A project holds source code; an ordinary conversation is development history; an app owns its released code and data independently of either. Local publication never uploads to the public market. The `LocalApp` tool schema and current host capabilities are authoritative.
 
 ## Workflow
 
-1. Build immediately when the user supplied a clear request or approved a plan. Ask only for missing decisions that affect the result. A one-off chart or explanation can use an inline visualization; an app belongs in the Apps library.
-2. A simple static app can be one complete HTML document with inline CSS/JavaScript, published as `LocalApp({"name":"…","summary":"…","html":"…"})`. The host constructs its schema-2 package. For Agent/device capabilities, multiple files, packages or services, create a project containing `lingxi-app.json` and publish with `bundle_path`.
+1. Build when the user has made a clear request or approved a plan. Ask only for missing decisions that change the result. A one-off chart or explanation can use an inline visualization; an application belongs in the Apps library.
+2. Use the source Project and Code Session selected by the native Create/Modify flow. Keep app source in that Project; do not move it because the conversation cwd changes or use an unrelated active Project. Mobile source paths come from the current brand's Linux user; obtain them from the host. The host binds the trusted Project/Session pair. If a saved source is missing, use native Restore Source or the permitted Remix/copy flow rather than silently binding another Project. Never invent or send private source-session, transport, permission, grant or approval fields.
+3. A simple static app can be one complete HTML document with inline CSS/JavaScript, published as `LocalApp({"name":"…","summary":"…","html":"…"})`. The host constructs its schema-2 package. For multiple files, frameworks, services or native Agent/device capabilities, create a project containing `lingxi-app.json` and publish with `bundle_path`. If no source Project was selected, use the native flow's distinct `.apps` authoring directory.
 <!-- if-shell -->
-   Write and check the project with the `{{SHELL_TOOL}}` tool. Keep dependencies and Python virtual environments inside the project. A long simple document may use `file_path` instead of embedding `html` in the tool call. Check scripts and the important user interactions before publication.
+Inspect the actual platform and available runtime with the `{{SHELL_TOOL}}` tool. Mobile commands run in LingXi's Linux user space. Keep dependencies and Python virtual environments inside the app project; do not install global packages, replace shared runtimes, or copy Desktop `venv`/`node_modules` to mobile Linux. A long simple document may use `file_path` instead of embedding HTML. Check scripts and important interactions before publication.
 <!-- end-if-shell -->
-3. For a project, declare only the needed capabilities, exact package source files, targets and repeatable install/build/process steps. Bind servers to `127.0.0.1` and their assigned `PORT`. Use `LOCAL_APP_DATA_DIR` for durable backend data; installation/build steps receive separate preparation data and must not migrate live user records.
-4. Fix whatever the tool reports, publish, and inspect `start`, `status` and `logs` where available. An application card and its entry in Apps are delivery; a source directory or temporary development server alone is not.
-5. Explain what works and what was actually tested. Do not describe source tests, a browser preview or a successful build as physical-device or real-model acceptance.
+4. Write the current schema-2 manifest. Declare only supported targets and needed capabilities; keep lockfiles and list exact package files. Bind services to `127.0.0.1` and the allocated `PORT`; store durable backend data in `LOCAL_APP_DATA_DIR`. Install/build steps use separate preparation data and must not alter live user records. A declared source package alone does not guarantee reproducible builds.
+5. For Modify, call `LocalApp` `read` first, edit the saved source Project, then publish to the same app `id` using the observed `expectedRevision`. If the revision conflicts, inspect and merge the newer source before retrying; never blindly retry against a new revision.
+6. Fix validation errors, publish, then inspect `start`, `status` and `logs` where available. A source directory, temporary development server, build or browser preview is not a published app or device acceptance.
+7. Explain what works and what was actually tested. Do not describe source tests, a browser preview or a successful build as physical-device or real-model acceptance.
 
 ## Project manifest
 
@@ -40,7 +42,59 @@ Use the current schema only. A minimal project looks like:
 }
 ```
 
-Static apps do not require Linux processes. A Node/Python app needs a compatible execution target and the user's exact-release consent in the native Apps page. On mobile, require an available Mobile Linux runtime rather than assuming Desktop commands or arbitrary native executables will run. Check architecture, runtime/channel and capability support. Do not modify the shared Linux toolchain. Package only declared source/build outputs and lockfiles; exclude credentials, local grants, user data and dependency caches.
+Static apps do not require Linux processes. A Node/Python app needs a compatible execution target and the user's exact-release consent in the native Apps page. On mobile, require an available Mobile Linux runtime rather than assuming Desktop commands or arbitrary native executables will run. Check architecture, runtime/channel and capability support. Do not modify the shared Linux toolchain. Package only declared source/build outputs and lockfiles; exclude credentials, local grants, user data, browser stores and dependency caches.
+
+For services, `venv` and step `cwd` are app-relative. Install/build commands terminate; named processes stay alive until stopped. `dependsOn` sets startup order and readiness uses an HTTP `path` or exact `output`. Use `window.localApp.serviceUrl()` and `serviceSocketUrl()` rather than hardcoded ports or saved run URLs; restart revokes the old run's service access. Declare only needed native capabilities and handle denial visibly. An `agent.tools` declaration is a capability requirement, not a grant. App pages never receive general host tools or provider credentials. App processes run with this device user's access; they are not isolated by a per-app Linux security sandbox.
+
+## Page tools with WebMCP
+
+For an interactive app with useful actions, expose its user-facing operations through the standard `document.modelContext` API. Register tools that call the same validated app functions used by the UI, validate domain rules again in each callback, and update/render the page from the result. Use `inputSchema` for argument shape; do not treat schema validation as authorization or business validation.
+
+The host provides the standard API: Desktop and static Mobile pages receive the polyfill automatically, which leaves a native implementation intact. A Mobile server-backed page must include `<script src="/__host/webmcp.js"></script>` before app code that uses the API. A `file://` preview does not have the installed app's host API or prove that it works. Do not overwrite `document.modelContext` or add a manifest capability for it. Reuse an already-installed browser integration for verification; do not silently install/configure one, grant access or open global CDP. If the installed app browser is unreachable, report that it was not verified. The user may choose an integration from Public settings.
+
+Register page tools once for the page lifetime with an `AbortController` signal; abort it during teardown/navigation. Keep the callback small and route it through the same validated function as the UI:
+
+```js
+let summaryTools;
+async function registerSummaryTool() {
+  const context = document.modelContext;
+  if (!context || typeof context.registerTool !== "function") return;
+  if (summaryTools) return;
+  const lifecycle = new AbortController();
+  summaryTools = lifecycle;
+  try {
+    await context.registerTool({
+      name: "reading.get_summary",
+      description: "Read the current reading summary",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      annotations: { readOnlyHint: true },
+      execute: async (input, { signal }) => {
+        if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).length !== 0)
+          throw new TypeError("Expected an empty object");
+        if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+        return await getReadingSummary({ signal });
+      }
+    }, { signal: lifecycle.signal });
+  } catch {
+    lifecycle.abort();
+    if (summaryTools === lifecycle) summaryTools = undefined;
+    // Keep ordinary UI controls available when tool registration fails.
+  }
+}
+
+function removeSummaryTool() {
+  const lifecycle = summaryTools;
+  summaryTools = undefined;
+  lifecycle?.abort();
+}
+void registerSummaryTool();
+window.addEventListener("pagehide", removeSummaryTool);
+window.addEventListener("pageshow", event => { if (event.persisted) void registerSummaryTool(); });
+```
+
+In the installed app browser, check `document.modelContext.getTools()`, execute `reading.get_summary` with `{}` using `executeTool()`, and verify its result against the page. Check that a non-empty input is rejected, teardown/navigation removes the registration, and a BFCache `pageshow` restores it. If `document.modelContext` or `registerTool` is unavailable, keep the ordinary UI usable and do not claim Agent access.
+
+WebMCP exposes page actions to an Agent; `window.localApp.agent` is a separate app-to-host AG-UI interface. Use each only for its direction and purpose.
 
 ## Calling the host Agent with AG-UI 1.0
 
@@ -128,10 +182,11 @@ standalone browser rendering are not real-provider or physical-device evidence.
 
 ## Updates and data
 
-- Find an app with `list`, then `read` its source metadata and latest revision. Edit the source project and update the same ID with `expectedRevision`; never overwrite concurrent work silently.
-- Version switches preserve app data and may require new execution/capability consent. New code does not receive permissions from a saved model preference alone.
-- Keep data formats backward readable. A changed filesystem `dataSchema` requires the host's verified backup/migration transaction; do not erase data or bypass a migration refusal.
+- Use `list` to find an app, then `read` its source metadata and latest release. Edit the bound source Project and update the same ID with the observed `expectedRevision`; never overwrite concurrent work silently.
+- Version switches preserve app data and may require new execution/capability consent. Failed staged preparation keeps the prior release; rolling code back does not reverse database or IndexedDB writes. New code does not receive permissions from a saved model preference alone.
+- Keep data formats backward readable. A changed filesystem `dataSchema` requires the host's verified backup/migration transaction; `compatibleFrom` alone is not proof. Do not erase data or bypass a migration refusal.
 - Use localStorage/IndexedDB for browser records, validate loaded data, report failed saves, and provide export/import for important records. Installation, publication and execution are different lifecycle steps.
+- Publishing to the public market is a separate native review action. Export only declared package files, excluding credentials, transcripts, grants, browser stores, databases and private files. Market installation copies code, not author permissions; a permitted customization creates a separate app and preserves upstream attribution.
 
 ## Interface and verification
 

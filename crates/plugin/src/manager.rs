@@ -41,7 +41,7 @@ use serde_json::Value;
 
 use command_api::CommandRegistry;
 use hooks::mods::{ModReplayFailure, ModReplayModule, ModWorkerFailure};
-use hooks::{HookDefinition, HookExecutor, HookRegistry};
+use hooks::{HookDefinition, HookExecutor, HookRegistry, HookShell};
 use lingxi_core::host::task_registry::{MonitorRegistration, TaskRegistryHandle};
 use lingxi_core::host::{FileSystem, HttpTransport, RuntimeSpawner};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
@@ -1363,7 +1363,20 @@ impl PluginManager {
         // Create the writable plugin-data directory before mutating any live
         // registry. A filesystem failure must not leave a partially loaded
         // plugin behind.
-        let plugin_data_dir = if manifest.components.lsp_servers.is_empty() {
+        let mcp_uses_plugin_data = manifest
+            .components
+            .mcp_servers
+            .values()
+            .any(mcp_config_references_plugin_data);
+        let hooks_use_plugin_data = manifest
+            .components
+            .hooks
+            .iter()
+            .any(hook_references_plugin_data);
+        let mut plugin_data_dir = if manifest.components.lsp_servers.is_empty()
+            && !mcp_uses_plugin_data
+            && !hooks_use_plugin_data
+        {
             None
         } else {
             Some(ensure_plugin_data_dir(&self.install_dir, &plugin_key).await?)
@@ -1476,8 +1489,18 @@ impl PluginManager {
                         parts.push(def.agent_type);
                         def.agent_type = parts.join(":");
                         if let Some(prompt) = def.system_prompt.take() {
-                            def.system_prompt =
-                                Some(user_config::substitute_text_field(&prompt, &text_subst_ctx));
+                            if plugin_data_dir.is_none() && text_references_plugin_data(&prompt) {
+                                plugin_data_dir = Some(
+                                    ensure_plugin_data_dir(&self.install_dir, &plugin_key).await?,
+                                );
+                            }
+                            def.system_prompt = Some(substitute_plugin_instance_text(
+                                &prompt,
+                                &text_subst_ctx,
+                                install_dir,
+                                plugin_data_dir.as_deref(),
+                                &self.project_dir,
+                            ));
                         }
                         agent_defs.push(def);
                     }
@@ -1544,6 +1567,16 @@ impl PluginManager {
                         file.content.clone().into(),
                     ),
                 };
+                if plugin_data_dir.is_none() && text_references_plugin_data(&prompt_template) {
+                    plugin_data_dir =
+                        Some(ensure_plugin_data_dir(&self.install_dir, &plugin_key).await?);
+                }
+                let prompt_template = substitute_plugin_instance_text_paths(
+                    &prompt_template,
+                    install_dir,
+                    plugin_data_dir.as_deref(),
+                    &self.project_dir,
+                );
                 let (user_facing_name, aliases) = command_api::plugin_prompt_name_metadata(
                     &namespaced_name,
                     file.frontmatter_name.as_ref(),
@@ -1616,10 +1649,29 @@ impl PluginManager {
                 bare_skill_names.push(skill.name.clone());
                 skill.name = format!("{plugin_name}:{}", skill.name);
                 skill.plugin_id = Some(manifest.id);
-                skill.description =
-                    user_config::substitute_text_field(&skill.description, &text_subst_ctx);
+                if plugin_data_dir.is_none() && text_references_plugin_data(&skill.description) {
+                    plugin_data_dir =
+                        Some(ensure_plugin_data_dir(&self.install_dir, &plugin_key).await?);
+                }
+                if plugin_data_dir.is_none() && text_references_plugin_data(&skill.content) {
+                    plugin_data_dir =
+                        Some(ensure_plugin_data_dir(&self.install_dir, &plugin_key).await?);
+                }
+                skill.description = substitute_plugin_instance_text(
+                    &skill.description,
+                    &text_subst_ctx,
+                    install_dir,
+                    plugin_data_dir.as_deref(),
+                    &self.project_dir,
+                );
                 skill.frontmatter.description = skill.description.clone();
-                skill.content = user_config::substitute_text_field(&skill.content, &text_subst_ctx);
+                skill.content = substitute_plugin_instance_text(
+                    &skill.content,
+                    &text_subst_ctx,
+                    install_dir,
+                    plugin_data_dir.as_deref(),
+                    &self.project_dir,
+                );
 
                 // Plugin skills are prompt commands in Claude Code. Register
                 // the same parsed file in the shared slash-command catalog so
@@ -1925,7 +1977,12 @@ impl PluginManager {
                 // Substitute `${user_config.KEY}` references (command / args
                 // / env, and remote url / headers) with the resolved values
                 // — the primary consumption path for a plugin's userConfig.
-                substitute_mcp_config(&mut scoped, &subst_ctx);
+                substitute_mcp_config(
+                    &mut scoped,
+                    &subst_ctx,
+                    install_dir,
+                    plugin_data_dir.as_deref(),
+                );
                 Some(PluginMcpServerOwner {
                     storage_id: plugin_key.clone(),
                     raw_server_key,
@@ -2118,18 +2175,19 @@ impl PluginManager {
                 .register_plugin_skills(manifest.id, skills);
         }
 
-        // 4. Hooks — apply the resolved userConfig to each Command hook before
-        //    registering: inject `LINGXI_PLUGIN_OPTION_<KEY>` into the child env
-        //    (claude `CLAUDE_PLUGIN_OPTION_${ye}`), substitute `${user_config.*}`
-        //    into exec-form command/args, and REJECT (skip) a shell-form command
-        //    that references `${user_config.*}` (the shell would re-parse the
-        //    substituted value — an injection hazard). A no-op when the plugin
-        //    has no userConfig (`subst_ctx` empty), leaving hooks byte-unchanged.
+        // 4. Hooks — bind plugin root/data and project paths to this installed
+        //    plugin instance, then apply its resolved userConfig. Child env is
+        //    stored on this plugin's cloned hook only; no process-global env is
+        //    changed. Shell-form commands keep plugin path placeholders for the
+        //    shell to expand from that scoped child env.
         let plugin_hooks = apply_user_config_to_hooks(
             plugin_name,
             &manifest.components.hooks,
             &subst_ctx,
             &text_subst_ctx,
+            install_dir,
+            plugin_data_dir.as_deref(),
+            &self.project_dir,
         );
         self.hook_registry
             .write()
@@ -3020,45 +3078,283 @@ fn component_root(component: &ComponentPath, fallback: PathBuf) -> PathBuf {
         .unwrap_or(fallback)
 }
 
-/// Substitute `${user_config.KEY}` references into an MCP server config's
-/// transport spec, in place. Covers the substitutable string surfaces: the
-/// Stdio `command` / `args` / `env` values, and remote (`Sse` / `Http` /
-/// `WebSocket`) `url` + `headers` values. Non-substitutable specs (`InProcess`,
-/// `SseIde`, `WsIde`, `SdkControl`) carry no userConfig-derived string and are
-/// left untouched. A no-op when the substitution context is empty (the common
-/// no-userConfig case), so a plugin without userConfig is byte-unchanged.
-fn substitute_mcp_config(cfg: &mut McpServerConfig, ctx: &Utf16JsonProjection) {
-    use lingxi_core::host::McpTransportSpec;
-    if ctx
-        .object_entries()
-        .is_some_and(|entries| entries.is_empty())
-    {
+fn plugin_data_reference(value: &str) -> bool {
+    value.contains("${CLAUDE_PLUGIN_DATA}")
+        || value.contains(&format!("${{{}}}", branding::PLUGIN_DATA_ENV))
+}
+
+fn text_references_plugin_data(value: &Utf16JsonProjection) -> bool {
+    value.string_units("").is_some_and(|units| {
+        contains_utf16_token(&units, "${CLAUDE_PLUGIN_DATA}")
+            || contains_utf16_token(&units, &format!("${{{}}}", branding::PLUGIN_DATA_ENV))
+    })
+}
+
+fn hook_references_plugin_data(hook: &HookDefinition) -> bool {
+    match &hook.executor {
+        HookExecutor::Command {
+            command,
+            args,
+            env,
+            cwd,
+            ..
+        } => {
+            plugin_data_reference(command)
+                || args.iter().any(|value| plugin_data_reference(value))
+                || env.values().any(|value| plugin_data_reference(value))
+                || cwd
+                    .as_ref()
+                    .is_some_and(|value| value.to_str().is_some_and(plugin_data_reference))
+        }
+        HookExecutor::Http { url, headers, .. } => {
+            plugin_data_reference(url) || headers.values().any(|value| plugin_data_reference(value))
+        }
+        HookExecutor::Function { source, .. } => plugin_data_reference(source),
+        HookExecutor::Agent { prompt, .. } | HookExecutor::Prompt { prompt, .. } => {
+            text_references_plugin_data(prompt)
+        }
+        HookExecutor::McpTool { .. } | HookExecutor::Builtin { .. } => false,
+    }
+}
+
+fn contains_utf16_token(source: &[u16], token: &str) -> bool {
+    let token = token.encode_utf16().collect::<Vec<_>>();
+    !token.is_empty() && source.windows(token.len()).any(|window| window == token)
+}
+
+fn replace_utf16_token(source: &mut Vec<u16>, token: &str, replacement: &str) {
+    let token = token.encode_utf16().collect::<Vec<_>>();
+    if token.is_empty() {
         return;
     }
+    let replacement = replacement.encode_utf16().collect::<Vec<_>>();
+    let mut result = Vec::with_capacity(source.len());
+    let mut cursor = 0;
+    while cursor < source.len() {
+        if source[cursor..].starts_with(&token) {
+            result.extend_from_slice(&replacement);
+            cursor += token.len();
+        } else {
+            result.push(source[cursor]);
+            cursor += 1;
+        }
+    }
+    *source = result;
+}
+
+fn substitute_plugin_instance_text_paths(
+    source: &Utf16JsonProjection,
+    install_dir: &Path,
+    plugin_data_dir: Option<&Path>,
+    project_dir: &Path,
+) -> Utf16JsonProjection {
+    let Some(mut units) = source.string_units("") else {
+        return source.clone();
+    };
+    let plugin_root = install_dir.to_string_lossy().into_owned();
+    replace_utf16_token(&mut units, "${CLAUDE_PLUGIN_ROOT}", &plugin_root);
+    replace_utf16_token(
+        &mut units,
+        &format!("${{{}}}", branding::PLUGIN_ROOT_ENV),
+        &plugin_root,
+    );
+    if let Some(plugin_data_dir) = plugin_data_dir {
+        let plugin_data = plugin_data_dir.to_string_lossy().into_owned();
+        replace_utf16_token(&mut units, "${CLAUDE_PLUGIN_DATA}", &plugin_data);
+        replace_utf16_token(
+            &mut units,
+            &format!("${{{}}}", branding::PLUGIN_DATA_ENV),
+            &plugin_data,
+        );
+    }
+    let project_dir = project_dir.to_string_lossy().into_owned();
+    replace_utf16_token(&mut units, "${CLAUDE_PROJECT_DIR}", &project_dir);
+    replace_utf16_token(
+        &mut units,
+        &format!("${{{}}}", branding::PROJECT_DIR_ENV),
+        &project_dir,
+    );
+    Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+        .expect("plugin instance path substitution remains a root string")
+}
+
+fn substitute_plugin_instance_text(
+    source: &Utf16JsonProjection,
+    text_ctx: &Utf16JsonProjection,
+    install_dir: &Path,
+    plugin_data_dir: Option<&Path>,
+    project_dir: &Path,
+) -> Utf16JsonProjection {
+    let paths =
+        substitute_plugin_instance_text_paths(source, install_dir, plugin_data_dir, project_dir);
+    user_config::substitute_text_field(&paths, text_ctx)
+}
+
+fn substitute_plugin_instance_string_paths(
+    source: &str,
+    install_dir: &Path,
+    plugin_data_dir: Option<&Path>,
+    project_dir: &Path,
+) -> String {
+    let plugin_root = install_dir.to_string_lossy();
+    let mut value = source
+        .replace("${CLAUDE_PLUGIN_ROOT}", &plugin_root)
+        .replace(&format!("${{{}}}", branding::PLUGIN_ROOT_ENV), &plugin_root);
+    if let Some(plugin_data_dir) = plugin_data_dir {
+        let plugin_data = plugin_data_dir.to_string_lossy();
+        value = value
+            .replace("${CLAUDE_PLUGIN_DATA}", &plugin_data)
+            .replace(&format!("${{{}}}", branding::PLUGIN_DATA_ENV), &plugin_data);
+    }
+    let project_dir = project_dir.to_string_lossy();
+    value
+        .replace("${CLAUDE_PROJECT_DIR}", &project_dir)
+        .replace(&format!("${{{}}}", branding::PROJECT_DIR_ENV), &project_dir)
+}
+
+fn normalize_plugin_tokens_for_powershell(command: &str) -> String {
+    command
+        .replace(
+            "${CLAUDE_PLUGIN_ROOT}",
+            &format!("${{{}}}", branding::PLUGIN_ROOT_ENV),
+        )
+        .replace(
+            "${CLAUDE_PLUGIN_DATA}",
+            &format!("${{{}}}", branding::PLUGIN_DATA_ENV),
+        )
+        .replace(
+            "${CLAUDE_PROJECT_DIR}",
+            &format!("${{{}}}", branding::PROJECT_DIR_ENV),
+        )
+}
+
+fn mcp_config_references_plugin_data(cfg: &McpServerConfig) -> bool {
+    use lingxi_core::host::McpTransportSpec;
+
+    match &cfg.spec {
+        McpTransportSpec::Stdio { command, args, env } => {
+            plugin_data_reference(command)
+                || args.iter().any(|value| plugin_data_reference(value))
+                || env.values().any(|value| plugin_data_reference(value))
+        }
+        McpTransportSpec::Sse {
+            url,
+            headers,
+            headers_helper,
+            ..
+        }
+        | McpTransportSpec::Http {
+            url,
+            headers,
+            headers_helper,
+            ..
+        }
+        | McpTransportSpec::WebSocket {
+            url,
+            headers,
+            headers_helper,
+        } => {
+            plugin_data_reference(url)
+                || headers.values().any(|value| plugin_data_reference(value))
+                || headers_helper.as_deref().is_some_and(plugin_data_reference)
+        }
+        McpTransportSpec::InProcess { .. }
+        | McpTransportSpec::SseIde { .. }
+        | McpTransportSpec::WsIde { .. }
+        | McpTransportSpec::SdkControl { .. } => false,
+    }
+}
+
+/// Substitute per-plugin root/data paths and `${user_config.KEY}` references
+/// into an MCP server config before registration. Stdio environment entries
+/// are part of this server's dynamic-scoped config; no process-global or other
+/// session environment is changed.
+fn substitute_mcp_config(
+    cfg: &mut McpServerConfig,
+    ctx: &Utf16JsonProjection,
+    install_dir: &Path,
+    plugin_data_dir: Option<&Path>,
+) {
+    use lingxi_core::host::McpTransportSpec;
+    let plugin_root = install_dir.to_string_lossy().into_owned();
+    let plugin_data = mcp_config_references_plugin_data(cfg)
+        .then(|| plugin_data_dir.map(|path| path.to_string_lossy().into_owned()))
+        .flatten();
+    let substitute_plugin_paths = |value: &str| {
+        let value = value
+            .replace("${CLAUDE_PLUGIN_ROOT}", &plugin_root)
+            .replace(&format!("${{{}}}", branding::PLUGIN_ROOT_ENV), &plugin_root);
+        if let Some(plugin_data) = plugin_data.as_deref() {
+            value
+                .replace("${CLAUDE_PLUGIN_DATA}", plugin_data)
+                .replace(&format!("${{{}}}", branding::PLUGIN_DATA_ENV), plugin_data)
+        } else {
+            value
+        }
+    };
+    let expand_field =
+        |value: &str| user_config::substitute_string_field(&substitute_plugin_paths(value), ctx);
     match &mut cfg.spec {
         McpTransportSpec::Stdio { command, args, env } => {
-            *command = user_config::substitute_string_field(command, ctx);
-            *args = user_config::substitute_args(args, ctx);
+            *command = expand_field(command);
+            let plugin_path_args = args
+                .iter()
+                .map(|arg| substitute_plugin_paths(arg))
+                .collect::<Vec<_>>();
+            *args = user_config::substitute_args(&plugin_path_args, ctx);
             for v in env.values_mut() {
-                *v = user_config::substitute_string_field(v, ctx);
+                *v = expand_field(v);
+            }
+            env.entry("CLAUDE_PLUGIN_ROOT".to_string())
+                .or_insert_with(|| plugin_root.clone());
+            env.entry(branding::PLUGIN_ROOT_ENV.to_string())
+                .or_insert_with(|| plugin_root.clone());
+            if let Some(plugin_data) = plugin_data.as_ref() {
+                env.entry("CLAUDE_PLUGIN_DATA".to_string())
+                    .or_insert_with(|| plugin_data.clone());
+                env.entry(branding::PLUGIN_DATA_ENV.to_string())
+                    .or_insert_with(|| plugin_data.clone());
             }
         }
-        McpTransportSpec::Sse { url, headers, .. } => {
-            *url = user_config::substitute_string_field(url, ctx);
+        McpTransportSpec::Sse {
+            url,
+            headers,
+            headers_helper,
+            ..
+        } => {
+            *url = expand_field(url);
             for v in headers.values_mut() {
-                *v = user_config::substitute_string_field(v, ctx);
+                *v = expand_field(v);
+            }
+            if let Some(helper) = headers_helper {
+                *helper = expand_field(helper);
             }
         }
-        McpTransportSpec::Http { url, headers, .. } => {
-            *url = user_config::substitute_string_field(url, ctx);
+        McpTransportSpec::Http {
+            url,
+            headers,
+            headers_helper,
+            ..
+        } => {
+            *url = expand_field(url);
             for v in headers.values_mut() {
-                *v = user_config::substitute_string_field(v, ctx);
+                *v = expand_field(v);
+            }
+            if let Some(helper) = headers_helper {
+                *helper = expand_field(helper);
             }
         }
-        McpTransportSpec::WebSocket { url, headers, .. } => {
-            *url = user_config::substitute_string_field(url, ctx);
+        McpTransportSpec::WebSocket {
+            url,
+            headers,
+            headers_helper,
+        } => {
+            *url = expand_field(url);
             for v in headers.values_mut() {
-                *v = user_config::substitute_string_field(v, ctx);
+                *v = expand_field(v);
+            }
+            if let Some(helper) = headers_helper {
+                *helper = expand_field(helper);
             }
         }
         McpTransportSpec::InProcess { .. }
@@ -3143,24 +3439,11 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// Apply a plugin's resolved `userConfig` (`ctx`, keyed by bare field name) to
-/// its hook definitions before registration, mirroring claude-code 2.1.207:
-///
-/// * every **Command** hook's child env gains a `LINGXI_PLUGIN_OPTION_<KEY>`
-///   entry per userConfig field (claude `CLAUDE_PLUGIN_OPTION_${ye}=String(me)`,
-///   with the established `LINGXI_` prefix — cf. `LINGXI_PLUGIN_ROOT`), so a hook
-///   script can read a value (including a sensitive one) from its environment
-///   without it ever touching a command line;
-/// * an **exec-form** Command hook (with discrete `args`) has `${user_config.*}`
-///   substituted into its `command` + `args` (each arg a discrete argv element —
-///   no shell re-parse);
-/// * a **shell-form** Command hook (a bare `command`, no `args`) that references
-///   `${user_config.*}` is REJECTED (skipped) — the substituted value would be
-///   re-parsed by the shell (`user_config::shell_form_reference_rejection`).
-///
-/// Non-Command hooks (Http / Agent / Prompt / Builtin) carry no subprocess env
-/// and are passed through unchanged. A no-op (verbatim clone) when `ctx` is empty
-/// — the common no-userConfig case stays byte-identical.
+/// Bind one installed plugin's root/data/project context and resolved
+/// `userConfig` to its hook definitions before registration. These values live
+/// only on cloned hook definitions; no process-global environment is modified.
+/// Sensitive values remain limited to command args/env and are excluded from
+/// model-visible prompt substitutions through `text_ctx`.
 fn non_sensitive_text_context(
     schema: Option<&crate::manifest::UserConfigSchema>,
     resolved: &Utf16JsonProjection,
@@ -3186,81 +3469,150 @@ fn apply_user_config_to_hooks(
     hooks: &[HookDefinition],
     ctx: &Utf16JsonProjection,
     text_ctx: &Utf16JsonProjection,
+    install_dir: &Path,
+    plugin_data_dir: Option<&Path>,
+    project_dir: &Path,
 ) -> Vec<HookDefinition> {
-    let Some(entries) = ctx.object_entries() else {
-        return hooks.to_vec();
-    };
-    if entries.is_empty() {
-        return hooks.to_vec();
-    }
+    let entries = ctx.object_entries().unwrap_or_default();
+    let has_user_config = !entries.is_empty();
     let mut out = Vec::with_capacity(hooks.len());
     for hook in hooks {
-        if matches!(
-            &hook.executor,
-            HookExecutor::Agent { .. } | HookExecutor::Prompt { .. }
-        ) {
-            let mut hook = hook.clone();
-            match &mut hook.executor {
-                HookExecutor::Agent { prompt, .. } | HookExecutor::Prompt { prompt, .. } => {
-                    *prompt = user_config::substitute_text_field(prompt, text_ctx);
-                }
-                _ => unreachable!("matched prompt-bearing hook"),
-            }
-            out.push(hook);
-            continue;
-        }
-        let HookExecutor::Command {
-            command,
-            args,
-            env,
-            cwd,
-            shell,
-        } = &hook.executor
-        else {
-            out.push(hook.clone());
-            continue;
-        };
-        // Shell-form = a bare command with no discrete exec-form args. Rejecting
-        // it (skip) is the safety gate: a substituted secret would hit the shell.
-        // The rejection names the OWNING PLUGIN (claude `Hook from plugin ${c}`),
-        // not the hook.
-        if args.is_empty() && user_config::references_user_config(command) {
-            tracing::warn!(
-                "{}",
-                user_config::shell_form_reference_rejection(plugin_name, command)
-            );
-            continue;
-        }
-        // Exec-form (and no-ref shell-form, a no-op): substitute the discrete
-        // command + args, then inject the plugin-option env vars.
-        let new_command = user_config::substitute_string_field(command, ctx);
-        let new_args = user_config::substitute_args(args, ctx);
-        let mut new_env = env.clone();
-        for entry in &entries {
-            let Ok(key) = String::from_utf16(entry.code_units) else {
-                // Environment variable names are UTF-8 host identifiers. A
-                // key that cannot be represented there must not be replaced
-                // with a lossy display spelling.
-                continue;
-            };
-            let Ok(value) = ctx.subprojection_property_units(entry.code_units) else {
-                continue;
-            };
-            new_env.insert(
-                user_config::option_env_var(&key),
-                user_config::value_to_env_string(&value),
-            );
-        }
         let mut hook = hook.clone();
-        hook.executor = HookExecutor::Command {
-            command: new_command,
-            args: new_args,
-            env: new_env,
-            cwd: cwd.clone(),
-            // The `shell` selector is config metadata, not a substitution
-            // target — carry it through the user-config rewrite unchanged.
-            shell: *shell,
-        };
+        match &mut hook.executor {
+            HookExecutor::Command {
+                command,
+                args,
+                env,
+                cwd,
+                shell,
+            } => {
+                let shell_form = args.is_empty();
+                // Shell-form command strings expand paths from their scoped
+                // child env. Keeping placeholders intact avoids splicing an
+                // unquoted filesystem path into shell syntax. Exec-form command
+                // and argv values are discrete process arguments.
+                if !shell_form {
+                    let path_command = substitute_plugin_instance_string_paths(
+                        command,
+                        install_dir,
+                        plugin_data_dir,
+                        project_dir,
+                    );
+                    *command = user_config::substitute_string_field(&path_command, ctx);
+                }
+                if shell_form && has_user_config && user_config::references_user_config(command) {
+                    tracing::warn!(
+                        "{}",
+                        user_config::shell_form_reference_rejection(plugin_name, command)
+                    );
+                    continue;
+                }
+                if shell_form
+                    && (*shell).unwrap_or_else(hooks::default_hook_shell) == HookShell::Powershell
+                {
+                    // The existing PowerShell executor recognizes LingXi
+                    // `${env:...}` tokens. Normalize only this cloned
+                    // shell-form command so its existing rewrite can bind the
+                    // imported Claude placeholders through the same scoped
+                    // child environment, without embedding path bytes.
+                    *command = normalize_plugin_tokens_for_powershell(command);
+                }
+                let path_args = args
+                    .iter()
+                    .map(|arg| {
+                        substitute_plugin_instance_string_paths(
+                            arg,
+                            install_dir,
+                            plugin_data_dir,
+                            project_dir,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                *args = user_config::substitute_args(&path_args, ctx);
+                for value in env.values_mut() {
+                    let path_value = substitute_plugin_instance_string_paths(
+                        value,
+                        install_dir,
+                        plugin_data_dir,
+                        project_dir,
+                    );
+                    *value = user_config::substitute_string_field(&path_value, ctx);
+                }
+                let cwd_text = cwd
+                    .as_ref()
+                    .and_then(|path| path.to_str())
+                    .map(ToOwned::to_owned);
+                if let Some(path) = cwd_text {
+                    *cwd = Some(PathBuf::from(substitute_plugin_instance_string_paths(
+                        &path,
+                        install_dir,
+                        plugin_data_dir,
+                        project_dir,
+                    )));
+                }
+
+                let plugin_root = install_dir.to_string_lossy().into_owned();
+                let project_path = project_dir.to_string_lossy().into_owned();
+                env.insert("CLAUDE_PLUGIN_ROOT".to_string(), plugin_root.clone());
+                env.insert(branding::PLUGIN_ROOT_ENV.to_string(), plugin_root);
+                env.insert("CLAUDE_PROJECT_DIR".to_string(), project_path.clone());
+                env.insert(branding::PROJECT_DIR_ENV.to_string(), project_path);
+                if let Some(plugin_data_dir) = plugin_data_dir {
+                    let plugin_data = plugin_data_dir.to_string_lossy().into_owned();
+                    env.insert("CLAUDE_PLUGIN_DATA".to_string(), plugin_data.clone());
+                    env.insert(branding::PLUGIN_DATA_ENV.to_string(), plugin_data);
+                }
+
+                for entry in &entries {
+                    let Ok(key) = String::from_utf16(entry.code_units) else {
+                        // Environment variable names are UTF-8 host identifiers.
+                        continue;
+                    };
+                    let Ok(value) = ctx.subprojection_property_units(entry.code_units) else {
+                        continue;
+                    };
+                    let lingxi_name = user_config::option_env_var(&key);
+                    let value = user_config::value_to_env_string(&value);
+                    let suffix = user_config::option_env_key(&key);
+                    env.insert(format!("CLAUDE_PLUGIN_OPTION_{suffix}"), value.clone());
+                    env.insert(lingxi_name, value);
+                }
+            }
+            HookExecutor::Agent { prompt, .. } | HookExecutor::Prompt { prompt, .. } => {
+                *prompt = substitute_plugin_instance_text(
+                    prompt,
+                    text_ctx,
+                    install_dir,
+                    plugin_data_dir,
+                    project_dir,
+                );
+            }
+            HookExecutor::Http { url, headers, .. } => {
+                *url = substitute_plugin_instance_string_paths(
+                    url,
+                    install_dir,
+                    plugin_data_dir,
+                    project_dir,
+                );
+                for value in headers.values_mut() {
+                    *value = substitute_plugin_instance_string_paths(
+                        value,
+                        install_dir,
+                        plugin_data_dir,
+                        project_dir,
+                    );
+                }
+            }
+            HookExecutor::Function { source, .. } => {
+                *source = substitute_plugin_instance_string_paths(
+                    source,
+                    install_dir,
+                    plugin_data_dir,
+                    project_dir,
+                );
+            }
+            HookExecutor::McpTool { .. } | HookExecutor::Builtin { .. } => {}
+        }
         out.push(hook);
     }
     out
@@ -3578,6 +3930,115 @@ mod user_config_tests {
         assert!(path.is_dir());
     }
 
+    fn plugin_mcp_config(spec: lingxi_core::host::McpTransportSpec) -> McpServerConfig {
+        McpServerConfig {
+            name: "server".into(),
+            spec,
+            scope: mcp::ConfigScope::Dynamic,
+            disabled: false,
+            timeout_ms: None,
+            always_load: false,
+            discovery_cache: None,
+            tools: Vec::new(),
+            tool_permissions: std::collections::BTreeMap::new(),
+            config_error: None,
+            metadata: mcp::McpServerMetadata::default(),
+        }
+    }
+
+    #[test]
+    fn claude_plugin_mcp_paths_resolve_inside_only_the_owning_server_config() {
+        use lingxi_core::host::McpTransportSpec;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_root = tmp.path().join("plugins/cache/ora/webmcp/0.10.0");
+        let plugin_data = tmp.path().join("plugins/data/webmcp-ora");
+        let mut config = plugin_mcp_config(McpTransportSpec::Stdio {
+            command: "node".into(),
+            args: vec!["${CLAUDE_PLUGIN_ROOT}/server.js".into()],
+            env: HashMap::from([("CACHE_DIR".into(), "${CLAUDE_PLUGIN_DATA}/cache".into())]),
+        });
+        let process_root_before = std::env::var("CLAUDE_PLUGIN_ROOT").ok();
+        let process_data_before = std::env::var("CLAUDE_PLUGIN_DATA").ok();
+
+        assert!(mcp_config_references_plugin_data(&config));
+        substitute_mcp_config(
+            &mut config,
+            &Utf16JsonProjection::parse("{}").unwrap(),
+            &plugin_root,
+            Some(&plugin_data),
+        );
+
+        let McpTransportSpec::Stdio { args, env, .. } = &config.spec else {
+            panic!("expected a stdio plugin server");
+        };
+        assert_eq!(args[0], format!("{}/server.js", plugin_root.display()));
+        assert_eq!(env["CACHE_DIR"], format!("{}/cache", plugin_data.display()));
+        assert_eq!(env["CLAUDE_PLUGIN_ROOT"], plugin_root.display().to_string());
+        assert_eq!(
+            env[branding::PLUGIN_ROOT_ENV],
+            plugin_root.display().to_string()
+        );
+        assert_eq!(env["CLAUDE_PLUGIN_DATA"], plugin_data.display().to_string());
+        assert_eq!(
+            env[branding::PLUGIN_DATA_ENV],
+            plugin_data.display().to_string()
+        );
+        assert_eq!(
+            std::env::var("CLAUDE_PLUGIN_ROOT").ok(),
+            process_root_before
+        );
+        assert_eq!(
+            std::env::var("CLAUDE_PLUGIN_DATA").ok(),
+            process_data_before
+        );
+        assert!(plugin_data.starts_with(tmp.path().join("plugins")));
+    }
+
+    #[test]
+    fn plugin_data_directory_is_created_only_for_a_referencing_mcp_instance() {
+        use lingxi_core::host::McpTransportSpec;
+
+        let config = plugin_mcp_config(McpTransportSpec::Stdio {
+            command: "node".into(),
+            args: vec!["${CLAUDE_PLUGIN_ROOT}/server.js".into()],
+            env: HashMap::new(),
+        });
+        assert!(!mcp_config_references_plugin_data(&config));
+
+        let mut remote = plugin_mcp_config(McpTransportSpec::Http {
+            url: "https://mcp.example.test/${CLAUDE_PLUGIN_ROOT}".into(),
+            headers: indexmap::IndexMap::from([(
+                "X-Plugin-Data".into(),
+                "${CLAUDE_PLUGIN_DATA}".into(),
+            )]),
+            headers_helper: Some("${CLAUDE_PLUGIN_ROOT}/headers.sh".into()),
+            oauth: None,
+        });
+        assert!(mcp_config_references_plugin_data(&remote));
+        let root = Path::new("/lingxi/plugins/cache/ora/plugin/1.0.0");
+        let data = Path::new("/lingxi/plugins/data/plugin-ora");
+        substitute_mcp_config(
+            &mut remote,
+            &Utf16JsonProjection::parse("{}").unwrap(),
+            root,
+            Some(data),
+        );
+        let McpTransportSpec::Http {
+            url,
+            headers,
+            headers_helper,
+            ..
+        } = remote.spec
+        else {
+            panic!("expected HTTP plugin server");
+        };
+        assert_eq!(url, format!("https://mcp.example.test/{}", root.display()));
+        assert_eq!(headers["X-Plugin-Data"], data.display().to_string());
+        let expected_helper = format!("{}/headers.sh", root.display());
+        assert_eq!(headers_helper.as_deref(), Some(expected_helper.as_str()));
+    }
+
     fn command_hook(name: &str, command: &str, args: &[&str]) -> HookDefinition {
         HookDefinition {
             id: HookId::new(),
@@ -3608,6 +4069,22 @@ mod user_config_tests {
         Utf16JsonProjection::parse(r#"{"API_KEY":"sk-live","PORT":8080}"#).unwrap()
     }
 
+    fn apply_hooks(
+        hooks: &[HookDefinition],
+        ctx: &Utf16JsonProjection,
+        text_ctx: &Utf16JsonProjection,
+    ) -> Vec<HookDefinition> {
+        apply_user_config_to_hooks(
+            "weather",
+            hooks,
+            ctx,
+            text_ctx,
+            Path::new("/plugins/weather/1.0.0"),
+            Some(Path::new("/plugins/data/weather")),
+            Path::new("/workspace"),
+        )
+    }
+
     #[test]
     fn prompt_bearing_hooks_keep_lone_utf16_units_during_user_config_substitution() {
         let context = Utf16JsonProjection::parse(r#"{"API_KEY":"sk-\ud800-live"}"#).unwrap();
@@ -3625,8 +4102,7 @@ mod user_config_tests {
             continue_on_block: false,
         };
 
-        let substituted =
-            apply_user_config_to_hooks("weather", &[agent, prompt_hook], &context, &context);
+        let substituted = apply_hooks(&[agent, prompt_hook], &context, &context);
         let expected = [
             "Use sk-".encode_utf16().collect::<Vec<_>>(),
             vec![0xd800],
@@ -3640,6 +4116,192 @@ mod user_config_tests {
             };
             assert_eq!(prompt.string_units(""), Some(expected.clone()));
         }
+    }
+
+    #[test]
+    fn plugin_hooks_bind_paths_and_option_env_only_to_the_owning_hook() {
+        let original_root = std::env::var_os("CLAUDE_PLUGIN_ROOT");
+        let original_data = std::env::var_os("CLAUDE_PLUGIN_DATA");
+        let mut command = command_hook(
+            "exec",
+            "${CLAUDE_PLUGIN_ROOT}/bin/check",
+            &["${CLAUDE_PLUGIN_DATA}/state.json", "${CLAUDE_PROJECT_DIR}"],
+        );
+        if let HookExecutor::Command { env, cwd, .. } = &mut command.executor {
+            env.insert("CONFIG".into(), "${CLAUDE_PLUGIN_ROOT}/config.json".into());
+            *cwd = Some(PathBuf::from("${CLAUDE_PLUGIN_DATA}/work"));
+        }
+        let mut prompt = command_hook("prompt", "unused", &[]);
+        prompt.executor = HookExecutor::Prompt {
+            prompt: Utf16JsonProjection::from(
+                "Read ${CLAUDE_PLUGIN_ROOT}/guide.md; save to ${CLAUDE_PLUGIN_DATA}/result",
+            ),
+            model: None,
+            continue_on_block: false,
+        };
+
+        let context = ctx();
+        let bound = apply_user_config_to_hooks(
+            "weather",
+            &[command, prompt],
+            &context,
+            &context,
+            Path::new("/plugins/weather/1.0.0"),
+            Some(Path::new("/plugins/data/weather")),
+            Path::new("/workspace"),
+        );
+        assert_eq!(bound.len(), 2);
+        let HookExecutor::Command {
+            command,
+            args,
+            env,
+            cwd,
+            ..
+        } = &bound[0].executor
+        else {
+            panic!("expected exec-form command hook");
+        };
+        assert_eq!(command, "/plugins/weather/1.0.0/bin/check");
+        assert_eq!(
+            args,
+            &[
+                "/plugins/data/weather/state.json".to_string(),
+                "/workspace".to_string(),
+            ]
+        );
+        assert_eq!(env["CONFIG"], "/plugins/weather/1.0.0/config.json");
+        assert_eq!(env["CLAUDE_PLUGIN_ROOT"], "/plugins/weather/1.0.0");
+        assert_eq!(env[branding::PLUGIN_ROOT_ENV], "/plugins/weather/1.0.0");
+        assert_eq!(env["CLAUDE_PLUGIN_DATA"], "/plugins/data/weather");
+        assert_eq!(env[branding::PLUGIN_DATA_ENV], "/plugins/data/weather");
+        assert_eq!(env["CLAUDE_PROJECT_DIR"], "/workspace");
+        assert_eq!(env[branding::PROJECT_DIR_ENV], "/workspace");
+        assert_eq!(env["CLAUDE_PLUGIN_OPTION_API_KEY"], "sk-live");
+        assert_eq!(env[&user_config::option_env_var("API_KEY")], "sk-live");
+        assert_eq!(env["CLAUDE_PLUGIN_OPTION_PORT"], "8080");
+        assert_eq!(env[&user_config::option_env_var("PORT")], "8080");
+        assert_eq!(
+            cwd.as_ref().unwrap(),
+            Path::new("/plugins/data/weather/work")
+        );
+        let HookExecutor::Prompt { prompt, .. } = &bound[1].executor else {
+            panic!("expected prompt hook");
+        };
+        assert_eq!(
+            prompt.string_at(""),
+            Some("Read /plugins/weather/1.0.0/guide.md; save to /plugins/data/weather/result")
+        );
+        assert_eq!(std::env::var_os("CLAUDE_PLUGIN_ROOT"), original_root);
+        assert_eq!(std::env::var_os("CLAUDE_PLUGIN_DATA"), original_data);
+
+        let mut shell = command_hook("shell", "exec \"${CLAUDE_PLUGIN_ROOT}/run.sh\"", &[]);
+        if let HookExecutor::Command { env, .. } = &mut shell.executor {
+            env.insert("CUSTOM".into(), "value".into());
+        }
+        let shell = apply_user_config_to_hooks(
+            "weather",
+            &[shell],
+            &Utf16JsonProjection::parse("{}").unwrap(),
+            &Utf16JsonProjection::parse("{}").unwrap(),
+            Path::new("/plugins/other/2.0.0"),
+            None,
+            Path::new("/other-workspace"),
+        );
+        let HookExecutor::Command { command, env, .. } = &shell[0].executor else {
+            panic!("expected shell-form command hook");
+        };
+        assert_eq!(command, "exec \"${CLAUDE_PLUGIN_ROOT}/run.sh\"");
+        assert_eq!(env["CLAUDE_PLUGIN_ROOT"], "/plugins/other/2.0.0");
+        assert_eq!(env["CLAUDE_PROJECT_DIR"], "/other-workspace");
+        assert!(!env.contains_key("CLAUDE_PLUGIN_DATA"));
+        assert_eq!(env["CUSTOM"], "value");
+    }
+
+    #[test]
+    fn plugin_prompt_path_binding_preserves_source_and_lone_utf16_units() {
+        let mut source_units = "Read ${CLAUDE_PLUGIN_ROOT}/guide; cache ${CLAUDE_PLUGIN_DATA}; project ${CLAUDE_PROJECT_DIR}; "
+            .encode_utf16()
+            .collect::<Vec<_>>();
+        source_units.push(0xd800);
+        let source =
+            Utf16JsonProjection::root_string(String::from_utf16_lossy(&source_units), source_units)
+                .unwrap();
+        let original_units = source.string_units("").unwrap();
+        let context = Utf16JsonProjection::parse("{}").unwrap();
+        let bound = substitute_plugin_instance_text(
+            &source,
+            &context,
+            Path::new("/plugins/weather/1.0.0"),
+            Some(Path::new("/plugins/data/weather")),
+            Path::new("/workspace"),
+        );
+
+        assert_eq!(source.string_units(""), Some(original_units));
+        let bound_units = bound.string_units("").unwrap();
+        assert!(bound_units.contains(&0xd800));
+        assert_eq!(
+            String::from_utf16_lossy(&bound_units),
+            "Read /plugins/weather/1.0.0/guide; cache /plugins/data/weather; project /workspace; �"
+        );
+    }
+
+    #[test]
+    fn powershell_plugin_hook_tokens_reach_existing_env_rewrite() {
+        let command = "Write-Output ${CLAUDE_PLUGIN_ROOT}/run ${CLAUDE_PLUGIN_DATA}/cache ${CLAUDE_PROJECT_DIR}";
+        let mut powershell = command_hook("powershell", command, &[]);
+        if let HookExecutor::Command { shell, .. } = &mut powershell.executor {
+            *shell = Some(HookShell::Powershell);
+        }
+        let mut bash = command_hook("bash", command, &[]);
+        if let HookExecutor::Command { shell, .. } = &mut bash.executor {
+            *shell = Some(HookShell::Bash);
+        }
+
+        let bound = apply_user_config_to_hooks(
+            "weather",
+            &[powershell, bash],
+            &Utf16JsonProjection::parse("{}").unwrap(),
+            &Utf16JsonProjection::parse("{}").unwrap(),
+            Path::new("/plugins/weather/1.0.0"),
+            Some(Path::new("/plugins/data/weather")),
+            Path::new("/workspace"),
+        );
+        let HookExecutor::Command {
+            command: powershell_command,
+            env,
+            ..
+        } = &bound[0].executor
+        else {
+            panic!("expected PowerShell command hook");
+        };
+        let native_command = format!(
+            "Write-Output ${{{}}}/run ${{{}}}/cache ${{{}}}",
+            branding::PLUGIN_ROOT_ENV,
+            branding::PLUGIN_DATA_ENV,
+            branding::PROJECT_DIR_ENV,
+        );
+        assert_eq!(powershell_command, &native_command);
+        assert_eq!(
+            hooks::powershell_env_token_rewrite(powershell_command),
+            format!(
+                "Write-Output ${{env:{}}}/run ${{env:{}}}/cache ${{env:{}}}",
+                branding::PLUGIN_ROOT_ENV,
+                branding::PLUGIN_DATA_ENV,
+                branding::PROJECT_DIR_ENV,
+            )
+        );
+        assert_eq!(env["CLAUDE_PLUGIN_ROOT"], "/plugins/weather/1.0.0");
+        assert_eq!(env["CLAUDE_PLUGIN_DATA"], "/plugins/data/weather");
+        assert_eq!(env["CLAUDE_PROJECT_DIR"], "/workspace");
+
+        let HookExecutor::Command {
+            command: bash_command,
+            ..
+        } = &bound[1].executor
+        else {
+            panic!("expected Bash command hook");
+        };
+        assert_eq!(bash_command, command);
     }
 
     #[test]
@@ -3715,7 +4377,7 @@ mod user_config_tests {
             };
             hook
         });
-        let hooks = apply_user_config_to_hooks("weather", &hooks, &resolved, &text_context);
+        let hooks = apply_hooks(&hooks, &resolved, &text_context);
 
         let expected_public = [
             "public-".encode_utf16().collect::<Vec<_>>(),
@@ -3757,7 +4419,7 @@ mod user_config_tests {
             "./verify.sh",
             &["--key", "${user_config.API_KEY}"],
         )];
-        let out = apply_user_config_to_hooks("weather", &hooks, &ctx(), &ctx());
+        let out = apply_hooks(&hooks, &ctx(), &ctx());
         assert_eq!(out.len(), 1);
         let HookExecutor::Command { args, env, .. } = &out[0].executor else {
             panic!("expected Command executor");
@@ -3784,7 +4446,7 @@ mod user_config_tests {
             command_hook("safe", "./ok.sh", &["--port", "${user_config.PORT}"]),
             command_hook("danger", "./run.sh ${user_config.API_KEY}", &[]),
         ];
-        let out = apply_user_config_to_hooks("weather", &hooks, &ctx(), &ctx());
+        let out = apply_hooks(&hooks, &ctx(), &ctx());
         // Only the exec-form hook survives; the shell-form one is dropped.
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].name, "safe");
@@ -3796,7 +4458,7 @@ mod user_config_tests {
     #[test]
     fn shell_form_hook_without_reference_survives() {
         let hooks = vec![command_hook("plain", "./noop.sh", &[])];
-        let out = apply_user_config_to_hooks("weather", &hooks, &ctx(), &ctx());
+        let out = apply_hooks(&hooks, &ctx(), &ctx());
         assert_eq!(out.len(), 1);
         let HookExecutor::Command { command, env, .. } = &out[0].executor else {
             panic!("expected Command executor");
@@ -3814,8 +4476,7 @@ mod user_config_tests {
             "./run.sh ${user_config.API_KEY}",
             &[],
         )];
-        let out = apply_user_config_to_hooks(
-            "weather",
+        let out = apply_hooks(
             &hooks,
             &Utf16JsonProjection::parse("{}").unwrap(),
             &Utf16JsonProjection::parse("{}").unwrap(),
@@ -3824,9 +4485,12 @@ mod user_config_tests {
         let HookExecutor::Command { command, env, .. } = &out[0].executor else {
             panic!("expected Command executor");
         };
-        // Not rejected, not substituted, no injected env.
+        // Not rejected or user-config substituted. Plugin-scoped path aliases
+        // are still present on this hook's child environment.
         assert_eq!(command, "./run.sh ${user_config.API_KEY}");
-        assert!(env.is_empty());
+        assert_eq!(env["CLAUDE_PLUGIN_ROOT"], "/plugins/weather/1.0.0");
+        assert_eq!(env["CLAUDE_PLUGIN_DATA"], "/plugins/data/weather");
+        assert_eq!(env["CLAUDE_PROJECT_DIR"], "/workspace");
     }
 
     /// The MCP stdio `command` gate: a scoped stdio server whose `command`

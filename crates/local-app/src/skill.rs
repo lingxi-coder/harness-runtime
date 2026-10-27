@@ -89,7 +89,7 @@ mod tests {
         let none = skill_markdown(None);
         assert!(!none.contains("file_path"));
         assert!(!none.contains("if-shell") && !none.contains("{{"));
-        assert!(none.contains("4. Fix whatever the tool reports"));
+        assert!(none.contains("4. Write the current schema-2 manifest"));
     }
 
     #[test]
