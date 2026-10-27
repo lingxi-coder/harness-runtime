@@ -47,6 +47,20 @@ use tokio::process::Command;
 /// keeps the full Bash-spawn contract unchanged.
 const HOOK_COMMAND_AUDIT_REASON: &str = "hook_command";
 
+// Hook commands are allowed to ignore their event input. If the child closes
+// stdin early, EPIPE says only that the remaining input cannot be delivered;
+// the hook's stdout, stderr and exit status still determine its result. Other
+// write errors remain failures, and the caller must still wait for the child.
+async fn write_hook_stdin<W: tokio::io::AsyncWrite + Unpin>(
+    stdin: &mut W,
+    input: &[u8],
+) -> std::io::Result<()> {
+    match stdin.write_all(input).await {
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        result => result,
+    }
+}
+
 /// SH-07 — drain `r` to EOF into `buf`, pushing every chunk to `observer` as it
 /// is read.
 ///
@@ -577,8 +591,7 @@ async fn run_recovery_hook_owner(
     let initial = async {
         if let Some(text) = cmd.inner().stdin.as_ref() {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(text.as_bytes())
+                write_hook_stdin(&mut stdin, text.as_bytes())
                     .await
                     .map_err(|e| ProcessError::Io(e.to_string()))?;
             }
@@ -2493,8 +2506,7 @@ impl ProcessRunner for PosixProcess {
         );
         if let Some(stdin_text) = &inner.stdin {
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(stdin_text.as_bytes())
+                write_hook_stdin(&mut stdin, stdin_text.as_bytes())
                     .await
                     .map_err(|e| ProcessError::Io(e.to_string()))?;
             }
@@ -4498,6 +4510,77 @@ mod async_hook_tests {
             }
             HookRunOutcome::Backgrounded { .. } => panic!("empty hook must not background"),
         }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn hook_closing_stdin_early_preserves_output_and_exit_status() {
+        for owned in [false, true] {
+            for exit_code in [0, 7] {
+                let base = sh(&format!(
+                    "exec 0<&-; printf 'hook-output\\n'; printf 'hook-error\\n' >&2; exit {exit_code}"
+                ));
+                let mut input = base.inner().clone();
+                // Larger than a pipe buffer: write_all must observe the closed
+                // read end even when it runs before the child closes stdin.
+                input.stdin = Some("x".repeat(8 * 1024 * 1024));
+                let mut command = SandboxedCommand::__new_sandboxed(input, base.tag().clone());
+                if owned {
+                    command = command
+                        .with_lifetime_guard(Arc::new(()))
+                        .with_require_group_cleanup_on_exit(true);
+                }
+                let outcome = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    PosixProcess::new()
+                        .run_hook_with_async_detection(&command, Duration::from_secs(5)),
+                )
+                .await
+                .expect("hook completes and owned group cleanup is verified")
+                .expect("closed stdin does not replace the hook result");
+                let HookRunOutcome::Completed(output) = outcome else {
+                    panic!("hook must return its actual process result");
+                };
+                assert_eq!(output.stdout, "hook-output\n", "owned={owned}");
+                assert_eq!(output.stderr, "hook-error\n", "owned={owned}");
+                assert_eq!(output.exit_code, exit_code, "owned={owned}");
+                assert!(!output.timed_out, "owned={owned}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_stdin_other_write_errors_are_not_ignored() {
+        struct DeniedWriter;
+        impl tokio::io::AsyncWrite for DeniedWriter {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                _buf: &[u8],
+            ) -> std::task::Poll<std::io::Result<usize>> {
+                std::task::Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "fixture write failure",
+                )))
+            }
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let error = write_hook_stdin(&mut DeniedWriter, b"event")
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(error.to_string(), "fixture write failure");
     }
 
     #[tokio::test]

@@ -12,6 +12,49 @@ use tokio::net::{UnixListener, UnixStream};
 fn error(error: impl std::fmt::Display) -> ProcessError {
     ProcessError::Io(error.to_string())
 }
+
+struct ProcessSnapshot {
+    state: char,
+    start_identity: String,
+}
+
+impl ProcessSnapshot {
+    fn terminated(&self) -> bool {
+        matches!(self.state, 'Z' | 'X' | 'x')
+    }
+}
+
+fn parse_process_snapshot(text: &str) -> Option<ProcessSnapshot> {
+    let (state, start_identity) = text.trim().split_once(char::is_whitespace)?;
+    let start_identity = start_identity.trim();
+    if start_identity.is_empty() {
+        return None;
+    }
+    Some(ProcessSnapshot {
+        state: state.chars().next()?,
+        start_identity: start_identity.to_owned(),
+    })
+}
+
+fn process_snapshot(pid: u32) -> Option<ProcessSnapshot> {
+    if pid <= 1 {
+        return None;
+    }
+    // Use the same locale, timezone and lstart representation as the shared
+    // birth-identity oracle, while also observing whether the process is a
+    // zombie. kill(pid, 0) alone reports zombies as present.
+    let output = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-o", "lstart=", "-p", &pid.to_string()])
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_process_snapshot(&String::from_utf8_lossy(&output.stdout))
+}
+
 struct UnixPlatform;
 struct UnixSocket(UnixListener);
 #[async_trait::async_trait]
@@ -25,14 +68,14 @@ impl Platform for UnixPlatform {
     fn process_is_alive(&self, pid: u32) -> Option<bool> {
         let pid = i32::try_from(pid).ok().filter(|pid| *pid > 1)?;
         match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None) {
-            Ok(()) => Some(true),
+            Ok(()) => process_snapshot(pid as u32).map(|snapshot| !snapshot.terminated()),
             Err(nix::errno::Errno::ESRCH) => Some(false),
             Err(_) => None,
         }
     }
 
-    #[cfg(test)]
     fn process_start_identity(&self, pid: u32) -> Option<String> {
+        #[cfg(test)]
         if pid != std::process::id()
             && matches!(
                 std::env::var("LXS_TEST_MODE").as_deref(),
@@ -48,6 +91,7 @@ impl Platform for UnixPlatform {
                 std::thread::sleep(std::time::Duration::from_secs(30));
             }
         }
+        #[cfg(test)]
         if std::env::var("LXS_TEST_HIDE_BIRTH_PID")
             .ok()
             .and_then(|value| value.parse::<u32>().ok())
@@ -56,12 +100,13 @@ impl Platform for UnixPlatform {
             return None;
         }
 
+        #[cfg(test)]
         if std::env::var("LXS_TEST_MODE").as_deref() == Ok("birthfail") && pid != std::process::id()
         {
-            None
-        } else {
-            lingxi_core::host::live_sessions::process_start_identity(pid)
+            return None;
         }
+        let snapshot = process_snapshot(pid)?;
+        (!snapshot.terminated()).then_some(snapshot.start_identity)
     }
 
     fn nonce(&self) -> Result<String, ProcessError> {
@@ -222,18 +267,32 @@ use std::{collections::HashMap, sync::Mutex, time::Duration};
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum Observation {
+        Exit(Option<i32>),
+        Known(Option<i32>, bool),
+        Unknown(Option<i32>),
+        Unverified(String),
+    }
+
     struct Sink {
         path: PathBuf,
         done: tokio::sync::Notify,
-        code: Mutex<Option<Option<i32>>>,
+        observations: Mutex<Vec<Observation>>,
     }
     impl Sink {
         fn new(path: PathBuf) -> Self {
             Self {
                 path,
                 done: tokio::sync::Notify::new(),
-                code: Mutex::new(None),
+                observations: Mutex::new(Vec::new()),
             }
+        }
+
+        fn record(&self, observation: Observation) {
+            self.observations.lock().unwrap().push(observation);
+            self.done.notify_one();
         }
     }
     #[async_trait::async_trait]
@@ -253,8 +312,7 @@ mod tests {
             Ok(())
         }
         async fn on_exit(&self, _: &str, code: Option<i32>) {
-            *self.code.lock().unwrap() = Some(code);
-            self.done.notify_one();
+            self.record(Observation::Exit(code));
         }
         async fn on_exit_with_status(&self, id: &str, code: Option<i32>, killed: bool) {
             let marker = if killed {
@@ -266,6 +324,24 @@ mod tests {
                 )
             };
             self.append_output(id, &marker).await.unwrap();
+        }
+
+        async fn on_exit_outcome_unknown(&self, id: &str, _: Option<i32>) {
+            self.append_output(id, "\n[exited; outcome unknown]\n")
+                .await
+                .unwrap();
+        }
+
+        async fn on_supervised_exit_with_status(&self, _: &str, code: Option<i32>, killed: bool) {
+            self.record(Observation::Known(code, killed));
+        }
+
+        async fn on_supervised_exit_unknown(&self, _: &str, code: Option<i32>) {
+            self.record(Observation::Unknown(code));
+        }
+
+        async fn on_wait_failure(&self, _: &str, cause: &str) {
+            self.record(Observation::Unverified(cause.to_owned()));
         }
     }
     fn factory(path: &Path) -> Arc<dyn BackgroundExitSink> {
@@ -285,6 +361,68 @@ mod tests {
     /// regression, which is the expensive part. ⛔ Do not tighten this back to
     /// shave seconds off a run that is already passing.
     const CROSS_PROCESS_WAIT: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn process_snapshot_parser_preserves_birth_and_detects_zombies() {
+        let active = parse_process_snapshot("  S+  Tue Oct 27 19:23:14 2026\n").unwrap();
+        assert!(!active.terminated());
+        assert_eq!(active.start_identity, "Tue Oct 27 19:23:14 2026");
+        for state in ["Z", "Z+", "X", "x"] {
+            let snapshot =
+                parse_process_snapshot(&format!("{state} Tue Oct 27 19:23:14 2026")).unwrap();
+            assert!(snapshot.terminated(), "state {state} must be dead");
+            assert_eq!(snapshot.start_identity, active.start_identity);
+        }
+        assert!(parse_process_snapshot("Z").is_none());
+        assert!(parse_process_snapshot("   ").is_none());
+    }
+
+    #[test]
+    fn live_process_snapshot_matches_shared_birth_identity() {
+        let pid = std::process::id();
+        let shared = lingxi_core::host::live_sessions::process_start_identity(pid)
+            .expect("shared birth identity is available");
+        assert_eq!(UnixPlatform.process_start_identity(pid), Some(shared));
+        assert_eq!(UnixPlatform.process_is_alive(pid), Some(true));
+    }
+
+    #[tokio::test]
+    async fn zombie_process_is_not_a_live_supervisor() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let observed = tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+            loop {
+                if process_snapshot(pid).is_some_and(|snapshot| snapshot.terminated()) {
+                    break (
+                        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None),
+                        lingxi_core::host::live_sessions::process_start_identity(pid),
+                        UnixPlatform.process_start_identity(pid),
+                        UnixPlatform.process_is_alive(pid),
+                    );
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        // Reap even when the probe timed out, so this regression cannot leave
+        // a zombie in the surrounding test process.
+        child.wait().unwrap();
+        let (signal_probe, legacy_identity, identity, alive) =
+            observed.expect("could not observe the exited child before reaping it");
+        assert!(
+            signal_probe.is_ok(),
+            "kill(0) reports the zombie as present"
+        );
+        assert!(
+            legacy_identity.is_some(),
+            "the shared birth oracle sees zombies"
+        );
+        assert_eq!(identity, None);
+        assert_eq!(alive, Some(false));
+    }
 
     #[tokio::test]
     async fn supervisor_cross_process_helper() {
@@ -369,7 +507,7 @@ mod tests {
                 .unwrap()
                 .is_err());
             tokio::time::timeout(CROSS_PROCESS_WAIT, async {
-                while lingxi_core::host::live_sessions::process_start_identity(child).is_some() {
+                while UnixPlatform.process_is_alive(child) != Some(false) {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
@@ -414,7 +552,7 @@ mod tests {
                 assert!(run.await.unwrap().is_err());
             }
             tokio::time::timeout(CROSS_PROCESS_WAIT, async {
-                while lingxi_core::host::live_sessions::process_start_identity(child).is_some() {
+                while UnixPlatform.process_is_alive(child) != Some(false) {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
@@ -548,7 +686,10 @@ mod tests {
         tokio::time::timeout(CROSS_PROCESS_WAIT, sink.done.notified())
             .await
             .unwrap();
-        assert_eq!(*sink.code.lock().unwrap(), Some(Some(0)));
+        assert_eq!(
+            *sink.observations.lock().unwrap(),
+            [Observation::Exit(Some(0))]
+        );
         let output = std::fs::read_to_string(&handoff.output_path).unwrap();
         assert!(output.contains("strict-supervisor"));
         release(&handoff).await.unwrap();
@@ -560,7 +701,7 @@ mod tests {
             SandboxedCommand::__new_sandboxed(
                 ProcessCommand {
                     command: "/bin/sh".into(),
-                    args: vec!["-c".into(), "sleep 5".into()],
+                    args: vec!["-c".into(), "sleep 60".into()],
                     cwd: Some(directory.to_owned()),
                     env: HashMap::new(),
                     timeout: None,
@@ -629,10 +770,17 @@ mod tests {
             lingxi_core::host::agent_processes::snapshot("owner-a"),
             vec![handle.pid]
         );
-        PosixProcess::new().kill_owner_processes("owner-a").await;
-        tokio::time::timeout(Duration::from_secs(3), sink.done.notified())
+        assert_eq!(
+            PosixProcess::new().kill_owner_processes("owner-a").await,
+            vec![handle.pid]
+        );
+        tokio::time::timeout(CROSS_PROCESS_WAIT, sink.done.notified())
             .await
             .unwrap();
+        assert_eq!(
+            *sink.observations.lock().unwrap(),
+            [Observation::Unknown(None)]
+        );
         release(&handoff).await.unwrap();
         let first_command = make_command(directory, "b4444444", "owner-race");
         let first = PosixProcess::new()
@@ -657,7 +805,7 @@ mod tests {
             "new owner work must not join an already-started stop snapshot"
         );
         std::env::remove_var("LXS_TEST_DELAY_ENDPOINT");
-        assert!(lingxi_core::host::live_sessions::process_start_identity(next.pid).is_some());
+        assert!(UnixPlatform.process_start_identity(next.pid).is_some());
         let next_cap = export(&next).unwrap();
         PosixProcess::new().kill(&next).await.unwrap();
         release(&next_cap).await.unwrap();
@@ -793,13 +941,22 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), sink.done.notified())
             .await
             .unwrap();
-        assert_eq!(*sink.code.lock().unwrap(), Some(Some(7)));
+        assert_eq!(
+            *sink.observations.lock().unwrap(),
+            [Observation::Exit(Some(7))]
+        );
         let text = std::fs::read_to_string(&handoff.output_path).unwrap();
         assert!(text.contains("before"));
         assert!(text.contains('后'));
         assert!(text.contains("[stderr] error"));
         assert_eq!(text.matches("[exited with code 7]").count(), 1);
-        assert!(kill(&handle).await.unwrap().is_ok());
+        let cleanup_error = kill(&handle).await.unwrap().unwrap_err().to_string();
+        assert!(
+            cleanup_error.contains(
+                "naturally exited shell released its process group without group cleanup proof"
+            ),
+            "a leader-only exit must not become a verified group cleanup: {cleanup_error}"
+        );
         release(&handoff).await.unwrap();
         assert!(kill(&handle).await.unwrap().is_err());
         // A copied receipt under a replacement directory is not the original
@@ -821,21 +978,27 @@ mod tests {
         assert!(validate(&handoff).await.is_ok());
 
         let second = tempfile::tempdir().unwrap();
-        let handoff = launch_source(second.path(), "printf running; sleep 5").await;
+        let handoff = launch_source(second.path(), "printf running; sleep 60").await;
         let sink = Arc::new(Sink::new(PathBuf::from(&handoff.output_path)));
         let handle = adopt(&handoff, sink.clone()).await.unwrap();
         kill(&handle).await.unwrap().unwrap();
         tokio::time::timeout(Duration::from_secs(10), sink.done.notified())
             .await
             .unwrap();
-        assert_eq!(*sink.code.lock().unwrap(), Some(None));
+        assert_eq!(
+            *sink.observations.lock().unwrap(),
+            [Observation::Unknown(None)]
+        );
         assert_eq!(
             std::fs::read_to_string(&handoff.output_path)
                 .unwrap()
-                .matches("[killed]")
+                .matches("[exited; outcome unknown]")
                 .count(),
             1
         );
+        assert!(!std::fs::read_to_string(&handoff.output_path)
+            .unwrap()
+            .contains("[killed]"));
         release(&handoff).await.unwrap();
     }
     #[tokio::test]
@@ -891,11 +1054,35 @@ mod tests {
     #[tokio::test]
     async fn supervisor_cross_process_crash_cleans_only_matching_birth() {
         let directory = tempfile::tempdir().unwrap();
-        let handoff = launch_source(directory.path(), "echo $$ > child.pid; sleep 60").await;
+        let handoff = launch_source(
+            directory.path(),
+            "echo $$ > child.pid; sleep 60 & echo $! > descendant.pid; wait",
+        )
+        .await;
+        let descendant = tokio::time::timeout(CROSS_PROCESS_WAIT, async {
+            loop {
+                if let Ok(pid) = std::fs::read_to_string(directory.path().join("descendant.pid")) {
+                    if let Ok(pid) = pid.trim().parse::<u32>() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("descendant did not start");
+        let descendant_birth = UnixPlatform
+            .process_start_identity(descendant)
+            .expect("descendant birth identity is available");
         assert!(handoff.process_start_identity.is_some());
         let mut forged = handoff.clone();
         forged.process_start_identity = Some("other process".into());
         assert!(guarded_orphan_cleanup(&forged).is_err());
+        assert_eq!(
+            UnixPlatform.process_start_identity(descendant),
+            Some(descendant_birth),
+            "a forged leader identity must not kill the descendant"
+        );
         let sink = Arc::new(Sink::new(PathBuf::from(&handoff.output_path)));
         adopt(&handoff, sink.clone()).await.unwrap();
         nix::sys::signal::kill(
@@ -906,12 +1093,20 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(10), sink.done.notified())
             .await
             .unwrap();
-        assert_eq!(*sink.code.lock().unwrap(), Some(Some(-1)));
+        {
+            let observations = sink.observations.lock().unwrap();
+            assert!(
+                matches!(&observations[..], [Observation::Unverified(cause)] if cause.contains("supervisor_lost_unverified")),
+                "lost-supervisor recovery must remain unverified: {observations:?}"
+            );
+        }
         let output = std::fs::read_to_string(&handoff.output_path).unwrap();
         assert_eq!(output.matches("[supervisor lost; task failed]").count(), 1);
 
         tokio::time::timeout(Duration::from_secs(5), async {
-            while lingxi_core::host::live_sessions::process_start_identity(handoff.pid).is_some() {
+            while UnixPlatform.process_is_alive(handoff.pid) != Some(false)
+                || UnixPlatform.process_is_alive(descendant) != Some(false)
+            {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
@@ -930,7 +1125,7 @@ mod tests {
         )
         .unwrap();
         tokio::time::timeout(CROSS_PROCESS_WAIT, async {
-            while lingxi_core::host::live_sessions::process_start_identity(handle.pid).is_some() {
+            while UnixPlatform.process_is_alive(handle.pid) != Some(false) {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
         })
@@ -949,7 +1144,7 @@ mod tests {
         if let Ok(pid) = std::fs::read_to_string(directory.path().join("child.pid")) {
             let pid = pid.trim().parse::<u32>().unwrap();
             tokio::time::timeout(Duration::from_secs(2), async {
-                while lingxi_core::host::live_sessions::process_start_identity(pid).is_some() {
+                while UnixPlatform.process_is_alive(pid) != Some(false) {
                     tokio::time::sleep(Duration::from_millis(20)).await;
                 }
             })
@@ -960,7 +1155,7 @@ mod tests {
     #[tokio::test]
     async fn supervisor_cross_process_control_outage_does_not_take_live_or_unknown_writer() {
         let directory = tempfile::tempdir().unwrap();
-        let handoff = launch_source(directory.path(), "sleep 10").await;
+        let handoff = launch_source(directory.path(), "sleep 60").await;
         let sink = Arc::new(Sink::new(PathBuf::from(&handoff.output_path)));
         let handle = adopt(&handoff, sink.clone()).await.unwrap();
         std::env::set_var("LXS_TEST_REFUSE_ENDPOINT", &handoff.socket_path);
@@ -979,8 +1174,8 @@ mod tests {
             assert_eq!(shared::supervisor_liveness(&handoff), expected);
             tokio::time::sleep(Duration::from_millis(3300)).await;
             assert_eq!(
-                *sink.code.lock().unwrap(),
-                None,
+                *sink.observations.lock().unwrap(),
+                [],
                 "control outage must not publish failure or take the writer"
             );
             assert!(!std::fs::read_to_string(&handoff.output_path)
@@ -990,9 +1185,13 @@ mod tests {
         std::env::remove_var("LXS_TEST_HIDE_BIRTH_PID");
         std::env::remove_var("LXS_TEST_REFUSE_ENDPOINT");
         kill(&handle).await.unwrap().unwrap();
-        tokio::time::timeout(Duration::from_secs(3), sink.done.notified())
+        tokio::time::timeout(CROSS_PROCESS_WAIT, sink.done.notified())
             .await
             .unwrap();
+        assert_eq!(
+            *sink.observations.lock().unwrap(),
+            [Observation::Unknown(None)]
+        );
         release(&handoff).await.unwrap();
     }
     #[tokio::test]

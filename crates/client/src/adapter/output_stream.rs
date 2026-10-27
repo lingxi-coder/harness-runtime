@@ -47,12 +47,11 @@
 //!
 //! ## `stop_reason` → `TurnOutcomeDto`
 //!
-//! `emit_end_turn` cannot observe cancellation (the cancel token is handled by
-//! the F1-13 turn wrapper), so it maps only the model's stop reason — mirroring
-//! `BridgeOutputStream` (`tui/src/events/orchestrator_bridge.rs:157-160`):
-//! `"max_tokens"` ⇒ [`TurnOutcomeDto::MaxTurns`], anything else ⇒
-//! [`TurnOutcomeDto::EndTurn`]. The raw `stop_reason` is preserved verbatim in
-//! `TurnEnded.stop_reason` for clients that need the exact string.
+//! The orchestrator's `"max_turns"` and the existing `"max_tokens"` compatibility
+//! mapping produce [`TurnOutcomeDto::MaxTurns`]. Its `"aborted_streaming"` and
+//! `"aborted_tools"` reasons produce [`TurnOutcomeDto::Cancelled`]; other reasons
+//! produce [`TurnOutcomeDto::EndTurn`]. The raw `stop_reason` is preserved
+//! verbatim in `TurnEnded.stop_reason` for clients that need it.
 
 use std::sync::Arc;
 
@@ -460,14 +459,14 @@ impl AdapterOutputStream {
             .await;
     }
 
-    /// Map a model `stop_reason` to a [`TurnOutcomeDto`].
+    /// Map a terminal `stop_reason` to a [`TurnOutcomeDto`].
     ///
-    /// Mirrors `BridgeOutputStream` (`orchestrator_bridge.rs:157-160`):
-    /// `"max_tokens"` ⇒ `MaxTurns`, everything else ⇒ `EndTurn`. Cancellation
-    /// is NOT observable here — it is surfaced by the F1-13 turn wrapper.
+    /// Preserve the existing `"max_tokens"` mapping alongside the orchestrator's
+    /// explicit budget and cancellation reasons.
     fn outcome_for(stop_reason: &str) -> TurnOutcomeDto {
         match stop_reason {
-            "max_tokens" => TurnOutcomeDto::MaxTurns,
+            "max_tokens" | "max_turns" => TurnOutcomeDto::MaxTurns,
+            "aborted_streaming" | "aborted_tools" => TurnOutcomeDto::Cancelled,
             _ => TurnOutcomeDto::EndTurn,
         }
     }
@@ -2155,6 +2154,42 @@ mod tests {
                 assert_eq!(stop_reason.as_deref(), Some("max_tokens"));
             }
             other => panic!("expected TurnEnded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_end_turn_maps_terminal_reasons_and_preserves_raw_reason() {
+        let cases = [
+            ("max_turns", TurnOutcomeDto::MaxTurns),
+            ("max_tokens", TurnOutcomeDto::MaxTurns),
+            ("aborted_streaming", TurnOutcomeDto::Cancelled),
+            ("aborted_tools", TurnOutcomeDto::Cancelled),
+            ("end_turn", TurnOutcomeDto::EndTurn),
+            ("tool_use", TurnOutcomeDto::EndTurn),
+            ("stop_sequence", TurnOutcomeDto::EndTurn),
+            ("refusal", TurnOutcomeDto::EndTurn),
+            ("budget_exhausted", TurnOutcomeDto::EndTurn),
+            ("unknown_reason", TurnOutcomeDto::EndTurn),
+        ];
+        for (reason, expected) in cases {
+            let sink = MockSink::arc();
+            let stream = AdapterOutputStream::new(sink.clone());
+            stream.emit_end_turn(reason, &CostSnapshot::default()).await;
+
+            let events = sink.events().await;
+            assert_eq!(events.len(), 2, "reason: {reason}");
+            assert!(matches!(&events[0], ClientEvent::CostUpdate { .. }));
+            match &events[1] {
+                ClientEvent::TurnEnded {
+                    outcome,
+                    stop_reason,
+                    ..
+                } => {
+                    assert_eq!(*outcome, expected, "reason: {reason}");
+                    assert_eq!(stop_reason.as_deref(), Some(reason));
+                }
+                other => panic!("expected TurnEnded for {reason}, got {other:?}"),
+            }
         }
     }
 

@@ -97,6 +97,18 @@ fn error(context: &str) -> ProcessError {
     ProcessError::Io(format!("{context}: {}", std::io::Error::last_os_error()))
 }
 
+#[cfg(test)]
+pub(super) fn hold_process_for_membership_test(pid: u32) -> Result<OwnedHandle, ProcessError> {
+    // IsProcessInJob requires PROCESS_QUERY_LIMITED_INFORMATION in addition
+    // to the SYNCHRONIZE access needed to wait on this same process object.
+    let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000, 0, pid) };
+    if raw.is_null() {
+        return Err(error("open test process for membership and wait"));
+    }
+    // SAFETY: successful OpenProcess returns a uniquely owned handle.
+    Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
+}
+
 /// Stop Rust's Windows CreateProcess call (which allows handle inheritance)
 /// from forwarding this dedicated helper's control streams to the payload.
 /// The payload's own separate piped stdio is created after this operation.
@@ -243,6 +255,18 @@ impl CommandJob {
             return Err(error("query payload job active processes"));
         }
         Ok(accounting.active_processes)
+    }
+
+    #[cfg(test)]
+    pub(super) fn contains_process(&self, process: &OwnedHandle) -> Result<bool, ProcessError> {
+        let mut member = 0;
+        // SAFETY: both handles remain owned for the duration of the query.
+        if unsafe { IsProcessInJob(process.as_raw_handle(), self.0.as_raw_handle(), &mut member) }
+            == 0
+        {
+            return Err(error("query test process job membership"));
+        }
+        Ok(member != 0)
     }
 
     /// A normally completed foreground shell may have deliberately detached

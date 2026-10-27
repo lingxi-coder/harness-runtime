@@ -827,7 +827,9 @@ mod imp {
             parent,
             file_name,
             relative,
-            desired_access,
+            // Every regular-file handle is checked below using metadata(),
+            // which needs this right even for write-only/append-only opens.
+            desired_access | FILE_READ_ATTRIBUTES,
             share_access,
             disposition,
             FILE_NON_DIRECTORY_FILE,

@@ -629,13 +629,42 @@ mod tests {
             .unwrap();
         // Retain this exact process object before termination; a PID can be
         // reused after its last handle is closed.
-        let descendant = super::super::supervisor_native::hold_process_handle_for_test(pid)
+        let descendant = super::super::supervisor_gate::hold_process_for_membership_test(pid)
             .expect("open descendant process");
         assert_eq!(
             super::super::supervisor_native::process_handle_is_alive_for_test(&descendant),
             Some(true)
         );
+        let job = owner.job.as_ref().expect("payload job assigned");
+        let active_before = job.active_processes().unwrap();
+        assert!(
+            job.contains_process(&descendant).unwrap(),
+            "the held descendant must belong to this payload job before termination"
+        );
         owner.terminate_and_reap().await.unwrap();
+        if super::super::supervisor_native::process_handle_is_alive_for_test(&descendant)
+            == Some(true)
+        {
+            let job = owner.job.as_ref().unwrap();
+            let member_after = job.contains_process(&descendant);
+            let active_after = job.active_processes();
+            let start = std::time::Instant::now();
+            let settled = tokio::time::timeout(Duration::from_secs(5), async {
+                while super::super::supervisor_native::process_handle_is_alive_for_test(&descendant)
+                    == Some(true)
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                super::super::supervisor_native::process_handle_is_alive_for_test(&descendant)
+            })
+            .await;
+            panic!(
+                "cleanup returned before descendant termination: active_before={active_before}, \
+                 member_after={member_after:?}, active_after={active_after:?}, \
+                 elapsed={:?}, eventual_state={settled:?}",
+                start.elapsed()
+            );
+        }
         assert_eq!(
             super::super::supervisor_native::process_handle_is_alive_for_test(&descendant),
             Some(false)

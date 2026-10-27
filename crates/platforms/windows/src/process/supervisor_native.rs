@@ -491,6 +491,90 @@ mod tests {
     }
 
     #[test]
+    fn rooted_output_append_handles_read_attributes_without_read_or_overwrite_access() {
+        use lingxi_core::host::rooted_fs;
+        use std::io::Write;
+
+        #[repr(C)]
+        struct IoStatusBlock {
+            status_or_pointer: usize,
+            information: usize,
+        }
+        #[link(name = "ntdll")]
+        extern "system" {
+            fn NtQueryInformationFile(
+                handle: Handle,
+                status: *mut IoStatusBlock,
+                information: *mut c_void,
+                length: u32,
+                information_class: u32,
+            ) -> i32;
+        }
+        fn access_mask(file: &std::fs::File) -> u32 {
+            let mut io_status = IoStatusBlock {
+                status_or_pointer: 0,
+                information: 0,
+            };
+            let mut access = 0u32;
+            // SAFETY: all pointers are live for this synchronous query;
+            // FileAccessInformation is a single ACCESS_MASK.
+            let status = unsafe {
+                NtQueryInformationFile(
+                    file.as_raw_handle(),
+                    &mut io_status,
+                    std::ptr::from_mut(&mut access).cast(),
+                    std::mem::size_of::<u32>() as u32,
+                    8,
+                )
+            };
+            assert!(status >= 0, "FileAccessInformation NTSTATUS {status:#x}");
+            access
+        }
+
+        let parent = tempfile::tempdir().unwrap();
+        let directory = parent.path().join("tasks");
+        let pin = rooted_fs::ensure_private_directory(
+            parent.path(),
+            Path::new("tasks"),
+            rooted_fs::PRIVATE_DIR_MODE,
+        )
+        .unwrap();
+        let leaf = Path::new("task.output");
+        let mut created =
+            rooted_fs::open_create_new_file_pinned(&directory, leaf, Some(&pin)).unwrap();
+        assert!(created.metadata().unwrap().is_file());
+        created.write_all(b"prefix").unwrap();
+        drop(created);
+
+        let mut first = rooted_fs::open_append_file_pinned(&directory, leaf, Some(&pin)).unwrap();
+        let mut second = rooted_fs::open_append_file_pinned(&directory, leaf, Some(&pin)).unwrap();
+        for file in [&first, &second] {
+            assert!(file.metadata().unwrap().is_file());
+            let access = access_mask(file);
+            assert_ne!(access & 0x80, 0, "FILE_READ_ATTRIBUTES: {access:#x}");
+            assert_ne!(access & 0x04, 0, "FILE_APPEND_DATA: {access:#x}");
+            assert_eq!(
+                access & 0x03,
+                0,
+                "FILE_READ_DATA/FILE_WRITE_DATA: {access:#x}"
+            );
+        }
+        first.write_all(b"-first").unwrap();
+        second.write_all(b"-second").unwrap();
+        first.write_all(b"-third").unwrap();
+        drop((first, second));
+        rooted_fs::append_file_pinned(&directory, leaf, "-fourth", Some(&pin)).unwrap();
+        assert_eq!(
+            std::fs::read(directory.join(leaf)).unwrap(),
+            b"prefix-first-second-third-fourth"
+        );
+        assert_eq!(
+            directory_security_sddl(&directory.join(leaf)),
+            directory_security_sddl(&directory)
+        );
+    }
+
+    #[test]
     fn existing_directory_keeps_default_owner_and_rejects_it_when_different() {
         use lingxi_core::host::rooted_fs;
         let parent = tempfile::tempdir().unwrap();

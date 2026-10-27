@@ -653,18 +653,22 @@ impl MockTaskRegistryHandle {
         receiver.send(message.into()).await
     }
 
+    /// Pause the mock foreground handoff until the test releases it.
     pub fn block_foreground_handoff(&self) {
         self.block_foreground_handoff.store(true, Ordering::SeqCst);
     }
 
+    /// Wait until the foreground handoff reaches its test barrier.
     pub async fn wait_for_foreground_handoff(&self) {
         self.foreground_handoff_entered.notified().await;
     }
 
+    /// Release a foreground handoff paused by the test barrier.
     pub fn release_foreground_handoff(&self) {
         self.foreground_handoff_release.notify_one();
     }
 
+    /// Request that the registered foreground agent move to the background.
     pub async fn foreground_background_outcome(
         &self,
         id: &str,
@@ -682,6 +686,7 @@ impl MockTaskRegistryHandle {
         }
     }
 
+    /// Return the background requester registered for a foreground agent.
     pub fn foreground_background_requester(
         &self,
         id: &str,
