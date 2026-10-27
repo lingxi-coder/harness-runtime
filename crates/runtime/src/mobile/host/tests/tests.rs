@@ -2850,7 +2850,7 @@ use client::protocol::events::{ClientEvent as Ev, TurnRecoveryStateDto};
 use client::protocol::permission::PermissionResponseDto;
 use lingxi_core::host::audio::{
     AudioCapabilitySnapshot, AudioError, AudioOperation, AudioOperationContext, AudioOperationId,
-    AudioOperationKind, AudioOperationSuccess, AudioOwner, AudioRecordingHandle, AudioService,
+    AudioOperationKind, AudioOperationSuccess, AudioOwner, AudioService,
 };
 
 /// Build a real, fully-wired [`MobileEngineHandle`] off-device (host fake
@@ -6341,141 +6341,142 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
     let first_image_refs = prompt_image_refs.clone();
     let expected_image_refs_for_first = expected_image_refs.clone();
     let expected_image_sources_for_first = expected_image_sources.clone();
-    let session_id =
-        first_runtime.block_on(async move {
-            let first = first_for_work;
-            let session_id = first
-                .inner
-                .orchestrator
-                .current_session_id()
-                .await
-                .as_uuid()
-                .to_string();
-            first
-                .inner
-                .session_writer
-                .append_mobile_empty_session(&session_id, "cold prompt replay", &first.session_cwd())
-                .await
-                .expect("anchor the session before restart");
-            first
-                .inner
-                .session_writer
-                .append_session_mode(first.inner.session_mode.as_str())
-                .await
-                .expect("persist the session mode");
+    let session_id = first_runtime.block_on(async move {
+        let first = first_for_work;
+        let session_id = first
+            .inner
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string();
+        first
+            .inner
+            .session_writer
+            .append_mobile_empty_session(&session_id, "cold prompt replay", &first.session_cwd())
+            .await
+            .expect("anchor the session before restart");
+        first
+            .inner
+            .session_writer
+            .append_session_mode(first.inner.session_mode.as_str())
+            .await
+            .expect("persist the session mode");
 
-            first
-                .submit(client::protocol::commands::ClientCommand::SendPrompt {
-                    text: ClientTextDto::from_code_units(initial_prompt_units.clone()),
-                    prompt_mode: None,
-                    images: first_image_refs.clone(),
-                    turn_id: Some(246),
-                    visualization_context: None,
-                })
-                .await
-                .expect("submit user prompt");
-            let wait_result =
-                tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                    loop {
-                        let stream_entry_closed = match entered_rx.try_recv() {
-                            Ok(()) => return Ok(()),
-                            Err(tokio::sync::oneshot::error::TryRecvError::Closed) => true,
-                            Err(tokio::sync::oneshot::error::TryRecvError::Empty) => false,
-                        };
-                        if let Some(message) = first_listener.received.lock().await.iter().find_map(
-                            |event| match event {
-                                ClientEvent::Error { message, .. } => Some(message.display()),
-                                _ => None,
-                            },
-                        ) {
-                            return Err(message);
-                        }
-                        if stream_entry_closed {
-                            return Err("stream entry signal closed".to_string());
-                        }
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                })
-                .await;
-            match wait_result {
-                Ok(Ok(())) => {}
-                Ok(Err(message)) => {
-                    panic!("initial prompt failed before model call: {message}");
-                }
-                Err(_) => {
-                    let errors = first_listener
+        first
+            .submit(client::protocol::commands::ClientCommand::SendPrompt {
+                text: ClientTextDto::from_code_units(initial_prompt_units.clone()),
+                prompt_mode: None,
+                images: first_image_refs.clone(),
+                turn_id: Some(246),
+                visualization_context: None,
+            })
+            .await
+            .expect("submit user prompt");
+        let wait_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let stream_entry_closed = match entered_rx.try_recv() {
+                    Ok(()) => return Ok(()),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => true,
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => false,
+                };
+                if let Some(message) =
+                    first_listener
                         .received
                         .lock()
                         .await
                         .iter()
-                        .filter_map(|event| match event {
+                        .find_map(|event| match event {
                             ClientEvent::Error { message, .. } => Some(message.display()),
                             _ => None,
                         })
-                        .collect::<Vec<_>>();
-                    panic!(
-                        "model call opened before simulated restart; listener errors: {errors:?}"
-                    );
+                {
+                    return Err(message);
                 }
+                if stream_entry_closed {
+                    return Err("stream entry signal closed".to_string());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
+        })
+        .await;
+        match wait_result {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => {
+                panic!("initial prompt failed before model call: {message}");
+            }
+            Err(_) => {
+                let errors = first_listener
+                    .received
+                    .lock()
+                    .await
+                    .iter()
+                    .filter_map(|event| match event {
+                        ClientEvent::Error { message, .. } => Some(message.display()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                panic!("model call opened before simulated restart; listener errors: {errors:?}");
+            }
+        }
 
-            let first_calls = pending.captured_calls();
-            assert_eq!(first_calls.len(), 1);
-            assert!(
-                first_calls[0].messages.iter().any(|message| matches!(
-                    message,
-                    ConversationMessage::User { content, .. }
-                        if content.iter().any(|block| matches!(
-                            block,
-                            ContentBlock::TextJsUtf16 { utf16_code_units, .. }
-                                if utf16_code_units == &initial_prompt_units
-                        ))
-                )),
-                "the first model request must preserve the exact prompt source units"
-            );
-            assert_eq!(
-                image_sources(&first_calls[0].messages),
-                expected_image_sources_for_first,
-                "the initial model request preserves image bytes, MIME types, and source order"
-            );
+        let first_calls = pending.captured_calls();
+        assert_eq!(first_calls.len(), 1);
+        assert!(
+            first_calls[0].messages.iter().any(|message| matches!(
+                message,
+                ConversationMessage::User { content, .. }
+                    if content.iter().any(|block| matches!(
+                        block,
+                        ContentBlock::TextJsUtf16 { utf16_code_units, .. }
+                            if utf16_code_units == &initial_prompt_units
+                    ))
+            )),
+            "the first model request must preserve the exact prompt source units"
+        );
+        assert_eq!(
+            image_sources(&first_calls[0].messages),
+            expected_image_sources_for_first,
+            "the initial model request preserves image bytes, MIME types, and source order"
+        );
 
-            let checkpoint = first
-                .durable_turns
-                .load(&session_id, 246)
-                .expect("load the durable turn checkpoint");
-            assert_eq!(
-                checkpoint.prompt.string_units(""),
-                Some(initial_prompt_units.clone())
-            );
-            assert_eq!(
-                checkpoint.images, expected_image_refs_for_first,
-                "the durable checkpoint preserves the original ordered image payload"
-            );
-            let metadata_path = first
-                .lingxi_home
-                .join("mobile-turns")
-                .join(&session_id)
-                .join("246.json");
-            let metadata = std::fs::read_to_string(metadata_path).expect("read persisted prompt");
-            let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&metadata)
-                .expect("metadata remains valid raw JSON");
-            assert_eq!(
-                source.string_units("/prompt"),
-                Some(initial_prompt_units.clone())
-            );
+        let checkpoint = first
+            .durable_turns
+            .load(&session_id, 246)
+            .expect("load the durable turn checkpoint");
+        assert_eq!(
+            checkpoint.prompt.string_units(""),
+            Some(initial_prompt_units.clone())
+        );
+        assert_eq!(
+            checkpoint.images, expected_image_refs_for_first,
+            "the durable checkpoint preserves the original ordered image payload"
+        );
+        let metadata_path = first
+            .lingxi_home
+            .join("mobile-turns")
+            .join(&session_id)
+            .join("246.json");
+        let metadata = std::fs::read_to_string(metadata_path).expect("read persisted prompt");
+        let source = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(&metadata)
+            .expect("metadata remains valid raw JSON");
+        assert_eq!(
+            source.string_units("/prompt"),
+            Some(initial_prompt_units.clone())
+        );
 
-            first
-                .durable_turns
-                .transition(
-                    &session_id,
-                    246,
-                    TurnRecoveryStateDto::PausedRecoverable,
-                    true,
-                    Some("simulated_process_restart".into()),
-                )
-                .expect("mark the in-flight request recoverable before restart");
-            session_id
-        });
+        first
+            .durable_turns
+            .transition(
+                &session_id,
+                246,
+                TurnRecoveryStateDto::PausedRecoverable,
+                true,
+                Some("simulated_process_restart".into()),
+            )
+            .expect("mark the in-flight request recoverable before restart");
+        session_id
+    });
     drop(first);
 
     let resumed_stream = Arc::new(MockStreamingApiClient::with_turns(vec![vec![
@@ -6643,7 +6644,11 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
         engine_for_work
             .inner
             .session_writer
-            .append_mobile_empty_session(&session_id, "uncorrelated image prompt", &engine_for_work.session_cwd())
+            .append_mobile_empty_session(
+                &session_id,
+                "uncorrelated image prompt",
+                &engine_for_work.session_cwd(),
+            )
             .await
             .expect("anchor the session transcript");
         engine_for_work
@@ -9297,6 +9302,909 @@ async fn lifecycle_listener_emits_raw_event_before_replay_ack() {
     ));
 }
 
+fn media_handoff_context(session_id: lingxi_core::types::SessionId) -> tool_api::ToolUseContext {
+    let mut context = tool_api::test_support::fresh_ctx();
+    context.session = Some(Arc::new(tokio::sync::Mutex::new(
+        lingxi_core::SessionState::empty(session_id, "test-model".into()),
+    )));
+    let assistant_message_id = lingxi_core::types::MessageId::new();
+    let tool_use_id = lingxi_core::types::ToolUseId::new();
+    context.assistant_message_id = Some(assistant_message_id.clone());
+    context.tool_use_id = Some(tool_use_id.clone());
+    context.assistant_message = Some(lingxi_core::types::ConversationMessage::Assistant {
+        id: assistant_message_id,
+        content: vec![lingxi_core::types::ContentBlock::ToolUse {
+            id: tool_use_id,
+            name: "media_session_start".into(),
+            input: lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"intent":"conversation","mode":"audio"}),
+            )
+            .expect("test media tool input is valid JSON"),
+            provider_id: None,
+        }],
+        stop_reason: Some("tool_use".into()),
+        per_turn_effort: None,
+        resumable: None,
+    });
+    context
+}
+
+fn media_handoff_request() -> tool_api::MediaAgentHandoffRequest {
+    tool_api::MediaAgentHandoffRequest {
+        operation_id: media_api::MediaOperationId::new(1, 1),
+        session: media_api::MediaSessionRef(media_api::MediaSessionId::from("media-session-1")),
+        mode: media_api::MediaSessionMode::Audio,
+    }
+}
+
+fn media_handoff_capability_context(
+    session_id: lingxi_core::types::SessionId,
+) -> orchestrator::MediaAgentCapabilityContext {
+    orchestrator::MediaAgentCapabilityContext {
+        session_id: session_id.as_uuid().to_string(),
+        model: "test-model".into(),
+        profile_name: None,
+        account_scope: None,
+    }
+}
+
+#[test]
+fn media_handoff_queue_rejects_duplicate_and_wrong_session_requests() {
+    use tool_api::MediaAgentHandoffHandle as _;
+
+    let queue = super::MobileMediaAgentHandoffQueue::default();
+    queue.set_attachment(Some(Arc::new(RecordingMediaAttachment::default())));
+    let session_id = lingxi_core::types::SessionId::new();
+    let session_key = session_id.as_uuid().to_string();
+    queue.bind_session(Arc::new(StdMutex::new(session_key.clone())));
+    let context = media_handoff_context(session_id);
+    let capability_context = media_handoff_capability_context(session_id);
+
+    queue
+        .request(&context, &capability_context, media_handoff_request())
+        .expect("first conversation request is queued");
+    assert!(queue
+        .request(&context, &capability_context, media_handoff_request())
+        .is_err());
+
+    let other_session = lingxi_core::types::SessionId::new();
+    let other_context = media_handoff_context(other_session);
+    assert!(queue
+        .request(&other_context, &capability_context, media_handoff_request())
+        .is_err());
+    assert!(queue.has_pending_for_session(&session_key));
+    assert!(!queue.has_pending_for_session(&other_session.as_uuid().to_string()));
+
+    assert!(queue
+        .take_for_turn(&other_session.as_uuid().to_string())
+        .is_none());
+    assert!(!queue.has_pending_for_session(&session_key));
+    assert!(queue.take_for_turn(&session_key).is_none());
+
+    queue
+        .request(&context, &capability_context, media_handoff_request())
+        .expect("request may be queued after stale ownership was cleared");
+    let (_, old_generation) = queue.take_for_turn(&session_key).unwrap();
+    assert!(queue.clear_for_session(&session_key).is_none());
+    queue
+        .request(&context, &capability_context, media_handoff_request())
+        .expect("a released claim may queue a fresh handoff");
+    let (_, new_generation) = queue.take_for_turn(&session_key).unwrap();
+    assert_ne!(old_generation, new_generation);
+    queue.finish_for_session(&session_key, old_generation);
+    assert!(queue.has_pending_for_session(&session_key));
+    queue.finish_for_session(&session_key, new_generation);
+    assert!(!queue.has_pending_for_session(&session_key));
+
+    queue
+        .request(&context, &capability_context, media_handoff_request())
+        .expect("session may queue another handoff after completion");
+    let abandoned = queue
+        .clear_for_session(&session_key)
+        .expect("session retarget returns pending media for owner cleanup");
+    assert_eq!(abandoned.request.session.0 .0, "media-session-1");
+    assert!(!queue.has_pending_for_session(&session_key));
+}
+
+#[tokio::test]
+async fn media_handoff_defers_terminal_until_the_owned_continuation_finishes() {
+    use client::protocol::events::{CostDto, TurnOutcomeDto as Outcome};
+    use tool_api::MediaAgentHandoffHandle as _;
+
+    let session_id = lingxi_core::types::SessionId::new();
+    let session_key = session_id.as_uuid().to_string();
+    let queue = Arc::new(super::MobileMediaAgentHandoffQueue::default());
+    queue.set_attachment(Some(Arc::new(RecordingMediaAttachment::default())));
+    queue.bind_session(Arc::new(StdMutex::new(session_key.clone())));
+    let context = media_handoff_context(session_id);
+    let capability_context = media_handoff_capability_context(session_id);
+    queue
+        .request(&context, &capability_context, media_handoff_request())
+        .expect("handoff request is queued");
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let store = Arc::new(crate::mobile::turn_durability::DurableTurnStore::new(
+        root.path().join("turns"),
+    ));
+    store
+        .begin(&session_key, 4, source_text("hello"), None, Vec::new())
+        .expect("turn checkpoint begins");
+    let turn = Arc::new(super::ActiveTurn::new_owned(
+        Some(4),
+        session_key.clone(),
+        7,
+    ));
+    let active = Arc::new(tokio::sync::Mutex::new(Some(turn.clone())));
+    let inner = Arc::new(FakeListener::default());
+    let listener = super::TurnLifecycleListener::new_durable_with_media_handoffs(
+        inner.clone(),
+        active,
+        store,
+        queue.clone(),
+    );
+    let terminal = ClientEvent::TurnEnded {
+        outcome: Outcome::EndTurn,
+        stop_reason: Some("ordinary_turn_complete".into()),
+        cost: CostDto {
+            total_usd: 0.0,
+            input_tokens: 0,
+            output_tokens: 0,
+            api_calls: 0,
+            session_duration_secs: 0,
+            formatted: "$0".into(),
+        },
+    };
+    listener.on_event(terminal.clone()).await;
+    assert!(inner.received.lock().await.is_empty());
+    assert!(!turn
+        .terminal_emitted
+        .load(std::sync::atomic::Ordering::Acquire));
+    assert!(turn.take_deferred_terminal().is_some());
+
+    let (_, claim_generation) = queue
+        .take_for_turn(&session_key)
+        .expect("queued handoff enters its owned continuation");
+    queue.finish_for_session(&session_key, claim_generation);
+    listener.on_event(terminal).await;
+    let events = inner.received.lock().await;
+    assert!(matches!(
+        events.first(),
+        Some(ClientEvent::TurnEnded { .. })
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ClientEvent::TurnEnded { .. }))
+            .count(),
+        1
+    );
+    assert!(turn
+        .terminal_emitted
+        .load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[test]
+fn host_private_media_transport_events_are_not_turn_history() {
+    use client::protocol::media::{
+        MediaControlActionDto, MediaControlRequestDto, MediaSessionRefDto,
+    };
+
+    let events = [
+        ClientEvent::MediaControlRequest {
+            request: MediaControlRequestDto {
+                request_id: "control-1".into(),
+                connection_id: "connection-1".into(),
+                media_session_ref: MediaSessionRefDto {
+                    id: "media-session-1".into(),
+                },
+                generation: 1,
+                action: MediaControlActionDto::FlushAudio {
+                    target_sequence: 1,
+                    target_sample_frames: 480,
+                },
+            },
+        },
+        ClientEvent::MediaServiceResponse {
+            response: client::protocol::media::MediaServiceResponseDto {
+                request_id: "service-1".into(),
+                result: None,
+                error: Some(client::protocol::media::MediaErrorDto {
+                    kind: client::protocol::media::MediaErrorKindDto::Unavailable,
+                    message: "host unavailable".into(),
+                }),
+            },
+        },
+    ];
+    for event in &events {
+        assert!(!super::TurnLifecycleListener::is_live_turn_payload(event));
+        assert!(!super::TurnLifecycleListener::is_turn_journal_event(event));
+    }
+}
+
+struct CancelledHandoffMediaService {
+    audio: Arc<dyn media_api::MediaAudioChannel>,
+    stop_calls: std::sync::atomic::AtomicUsize,
+    session_audio_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl CancelledHandoffMediaService {
+    fn new(audio: Arc<dyn media_api::MediaAudioChannel>) -> Self {
+        Self {
+            audio,
+            stop_calls: std::sync::atomic::AtomicUsize::new(0),
+            session_audio_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+#[derive(Default)]
+struct HandoffTestAudioChannel;
+
+#[async_trait]
+impl media_api::MediaAudioChannel for HandoffTestAudioChannel {
+    async fn read(&self) -> Result<Option<media_api::MediaFrame>, media_api::MediaError> {
+        Ok(None)
+    }
+
+    async fn write(
+        &self,
+        frame: media_api::MediaPcmFrame,
+    ) -> Result<media_api::MediaRenderReceipt, media_api::MediaError> {
+        Ok(media_api::MediaRenderReceipt {
+            accepted_sample_frames: u32::try_from(
+                frame.pcm16le.len() / (usize::from(frame.channels) * 2),
+            )
+            .unwrap_or(u32::MAX),
+            played_sample_frames: 0,
+            rendered_at_unix_ms: None,
+        })
+    }
+
+    async fn flush(&self) -> Result<media_api::MediaRenderReceipt, media_api::MediaError> {
+        Ok(media_api::MediaRenderReceipt {
+            accepted_sample_frames: 0,
+            played_sample_frames: 0,
+            rendered_at_unix_ms: Some(1),
+        })
+    }
+
+    async fn interrupt(&self) -> Result<media_api::MediaRenderReceipt, media_api::MediaError> {
+        self.flush().await
+    }
+}
+
+#[async_trait]
+impl media_api::MediaService for CancelledHandoffMediaService {
+    fn capabilities(&self) -> media_api::MediaCapabilities {
+        media_api::MediaCapabilities {
+            service_epoch: 1,
+            support_revision: 1,
+            supported_operations: vec![media_api::MediaOperationKind::Stop],
+            supported_media_kinds: Vec::new(),
+            readiness: Vec::new(),
+            max_payload_bytes: 1024,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _: media_api::MediaOperationContext,
+        operation: media_api::MediaOperation,
+    ) -> Result<media_api::MediaResult, media_api::MediaError> {
+        match operation {
+            media_api::MediaOperation::Stop { target } => {
+                self.stop_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(media_api::MediaResult::Stopped { resource: target })
+            }
+            _ => Err(media_api::MediaError::new(
+                media_api::MediaErrorKind::Unsupported,
+                "test service supports cleanup only",
+            )),
+        }
+    }
+
+    async fn read_media(
+        &self,
+        _: media_api::MediaOperationContext,
+        _: media_api::MediaRef,
+    ) -> Result<media_api::MediaContent, media_api::MediaError> {
+        Err(media_api::MediaError::new(
+            media_api::MediaErrorKind::Unsupported,
+            "not used",
+        ))
+    }
+
+    async fn cancel(&self, _: media_api::MediaOperationId) -> Result<(), media_api::MediaError> {
+        Ok(())
+    }
+
+    async fn session_audio(
+        &self,
+        context: media_api::MediaOperationContext,
+        _: media_api::MediaSessionRef,
+    ) -> Result<Arc<dyn media_api::MediaAudioChannel>, media_api::MediaError> {
+        if !matches!(context.owner, media_api::MediaOwner::Session { .. }) {
+            return Err(media_api::MediaError::new(
+                media_api::MediaErrorKind::NotFound,
+                "test owner mismatch",
+            ));
+        }
+        self.session_audio_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.audio.clone())
+    }
+}
+
+#[derive(Default)]
+struct RecordingMediaAttachment {
+    audio: StdMutex<Option<Arc<dyn media_api::MediaAudioChannel>>>,
+}
+
+#[async_trait]
+impl super::MediaConversationAttachment for RecordingMediaAttachment {
+    async fn open(
+        &self,
+        _: tool_api::MediaAgentHandoffRequest,
+        _: orchestrator::RealtimeAgentContext,
+        audio: Arc<dyn media_api::MediaAudioChannel>,
+    ) -> Result<super::RealtimeAgentSessionIo, String> {
+        *self.audio.lock().unwrap() = Some(audio);
+        Err("test attachment captured the channel".into())
+    }
+}
+
+struct ClosingMediaRealtimeCodec;
+
+impl llm_runtime::services::sdk::realtime::RealtimeCodec for ClosingMediaRealtimeCodec {
+    fn capabilities(&self) -> llm_runtime::services::sdk::realtime::RealtimeCapabilities {
+        llm_runtime::services::sdk::realtime::RealtimeCapabilities {
+            history_import: true,
+            tools: true,
+            input_transcription: true,
+            output_transcription: true,
+            interruption: true,
+            ..Default::default()
+        }
+    }
+
+    fn encode(
+        &self,
+        _: &llm_runtime::services::sdk::realtime::RealtimeInput,
+    ) -> Result<
+        Vec<llm_runtime::services::sdk::realtime::RealtimeFrame>,
+        llm_runtime::services::sdk::realtime::RealtimeError,
+    > {
+        Ok(Vec::new())
+    }
+
+    fn decode(
+        &self,
+        _: llm_runtime::services::sdk::realtime::RealtimeFrame,
+    ) -> Result<
+        Vec<llm_runtime::services::sdk::realtime::RealtimeEvent>,
+        llm_runtime::services::sdk::realtime::RealtimeError,
+    > {
+        Ok(Vec::new())
+    }
+}
+
+struct ClosingMediaRealtimeSink;
+
+#[async_trait]
+impl llm_runtime::services::sdk::realtime::RealtimeSink for ClosingMediaRealtimeSink {
+    async fn send(
+        &mut self,
+        _: llm_runtime::services::sdk::realtime::RealtimeFrame,
+    ) -> Result<(), llm_runtime::services::sdk::realtime::RealtimeError> {
+        Ok(())
+    }
+
+    async fn ping(
+        &mut self,
+        _: bytes::Bytes,
+    ) -> Result<(), llm_runtime::services::sdk::realtime::RealtimeError> {
+        Err(
+            llm_runtime::services::sdk::realtime::RealtimeError::InvalidInput {
+                message: "fixture transport does not support Ping".into(),
+            },
+        )
+    }
+
+    fn abort(&mut self) {}
+
+    async fn close(
+        &mut self,
+        _: llm_runtime::services::sdk::realtime::RealtimeClose,
+    ) -> Result<(), llm_runtime::services::sdk::realtime::RealtimeError> {
+        Ok(())
+    }
+}
+
+struct IdleMediaRealtimeTransport;
+
+#[async_trait]
+impl llm_runtime::services::sdk::realtime::RealtimeTransport for IdleMediaRealtimeTransport {
+    async fn connect(
+        &self,
+        _: llm_runtime::services::sdk::realtime::RealtimeConnectRequest,
+    ) -> Result<
+        llm_runtime::services::sdk::realtime::RealtimeConnection,
+        llm_runtime::services::sdk::realtime::RealtimeError,
+    > {
+        use futures_util::StreamExt as _;
+
+        Ok(llm_runtime::services::sdk::realtime::RealtimeConnection {
+            outbound: Box::new(ClosingMediaRealtimeSink),
+            inbound: futures_util::stream::pending().boxed(),
+        })
+    }
+}
+
+struct SuccessfulHandoffMediaService {
+    audio: Arc<dyn media_api::MediaAudioChannel>,
+    start_calls: std::sync::atomic::AtomicUsize,
+    stop_calls: std::sync::atomic::AtomicUsize,
+    session_audio_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl SuccessfulHandoffMediaService {
+    fn new(audio: Arc<dyn media_api::MediaAudioChannel>) -> Self {
+        Self {
+            audio,
+            start_calls: std::sync::atomic::AtomicUsize::new(0),
+            stop_calls: std::sync::atomic::AtomicUsize::new(0),
+            session_audio_calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl media_api::MediaService for SuccessfulHandoffMediaService {
+    fn capabilities(&self) -> media_api::MediaCapabilities {
+        media_api::MediaCapabilities {
+            service_epoch: 1,
+            support_revision: 1,
+            supported_operations: vec![
+                media_api::MediaOperationKind::SessionStart,
+                media_api::MediaOperationKind::Stop,
+            ],
+            supported_media_kinds: vec![media_api::MediaKind::Audio],
+            readiness: Vec::new(),
+            max_payload_bytes: 1024,
+        }
+    }
+
+    async fn execute(
+        &self,
+        _: media_api::MediaOperationContext,
+        operation: media_api::MediaOperation,
+    ) -> Result<media_api::MediaResult, media_api::MediaError> {
+        match operation {
+            media_api::MediaOperation::SessionStart { request }
+                if request.intent == media_api::MediaSessionIntent::Conversation =>
+            {
+                self.start_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(media_api::MediaResult::SessionStarted {
+                    session: media_api::MediaSessionRef(media_api::MediaSessionId::from(
+                        "media-session-success",
+                    )),
+                    status: media_api::MediaSessionStatus {
+                        state: media_api::MediaSessionState::Ready,
+                        audio_enabled: true,
+                        video_enabled: false,
+                    },
+                })
+            }
+            media_api::MediaOperation::Stop { target } => {
+                self.stop_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(media_api::MediaResult::Stopped { resource: target })
+            }
+            _ => Err(media_api::MediaError::new(
+                media_api::MediaErrorKind::Unsupported,
+                "test service supports conversation start and cleanup only",
+            )),
+        }
+    }
+
+    async fn read_media(
+        &self,
+        _: media_api::MediaOperationContext,
+        _: media_api::MediaRef,
+    ) -> Result<media_api::MediaContent, media_api::MediaError> {
+        Err(media_api::MediaError::new(
+            media_api::MediaErrorKind::Unsupported,
+            "not used",
+        ))
+    }
+
+    async fn cancel(&self, _: media_api::MediaOperationId) -> Result<(), media_api::MediaError> {
+        Ok(())
+    }
+
+    async fn session_audio(
+        &self,
+        context: media_api::MediaOperationContext,
+        _: media_api::MediaSessionRef,
+    ) -> Result<Arc<dyn media_api::MediaAudioChannel>, media_api::MediaError> {
+        if !matches!(context.owner, media_api::MediaOwner::Session { .. }) {
+            return Err(media_api::MediaError::new(
+                media_api::MediaErrorKind::NotFound,
+                "test owner mismatch",
+            ));
+        }
+        self.session_audio_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(self.audio.clone())
+    }
+}
+
+struct SuccessfulHandoffAttachment {
+    expected_audio: Arc<dyn media_api::MediaAudioChannel>,
+    same_channel: std::sync::atomic::AtomicBool,
+    open_calls: std::sync::atomic::AtomicUsize,
+    opened: tokio::sync::Notify,
+    _io_guards: StdMutex<
+        Option<(
+            tokio::sync::mpsc::Sender<orchestrator::RealtimeAgentInput>,
+            tokio::sync::mpsc::Receiver<llm_runtime::services::sdk::realtime::RealtimeEvent>,
+        )>,
+    >,
+}
+
+impl SuccessfulHandoffAttachment {
+    fn new(expected_audio: Arc<dyn media_api::MediaAudioChannel>) -> Self {
+        Self {
+            expected_audio,
+            same_channel: std::sync::atomic::AtomicBool::new(false),
+            open_calls: std::sync::atomic::AtomicUsize::new(0),
+            opened: tokio::sync::Notify::new(),
+            _io_guards: StdMutex::new(None),
+        }
+    }
+}
+
+#[async_trait]
+impl super::MediaConversationAttachment for SuccessfulHandoffAttachment {
+    async fn open(
+        &self,
+        request: tool_api::MediaAgentHandoffRequest,
+        _: orchestrator::RealtimeAgentContext,
+        audio: Arc<dyn media_api::MediaAudioChannel>,
+    ) -> Result<super::RealtimeAgentSessionIo, String> {
+        if request.session.0 .0 != "media-session-success" {
+            return Err("unexpected media session reference".into());
+        }
+        self.same_channel.store(
+            Arc::ptr_eq(&self.expected_audio, &audio),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        self.open_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.opened.notify_one();
+
+        use llm_runtime::services::sdk::realtime::{
+            RealtimeConnectRequest, RealtimeLimits, RealtimeSession,
+        };
+        let transport = IdleMediaRealtimeTransport;
+        let (session, driver) = RealtimeSession::connect(
+            &transport,
+            RealtimeConnectRequest {
+                endpoint: "wss://fixture".into(),
+                headers: Vec::new(),
+                max_frame_bytes: 1024,
+            },
+            Arc::new(ClosingMediaRealtimeCodec),
+            RealtimeLimits::default(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+        tokio::spawn(driver.run());
+        let (control, events) = session.into_parts();
+        let (input_tx, inputs) = tokio::sync::mpsc::channel(8);
+        let (output, output_rx) = tokio::sync::mpsc::channel(8);
+        *self._io_guards.lock().unwrap() = Some((input_tx, output_rx));
+        Ok(super::RealtimeAgentSessionIo {
+            control,
+            events,
+            inputs,
+            output,
+            limits: orchestrator::RealtimeAgentLimits {
+                idle_timeout: std::time::Duration::from_millis(300),
+                max_duration: std::time::Duration::from_secs(5),
+                ..Default::default()
+            },
+            image_input_supported: false,
+        })
+    }
+}
+
+#[test]
+fn successful_media_handoff_reuses_channel_and_keeps_one_turn_owner() {
+    use crate::mobile::test_support::{new_engine_with_streaming, test_config, HostFakePlatform};
+    use orchestrator::test_support_stream::{
+        content_block_start_text, content_block_start_tool_use, content_block_stop,
+        input_json_delta, message_delta_stop, message_start, message_stop, text_delta,
+        MockStreamingApiClient,
+    };
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let audio: Arc<dyn media_api::MediaAudioChannel> = Arc::new(HandoffTestAudioChannel);
+    let service = Arc::new(SuccessfulHandoffMediaService::new(audio.clone()));
+    let attachment = Arc::new(SuccessfulHandoffAttachment::new(audio));
+    let tool_use_id = lingxi_core::types::ToolUseId::new();
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![
+        vec![
+            message_start("media-start", "test-model"),
+            content_block_start_tool_use(0, tool_use_id, "media_session_start"),
+            input_json_delta(
+                0,
+                r#"{"intent":"conversation","mode":"audio","audio_source_ref":"mic-1"}"#,
+            ),
+            content_block_stop(0),
+            message_delta_stop("tool_use"),
+            message_stop(),
+        ],
+        vec![
+            message_start("after-media-start", "test-model"),
+            content_block_start_text(0),
+            text_delta(0, "The media session is ready."),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ],
+    ]));
+    let mut config = test_config(root.path());
+    std::fs::create_dir_all(&config.lingxi_home).expect("create fixture settings directory");
+    std::fs::write(
+        config.lingxi_home.join("settings.json"),
+        r#"{"permissions":{"allow":["media_session_start"]}}"#,
+    )
+    .expect("allow the fixture media start through the production permission gate");
+    config.media_service = Some(service.clone());
+    config.media_conversation_attachment = Some(attachment.clone());
+    let listener = Arc::new(FakeListener::default());
+    let engine = new_engine_with_streaming(
+        config,
+        Arc::new(HostFakePlatform::new(root.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(streaming.clone()),
+    )
+    .expect("build mobile engine with media host");
+
+    engine.runtime().block_on(async {
+        engine
+            .submit(ClientCommand::SendPrompt {
+                text: ClientTextDto::from("Start an audio conversation"),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(71),
+                visualization_context: None,
+            })
+            .await
+            .expect("submit prompt");
+
+        let attachment_opened = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            attachment.opened.notified(),
+        )
+        .await;
+        if attachment_opened.is_err() {
+            let captured_calls = streaming.captured_calls().await;
+            let captured_requests = captured_calls
+                .iter()
+                .map(|call| {
+                    (
+                        call.model.clone(),
+                        call.profile.clone(),
+                        call.messages.len(),
+                        call.tools
+                            .iter()
+                            .map(|tool| tool.name.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let events = listener.received.lock().await;
+            panic!(
+                "the committed media tool result must enter realtime under the same turn; start_calls={}, stop_calls={}, session_audio_calls={}, attachment_open_calls={}, captured_requests={captured_requests:?}, received_events={events:#?}",
+                service.start_calls.load(std::sync::atomic::Ordering::SeqCst),
+                service.stop_calls.load(std::sync::atomic::Ordering::SeqCst),
+                service.session_audio_calls.load(std::sync::atomic::Ordering::SeqCst),
+                attachment.open_calls.load(std::sync::atomic::Ordering::SeqCst),
+            );
+        }
+        attachment_opened.expect("the committed media tool result must enter realtime under the same turn");
+        assert!(
+            !listener
+                .received
+                .lock()
+                .await
+                .iter()
+                .any(|event| matches!(event, ClientEvent::TurnEnded { .. })),
+            "the ordinary tool loop must not emit its terminal before realtime finishes"
+        );
+        assert!(engine.active_cancel.lock().await.is_some());
+
+        tokio::time::timeout(std::time::Duration::from_secs(8), async {
+            loop {
+                let ended = listener
+                    .received
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|event| matches!(event, ClientEvent::TurnEnded { .. }));
+                let idle = engine.active_cancel.lock().await.is_none();
+                if ended && idle {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the same active turn continues and ends after native realtime");
+
+        let events = listener.received.lock().await;
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ClientEvent::TurnStarted { .. }))
+                .count(),
+            1,
+            "the handoff must not reserve or start a second turn"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, ClientEvent::TurnEnded { .. }))
+                .count(),
+            1,
+            "the ordinary turn terminal is deferred until realtime finishes"
+        );
+        drop(events);
+        assert!(
+            attachment
+                .same_channel
+                .load(std::sync::atomic::Ordering::SeqCst)
+        );
+        assert_eq!(
+            attachment
+                .open_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            service
+                .start_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            service
+                .session_audio_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            service.stop_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the media session is released once after realtime ends"
+        );
+    });
+}
+
+#[tokio::test]
+async fn media_conversation_attachment_receives_the_existing_service_channel() {
+    use media_api::MediaService as _;
+
+    let audio: Arc<dyn media_api::MediaAudioChannel> = Arc::new(HandoffTestAudioChannel);
+    let service = CancelledHandoffMediaService::new(audio.clone());
+    let session_ref =
+        media_api::MediaSessionRef(media_api::MediaSessionId::from("media-session-1"));
+    let context = media_api::MediaOperationContext::new(
+        media_api::MediaOperationId::new(1, 1),
+        media_api::MediaOwner::Session {
+            session_id: "session-1".into(),
+        },
+    );
+    let existing_channel = service
+        .session_audio(context, session_ref.clone())
+        .await
+        .expect("owner-bound session audio");
+    let attachment = RecordingMediaAttachment::default();
+    let request = tool_api::MediaAgentHandoffRequest {
+        operation_id: media_api::MediaOperationId::new(2, 1),
+        session: session_ref,
+        mode: media_api::MediaSessionMode::Audio,
+    };
+    let prepared = orchestrator::RealtimeAgentContext {
+        session_id: "session-1".into(),
+        profile_name: Some("profile".into()),
+        account_scope: Some("profile:profile".into()),
+        instructions: String::new(),
+        history: Vec::new(),
+        tools: Vec::new(),
+    };
+
+    let _ = crate::media_handoff::open_attachment(
+        &attachment,
+        request,
+        prepared,
+        existing_channel.clone(),
+    )
+    .await;
+    let attached = attachment.audio.lock().unwrap().clone().unwrap();
+    assert!(Arc::ptr_eq(&existing_channel, &attached));
+    assert_eq!(
+        service
+            .session_audio_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cancelled_media_handoff_drains_under_the_existing_active_turn() {
+    use tool_api::MediaAgentHandoffHandle as _;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let runtime = build_mobile(
+        test_config(root.path()),
+        Arc::new(HostFakePlatform::new(root.path().into())),
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+    )
+    .await
+    .expect("build mobile runtime");
+    let session = runtime.orchestrator.current_session_id().await;
+    let session_key = session.as_uuid().to_string();
+    let handoffs = Arc::new(super::MobileMediaAgentHandoffQueue::default());
+    handoffs.set_attachment(Some(Arc::new(RecordingMediaAttachment::default())));
+    handoffs.bind_session(Arc::new(StdMutex::new(session_key.clone())));
+    let invocation = media_handoff_context(session);
+    let capability_context = media_handoff_capability_context(session);
+    handoffs
+        .request(&invocation, &capability_context, media_handoff_request())
+        .expect("handoff request is queued");
+
+    let turn = Arc::new(super::ActiveTurn::new_owned(
+        Some(9),
+        session_key.clone(),
+        11,
+    ));
+    turn.cancel.cancel();
+    let service_impl = Arc::new(CancelledHandoffMediaService::new(Arc::new(
+        HandoffTestAudioChannel,
+    )));
+    let service: Arc<dyn media_api::MediaService> = service_impl.clone();
+    let end = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        super::continue_media_agent_handoff(
+            runtime.orchestrator.clone(),
+            turn,
+            handoffs.clone(),
+            Some(service),
+            None,
+            true,
+        ),
+    )
+    .await
+    .expect("handoff cleanup completes under the current turn")
+    .expect("cancelled handoff is a normal terminal");
+    assert_eq!(end, Some(orchestrator::RealtimeAgentEnd::Cancelled));
+    assert!(!handoffs.has_pending_for_session(&session_key));
+    assert_eq!(
+        service_impl
+            .stop_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "cancelled handoff stops the media session exactly once"
+    );
+}
+
 /// `cancel_active_turn` marks the durable checkpoint `Cancelled` BEFORE
 /// the executor unwinds, so every non-terminal event the unwinding
 /// executor still emits is refused by `append_event` with
@@ -10100,11 +11008,11 @@ fn mobile_session_switch_ends_only_the_previous_audio_owner() {
                 .await;
             handles.insert(
                 previous_owner.clone(),
-                AudioRecordingHandle("old-recording".into()),
+                media_api::RecordingRef(media_api::RecordingId::from("old-recording")),
             );
             handles.insert(
                 unrelated_owner.clone(),
-                AudioRecordingHandle("other-recording".into()),
+                media_api::RecordingRef(media_api::RecordingId::from("other-recording")),
             );
         }
 
@@ -10170,7 +11078,10 @@ fn mobile_turn_end_preserves_recording_until_engine_disposal() {
             .audio_recording_handles
             .lock()
             .await
-            .insert(owner.clone(), AudioRecordingHandle("live-recording".into()));
+            .insert(
+                owner.clone(),
+                media_api::RecordingRef(media_api::RecordingId::from("live-recording")),
+            );
 
         handle
             .submit(ClientCommand::SendPrompt {
@@ -11658,7 +12569,11 @@ fn mobile_transcript_authority_follows_real_new_and_resume_session_activation() 
         handle
             .inner
             .session_writer
-            .append_mobile_empty_session(&original.as_uuid().to_string(), "original conversation", &handle.session_cwd())
+            .append_mobile_empty_session(
+                &original.as_uuid().to_string(),
+                "original conversation",
+                &handle.session_cwd(),
+            )
             .await
             .unwrap();
         handle

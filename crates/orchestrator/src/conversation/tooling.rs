@@ -638,9 +638,9 @@ impl ConversationOrchestrator {
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
         // `Xla(model)=Dh(model)?FWd:UWd`). Snapshot it from the live session.
-        let (model, model_profile) = {
+        let (session_id, model, selected_model_profile) = {
             let s = self.session.lock().await;
-            (s.model.clone(), s.model_profile.clone())
+            (s.session_id, s.model.clone(), s.model_profile.clone())
         };
         // Same snapshot, one turn earlier than it used to be taken: claude-code
         // registers the main-loop model as a LIVE accessor (`Dx(()=>HR(rt()))`,
@@ -649,10 +649,19 @@ impl ConversationOrchestrator {
         // inside `filtered_available_tools` — keeps the advertise path free of a
         // second `session` lock, which would deadlock the callers that already
         // hold one.
-        self.refresh_main_loop_model_for_route(&model, model_profile.as_deref());
+        self.refresh_main_loop_model_for_route(&model, selected_model_profile.as_deref());
         let model_source = self
-            .main_model_source_for_request(&model, model_profile.as_deref())
+            .main_model_source_for_request(&model, selected_model_profile.as_deref())
             .await;
+        // Use the provider profile selected by the trusted runtime route, not
+        // a model-name guess. This also fills in a configured default profile
+        // when the session has no explicit profile pin.
+        let model_profile = self
+            .api
+            .resolve_media_route(&model, selected_model_profile.as_deref())
+            .ok()
+            .map(|route| route.main.profile_name)
+            .or(selected_model_profile);
         let tools = self.filtered_available_tools().await;
         // Capture canonical names and aliases from the exact post-filter vector
         // used below to build this request's wire tool declarations. A later
@@ -692,6 +701,16 @@ impl ConversationOrchestrator {
                 _ => tool_api::tool_trait::BashPrecommitSkills::default(),
             };
         let bash_precommit_session_generation = self.tools.bash_precommit_session_generation();
+        let prompt_options = PromptOptions {
+            include_examples: true,
+            session_id: Some(session_id),
+            is_scheduled_turn: crate::scheduled_turn::current().is_some(),
+            model: Some(model.clone()),
+            model_profile: model_profile.clone(),
+            workflow_authoring_available,
+            bash_precommit_skills,
+            bash_precommit_session_generation,
+        };
         let cache_key = WireToolSchemaCacheKey {
             exact_schema_identities: tools
                 .iter()
@@ -708,10 +727,12 @@ impl ConversationOrchestrator {
             dynamic_schema_revisions: tools
                 .iter()
                 .filter_map(|tool| {
-                    tool.input_schema_revision()
+                    tool.input_schema_revision_for_prompt(&prompt_options)
                         .map(|revision| (tool.name().to_string(), revision))
                 })
                 .collect(),
+            session_id: Some(session_id),
+            is_scheduled_turn: prompt_options.is_scheduled_turn,
             model: model.clone(),
             model_profile: model_profile.clone(),
             workflow_authoring_available,
@@ -730,18 +751,7 @@ impl ConversationOrchestrator {
             if let Some(cached) = cached.filter(|entry| entry.key == cache_key) {
                 cached.wire
             } else {
-                let wire = tool_api::wire::tools_to_wire(
-                    &tools,
-                    &PromptOptions {
-                        include_examples: true,
-                        model: Some(model.clone()),
-                        model_profile: model_profile.clone(),
-                        workflow_authoring_available,
-                        bash_precommit_skills,
-                        bash_precommit_session_generation,
-                    },
-                )
-                .await;
+                let wire = tool_api::wire::tools_to_wire(&tools, &prompt_options).await;
                 *self.prompt_runtime.wire_tool_schema_cache.lock().await =
                     Some(WireToolSchemaCache {
                         key: cache_key.clone(),

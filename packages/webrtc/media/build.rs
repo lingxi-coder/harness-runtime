@@ -55,6 +55,7 @@ fn main() {
     }
     if std::env::var_os("CARGO_FEATURE_GSTREAMER_MEDIA").is_some()
         && std::env::var("HOST").ok() == std::env::var("TARGET").ok()
+        && std::env::var("PROFILE").as_deref() != Ok("release")
     {
         let output = std::process::Command::new("pkg-config")
             .args(["--variable=pluginsdir", "gstreamer-1.0"])
@@ -68,5 +69,7 @@ fn main() {
             "cargo:rustc-env=LINGXI_DEV_GST_PLUGIN_DIR={}",
             String::from_utf8(output.stdout).unwrap().trim()
         );
+    } else {
+        println!("cargo:rustc-env=LINGXI_DEV_GST_PLUGIN_DIR=");
     }
 }

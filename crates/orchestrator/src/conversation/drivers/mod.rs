@@ -24,8 +24,9 @@ mod projected_content;
 mod realtime;
 mod streaming;
 pub use realtime::{
-    realtime_history, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
-    RealtimeAgentLimits,
+    realtime_history, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
+    MediaConversationAttachment, RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput,
+    RealtimeAgentLimits, RealtimeAgentSessionIo,
 };
 
 use super::hooks_impl::ModPromptScreen;

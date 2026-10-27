@@ -38,6 +38,10 @@ use crate::protocol::audio::{
 use crate::protocol::computer_access::ComputerAccessResponseDto;
 use crate::protocol::controls::ReasoningSelectionDto;
 use crate::protocol::listings::TaskStatusDto;
+use crate::protocol::media::{
+    MediaConnectionResponseDto, MediaControlResponseDto, MediaDeviceResponseDto,
+    MediaServiceRequestDto, MediaSessionModeDto,
+};
 use crate::protocol::permission::PermissionResponseDto;
 use crate::protocol::text::ClientTextDto;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -905,6 +909,26 @@ define_client_command! {
         request_id: String,
         command_json: String,
     },
+    /// Response to a host-private media connection negotiation request.
+    MediaConnectionResponse {
+        response: MediaConnectionResponseDto,
+    },
+    /// Response to one bounded native media device callback request.
+    MediaDeviceResponse {
+        response: MediaDeviceResponseDto,
+    },
+    /// Client request to execute/read/cancel against the shared app media service.
+    MediaServiceRequest {
+        request: MediaServiceRequestDto,
+    },
+    /// Response to a host-private peer audio barrier request.
+    MediaControlResponse {
+        response: MediaControlResponseDto,
+    },
+    /// Update explicit native duplex modes independently of legacy audio operations.
+    UpdateMediaSessionModes {
+        modes: Vec<MediaSessionModeDto>,
+    },
 }
 
 impl From<ClientCommandWire> for ClientCommand {
@@ -1267,6 +1291,21 @@ impl From<ClientCommandWire> for ClientCommand {
             },
             ClientCommandWire::RecordPromptSuggestionSubmission { text } => {
                 Self::RecordPromptSuggestionSubmission { text }
+            }
+            ClientCommandWire::MediaConnectionResponse { response } => {
+                Self::MediaConnectionResponse { response }
+            }
+            ClientCommandWire::MediaDeviceResponse { response } => {
+                Self::MediaDeviceResponse { response }
+            }
+            ClientCommandWire::MediaServiceRequest { request } => {
+                Self::MediaServiceRequest { request }
+            }
+            ClientCommandWire::MediaControlResponse { response } => {
+                Self::MediaControlResponse { response }
+            }
+            ClientCommandWire::UpdateMediaSessionModes { modes } => {
+                Self::UpdateMediaSessionModes { modes }
             }
         }
     }

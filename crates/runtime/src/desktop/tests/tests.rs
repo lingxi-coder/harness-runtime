@@ -656,6 +656,7 @@ async fn desktop_registry_exposes_connect() {
         shared_registry,
         workflow_tool,
         workflow_snapshot,
+        Arc::new(tool_api::ToolRegistry::new()),
     )
     .await
     .expect("desktop settings must load for command registry");
@@ -772,6 +773,7 @@ async fn safe_mode_and_bare_skip_custom_command_discovery() {
             shared_registry,
             workflow_tool,
             workflow_snapshot,
+            Arc::new(tool_api::ToolRegistry::new()),
         )
         .await
         .expect("desktop settings must load for command registry");
@@ -904,6 +906,7 @@ async fn an_add_dir_root_contributes_its_skills() {
             shared_registry,
             workflow_tool,
             workflow_snapshot,
+            Arc::new(tool_api::ToolRegistry::new()),
         )
         .await
         .expect("desktop settings must load for command registry");

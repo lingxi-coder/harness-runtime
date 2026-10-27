@@ -11,11 +11,18 @@ use crate::{
     playout::Playout,
     processing::Processor,
 };
+use crossbeam_queue::ArrayQueue;
 use std::{
     io,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
+
+const DECODED_PCM_QUEUE_FRAMES: usize = 32;
+const MAX_DECODED_FRAME_DURATION: Duration = Duration::from_millis(120);
 
 pub struct CapturePort {
     buffers: Arc<Buffers>,
@@ -28,6 +35,232 @@ pub struct RenderPort {
     playback: Playback,
     reference: FramePacker,
     rate: u32,
+}
+
+/// One bounded, timestamped mono frame decoded from incoming RTP audio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodedAudioFrame {
+    /// Monotonic sequence within this playout instance.
+    pub sequence: u64,
+    /// Monotonic presentation time mapped from RTP ingress and GStreamer running time.
+    pub at: Instant,
+    /// PCM sample rate selected when the playout instance was created.
+    pub sample_rate_hz: u32,
+    /// Decoded frames are mono.
+    pub channels: u16,
+    /// Interleaved signed PCM16 little-endian samples.
+    pub pcm16le: Vec<u8>,
+}
+
+struct QueuedPcmFrame {
+    sequence: u64,
+    pts_ns: u64,
+    pcm16le: Vec<u8>,
+}
+
+struct PcmOutputState {
+    queue: ArrayQueue<QueuedPcmFrame>,
+    sample_rate_hz: u32,
+    next_sequence: AtomicU64,
+    failed: AtomicBool,
+}
+
+/// Bounded decoded-PCM output shared with the GStreamer sink thread.
+#[derive(Clone)]
+pub(crate) struct PcmOutput(Arc<PcmOutputState>);
+
+impl PcmOutput {
+    fn new(sample_rate_hz: u32) -> Self {
+        Self(Arc::new(PcmOutputState {
+            queue: ArrayQueue::new(DECODED_PCM_QUEUE_FRAMES),
+            sample_rate_hz,
+            next_sequence: AtomicU64::new(0),
+            failed: AtomicBool::new(false),
+        }))
+    }
+
+    pub(crate) fn rate(&self) -> u32 {
+        self.0.sample_rate_hz
+    }
+
+    pub(crate) fn push(
+        &self,
+        samples_f32le: &[u8],
+        pts: Option<gstreamer::ClockTime>,
+    ) -> Result<(), &'static str> {
+        if self.0.failed.load(Ordering::Acquire) {
+            return Err("decoded audio output failed");
+        }
+        let sample_count = samples_f32le.len() / 4;
+        let max_samples = (u64::from(self.0.sample_rate_hz)
+            * MAX_DECODED_FRAME_DURATION.as_millis() as u64
+            / 1_000) as usize;
+        if samples_f32le.is_empty()
+            || !samples_f32le.len().is_multiple_of(4)
+            || sample_count > max_samples
+        {
+            self.fail();
+            return Err("decoded audio frame exceeds its sample bound");
+        }
+        let Some(pts) = pts else {
+            self.fail();
+            return Err("decoded audio frame has no timestamp");
+        };
+        let sequence = match self.0.next_sequence.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |sequence| sequence.checked_add(1),
+        ) {
+            Ok(sequence) => sequence,
+            Err(_) => {
+                self.fail();
+                return Err("decoded audio sequence exhausted");
+            }
+        };
+        let mut pcm16le = Vec::with_capacity(sample_count * 2);
+        for bytes in samples_f32le.chunks_exact(4) {
+            let sample = f32::from_le_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| "invalid decoded audio sample")?,
+            );
+            if !sample.is_finite() {
+                self.fail();
+                return Err("decoded audio contains an invalid sample");
+            }
+            let sample = (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16;
+            pcm16le.extend_from_slice(&sample.to_le_bytes());
+        }
+        if self
+            .0
+            .queue
+            .push(QueuedPcmFrame {
+                sequence,
+                pts_ns: pts.nseconds(),
+                pcm16le,
+            })
+            .is_err()
+        {
+            self.fail();
+            return Err("decoded audio output queue is full");
+        }
+        Ok(())
+    }
+
+    fn pop(&self) -> Option<QueuedPcmFrame> {
+        self.0.queue.pop()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.queue.is_empty()
+    }
+
+    fn clear(&self) {
+        while self.0.queue.pop().is_some() {}
+    }
+
+    fn failed(&self) -> bool {
+        self.0.failed.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn fail(&self) {
+        self.0.failed.store(true, Ordering::Release);
+    }
+}
+
+/// Host-facing decoded audio playout backed by the existing RTP jitter/decode pipeline.
+///
+/// This type owns no device. Feed incoming [`lingxi_webrtc_core::ReceivedRtp`] packets,
+/// then consume decoded PCM frames and pass them to the host's already-open output path.
+/// The output queue holds at most 32 frames, each no longer than 120 ms; overflow fails
+/// the playout instead of dropping decoded speech.
+pub struct DecodedAudioPlayout {
+    playout: Playout,
+    output: PcmOutput,
+    sample_rate_hz: u32,
+    input_finished: bool,
+    interrupted: bool,
+}
+
+impl DecodedAudioPlayout {
+    /// Create a mono PCM16LE playout stream at the requested output rate.
+    pub fn new(sample_rate_hz: u32) -> Result<Self, &'static str> {
+        if !(8_000..=192_000).contains(&sample_rate_hz) {
+            return Err("invalid decoded audio sample rate");
+        }
+        let output = PcmOutput::new(sample_rate_hz);
+        let playout = Playout::new_pcm(sample_rate_hz, output.clone())?;
+        Ok(Self {
+            playout,
+            output,
+            sample_rate_hz,
+            input_finished: false,
+            interrupted: false,
+        })
+    }
+
+    /// Push one owned RTP packet into the existing bounded jitter/decode pipeline.
+    pub fn push(&mut self, packet: lingxi_webrtc_core::ReceivedRtp) -> Result<(), &'static str> {
+        if self.interrupted {
+            return Err("decoded audio playout was interrupted");
+        }
+        if self.input_finished {
+            return Err("decoded audio playout input is finished");
+        }
+        self.playout.push(packet)
+    }
+
+    /// Take one decoded frame if available; `None` means no frame is ready yet.
+    pub fn try_read(&mut self) -> Result<Option<DecodedAudioFrame>, &'static str> {
+        if self.interrupted {
+            return Ok(None);
+        }
+        self.playout.check()?;
+        if self.output.failed() {
+            return Err("decoded audio playout failed");
+        }
+        let Some(frame) = self.output.pop() else {
+            return Ok(None);
+        };
+        let at = self.playout.presentation_time(frame.pts_ns)?;
+        Ok(Some(DecodedAudioFrame {
+            sequence: frame.sequence,
+            at,
+            sample_rate_hz: self.sample_rate_hz,
+            channels: 1,
+            pcm16le: frame.pcm16le,
+        }))
+    }
+
+    /// End RTP input and let the jitter/decode pipeline finish queued audio.
+    /// Consume frames until [`Self::is_drained`] before flushing the host output path.
+    pub fn finish_input(&mut self) -> Result<(), &'static str> {
+        if self.interrupted {
+            return Err("decoded audio playout was interrupted");
+        }
+        if !self.input_finished {
+            self.playout.finish_input()?;
+            self.input_finished = true;
+        }
+        Ok(())
+    }
+
+    /// Whether EOS was observed and all decoded frames have been consumed.
+    /// This does not mean that frames already passed to the host have played.
+    pub fn is_drained(&self) -> bool {
+        self.interrupted || (self.playout.ended() && self.output.is_empty())
+    }
+
+    /// Stop immediately and discard frames that have not yet been handed to the host.
+    /// Actual played progress is reported by the host output path's render receipt.
+    pub fn interrupt(&mut self) -> Result<(), &'static str> {
+        if !self.interrupted {
+            self.playout.interrupt()?;
+            self.output.clear();
+            self.interrupted = true;
+        }
+        Ok(())
+    }
 }
 /// Shared media worker for native iOS/Android adapters and synthetic fixtures.
 pub struct NativeAudio {
@@ -290,5 +523,56 @@ mod tests {
         render.render(&mut partial, Instant::now()).unwrap();
         assert!(partial.iter().all(|v| *v == 0.));
         assert_eq!(owner.worker.buffers.queued.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn decoded_pcm_output_preserves_pts_and_converts_to_bounded_pcm16le() {
+        let output = PcmOutput::new(48_000);
+        let samples = [0.5f32, -1.0, 1.0];
+        let bytes: Vec<_> = samples
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect();
+        output
+            .push(&bytes, Some(gstreamer::ClockTime::from_mseconds(20)))
+            .unwrap();
+
+        let frame = output.pop().unwrap();
+        assert_eq!(frame.sequence, 0);
+        assert_eq!(frame.pts_ns, 20_000_000);
+        assert_eq!(frame.pcm16le.len(), 6);
+        let samples: Vec<_> = frame
+            .pcm16le
+            .chunks_exact(2)
+            .map(|bytes| i16::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert_eq!(samples, [16_384, -32_767, 32_767]);
+    }
+
+    #[test]
+    fn decoded_pcm_output_fails_closed_on_oversize_or_full_queue() {
+        let output = PcmOutput::new(8_000);
+        let oversized = vec![0; (960 + 1) * 4];
+        assert!(
+            output
+                .push(&oversized, Some(gstreamer::ClockTime::ZERO))
+                .is_err()
+        );
+        assert!(output.failed());
+
+        let output = PcmOutput::new(8_000);
+        let one_sample = 0.0f32.to_le_bytes();
+        for _ in 0..DECODED_PCM_QUEUE_FRAMES {
+            output
+                .push(&one_sample, Some(gstreamer::ClockTime::ZERO))
+                .unwrap();
+        }
+        assert!(
+            output
+                .push(&one_sample, Some(gstreamer::ClockTime::ZERO))
+                .is_err()
+        );
+        assert!(output.failed());
+        assert_eq!(output.0.queue.len(), DECODED_PCM_QUEUE_FRAMES);
     }
 }

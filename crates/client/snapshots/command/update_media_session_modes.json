@@ -1,0 +1,6 @@
+{
+  "type": "update_media_session_modes",
+  "modes": [
+    "audio"
+  ]
+}

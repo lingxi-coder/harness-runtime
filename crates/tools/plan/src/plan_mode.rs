@@ -1357,6 +1357,8 @@ mod tests {
         let tool = ExitPlanModeTool::new(bctx);
         let prompt = tool
             .prompt(&PromptOptions {
+                is_scheduled_turn: false,
+                session_id: None,
                 include_examples: true,
                 model: None,
                 model_profile: None,

@@ -6,7 +6,7 @@ members = [
     "crates/mcp-wire",
     "crates/runtime",
     "crates/branding",
-    "crates/audio-runtime",
+    "crates/media-runtime",
     "crates/client",
     "crates/configuration-admin",
     "crates/tool-api",
@@ -27,10 +27,12 @@ members = [
     "crates/tools/agent",
     "crates/tools/workflow",
     "crates/tools/mobile",
+    "crates/tools/media",
     "crates/tools/computer-use",
     "crates/tools/android-use",
     "crates/core",
     "crates/device-api",
+    "crates/media-api",
     "crates/json-projection",
     "crates/mcp-wire",
     "crates/rooted-fs",
@@ -88,7 +90,7 @@ members = [
 default-members = [
     "crates/runtime",
     "crates/branding",
-    "crates/audio-runtime",
+    "crates/media-runtime",
     "crates/client",
     "crates/tool-api",
     "crates/tools/file",
@@ -108,10 +110,12 @@ default-members = [
     "crates/tools/agent",
     "crates/tools/workflow",
     "crates/tools/mobile",
+    "crates/tools/media",
     "crates/tools/computer-use",
     "crates/tools/android-use",
     "crates/core",
     "crates/device-api",
+    "crates/media-api",
     "crates/json-projection",
     "crates/mcp-wire",
     "crates/rooted-fs",
@@ -176,6 +180,9 @@ platform-pty = { git = "https://github.com/lingxi-coder/mobile-linux-runtime.git
 # prefix, brand name). Path is workspace-root-relative so every member uses
 # `branding.workspace = true` regardless of its own depth.
 branding = { path = "crates/branding" }
+media-api = { path = "crates/media-api" }
+media-runtime = { path = "crates/media-runtime" }
+tool-media = { path = "crates/tools/media" }
 
 # Generic leaf libraries with no workspace dependencies (device API, JSON projection, MCP wire types, rooted
 # filesystem). The product takes them from this repository at the same revision as the rest of the engine.

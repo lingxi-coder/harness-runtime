@@ -1786,6 +1786,8 @@ mod tests {
         // prompt(model:None) ⇒ Dh(undefined)=false ⇒ LONG.
         let long_prompt = tool
             .prompt(&PromptOptions {
+                is_scheduled_turn: false,
+                session_id: None,
                 include_examples: false,
                 model: None,
                 model_profile: None,
@@ -1797,6 +1799,8 @@ mod tests {
         // prompt(model:claude-opus-4-8) ⇒ Dh=true ⇒ SHORT (byte-anchor).
         let short_prompt = tool
             .prompt(&PromptOptions {
+                is_scheduled_turn: false,
+                session_id: None,
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,

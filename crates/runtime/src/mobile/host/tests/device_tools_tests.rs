@@ -14,9 +14,19 @@ use tool_api::tool_trait::ToolStaticContext;
 use super::{build_mobile, test_config, FakeListener, HostFakePlatform, RecordingPermissionSink};
 
 const DEVICE_TOOLS: &[&str] = &[
-    "camera",
-    "voice",
-    "speech",
+    "media_sources",
+    "media_status",
+    "media_capture",
+    "media_record",
+    "media_transcribe",
+    "media_synthesize",
+    "media_play",
+    "media_speak",
+    "media_session_start",
+    "media_session_update",
+    "media_observe",
+    "media_wait",
+    "media_stop",
     "clipboard",
     "share",
     "notification",
@@ -28,7 +38,7 @@ const DEVICE_TOOLS: &[&str] = &[
     "contacts",
 ];
 
-const DEVICE_SKILLS: &[&str] = &["mobile-device", "mobile-media", "mobile-personal-context"];
+const DEVICE_SKILLS: &[&str] = &["mobile-device", "media", "mobile-personal-context"];
 
 fn source_text_contains(value: &Utf16JsonProjection, needle: &str) -> bool {
     let Some(units) = value.string_units("") else {
@@ -214,7 +224,7 @@ async fn native_device_tools_and_skills_are_wired_in_chat_and_code() {
             }
             assert!(!listing
                 .iter()
-                .any(|entry| entry.name.string_at("") == Some("mobile-media")));
+                .any(|entry| entry.name.string_at("") == Some("media")));
         }
     }
 }

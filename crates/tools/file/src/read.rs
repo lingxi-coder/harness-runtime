@@ -3725,6 +3725,8 @@ mod tests {
         assert_eq!(desc, "Read a file from the local filesystem.");
         let prompt_source = tool
             .prompt(&PromptOptions {
+                is_scheduled_turn: false,
+                session_id: None,
                 include_examples: false,
                 model: None,
                 model_profile: None,
@@ -3768,6 +3770,8 @@ mod tests {
         // model:claude-opus-4-8 ⇒ Dh=true ⇒ SHORT prompt (byte-anchor).
         let prompt_source = tool
             .prompt(&PromptOptions {
+                is_scheduled_turn: false,
+                session_id: None,
                 include_examples: false,
                 model: Some("claude-opus-4-8".to_string()),
                 model_profile: None,

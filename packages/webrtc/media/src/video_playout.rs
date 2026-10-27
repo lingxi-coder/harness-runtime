@@ -4,7 +4,7 @@ use crate::video::{VideoFrame, VideoLayout};
 use gstreamer::{self as gst, prelude::*};
 use gstreamer_app::{AppSink, AppSrc};
 use gstreamer_video::VideoInfo;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 pub struct VideoPlayout {
     pipeline: gst::Pipeline,
     source: AppSrc,
@@ -80,6 +80,13 @@ impl VideoPlayout {
             anchor,
         })
     }
+
+    pub(crate) fn frame_time(&self, pts: Duration) -> Result<Instant, &'static str> {
+        self.anchor
+            .checked_add(pts)
+            .ok_or("decoded video timestamp overflow")
+    }
+
     pub fn push(&self, packet: lingxi_webrtc_core::ReceivedRtp) -> Result<(), String> {
         let Some(elapsed) = packet.at.checked_duration_since(self.anchor) else {
             return Ok(());

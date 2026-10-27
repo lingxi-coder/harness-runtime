@@ -813,6 +813,14 @@ pub struct DesktopConfig {
     /// schemas. Every other desktop host (CLI, TUI, offline factories) leaves it
     /// `None`, so audio tools are absent.
     pub audio: Option<DesktopAudio>,
+    /// App-scoped host media facade shared by media tools and UI/remote callers.
+    pub media_service: Option<Arc<dyn media_api::MediaService>>,
+    /// Host-selected native Agent attachment for Conversation-intent media
+    /// sessions. Only a bridge-capable host supplies this.
+    pub media_conversation_attachment: Option<Arc<dyn orchestrator::MediaConversationAttachment>>,
+    /// Queue created by the host before its output adapter so an ordinary
+    /// terminal can be held until same-turn media realtime completes.
+    pub media_agent_handoffs: Option<Arc<super::DesktopMediaAgentHandoffQueue>>,
 }
 
 /// Desktop session composition, independent from the permission-gate transport.
@@ -1164,6 +1172,21 @@ impl std::fmt::Debug for DesktopConfig {
                 &self.session_agent_observer.as_ref().map(|_| "<configured>"),
             )
             .field("audio", &self.audio.as_ref().map(|_| "<configured>"))
+            .field(
+                "media_service",
+                &self.media_service.as_ref().map(|_| "<configured>"),
+            )
+            .field(
+                "media_conversation_attachment",
+                &self
+                    .media_conversation_attachment
+                    .as_ref()
+                    .map(|_| "<configured>"),
+            )
+            .field(
+                "media_agent_handoffs",
+                &self.media_agent_handoffs.as_ref().map(|_| "<configured>"),
+            )
             .field("add_dir", &self.add_dir)
             .field("cli_mcp_server_count", &self.cli_mcp_servers.len())
             .field("strict_mcp_config", &self.strict_mcp_config)
@@ -1327,6 +1350,9 @@ impl Default for DesktopConfig {
             // Default: no device audio ⟶ the `voice`/`speech` tools are not
             // registered (only the bridge composition root wires an AudioBridge).
             audio: None,
+            media_service: None,
+            media_conversation_attachment: None,
+            media_agent_handoffs: None,
         }
     }
 }

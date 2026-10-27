@@ -173,4 +173,8 @@
 /// Version 28 requires ordered inline image attachments on RunSlashCommand.
 /// Version 29 carries prompt suggestions as exact UTF-16 text in native
 /// bindings while preserving their JSON string wire representation.
+/// The 29.0.0 media additions append host-private media-service, media-control,
+/// media-device and media-connection request/response variants and introduce
+/// new DTO families. They do not retype or remove an existing field/variant;
+/// host routing keeps these control messages outside model history and AG-UI.
 pub const CLIENT_PROTOCOL_VERSION: &str = "29.0.0";

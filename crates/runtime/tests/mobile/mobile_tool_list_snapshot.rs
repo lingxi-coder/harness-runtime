@@ -5,42 +5,72 @@
 #![allow(clippy::unwrap_used)]
 
 use harness_runtime::mobile::mobile_tool_registry;
-use lingxi_core::host::audio::{
-    AudioCapabilitySnapshot, AudioError, AudioErrorKind, AudioOperation, AudioOperationContext,
-    AudioOperationId, AudioOperationKind, AudioOperationSuccess, AudioService,
+use media_api::{
+    MediaCapabilities, MediaContent, MediaError, MediaErrorKind, MediaKind, MediaOperation,
+    MediaOperationContext, MediaOperationKind, MediaOperationReadiness, MediaReadinessState,
+    MediaRef, MediaResult, MediaService,
 };
 use std::sync::Arc;
 
-struct SnapshotAudio;
+struct SnapshotMedia;
 
 #[async_trait::async_trait]
-impl AudioService for SnapshotAudio {
-    fn capabilities(&self) -> AudioCapabilitySnapshot {
-        AudioCapabilitySnapshot {
+impl MediaService for SnapshotMedia {
+    fn capabilities(&self) -> MediaCapabilities {
+        let supported_operations = vec![
+            MediaOperationKind::Sources,
+            MediaOperationKind::Status,
+            MediaOperationKind::Capture,
+            MediaOperationKind::Record,
+            MediaOperationKind::Transcribe,
+            MediaOperationKind::Synthesize,
+            MediaOperationKind::Play,
+            MediaOperationKind::Speak,
+            MediaOperationKind::SessionStart,
+            MediaOperationKind::SessionUpdate,
+            MediaOperationKind::Observe,
+            MediaOperationKind::Wait,
+            MediaOperationKind::Stop,
+        ];
+        MediaCapabilities {
             service_epoch: 1,
             support_revision: 1,
-            supported_operations: vec![
-                AudioOperationKind::Record,
-                AudioOperationKind::Listen,
-                AudioOperationKind::Speak,
-            ],
-            readiness: Vec::new(),
+            supported_media_kinds: vec![MediaKind::Image, MediaKind::Audio, MediaKind::Video],
+            readiness: supported_operations
+                .iter()
+                .map(|operation| MediaOperationReadiness {
+                    operation: *operation,
+                    state: MediaReadinessState::Ready,
+                })
+                .collect(),
+            supported_operations,
             max_payload_bytes: 1024,
         }
     }
 
     async fn execute(
         &self,
-        _: AudioOperationContext,
-        _: AudioOperation,
-    ) -> Result<AudioOperationSuccess, AudioError> {
-        Err(AudioError::new(
-            AudioErrorKind::Unavailable,
+        _: MediaOperationContext,
+        _: MediaOperation,
+    ) -> Result<MediaResult, MediaError> {
+        Err(MediaError::new(
+            MediaErrorKind::Unavailable,
             "snapshot fixture",
         ))
     }
 
-    async fn cancel(&self, _: AudioOperationId) -> Result<(), AudioError> {
+    async fn read_media(
+        &self,
+        _: MediaOperationContext,
+        _: MediaRef,
+    ) -> Result<MediaContent, MediaError> {
+        Err(MediaError::new(
+            MediaErrorKind::NotFound,
+            "snapshot fixture",
+        ))
+    }
+
+    async fn cancel(&self, _: media_api::MediaOperationId) -> Result<(), MediaError> {
         Ok(())
     }
 }
@@ -55,8 +85,8 @@ fn mobile_tool_list_snapshot() {
         exit_code: 0,
         timed_out: false,
     });
-    // The locked mobile tool set represents a host with all audio operations.
-    ctx.audio = Some(Arc::new(SnapshotAudio));
+    // The locked mobile tool set represents a host with the complete media catalog.
+    ctx.media = Some(Arc::new(SnapshotMedia));
     let reg = mobile_tool_registry(ctx);
 
     let mut names = reg.all_names();
@@ -91,7 +121,21 @@ fn mobile_tool_list_snapshot() {
     // Only wired native tools are advertised. LSP is part of the
     // production UniFFI profile; the default host-only test build intentionally
     // omits its optional runtime dependency.
-    for required in ["voice", "speech"] {
+    for required in [
+        "media_sources",
+        "media_status",
+        "media_capture",
+        "media_record",
+        "media_transcribe",
+        "media_synthesize",
+        "media_play",
+        "media_speak",
+        "media_session_start",
+        "media_session_update",
+        "media_observe",
+        "media_wait",
+        "media_stop",
+    ] {
         assert!(
             names.iter().any(|n| n == required),
             "mobile tool set must include `{required}`"

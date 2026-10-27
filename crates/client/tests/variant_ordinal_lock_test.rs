@@ -346,6 +346,11 @@ fn side_chat_variants_are_appended_after_the_protocol_25_prefix() {
         "SideChatGet".into(),
         "SideChatEnd".into(),
         "SideChatSubmit".into(),
+        "MediaConnectionResponse".into(),
+        "MediaDeviceResponse".into(),
+        "MediaServiceRequest".into(),
+        "MediaControlResponse".into(),
+        "UpdateMediaSessionModes".into(),
     ]));
     assert!(events.ends_with(&[
         "SideChatCreated".into(),
@@ -358,6 +363,10 @@ fn side_chat_variants_are_appended_after_the_protocol_25_prefix() {
         "SideChatError".into(),
         "SessionStorageState".into(),
         "WorkspaceChanged".into(),
+        "MediaConnectionRequest".into(),
+        "MediaDeviceRequest".into(),
+        "MediaServiceResponse".into(),
+        "MediaControlRequest".into(),
     ]));
 }
 

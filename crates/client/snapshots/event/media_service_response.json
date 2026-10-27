@@ -1,0 +1,19 @@
+{
+  "type": "media_service_response",
+  "response": {
+    "request_id": "service-1",
+    "result": {
+      "type": "operation",
+      "operation_id": {
+        "id": "operation-1",
+        "generation": 1,
+        "service_epoch": 2
+      },
+      "result": {
+        "type": "sources",
+        "sources": []
+      }
+    },
+    "error": null
+  }
+}

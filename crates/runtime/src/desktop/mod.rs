@@ -1609,28 +1609,12 @@ pub fn register_desktop_tools(
         }
         None => tool_computer_use::register_all(reg, ctx.clone()),
     }
-    // The two audio tools (`voice` + `speech`) from `tool-mobile`. Registered
-    // ONLY where the capability behind them exists — i.e. where the host filled
-    // `DesktopConfig::audio`, which today means a `bridge-server` connection
-    // whose `AudioBridge` proxies to the Electron client. Two consequences worth
-    // being explicit about:
-    //
-    // * With no audio wired (CLI, TUI, every offline factory) this call
-    //   registers NOTHING, so the desktop tool list — and its locked snapshot —
-    //   is byte-identical to what it was before audio existed.
-    // * Only these two. `tool_mobile::register_all` would also add camera /
-    //   notification / clipboard / share, device capabilities the desktop does
-    //   not have; advertising a tool that can only ever fail is worse than not
-    //   having it, since the model spends a turn learning something false.
-    //
-    // NOTE the gate is on the capability being INJECTED, not on the client
-    // having proven it can serve it: the desktop cannot know in advance whether
-    // the connected renderer implements audio. That is handled honestly at call
-    // time instead — `AudioBridge` fails with "no desktop client is connected"
-    // when nobody answers — and deliberately NOT with a protocol capability
-    // handshake, which would be a negotiation invented for a client that may
-    // simply be an older build.
-    tool_mobile::register_audio(reg, &ctx);
+    // Register the unified media operations whenever the shared app-scoped
+    // facade exists. The live service capabilities filter each tool from the
+    // model catalog, including changes delivered after this runtime is built.
+    // Readiness stays an execution-time concern so permission prompts and
+    // temporary resource contention do not hide supported operations.
+    tool_media::register_all(reg, ctx.clone());
     // `RemoteTrigger` gets the credential-store auth provider on desktop so it
     // can drive the claude.ai CCR API in-process. `register_all_with_auth`
     // registers `ScheduleCron` + `RemoteTrigger` (the latter with `cron_auth`)
@@ -1738,12 +1722,12 @@ impl DesktopAudio {
     /// continue using `from_single` to resolve routing only once.
     pub fn from_unified(
         device: Arc<dyn lingxi_core::host::audio::AudioService>,
-        offline: Vec<audio_runtime::OfflineAudioBackend>,
-        cloud_host: Option<Arc<dyn audio_runtime::CloudAudioHost>>,
-        settings: audio_runtime::AudioRoutingSettings,
+        offline: Vec<media_runtime::OfflineAudioBackend>,
+        cloud_host: Option<Arc<dyn media_runtime::CloudAudioHost>>,
+        settings: media_runtime::AudioRoutingSettings,
         owner: Option<lingxi_core::host::audio::AudioOwner>,
     ) -> Self {
-        let service = Arc::new(audio_runtime::UnifiedAudioService::new(
+        let service = Arc::new(media_runtime::UnifiedAudioService::new(
             device, offline, cloud_host, settings,
         ));
         Self {
@@ -1916,6 +1900,7 @@ async fn desktop_command_registry(
     shared_registry: Arc<RwLock<CommandRegistry>>,
     workflow_tool: Arc<tool_workflow::WorkflowTool>,
     workflow_command_snapshot: Arc<crate::workflow_catalog::WorkflowCommandSnapshot>,
+    tools: Arc<ToolRegistry>,
 ) -> Result<CommandRegistry, lingxi_core::settings::SettingsError> {
     let mut reg = CommandRegistry::new();
     register_all_builtin_commands(&mut reg);
@@ -1995,8 +1980,14 @@ async fn desktop_command_registry(
         gates.safe_mode,
         disable_agent_view,
     );
-    let reload_finalizer =
+    let workflow_reload_finalizer =
         workflow_command_snapshot.locked_post_reload_finalizer(workflow_tool.clone());
+    let media_tools = tools.clone();
+    let reload_finalizer: Arc<dyn Fn(&mut CommandRegistry) + Send + Sync> =
+        Arc::new(move |registry| {
+            workflow_reload_finalizer(registry);
+            crate::media_skill::register_media_skill_for_tools(registry, media_tools.clone());
+        });
     reg.register_builtin_handler(Arc::new(
         command_api::builtins::ReloadSkillsHandler::with_all_roots(
             shared_registry,
@@ -2009,8 +2000,9 @@ async fn desktop_command_registry(
         )
         .with_additional_command_dirs(additional_command_dirs.clone())
         .with_additional_skills_only(gates.bare)
-        .with_locked_post_reload_finalizer(!additional_command_dirs.is_empty(), reload_finalizer),
+        .with_locked_post_reload_finalizer(true, reload_finalizer),
     ));
+    crate::media_skill::register_media_skill_for_tools(&mut reg, tools.clone());
     // Native CMr suppresses all disk customizations in safe mode. Bare mode
     // admits only explicitly supplied additional skill roots; it skips the
     // managed/user/project scan and all legacy command directories.
@@ -2792,6 +2784,10 @@ pub struct DesktopRuntime {
     /// context" unfalsifiable, since the tools are registered *because* of the
     /// capability.
     audio: Option<DesktopAudio>,
+    /// App-scoped media facade injected into the builtin media tools.
+    media: Option<Arc<dyn media_api::MediaService>>,
+    /// App-scoped queue shared with the output terminal gate and media tools.
+    media_agent_handoffs: Option<Arc<DesktopMediaAgentHandoffQueue>>,
 }
 
 impl DesktopRuntime {
@@ -3022,6 +3018,38 @@ impl DesktopRuntime {
     #[must_use]
     pub fn has_audio(&self) -> bool {
         self.audio.is_some()
+    }
+
+    /// Shared app-scoped service used by media tools and host UI/remote callers.
+    #[must_use]
+    pub fn media_service(&self) -> Option<Arc<dyn media_api::MediaService>> {
+        self.media.clone()
+    }
+
+    /// Shared queue installed in the builtin tool context and output adapter.
+    #[must_use]
+    pub fn media_handoff_queue(&self) -> Option<Arc<DesktopMediaAgentHandoffQueue>> {
+        self.media_agent_handoffs.clone()
+    }
+
+    /// Continue a queued Conversation-intent media session after the ordinary
+    /// streamed tool work has drained, without reserving another turn.
+    pub async fn continue_media_agent_handoff(
+        &self,
+        cancel: tokio_util::sync::CancellationToken,
+        ordinary_turn_succeeded: bool,
+    ) -> Result<Option<orchestrator::RealtimeAgentEnd>, orchestrator::OrchestratorError> {
+        let Some(queue) = self.media_agent_handoffs.clone() else {
+            return Ok(None);
+        };
+        queue
+            .continue_after_turn(
+                self.orchestrator.clone(),
+                self.media.clone(),
+                cancel,
+                ordinary_turn_succeeded,
+            )
+            .await
     }
 }
 
@@ -6668,6 +6696,7 @@ mod configuration;
 mod credentials;
 mod fusion_services;
 mod mcp_startup;
+mod media_handoff;
 mod mod_commands;
 mod mod_settings;
 mod mod_tool_invoker;
@@ -6729,6 +6758,7 @@ use fusion_services::FusionCatalogRefreshingCredentialWriter;
 use fusion_services::FusionCatalogRefreshingOAuthConnect;
 pub use fusion_services::FusionCatalogRegistry;
 pub use mcp_startup::McpStartupProgress;
+pub use media_handoff::{DesktopMediaAgentHandoffQueue, ScheduledTerminalDeferralGuard};
 pub use orchestrator::config::ModRenderSurface;
 use permission_config::append_mcp_permission_rules;
 use permission_config::append_restricted_builtin_denies;

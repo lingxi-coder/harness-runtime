@@ -8253,6 +8253,8 @@ mod tests {
                     },
                 );
                 let opts = PromptOptions {
+                    is_scheduled_turn: false,
+                    session_id: None,
                     bash_precommit_session_generation: generation,
                     bash_precommit_skills: tool_api::tool_trait::BashPrecommitSkills {
                         custom_verify: expected["skills"]["verify"].as_bool().unwrap(),
@@ -8265,6 +8267,8 @@ mod tests {
                 let verbose = tool.prompt(&opts).await.string_at("").unwrap().to_owned();
                 let concise = clone
                     .prompt(&PromptOptions {
+                        is_scheduled_turn: false,
+                        session_id: None,
                         model: Some("claude-opus-4-8".into()),
                         ..opts
                     })
@@ -8358,6 +8362,8 @@ mod tests {
         };
         let tool = BashTool::new(shell_test_ctx(out));
         let opts = PromptOptions {
+            is_scheduled_turn: false,
+            session_id: None,
             model: Some("claude-opus-4-8".into()),
             ..Default::default()
         };

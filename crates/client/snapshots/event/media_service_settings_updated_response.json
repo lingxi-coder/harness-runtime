@@ -1,0 +1,10 @@
+{
+  "type": "media_service_response",
+  "response": {
+    "request_id": "settings-1",
+    "result": {
+      "type": "settings_updated"
+    },
+    "error": null
+  }
+}

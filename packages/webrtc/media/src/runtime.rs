@@ -1,8 +1,50 @@
 //! Explicit, process-once media initialization. No environment mutation, plugin
 //! scanning subprocess, global teardown, or executable-relative helper paths.
 use gstreamer::{self as gst, glib};
-use std::{ffi::CString, path::Path, sync::OnceLock};
+use std::{
+    ffi::CString,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
+static CONFIGURED_VIDEO: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// Initialize the host-selected distribution without embedding a release SDK path.
+/// The product launcher supplies its bundled plugin directory on dynamic hosts.
+pub fn initialize_configured(video: bool) -> Result<(), String> {
+    #[cfg(feature = "static-plugins")]
+    {
+        let _ = video;
+        initialize_static()
+    }
+    #[cfg(not(feature = "static-plugins"))]
+    {
+        let directory = configured_plugin_directory()?;
+        initialize(&directory)?;
+        if video {
+            CONFIGURED_VIDEO
+                .get_or_init(|| load_video_plugins(&directory))
+                .clone()?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(feature = "static-plugins"))]
+fn configured_plugin_directory() -> Result<PathBuf, String> {
+    match std::env::var_os("LINGXI_GSTREAMER_PLUGIN_DIR") {
+        Some(directory) if !directory.is_empty() => Ok(PathBuf::from(directory)),
+        Some(_) => Err("configured media plugin directory is empty".into()),
+        None => {
+            let development = env!("LINGXI_DEV_GST_PLUGIN_DIR");
+            if development.is_empty() {
+                Err("the host must configure its media plugin directory".into())
+            } else {
+                Ok(PathBuf::from(development))
+            }
+        }
+    }
+}
 pub fn initialize(plugin_directory: &Path) -> Result<(), String> {
     INITIALIZED
         .get_or_init(|| initialize_inner(plugin_directory))

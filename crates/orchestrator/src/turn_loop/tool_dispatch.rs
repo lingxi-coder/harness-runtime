@@ -2298,7 +2298,7 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
             })?;
         let mut verdict = evaluation.verdict;
 
-        let (messages, model, model_profile) = {
+        let (messages, model, selected_model_profile) = {
             let session = self.session.lock().await;
             (
                 session.model_context_history(),
@@ -2306,7 +2306,14 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
                 session.model_profile.clone(),
             )
         };
+        let model_profile = self
+            .api
+            .resolve_media_route(&model, selected_model_profile.as_deref())
+            .ok()
+            .map(|route| route.main.profile_name)
+            .or(selected_model_profile);
         let context = ToolUseContext {
+            is_scheduled_turn: crate::scheduled_turn::current().is_some(),
             available_tool_names: None,
             options: ToolUseOptions {
                 debug: false,
@@ -3844,11 +3851,18 @@ pub(crate) async fn streaming_tool_context_base(
     orch: &ConversationOrchestrator,
     messages: Vec<ConversationMessage>,
 ) -> ToolUseContext {
-    let (main_loop_model, model_profile) = {
+    let (main_loop_model, selected_model_profile) = {
         let session = orch.session.lock().await;
         (session.model.clone(), session.model_profile.clone())
     };
+    let model_profile = orch
+        .api
+        .resolve_media_route(&main_loop_model, selected_model_profile.as_deref())
+        .ok()
+        .map(|route| route.main.profile_name)
+        .or(selected_model_profile);
     ToolUseContext {
+        is_scheduled_turn: crate::scheduled_turn::current().is_some(),
         available_tool_names: None,
         options: ToolUseOptions {
             debug: false,

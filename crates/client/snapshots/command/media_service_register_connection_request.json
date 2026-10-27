@@ -1,0 +1,18 @@
+{
+  "type": "media_service_request",
+  "request": {
+    "request_id": "route-1",
+    "action": {
+      "type": "register_connection",
+      "connection_id": "approved-route",
+      "label": "Approved screen and audio route",
+      "supported_modes": [
+        "audio_video"
+      ],
+      "source_kinds": [
+        "microphone",
+        "screen"
+      ]
+    }
+  }
+}

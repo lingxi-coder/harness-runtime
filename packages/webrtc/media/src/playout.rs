@@ -4,6 +4,7 @@
 
 use super::audio_sink::Sink;
 use super::playback::PlaybackWriter;
+use crate::ports::PcmOutput;
 use gst::prelude::*;
 use gstreamer as gst;
 use lingxi_webrtc_core::ReceivedRtp;
@@ -17,17 +18,35 @@ pub(super) struct Playout {
     source: gstreamer_app::AppSrc,
     anchor: (Instant, gst::ClockTime),
     failed: Arc<AtomicBool>,
+    ended: Arc<AtomicBool>,
     latency: Arc<AtomicBool>,
 }
 
 impl Playout {
+    pub(super) fn presentation_time(&self, pts_ns: u64) -> Result<Instant, &'static str> {
+        let offset_ns = pts_ns.saturating_sub(self.anchor.1.nseconds());
+        self.anchor
+            .0
+            .checked_add(std::time::Duration::from_nanos(offset_ns))
+            .ok_or("decoded audio timestamp overflow")
+    }
+
     pub(super) fn new(writer: PlaybackWriter) -> Result<Self, &'static str> {
+        let rate = writer.rate();
+        Self::build(rate, Sink::new_playback(writer))
+    }
+
+    pub(super) fn new_pcm(rate: u32, output: PcmOutput) -> Result<Self, &'static str> {
+        Self::build(rate, Sink::new_pcm(output))
+    }
+
+    fn build(rate: u32, sink: Sink) -> Result<Self, &'static str> {
         crate::runtime::ensure_initialized()?;
         let caps = gst::Caps::builder("audio/x-raw")
             .field("format", "F32LE")
             .field("layout", "interleaved")
             .field("channels", 1i32)
-            .field("rate", writer.rate() as i32)
+            .field("rate", rate as i32)
             .build();
         let source = gstreamer_app::AppSrc::builder()
             .is_live(true)
@@ -72,7 +91,6 @@ impl Playout {
             .property("caps", caps)
             .build()
             .map_err(|_| "audio format filter unavailable")?;
-        let sink = Sink::new(writer);
         let pipeline = gst::Pipeline::new();
         let elements = [
             source.upcast_ref(),
@@ -90,19 +108,20 @@ impl Playout {
         gst::Element::link_many(elements).map_err(|_| "audio pipeline linking failed")?;
         pipeline.use_clock(Some(&gst::SystemClock::obtain()));
         let failed = Arc::new(AtomicBool::new(false));
+        let ended = Arc::new(AtomicBool::new(false));
         let latency = Arc::new(AtomicBool::new(true));
         let failure = failed.clone();
+        let end = ended.clone();
         let changed = latency.clone();
         pipeline
             .bus()
             .ok_or("audio bus unavailable")?
             .set_sync_handler(move |_, message| {
                 match message.view() {
-                    gst::MessageView::Error(_)
-                    | gst::MessageView::Eos(_)
-                    | gst::MessageView::ClockLost(_) => {
+                    gst::MessageView::Error(_) | gst::MessageView::ClockLost(_) => {
                         failure.store(true, Ordering::Release);
                     }
+                    gst::MessageView::Eos(_) => end.store(true, Ordering::Release),
                     gst::MessageView::Latency(_) => {
                         changed.store(true, Ordering::Release);
                     }
@@ -115,6 +134,7 @@ impl Playout {
             source,
             anchor: (Instant::now(), gst::ClockTime::ZERO),
             failed,
+            ended,
             latency,
         };
         playout
@@ -160,6 +180,25 @@ impl Playout {
                 .recalculate_latency()
                 .map_err(|_| "audio latency negotiation failed")?;
         }
+        Ok(())
+    }
+
+    pub(super) fn finish_input(&self) -> Result<(), &'static str> {
+        self.source
+            .end_of_stream()
+            .map(|_| ())
+            .map_err(|_| "audio pipeline rejected EOS")
+    }
+
+    pub(super) fn ended(&self) -> bool {
+        self.ended.load(Ordering::Acquire)
+    }
+
+    pub(super) fn interrupt(&self) -> Result<(), &'static str> {
+        self.pipeline
+            .set_state(gst::State::Null)
+            .map_err(|_| "audio pipeline interruption failed")?;
+        self.ended.store(true, Ordering::Release);
         Ok(())
     }
 }

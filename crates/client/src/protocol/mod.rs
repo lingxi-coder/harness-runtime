@@ -18,6 +18,7 @@ pub mod controls;
 pub mod error;
 pub mod events;
 pub mod listings;
+pub mod media;
 pub mod message;
 pub mod permission;
 pub mod text;

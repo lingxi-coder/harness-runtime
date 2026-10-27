@@ -1364,6 +1364,8 @@ struct WireToolSchemaCacheKey {
     tool_names: Vec<String>,
     dynamic_schema_revisions: Vec<(String, String)>,
     exact_schema_identities: Vec<(String, String)>,
+    session_id: Option<lingxi_core::types::SessionId>,
+    is_scheduled_turn: bool,
     model: String,
     model_profile: Option<String>,
     /// Whether this request can load `workflow-authoring`, matching the value
@@ -2041,8 +2043,9 @@ pub(crate) use compaction_impl::{
 #[path = "conversation/drivers/mod.rs"]
 mod drivers_impl;
 pub use drivers_impl::{
-    realtime_history, skill_prompt_inputs, PendingPromptIdentity, QueuedPromptInput,
-    RealtimeAgentContext, RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits,
+    realtime_history, skill_prompt_inputs, MediaAgentCapabilityContext, MediaAgentHandoffRequest,
+    MediaConversationAttachment, PendingPromptIdentity, QueuedPromptInput, RealtimeAgentContext,
+    RealtimeAgentEnd, RealtimeAgentInput, RealtimeAgentLimits, RealtimeAgentSessionIo,
 };
 #[path = "conversation/context_announcements.rs"]
 pub(crate) mod context_announcements_impl;

@@ -1,8 +1,9 @@
-//! Forward decoded PCM directly to the bounded, epoch-owned CPAL queue.
-//! CPAL paces playback; a second audio ring can overwrite late speech with silence.
-//! Native resets outside an owner-initiated teardown fail the session closed.
+//! Forward decoded PCM to an epoch-owned device queue or bounded host-readable queue.
+//! Device playback is paced by its native callback; decoded host frames retain PTS.
+//! Unexpected device resets fail the current output path closed.
 
 use super::playback::PlaybackWriter;
+use crate::ports::PcmOutput;
 use audio::gst_base::subclass::prelude::*;
 use audio::prelude::*;
 use gst::glib;
@@ -14,7 +15,7 @@ mod imp {
     use super::*;
     #[derive(Default)]
     pub struct Sink {
-        pub(super) writer: OnceLock<PlaybackWriter>,
+        pub(super) target: OnceLock<SinkTarget>,
     }
     #[glib::object_subclass]
     impl ObjectSubclass for Sink {
@@ -60,13 +61,13 @@ mod imp {
     }
     impl BaseSinkImpl for Sink {
         fn set_caps(&self, caps: &gst::Caps) -> Result<(), gst::LoggableError> {
-            let writer = self
-                .writer
+            let target = self
+                .target
                 .get()
                 .ok_or_else(|| gst::loggable_error!(gst::CAT_RUST, "speaker not bound"))?;
             let info = audio::AudioInfo::from_caps(caps)
                 .map_err(|_| gst::loggable_error!(gst::CAT_RUST, "invalid speaker caps"))?;
-            if info.rate() != writer.rate()
+            if info.rate() != target.rate()
                 || info.channels() != 1
                 || info.format() != audio::AudioFormat::F32le
                 || info.layout() != audio::AudioLayout::Interleaved
@@ -79,23 +80,35 @@ mod imp {
             Ok(())
         }
         fn render(&self, buffer: &gst::Buffer) -> Result<gst::FlowSuccess, gst::FlowError> {
-            let writer = self.writer.get().ok_or(gst::FlowError::Error)?;
-            (|| {
-                let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-                let mut bytes = map.as_slice();
-                while !bytes.is_empty() {
-                    let written = writer.write(bytes).map_err(|_| gst::FlowError::Error)?;
-                    bytes = &bytes[written..];
+            let target = self.target.get().ok_or(gst::FlowError::Error)?;
+            let result = match target {
+                SinkTarget::Playback(writer) => (|| {
+                    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                    let mut bytes = map.as_slice();
+                    while !bytes.is_empty() {
+                        let written = writer.write(bytes).map_err(|_| gst::FlowError::Error)?;
+                        bytes = &bytes[written..];
+                    }
+                    Ok(gst::FlowSuccess::Ok)
+                })(),
+                SinkTarget::Pcm(output) => {
+                    let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                    output
+                        .push(map.as_slice(), buffer.pts())
+                        .map(|()| gst::FlowSuccess::Ok)
+                        .map_err(|_| gst::FlowError::Error)
                 }
-                Ok(gst::FlowSuccess::Ok)
-            })()
-            .inspect_err(|_| writer.fail_if_current())
+            };
+            if result.is_err() {
+                target.fail();
+            }
+            result
         }
         fn unlock(&self) -> Result<(), gst::ErrorMessage> {
-            // Flushes cancel blocked writes. Owner-initiated teardown retires
-            // this writer's epoch first, so it cannot fail the next session.
-            if let Some(writer) = self.writer.get() {
-                writer.fail_if_current();
+            // Flushes cancel blocked writes. Device writers are epoch-bound, and
+            // each decoded PCM queue belongs to one playout instance.
+            if let Some(target) = self.target.get() {
+                target.fail();
             }
             self.parent_unlock()
         }
@@ -107,13 +120,43 @@ glib::wrapper! {
 }
 
 impl Sink {
-    pub(super) fn new(writer: PlaybackWriter) -> Self {
+    pub(super) fn new_playback(writer: PlaybackWriter) -> Self {
         let sink: Self = glib::Object::new();
-        assert!(sink.imp().writer.set(writer).is_ok());
+        assert!(sink.imp().target.set(SinkTarget::Playback(writer)).is_ok());
         sink.set_sync(false);
         sink.set_async(false);
         sink.set_enable_last_sample(false);
         sink
+    }
+
+    pub(super) fn new_pcm(output: PcmOutput) -> Self {
+        let sink: Self = glib::Object::new();
+        assert!(sink.imp().target.set(SinkTarget::Pcm(output)).is_ok());
+        sink.set_sync(false);
+        sink.set_async(false);
+        sink.set_enable_last_sample(false);
+        sink
+    }
+}
+
+enum SinkTarget {
+    Playback(PlaybackWriter),
+    Pcm(PcmOutput),
+}
+
+impl SinkTarget {
+    fn rate(&self) -> u32 {
+        match self {
+            Self::Playback(writer) => writer.rate(),
+            Self::Pcm(output) => output.rate(),
+        }
+    }
+
+    fn fail(&self) {
+        match self {
+            Self::Playback(writer) => writer.fail_if_current(),
+            Self::Pcm(output) => output.fail(),
+        }
     }
 }
 

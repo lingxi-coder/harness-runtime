@@ -55,7 +55,10 @@ pub use builtin_context::{
     TaskLifecycleHookFirer,
 };
 pub use content_replacement::ContentReplacementState;
-pub use context::{ToolUseContext, ToolUseOptions};
+pub use context::{
+    MediaAgentCapabilityContext, MediaAgentHandoffHandle, MediaAgentHandoffRequest, ToolUseContext,
+    ToolUseOptions,
+};
 pub use defer::{
     mode_from_env, mode_from_values, DeferralState, DeferredMcpFailedServer,
     DeferredMcpServerStatus, DeferredToolNativeContext, DeferredToolRevocation, ToolSearchMode,

@@ -57,10 +57,33 @@ impl Tool for LiveAudioSchemaTool {
         })))
     }
 
+    fn input_schema_snapshot_for_prompt(
+        &self,
+        options: &PromptOptions,
+    ) -> Option<lingxi_core::types::utf16_json::Utf16JsonProjection> {
+        let session_id = options.session_id?;
+        Some(tool_api::tool_trait::generated_builtin_result(&json!({
+            "type": "object",
+            "properties": {
+                "action": { "type": "string", "enum": self.current_actions() }
+            },
+            "required": ["action"],
+            "x-session-id": session_id.as_uuid().to_string()
+        })))
+    }
+
     fn input_schema_revision(&self) -> Option<String> {
         Some(format!(
             "native:{}",
             self.schema_revision.load(Ordering::Acquire)
+        ))
+    }
+
+    fn input_schema_revision_for_prompt(&self, options: &PromptOptions) -> Option<String> {
+        Some(format!(
+            "native:{}:{}",
+            self.schema_revision.load(Ordering::Acquire),
+            options.session_id?.as_uuid()
         ))
     }
 
@@ -373,4 +396,60 @@ async fn live_audio_support_updates_wire_cache_and_tool_search_together() {
         .tool_names
         .iter()
         .any(|name| name == "speech"));
+}
+
+#[tokio::test]
+async fn wire_schema_snapshot_and_cache_follow_the_current_request_session() {
+    let (orchestrator, registry, supported_actions, schema_revision) = live_audio_orchestrator();
+    *supported_actions.write().expect("support lock") = Some(vec!["transcribe".into()]);
+    schema_revision.store(1, Ordering::Release);
+    registry.deferral().mark_loaded(["speech"]);
+
+    let initial_session = orchestrator.session.lock().await.session_id;
+    let initial_wire = orchestrator.build_wire_tools().await.unwrap().0;
+    let initial_schema: serde_json::Value = serde_json::from_str(
+        &wire_tool(&initial_wire, "speech")
+            .unwrap()
+            .input_schema
+            .to_json_string()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        initial_schema["x-session-id"],
+        initial_session.as_uuid().to_string()
+    );
+    let initial_cache = orchestrator
+        .prompt_runtime
+        .wire_tool_schema_cache
+        .lock()
+        .await
+        .clone()
+        .expect("initial session schema populates cache");
+    assert_eq!(initial_cache.key.session_id, Some(initial_session));
+
+    let retargeted_session = lingxi_core::types::SessionId::new();
+    orchestrator.session.lock().await.session_id = retargeted_session;
+    let retargeted_wire = orchestrator.build_wire_tools().await.unwrap().0;
+    let retargeted_schema: serde_json::Value = serde_json::from_str(
+        &wire_tool(&retargeted_wire, "speech")
+            .unwrap()
+            .input_schema
+            .to_json_string()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        retargeted_schema["x-session-id"],
+        retargeted_session.as_uuid().to_string()
+    );
+    let retargeted_cache = orchestrator
+        .prompt_runtime
+        .wire_tool_schema_cache
+        .lock()
+        .await
+        .clone()
+        .expect("retargeted session refreshes cache");
+    assert_eq!(retargeted_cache.key.session_id, Some(retargeted_session));
+    assert_ne!(initial_cache.key, retargeted_cache.key);
 }

@@ -36,6 +36,29 @@ pub enum MdnsMode {
     Disabled,
 }
 
+/// Negotiated direction of enabled video media. This affects RTP transceivers
+/// and never opens a local camera or screen capture device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VideoDirection {
+    /// Send local camera/screen video and receive peer video.
+    #[default]
+    SendReceive,
+    /// Send selected local video sources without receiving video.
+    SendOnly,
+    /// Receive peer video without advertising local video senders.
+    ReceiveOnly,
+}
+
+impl VideoDirection {
+    pub(crate) const fn sends(self) -> bool {
+        matches!(self, Self::SendReceive | Self::SendOnly)
+    }
+
+    pub(crate) const fn receives(self) -> bool {
+        matches!(self, Self::SendReceive | Self::ReceiveOnly)
+    }
+}
+
 pub(crate) const DEFAULT_SCTP_BUFFER: usize = 64 * 1024;
 pub(crate) const DEFAULT_RECEIVE_QUEUE: usize = 32;
 const MIN_SCTP_BUFFER: usize = 16 * 1024;
@@ -45,11 +68,19 @@ const MAX_RECEIVE_QUEUE: usize = 65_536;
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
     pub bind_addresses: Vec<String>,
+    /// Negotiate the independent `lingxi-agent` DataChannel. Defaults to true
+    /// for existing RPC sessions; media-only peers must set false.
+    pub data_channel: bool,
+    /// Negotiate and send an Opus audio track. Defaults to true to preserve the
+    /// existing voice-session behavior; Video-only sessions must set false.
+    pub audio: bool,
+    /// Whether enabled video sends, receives, or does both directions.
+    pub video_direction: VideoDirection,
     pub video: bool,
     pub answerer: bool,
     pub ice: IceConfig,
     /// Negotiate only the `lingxi-agent` DataChannel: no audio or video track, no
-    /// media codecs in the SDP. Incompatible with `video`; audio/video calls fail.
+    /// media codecs in the SDP. Incompatible with `audio` or `video`.
     pub data_only: bool,
     /// Bytes of outbound DataChannel data in flight before `send_bytes` waits (16 KiB..16 MiB).
     pub sctp_send_buffer: usize,
@@ -68,6 +99,9 @@ impl Default for SessionConfig {
     fn default() -> Self {
         Self {
             bind_addresses: vec!["0.0.0.0:0".into(), "[::]:0".into()],
+            data_channel: true,
+            audio: true,
+            video_direction: VideoDirection::SendReceive,
             video: false,
             answerer: false,
             ice: IceConfig::default(),
@@ -87,6 +121,8 @@ impl SessionConfig {
     pub fn data_only(ice: IceConfig) -> Self {
         Self {
             data_only: true,
+            data_channel: true,
+            audio: false,
             ice,
             sctp_send_buffer: 1024 * 1024,
             sctp_receive_buffer: 1024 * 1024,
@@ -97,8 +133,14 @@ impl SessionConfig {
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.data_only && self.video {
-            return Err("data-only sessions cannot carry video");
+        if self.data_only && (self.audio || self.video) {
+            return Err("data-only sessions cannot carry audio or video");
+        }
+        if self.data_only && !self.data_channel {
+            return Err("data-only sessions require a data channel");
+        }
+        if !self.data_channel && !self.audio && !self.video {
+            return Err("session must enable media or a data channel");
         }
         if !(MIN_SCTP_BUFFER..=MAX_SCTP_BUFFER).contains(&self.sctp_send_buffer)
             || !(MIN_SCTP_BUFFER..=MAX_SCTP_BUFFER).contains(&(self.sctp_receive_buffer as usize))

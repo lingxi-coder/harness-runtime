@@ -32,15 +32,6 @@ const SKILLS: &[DeviceSkill] = &[
         ],
     },
     DeviceSkill {
-        name: "mobile-media",
-        markdown: include_str!("device_skills/mobile-media/SKILL.md"),
-        tools: &[
-            ("camera", "capture or select a photo"),
-            ("voice", "record microphone audio"),
-            ("speech", "live speech recognition or playback"),
-        ],
-    },
-    DeviceSkill {
         name: "mobile-personal-context",
         markdown: include_str!("device_skills/mobile-personal-context/SKILL.md"),
         tools: &[
@@ -103,6 +94,16 @@ pub(crate) fn register_mobile_device_skills(
     registry: &mut CommandRegistry,
     available_tool_names: &[String],
 ) {
+    register_mobile_device_skills_with_tools(registry, available_tool_names, None);
+}
+
+/// Register mobile device skills while retaining the live media tool catalog
+/// for `/media` prompt filtering.
+pub(crate) fn register_mobile_device_skills_with_tools(
+    registry: &mut CommandRegistry,
+    available_tool_names: &[String],
+    media_tools: Option<Arc<tool_api::ToolRegistry>>,
+) {
     registry.unregister_loaded_from(LOADED_FROM);
     for skill in SKILLS {
         let available: Vec<_> = skill
@@ -162,6 +163,11 @@ pub(crate) fn register_mobile_device_skills(
     );
     // `/local-app` follows the `LocalApp` tool the same way.
     crate::local_apps::register_skill(registry, available_tool_names, tool_shell_mobile::TOOL_NAME);
+    if let Some(media_tools) = media_tools {
+        crate::media_skill::register_media_skill_for_tools(registry, media_tools);
+    } else {
+        crate::media_skill::register_media_skill(registry, available_tool_names);
+    }
 }
 
 #[cfg(test)]
@@ -185,9 +191,19 @@ mod tests {
     }
 
     const ALL_TOOLS: &[&str] = &[
-        "camera",
-        "voice",
-        "speech",
+        "media_sources",
+        "media_status",
+        "media_capture",
+        "media_record",
+        "media_transcribe",
+        "media_synthesize",
+        "media_play",
+        "media_speak",
+        "media_session_start",
+        "media_session_update",
+        "media_observe",
+        "media_wait",
+        "media_stop",
         "device_status",
         "clipboard",
         "share",
@@ -262,7 +278,7 @@ mod tests {
                     .iter()
                     .map(|name| name.string_at("").unwrap())
                     .collect::<Vec<_>>(),
-                ["mobile-device", "mobile-media", "mobile-personal-context"]
+                ["media", "mobile-device", "mobile-personal-context"]
             );
             for name in names {
                 let descriptor = loader.load(&name).await.unwrap().unwrap();
@@ -275,7 +291,6 @@ mod tests {
                 let prompt = descriptor.dynamic_body.unwrap();
                 let body = prompt.build(&"".into()).string_at("").unwrap().to_owned();
                 assert!(body.starts_with("# "));
-                assert!(body.contains("No manifest"));
                 assert!(prompt
                     .build(&"Read my device".into())
                     .string_at("")
@@ -296,7 +311,7 @@ mod tests {
             &mut *registry.write().await,
             &tool_names(&["clipboard", "contacts"]),
         );
-        assert!(loader.load(&"mobile-media".into()).await.unwrap().is_none());
+        assert!(loader.load(&"media".into()).await.unwrap().is_none());
         let device = loader.load(&"mobile-device".into()).await.unwrap().unwrap();
         let body = device
             .dynamic_body
@@ -395,7 +410,11 @@ mod tests {
             documented.extend(names);
         }
         documented.sort_unstable();
-        let mut expected = ALL_TOOLS.to_vec();
+        let mut expected = ALL_TOOLS
+            .iter()
+            .copied()
+            .filter(|name| !name.starts_with("media_"))
+            .collect::<Vec<_>>();
         expected.sort_unstable();
         assert_eq!(documented, expected);
     }

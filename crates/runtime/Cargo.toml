@@ -91,6 +91,7 @@ desktop = [
     "dep:tool-worktree",
     "dep:tool-computer-use",
     "dep:tool-mobile",
+    "dep:tool-media",
     "dep:nix",
     "dep:platform-windows",
 ]
@@ -151,6 +152,7 @@ mobile = [
     "dep:local-app",
     "dep:tool-skill",
     "dep:tool-mobile",
+    "dep:tool-media",
     "dep:tool-shell-mobile",
     "dep:tool-git-mobile",
     "command-api/builtin-handlers",
@@ -184,7 +186,8 @@ collaboration = [
 
 [dependencies]
 jsonschema = { version = "=0.46.10", default-features = false, optional = true }
-audio-runtime = { path = "../audio-runtime" }
+media-runtime = { path = "../media-runtime" }
+media-api.workspace = true
 chrono = { version = "0.4", optional = true, default-features = false, features = ["clock"] }
 
 mobile-linux-api.workspace = true
@@ -257,6 +260,7 @@ tool-lsp = { path = "../tools/lsp", optional = true }
 tool-mcp = { path = "../tools/mcp", optional = true }
 tool-meta = { path = "../tools/meta", optional = true }
 tool-mobile = { path = "../tools/mobile", optional = true }
+tool-media = { path = "../tools/media", optional = true }
 tool-plan = { path = "../tools/plan", optional = true }
 tool-shell = { path = "../tools/shell", optional = true }
 tool-shell-mobile = { path = "../tools/shell-mobile", optional = true }

@@ -212,6 +212,9 @@ impl Sender {
 }
 pub struct RemoteVideoFrame {
     pub ssrc: u32,
+    /// Monotonic receive timestamp derived from the decoder's RTP ingress
+    /// anchor and the decoded frame PTS.
+    pub at: Instant,
     pub frame: VideoFrame,
 }
 pub struct NativeVideo {
@@ -253,13 +256,19 @@ impl NativeVideo {
         self.receiving = receiving;
         Ok(())
     }
+    /// Encode and send queued camera/screen frames without touching the
+    /// session's inbound video path. Use this for a SendOnly RTC session.
+    pub async fn service_sending(&mut self, session: &mut RtcSession) -> Result<(), String> {
+        self.camera.service(session).await?;
+        self.screen.service(session).await?;
+        Ok(())
+    }
     /// Worker-only: native capture/render callbacks never enter this method.
     pub async fn service(
         &mut self,
         session: &mut RtcSession,
     ) -> Result<Vec<RemoteVideoFrame>, String> {
-        self.camera.service(session).await?;
-        self.screen.service(session).await?;
+        self.service_sending(session).await?;
         session
             .set_video_suppressed(!self.receiving)
             .map_err(str::to_owned)?;
@@ -290,7 +299,8 @@ impl NativeVideo {
                 let Some(frame) = decoder.take_frame()? else {
                     break;
                 };
-                frames.push(RemoteVideoFrame { ssrc, frame });
+                let at = decoder.frame_time(frame.pts).map_err(str::to_owned)?;
+                frames.push(RemoteVideoFrame { ssrc, at, frame });
             }
         }
         Ok(frames)
@@ -436,5 +446,23 @@ mod tests {
         assert_eq!(camera.queue.frames.len(), 2);
         drop(native);
         assert_eq!(camera.queue.epoch.load(Ordering::Acquire), u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn send_only_service_does_not_require_an_inbound_video_track() {
+        let mut session = RtcSession::with_config(lingxi_webrtc_core::SessionConfig {
+            audio: false,
+            video: true,
+            video_direction: lingxi_webrtc_core::VideoDirection::SendOnly,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        assert!(session.set_video_suppressed(true).is_err());
+
+        let (mut native, _, _) = NativeVideo::new();
+        native.controls(false, false, false).unwrap();
+        native.service_sending(&mut session).await.unwrap();
+        session.close().await.unwrap();
     }
 }

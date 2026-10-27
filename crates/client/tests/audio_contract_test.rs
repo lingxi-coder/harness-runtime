@@ -3,8 +3,8 @@
 use client::protocol::audio::{
     AudioCapabilitySnapshotDto, AudioErrorDto, AudioErrorKindDto, AudioInitiatorDto,
     AudioOperationDto, AudioOperationIdDto, AudioOperationKindDto, AudioOperationReadinessDto,
-    AudioOperationRequestDto, AudioOperationResultDto, AudioOwnerDto, AudioReadinessStateDto,
-    AudioStatusDto,
+    AudioOperationRequestDto, AudioOperationResultDto, AudioOperationRoutePolicyDto, AudioOwnerDto,
+    AudioReadinessStateDto, AudioStatusDto,
 };
 use serde_json::json;
 
@@ -25,6 +25,7 @@ fn audio_request_uses_stable_owner_and_skew_safe_timeout_budget() {
             request_id: None,
         }),
         timeout_budget_ms: Some(30_000),
+        route_policy: Some(AudioOperationRoutePolicyDto::HostConfiguredLocalOnly),
         max_payload_bytes: 12_533_760,
         operation: AudioOperationDto::Listen { language: None },
     };
@@ -41,6 +42,7 @@ fn audio_request_uses_stable_owner_and_skew_safe_timeout_budget() {
     );
     assert_eq!(value["operation"], json!({"type":"listen"}));
     assert_eq!(value["timeout_budget_ms"], 30_000);
+    assert_eq!(value["route_policy"], "host_configured_local_only");
     assert_eq!(value["max_payload_bytes"], 12_533_760);
     assert_eq!(value["initiator"]["tool_use_id"], "tool-3");
     assert!(value["initiator"].get("request_id").is_none());

@@ -1,0 +1,14 @@
+{
+  "type": "media_control_request",
+  "request": {
+    "request_id": "control-close-1",
+    "connection_id": "route-1",
+    "media_session_ref": {
+      "id": "media-session-1"
+    },
+    "generation": 4,
+    "action": {
+      "type": "close"
+    }
+  }
+}

@@ -1,9 +1,10 @@
 //! SDK-only cloud speech adapter; no provider codecs or credentials live here.
-use crate::{check_ready, CloudBinding};
+use super::{check_ready, CloudBinding};
 use async_trait::async_trait;
-use lingxi_core::host::audio::*;
-use lingxi_core::host::{SttTranscript, TtsAudio};
 use lingxi_llm_client as sdk;
+use media_api::audio::*;
+use media_api::stt::SttTranscript;
+use media_api::tts::TtsAudio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,11 +17,62 @@ pub struct HostedCloudRoute {
     pub profile_name: String,
     /// Stable account identity corresponding to supplied credentials.
     pub account_scope: String,
+    /// Opaque identity of the provider credential registration captured at resolution.
+    pub credential_source_id: String,
+    credential_source: Arc<dyn CloudAudioCredentialSource>,
 }
 impl HostedCloudRoute {
+    /// Capture one SDK route and exact credential source for an operation snapshot.
+    #[must_use]
+    pub fn new(
+        snapshot: sdk::ClientSnapshot,
+        profile_name: String,
+        account_scope: String,
+        credential_source_id: String,
+        credential_source: Arc<dyn CloudAudioCredentialSource>,
+    ) -> Self {
+        Self {
+            snapshot,
+            profile_name,
+            account_scope,
+            credential_source_id,
+            credential_source,
+        }
+    }
+
+    /// Replace credentials with another resolver while retaining this operation's SDK/profile snapshot.
+    #[must_use]
+    pub fn with_credential_source(
+        mut self,
+        credential_source_id: String,
+        credential_source: Arc<dyn CloudAudioCredentialSource>,
+    ) -> Self {
+        self.credential_source_id = credential_source_id;
+        self.credential_source = credential_source;
+        self
+    }
+
     fn sdk_route(&self) -> sdk::audio::AudioRoute {
         sdk::audio::AudioRoute::new(self.profile_name.clone(), self.account_scope.clone())
     }
+
+    /// Resolve credentials through this operation's pinned host source.
+    pub async fn request_options(
+        &self,
+        context: &AudioOperationContext,
+    ) -> Result<sdk::RequestOptions, AudioError> {
+        self.credential_source.request_options(context).await
+    }
+}
+
+/// Route-local credential resolver pinned when a trusted host resolves a cloud operation.
+#[async_trait]
+pub trait CloudAudioCredentialSource: Send + Sync {
+    /// Supply credentials from this exact provider/account registration version.
+    async fn request_options(
+        &self,
+        context: &AudioOperationContext,
+    ) -> Result<sdk::RequestOptions, AudioError>;
 }
 /// Host credential and trusted-session boundary. Local audio requires no host.
 #[async_trait]
@@ -32,12 +84,12 @@ pub trait CloudAudioHost: Send + Sync {
         owner: &AudioOwner,
         binding: &CloudBinding,
     ) -> Result<HostedCloudRoute, AudioError>;
-    /// Supply credentials only for the exact pinned profile/account.
-    async fn request_options(
-        &self,
-        route: &HostedCloudRoute,
-        context: &AudioOperationContext,
-    ) -> Result<sdk::RequestOptions, AudioError>;
+    /// Union of operations supported by configured cloud audio routes.
+    /// This structural catalog is used only for host-wide tool discovery; it must not resolve an owner,
+    /// fetch credentials, or claim transient readiness. Calls still preflight the exact owner route.
+    fn catalog_supported_operations(&self) -> Vec<AudioOperationKind> {
+        Vec::new()
+    }
     /// Exact container supported by the native bounded capture implementation.
     /// Android uses WAV; Apple hosts may override with m4a.
     fn capture_format(&self) -> &str {
@@ -71,8 +123,11 @@ pub(crate) fn preflight(
     kind: AudioOperationKind,
     model: Option<&str>,
     device: &AudioCapabilitySnapshot,
-) -> Result<(), AudioError> {
-    if route.profile_name.trim().is_empty() || route.account_scope.trim().is_empty() {
+) -> Result<Option<String>, AudioError> {
+    if route.profile_name.trim().is_empty()
+        || route.account_scope.trim().is_empty()
+        || route.credential_source_id.trim().is_empty()
+    {
         return Err(AudioError::new(
             AudioErrorKind::InvalidRequest,
             "cloud audio requires an exact profile and account",
@@ -118,7 +173,7 @@ pub(crate) fn preflight(
             ));
         }
     }
-    Ok(())
+    Ok(declared.id.clone())
 }
 fn remaining(
     context: &AudioOperationContext,
@@ -146,7 +201,7 @@ pub(crate) async fn execute(
     operation: AudioOperation,
     started: Instant,
 ) -> Result<AudioOperationSuccess, AudioError> {
-    let mut options = host.request_options(route, &context).await?;
+    let mut options = route.request_options(&context).await?;
     // An authenticator may be host-provided, but the SDK's stable resource
     // account identity must match the route captured before asynchronous work.
     if options

@@ -14,6 +14,7 @@ use lingxi_core::types::{
     utf16_json::Utf16JsonProjection, AgentId, McpConnectionId, MessageId, SessionId, ToolUseId,
 };
 use lingxi_core::SessionState;
+use media_api::{MediaOperationId, MediaSessionRef};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -78,6 +79,9 @@ pub struct ToolUseContext {
     /// Current Native query-function depth for a main-loop tool invocation.
     /// None means this call was not produced by a tracked model query.
     pub native_query_depth: Option<u32>,
+    /// Trusted host origin for this turn. Scheduled turns cannot transfer
+    /// ownership to interactive-only continuations such as media realtime.
+    pub is_scheduled_turn: bool,
     /// Trusted host-selected execution policy for this invocation. The nested
     /// dispatch path copies it from `SubagentInvocationContext`; ordinary
     /// callers use [`ToolExecutionPolicy::Ordinary`].
@@ -151,7 +155,101 @@ pub struct ToolUseContext {
     // File state cache wired in Plan 10.
 }
 
+/// Typed, host-bound continuation request for a media conversation session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaAgentHandoffRequest {
+    /// Host-minted identity of the successful session-start operation.
+    pub operation_id: MediaOperationId,
+    /// Opaque reference returned by the host media service.
+    pub session: MediaSessionRef,
+    /// Trusted mode selected for the media session. Host handoff admission
+    /// checks this before allowing the session to continue the Agent turn.
+    pub mode: media_api::MediaSessionMode,
+}
+
+/// Trusted model route information for deciding whether a media session can
+/// continue through the current Agent's selected provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaAgentCapabilityContext {
+    /// Current host-bound conversation session.
+    pub session_id: String,
+    /// Current model identifier.
+    pub model: String,
+    /// Exact profile pinned to this session, if present.
+    pub profile_name: Option<String>,
+    /// Account scope derived from the pinned profile.
+    pub account_scope: Option<String>,
+}
+
+/// Narrow callback that asks the current turn owner to continue as an Agent
+/// media conversation after the ordinary tool result has been committed.
+///
+/// Implementations must bind the request to trusted invocation context and
+/// return promptly. They must not reserve a second turn or start an Agent run
+/// reentrantly from inside a tool call.
+pub trait MediaAgentHandoffHandle: Send + Sync {
+    /// Structural modes that may be offered by this host attachment. The
+    /// default supports audio-only; video modes require an explicit host
+    /// implementation. Invocation-specific checks still run at dispatch.
+    fn supported_modes(&self) -> Vec<media_api::MediaSessionMode> {
+        vec![media_api::MediaSessionMode::Audio]
+    }
+
+    /// Modes advertised for this exact session and provider route. Hosts with
+    /// connection-scoped provider bindings should resolve them by the supplied
+    /// trusted context instead of exposing a process-wide capability union.
+    fn supported_modes_for_context(
+        &self,
+        context: &MediaAgentCapabilityContext,
+    ) -> Vec<media_api::MediaSessionMode> {
+        self.supported_modes()
+            .into_iter()
+            .filter(|mode| self.supports_mode(context, *mode))
+            .collect()
+    }
+
+    /// Whether this exact session profile can attach the selected media mode.
+    fn supports_mode(
+        &self,
+        _context: &MediaAgentCapabilityContext,
+        mode: media_api::MediaSessionMode,
+    ) -> bool {
+        self.supported_modes().contains(&mode)
+    }
+
+    /// Queue a deferred handoff for this trusted main-loop invocation.
+    fn request(
+        &self,
+        invocation: &ToolUseContext,
+        capability_context: &MediaAgentCapabilityContext,
+        request: MediaAgentHandoffRequest,
+    ) -> Result<(), String>;
+}
+
 impl ToolUseContext {
+    /// Snapshot trusted media routing identity from the exact current
+    /// conversation state. This awaits the session lock so normal lock
+    /// contention does not masquerade as an unsupported provider.
+    pub async fn media_agent_capability_context(&self) -> Option<MediaAgentCapabilityContext> {
+        let session = self.session.as_ref()?.lock().await;
+        // ToolUseOptions is captured by the owning request builder. Prefer its
+        // resolved route profile so a trusted default route remains usable
+        // even when the session did not persist an explicit profile pin.
+        let profile_name = self
+            .options
+            .model_profile
+            .clone()
+            .or_else(|| session.model_profile.clone());
+        Some(MediaAgentCapabilityContext {
+            session_id: session.session_id.as_uuid().to_string(),
+            model: session.model.clone(),
+            account_scope: profile_name
+                .as_ref()
+                .map(|profile| format!("profile:{profile}")),
+            profile_name,
+        })
+    }
+
     /// Build device-audio ownership only from trusted host context. The
     /// per-call agent/tool IDs remain attribution and never become the stable
     /// recording owner.
@@ -223,6 +321,7 @@ impl ToolUseContext {
             origin_session_id: None,
             agent_spawn_provenance: Default::default(),
             native_query_depth: None,
+            is_scheduled_turn: false,
             instruction_context: None,
             tool_execution_policy: ToolExecutionPolicy::Ordinary,
             trusted_effective_permission_mode: None,

@@ -21,22 +21,8 @@ pub(crate) struct VideoTrack {
 }
 impl VideoTrack {
     pub fn new(media: &mut MediaEngine, source: VideoSource) -> Result<Self, &'static str> {
-        let codec = RTCRtpCodec {
-            mime_type: "video/VP8".into(),
-            clock_rate: 90000,
-            channels: 0,
-            sdp_fmtp_line: String::new(),
-            rtcp_feedback: vec![],
-        };
-        media
-            .register_codec(
-                RTCRtpCodecParameters {
-                    rtp_codec: codec.clone(),
-                    payload_type: 96,
-                },
-                RtpCodecKind::Video,
-            )
-            .map_err(|_| "video codec registration failed")?;
+        let codec = video_codec();
+        Self::register_codec(media)?;
         let ssrc = rand::random();
         let label = match source {
             VideoSource::Camera => "camera",
@@ -63,6 +49,20 @@ impl VideoTrack {
             ssrc,
         })
     }
+
+    pub fn register_codec(media: &mut MediaEngine) -> Result<(), &'static str> {
+        let codec = video_codec();
+        media
+            .register_codec(
+                RTCRtpCodecParameters {
+                    rtp_codec: codec,
+                    payload_type: 96,
+                },
+                RtpCodecKind::Video,
+            )
+            .map_err(|_| "video codec registration failed")
+    }
+
     pub async fn send(&self, data: Vec<u8>, duration: Duration) -> Result<(), &'static str> {
         if data.is_empty()
             || data.len() > 4 * 1024 * 1024
@@ -87,5 +87,15 @@ impl VideoTrack {
         .await
         .map_err(|_| "video send timed out")?
         .map_err(|_| "video send failed")
+    }
+}
+
+fn video_codec() -> RTCRtpCodec {
+    RTCRtpCodec {
+        mime_type: "video/VP8".into(),
+        clock_rate: 90000,
+        channels: 0,
+        sdp_fmtp_line: String::new(),
+        rtcp_feedback: vec![],
     }
 }

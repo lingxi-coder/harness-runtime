@@ -27,6 +27,10 @@ use crate::protocol::listings::{
     SessionAgentSummaryDto, SessionModeDto, SessionRowDto, SkillDto, SlashCommandDto,
     StatusSnapshotDto, TaskRowDto, TaskStatusDto,
 };
+use crate::protocol::media::{
+    MediaConnectionRequestDto, MediaControlRequestDto, MediaDeviceRequestEnvelopeDto,
+    MediaServiceResponseDto,
+};
 use crate::protocol::message::MessageDto;
 use crate::protocol::permission::PermissionResolutionDto;
 use crate::protocol::text::ClientTextDto;
@@ -859,6 +863,23 @@ define_client_event! {
     WorkspaceChanged {
         state: crate::protocol::listings::WorkspaceStateDto,
     },
+    /// Host-private request for authenticated media session negotiation.
+    /// The bridge routes it only to the owning native media adapter.
+    MediaConnectionRequest {
+        request: MediaConnectionRequestDto,
+    },
+    /// One bounded native media device callback request.
+    MediaDeviceRequest {
+        request: MediaDeviceRequestEnvelopeDto,
+    },
+    /// Response to the authenticated client's host-private media service RPC.
+    MediaServiceResponse {
+        response: MediaServiceResponseDto,
+    },
+    /// Host-private peer audio barrier routed to the authenticated native adapter.
+    MediaControlRequest {
+        request: MediaControlRequestDto,
+    },
 }
 
 impl From<ClientEventWire> for ClientEvent {
@@ -1241,6 +1262,16 @@ impl From<ClientEventWire> for ClientEvent {
             }
             ClientEventWire::FastModeChanged { enabled } => Self::FastModeChanged { enabled },
             ClientEventWire::AudioRequest { request } => Self::AudioRequest { request },
+            ClientEventWire::MediaConnectionRequest { request } => {
+                Self::MediaConnectionRequest { request }
+            }
+            ClientEventWire::MediaDeviceRequest { request } => Self::MediaDeviceRequest { request },
+            ClientEventWire::MediaServiceResponse { response } => {
+                Self::MediaServiceResponse { response }
+            }
+            ClientEventWire::MediaControlRequest { request } => {
+                Self::MediaControlRequest { request }
+            }
             ClientEventWire::TurnRecoveryState { snapshot } => Self::TurnRecoveryState { snapshot },
             ClientEventWire::TurnEventReplay {
                 session_id,

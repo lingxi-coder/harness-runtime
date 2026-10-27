@@ -89,6 +89,12 @@ pub struct MobileConfig {
     /// token never enters the broadly-cloned public ctx. `tool-git-mobile`
     /// reads it at call time.
     pub android_git_secret: Option<tool_api::MobileGitSecret>,
+    /// App-scoped facade shared by media tools, native UI and remote media
+    /// callers. Hosts compose device ports, connectors and storage once.
+    pub media_service: Option<Arc<dyn media_api::MediaService>>,
+    /// Host adapter that opens native Agent realtime IO for conversation-mode
+    /// media sessions. Observation-only sessions do not use this callback.
+    pub media_conversation_attachment: Option<Arc<dyn super::MediaConversationAttachment>>,
     /// P0.2 (mobile LINGXI.md hierarchy): the memory hierarchy provider the
     /// orchestrator loads its instruction files from. The production FFI entry
     /// points (`ios-framework` / `android-aar`) inject
@@ -160,6 +166,22 @@ impl std::fmt::Debug for MobileConfig {
             .field("android_git", &self.android_git)
             .field("android_git_secret", &self.android_git_secret)
             .field(
+                "media_service",
+                if self.media_service.is_some() {
+                    &"Some(<service>)"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "media_conversation_attachment",
+                if self.media_conversation_attachment.is_some() {
+                    &"Some(<attachment>)"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
                 "memory_provider",
                 if self.memory_provider.is_some() {
                     &"Some(<provider>)"
@@ -213,6 +235,8 @@ impl Default for MobileConfig {
             android_shell: None,
             android_git: None,
             android_git_secret: None,
+            media_service: None,
+            media_conversation_attachment: None,
             // P0.2: default to NO memory provider (empty, deterministic). The
             // production FFI entry points inject `Some(real_provider())`.
             memory_provider: None,

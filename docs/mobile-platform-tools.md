@@ -4,8 +4,11 @@ Android and iOS expose native device operations directly to the model through th
 
 | Tool | Operation | Input |
 | --- | --- | --- |
-| `camera` | Capture a photo or choose one from the library; return an image to the model | Existing camera action and options |
-| `voice` / `speech` | Recording, transcription, speech and playback supported by the native audio service | Existing audio actions |
+| `media_capture` | Capture from a supported source; return actual image content for visual analysis | Discovered source and bounded capture options |
+| `media_record` / `media_stop` | Record and finalize an owner-scoped recording | Discovered source, then returned typed recording reference |
+| `media_transcribe` / `media_synthesize` / `media_play` / `media_speak` | Recognition, synthesis and playback through the shared media service | Explicit live/stored input or returned media reference |
+| `media_sources` / `media_status` | Discover supported sources and inspect readiness | Optional kind, usage or typed target |
+| `media_session_start` / `media_session_update` / `media_observe` / `media_wait` | Manage and observe a bounded realtime session | Returned source/session/operation references |
 | `notification` | Post a local notification | Title, body and optional tag |
 | `clipboard` | Read or write plain text | `action`, optional `text` |
 | `share` | Present the native sharing sheet | `text` and/or `url` |
@@ -16,11 +19,11 @@ Android and iOS expose native device operations directly to the model through th
 | `calendar` | Read events in a bounded interval | `start_ms`, `end_ms`, optional `limit` |
 | `contacts` | Search contacts by name | `query`, optional `limit` |
 
-The three bundled skills `mobile-device`, `mobile-media` and `mobile-personal-context` describe the available tools and task workflows. They enter the same live command registry used by the model skill listing, `Skill` and `/reload-skills`; they do not depend on the Local App plugin. Only groups with available tools are listed. Both Chat and Code sessions can use device tools; Chat still excludes code execution and workspace mutation tools.
+The bundled skills `mobile-device`, `media` and `mobile-personal-context` describe available workflows. `media` is shared with Desktop. They enter the live command registry used by the model skill listing, `Skill` and `/reload-skills`; they do not depend on the Local App plugin. A skill is listed when its tools are available and grants no device access. Both Chat and Code sessions can use device tools; Chat still excludes code execution and workspace mutation tools.
 
 ## Contracts
 
-- Register device tools only when the host supplies their native backend. Audio continues to project its current supported operations. Permission readiness is not a substitute for support.
+- Register device tools only when the host supplies their backend. The media service projects structural support for discovery and exact owner-specific routes/readiness before execution. Permission readiness is not a substitute for support.
 - Location, calendar, contacts and external URL access go through ordinary tool permissions and then native OS permissions. Skills do not grant access through `allowed-tools`.
 - New device tools use strict typed inputs and reject unknown fields or invalid bounds before native dispatch. Calendar ranges are at most 366 days and 100 events; contact searches are at most 200 characters and 50 results. Personal-data fields and lists are bounded; serialized calendar/contact results have 64/32 KiB budgets. `truncated` is true when data is omitted or shortened, or a native result reaches the requested limit. Because native providers return capped arrays without `has_more`, a full page may have additional matches and is conservatively marked even when it contains exactly every match; the flag is not proof of additional records.
 - Native failures return structured error codes such as `permission_denied`, `unavailable` and `timeout`. Cancellation stops waiting; one-shot native providers may complete after cancellation because their interfaces do not expose cancellation handles. An already canceled call never dispatches.
@@ -30,4 +33,4 @@ The three bundled skills `mobile-device`, `mobile-media` and `mobile-personal-co
 
 ## Packaging
 
-The product consumes Harness through a canonical Git URL and immutable revision. Rebuilding Android/iOS against the updated revision is required to ship these changes; changing a sibling checkout alone does not update an installed app. FFI callback signatures are unchanged.
+The product consumes Harness through a canonical Git URL and immutable revision. Rebuilding Android/iOS against the updated revision and regenerating native bindings is required to ship these changes; changing a sibling checkout alone does not update an installed app. See [Media service](architecture/media-service.md) for the common host and native port boundary.

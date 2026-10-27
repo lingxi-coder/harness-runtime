@@ -1,0 +1,14 @@
+{
+  "type": "media_service_request",
+  "request": {
+    "request_id": "service-cancel-1",
+    "action": {
+      "type": "cancel",
+      "operation_id": {
+        "id": "operation-1",
+        "generation": 1,
+        "service_epoch": 2
+      }
+    }
+  }
+}

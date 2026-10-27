@@ -54,6 +54,11 @@ pub struct Capabilities {
     /// not reported its device-local AudioService capabilities yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<AudioCapabilitySnapshotDto>,
+    /// Structurally supported host-native media session modes. This comes from
+    /// the dedicated duplex MediaDeviceSession adapter, not AudioService
+    /// operation capabilities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_session_modes: Option<Vec<client::protocol::media::MediaSessionModeDto>>,
 }
 
 impl Default for Capabilities {
@@ -66,6 +71,7 @@ impl Default for Capabilities {
             supports_commands: true,
             client_protocol_version: CLIENT_PROTOCOL_VERSION.to_string(),
             audio: None,
+            media_session_modes: None,
         }
     }
 }
@@ -388,7 +394,37 @@ impl<'de> Deserialize<'de> for Frame {
 
 #[cfg(test)]
 mod tests {
-    use super::version_compatible;
+    use super::{version_compatible, Capabilities};
+
+    #[test]
+    fn explicit_native_media_modes_are_optional_and_round_trip() {
+        let capabilities = Capabilities {
+            media_session_modes: Some(vec![client::protocol::media::MediaSessionModeDto::Audio]),
+            ..Capabilities::default()
+        };
+        let json = serde_json::to_value(&capabilities).expect("capabilities serialize");
+        assert_eq!(json["media_session_modes"], serde_json::json!(["audio"]));
+        assert_eq!(
+            serde_json::from_value::<Capabilities>(json)
+                .expect("capabilities deserialize")
+                .media_session_modes,
+            Some(vec![client::protocol::media::MediaSessionModeDto::Audio])
+        );
+
+        let legacy = serde_json::json!({
+            "supports_streaming": true,
+            "supports_tools": true,
+            "supports_skills": true,
+            "supports_commands": true,
+            "client_protocol_version": "25.0.0"
+        });
+        assert_eq!(
+            serde_json::from_value::<Capabilities>(legacy)
+                .expect("old handshake remains valid")
+                .media_session_modes,
+            None
+        );
+    }
 
     #[test]
     fn same_major_is_compatible() {

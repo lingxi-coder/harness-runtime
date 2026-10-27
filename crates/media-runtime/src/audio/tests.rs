@@ -1,10 +1,11 @@
 use super::*;
 use bytes::Bytes;
 use futures_util::{stream, StreamExt};
-use lingxi_core::host::{TtsAudio, VoiceRecording};
 use lingxi_llm_client as sdk;
+use media_api::tts::TtsAudio;
+use media_api::voice::VoiceRecording;
 use serde_json::json;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 struct Local {
     kinds: Vec<AudioOperationKind>,
@@ -13,6 +14,76 @@ struct Local {
     cancel: AtomicUsize,
     pending: bool,
     operations: Mutex<Vec<AudioOperationKind>>,
+    requests: Mutex<Vec<AudioOperation>>,
+}
+
+struct EpochAudio {
+    epoch: AtomicU64,
+    entered: AtomicUsize,
+    pending: AtomicBool,
+    contexts: Mutex<Vec<AudioOperationContext>>,
+    cancellations: Mutex<Vec<AudioOperationId>>,
+}
+
+impl EpochAudio {
+    fn new(epoch: u64) -> Arc<Self> {
+        Arc::new(Self {
+            epoch: AtomicU64::new(epoch),
+            entered: AtomicUsize::new(0),
+            pending: AtomicBool::new(false),
+            contexts: Mutex::new(Vec::new()),
+            cancellations: Mutex::new(Vec::new()),
+        })
+    }
+}
+
+#[async_trait]
+impl AudioService for EpochAudio {
+    fn capabilities(&self) -> AudioCapabilitySnapshot {
+        let supported_operations = vec![AudioOperationKind::Record, AudioOperationKind::Speak];
+        AudioCapabilitySnapshot {
+            service_epoch: self.epoch.load(Ordering::SeqCst),
+            support_revision: 1,
+            readiness: supported_operations
+                .iter()
+                .map(|operation| AudioOperationReadiness {
+                    operation: *operation,
+                    state: AudioReadinessState::Ready,
+                })
+                .collect(),
+            supported_operations,
+            max_payload_bytes: 1024,
+        }
+    }
+
+    async fn execute(
+        &self,
+        context: AudioOperationContext,
+        operation: AudioOperation,
+    ) -> Result<AudioOperationSuccess, AudioError> {
+        self.contexts.lock().unwrap().push(context);
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        if self.pending.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        match operation {
+            AudioOperation::StartRecording { .. } => Ok(AudioOperationSuccess::RecordingStarted {
+                handle: media_api::RecordingRef(media_api::RecordingId::from("recording-1")),
+            }),
+            AudioOperation::Speak { .. } => {
+                Ok(AudioOperationSuccess::PlaybackCompleted { duration_ms: 1 })
+            }
+            _ => Err(AudioError::new(
+                AudioErrorKind::Unsupported,
+                "the epoch test backend supports recording and speech only",
+            )),
+        }
+    }
+
+    async fn cancel(&self, identity: AudioOperationId) -> Result<(), AudioError> {
+        self.cancellations.lock().unwrap().push(identity);
+        Ok(())
+    }
 }
 impl Local {
     fn new(kinds: Vec<AudioOperationKind>) -> Arc<Self> {
@@ -23,6 +94,7 @@ impl Local {
             cancel: AtomicUsize::new(0),
             pending: false,
             operations: Mutex::new(vec![]),
+            requests: Mutex::new(vec![]),
         })
     }
 }
@@ -50,6 +122,7 @@ impl AudioService for Local {
         operation: AudioOperation,
     ) -> Result<AudioOperationSuccess, AudioError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.requests.lock().unwrap().push(operation.clone());
         if let Some(kind) = operation.kind() {
             self.operations.lock().unwrap().push(kind);
         }
@@ -76,10 +149,43 @@ impl AudioService for Local {
             },
         })
     }
+    async fn execute_host_configured_local(
+        &self,
+        context: AudioOperationContext,
+        operation: AudioOperation,
+    ) -> Result<AudioOperationSuccess, AudioError> {
+        self.execute(context, operation).await
+    }
     async fn cancel(&self, _: AudioOperationId) -> Result<(), AudioError> {
         self.cancel.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+}
+#[tokio::test]
+async fn host_configured_local_uses_one_native_route_and_never_selects_cloud_or_offline_twice() {
+    let device = Local::new(vec![AudioOperationKind::Synthesize]);
+    let offline = Local::new(vec![AudioOperationKind::Synthesize]);
+    let service = UnifiedAudioService::new(
+        device.clone(),
+        vec![OfflineAudioBackend {
+            id: "installed-model".into(),
+            service: offline.clone(),
+        }],
+        None,
+        AudioRoutingSettings {
+            operations: [(
+                AudioOperationKind::Synthesize,
+                AudioRouteMode::HostConfigured,
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        },
+    );
+
+    service.execute(context("a"), synthesis()).await.unwrap();
+    assert_eq!(device.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(offline.calls.load(Ordering::SeqCst), 0);
 }
 fn context(owner: &str) -> AudioOperationContext {
     AudioOperationContext {
@@ -92,6 +198,135 @@ fn context(owner: &str) -> AudioOperationContext {
         max_payload_bytes: 1024,
     }
 }
+
+fn logical_context(owner: &str, service_epoch: u64) -> AudioOperationContext {
+    let mut context = context(owner);
+    context.identity.service_epoch = service_epoch;
+    context
+}
+
+fn speak() -> AudioOperation {
+    AudioOperation::Speak {
+        text: "hello".into(),
+        language: None,
+        rate: None,
+        voice: None,
+    }
+}
+
+#[tokio::test]
+async fn logical_audio_epoch_maps_to_the_current_native_epoch_for_execute_and_cancel() {
+    let native = EpochAudio::new(77);
+    let service = Arc::new(UnifiedAudioService::new_with_service_epoch(
+        native.clone(),
+        vec![],
+        None,
+        AudioRoutingSettings::default(),
+        1,
+    ));
+    let owner = "logical-epoch-owner";
+    assert_eq!(service.capabilities().service_epoch, 1);
+
+    let record_context = logical_context(owner, 1);
+    let record_identity = record_context.identity.clone();
+    assert!(matches!(
+        service
+            .execute(
+                record_context,
+                AudioOperation::StartRecording {
+                    sample_rate_hz: 24_000,
+                    format: "audio/wav".into(),
+                },
+            )
+            .await
+            .unwrap(),
+        AudioOperationSuccess::RecordingStarted { .. }
+    ));
+    let native_record_context = native.contexts.lock().unwrap()[0].clone();
+    assert_eq!(native_record_context.identity.id, record_identity.id);
+    assert_eq!(
+        native_record_context.identity.generation,
+        record_identity.generation
+    );
+    assert_eq!(native_record_context.identity.service_epoch, 77);
+
+    let speak_context = logical_context(owner, 1);
+    let speak_identity = speak_context.identity.clone();
+    assert!(matches!(
+        service.execute(speak_context, speak()).await.unwrap(),
+        AudioOperationSuccess::PlaybackCompleted { .. }
+    ));
+    let native_speak_context = native.contexts.lock().unwrap()[1].clone();
+    assert_eq!(native_speak_context.identity.id, speak_identity.id);
+    assert_eq!(
+        native_speak_context.identity.generation,
+        speak_identity.generation
+    );
+    assert_eq!(native_speak_context.identity.service_epoch, 77);
+
+    native.pending.store(true, Ordering::SeqCst);
+    let pending_context = logical_context(owner, 1);
+    let public_identity = pending_context.identity.clone();
+    let pending = tokio::spawn({
+        let service = service.clone();
+        async move { service.execute(pending_context, speak()).await }
+    });
+    while native.entered.load(Ordering::SeqCst) < 3 {
+        tokio::task::yield_now().await;
+    }
+    service.cancel(public_identity.clone()).await.unwrap();
+    assert_eq!(
+        pending.await.unwrap().unwrap_err().kind,
+        AudioErrorKind::Cancelled
+    );
+    let native_cancel_identity = AudioOperationId {
+        service_epoch: 77,
+        ..public_identity.clone()
+    };
+    assert!(native
+        .cancellations
+        .lock()
+        .unwrap()
+        .contains(&native_cancel_identity));
+    assert!(!native
+        .cancellations
+        .lock()
+        .unwrap()
+        .contains(&public_identity));
+
+    native.pending.store(false, Ordering::SeqCst);
+    native.epoch.store(78, Ordering::SeqCst);
+    let next_context = logical_context(owner, 1);
+    assert!(matches!(
+        service.execute(next_context, speak()).await.unwrap(),
+        AudioOperationSuccess::PlaybackCompleted { .. }
+    ));
+    assert_eq!(
+        native.contexts.lock().unwrap()[3].identity.service_epoch,
+        78
+    );
+    assert_eq!(
+        service
+            .capabilities_for(&AudioOwner::Session {
+                session_id: owner.into()
+            })
+            .service_epoch,
+        1
+    );
+
+    let before_stale = native.entered.load(Ordering::SeqCst);
+    let stale_context = logical_context(owner, 77);
+    assert_eq!(
+        service
+            .execute(stale_context, speak())
+            .await
+            .unwrap_err()
+            .kind,
+        AudioErrorKind::InvalidRequest
+    );
+    assert_eq!(native.entered.load(Ordering::SeqCst), before_stale);
+}
+
 fn synthesis() -> AudioOperation {
     AudioOperation::Synthesize {
         text: "hello".into(),
@@ -156,6 +391,7 @@ async fn unavailable_system_is_not_silently_rerouted_and_zero_budget_never_dispa
             operations: [(AudioOperationKind::Synthesize, AudioRouteMode::System)]
                 .into_iter()
                 .collect(),
+            ..Default::default()
         },
     );
     assert_eq!(
@@ -184,6 +420,7 @@ impl Local {
             cancel: AtomicUsize::new(0),
             pending: self.pending,
             operations: Mutex::new(vec![]),
+            requests: Mutex::new(vec![]),
         }
     }
 }
@@ -286,6 +523,24 @@ struct Host {
     resolutions: AtomicUsize,
     usage: AtomicUsize,
 }
+struct TestCredentials {
+    profile_name: String,
+}
+#[async_trait]
+impl CloudAudioCredentialSource for TestCredentials {
+    async fn request_options(
+        &self,
+        _: &AudioOperationContext,
+    ) -> Result<sdk::RequestOptions, AudioError> {
+        Ok(sdk::RequestOptions {
+            credential: Some(sdk::protocol::Secret::new(format!(
+                "host-key-{}",
+                self.profile_name
+            ))),
+            ..Default::default()
+        })
+    }
+}
 #[async_trait]
 impl CloudAudioHost for Host {
     fn resolve(
@@ -306,22 +561,24 @@ impl CloudAudioHost for Host {
             }
             CloudBinding::ExplicitProfile { profile_name } => profile_name.clone(),
         };
-        Ok(HostedCloudRoute {
-            snapshot: self.snapshot.clone(),
-            profile_name,
-            account_scope: "account-a".into(),
-        })
+        let credentials = Arc::new(TestCredentials {
+            profile_name: profile_name.clone(),
+        });
+        Ok(HostedCloudRoute::new(
+            self.snapshot.clone(),
+            profile_name.clone(),
+            "account-a".into(),
+            format!("host:{profile_name}:account-a:v1"),
+            credentials,
+        ))
     }
-    async fn request_options(
-        &self,
-        route: &HostedCloudRoute,
-        _: &AudioOperationContext,
-    ) -> Result<sdk::RequestOptions, AudioError> {
-        assert_eq!(route.account_scope, "account-a");
-        Ok(sdk::RequestOptions {
-            credential: Some(sdk::protocol::Secret::new("host-key".into())),
-            ..Default::default()
-        })
+    fn catalog_supported_operations(&self) -> Vec<AudioOperationKind> {
+        vec![
+            AudioOperationKind::Listen,
+            AudioOperationKind::Transcribe,
+            AudioOperationKind::Synthesize,
+            AudioOperationKind::Speak,
+        ]
     }
     fn record_usage(&self, _: &AudioOperationContext, _: &sdk::audio::AudioUsage) {
         self.usage.fetch_add(1, Ordering::SeqCst);
@@ -366,6 +623,7 @@ fn cloud_settings() -> AudioRoutingSettings {
             )
         })
         .collect(),
+        ..Default::default()
     }
 }
 #[tokio::test]
@@ -373,6 +631,24 @@ async fn cloud_exact_profile_audio_model_and_per_kind_override_execute_sdk_once(
     let (host, transport) = host(vec![1, 2]);
     let device = Local::new(vec![AudioOperationKind::Play]);
     let mut settings = cloud_settings();
+    settings.defaults.insert(
+        AudioOperationKind::Synthesize,
+        AudioOperationDefaults {
+            voice: Some("alloy".into()),
+            voice_scope: Some(AudioVoiceScope {
+                profile_name: Some("session-profile".into()),
+                model_id: Some("tts-1".into()),
+            }),
+            ..Default::default()
+        },
+    );
+    settings.operations.insert(
+        AudioOperationKind::Synthesize,
+        AudioRouteMode::Cloud {
+            binding: CloudBinding::FollowSession,
+            model: Some("tts-1".into()),
+        },
+    );
     settings.operations.insert(
         AudioOperationKind::Speak,
         AudioRouteMode::Cloud {
@@ -380,6 +656,17 @@ async fn cloud_exact_profile_audio_model_and_per_kind_override_execute_sdk_once(
                 profile_name: "override-profile".into(),
             },
             model: Some("tts-1".into()),
+        },
+    );
+    settings.defaults.insert(
+        AudioOperationKind::Speak,
+        AudioOperationDefaults {
+            voice: Some("alloy".into()),
+            voice_scope: Some(AudioVoiceScope {
+                profile_name: Some("override-profile".into()),
+                model_id: Some("tts-1".into()),
+            }),
+            ..Default::default()
         },
     );
     let service = UnifiedAudioService::new(device.clone(), vec![], Some(host.clone()), settings);
@@ -413,6 +700,64 @@ async fn cloud_exact_profile_audio_model_and_per_kind_override_execute_sdk_once(
     );
     assert_eq!(host.usage.load(Ordering::SeqCst), 2);
 }
+
+#[tokio::test]
+async fn saved_cloud_voice_scope_is_checked_against_the_resolved_session_and_effective_model() {
+    let (host, transport) = host(vec![1, 2]);
+    let mut settings = cloud_settings();
+    settings.defaults.insert(
+        AudioOperationKind::Synthesize,
+        AudioOperationDefaults {
+            voice: Some("alloy".into()),
+            voice_scope: Some(AudioVoiceScope {
+                profile_name: Some("wrong-profile".into()),
+                model_id: Some("tts-1".into()),
+            }),
+            ..Default::default()
+        },
+    );
+    let service = UnifiedAudioService::new(
+        Local::new(vec![AudioOperationKind::Play]),
+        vec![],
+        Some(host.clone()),
+        settings,
+    );
+
+    let error = service
+        .execute(context("session"), synthesis())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, AudioErrorKind::InvalidRequest);
+    assert_eq!(host.resolutions.load(Ordering::SeqCst), 1);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+
+    let mut settings = cloud_settings();
+    settings.defaults.insert(
+        AudioOperationKind::Synthesize,
+        AudioOperationDefaults {
+            voice: Some("alloy".into()),
+            voice_scope: Some(AudioVoiceScope {
+                profile_name: Some("session-profile".into()),
+                model_id: Some("tts-1".into()),
+            }),
+            ..Default::default()
+        },
+    );
+    let default_model_service = UnifiedAudioService::new(
+        Local::new(vec![AudioOperationKind::Play]),
+        vec![],
+        Some(host.clone()),
+        settings,
+    );
+    let error = default_model_service
+        .execute(context("session"), synthesis())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, AudioErrorKind::InvalidRequest);
+    assert_eq!(host.resolutions.load(Ordering::SeqCst), 2);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn cloud_unsupported_model_or_capture_never_requests_credentials_or_dispatches() {
     let (host, transport) = host(vec![1, 2]);
@@ -501,6 +846,22 @@ async fn automatic_unavailable_system_selects_ready_offline_before_dispatch() {
 }
 
 struct SwitchingHost(Arc<Host>);
+struct SwitchingCredentials {
+    host: Arc<Host>,
+    pinned: HostedCloudRoute,
+}
+#[async_trait]
+impl CloudAudioCredentialSource for SwitchingCredentials {
+    async fn request_options(
+        &self,
+        context: &AudioOperationContext,
+    ) -> Result<sdk::RequestOptions, AudioError> {
+        // The registry changes after resolve; the route-local source still uses its captured entry.
+        *self.host.profile.lock().unwrap() = "override-profile".into();
+        tokio::task::yield_now().await;
+        self.pinned.request_options(context).await
+    }
+}
 #[async_trait]
 impl CloudAudioHost for SwitchingHost {
     fn resolve(
@@ -508,17 +869,17 @@ impl CloudAudioHost for SwitchingHost {
         owner: &AudioOwner,
         binding: &CloudBinding,
     ) -> Result<HostedCloudRoute, AudioError> {
-        self.0.resolve(owner, binding)
+        let route = self.0.resolve(owner, binding)?;
+        Ok(route.clone().with_credential_source(
+            format!("switching:{}", route.credential_source_id),
+            Arc::new(SwitchingCredentials {
+                host: self.0.clone(),
+                pinned: route,
+            }),
+        ))
     }
-    async fn request_options(
-        &self,
-        route: &HostedCloudRoute,
-        context: &AudioOperationContext,
-    ) -> Result<sdk::RequestOptions, AudioError> {
-        // Session selection changes while asynchronous credentials are acquired.
-        *self.0.profile.lock().unwrap() = "override-profile".into();
-        tokio::task::yield_now().await;
-        self.0.request_options(route, context).await
+    fn catalog_supported_operations(&self) -> Vec<AudioOperationKind> {
+        self.0.catalog_supported_operations()
     }
 }
 #[tokio::test]
@@ -540,6 +901,51 @@ async fn an_operation_pins_route_before_credentials_and_next_call_follows_new_se
         ]
     );
 }
+
+#[tokio::test]
+async fn global_audio_capabilities_union_configured_cloud_routes_without_faking_an_owner() {
+    let (host, transport) = host(vec![1, 2]);
+    let service =
+        UnifiedAudioService::new(Local::new(vec![]), vec![], Some(host), cloud_settings());
+    let catalog = service.capabilities();
+    assert!(catalog
+        .supported_operations
+        .contains(&AudioOperationKind::Synthesize));
+    assert!(catalog.readiness.is_empty());
+
+    let unbound = AudioOwner::System {
+        instance_id: "ui".into(),
+    };
+    let owner_caps = service.capabilities_for(&unbound);
+    assert!(owner_caps
+        .supported_operations
+        .contains(&AudioOperationKind::Synthesize));
+    assert_eq!(
+        owner_caps
+            .readiness
+            .iter()
+            .find(|entry| entry.operation == AudioOperationKind::Synthesize)
+            .unwrap()
+            .state,
+        AudioReadinessState::Unavailable,
+    );
+    let error = service
+        .execute(
+            AudioOperationContext {
+                identity: AudioOperationId::new(1, 7),
+                owner: unbound,
+                initiator: None,
+                timeout_budget_ms: Some(1_000),
+                max_payload_bytes: 1024,
+            },
+            synthesis(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, AudioErrorKind::Unavailable);
+    assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn session_bound_projection_rejects_another_resource_owner_before_dispatch() {
     let device = Local::new(vec![AudioOperationKind::Synthesize]);
@@ -563,4 +969,88 @@ async fn session_bound_projection_rejects_another_resource_owner_before_dispatch
     assert_eq!(device.calls.load(Ordering::SeqCst), 0);
     bound.execute(context("a"), synthesis()).await.unwrap();
     assert_eq!(device.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn trusted_settings_preserve_speech_defaults_without_overwriting_explicit_arguments() {
+    let device = Local::new(vec![AudioOperationKind::Synthesize]);
+    let settings = AudioRoutingSettings {
+        defaults: [(
+            AudioOperationKind::Synthesize,
+            AudioOperationDefaults {
+                language: Some("zh-CN".into()),
+                rate: Some(1.0),
+                voice: Some("configured-voice".into()),
+                voice_scope: None,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        ..Default::default()
+    };
+    let service = UnifiedAudioService::new(device.clone(), vec![], None, settings.clone());
+    service.execute(context("a"), synthesis()).await.unwrap();
+    service
+        .execute(
+            context("a"),
+            AudioOperation::Synthesize {
+                text: "hello".into(),
+                language: Some("en-US".into()),
+                rate: Some(1.25),
+                voice: Some("requested-voice".into()),
+            },
+        )
+        .await
+        .unwrap();
+    let mut updated = settings;
+    updated
+        .defaults
+        .get_mut(&AudioOperationKind::Synthesize)
+        .unwrap()
+        .voice = Some("next-voice".into());
+    service.update_settings(updated);
+    service.execute(context("a"), synthesis()).await.unwrap();
+    let requests = device.requests.lock().unwrap();
+    assert!(
+        matches!(&requests[0], AudioOperation::Synthesize { language: Some(language), rate: Some(1.0), voice: Some(voice), .. }
+        if language == "zh-CN" && voice == "configured-voice")
+    );
+    assert!(
+        matches!(&requests[1], AudioOperation::Synthesize { language: Some(language), rate: Some(1.25), voice: Some(voice), .. }
+        if language == "en-US" && voice == "requested-voice")
+    );
+    assert!(
+        matches!(&requests[2], AudioOperation::Synthesize { voice: Some(voice), .. } if voice == "next-voice")
+    );
+}
+
+#[tokio::test]
+async fn invalid_selected_configuration_never_falls_through_to_another_route() {
+    let device = Local::new(vec![AudioOperationKind::Synthesize]);
+    let service = UnifiedAudioService::new(
+        device.clone(),
+        vec![],
+        None,
+        AudioRoutingSettings {
+            operations: [(
+                AudioOperationKind::Synthesize,
+                AudioRouteMode::Invalid {
+                    reason: "invalid audio binding".into(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        },
+    );
+    assert!(service
+        .capabilities()
+        .supported_operations
+        .contains(&AudioOperationKind::Synthesize));
+    let error = service
+        .execute(context("a"), synthesis())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, AudioErrorKind::InvalidRequest);
+    assert_eq!(device.calls.load(Ordering::SeqCst), 0);
 }
