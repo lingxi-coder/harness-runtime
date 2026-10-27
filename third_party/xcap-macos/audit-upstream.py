@@ -40,7 +40,7 @@ def source_archive(destination):
 def audit(workspace, archive=None):
     metadata = subprocess.run(
         ["cargo", "metadata", "--locked", "--format-version=1"],
-        cwd=workspace, check=True, text=True, capture_output=True,
+        cwd=workspace, check=True, encoding="utf-8", capture_output=True,
     )
     packages = [package for package in json.loads(metadata.stdout)["packages"] if package["name"] == "xcap"]
     if len(packages) != 1 or packages[0]["version"] != VERSION:

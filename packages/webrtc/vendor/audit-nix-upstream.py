@@ -127,7 +127,7 @@ def verify_source(archive):
 def audit(workspace, archive=None):
     metadata = subprocess.run(
         ["cargo", "metadata", "--locked", "--all-features", "--format-version=1"],
-        cwd=workspace, check=True, text=True, capture_output=True,
+        cwd=workspace, check=True, encoding="utf-8", capture_output=True,
     )
     verify_identity(json.loads(metadata.stdout), workspace)
     with tempfile.TemporaryDirectory(prefix="nix-upstream-audit-") as temporary:
