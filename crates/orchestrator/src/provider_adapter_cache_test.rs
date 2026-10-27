@@ -510,6 +510,7 @@ async fn child_announcements_reach_prepared_wire_and_cold_resume_reloads_policy(
         directory.path().to_path_buf(),
     )));
     let inheritance = || SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(ChildInstructionInheritance),
         budget: Arc::new(ChildInstructionInheritance),
     };

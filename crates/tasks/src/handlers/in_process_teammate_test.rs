@@ -1414,6 +1414,8 @@ async fn teammate_alias_uses_immediate_parent_profile_with_shared_model_id() {
             Some("provider-b"),
             None,
             definition,
+            None,
+            false,
         )
         .await
         .expect("nested parent's route is pinned independently from the child")
@@ -1472,6 +1474,8 @@ async fn teammate_environment_model_resolves_before_definition_and_call_profile(
                 None,
                 Some("openai/gpt-4o"),
                 definition,
+                None,
+                false,
             )
             .await
             .expect("environmental model owns its complete route");
@@ -1529,6 +1533,8 @@ async fn teammate_same_tier_and_bedrock_region_follow_parent_policy() {
                 None,
                 None,
                 definition,
+                None,
+                false,
             )
             .await
             .unwrap();
@@ -3306,6 +3312,7 @@ fn source_json_fixture(
 }
 fn plan_invocation() -> lingxi_core::host::tool_invoker::SubagentInvocationContext {
     lingxi_core::host::tool_invoker::SubagentInvocationContext {
+        session_origin: None,
         available_tool_names: None,
         cancellation_token: lingxi_core::host::CancellationToken::new(),
         permission_pause_observer: None,

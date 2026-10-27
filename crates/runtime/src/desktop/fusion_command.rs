@@ -334,6 +334,19 @@ impl DesktopFusionCommandHandler {
                 };
             }
         };
+        let session_origin = match self.handle.capture_session_origin().await {
+            Ok(Some(origin)) if origin.session_id() != session_id => {
+                return CommandResult::Done {
+                    display: Some("fusion failed to start: the originating session changed".into()),
+                };
+            }
+            Ok(origin) => origin,
+            Err(error) => {
+                return CommandResult::Done {
+                    display: Some(format!("fusion failed to start: {error}").into()),
+                };
+            }
+        };
         let snapshot = self.handle.get_status_snapshot().await;
         let conversation_id = session_id.to_string();
         let strategy = match self.executor.capture_strategy(parsed.strategy.as_ref()) {
@@ -406,6 +419,7 @@ impl DesktopFusionCommandHandler {
                 TaskSpawnInput::LocalFusion {
                     request,
                     conversation_id: conversation_id.clone(),
+                    session_origin,
                 },
                 description,
             )

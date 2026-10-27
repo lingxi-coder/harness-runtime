@@ -31,7 +31,9 @@ use lingxi_core::types::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::sync::{Notify, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -283,16 +285,96 @@ pub struct MessageQueueManager {
     /// Optional crash-recovery operation recorder. `None` = log to nowhere
     /// (the default; tests and embedders that don't replay).
     recorder: Arc<RwLock<Option<Arc<dyn QueueOperationRecorder>>>>,
-    /// The active turn's cancel token, if a turn is running. A `Now`-priority
-    /// enqueue cancels it (twin of `subscribeToCommandQueue` ⇒ abort).
-    active_turn: Arc<RwLock<Option<CancellationToken>>>,
-    /// Optional hook run RIGHT BEFORE the active turn's token is fired by a
-    /// `Now`-priority enqueue. The composition root uses this to record the
-    /// abort REASON (so the turn loop can tell a `Now`-command abort from a user
-    /// Ctrl+C) on a flag of its own type — keeping `msgqueue` free of any
-    /// dependency on the orchestrator's reason enum. `None` ⇒ no reason
-    /// bookkeeping (the default; the token still fires).
-    on_now_abort: Arc<RwLock<Option<Arc<dyn Fn() + Send + Sync>>>>,
+    /// Only protects the active turn and the legacy hook. No callback, token
+    /// cancellation, or captured value's destructor runs while it is held.
+    active_turn: Arc<Mutex<ActiveTurnState>>,
+}
+
+type NowAbortHook = Arc<dyn Fn() + Send + Sync>;
+type NowAbortTarget = (CancellationToken, Option<NowAbortHook>);
+
+#[derive(Default)]
+struct ActiveTurnState {
+    turn: Option<ActiveTurn>,
+    /// The hook for unowned registrations; owned turns carry their own hook.
+    on_now_abort: Option<NowAbortHook>,
+}
+
+enum ActiveTurn {
+    Unowned {
+        token: CancellationToken,
+    },
+    Owned {
+        owner: Arc<()>,
+        token: CancellationToken,
+        on_now_abort: NowAbortHook,
+    },
+}
+
+/// A Now enqueue delivers its notification and captured abort after recording
+/// succeeds, or when its still-pending future is dropped.
+struct PendingNowDelivery {
+    notify: Arc<Notify>,
+    target: Option<NowAbortTarget>,
+    armed: bool,
+}
+
+impl PendingNowDelivery {
+    fn finish(&mut self) {
+        // Disarm before invoking external callbacks to avoid delivering twice
+        // if a callback panics on the normal completion path.
+        self.armed = false;
+        self.notify.notify_one();
+        if let Some((token, hook)) = self.target.take() {
+            if let Some(hook) = hook {
+                hook();
+            }
+            token.cancel();
+        }
+    }
+}
+
+impl Drop for PendingNowDelivery {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.armed = false;
+
+        // This can run during unwinding or task cancellation. Do not let a
+        // panicking waker or hook cause a second panic, and still attempt to
+        // cancel the captured token if the hook panics. Borrow each captured
+        // value for its action, then drop it separately under the same guard.
+        run_drop_action(|| self.notify.notify_one(), "notify");
+        if let Some((token, hook)) = self.target.take() {
+            if let Some(hook) = hook {
+                run_drop_action(|| hook(), "abort hook");
+                run_drop_action(|| drop(hook), "abort hook drop");
+            }
+            run_drop_action(|| token.cancel(), "token cancellation");
+            run_drop_action(|| drop(token), "token drop");
+        }
+    }
+}
+
+fn run_drop_action(action: impl FnOnce(), name: &'static str) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(action)) {
+        // Even dropping an arbitrary panic payload can panic. A cancellation
+        // path must not abort the process during an existing unwind.
+        std::mem::forget(payload);
+        if let Err(payload) = std::panic::catch_unwind(|| {
+            tracing::error!(action = name, "panic while dropping a Now enqueue");
+        }) {
+            std::mem::forget(payload);
+        }
+    }
+}
+
+/// Fields drop in declaration order: the recorder future must release its
+/// resources before delivery can invoke a reentrant hook during cancellation.
+struct PendingNowRecording<F: Future<Output = ()>> {
+    recorder: Option<Pin<Box<F>>>,
+    delivery: PendingNowDelivery,
 }
 
 impl MessageQueueManager {
@@ -355,8 +437,7 @@ impl MessageQueueManager {
             queue: Arc::new(RwLock::new(VecDeque::new())),
             notify: Arc::new(Notify::new()),
             recorder: Arc::new(RwLock::new(None)),
-            active_turn: Arc::new(RwLock::new(None)),
-            on_now_abort: Arc::new(RwLock::new(None)),
+            active_turn: Arc::new(Mutex::new(ActiveTurnState::default())),
         }
     }
 
@@ -373,18 +454,23 @@ impl MessageQueueManager {
             queue: Arc::new(RwLock::new(VecDeque::new())),
             notify: Arc::new(Notify::new()),
             recorder: Arc::new(RwLock::new(Some(recorder))),
-            active_turn: Arc::new(RwLock::new(None)),
-            on_now_abort: Arc::new(RwLock::new(None)),
+            active_turn: Arc::new(Mutex::new(ActiveTurnState::default())),
         }
     }
 
-    /// Install the `Now`-abort reason hook: a callback run synchronously right
-    /// before the active turn's token is fired by a `Now`-priority enqueue.
-    /// The composition root captures its own abort-reason flag in this closure
-    /// so the turn loop can distinguish a `Now`-command abort from a user
-    /// interrupt — without `msgqueue` knowing the reason type. Idempotent.
+    /// Install the `Now`-abort reason hook for unowned registrations. The hook
+    /// runs synchronously before the snapshotted token is fired, without the
+    /// queue's active-turn lock held. Owned registrations use their own hook.
+    ///
+    /// A concurrent registration can replace the active token before the hook
+    /// runs. Callers that share reason state across turns should use
+    /// [`Self::register_owned_active_turn`] and bind its hook to that turn.
     pub async fn set_now_abort_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
-        *self.on_now_abort.write().await = Some(hook);
+        let previous = {
+            let mut state = self.active_turn.lock().unwrap_or_else(|e| e.into_inner());
+            state.on_now_abort.replace(hook)
+        };
+        drop(previous);
     }
 
     /// Install the operation recorder (twin of wiring `recordQueueOperation`).
@@ -398,19 +484,76 @@ impl MessageQueueManager {
     /// at turn end. Twin of the print.ts `abortController` the queue subscriber
     /// fires on `now`.
     pub async fn register_active_turn(&self, token: CancellationToken) {
-        *self.active_turn.write().await = Some(token);
+        let previous = {
+            let mut state = self.active_turn.lock().unwrap_or_else(|e| e.into_inner());
+            state.turn.replace(ActiveTurn::Unowned { token })
+        };
+        drop(previous);
     }
 
     /// Forget the active turn's token (turn ended). A later `Now` enqueue then
-    /// has nothing to abort — it simply waits to be drained.
+    /// has nothing to abort — it simply waits to be drained. This unconditionally
+    /// clears the slot; owned turns should use [`Self::clear_owned_active_turn`].
     pub async fn clear_active_turn(&self) {
-        *self.active_turn.write().await = None;
+        let previous = {
+            let mut state = self.active_turn.lock().unwrap_or_else(|e| e.into_inner());
+            state.turn.take()
+        };
+        drop(previous);
+    }
+
+    /// Register a token and callback belonging to one specific turn. `owner`
+    /// is an identity marker: retain a clone and pass it to
+    /// [`Self::clear_owned_active_turn`] when the turn ends.
+    ///
+    /// A `Now` enqueue snapshots the token and this callback together at
+    /// insertion, then invokes the callback and cancels that token outside the
+    /// queue lock. The callback may therefore run after a newer turn is
+    /// registered; any shared cancellation reason it updates must be bound to
+    /// this owner's generation. The global hook installed with
+    /// [`Self::set_now_abort_hook`] is not used.
+    pub fn register_owned_active_turn(
+        &self,
+        owner: Arc<()>,
+        token: CancellationToken,
+        on_now_abort: Arc<dyn Fn() + Send + Sync>,
+    ) {
+        let previous = {
+            let mut state = self.active_turn.lock().unwrap_or_else(|e| e.into_inner());
+            state.turn.replace(ActiveTurn::Owned {
+                owner,
+                token,
+                on_now_abort,
+            })
+        };
+        drop(previous);
+    }
+
+    /// Clear the token only when the same owner still occupies the slot.
+    /// Returns `true` when a matching registration was removed.
+    pub fn clear_owned_active_turn(&self, owner: &Arc<()>) -> bool {
+        let previous = {
+            let mut state = self.active_turn.lock().unwrap_or_else(|e| e.into_inner());
+            if matches!(state.turn.as_ref(), Some(ActiveTurn::Owned { owner: current, .. }) if Arc::ptr_eq(current, owner))
+            {
+                state.turn.take()
+            } else {
+                None
+            }
+        };
+        let removed = previous.is_some();
+        drop(previous);
+        removed
     }
 
     /// Whether a turn still owns the queue. Scheduled work waits for this owner
     /// to finish before announcing a wakeup or resolving its task file.
     pub async fn has_active_turn(&self) -> bool {
-        self.active_turn.read().await.is_some()
+        self.active_turn
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .turn
+            .is_some()
     }
 
     /// Consume the next batch of human prompts that belongs inside the running
@@ -480,9 +623,11 @@ impl MessageQueueManager {
 
     /// Append `cmd` to the queue; wakes one waiter and logs an `Enqueue`.
     ///
-    /// If `cmd` is `Now`-priority, the active turn's cancellation token (if any)
-    /// is fired so the in-flight turn aborts and the run loop drains the urgent
-    /// command (twin of print.ts:1858-1863).
+    /// If `cmd` is `Now`-priority, the active turn at insertion is captured and
+    /// its cancellation token (if any) is fired so the in-flight turn aborts
+    /// and the run loop drains the urgent command (twin of print.ts:1858-1863).
+    /// If this future is dropped after insertion while recording is pending,
+    /// notification and cancellation still run; recording itself may not finish.
     pub async fn enqueue(&self, cmd: QueuedCommand) {
         let is_now = cmd.priority == QueuePriority::Now;
         let op = QueueOperation::Enqueue {
@@ -490,22 +635,51 @@ impl MessageQueueManager {
             priority: cmd.priority,
             source: cmd.source,
         };
-        {
+        let turn = {
             let mut q = self.queue.write().await;
-            q.push_back(cmd);
-        }
-        self.record(op).await;
-        self.notify.notify_one();
-        if is_now {
-            if let Some(token) = self.active_turn.read().await.as_ref() {
-                // Record the abort REASON before firing so the turn loop reads
-                // `QueueNowCommand` (not a user interrupt) when it observes the
-                // cancellation. No-op when no hook is wired.
-                if let Some(hook) = self.on_now_abort.read().await.as_ref() {
-                    hook();
+            if is_now {
+                // Hold the queue write lock and the owner lock together only
+                // during insertion and the snapshot. A consumer cannot take
+                // this command before it is bound to its current owner, and
+                // registration cannot change the owner during insertion.
+                let state = self.active_turn.lock().unwrap_or_else(|e| e.into_inner());
+                q.push_back(cmd);
+                match state.turn.as_ref() {
+                    Some(ActiveTurn::Unowned { token }) => {
+                        Some((token.clone(), state.on_now_abort.clone()))
+                    }
+                    Some(ActiveTurn::Owned {
+                        token,
+                        on_now_abort,
+                        ..
+                    }) => Some((token.clone(), Some(on_now_abort.clone()))),
+                    None => None,
                 }
-                token.cancel();
+            } else {
+                q.push_back(cmd);
+                None
             }
+        };
+        if is_now {
+            // Dropping a pending recorder also drops `delivery`, which wakes
+            // consumers and cancels the token captured at insertion. On the
+            // success path retain the original record → notify → abort order.
+            let mut pending = PendingNowRecording {
+                recorder: Some(Box::pin(self.record(op))),
+                delivery: PendingNowDelivery {
+                    notify: self.notify.clone(),
+                    target: turn,
+                    armed: true,
+                },
+            };
+            if let Some(recorder) = pending.recorder.as_mut() {
+                recorder.as_mut().await;
+            }
+            drop(pending.recorder.take());
+            pending.delivery.finish();
+        } else {
+            self.record(op).await;
+            self.notify.notify_one();
         }
     }
 
@@ -1084,6 +1258,406 @@ mod tests {
         q.enqueue(mk(QueuePriority::Now, "urgent")).await;
         assert!(ran.load(O::SeqCst), "hook must run on Now enqueue");
         assert!(token.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn stale_owner_cannot_clear_a_replacement_or_use_the_global_hook() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let queue = MessageQueueManager::new();
+        let global_calls = Arc::new(AtomicUsize::new(0));
+        let global = global_calls.clone();
+        queue
+            .set_now_abort_hook(Arc::new(move || {
+                global.fetch_add(1, Ordering::SeqCst);
+            }))
+            .await;
+
+        // Legacy registrations still use the global hook.
+        let legacy = CancellationToken::new();
+        queue.register_active_turn(legacy.clone()).await;
+        queue.enqueue(mk(QueuePriority::Now, "legacy")).await;
+        assert!(legacy.is_cancelled());
+        assert_eq!(global_calls.load(Ordering::SeqCst), 1);
+
+        let owner_a = Arc::new(());
+        let token_a = CancellationToken::new();
+        queue.register_owned_active_turn(owner_a.clone(), token_a.clone(), Arc::new(|| {}));
+        let owner_b = Arc::new(());
+        let token_b = CancellationToken::new();
+        let owned_calls = Arc::new(AtomicUsize::new(0));
+        let owned = owned_calls.clone();
+        queue.register_owned_active_turn(
+            owner_b.clone(),
+            token_b.clone(),
+            Arc::new(move || {
+                owned.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+
+        assert!(!queue.clear_owned_active_turn(&owner_a));
+        assert!(queue.has_active_turn().await);
+        queue.enqueue(mk(QueuePriority::Now, "replacement")).await;
+        assert!(!token_a.is_cancelled());
+        assert!(token_b.is_cancelled());
+        assert_eq!(owned_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(global_calls.load(Ordering::SeqCst), 1);
+        assert!(queue.clear_owned_active_turn(&owner_b));
+        assert!(!queue.has_active_turn().await);
+
+        let another_legacy = CancellationToken::new();
+        queue.register_active_turn(another_legacy.clone()).await;
+        assert!(!queue.clear_owned_active_turn(&owner_b));
+        queue.enqueue(mk(QueuePriority::Now, "legacy again")).await;
+        assert!(another_legacy.is_cancelled());
+        assert_eq!(global_calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn now_enqueue_keeps_its_insertion_owner_while_recording_is_blocked() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        struct BlockingRecorder {
+            entered: tokio::sync::mpsc::UnboundedSender<()>,
+            release: Arc<Notify>,
+        }
+
+        #[async_trait::async_trait]
+        impl QueueOperationRecorder for BlockingRecorder {
+            async fn record(&self, op: QueueOperation) {
+                if matches!(op, QueueOperation::Enqueue { uuid, .. } if uuid == "urgent") {
+                    self.entered.send(()).unwrap();
+                    self.release.notified().await;
+                }
+            }
+        }
+
+        // Check both an old active turn and no active turn at insertion. A
+        // later registration must not become the target in either case.
+        for had_old_turn in [true, false] {
+            let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+            let release = Arc::new(Notify::new());
+            let queue = MessageQueueManager::with_recorder(Arc::new(BlockingRecorder {
+                entered: entered_tx,
+                release: release.clone(),
+            }));
+            let owner_a = Arc::new(());
+            let token_a = CancellationToken::new();
+            let reason_a = Arc::new(AtomicBool::new(false));
+            if had_old_turn {
+                let reason = reason_a.clone();
+                queue.register_owned_active_turn(
+                    owner_a.clone(),
+                    token_a.clone(),
+                    Arc::new(move || reason.store(true, Ordering::SeqCst)),
+                );
+            }
+
+            let queue_for_now = queue.clone();
+            let now = tokio::spawn(async move {
+                queue_for_now
+                    .enqueue(mk(QueuePriority::Now, "urgent"))
+                    .await;
+            });
+            tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+                .await
+                .expect("enqueue did not reach the recorder")
+                .expect("recorder channel closed");
+
+            if had_old_turn {
+                assert!(queue.clear_owned_active_turn(&owner_a));
+            }
+            let consumed = queue.dequeue().await.expect("urgent command was inserted");
+            assert_eq!(consumed.uuid, "urgent");
+
+            let owner_b = Arc::new(());
+            let token_b = CancellationToken::new();
+            let reason_b = Arc::new(AtomicBool::new(false));
+            let reason = reason_b.clone();
+            queue.register_owned_active_turn(
+                owner_b.clone(),
+                token_b.clone(),
+                Arc::new(move || reason.store(true, Ordering::SeqCst)),
+            );
+
+            release.notify_one();
+            tokio::time::timeout(Duration::from_secs(5), now)
+                .await
+                .expect("enqueue did not finish")
+                .unwrap();
+            assert_eq!(token_a.is_cancelled(), had_old_turn);
+            assert_eq!(reason_a.load(Ordering::SeqCst), had_old_turn);
+            assert!(!token_b.is_cancelled());
+            assert!(!reason_b.load(Ordering::SeqCst));
+            assert!(queue.clear_owned_active_turn(&owner_b));
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_now_enqueue_during_recording_wakes_and_cancels() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        struct HoldingRecorder {
+            entered: tokio::sync::mpsc::UnboundedSender<()>,
+            held: Arc<tokio::sync::Mutex<()>>,
+        }
+
+        #[async_trait::async_trait]
+        impl QueueOperationRecorder for HoldingRecorder {
+            async fn record(&self, op: QueueOperation) {
+                if matches!(op, QueueOperation::Enqueue { .. }) {
+                    let _guard = self.held.lock().await;
+                    self.entered.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+
+        // A cancelled enqueue must also wake consumers when no turn was active.
+        // A panicking hook must not prevent cancellation during future drop.
+        for (had_owner, hook_panics) in [(true, false), (true, true), (false, false)] {
+            let held = Arc::new(tokio::sync::Mutex::new(()));
+            let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+            let queue = MessageQueueManager::with_recorder(Arc::new(HoldingRecorder {
+                entered: entered_tx,
+                held: held.clone(),
+            }));
+            let owner = Arc::new(());
+            let token = CancellationToken::new();
+            let hook_ran = Arc::new(AtomicBool::new(false));
+            let recorder_released = Arc::new(AtomicBool::new(false));
+            if had_owner {
+                let callback_queue = queue.clone();
+                let callback_owner = owner.clone();
+                let callback_held = held.clone();
+                let callback_ran = hook_ran.clone();
+                let callback_released = recorder_released.clone();
+                queue.register_owned_active_turn(
+                    owner,
+                    token.clone(),
+                    Arc::new(move || {
+                        callback_released.store(callback_held.try_lock().is_ok(), Ordering::SeqCst);
+                        callback_ran.store(true, Ordering::SeqCst);
+                        assert!(callback_queue.clear_owned_active_turn(&callback_owner));
+                        assert!(!hook_panics, "test abort hook panic");
+                    }),
+                );
+            }
+
+            // Register a waiter before inserting the command, so its wake is
+            // evidence of the dropped enqueue's notification.
+            let notified = queue.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let queue_for_now = queue.clone();
+            let now = tokio::spawn(async move {
+                queue_for_now
+                    .enqueue(mk(QueuePriority::Now, "urgent"))
+                    .await;
+            });
+            tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+                .await
+                .expect("enqueue did not reach the recorder")
+                .expect("recorder channel closed");
+            assert!(!token.is_cancelled(), "recording has not completed");
+
+            now.abort();
+            assert!(now.await.unwrap_err().is_cancelled());
+            tokio::time::timeout(Duration::from_secs(5), notified)
+                .await
+                .expect("dropped enqueue did not wake consumers");
+            assert_eq!(token.is_cancelled(), had_owner);
+            assert_eq!(hook_ran.load(Ordering::SeqCst), had_owner);
+            assert_eq!(recorder_released.load(Ordering::SeqCst), had_owner);
+            assert!(!queue.has_active_turn().await);
+            assert_eq!(queue.dequeue().await.unwrap().uuid, "urgent");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn in_flight_old_hook_does_not_block_or_cancel_replacement() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        let queue = MessageQueueManager::new();
+        let owner_a = Arc::new(());
+        let token_a = CancellationToken::new();
+        let reason_a = Arc::new(AtomicBool::new(false));
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        let release_rx = Mutex::new(release_rx);
+        let old_reason = reason_a.clone();
+        let old_token = token_a.clone();
+        queue.register_owned_active_turn(
+            owner_a.clone(),
+            token_a.clone(),
+            Arc::new(move || {
+                assert!(!old_token.is_cancelled());
+                entered_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+                old_reason.store(true, Ordering::SeqCst);
+            }),
+        );
+
+        let queue_for_now = queue.clone();
+        let first_now = tokio::spawn(async move {
+            queue_for_now
+                .enqueue(mk(QueuePriority::Now, "old turn"))
+                .await;
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+            .await
+            .expect("old callback did not start")
+            .expect("old callback channel closed");
+
+        let owner_b = Arc::new(());
+        let token_b = CancellationToken::new();
+        let reason_b = Arc::new(AtomicBool::new(false));
+        let queue_for_registration = queue.clone();
+        let new_owner = owner_b.clone();
+        let new_token = token_b.clone();
+        let callback_token = token_b.clone();
+        let new_reason = reason_b.clone();
+        let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+        let registration = std::thread::spawn(move || {
+            queue_for_registration.register_owned_active_turn(
+                new_owner,
+                new_token,
+                Arc::new(move || {
+                    assert!(!callback_token.is_cancelled());
+                    new_reason.store(true, Ordering::SeqCst);
+                }),
+            );
+            let _ = registered_tx.send(());
+        });
+        let registered = tokio::time::timeout(Duration::from_secs(5), registered_rx).await;
+        if registered.is_err() {
+            // Unblock the callback before failing so a lock regression cannot
+            // leave a thread stuck for the rest of the test process.
+            let _ = release_tx.send(());
+            registration.join().unwrap();
+            panic!("registering a new owner waited for the old callback");
+        }
+        registered.unwrap().unwrap();
+
+        let stale_clear = queue.clear_owned_active_turn(&owner_a);
+        let replacement_was_cancelled = token_b.is_cancelled();
+        release_tx.send(()).unwrap();
+        registration.join().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), first_now)
+            .await
+            .expect("old enqueue did not finish")
+            .unwrap();
+
+        assert!(!stale_clear);
+        assert!(!replacement_was_cancelled);
+        assert!(reason_a.load(Ordering::SeqCst));
+        assert!(token_a.is_cancelled());
+        assert!(!reason_b.load(Ordering::SeqCst));
+        assert!(!token_b.is_cancelled());
+
+        queue.enqueue(mk(QueuePriority::Now, "new turn")).await;
+        assert!(reason_b.load(Ordering::SeqCst));
+        assert!(token_b.is_cancelled());
+    }
+
+    #[test]
+    fn owned_abort_hook_can_reenter_and_replace_the_turn() {
+        use std::time::Duration;
+
+        let queue = MessageQueueManager::new();
+        let owner_a = Arc::new(());
+        let token_a = CancellationToken::new();
+        let owner_b = Arc::new(());
+        let token_b = CancellationToken::new();
+        let callback_queue = queue.clone();
+        let callback_owner_a = owner_a.clone();
+        let callback_owner_b = owner_b.clone();
+        let callback_token_b = token_b.clone();
+        queue.register_owned_active_turn(
+            owner_a,
+            token_a.clone(),
+            Arc::new(move || {
+                assert!(callback_queue.clear_owned_active_turn(&callback_owner_a));
+                callback_queue.register_owned_active_turn(
+                    callback_owner_b.clone(),
+                    callback_token_b.clone(),
+                    Arc::new(|| {}),
+                );
+            }),
+        );
+
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let queue_for_now = queue.clone();
+        let thread = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(queue_for_now.enqueue(mk(QueuePriority::Now, "reentrant")));
+            let _ = finished_tx.send(());
+        });
+        finished_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("callback could not reenter the queue");
+        thread.join().unwrap();
+        assert!(token_a.is_cancelled());
+        assert!(!token_b.is_cancelled());
+        assert!(queue.clear_owned_active_turn(&owner_b));
+    }
+
+    #[test]
+    fn replacing_an_owner_drops_its_callback_outside_the_queue_lock() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Duration;
+
+        struct ReenterOnDrop {
+            queue: MessageQueueManager,
+            owner: Arc<()>,
+            dropped: Arc<AtomicBool>,
+        }
+        impl Drop for ReenterOnDrop {
+            fn drop(&mut self) {
+                assert!(!self.queue.clear_owned_active_turn(&self.owner));
+                self.dropped.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let queue = MessageQueueManager::new();
+        let owner_a = Arc::new(());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let on_drop = ReenterOnDrop {
+            queue: queue.clone(),
+            owner: owner_a.clone(),
+            dropped: dropped.clone(),
+        };
+        queue.register_owned_active_turn(
+            owner_a,
+            CancellationToken::new(),
+            Arc::new(move || {
+                let _ = &on_drop;
+            }),
+        );
+
+        let owner_b = Arc::new(());
+        let queue_for_registration = queue.clone();
+        let new_owner = owner_b.clone();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            queue_for_registration.register_owned_active_turn(
+                new_owner,
+                CancellationToken::new(),
+                Arc::new(|| {}),
+            );
+            let _ = finished_tx.send(());
+        });
+        finished_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("dropping the old callback could not reenter the queue");
+        thread.join().unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(queue.clear_owned_active_turn(&owner_b));
     }
 
     #[tokio::test]

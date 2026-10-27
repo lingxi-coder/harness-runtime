@@ -142,6 +142,7 @@ impl ToolInvoker for RegistryToolInvoker {
             same_turn_tool_uses: vec![],
             agent_id: Some(agent_id),
             origin_session_id,
+            session_origin: None,
             agent_spawn_provenance: Default::default(),
             native_query_depth: None,
             nested_memory_triggers: Arc::default(),
@@ -155,6 +156,7 @@ impl ToolInvoker for RegistryToolInvoker {
             session: None,
             subagent_registry: None,
             cancel: None,
+            host_tool_cancellation: crate::context::HostToolCancellation::Ordinary,
             fork_parent_system_prompt: None,
             cwd: None,
             depth: 0,
@@ -363,6 +365,7 @@ impl RegistryToolInvoker {
                 agent_name: None,
                 team_name: None,
                 origin_session_id: None,
+                session_origin: None,
                 instruction_context: None,
                 tool_execution_policy: ctx.tool_execution_policy,
                 trusted_effective_permission_mode: None,
@@ -371,6 +374,7 @@ impl RegistryToolInvoker {
                 session: None,
                 subagent_registry: None,
                 cancel: Some(ctx.cancellation_token.clone()),
+                host_tool_cancellation: crate::context::HostToolCancellation::Ordinary,
                 fork_parent_system_prompt: None,
                 cwd: None,
                 depth: 0,
@@ -404,6 +408,7 @@ impl RegistryToolInvoker {
         tool_use_ctx.agent_name = ctx.agent_name.clone();
         tool_use_ctx.team_name = ctx.team_name.clone();
         tool_use_ctx.origin_session_id = ctx.origin_session_id;
+        tool_use_ctx.session_origin = ctx.session_origin.clone();
         tool_use_ctx.instruction_context = ctx.instruction_context.clone();
         tool_use_ctx.tool_execution_policy = ctx.tool_execution_policy;
         tool_use_ctx.trusted_effective_permission_mode =
@@ -599,7 +604,10 @@ impl RegistryToolInvoker {
                         input = u;
                     }
                 }
-                lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => {
+                lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason }
+                | lingxi_core::host::permission_gate::PermissionOutcome::TransportClosed {
+                    reason,
+                } => {
                     return Err(ToolInvokerError::Internal(reason));
                 }
             }
@@ -1560,6 +1568,7 @@ mod tests {
             .insert("/project/pkg/AGENTS.md".into());
 
         let mut invocation = SubagentInvocationContext {
+            session_origin: None,
             available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
@@ -1709,6 +1718,7 @@ mod tests {
                 "NameRecordingTool",
                 json!({}),
                 SubagentInvocationContext {
+                    session_origin: None,
                     available_tool_names: None,
                     cancellation_token: tokio_util::sync::CancellationToken::new(),
                     permission_pause_observer: None,
@@ -1921,6 +1931,7 @@ mod tests {
 
     fn no_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            session_origin: None,
             available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
@@ -2126,6 +2137,7 @@ mod tests {
 
     fn named_ctx(can_show: bool) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            session_origin: None,
             available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,
@@ -2279,6 +2291,7 @@ mod tests {
 
     fn ctx_with_tool_use_id(id: &str) -> SubagentInvocationContext {
         SubagentInvocationContext {
+            session_origin: None,
             available_tool_names: None,
             cancellation_token: tokio_util::sync::CancellationToken::new(),
             permission_pause_observer: None,

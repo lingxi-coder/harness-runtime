@@ -312,6 +312,7 @@ pub fn error_kind_for(err: &OrchestratorError) -> ErrorKindDto {
         OrchestratorError::Settings(_)
         | OrchestratorError::StreamEndedWithoutStop
         | OrchestratorError::Internal(_)
+        | OrchestratorError::RecoveryInterrupted
         | OrchestratorError::PermissionAbort { .. }
         | OrchestratorError::Compaction(_)
         | OrchestratorError::CompactionCancelled

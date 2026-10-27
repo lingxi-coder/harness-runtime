@@ -881,6 +881,7 @@ impl LocalAgentHandler {
         let inherit = inheritance.unwrap_or_else(|| SubagentInheritance {
             tool_invoker: self.tool_invoker.clone(),
             budget: self.budget.clone(),
+            session_origin: None,
         });
 
         if restoring.is_none() {
@@ -1610,6 +1611,8 @@ mod tests {
         // Pointer identity of the inherited Arcs, captured for ptr_eq checks.
         seen_invoker: StdMutex<Option<Arc<dyn ToolInvoker>>>,
         seen_budget: StdMutex<Option<Arc<dyn BudgetEnforcerHandle>>>,
+        seen_origin:
+            StdMutex<Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>>,
     }
     impl MockSpawner {
         fn new(canned: CannedResult) -> Arc<Self> {
@@ -1618,6 +1621,7 @@ mod tests {
                 seen_request: StdMutex::new(None),
                 seen_invoker: StdMutex::new(None),
                 seen_budget: StdMutex::new(None),
+                seen_origin: StdMutex::new(None),
             })
         }
         fn request(&self) -> Option<SubagentSpawnRequest> {
@@ -1634,6 +1638,7 @@ mod tests {
             *self.seen_request.lock().unwrap() = Some(request);
             *self.seen_invoker.lock().unwrap() = Some(inherit.tool_invoker.clone());
             *self.seen_budget.lock().unwrap() = Some(inherit.budget.clone());
+            *self.seen_origin.lock().unwrap() = inherit.session_origin.clone();
             // Take the canned value out and DROP the guard before any await:
             // a `std::sync::MutexGuard` held across `.await` makes the future
             // `!Send`, but `SubagentSpawner::spawn` must return a `Send` future.
@@ -2725,6 +2730,7 @@ mod tests {
             ..Default::default()
         };
         let inherit = SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(MockInvoker),
             budget: Arc::new(MockBudget),
         };
@@ -3221,6 +3227,105 @@ mod tests {
         .expect("worker should proceed once the registry row exists");
         assert_eq!(status, TaskStatus::Completed);
         assert!(spawner.request().is_some());
+    }
+
+    #[derive(Debug)]
+    struct TestOrigin {
+        session_id: lingxi_core::types::SessionId,
+        generation: u64,
+        live_generation: Arc<std::sync::atomic::AtomicU64>,
+        root: PathBuf,
+    }
+
+    #[async_trait]
+    impl lingxi_core::host::subagent_spawn::SessionOriginCapability for TestOrigin {
+        fn owner_id(&self) -> usize {
+            1
+        }
+        fn session_id(&self) -> lingxi_core::types::SessionId {
+            self.session_id
+        }
+        fn generation(&self) -> u64 {
+            self.generation
+        }
+        fn cwd(&self) -> &std::path::Path {
+            &self.root
+        }
+        fn root(&self) -> &std::path::Path {
+            &self.root
+        }
+        async fn admit(
+            &self,
+        ) -> Result<Arc<dyn Send + Sync>, lingxi_core::host::subagent_spawn::SessionOriginError>
+        {
+            if self
+                .live_generation
+                .load(std::sync::atomic::Ordering::SeqCst)
+                != self.generation
+            {
+                return Err(lingxi_core::host::subagent_spawn::SessionOriginError::SessionChanged);
+            }
+            Ok(Arc::new(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_agent_keeps_original_session_generation_across_activation() {
+        let fs: Arc<dyn FileSystem> = Arc::new(InMemoryFs::new());
+        let spawner = MockSpawner::new(CannedResult::Completed(json!("ok"), 0));
+        let (_dir, mgr) = make_output_manager(fs.clone());
+        let sink = Arc::new(RecordingSink {
+            explicit_activation: true,
+            ..Default::default()
+        });
+        let handler = make_handler(spawner.clone(), mgr, sink.clone());
+        let session_id = lingxi_core::types::SessionId::new();
+        let generation = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let original: Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability> =
+            Arc::new(TestOrigin {
+                session_id,
+                generation: 1,
+                live_generation: generation.clone(),
+                root: PathBuf::from("/workspace"),
+            });
+        let mut input = local_agent_input("queued work");
+        let TaskSpawnInput::LocalAgent {
+            spawn_request,
+            inheritance,
+            ..
+        } = &mut input
+        else {
+            unreachable!()
+        };
+        *spawn_request = Some(SubagentSpawnRequest {
+            origin_session_id: Some(session_id),
+            ..Default::default()
+        });
+        *inheritance = Some(SubagentInheritance {
+            tool_invoker: Arc::new(MockInvoker),
+            budget: Arc::new(MockBudget),
+            session_origin: Some(original.clone()),
+        });
+        let mut handle = handler.spawn(input, make_ctx(fs)).await.unwrap();
+        assert!(spawner.request().is_none(), "the worker remains queued");
+        // Switch A -> B -> A before the worker is activated. A's UUID is the
+        // same again, but its new generation cannot admit this older work.
+        generation.store(2, std::sync::atomic::Ordering::SeqCst);
+        generation.store(3, std::sync::atomic::Ordering::SeqCst);
+        handle.activate();
+        assert_eq!(await_terminal(&sink).await, TaskStatus::Completed);
+        let observed = spawner
+            .seen_origin
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("origin reaches the worker");
+        assert!(Arc::ptr_eq(&observed, &original));
+        assert_eq!(observed.session_id(), session_id);
+        assert!(matches!(
+            observed.admit().await,
+            Err(lingxi_core::host::subagent_spawn::SessionOriginError::SessionChanged)
+        ));
     }
 
     #[tokio::test]
@@ -4422,6 +4527,7 @@ mod tests {
             creator_agent_id: Some(creator_agent_id),
             spawn_request: Some(expected.clone()),
             inheritance: Some(SubagentInheritance {
+                session_origin: None,
                 tool_invoker: inherited_invoker.clone(),
                 budget: inherited_budget.clone(),
             }),
@@ -4463,6 +4569,7 @@ mod tests {
         let result = handler
             .spawn(
                 TaskSpawnInput::LocalWorkflow {
+                    session_origin: None,
                     session_uuid: None,
                     workflow_id: "wf".into(),
                     script: String::new(),

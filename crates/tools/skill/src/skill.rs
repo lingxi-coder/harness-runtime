@@ -487,7 +487,11 @@ impl SkillTool {
             }
         };
 
-        let origin_session_id = if let Some(session) = ctx.session.as_ref() {
+        let origin_session_id = if let Some(origin) = ctx.session_origin.as_ref() {
+            Some(origin.session_id())
+        } else if let Some(session_id) = ctx.origin_session_id {
+            Some(session_id)
+        } else if let Some(session) = ctx.session.as_ref() {
             Some(session.lock().await.session_id)
         } else {
             ctx.origin_session_id
@@ -588,6 +592,7 @@ impl SkillTool {
         let inherit = lingxi_core::host::subagent_spawn::SubagentInheritance {
             tool_invoker: Arc::new(invoker_impl),
             budget,
+            session_origin: ctx.session_origin.clone(),
         };
 
         // Re-check across the await window: a concurrent tool call can launch

@@ -118,6 +118,42 @@ impl Output {
         })
         .await
     }
+
+    /// Write one record with a separately observed final byte.
+    ///
+    /// This is for unbuffered protocol transports that use the last byte as
+    /// their record boundary. `poll_tail` is called after the prefix is fully
+    /// written, once per final-byte poll, under the same writer lease; it may
+    /// synchronize a cancellation decision with the writer's actual result.
+    /// The callback must not block. If the caller abandons a pending tail poll,
+    /// it must treat delivery as unknown unless the transport proves otherwise.
+    pub async fn write_record_with_tail(
+        &self,
+        bytes: &[u8],
+        mut poll_tail: impl FnMut(
+            Pin<&mut (dyn AsyncWrite + Send)>,
+            &mut std::task::Context<'_>,
+            u8,
+        ) -> std::task::Poll<io::Result<()>>,
+    ) -> io::Result<()> {
+        let result = async {
+            let (tail, prefix) = bytes.split_last().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "record has no final byte")
+            })?;
+            let mut writer = self.inner.writer.lock().await;
+            if self.error().is_some() {
+                return Err(self.delivery_error());
+            }
+            writer.write_all(prefix).await?;
+            std::future::poll_fn(|cx| poll_tail(writer.as_mut(), cx, *tail)).await?;
+            writer.flush().await
+        }
+        .await;
+        if let Err(error) = &result {
+            self.record_error(error);
+        }
+        result
+    }
     /// Append a newline and write the complete record under one writer lease.
     pub async fn write_line(&self, line: &str) -> io::Result<()> {
         let mut bytes = line.as_bytes().to_vec();

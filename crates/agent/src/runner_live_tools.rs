@@ -361,6 +361,7 @@ mod tests {
             parent_agent_id: None,
             native_query_depth: None,
             origin_session_id: None,
+            session_origin: None,
             tool_execution_policy: ToolExecutionPolicy::Ordinary,
             instruction_context: None,
             fork_context: Some(SubagentForkContext {

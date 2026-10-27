@@ -246,6 +246,7 @@ fn invocation_context_for_tool(
         }),
         parent_agent_id: Some(agent_id),
         origin_session_id: ctx.origin_session_id,
+        session_origin: ctx.session_origin.clone(),
         instruction_context: Some(ctx.instruction_context.clone()),
         fork_context: (name == "Agent" || name == lingxi_core::host::handback::HANDBACK_TOOL_NAME)
             .then(|| lingxi_core::host::tool_invoker::SubagentForkContext {
@@ -2620,6 +2621,7 @@ fn subagent_hook_inheritance(
     Some(lingxi_core::host::SubagentInheritance {
         tool_invoker: ctx.tool_invoker.clone()?,
         budget: ctx.budget.clone()?,
+        session_origin: ctx.session_origin.clone(),
     })
 }
 
@@ -3771,6 +3773,7 @@ async fn run_subagent_loop(
                 transcript_mod_cwd,
                 Some(resolve_model(&ctx)),
             )
+            .with_mod_session_origin(ctx.session_origin.clone(), ctx.origin_session_id.is_some())
     });
     crate::transcript::set_message_row_index_writer(
         ctx.transcript_fs.as_ref().and(transcript.as_ref()),
@@ -4000,8 +4003,28 @@ async fn run_subagent_loop(
             )
             .await;
         }
-        let mod_host = match mod_executor.as_ref() {
+        let mut mod_host = match mod_executor.as_ref() {
             Some(executor) => executor.mod_host().await,
+            None => None,
+        };
+        let binding = match mod_host.as_ref() {
+            Some(host) => Some(
+                host.bind_child_turn_step_session(
+                    ctx.session_origin.clone(),
+                    ctx.origin_session_id.is_some(),
+                    &mod_cwd,
+                )
+                .await,
+            ),
+            None => None,
+        };
+        let mod_session = match binding {
+            Some(Ok(session)) => session,
+            Some(Err(error)) => {
+                tracing::warn!(%error, "child Mod session binding failed");
+                mod_host = None;
+                None
+            }
             None => None,
         };
         let mod_turn_id = mod_host.as_ref().map(|_| uuid::Uuid::new_v4().to_string());
@@ -4128,6 +4151,7 @@ async fn run_subagent_loop(
                     if host.has_event("turn.complete") {
                         mod_turn = Some(Box::new(ChildTurnComplete::new(
                             Some(host.clone()),
+                            mod_session.clone(),
                             mod_cwd.clone(),
                             agent_id,
                             turn_id.clone(),
@@ -4135,7 +4159,8 @@ async fn run_subagent_loop(
                     }
                     if host.has_event("turn.start") {
                         let text = child_turn_start_text(history);
-                        fire_child_turn_start(host, &mod_cwd, &text, turn_id).await;
+                        fire_child_turn_start(host, mod_session.clone(), &mod_cwd, &text, turn_id)
+                            .await;
                     }
                 }
                 mod_started = true;
@@ -4268,7 +4293,13 @@ async fn run_subagent_loop(
                     let profile = model_profile.as_deref();
                     let mut model_snapshot = history.to_vec();
                     child_attachments
-                        .screen(&mut model_snapshot, mod_host.as_ref(), &mod_cwd, agent_id)
+                        .screen(
+                            &mut model_snapshot,
+                            mod_host.as_ref(),
+                            mod_session.clone(),
+                            &mod_cwd,
+                            agent_id,
+                        )
                         .await;
                     let messages_for_api = match instruction_request_messages(
                         &model_snapshot,
@@ -4329,11 +4360,15 @@ async fn run_subagent_loop(
                                 effort_wire.as_ref(),
                                 request.messages.len(),
                             );
+                            // Bind to the immutable capability admitted at child
+                            // launch; never derive a child's session from the
+                            // shared host's currently selected session.
                             Ok(crate::mod_turn_step::stream(
                                 host.clone(),
                                 input,
                                 request.clone(),
                                 mod_cwd.clone(),
+                                mod_session.clone(),
                                 physical_responses.clone(),
                             ))
                         } else {
@@ -6262,6 +6297,9 @@ async fn run_subagent_loop(
         if let Some(turn) = mod_turn.as_mut() {
             turn.dispatch();
         }
+        // An idle persistent child keeps only its weak origin capability. A
+        // bound view may own the orchestrator while a turn is active.
+        drop(mod_session);
 
         // Flush the turn-set's messages to the per-agent transcript. Runs for
         // BOTH dispositions below — a one-shot subagent's transcript is just as

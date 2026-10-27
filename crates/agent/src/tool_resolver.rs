@@ -387,6 +387,39 @@ pub async fn resolve_subagent_tools(
     ),
     ToolResolutionError,
 > {
+    resolve_subagent_tools_with_origin(
+        registry,
+        agent_def,
+        deny_context,
+        child_selection,
+        depth,
+        coordinator_mode,
+        agent_mcp_tools,
+        None,
+        false,
+    )
+    .await
+}
+
+/// Resolve the same child tool schemas while retaining the launch session's
+/// immutable capability for Mod-backed tool descriptions.
+pub async fn resolve_subagent_tools_with_origin(
+    registry: &tool_api::ToolRegistry,
+    agent_def: &AgentDefinition,
+    deny_context: &lingxi_core::host::permission_gate::NativeMcpDenyContext,
+    child_selection: Option<&ResolvedModelSelection>,
+    depth: u32,
+    coordinator_mode: bool,
+    agent_mcp_tools: &[Arc<dyn Tool>],
+    session_origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+    require_session_origin: bool,
+) -> Result<
+    (
+        Vec<lingxi_core::host::SourceToolWireDefinition>,
+        Vec<String>,
+    ),
+    ToolResolutionError,
+> {
     resolve_subagent_tools_with_handback(
         registry,
         agent_def,
@@ -397,6 +430,8 @@ pub async fn resolve_subagent_tools(
         agent_mcp_tools,
         None,
         HandbackToolGates::default(),
+        session_origin,
+        require_session_origin,
     )
     .await
     .map(|(schemas, allowed, _)| (schemas, allowed))
@@ -422,6 +457,8 @@ pub async fn resolve_subagent_tools_with_handback(
     agent_mcp_tools: &[Arc<dyn Tool>],
     supplied: Option<&Arc<dyn Tool>>,
     handback_gates: HandbackToolGates,
+    session_origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+    require_session_origin: bool,
 ) -> Result<
     (
         Vec<lingxi_core::host::SourceToolWireDefinition>,
@@ -485,6 +522,8 @@ pub async fn resolve_subagent_tools_with_handback(
         &PromptOptions {
             include_examples: true,
             session_id: None,
+            session_origin,
+            require_session_origin,
             is_scheduled_turn: false,
             model: child_selection.map(|selection| selection.model.clone()),
             model_profile: child_selection.and_then(|selection| selection.model_profile.clone()),

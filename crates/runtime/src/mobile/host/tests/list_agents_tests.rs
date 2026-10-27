@@ -87,6 +87,7 @@ async fn mobile_list_agents_catalog_and_peers_dispatch_use_live_mobile_stores() 
 
     handle
         .submit(ClientCommand::RunSlashCommand {
+            session_id: Some(handle.active_session_id()),
             raw: ClientTextDto::from_utf8("/peers"),
             images: Vec::<ImageRefDto>::new(),
             turn_id: Some(731),

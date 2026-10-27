@@ -459,6 +459,78 @@ fn turn_started_round_trips() {
     assert_eq!(back_none, ev_none);
 }
 
+#[test]
+fn turn_recovery_state_requires_an_unsigned_revision() {
+    let mut event = serde_json::json!({
+        "type": "turn_recovery_state",
+        "snapshot": {
+            "session_id": "session-a",
+            "turn_id": 7,
+            "revision": 42,
+            "state": {"type": "running"},
+            "first_sequence": 1,
+            "last_sequence": 3,
+            "safe_to_resume": true,
+            "projection_uncertain": false
+        }
+    });
+    let decoded: ClientEvent = serde_json::from_value(event.clone()).expect("decode revision");
+    let ClientEvent::TurnRecoveryState { snapshot } = decoded else {
+        panic!("expected turn recovery state");
+    };
+    assert_eq!(snapshot.revision, 42);
+
+    event["snapshot"]
+        .as_object_mut()
+        .unwrap()
+        .remove("revision");
+    assert!(serde_json::from_value::<ClientEvent>(event.clone()).is_err());
+    event["snapshot"]["revision"] = serde_json::json!(-1);
+    assert!(serde_json::from_value::<ClientEvent>(event).is_err());
+}
+
+#[test]
+fn turn_recovery_projection_uncertainty_is_required_and_independent_of_reason() {
+    let mut event = serde_json::json!({
+        "type": "turn_recovery_state",
+        "snapshot": {
+            "session_id": "session-a",
+            "turn_id": 7,
+            "revision": 42,
+            "state": {"type": "paused_recoverable"},
+            "first_sequence": 1,
+            "last_sequence": 3,
+            "safe_to_resume": false,
+            "projection_uncertain": true,
+            "reason": "background_time_expired"
+        }
+    });
+    for uncertain in [true, false] {
+        event["snapshot"]["projection_uncertain"] = serde_json::json!(uncertain);
+        let decoded: ClientEvent = serde_json::from_value(event.clone()).unwrap();
+        let ClientEvent::TurnRecoveryState { snapshot } = &decoded else {
+            panic!("expected turn recovery state");
+        };
+        assert_eq!(snapshot.projection_uncertain, uncertain);
+        assert_eq!(snapshot.reason.as_deref(), Some("background_time_expired"));
+        assert_eq!(serde_json::to_value(decoded).unwrap(), event);
+    }
+
+    event["snapshot"]
+        .as_object_mut()
+        .unwrap()
+        .remove("projection_uncertain");
+    assert!(serde_json::from_value::<ClientEvent>(event.clone()).is_err());
+    for invalid in [
+        serde_json::Value::Null,
+        serde_json::json!("true"),
+        serde_json::json!(1),
+    ] {
+        event["snapshot"]["projection_uncertain"] = invalid;
+        assert!(serde_json::from_value::<ClientEvent>(event.clone()).is_err());
+    }
+}
+
 /// `TurnEnded` — 1:1 `emit_end_turn`. Carries the outcome, stop reason, and the
 /// lowered [`CostDto`].
 #[test]

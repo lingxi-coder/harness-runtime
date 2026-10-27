@@ -834,6 +834,7 @@ async fn handback_supplied_dispatch_native_model_result_bytes_match_pinned_fixtu
                 ctx.agent_id
             }),
             origin_session_id: ctx.origin_session_id,
+            session_origin: ctx.session_origin.clone(),
             instruction_context: Some(ctx.instruction_context.clone()),
             fork_context: Some(SubagentForkContext {
                 messages: ctx.prompt_messages.clone(),

@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-fn groups() -> &'static Mutex<HashMap<String, HashMap<u32, u64>>> {
-    static GROUPS: OnceLock<Mutex<HashMap<String, HashMap<u32, u64>>>> = OnceLock::new();
+fn groups() -> &'static Mutex<HashMap<String, HashMap<u32, RegistrationEntry>>> {
+    static GROUPS: OnceLock<Mutex<HashMap<String, HashMap<u32, RegistrationEntry>>>> =
+        OnceLock::new();
     GROUPS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -13,6 +14,13 @@ fn groups() -> &'static Mutex<HashMap<String, HashMap<u32, u64>>> {
 pub struct RegistrationEntry {
     pub pid: u32,
     pub token: u64,
+    requires_capability: bool,
+}
+impl RegistrationEntry {
+    /// This registration may only be stopped through its held capability.
+    pub fn requires_capability(&self) -> bool {
+        self.requires_capability
+    }
 }
 
 pub struct Registration {
@@ -30,7 +38,7 @@ impl Drop for Registration {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(pids) = owners.get_mut(&self.owner) {
-            if pids.get(&self.entry.pid) == Some(&self.entry.token) {
+            if pids.get(&self.entry.pid) == Some(&self.entry) {
                 pids.remove(&self.entry.pid);
             }
             if pids.is_empty() {
@@ -41,6 +49,17 @@ impl Drop for Registration {
 }
 
 pub fn register(owner: Option<&str>, pid: Option<u32>) -> Option<Registration> {
+    register_with_capability_requirement(owner, pid, false)
+}
+
+/// Register an exact process generation and retain its signaling policy. A
+/// capability requirement cannot be weakened by replacing an overlapping
+/// registration of the same owner and PID.
+pub fn register_with_capability_requirement(
+    owner: Option<&str>,
+    pid: Option<u32>,
+    requires_capability: bool,
+) -> Option<Registration> {
     let (owner, pid) = (owner?, pid?);
     static NEXT_TOKEN: AtomicU64 = AtomicU64::new(1);
     let token = NEXT_TOKEN
@@ -48,15 +67,24 @@ pub fn register(owner: Option<&str>, pid: Option<u32>) -> Option<Registration> {
             value.checked_add(1)
         })
         .expect("process registration tokens exhausted");
-    groups()
+    let mut owners = groups()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .entry(owner.to_owned())
-        .or_default()
-        .insert(pid, token);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pids = owners.entry(owner.to_owned()).or_default();
+    let requires_capability = requires_capability
+        || pids
+            .get(&pid)
+            .is_some_and(RegistrationEntry::requires_capability);
+    let entry = RegistrationEntry {
+        pid,
+        token,
+        requires_capability,
+    };
+    pids.insert(pid, entry);
+    drop(owners);
     Some(Registration {
         owner: owner.to_owned(),
-        entry: RegistrationEntry { pid, token },
+        entry,
     })
 }
 
@@ -67,10 +95,7 @@ pub fn snapshot_entries(owner: &str) -> Vec<RegistrationEntry> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(owner)
         .into_iter()
-        .flat_map(|pids| {
-            pids.iter()
-                .map(|(&pid, &token)| RegistrationEntry { pid, token })
-        })
+        .flat_map(|pids| pids.values().copied())
         .collect()
 }
 
@@ -82,7 +107,31 @@ pub fn is_current(owner: &str, entry: RegistrationEntry) -> bool {
         .get(owner)
         .and_then(|pids| pids.get(&entry.pid))
         .copied()
-        == Some(entry.token)
+        == Some(entry)
+}
+
+/// Run a short synchronous operation while the registration is still held.
+/// The owner must unregister before reaping its child, so a signal performed
+/// inside this callback cannot target a recycled numeric process identity.
+pub fn with_current<R>(
+    owner: &str,
+    entry: RegistrationEntry,
+    action: impl FnOnce() -> R,
+) -> Option<R> {
+    let owners = groups()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let current = owners
+        .get(owner)
+        .and_then(|pids| pids.get(&entry.pid))
+        .copied();
+    if current == Some(entry) {
+        let result = action();
+        drop(owners);
+        Some(result)
+    } else {
+        None
+    }
 }
 
 /// Snapshot the live registered PIDs for one owner without consuming them.
@@ -108,6 +157,27 @@ mod tests {
         drop(old);
         assert_eq!(snapshot_entries(owner), vec![new.entry()]);
         drop(new);
+        assert!(snapshot(owner).is_empty());
+    }
+
+    #[test]
+    fn capability_requirement_is_per_entry_and_cannot_be_downgraded() {
+        let owner = "registration-capability-policy";
+        let ordinary = register(Some(owner), Some(4101)).unwrap();
+        let strict = register_with_capability_requirement(Some(owner), Some(4102), true).unwrap();
+        assert!(!ordinary.entry().requires_capability());
+        assert!(strict.entry().requires_capability());
+        let replacement = register(Some(owner), Some(4102)).unwrap();
+        assert!(replacement.entry().requires_capability());
+        assert!(!is_current(owner, strict.entry()));
+        assert!(is_current(owner, replacement.entry()));
+        drop(strict);
+        assert!(is_current(owner, replacement.entry()));
+        drop(replacement);
+        let new = register(Some(owner), Some(4102)).unwrap();
+        assert!(!new.entry().requires_capability());
+        drop(new);
+        drop(ordinary);
         assert!(snapshot(owner).is_empty());
     }
 }

@@ -43,6 +43,11 @@ pub(crate) struct OwnedToolCall {
     #[cfg(test)]
     pub(crate) dispatch_finished_tx: Option<oneshot::Sender<()>>,
     pub(crate) tool_context_state: Option<ToolInvocationContextState>,
+    /// Keeps the originating turn's live owner until the physical dispatch
+    /// finishes, including when the actor detaches an unfinished task.
+    pub(crate) recovery_lease: Option<Arc<dyn Send + Sync>>,
+    /// Residual turn identity for asynchronous hooks spawned by this call.
+    pub(crate) recovery_work_lease: Option<Arc<dyn Send + Sync>>,
 }
 
 #[derive(Clone)]
@@ -270,6 +275,7 @@ pub(crate) struct ToolScheduler {
 }
 
 impl ToolScheduler {
+    #[cfg(test)]
     pub(crate) fn spawn(
         dispatch: ToolDispatch,
         max_safe_concurrency: usize,
@@ -278,6 +284,28 @@ impl ToolScheduler {
         session_root: CancellationToken,
         publication_commit_lock: Arc<tokio::sync::Mutex<()>>,
         model_context_resolver: Option<ModelContextResolver>,
+    ) -> Self {
+        Self::spawn_with_cancel_reason(
+            dispatch,
+            max_safe_concurrency,
+            user_cancel,
+            initial_tool_context_state,
+            session_root,
+            publication_commit_lock,
+            model_context_resolver,
+            None,
+        )
+    }
+
+    pub(crate) fn spawn_with_cancel_reason(
+        dispatch: ToolDispatch,
+        max_safe_concurrency: usize,
+        user_cancel: Option<CancellationToken>,
+        initial_tool_context_state: Option<ToolInvocationContextState>,
+        session_root: CancellationToken,
+        publication_commit_lock: Arc<tokio::sync::Mutex<()>>,
+        model_context_resolver: Option<ModelContextResolver>,
+        cancel_reason: Option<crate::prompt::mid_turn_input::CancelReasonFlag>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         // User interruption is per-tool (InterruptBehavior::Cancel). The root
@@ -297,6 +325,7 @@ impl ToolScheduler {
             session_root,
             root,
             user_cancel,
+            cancel_reason,
             root_cancel_slot: Arc::clone(&root_cancel_slot),
             reset_cancel_requested: Arc::clone(&reset_cancel_requested),
             stop_scheduling_requested: Arc::clone(&stop_scheduling_requested),
@@ -570,6 +599,7 @@ struct Actor {
     session_root: CancellationToken,
     root: CancellationToken,
     user_cancel: Option<CancellationToken>,
+    cancel_reason: Option<crate::prompt::mid_turn_input::CancelReasonFlag>,
     root_cancel_slot: Arc<Mutex<CancellationToken>>,
     reset_cancel_requested: Arc<AtomicBool>,
     stop_scheduling_requested: Arc<AtomicBool>,
@@ -971,7 +1001,20 @@ impl Actor {
         let recorded_context_state = record.context_state.clone();
         let mut pending_safe_modifiers = Vec::new();
         let mut context_failure = None;
-        if user_abort_wins {
+        // A completed permission denial is a real decision even if a host
+        // pause arrives before Tn consumes it. Ordinary user interruption keeps
+        // the existing discard semantics. A transport closure during pause is
+        // represented as a neutral result without a permission-denial marker.
+        let retain_permission_denial = self.cancel_reason.as_ref().is_some_and(|reason| {
+            reason.get() == crate::prompt::mid_turn_input::CancelReason::LifecyclePause
+        }) && outcome.as_ref().is_ok_and(|payload| {
+            payload
+                .dispatch
+                .publications
+                .iter()
+                .any(|publication| publication.permission_denial.is_some())
+        });
+        if user_abort_wins && !retain_permission_denial {
             outcome = Err(OrchestratorError::StreamingProtocol(
                 "tool interrupted before its result was accepted".into(),
             ));
@@ -1482,6 +1525,8 @@ mod tests {
             #[cfg(test)]
             dispatch_finished_tx: None,
             tool_context_state: None,
+            recovery_lease: None,
+            recovery_work_lease: None,
         }
     }
 

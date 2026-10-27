@@ -180,6 +180,7 @@ pub(crate) fn child_turn_start_text(history: &[ConversationMessage]) -> Utf16Jso
 
 pub(crate) async fn fire_child_turn_start(
     host: &Arc<ModHost>,
+    session: Option<Arc<dyn ModSessionContext>>,
     cwd: &std::path::Path,
     text: &Utf16JsonProjection,
     turn_id: &str,
@@ -199,7 +200,7 @@ pub(crate) async fn fire_child_turn_start(
             ))
         }
     };
-    let result = if let Some(session) = host.bound_session() {
+    let result = if let Some(session) = session {
         let log_session = session.clone();
         let toast_session = session.clone();
         let status_session = session.clone();
@@ -235,11 +236,11 @@ pub(crate) async fn fire_child_turn_start(
 impl ChildTurnComplete {
     pub(crate) fn new(
         host: Option<Arc<ModHost>>,
+        session: Option<Arc<dyn ModSessionContext>>,
         cwd: PathBuf,
         agent_id: AgentId,
         turn_id: String,
     ) -> Self {
-        let session = host.as_ref().and_then(|host| host.bound_session());
         Self {
             host,
             session,

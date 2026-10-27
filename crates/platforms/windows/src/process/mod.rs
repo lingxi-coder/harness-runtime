@@ -19,3 +19,6 @@ mod supervisor_native;
 
 #[cfg(windows)]
 mod supervisor_gate;
+
+#[cfg(windows)]
+pub mod owned_job;

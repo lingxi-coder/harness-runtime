@@ -32,6 +32,7 @@ fn version_is_semver() {
     }
 }
 
+/// Major 30 adds durable recovery snapshot fields and a correlated attach.
 /// Major 27 removes the legacy ToolResult raw diff fields and makes the
 /// host-derived tool header/display projections required. Major 25 moved
 /// `ClientEvent::Error.message` to the source-preserving string carrier.
@@ -42,6 +43,6 @@ fn version_is_semver() {
 /// only asks that SOME bump happened, so without this a later edit could ride
 /// along on this bump without anyone choosing it.
 #[test]
-fn version_is_twenty_nine_zero_zero() {
-    assert_eq!(CLIENT_PROTOCOL_VERSION, "29.0.0");
+fn version_is_thirty_zero_zero() {
+    assert_eq!(CLIENT_PROTOCOL_VERSION, "30.0.0");
 }

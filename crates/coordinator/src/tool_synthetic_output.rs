@@ -314,6 +314,7 @@ mod tests {
     /// `tool-api/test-support` feature (not enabled for the coordinator crate).
     fn fresh_ctx() -> ToolUseContext {
         ToolUseContext {
+            session_origin: None,
             is_scheduled_turn: false,
             available_tool_names: None,
             agent_spawn_provenance: Default::default(),
@@ -349,6 +350,7 @@ mod tests {
             session: None,
             subagent_registry: None,
             cancel: None,
+            host_tool_cancellation: tool_api::context::HostToolCancellation::Ordinary,
             fork_parent_system_prompt: None,
             cwd: None,
             depth: 0,

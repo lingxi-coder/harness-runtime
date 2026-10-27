@@ -761,7 +761,9 @@ impl StdioControlPermissionGate {
             PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
                 PermissionDecision::Allow
             }
-            PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
+            PermissionOutcome::Deny { reason } | PermissionOutcome::TransportClosed { reason } => {
+                PermissionDecision::Deny { reason }
+            }
         }
     }
 

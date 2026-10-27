@@ -1838,18 +1838,35 @@ const FOREGROUND_ARMING_DELAY: std::time::Duration = std::time::Duration::from_m
 struct BackgroundBashRequester {
     notify: std::sync::Arc<tokio::sync::Notify>,
     reason: std::sync::Arc<std::sync::atomic::AtomicU8>,
-    settled: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
+    settled: std::sync::Arc<
+        tokio::sync::watch::Sender<Option<lingxi_core::host::task_registry::TaskBackgroundOutcome>>,
+    >,
+    active: std::sync::Arc<std::sync::Mutex<bool>>,
+    arming_settled: tokio::sync::watch::Receiver<
+        Option<lingxi_core::host::task_registry::TaskBackgroundOutcome>,
+    >,
 }
 
-struct BackgroundRequestSettled(std::sync::Arc<tokio::sync::watch::Sender<bool>>);
+struct BackgroundRequestSettled {
+    sender: std::sync::Arc<
+        tokio::sync::watch::Sender<Option<lingxi_core::host::task_registry::TaskBackgroundOutcome>>,
+    >,
+    outcome: lingxi_core::host::task_registry::TaskBackgroundOutcome,
+}
 impl Drop for BackgroundRequestSettled {
     fn drop(&mut self) {
-        self.0.send_replace(true);
+        self.sender.send_replace(Some(self.outcome));
     }
 }
 
 #[async_trait::async_trait]
 impl lingxi_core::host::task_registry::TaskBackgrounder for BackgroundBashRequester {
+    fn outcome_wait_is_cancellation_safe(&self) -> bool {
+        // Repeating this waiter only re-signals the same runner; it observes a
+        // stable receipt and preserves whichever reason was recorded first.
+        true
+    }
+
     async fn background(&self) {
         self.background_with_reason(lingxi_core::host::task_registry::TaskBackgroundReason::User)
             .await;
@@ -1858,85 +1875,172 @@ impl lingxi_core::host::task_registry::TaskBackgrounder for BackgroundBashReques
         &self,
         reason: lingxi_core::host::task_registry::TaskBackgroundReason,
     ) {
-        // First trigger wins, so an arriving message cannot relabel Ctrl+B.
-        let _ = self.reason.compare_exchange(
-            0,
-            reason as u8,
-            std::sync::atomic::Ordering::SeqCst,
-            std::sync::atomic::Ordering::SeqCst,
-        );
+        let _ = self.background_with_outcome(reason).await;
+    }
+
+    async fn background_with_outcome(
+        &self,
+        reason: lingxi_core::host::task_registry::TaskBackgroundReason,
+    ) -> lingxi_core::host::task_registry::TaskBackgroundOutcome {
+        use lingxi_core::host::task_registry::TaskBackgroundOutcome;
         let mut settled = self.settled.subscribe();
-        self.notify.notify_one();
-        // Do not cancel the owning turn until its process has actually detached.
-        while !*settled.borrow_and_update() {
-            if settled.changed().await.is_err() {
-                break;
+        {
+            let active = self.active.lock().unwrap();
+            if *active {
+                // First trigger wins, so an arriving message cannot relabel Ctrl+B.
+                let _ = self.reason.compare_exchange(
+                    0,
+                    reason as u8,
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                self.notify.notify_one();
             }
+        }
+        // A dropped caller or failed registration/ack is not a detach receipt.
+        let process_outcome = wait_for_background_outcome(&mut settled).await;
+        if matches!(process_outcome, TaskBackgroundOutcome::Unknown) {
+            return TaskBackgroundOutcome::Unknown;
+        }
+        // The registry marks a successful row backgrounded after this returns.
+        // A foreground result must first withdraw its original row.
+        let mut arming_settled = self.arming_settled.clone();
+        let arming_outcome = wait_for_background_outcome(&mut arming_settled).await;
+        match (process_outcome, arming_outcome) {
+            (TaskBackgroundOutcome::Backgrounded, TaskBackgroundOutcome::Backgrounded) => {
+                TaskBackgroundOutcome::Backgrounded
+            }
+            (TaskBackgroundOutcome::NotBackgrounded, TaskBackgroundOutcome::NotBackgrounded) => {
+                TaskBackgroundOutcome::NotBackgrounded
+            }
+            _ => TaskBackgroundOutcome::Unknown,
         }
     }
 }
 
-/// The live arming of one foreground command: the 2 s timer, plus what it takes
-/// to withdraw the row again.
+async fn wait_for_background_outcome(
+    receiver: &mut tokio::sync::watch::Receiver<
+        Option<lingxi_core::host::task_registry::TaskBackgroundOutcome>,
+    >,
+) -> lingxi_core::host::task_registry::TaskBackgroundOutcome {
+    loop {
+        if let Some(outcome) = *receiver.borrow_and_update() {
+            return outcome;
+        }
+        if receiver.changed().await.is_err() {
+            return lingxi_core::host::task_registry::TaskBackgroundOutcome::Unknown;
+        }
+    }
+}
+
+/// The caller's decision for the independently supervised arming operation.
+#[derive(Clone, Copy)]
+enum ForegroundArmingDecision {
+    Withdraw,
+    KeepBackground,
+    CallerDropped,
+}
+
+/// The live arming of one foreground command. Once registration starts, its
+/// supervisor must finish it even if this handle is dropped: the registry can
+/// publish a row before its TaskCreated hook returns the row's instance lease.
 struct ForegroundArming {
-    timer: Option<tokio::task::JoinHandle<()>>,
-    withdraw_on_drop: bool,
-    task_id: String,
-    registry: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+    decision: Option<tokio::sync::oneshot::Sender<ForegroundArmingDecision>>,
+    active: std::sync::Arc<std::sync::Mutex<bool>>,
 }
 
 impl ForegroundArming {
+    fn decide(&mut self, outcome: ForegroundArmingDecision) {
+        if let Some(decision) = self.decision.take() {
+            let mut active = self.active.lock().unwrap();
+            *active = false;
+            let _ = decision.send(outcome);
+        }
+    }
+
     /// claude-code `W6t` — the command finished in the foreground, so cancel the
     /// timer and withdraw the row if it ever appeared.
     ///
     /// Withdrawing is not optional: a row left behind is `running` forever, and
     /// the registry would eventually narrate a completion for a command the
     /// model was never told had started.
-    async fn join_timer(&mut self) {
-        if let Some(timer) = self.timer.as_mut() {
-            timer.abort();
-            // Keep the handle in self until joined: dropping this await must
-            // still let Drop serialize withdrawal after the timer terminates.
-            let _ = timer.await;
-        }
-        self.timer = None;
-    }
-
     async fn disarm(mut self) {
-        self.join_timer().await;
-        self.registry
-            .unregister_foreground_bash(&self.task_id)
-            .await;
-        self.withdraw_on_drop = false;
+        self.decide(ForegroundArmingDecision::Withdraw);
     }
 
     async fn keep_for_background(mut self) {
-        self.join_timer().await;
-        self.withdraw_on_drop = false;
+        self.decide(ForegroundArmingDecision::KeepBackground);
     }
 }
 
 impl Drop for ForegroundArming {
     fn drop(&mut self) {
-        let timer = self.timer.take();
-        if let Some(timer) = &timer {
-            timer.abort();
+        self.decide(ForegroundArmingDecision::CallerDropped);
+    }
+}
+
+fn pending_arming_decision(
+    receiver: &mut tokio::sync::oneshot::Receiver<ForegroundArmingDecision>,
+) -> Option<ForegroundArmingDecision> {
+    match receiver.try_recv() {
+        Ok(decision) => Some(decision),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+            Some(ForegroundArmingDecision::CallerDropped)
         }
-        if !self.withdraw_on_drop {
-            return;
+    }
+}
+
+async fn finish_foreground_arming(
+    registry: &dyn lingxi_core::host::task_registry::TaskRegistryHandle,
+    task_id: &str,
+    lease: Option<&lingxi_core::host::task_registry::ForegroundTaskLease>,
+    host_request: Option<&tool_api::context::HostToolRequest>,
+    decision: ForegroundArmingDecision,
+) -> lingxi_core::host::task_registry::TaskBackgroundOutcome {
+    use lingxi_core::host::task_registry::TaskBackgroundOutcome;
+    if matches!(decision, ForegroundArmingDecision::KeepBackground) {
+        return TaskBackgroundOutcome::Backgrounded;
+    }
+    if matches!(decision, ForegroundArmingDecision::CallerDropped) {
+        if let Some(request) = host_request {
+            // A dropped strict call may still own its process. Preserve the row
+            // and output until the existing cancellation receipt is verified.
+            if !request.is_cancelled() {
+                request.lifecycle_token().cancelled().await;
+            }
+            if !request.is_cancelled() || request.cancel_and_reap().await.is_err() {
+                return TaskBackgroundOutcome::Unknown;
+            }
         }
-        let registry = self.registry.clone();
-        let task_id = self.task_id.clone();
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            runtime.spawn(async move {
-                if let Some(timer) = timer {
-                    let _ = timer.await;
-                }
-                // This only withdraws an unpromoted foreground row. It neither
-                // kills a process nor removes an acknowledged background task.
-                registry.unregister_foreground_bash(&task_id).await;
-            });
-        }
+    }
+    if let Some(lease) = lease {
+        // Only withdraw this exact unpromoted row, never a replacement or an
+        // acknowledged background task with the same ID.
+        registry.unregister_foreground_bash_owned(lease).await;
+    }
+    if matches!(decision, ForegroundArmingDecision::Withdraw) || host_request.is_some() {
+        // An earlier foreground cleanup can have seen the still-published row
+        // and left its output in place while TaskCreated was running.
+        registry.discard_bash_output(task_id).await;
+    }
+    TaskBackgroundOutcome::NotBackgrounded
+}
+
+fn emit_foreground_background_hint(
+    active: &std::sync::Mutex<bool>,
+    progress: &ToolProgressSender,
+    tool_use_id: lingxi_core::types::ToolUseId,
+) {
+    let active = active.lock().unwrap();
+    if *active {
+        let _ = progress.try_send(tool_api::progress::ToolProgress {
+            data: tool_api::tool_trait::generated_builtin_result(&serde_json::json!({
+                "kind": "background_hint",
+                "toolUseId": tool_use_id.to_string(),
+            })),
+            tool_use_id,
+        });
     }
 }
 
@@ -1945,6 +2049,8 @@ impl Drop for ForegroundArming {
 /// the completion `<task-notification>` fire.
 struct BackgroundBashExitSink {
     registry: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+    _sandbox_lease: Option<tool_api::sandbox_runner::SandboxLease>,
+    quarantined_lease: std::sync::Mutex<Option<tool_api::context::QuarantinedSandboxLease>>,
 }
 
 #[async_trait::async_trait]
@@ -1956,6 +2062,40 @@ impl lingxi_core::host::BackgroundExitSink for BackgroundBashExitSink {
     async fn on_supervised_exit(&self, task_id: &str, exit_code: Option<i32>) {
         self.registry.mark_shell_supervised(task_id).await;
         self.on_exit(task_id, exit_code).await;
+    }
+
+    async fn on_wait_failure(&self, task_id: &str, reason: &str) {
+        {
+            let mut retained = self
+                .quarantined_lease
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if retained.is_none() {
+                if let Some(lease) = self._sandbox_lease.clone() {
+                    *retained = Some(tool_api::context::QuarantinedSandboxLease::new(lease));
+                }
+            }
+        }
+        self.registry.mark_shell_supervised(task_id).await;
+        let _ = self
+            .registry
+            .settle_background_bash_unverified(task_id, reason)
+            .await;
+    }
+
+    async fn on_cleanup_verified(&self, task_id: &str) {
+        let _ = self
+            .registry
+            .settle_background_bash_unknown(task_id, None)
+            .await;
+        let retained = self
+            .quarantined_lease
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(lease) = retained {
+            lease.release_verified();
+        }
     }
 
     fn manages_output(&self) -> bool {
@@ -2013,6 +2153,13 @@ impl lingxi_core::host::BackgroundExitSink for BackgroundBashExitSink {
             .await;
     }
 
+    async fn on_exit_outcome_unknown(&self, task_id: &str, exit_code: Option<i32>) {
+        let _ = self
+            .registry
+            .settle_background_bash_unknown(task_id, exit_code)
+            .await;
+    }
+
     async fn on_exit(&self, task_id: &str, exit_code: Option<i32>) {
         // Best-effort: a settle for a since-evicted task is a benign NotFound.
         let _ = self
@@ -2026,12 +2173,29 @@ impl lingxi_core::host::BackgroundExitSink for BackgroundBashExitSink {
 struct BackgroundBashKiller {
     process: std::sync::Arc<dyn lingxi_core::host::ProcessRunner>,
     handle: lingxi_core::host::ProcessHandle,
+    owner: Option<String>,
 }
 
 #[async_trait::async_trait]
 impl lingxi_core::host::task_registry::TaskKiller for BackgroundBashKiller {
     async fn kill(&self) {
         let _ = self.process.kill(&self.handle).await;
+    }
+
+    async fn kill_verified(
+        &self,
+    ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
+        let owner = self.owner.as_deref().ok_or_else(|| {
+            lingxi_core::host::task_registry::TaskRegistryError::Internal(
+                "owned shell has no process owner".into(),
+            )
+        })?;
+        self.process
+            .terminate_and_wait_owned_background(&self.handle, owner)
+            .await
+            .map_err(|error| {
+                lingxi_core::host::task_registry::TaskRegistryError::Internal(error.to_string())
+            })
     }
 }
 
@@ -2175,9 +2339,18 @@ impl BashTool {
     ///
     /// Returns `None` when no registry is wired, in which case the runner keeps
     /// minting its own identity and behaviour is unchanged.
-    async fn allocate_task_identity(&self) -> Option<(String, String)> {
+    pub(crate) async fn allocate_task_identity(&self) -> Option<(String, String)> {
+        self.allocate_task_identity_with_ownership(false).await
+    }
+
+    async fn allocate_task_identity_with_ownership(&self, owned: bool) -> Option<(String, String)> {
         let registry = self.ctx.task_registry.as_ref()?;
-        match registry.allocate_bash_output().await {
+        let allocation = if owned {
+            registry.allocate_owned_bash_output().await
+        } else {
+            registry.allocate_bash_output().await
+        };
+        match allocation {
             Ok(handle) => Some((handle.task_id, handle.output_path)),
             Err(error) => {
                 // Fail open: a registry that cannot mint an identity must not
@@ -2197,11 +2370,12 @@ impl BashTool {
     /// command, so the runner writes to that file and reports that id.
     ///
     /// [`BackgroundTaskBinding`]: lingxi_core::host::BackgroundTaskBinding
-    fn bind_identity(
+    pub(crate) fn bind_identity(
         &self,
         sandboxed: lingxi_core::host::SandboxedCommand,
         bound: Option<&(String, String)>,
         on_demand: Option<std::sync::Arc<tokio::sync::Notify>>,
+        sandbox_lease: Option<tool_api::sandbox_runner::SandboxLease>,
     ) -> lingxi_core::host::SandboxedCommand {
         let Some((task_id, output_path)) = bound else {
             return sandboxed;
@@ -2210,8 +2384,11 @@ impl BashTool {
             task_id: task_id.clone(),
             output_path: std::path::PathBuf::from(output_path),
             on_exit: self.ctx.task_registry.clone().map(|registry| {
-                std::sync::Arc::new(BackgroundBashExitSink { registry })
-                    as std::sync::Arc<dyn lingxi_core::host::BackgroundExitSink>
+                std::sync::Arc::new(BackgroundBashExitSink {
+                    registry,
+                    _sandbox_lease: sandbox_lease.clone(),
+                    quarantined_lease: Default::default(),
+                }) as std::sync::Arc<dyn lingxi_core::host::BackgroundExitSink>
             }),
             on_demand,
         })
@@ -2269,7 +2446,11 @@ impl BashTool {
         description: Option<Utf16JsonProjection>,
         notify: std::sync::Arc<tokio::sync::Notify>,
         reason: std::sync::Arc<std::sync::atomic::AtomicU8>,
-        settled: std::sync::Arc<tokio::sync::watch::Sender<bool>>,
+        settled: std::sync::Arc<
+            tokio::sync::watch::Sender<
+                Option<lingxi_core::host::task_registry::TaskBackgroundOutcome>,
+            >,
+        >,
         progress: ToolProgressSender,
     ) -> Option<ForegroundArming> {
         let registry = self.ctx.task_registry.clone()?;
@@ -2286,48 +2467,108 @@ impl BashTool {
         let arming_registry = registry.clone();
         let tool_use_id = ctx.tool_use_id.clone();
         let hint_enabled = !crate::prompt::background_tasks_disabled();
-        let timer = tokio::spawn(async move {
-            tokio::time::sleep(FOREGROUND_ARMING_DELAY).await;
-            if let Err(error) = arming_registry
-                .register_foreground_bash(&id, registration, auto_background_armed)
-                .await
-            {
-                tracing::debug!(
-                    target: "tool_shell::bash",
-                    %error,
-                    "could not arm the foreground shell record"
-                );
-                return;
+        let host_request = match &ctx.host_tool_cancellation {
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(request) => {
+                Some(request.clone())
             }
-            // Only now is the row addressable, so bind the handle that moves it
-            // to the background before anything can ask for that.
-            let _ = arming_registry
-                .bind_background_requester(
+            tool_api::context::HostToolCancellation::Ordinary => None,
+        };
+        let (decision_tx, mut decision_rx) = tokio::sync::oneshot::channel();
+        let active = std::sync::Arc::new(std::sync::Mutex::new(true));
+        let arming_active = active.clone();
+        let (arming_settled, arming_settled_rx) = tokio::sync::watch::channel(None);
+        tokio::spawn(async move {
+            // The delay can be cancelled, but the registration future cannot:
+            // it may already have published its row before awaiting a hook.
+            let mut decision = tokio::select! {
+                biased;
+                result = &mut decision_rx => Some(result.unwrap_or(ForegroundArmingDecision::CallerDropped)),
+                () = tokio::time::sleep(FOREGROUND_ARMING_DELAY) => None,
+            };
+            let mut lease = None;
+            if decision.is_none() {
+                decision = pending_arming_decision(&mut decision_rx);
+            }
+
+            if decision.is_none() {
+                let registration = arming_registry.register_foreground_bash_owned(
                     &id,
-                    std::sync::Arc::new(BackgroundBashRequester {
-                        notify,
-                        reason,
-                        settled,
-                    }),
-                )
-                .await;
-            if hint_enabled {
-                if let Some(tool_use_id) = tool_use_id {
-                    let _ = progress.try_send(tool_api::progress::ToolProgress {
-                        data: tool_api::tool_trait::generated_builtin_result(&serde_json::json!({
-                            "kind": "background_hint",
-                            "toolUseId": tool_use_id.to_string(),
-                        })),
-                        tool_use_id,
-                    });
+                    registration,
+                    auto_background_armed,
+                );
+                tokio::pin!(registration);
+                let registered = tokio::select! {
+                    result = &mut registration => result,
+                    result = &mut decision_rx => {
+                        decision = Some(result.unwrap_or(ForegroundArmingDecision::CallerDropped));
+                        tracing::debug!(target: "tool_shell::bash", task_id = %id,
+                            "foreground registration remains pending until its TaskCreated hook returns");
+                        registration.await
+                    }
+                };
+                match registered {
+                    Ok(registered_lease) => lease = Some(registered_lease),
+                    Err(error) => tracing::debug!(
+                        target: "tool_shell::bash",
+                        %error,
+                        "could not arm the foreground shell record"
+                    ),
                 }
             }
+            if decision.is_none() {
+                decision = pending_arming_decision(&mut decision_rx);
+            }
+            if decision.is_none() {
+                if let Some(lease) = &lease {
+                    // Both binding and eventual withdrawal use the instance
+                    // returned by this registration, even if the ID was reused.
+                    let bound = arming_registry
+                        .bind_background_requester_owned(
+                            lease,
+                            std::sync::Arc::new(BackgroundBashRequester {
+                                notify,
+                                reason,
+                                settled,
+                                active: arming_active.clone(),
+                                arming_settled: arming_settled_rx,
+                            }),
+                        )
+                        .await;
+                    if let Err(error) = bound {
+                        tracing::debug!(target: "tool_shell::bash", %error, "foreground shell row changed before requester binding");
+                    } else {
+                        decision = pending_arming_decision(&mut decision_rx);
+                        if decision.is_none() && hint_enabled {
+                            if let Some(tool_use_id) = tool_use_id {
+                                emit_foreground_background_hint(
+                                    &arming_active,
+                                    &progress,
+                                    tool_use_id,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            let decision = match decision {
+                Some(decision) => decision,
+                None => decision_rx
+                    .await
+                    .unwrap_or(ForegroundArmingDecision::CallerDropped),
+            };
+            let outcome = finish_foreground_arming(
+                arming_registry.as_ref(),
+                &id,
+                lease.as_ref(),
+                host_request.as_deref(),
+                decision,
+            )
+            .await;
+            arming_settled.send_replace(Some(outcome));
         });
         Some(ForegroundArming {
-            timer: Some(timer),
-            withdraw_on_drop: true,
-            task_id: task_id.to_string(),
-            registry,
+            decision: Some(decision_tx),
+            active,
         })
     }
 
@@ -2368,6 +2609,7 @@ impl BashTool {
         &self,
         task_id: &str,
         handle: &lingxi_core::host::ProcessHandle,
+        owner: Option<String>,
     ) -> Result<(), ToolError> {
         let Some(registry) = self.ctx.task_registry.as_ref() else {
             return Ok(());
@@ -2375,6 +2617,7 @@ impl BashTool {
         let killer = std::sync::Arc::new(BackgroundBashKiller {
             process: self.ctx.process.clone(),
             handle: handle.clone(),
+            owner,
         }) as std::sync::Arc<dyn lingxi_core::host::task_registry::TaskKiller>;
         registry
             .bind_background_process(task_id, handle.pid, killer)
@@ -2394,13 +2637,20 @@ impl BashTool {
         description: Option<Utf16JsonProjection>,
         cwd: &std::path::Path,
         handle: &lingxi_core::host::ProcessHandle,
+        preserve_owned_cleanup: bool,
     ) -> Result<String, ToolError> {
         let task_id = bound.map_or_else(|| handle.task_id.clone(), |(id, _)| id.clone());
         let result = async {
             self.register_background_task(ctx, bound, command, description, cwd)
                 .await?;
             if bound.is_some() {
-                self.bind_background_task(&task_id, handle).await?;
+                let owner = match &ctx.host_tool_cancellation {
+                    tool_api::context::HostToolCancellation::TerminateOwnedProcess(request) => {
+                        Some(request.process_owner())
+                    }
+                    tool_api::context::HostToolCancellation::Ordinary => None,
+                };
+                self.bind_background_task(&task_id, handle, owner).await?;
             }
             self.ctx
                 .process
@@ -2412,11 +2662,16 @@ impl BashTool {
         }
         .await;
         if let Err(error) = result {
-            let _ = self.ctx.process.kill(handle).await;
-            if let (Some(registry), Some((id, _))) = (self.ctx.task_registry.as_ref(), bound) {
-                let _ = registry.settle_background_bash(id, None, true).await;
-                registry.discard_bash_output(id).await;
+            if !preserve_owned_cleanup {
+                let _ = self.ctx.process.kill(handle).await;
+                if let (Some(registry), Some((id, _))) = (self.ctx.task_registry.as_ref(), bound) {
+                    let _ = registry.settle_background_bash(id, None, true).await;
+                    registry.discard_bash_output(id).await;
+                }
             }
+            // An owned launch is already tracked by the host request. The
+            // registration error is not an exit receipt: its background sink
+            // must publish the outcome only after the supervisor verifies it.
             return Err(error);
         }
         Ok(task_id)
@@ -2617,6 +2872,286 @@ static SIDE_INPUT_SCHEMA: Lazy<Utf16JsonProjection> = Lazy::new(|| {
     schema
 });
 
+// Host-originated requests keep polling their owned runner after cancellation.
+// A PID snapshot may be empty while supervisor startup is still in flight, so
+// it is never used as evidence that nothing was spawned.
+#[derive(Clone)]
+struct OwnedSandboxQuarantine(
+    std::sync::Arc<std::sync::Mutex<Option<tool_api::context::QuarantinedSandboxLease>>>,
+);
+
+impl OwnedSandboxQuarantine {
+    fn new(lease: Option<tool_api::sandbox_runner::SandboxLease>) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(
+            lease.map(tool_api::context::QuarantinedSandboxLease::new),
+        )))
+    }
+
+    fn release_verified(&self) {
+        let retained = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(lease) = retained {
+            lease.release_verified();
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn spawn_host_background_with_timeout(
+    process: std::sync::Arc<dyn lingxi_core::host::ProcessRunner>,
+    command: lingxi_core::host::SandboxedCommand,
+    request: std::sync::Arc<tool_api::context::HostToolRequest>,
+    owner: String,
+    output_cleanup: Option<(
+        std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+        String,
+    )>,
+    sandbox_lease: Option<tool_api::sandbox_runner::SandboxLease>,
+    timeout: Duration,
+) -> Result<Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError>, ToolError> {
+    let runner = process.clone();
+    let mut spawning = tokio::spawn(async move { runner.spawn_background(&command).await });
+    match tokio::time::timeout(timeout, &mut spawning).await {
+        Ok(Ok(result)) => Ok(result),
+        Ok(Err(error)) => {
+            if let Some(lease) = sandbox_lease {
+                request.retain_sandbox_lease(lease);
+            }
+            let message =
+                format!("background spawn task failed; process cleanup is unverified: {error}");
+            request.record_cleanup_error(message.clone());
+            Err(ToolError::Io(message.into()))
+        }
+        Err(_) => {
+            let retained = sandbox_lease.map(|lease| request.retain_sandbox_lease(lease));
+            request.record_cleanup_error(
+                "background spawn timed out; process cleanup is unverified".into(),
+            );
+            // The timed-out task may still publish a handle. Keep its owner
+            // alive, then stop and verify that exact process before releasing.
+            tokio::spawn(async move {
+                let verified = match spawning.await {
+                    Ok(Ok(handle)) => loop {
+                        if process
+                            .terminate_and_wait_owned_background(&handle, &owner)
+                            .await
+                            .is_ok()
+                        {
+                            break true;
+                        }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                    },
+                    Ok(Err(mobile_linux_api::ProcessError::Io(message)))
+                        if message.starts_with(
+                            lingxi_core::host::process::OWNED_SHELL_CLEANUP_UNVERIFIED,
+                        ) =>
+                    {
+                        false
+                    }
+                    Ok(Err(_)) => true, // the runner proved it never started a child
+                    Err(_) => false,
+                };
+                if verified {
+                    if let Some((registry, id)) = output_cleanup {
+                        registry.discard_bash_output(&id).await;
+                    }
+                    if let Some(lease) = retained {
+                        lease.release_verified();
+                    }
+                }
+            });
+            Err(ToolError::Io(
+                "background spawn timed out; process cleanup is unverified".into(),
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_host_foreground(
+    process: std::sync::Arc<dyn lingxi_core::host::ProcessRunner>,
+    command: lingxi_core::host::SandboxedCommand,
+    limit: Option<usize>,
+    cancel: lingxi_core::host::CancellationToken,
+    request: std::sync::Arc<tool_api::context::HostToolRequest>,
+    owner: String,
+    output_cleanup: Option<(
+        std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+        String,
+    )>,
+    sandbox_lease: Option<tool_api::sandbox_runner::SandboxLease>,
+) -> Result<Result<lingxi_core::host::ForegroundRunResult, mobile_linux_api::ProcessError>, ToolError>
+{
+    run_host_foreground_with_timeout(
+        process,
+        command,
+        limit,
+        cancel,
+        request,
+        owner,
+        output_cleanup,
+        sandbox_lease,
+        Duration::from_secs(20),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_host_foreground_with_timeout(
+    process: std::sync::Arc<dyn lingxi_core::host::ProcessRunner>,
+    command: lingxi_core::host::SandboxedCommand,
+    limit: Option<usize>,
+    cancel: lingxi_core::host::CancellationToken,
+    request: std::sync::Arc<tool_api::context::HostToolRequest>,
+    owner: String,
+    output_cleanup: Option<(
+        std::sync::Arc<dyn lingxi_core::host::task_registry::TaskRegistryHandle>,
+        String,
+    )>,
+    sandbox_lease: Option<tool_api::sandbox_runner::SandboxLease>,
+    cleanup_timeout: Duration,
+) -> Result<Result<lingxi_core::host::ForegroundRunResult, mobile_linux_api::ProcessError>, ToolError>
+{
+    let worker_request = request.clone();
+    let rejected_cleanup = output_cleanup.clone();
+    // A runner can panic after creating a child. Quarantine before its first
+    // poll so unwinding cannot drop the last sandbox lease prematurely.
+    let quarantine = OwnedSandboxQuarantine::new(sandbox_lease.clone());
+    let worker_quarantine = quarantine.clone();
+    match request.run_background(async move {
+        let _lease = sandbox_lease.clone();
+        let request_cancel = worker_request.cancellation_token();
+        if cancel.is_cancelled() || request_cancel.is_cancelled() {
+            worker_request.cancel();
+            if let Some((registry, id)) = &output_cleanup { registry.discard_bash_output(id).await; }
+            worker_quarantine.release_verified();
+            return Err(ToolError::Aborted);
+        }
+        let cancellation = async {
+            tokio::select! {
+                () = cancel.cancelled() => {},
+                () = request_cancel.cancelled() => {},
+            }
+        };
+        tokio::pin!(cancellation);
+        let polled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let did_poll = polled.clone();
+        let runner = process.clone();
+        let mut running = Box::pin(async move {
+            did_poll.store(true, std::sync::atomic::Ordering::SeqCst);
+            runner.run_foreground_with_output_limit(&command, limit).await
+        });
+        let result = tokio::select! {
+            biased;
+            () = &mut cancellation => {
+                worker_request.cancel();
+                if !polled.load(std::sync::atomic::Ordering::SeqCst) {
+                    if let Some((registry, id)) = &output_cleanup { registry.discard_bash_output(id).await; }
+                    worker_quarantine.release_verified();
+                    return Err(ToolError::Aborted);
+                }
+                // Keep the owner alive until the supervisor replies. A bounded
+                // failure is explicit if the process cannot be verified.
+                let joined = tokio::time::timeout(cleanup_timeout, async {
+                    loop {
+                        process.kill_owner_processes(&owner).await;
+                        tokio::select! {
+                            result = &mut running => break result,
+                            () = tokio::time::sleep(Duration::from_millis(10)) => {}
+                        }
+                    }
+                }).await;
+                match joined {
+                    Ok(Ok(result)) => {
+                        if let lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) = result.outcome {
+                            let cleanup = output_cleanup.clone();
+                            worker_request.track_background_with_cleanup(process.clone(), handle, owner.clone(), cleanup, sandbox_lease.clone());
+                        } else if let Some((registry, id)) = &output_cleanup {
+                            registry.discard_bash_output(id).await;
+                        }
+                        worker_quarantine.release_verified();
+                    }
+                    Ok(Err(mobile_linux_api::ProcessError::Io(message))) if message == "supervisor command cancelled" => {
+                        if let Some((registry, id)) = &output_cleanup { registry.discard_bash_output(id).await; }
+                        worker_quarantine.release_verified();
+                    }
+                    Ok(Err(error)) => {
+                        worker_request.record_cleanup_error(format!("foreground cancellation cleanup is unverified: {error}"));
+                    }
+                    Err(_) => {
+                        let retained = worker_quarantine.clone();
+                        let late_process = process.clone();
+                        let late_owner = owner.clone();
+                        let late_cleanup = output_cleanup.clone();
+                        // The request's bounded wait may finish first, but the
+                        // child-owning future must continue to be polled. A
+                        // late verified result is the only reason to release
+                        // quarantined sandbox resources.
+                        tokio::spawn(async move {
+                            loop {
+                                late_process.kill_owner_processes(&late_owner).await;
+                                tokio::select! {
+                                    outcome = &mut running => {
+                                        let verified = match outcome {
+                                            Ok(result) => match result.outcome {
+                                                lingxi_core::host::ForegroundOutcome::Completed(_) => true,
+                                                lingxi_core::host::ForegroundOutcome::MovedToBackground(handle) => {
+                                                    loop {
+                                                        if late_process.terminate_and_wait_owned_background(&handle, &late_owner).await.is_ok() { break true; }
+                                                        tokio::time::sleep(Duration::from_millis(250)).await;
+                                                    }
+                                                }
+                                            },
+                                            Err(mobile_linux_api::ProcessError::Io(message)) if message == "supervisor command cancelled" => true,
+                                            Err(_) => false,
+                                        };
+                                        if verified {
+                                            if let Some((registry, id)) = late_cleanup { registry.discard_bash_output(&id).await; }
+                                            retained.release_verified();
+                                        }
+                                        break;
+                                    }
+                                    () = tokio::time::sleep(Duration::from_millis(250)) => {}
+                                }
+                            }
+                        });
+                        worker_request.record_cleanup_error("foreground cancellation timed out; process cleanup is unverified".into());
+                    },
+                }
+                return Err(ToolError::Aborted);
+            }
+            result = &mut running => result,
+        };
+        if let Err(mobile_linux_api::ProcessError::Io(message)) = &result {
+            if message.starts_with(lingxi_core::host::process::OWNED_SHELL_CLEANUP_UNVERIFIED) {
+                worker_request.record_cleanup_error(message.clone());
+            }
+        }
+        if let Ok(lingxi_core::host::ForegroundRunResult {
+            outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(handle), ..
+        }) = &result {
+            // Covers timeout and on-demand moves before response publication.
+            let cleanup = output_cleanup.clone();
+            worker_request.track_background_with_cleanup(process, handle.clone(), owner, cleanup, sandbox_lease.clone());
+        }
+        if !matches!(&result, Err(mobile_linux_api::ProcessError::Io(message)) if message.starts_with(lingxi_core::host::process::OWNED_SHELL_CLEANUP_UNVERIFIED)) {
+            worker_quarantine.release_verified();
+        }
+        Ok(result)
+    }).await {
+        Ok(Some(result)) => result,
+        Ok(None) => {
+            if let Some((registry, id)) = rejected_cleanup { registry.discard_bash_output(&id).await; }
+            quarantine.release_verified();
+            Err(ToolError::Aborted)
+        }
+        Err(error) => Err(ToolError::Internal(format!("owned foreground task failed: {error}").into())),
+    }
+}
+
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
@@ -2753,6 +3288,15 @@ impl Tool for BashTool {
         // claude-code `BashTool.tsx:434-436`: `isConcurrencySafe` delegates to
         // `isReadOnly`.
         self.is_read_only(input)
+    }
+
+    fn interrupt_behavior(
+        &self,
+        _input: &Utf16JsonProjection,
+    ) -> tool_api::tool_trait::InterruptBehavior {
+        // Bash performs its own process-tree cleanup on cancellation. The
+        // dispatcher must keep polling it rather than dropping its future.
+        tool_api::tool_trait::InterruptBehavior::Block
     }
 
     fn is_read_only(&self, input: &Utf16JsonProjection) -> bool {
@@ -3046,6 +3590,16 @@ impl Tool for BashTool {
         // non-streaming caller, in which case the run is awaited directly (no
         // behavior change).
         let cancel = ctx.cancel.clone();
+        // An MCP request owns its shell independently of ordinary turn
+        // interruption. A unique owner prevents cancelling one request from
+        // killing another request's concurrent shell.
+        let host_request = match &ctx.host_tool_cancellation {
+            tool_api::context::HostToolCancellation::Ordinary => None,
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(request) => {
+                Some(request.clone())
+            }
+        };
+        let host_cancel_owner = host_request.as_ref().map(|request| request.process_owner());
 
         let cmd_str = input
             .string_at("/command")
@@ -3289,6 +3843,7 @@ impl Tool for BashTool {
             None => normalized_cmd,
         };
 
+        let mut sandbox_lease = None;
         let inner_cmd = match decision {
             // HP-6: `sandbox.credentials` must hold even when THIS command is
             // not sandbox-wrapped. `excludedCommands` and
@@ -3321,7 +3876,7 @@ impl Tool for BashTool {
                 match self
                     .ctx
                     .sandbox_runner
-                    .wrap(
+                    .wrap_with_lease(
                         &spawn_cmd,
                         &rooted_runtime,
                         self.ctx.platform,
@@ -3330,7 +3885,10 @@ impl Tool for BashTool {
                     )
                     .await
                 {
-                    Ok(wrapped) => wrapped,
+                    Ok(wrapped) => {
+                        sandbox_lease = Some(wrapped.lease);
+                        wrapped.command
+                    }
                     Err(sandbox::wrap::SandboxWrapError::Unsupported(s)) => {
                         emit_failed(&self.ctx.bus, &request_id, "sandbox_refused", started_at)
                             .await;
@@ -3350,141 +3908,297 @@ impl Tool for BashTool {
             }
         };
 
+        // A real host-owned sandbox lease cannot currently be transferred to
+        // an independent supervisor across source-process exit. Refuse an
+        // explicit handoff before spawning; keep ordinary foreground execution.
+        let host_detach_forbidden =
+            host_request.is_some() && sandbox_lease.as_ref().is_some_and(|lease| !lease.is_noop());
+        if run_bg && host_detach_forbidden {
+            return Err(ToolError::InvalidInput(
+                "This host cannot transfer sandbox resources to an independent background process"
+                    .into(),
+            ));
+        }
+
         // ===== Background path (TS `!result.backgroundTaskId`) =====
         // Background tasks never mutate the shared cwd, so they skip the
         // `pwd -P` readback entirely — but they START in it, same as the
         // foreground arm (see the shared `cwd` derivation above).
         if run_bg {
-            // bg-08: the oracle emits this the moment an explicit background
-            // launch is taken (`i("tengu_bash_command_explicitly_backgrounded",
-            // {command_type:Npe(ve)})`, `src_160988549.js` @4343453).
-            {
-                let mut meta: LogEventMetadata = HashMap::new();
-                meta.insert(
-                    "command_type".into(),
-                    AnalyticsValue::String(telemetry_command_type(&cmd_str).into()),
-                );
-                self.ctx
-                    .bus
-                    .log_event(BASH_EXPLICITLY_BACKGROUNDED, meta)
+            let tool = self.clone();
+            let request = host_request.clone();
+            let owner = host_cancel_owner.clone();
+            let launch = async move {
+                if request
+                    .as_ref()
+                    .is_some_and(|request| request.is_cancelled())
+                {
+                    return Err(ToolError::Aborted);
+                }
+                // bg-08: the oracle emits this the moment an explicit background
+                // launch is taken (`i("tengu_bash_command_explicitly_backgrounded",
+                // {command_type:Npe(ve)})`, `src_160988549.js` @4343453).
+                {
+                    let mut meta: LogEventMetadata = HashMap::new();
+                    meta.insert(
+                        "command_type".into(),
+                        AnalyticsValue::String(telemetry_command_type(&cmd_str).into()),
+                    );
+                    tool.ctx
+                        .bus
+                        .log_event(BASH_EXPLICITLY_BACKGROUNDED, meta)
+                        .await;
+                }
+                let pcmd = SbxCommand {
+                    command: shell,
+                    // BASH.4: login-shell init (see the foreground site) — `-l`
+                    // after `-c`, matching `bashProvider.ts:201-205` with the
+                    // snapshot path deferred.
+                    args: vec!["-c".into(), "-l".into(), inner_cmd],
+                    // The PERSISTENT shell cwd, the SAME binding the foreground
+                    // arm uses. claude-code has ONE spawn for both modes (`vV`);
+                    // `run_in_background` only decides what happens AFTER the shell
+                    // is already running in the session cwd, so a `cd sub` from an
+                    // earlier foreground call must be visible here too. Spawning in
+                    // the workspace instead made a backgrounded command silently
+                    // run somewhere else than the command before it.
+                    cwd: Some(cwd.clone()),
+                    env: HashMap::new(),
+                    timeout: Some(Duration::from_millis(timeout_ms)),
+                    stdin: None,
+                };
+                let sandboxed = tool
+                    .ctx
+                    .sandbox
+                    .bypass_with_audit(pcmd, "bash_tool_call")
+                    .with_require_group_cleanup_on_exit(request.is_some())
+                    .with_background_timeout(
+                        resolve_background_timeout_ms(&input, true).map(Duration::from_millis),
+                    );
+                // Mint the task identity BEFORE spawning, so the id handed to the
+                // model, the record the registry keeps and the file the child
+                // writes to are one identity (claude-code `vV` mints it in the one
+                // shell spawn; `Xne` then registers that same id). Without a wired
+                // registry the runner keeps minting its own — the previous
+                // behaviour, retained for hosts that have no task registry.
+                let bound = tool
+                    .allocate_task_identity_with_ownership(request.is_some())
                     .await;
-            }
-            let pcmd = SbxCommand {
-                command: shell,
-                // BASH.4: login-shell init (see the foreground site) — `-l`
-                // after `-c`, matching `bashProvider.ts:201-205` with the
-                // snapshot path deferred.
-                args: vec!["-c".into(), "-l".into(), inner_cmd],
-                // The PERSISTENT shell cwd, the SAME binding the foreground
-                // arm uses. claude-code has ONE spawn for both modes (`vV`);
-                // `run_in_background` only decides what happens AFTER the shell
-                // is already running in the session cwd, so a `cd sub` from an
-                // earlier foreground call must be visible here too. Spawning in
-                // the workspace instead made a backgrounded command silently
-                // run somewhere else than the command before it.
-                cwd: Some(cwd.clone()),
-                env: HashMap::new(),
-                timeout: Some(Duration::from_millis(timeout_ms)),
-                stdin: None,
-            };
-            let sandboxed = self
-                .ctx
-                .sandbox
-                .bypass_with_audit(pcmd, "bash_tool_call")
-                .with_background_timeout(
-                    resolve_background_timeout_ms(&input, true).map(Duration::from_millis),
-                );
-            // Mint the task identity BEFORE spawning, so the id handed to the
-            // model, the record the registry keeps and the file the child
-            // writes to are one identity (claude-code `vV` mints it in the one
-            // shell spawn; `Xne` then registers that same id). Without a wired
-            // registry the runner keeps minting its own — the previous
-            // behaviour, retained for hosts that have no task registry.
-            let bound = self.allocate_task_identity().await;
-            let sandboxed = self.bind_identity(sandboxed, bound.as_ref(), None);
-            let sandboxed =
-                sandboxed.with_process_owner(ctx.agent_id.map(|id| id.to_string()).or_else(|| {
-                    self.ctx
-                        .side_chat
-                        .then(|| self.ctx.session_id.map(|id| id.to_string()))
-                        .flatten()
+                let sandboxed =
+                    tool.bind_identity(sandboxed, bound.as_ref(), None, sandbox_lease.clone());
+                let sandboxed = if let Some(lease) = sandbox_lease.clone() {
+                    sandboxed.with_lifetime_guard(lease)
+                } else {
+                    sandboxed
+                };
+                if sandbox_lease.as_ref().is_some_and(|lease| !lease.is_noop())
+                    && !tool.ctx.process.supports_background_lifetime_guard()
+                {
+                    if let (Some(registry), Some((id, _))) = (&tool.ctx.task_registry, &bound) {
+                        registry.discard_bash_output(id).await;
+                    }
+                    return Err(ToolError::InvalidInput(
+                        "This runner cannot retain sandbox resources for a background process"
+                            .into(),
+                    ));
+                }
+                let sandboxed = sandboxed.with_process_owner(owner.clone().or_else(|| {
+                    ctx.agent_id.map(|id| id.to_string()).or_else(|| {
+                        tool.ctx
+                            .side_chat
+                            .then(|| tool.ctx.session_id.map(|id| id.to_string()))
+                            .flatten()
+                    })
                 }));
-            return match self.ctx.process.spawn_background(&sandboxed).await {
-                Ok(handle) => {
-                    // Only claim the registry identity if the runner actually
-                    // honoured it; a runner that mints its own id is writing to
-                    // its own file, so the registry must not advertise a path
-                    // nothing writes to.
-                    let bound = self.take_honoured_identity(bound, &handle).await;
-                    let task_id = self
-                        .acknowledge_background_task(
+                if request.is_some()
+                    && (owner.is_none()
+                        || bound.is_none()
+                        || tool.ctx.task_registry.is_none()
+                        || !tool
+                            .ctx
+                            .process
+                            .supports_verified_background_stop(&sandboxed)
+                        || request
+                            .as_ref()
+                            .is_some_and(|request| request.is_cancelled()))
+                {
+                    if let (Some((task_id, _)), Some(registry)) =
+                        (bound.as_ref(), tool.ctx.task_registry.as_ref())
+                    {
+                        let _ = registry.settle_background_bash(task_id, None, false).await;
+                        registry.discard_bash_output(task_id).await;
+                    }
+                    return if request
+                        .as_ref()
+                        .is_some_and(|request| request.is_cancelled())
+                    {
+                        Err(ToolError::Aborted)
+                    } else {
+                        Err(ToolError::InvalidInput(
+                            "This host cannot verify background process cleanup".into(),
+                        ))
+                    };
+                }
+                // A timed-out launch remains independently owned until its
+                // late handle can be stopped and termination verified.
+                let spawned = if let Some(request) = &request {
+                    spawn_host_background_with_timeout(
+                        tool.ctx.process.clone(),
+                        sandboxed.clone(),
+                        request.clone(),
+                        owner.clone().expect("owned shell has an owner"),
+                        bound.as_ref().and_then(|(id, _)| {
+                            tool.ctx
+                                .task_registry
+                                .clone()
+                                .map(|registry| (registry, id.clone()))
+                        }),
+                        sandbox_lease.clone(),
+                        Duration::from_secs(20),
+                    )
+                    .await?
+                } else {
+                    tool.ctx.process.spawn_background(&sandboxed).await
+                };
+                match spawned {
+                    Ok(handle) => {
+                        // Retain ownership before any registration or ack can
+                        // block or fail. Cancellation may race this exact point.
+                        if let (Some(request), Some(owner)) = (&request, &owner) {
+                            request.track_background_with_cleanup(
+                                tool.ctx.process.clone(),
+                                handle.clone(),
+                                owner.clone(),
+                                bound.as_ref().and_then(|(id, _)| {
+                                    tool.ctx
+                                        .task_registry
+                                        .clone()
+                                        .map(|registry| (registry, id.clone()))
+                                }),
+                                sandbox_lease.clone(),
+                            );
+                            if bound.as_ref().is_none_or(|(id, _)| id != &handle.task_id) {
+                                return Err(ToolError::Internal(
+                                    "owned background identity does not match the registry".into(),
+                                ));
+                            }
+                        }
+                        // Only claim the registry identity if the runner actually
+                        // honoured it; a runner that mints its own id is writing to
+                        // its own file, so the registry must not advertise a path
+                        // nothing writes to.
+                        let bound = tool.take_honoured_identity(bound, &handle).await;
+                        let acknowledge = tool.acknowledge_background_task(
                             &ctx,
                             bound.as_ref(),
                             &cmd_str,
                             background_description_source(&input),
                             &cwd,
                             &handle,
-                        )
-                        .await?;
-                    let out_path = match bound.as_ref() {
-                        Some((_, path)) => path.clone(),
-                        None => task_output_path(&handle.task_id).display().to_string(),
-                    };
-                    // Model-facing background note (`y` in the binary's mapper,
-                    // built by `$2t`): `Command running in background with ID: …
-                    // Output is being written to: … use Read on that file path.`
-                    // (offset 183106320), with the 2.1.238 lifetime sentence
-                    // selected by `reapedAtFinalResponse`.
-                    let reaped = background_ends_with_final_response(&ctx);
-                    let mut note = background_note(&task_id, &out_path, None, reaped);
-                    // PARITY 2.1.210 (`backgroundCwdHint`): when the backgrounded
-                    // command contains a statement-level `cd`/`pushd`/`popd`/`chdir`
-                    // (`ror`), the binary appends this hint on a new line so the
-                    // model does not assume the directory change took effect for
-                    // subsequent commands (the bg run never mutates the session cwd).
-                    if crate::read_only::command_has_statement_level_cd(&cmd_str) {
-                        note.push_str(&format!(
+                            request.is_some(),
+                        );
+                        let task_id = if request.is_some() {
+                            match tokio::time::timeout(Duration::from_secs(20), acknowledge).await {
+                                Ok(result) => result?,
+                                Err(_) => {
+                                    return Err(ToolError::Io(
+                                        "background registration timed out".into(),
+                                    ));
+                                }
+                            }
+                        } else {
+                            acknowledge.await?
+                        };
+                        if request
+                            .as_ref()
+                            .is_some_and(|request| !request.mark_background_ready(&handle))
+                        {
+                            return Err(ToolError::Aborted);
+                        }
+                        let out_path = match bound.as_ref() {
+                            Some((_, path)) => path.clone(),
+                            None => task_output_path(&handle.task_id).display().to_string(),
+                        };
+                        // Model-facing background note (`y` in the binary's mapper,
+                        // built by `$2t`): `Command running in background with ID: …
+                        // Output is being written to: … use Read on that file path.`
+                        // (offset 183106320), with the 2.1.238 lifetime sentence
+                        // selected by `reapedAtFinalResponse`.
+                        let reaped = background_ends_with_final_response(&ctx);
+                        let mut note = background_note(&task_id, &out_path, None, reaped);
+                        // PARITY 2.1.210 (`backgroundCwdHint`): when the backgrounded
+                        // command contains a statement-level `cd`/`pushd`/`popd`/`chdir`
+                        // (`ror`), the binary appends this hint on a new line so the
+                        // model does not assume the directory change took effect for
+                        // subsequent commands (the bg run never mutates the session cwd).
+                        if crate::read_only::command_has_statement_level_cd(&cmd_str) {
+                            note.push_str(&format!(
                             "\nSession cwd remains {}; directory changes made by the backgrounded command do not apply to subsequent commands.",
                             cwd.display()
                         ));
+                        }
+                        let model_content = bash_model_content("", "", false, Some(&note));
+                        Ok(ToolCallResult {
+                            // Backgrounded launch: the binary's result data is the
+                            // main shape with empty stdout/stderr + `backgroundTaskId`
+                            // (the ID + output path ride in the model note, NOT data).
+                            data: bash_result_data(
+                                "",
+                                "",
+                                false,
+                                false,
+                                None,
+                                crate::silent::is_silent_bash_command(&cmd_str),
+                                Some(&task_id),
+                                None,
+                                None,
+                                reaped,
+                            ),
+                            model_content: Some(model_content.into()),
+                            new_messages: vec![],
+                            context_modifier: None,
+                            is_error: false,
+                            mcp_meta: None,
+                            subagent_hooks_fired: false,
+                        })
                     }
-                    let model_content = bash_model_content("", "", false, Some(&note));
-                    Ok(ToolCallResult {
-                        // Backgrounded launch: the binary's result data is the
-                        // main shape with empty stdout/stderr + `backgroundTaskId`
-                        // (the ID + output path ride in the model note, NOT data).
-                        data: bash_result_data(
-                            "",
-                            "",
-                            false,
-                            false,
-                            None,
-                            crate::silent::is_silent_bash_command(&cmd_str),
-                            Some(&task_id),
-                            None,
-                            None,
-                            reaped,
-                        ),
-                        model_content: Some(model_content.into()),
-                        new_messages: vec![],
-                        context_modifier: None,
-                        is_error: false,
-                        mcp_meta: None,
-                        subagent_hooks_fired: false,
-                    })
-                }
-                Err(e) => {
-                    // The identity was allocated before spawning. Retire its
-                    // pending receipt and spool if no task row was published.
-                    if let (Some((task_id, _)), Some(registry)) =
-                        (bound.as_ref(), self.ctx.task_registry.as_ref())
-                    {
-                        let _ = registry.settle_background_bash(task_id, None, false).await;
-                        registry.discard_bash_output(task_id).await;
+                    Err(e) => {
+                        if let (Some(request), mobile_linux_api::ProcessError::Io(message)) =
+                            (&request, &e)
+                        {
+                            if message.starts_with(
+                                lingxi_core::host::process::OWNED_SHELL_CLEANUP_UNVERIFIED,
+                            ) {
+                                if let Some(lease) = sandbox_lease.clone() {
+                                    request.retain_sandbox_lease(lease);
+                                }
+                                request.record_cleanup_error(message.clone());
+                                return Err(ToolError::Io(message.clone().into()));
+                            }
+                        }
+                        // The identity was allocated before spawning. Retire its
+                        // pending receipt and spool if no task row was published.
+                        if let (Some((task_id, _)), Some(registry)) =
+                            (bound.as_ref(), tool.ctx.task_registry.as_ref())
+                        {
+                            let _ = registry.settle_background_bash(task_id, None, false).await;
+                            registry.discard_bash_output(task_id).await;
+                        }
+                        emit_failed(&tool.ctx.bus, &request_id, "spawn_failed", started_at).await;
+                        Err(ToolError::Io(format!("{e}").into()))
                     }
-                    emit_failed(&self.ctx.bus, &request_id, "spawn_failed", started_at).await;
-                    Err(ToolError::Io(format!("{e}").into()))
                 }
+            };
+            return if let Some(request) = host_request {
+                match request.run_background(launch).await {
+                    Ok(Some(result)) => result,
+                    Ok(None) => Err(ToolError::Aborted),
+                    Err(error) => Err(ToolError::Internal(
+                        format!("background launch task failed: {error}").into(),
+                    )),
+                }
+            } else {
+                launch.await
             };
         }
 
@@ -3520,11 +4234,12 @@ impl Tool for BashTool {
             .ctx
             .sandbox
             .bypass_with_audit(pcmd, "bash_tool_call")
-            .with_auto_background_on_timeout(can_auto_background)
+            .with_require_group_cleanup_on_exit(host_request.is_some())
+            .with_auto_background_on_timeout(can_auto_background && !host_detach_forbidden)
             .with_background_timeout(
                 resolve_background_timeout_ms(&input, false).map(Duration::from_millis),
             )
-            .with_process_owner(
+            .with_process_owner(host_cancel_owner.clone().or_else(|| {
                 ctx.agent_id
                     .as_ref()
                     .map(ToString::to_string)
@@ -3540,8 +4255,8 @@ impl Tool for BashTool {
                         } else {
                             owner
                         }
-                    }),
-            );
+                    })
+            }));
         // A foreground command can still be moved to the background when it
         // exceeds its timeout (claude-code 2.1.210 `timedOutAfterMs`), and the
         // id it is then given must be a registry id for the same reason the
@@ -3552,7 +4267,8 @@ impl Tool for BashTool {
         let fg_bound = if self.ctx.side_chat {
             None
         } else {
-            self.allocate_task_identity().await
+            self.allocate_task_identity_with_ownership(host_request.is_some())
+                .await
         };
         // The other end of claude-code `I_t`'s `t.background(e)`. Ctrl+B,
         // background-all and the SDK `background_tasks` request all reach a
@@ -3560,16 +4276,59 @@ impl Tool for BashTool {
         // exactly like the deadline firing.
         let on_demand = fg_bound
             .as_ref()
-            .filter(|_| self.ctx.process.supports_foreground_backgrounding())
+            .filter(|_| {
+                !host_detach_forbidden && self.ctx.process.supports_foreground_backgrounding()
+            })
             .map(|_| std::sync::Arc::new(tokio::sync::Notify::new()));
-        let sandboxed = self.bind_identity(sandboxed, fg_bound.as_ref(), on_demand.clone());
+        let sandboxed = self.bind_identity(
+            sandboxed,
+            fg_bound.as_ref(),
+            on_demand.clone(),
+            sandbox_lease.clone(),
+        );
+        let sandboxed = if let Some(lease) = sandbox_lease.clone() {
+            sandboxed.with_lifetime_guard(lease)
+        } else {
+            sandboxed
+        };
+        if sandbox_lease.as_ref().is_some_and(|lease| !lease.is_noop())
+            && ((can_auto_background && !host_detach_forbidden) || on_demand.is_some())
+            && !self.ctx.process.supports_background_lifetime_guard()
+        {
+            if let (Some(registry), Some((id, _))) = (&self.ctx.task_registry, &fg_bound) {
+                registry.discard_bash_output(id).await;
+            }
+            return Err(ToolError::InvalidInput(
+                "This runner cannot retain sandbox resources for a background process".into(),
+            ));
+        }
+        if host_request.is_some()
+            && (fg_bound.is_none()
+                || self.ctx.task_registry.is_none()
+                || !self
+                    .ctx
+                    .process
+                    .supports_verified_background_stop(&sandboxed))
+        {
+            if let (Some(registry), Some((task_id, _))) =
+                (self.ctx.task_registry.as_ref(), fg_bound.as_ref())
+            {
+                registry.discard_bash_output(task_id).await;
+            }
+            return Err(ToolError::InvalidInput(
+                "This host cannot verify owned process cleanup".into(),
+            ));
+        }
         // claude-code `U6t` after `cnr` (2000) ms: a foreground command that is
         // still running becomes a visible `local_bash` row so `/tasks`, Ctrl+B
         // and background-all have something to address. Short commands never
         // appear — arming at spawn would flash a row for every `ls`.
         let background_reason = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
-        let settled = std::sync::Arc::new(tokio::sync::watch::channel(false).0);
-        let _background_settled = BackgroundRequestSettled(settled.clone());
+        let settled = std::sync::Arc::new(tokio::sync::watch::channel(None).0);
+        let mut background_settled = BackgroundRequestSettled {
+            sender: settled.clone(),
+            outcome: lingxi_core::host::task_registry::TaskBackgroundOutcome::Unknown,
+        };
         let arming = match (fg_bound.as_ref(), on_demand.as_ref()) {
             (Some((task_id, _)), Some(notify)) => self.arm_foreground_record(
                 &ctx,
@@ -3602,53 +4361,82 @@ impl Tool for BashTool {
         // background (returning `MovedToBackground`) rather than killing it; the
         // default trait impl still maps a normal finish to `Completed` and a
         // timeout to `Err(Timeout)`, preserving the interrupted-result fallback.
-        let run_fut = self.ctx.process.run_foreground_with_output_limit(
-            &sandboxed,
-            if self.ctx.side_chat {
-                None
-            } else {
-                Some(bash_max_output_length())
-            },
-        );
-        tokio::pin!(run_fut);
-        let run_result = match &cancel {
-            Some(token) => {
-                tokio::select! {
-                    biased;
-                    () = token.cancelled() => {
-                        if self.ctx.side_chat {
-                            if let Some(owner) = ctx.agent_id.as_ref().map(ToString::to_string).or_else(|| self.ctx.session_id.map(|id| id.to_string())) {
-                                loop {
-                                    self.ctx.process.kill_owner_processes(&format!("side:{owner}")).await;
-                                    tokio::select! {
-                                        result = &mut run_fut => {
-                                            if let Err(error) = result {
-                                                if self.ctx.note_side_chat_cleanup_failure(&error.to_string()) { return Err(ToolError::Internal(error.to_string())); }
-                                            }
-                                            break;
-                                        }
-                                        () = tokio::time::sleep(Duration::from_millis(10)) => {}
-                                    }
-                                }
-                            }
-                            self.ctx.sandbox_runner.cleanup_after_command().await;
-                            return Err(ToolError::Aborted);
-                        }
-                        // `turnAbortBackgrounds: !Dl()` applies even before the
-                        // 2 s UI row is armed. Keep polling the same runner so
-                        // detachment does not drop (and kill) its OS child.
-                        if !self.ctx.side_chat && !crate::prompt::background_tasks_disabled() {
-                            if let Some(notify) = &on_demand {
-                                let _ = background_reason.compare_exchange(0, lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort as u8, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
-                                notify.notify_one();
-                                run_fut.await
-                            } else { return Err(ToolError::Aborted); }
-                        } else { return Err(ToolError::Aborted); }
-                    }
-                    res = &mut run_fut => res,
+        let run_result = if let (Some(request), Some(owner)) =
+            (host_request.clone(), host_cancel_owner.clone())
+        {
+            match run_host_foreground(
+                self.ctx.process.clone(),
+                sandboxed.clone(),
+                if self.ctx.side_chat {
+                    None
+                } else {
+                    Some(bash_max_output_length())
+                },
+                cancel.clone().unwrap_or_default(),
+                request,
+                owner,
+                self.ctx
+                    .task_registry
+                    .clone()
+                    .zip(fg_bound.as_ref().map(|(id, _)| id.clone())),
+                sandbox_lease.clone(),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(ToolError::Aborted) => return Err(ToolError::Aborted),
+                Err(error) => {
+                    return Err(error);
                 }
             }
-            None => run_fut.await,
+        } else {
+            let mut run_fut = Box::pin(self.ctx.process.run_foreground_with_output_limit(
+                &sandboxed,
+                if self.ctx.side_chat {
+                    None
+                } else {
+                    Some(bash_max_output_length())
+                },
+            ));
+            let run_result = match &cancel {
+                Some(token) => {
+                    tokio::select! {
+                        biased;
+                        () = token.cancelled() => {
+                            if self.ctx.side_chat {
+                                if let Some(owner) = ctx.agent_id.as_ref().map(ToString::to_string).or_else(|| self.ctx.session_id.map(|id| id.to_string())) {
+                                    loop {
+                                        self.ctx.process.kill_owner_processes(&format!("side:{owner}")).await;
+                                        tokio::select! {
+                                            result = &mut run_fut => {
+                                                if let Err(error) = result {
+                                                    if self.ctx.note_side_chat_cleanup_failure(&error.to_string()) { return Err(ToolError::Internal(error.to_string())); }
+                                                }
+                                                break;
+                                            }
+                                            () = tokio::time::sleep(Duration::from_millis(10)) => {}
+                                        }
+                                    }
+                                }
+                                return Err(ToolError::Aborted);
+                            }
+                            // `turnAbortBackgrounds: !Dl()` applies even before the
+                            // 2 s UI row is armed. Keep polling the same runner so
+                            // detachment does not drop (and kill) its OS child.
+                            if !self.ctx.side_chat && !crate::prompt::background_tasks_disabled() {
+                                if let Some(notify) = &on_demand {
+                                    let _ = background_reason.compare_exchange(0, lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort as u8, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
+                                    notify.notify_one();
+                                    run_fut.await
+                                } else { return Err(ToolError::Aborted); }
+                            } else { return Err(ToolError::Aborted); }
+                        }
+                        res = &mut run_fut => res,
+                    }
+                }
+                None => run_fut.await,
+            };
+            run_result
         };
         if let Err(error) = &run_result {
             self.ctx.note_side_chat_cleanup_failure(&error.to_string());
@@ -3656,7 +4444,6 @@ impl Tool for BashTool {
         // The wrapped command has finished: tear down any per-command sandbox
         // state (e.g. bwrap mount points). No-op for the default
         // `LegacyWrapRunner`; only the live runner has anything to clean up.
-        self.ctx.sandbox_runner.cleanup_after_command().await;
         let sandbox_violation_lines = self
             .ctx
             .sandbox_runner
@@ -3680,18 +4467,34 @@ impl Tool for BashTool {
                 ..
             })
         );
+        if matches!(
+            &run_result,
+            Ok(lingxi_core::host::ForegroundRunResult {
+                outcome: lingxi_core::host::ForegroundOutcome::Completed(_),
+                ..
+            })
+        ) {
+            background_settled.outcome =
+                lingxi_core::host::task_registry::TaskBackgroundOutcome::NotBackgrounded;
+        }
         // claude-code `W6t`: a command that finished in the FOREGROUND gives its
         // armed row back. A command that moved to the background keeps it — it
         // owns a live child now, and the background arm below flips
         // `isBackgrounded` and takes over the record.
+        let output_cleanup_supervised = arming.is_some();
         if let Some(arming) = arming {
-            if moved_to_background {
+            if moved_to_background && !host_detach_forbidden {
                 arming.keep_for_background().await;
             } else {
                 arming.disarm().await;
             }
         }
-        if !moved_to_background {
+        if moved_to_background && host_detach_forbidden {
+            return Err(ToolError::Internal(
+                "A supervised process unexpectedly moved to the background without transferable sandbox resources".into(),
+            ));
+        }
+        if !moved_to_background && !output_cleanup_supervised {
             if let (Some(registry), Some((task_id, _))) =
                 (self.ctx.task_registry.as_ref(), fg_bound.as_ref())
             {
@@ -3753,17 +4556,79 @@ impl Tool for BashTool {
                 // TaskOutput / TaskStop / TaskList and its completion produces a
                 // `<task-notification>` (claude-code `wn` → `Xne` on the
                 // timeout path).
+                if host_request.is_some()
+                    && fg_bound
+                        .as_ref()
+                        .is_none_or(|(id, _)| id != &handle.task_id)
+                {
+                    return Err(ToolError::Internal(
+                        "owned background identity does not match the registry".into(),
+                    ));
+                }
                 let fg_bound = self.take_honoured_identity(fg_bound, &handle).await;
-                let task_id = self
-                    .acknowledge_background_task(
+                let task_id = if let Some(request) = host_request.clone() {
+                    let tool = self.clone();
+                    let task_ctx = ctx.clone();
+                    let task_bound = fg_bound.clone();
+                    let task_command = cmd_str.clone();
+                    let task_description = background_description_source(&input);
+                    let task_cwd = cwd.clone();
+                    let task_handle = handle.clone();
+                    let task_request = request.clone();
+                    match request
+                        .run_background(async move {
+                            let acknowledged = tokio::time::timeout(
+                                Duration::from_secs(20),
+                                tool.acknowledge_background_task(
+                                    &task_ctx,
+                                    task_bound.as_ref(),
+                                    &task_command,
+                                    task_description,
+                                    &task_cwd,
+                                    &task_handle,
+                                    true,
+                                ),
+                            )
+                            .await;
+                            let id = match acknowledged {
+                                Ok(result) => result?,
+                                Err(_) => {
+                                    return Err(ToolError::Io(
+                                        "background registration timed out".into(),
+                                    ));
+                                }
+                            };
+                            if !task_request.mark_background_ready(&task_handle) {
+                                return Err(ToolError::Aborted);
+                            }
+                            Ok(id)
+                        })
+                        .await
+                    {
+                        Ok(Some(result)) => result?,
+                        Ok(None) => return Err(ToolError::Aborted),
+                        Err(error) => {
+                            return Err(ToolError::Internal(
+                                format!("background registration task failed: {error}").into(),
+                            ))
+                        }
+                    }
+                } else {
+                    self.acknowledge_background_task(
                         &ctx,
                         fg_bound.as_ref(),
                         &cmd_str,
                         background_description_source(&input),
                         &cwd,
                         &handle,
+                        false,
                     )
-                    .await?;
+                    .await?
+                };
+                // Keep the actual registration/binding/runner acknowledgement
+                // as the receipt for a successful background request.
+                background_settled.outcome =
+                    lingxi_core::host::task_registry::TaskBackgroundOutcome::Backgrounded;
                 let out_path = match fg_bound.as_ref() {
                     Some((_, path)) => path.clone(),
                     None => task_output_path(&handle.task_id).display().to_string(),
@@ -6518,7 +7383,7 @@ mod tests {
     use lingxi_core::host::process::{
         ForegroundRunResult, ProcessHandle, ProcessOutputFile, ProcessRunner,
     };
-    use lingxi_core::host::sandbox::SandboxedCommand;
+    use lingxi_core::host::sandbox::{ProcessCommand as SbxCommand, SandboxedCommand};
     use mobile_linux_api::ProcessError;
     use std::sync::Arc;
 
@@ -6530,8 +7395,9 @@ mod tests {
         }
         async fn spawn_background(
             &self,
-            _: &SandboxedCommand,
+            cmd: &SandboxedCommand,
         ) -> Result<ProcessHandle, ProcessError> {
+            assert!(!cmd.requires_group_cleanup_on_exit());
             Ok(ProcessHandle {
                 task_id: "task-abc123".into(),
                 pid: 4242,
@@ -6634,6 +7500,7 @@ mod tests {
         bound_pids: std::sync::Mutex<Vec<u32>>,
         output_chunks: std::sync::Mutex<Vec<(String, String)>>,
         output_flushes: std::sync::Mutex<Vec<String>>,
+        unverified: std::sync::Mutex<Vec<(String, String)>>,
 
         allocated: std::sync::Mutex<Vec<String>>,
         registered: std::sync::Mutex<
@@ -6647,6 +7514,18 @@ mod tests {
         armed: std::sync::Mutex<Vec<String>>,
         requesters: std::sync::Mutex<Vec<String>>,
         unarmed: std::sync::Mutex<Vec<String>>,
+        foreground_instances: std::sync::Mutex<std::collections::HashMap<String, Arc<()>>>,
+        registration_gate: Option<Arc<ForegroundRegistrationGate>>,
+        binding_gate: Option<Arc<ForegroundRegistrationGate>>,
+        requester:
+            std::sync::Mutex<Option<Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>>>,
+        withdrawal_attempted: tokio::sync::Notify,
+    }
+
+    #[derive(Default)]
+    struct ForegroundRegistrationGate {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
     }
 
     #[tokio::test]
@@ -6655,6 +7534,8 @@ mod tests {
         let registry = std::sync::Arc::new(RecordingRegistry::default());
         let sink = BackgroundBashExitSink {
             registry: registry.clone(),
+            _sandbox_lease: None,
+            quarantined_lease: Default::default(),
         };
         assert!(sink.manages_output());
         sink.append_output("boutput01", "[stderr] 中🦀")
@@ -6671,8 +7552,62 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn background_bash_sink_keeps_unverified_lease_after_observer_drop() {
+        use lingxi_core::host::BackgroundExitSink as _;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let registry = std::sync::Arc::new(RecordingRegistry::default());
+        let retained_releases = std::sync::Arc::new(AtomicUsize::new(0));
+        let retained = BackgroundBashExitSink {
+            registry: registry.clone(),
+            _sandbox_lease: Some(tool_api::sandbox_runner::SandboxLease::new({
+                let count = retained_releases.clone();
+                move || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
+            })),
+            quarantined_lease: Default::default(),
+        };
+        retained
+            .on_wait_failure("b-unverified", "wait failed")
+            .await;
+        drop(retained);
+        assert_eq!(retained_releases.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            registry.unverified.lock().unwrap().as_slice(),
+            &[("b-unverified".into(), "wait failed".into())]
+        );
+
+        let verified_releases = std::sync::Arc::new(AtomicUsize::new(0));
+        let verified = BackgroundBashExitSink {
+            registry,
+            _sandbox_lease: Some(tool_api::sandbox_runner::SandboxLease::new({
+                let count = verified_releases.clone();
+                move || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                }
+            })),
+            quarantined_lease: Default::default(),
+        };
+        verified.on_wait_failure("b-recovered", "wait failed").await;
+        verified.on_cleanup_verified("b-recovered").await;
+        drop(verified);
+        assert_eq!(verified_releases.load(Ordering::SeqCst), 1);
+    }
+
     #[async_trait::async_trait]
     impl lingxi_core::host::task_registry::TaskRegistryHandle for RecordingRegistry {
+        async fn settle_background_bash_unverified(
+            &self,
+            task_id: &str,
+            reason: &str,
+        ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
+            self.unverified
+                .lock()
+                .unwrap()
+                .push((task_id.into(), reason.into()));
+            Ok(())
+        }
         async fn append_bash_output(
             &self,
             task_id: &str,
@@ -6701,8 +7636,56 @@ mod tests {
             self.armed.lock().unwrap().push(task_id.to_string());
             Ok(())
         }
+        async fn register_foreground_bash_owned(
+            &self,
+            task_id: &str,
+            registration: lingxi_core::host::task_registry::BackgroundBashRegistration,
+            armed: bool,
+        ) -> Result<
+            lingxi_core::host::task_registry::ForegroundTaskLease,
+            lingxi_core::host::task_registry::TaskRegistryError,
+        > {
+            self.register_foreground_bash(task_id, registration, armed)
+                .await?;
+            let identity = Arc::new(());
+            self.foreground_instances
+                .lock()
+                .unwrap()
+                .insert(task_id.into(), identity.clone());
+            if let Some(gate) = &self.registration_gate {
+                // Model TaskCreated: the row is visible before the hook returns
+                // the lease to its caller.
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
+            Ok(lingxi_core::host::task_registry::ForegroundTaskLease::new(
+                task_id.into(),
+                identity,
+            ))
+        }
         async fn unregister_foreground_bash(&self, task_id: &str) {
             self.unarmed.lock().unwrap().push(task_id.to_string());
+        }
+        async fn unregister_foreground_bash_owned(
+            &self,
+            lease: &lingxi_core::host::task_registry::ForegroundTaskLease,
+        ) {
+            let matches = {
+                let mut rows = self.foreground_instances.lock().unwrap();
+                if rows
+                    .get(lease.task_id())
+                    .is_some_and(|current| Arc::ptr_eq(current, lease.identity()))
+                {
+                    rows.remove(lease.task_id());
+                    true
+                } else {
+                    false
+                }
+            };
+            if matches {
+                self.unregister_foreground_bash(lease.task_id()).await;
+            }
+            self.withdrawal_attempted.notify_one();
         }
         async fn bind_background_requester(
             &self,
@@ -6710,6 +7693,35 @@ mod tests {
             _r: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>,
         ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
             self.requesters.lock().unwrap().push(task_id.to_string());
+            Ok(())
+        }
+        async fn bind_background_requester_owned(
+            &self,
+            lease: &lingxi_core::host::task_registry::ForegroundTaskLease,
+            requester: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>,
+        ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
+            if !self
+                .foreground_instances
+                .lock()
+                .unwrap()
+                .get(lease.task_id())
+                .is_some_and(|current| Arc::ptr_eq(current, lease.identity()))
+            {
+                return Err(
+                    lingxi_core::host::task_registry::TaskRegistryError::NotFound(
+                        lease.task_id().into(),
+                    ),
+                );
+            }
+            self.bind_background_requester(lease.task_id(), requester.clone())
+                .await?;
+            *self.requester.lock().unwrap() = Some(requester);
+            if let Some(gate) = &self.binding_gate {
+                // Exercise a caller observing a published requester before the
+                // binding future reports completion to its supervisor.
+                gate.entered.notify_one();
+                gate.release.notified().await;
+            }
             Ok(())
         }
         async fn create(
@@ -6791,6 +7803,14 @@ mod tests {
                 output_path: "/session/tasks/b1a2b3c4d.output".to_string(),
             })
         }
+        async fn allocate_owned_bash_output(
+            &self,
+        ) -> Result<
+            lingxi_core::host::task_registry::BackgroundBashHandle,
+            lingxi_core::host::task_registry::TaskRegistryError,
+        > {
+            self.allocate_bash_output().await
+        }
         async fn register_background_bash(
             &self,
             task_id: &str,
@@ -6810,7 +7830,14 @@ mod tests {
             Ok(())
         }
         async fn discard_bash_output(&self, task_id: &str) {
-            self.discarded.lock().unwrap().push(task_id.to_string());
+            if !self
+                .foreground_instances
+                .lock()
+                .unwrap()
+                .contains_key(task_id)
+            {
+                self.discarded.lock().unwrap().push(task_id.to_string());
+            }
         }
         async fn bind_background_process(
             &self,
@@ -6865,37 +7892,209 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn foreground_disarm_joins_timer_before_withdrawing_its_row() {
-        struct TimerDropped(Arc<std::sync::atomic::AtomicBool>);
-        impl Drop for TimerDropped {
-            fn drop(&mut self) {
-                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let ready = Arc::new(tokio::sync::Notify::new());
-        let timer = tokio::spawn({
-            let dropped = dropped.clone();
-            let ready = ready.clone();
-            async move {
-                let _guard = TimerDropped(dropped);
-                ready.notify_one();
-                std::future::pending::<()>().await;
-            }
+    fn test_foreground_arming(
+        registry: Arc<RecordingRegistry>,
+        task_id: &str,
+        host_request: Option<Arc<tool_api::context::HostToolRequest>>,
+    ) -> ForegroundArming {
+        let mut context = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
         });
-        ready.notified().await;
-        let registry = Arc::new(RecordingRegistry::default());
-        ForegroundArming {
-            timer: Some(timer),
-            withdraw_on_drop: true,
-            task_id: "barming01".into(),
-            registry: registry.clone(),
+        context.task_registry = Some(registry);
+        let mut tool_context = use_ctx();
+        if let Some(request) = host_request {
+            tool_context.host_tool_cancellation =
+                tool_api::context::HostToolCancellation::TerminateOwnedProcess(request);
         }
-        .disarm()
-        .await;
-        assert!(dropped.load(std::sync::atomic::Ordering::SeqCst));
-        assert_eq!(*registry.unarmed.lock().unwrap(), vec!["barming01"]);
+        let (settled, _) = tokio::sync::watch::channel(None);
+        BashTool::new(context)
+            .arm_foreground_record(
+                &tool_context,
+                task_id,
+                "sleep 10",
+                None,
+                Arc::new(tokio::sync::Notify::new()),
+                Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                Arc::new(settled),
+                fresh_tx(),
+            )
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn foreground_arming_disarm_does_not_wait_for_task_created_or_withdraw_replacement() {
+        for replace_row in [false, true] {
+            let gate = Arc::new(ForegroundRegistrationGate::default());
+            let registry = Arc::new(RecordingRegistry {
+                registration_gate: Some(gate.clone()),
+                ..Default::default()
+            });
+            let arming = test_foreground_arming(registry.clone(), "barming01", None);
+            tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+                .await
+                .expect("the row must be published before TaskCreated returns");
+
+            // The hook can itself be waiting for this caller. Waiting for the
+            // hook from disarm would deadlock that real reentrant path.
+            tokio::time::timeout(Duration::from_millis(250), arming.disarm())
+                .await
+                .expect("disarm must not wait for the pending TaskCreated hook");
+            assert!(registry
+                .foreground_instances
+                .lock()
+                .unwrap()
+                .contains_key("barming01"));
+            assert!(registry.unarmed.lock().unwrap().is_empty());
+
+            let replacement = replace_row.then(|| {
+                let identity = Arc::new(());
+                registry
+                    .foreground_instances
+                    .lock()
+                    .unwrap()
+                    .insert("barming01".into(), identity.clone());
+                identity
+            });
+            gate.release.notify_one();
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                registry.withdrawal_attempted.notified(),
+            )
+            .await
+            .expect("the supervisor must settle the original registration");
+            if let Some(replacement) = replacement {
+                let rows = registry.foreground_instances.lock().unwrap();
+                assert!(Arc::ptr_eq(rows.get("barming01").unwrap(), &replacement));
+                assert!(registry.unarmed.lock().unwrap().is_empty());
+            } else {
+                assert!(!registry
+                    .foreground_instances
+                    .lock()
+                    .unwrap()
+                    .contains_key("barming01"));
+                assert_eq!(*registry.unarmed.lock().unwrap(), vec!["barming01"]);
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while registry.discarded.lock().unwrap().is_empty() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("the original output receipt must eventually be discarded");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_arming_disarm_prevents_a_late_background_hint() {
+        let (decision, mut decision_rx) = tokio::sync::oneshot::channel();
+        let active = Arc::new(std::sync::Mutex::new(true));
+        let arming = ForegroundArming {
+            decision: Some(decision),
+            active: active.clone(),
+        };
+        let (progress, mut progress_rx) = tool_api::progress::progress_channel();
+        // Reproduce the ordering where the supervisor has already observed no
+        // decision, but the caller finishes before it sends its hint.
+        assert!(matches!(
+            decision_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        arming.disarm().await;
+        emit_foreground_background_hint(&active, &progress, lingxi_core::types::ToolUseId::new());
+        assert!(progress_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn foreground_arming_waits_for_withdrawal_before_background_request_returns() {
+        use lingxi_core::host::task_registry::{TaskBackgroundReason, TaskBackgrounder};
+
+        for request_before_disarm in [false, true] {
+            let gate = Arc::new(ForegroundRegistrationGate::default());
+            let registry = Arc::new(RecordingRegistry {
+                binding_gate: Some(gate.clone()),
+                ..Default::default()
+            });
+            let mut context = shell_test_ctx(ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            });
+            context.task_registry = Some(registry.clone());
+            let notify = Arc::new(tokio::sync::Notify::new());
+            let settled = Arc::new(tokio::sync::watch::channel(None).0);
+            let arming = BashTool::new(context)
+                .arm_foreground_record(
+                    &use_ctx(),
+                    "binding-pending",
+                    "sleep 10",
+                    None,
+                    notify.clone(),
+                    Arc::new(std::sync::atomic::AtomicU8::new(0)),
+                    settled.clone(),
+                    fresh_tx(),
+                )
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+                .await
+                .expect("the requester must be visible while binding is pending");
+            let requester = registry.requester.lock().unwrap().clone().unwrap();
+            let observed_registry = registry.clone();
+            let background_request = async move {
+                let outcome = requester
+                    .background_with_outcome(TaskBackgroundReason::User)
+                    .await;
+                // This is the point where the real registry rechecks the row
+                // and would otherwise mark it backgrounded.
+                let remains = observed_registry
+                    .foreground_instances
+                    .lock()
+                    .unwrap()
+                    .contains_key("binding-pending");
+                (outcome, remains)
+            };
+            let request_task = if request_before_disarm {
+                let task = tokio::spawn(background_request);
+                tokio::time::timeout(Duration::from_secs(1), notify.notified())
+                    .await
+                    .expect("an active requester must notify the runner");
+                arming.disarm().await;
+                task
+            } else {
+                arming.disarm().await;
+                let task = tokio::spawn(background_request);
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), notify.notified())
+                        .await
+                        .is_err()
+                );
+                task
+            };
+            settled.send_replace(Some(
+                lingxi_core::host::task_registry::TaskBackgroundOutcome::NotBackgrounded,
+            ));
+            tokio::task::yield_now().await;
+            assert!(
+                !request_task.is_finished(),
+                "the process result alone must not publish background ownership"
+            );
+            gate.release.notify_one();
+            let (outcome, remains) = tokio::time::timeout(Duration::from_secs(2), request_task)
+                .await
+                .expect("the requester must finish after withdrawal")
+                .unwrap();
+            assert_eq!(
+                outcome,
+                lingxi_core::host::task_registry::TaskBackgroundOutcome::NotBackgrounded
+            );
+            assert!(
+                !remains,
+                "the original row must already be gone when the registry rechecks"
+            );
+        }
     }
 
     #[tokio::test]
@@ -6934,8 +8133,12 @@ mod tests {
                 true
             }
         }
-        for arm_first in [false, true] {
-            let registry = Arc::new(RecordingRegistry::default());
+        for (arm_first, block_task_created) in [(false, false), (true, false), (true, true)] {
+            let gate = block_task_created.then(|| Arc::new(ForegroundRegistrationGate::default()));
+            let registry = Arc::new(RecordingRegistry {
+                registration_gate: gate.clone(),
+                ..Default::default()
+            });
             let entered = Arc::new(tokio::sync::Notify::new());
             let runner = Arc::new(PendingRunner {
                 entered: entered.clone(),
@@ -6960,26 +8163,41 @@ mod tests {
                 tokio::time::sleep(FOREGROUND_ARMING_DELAY + std::time::Duration::from_millis(100))
                     .await;
                 assert_eq!(registry.armed.lock().unwrap().len(), 1);
+                if let Some(gate) = &gate {
+                    tokio::time::timeout(Duration::from_secs(1), gate.entered.notified())
+                        .await
+                        .expect("TaskCreated must be pending after row publication");
+                }
             }
             // Models the owning host aborting its task without polling Bash's
             // cooperative cancellation branch again.
             drop(call);
-            tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                loop {
-                    if !registry.unarmed.lock().unwrap().is_empty() {
-                        break;
+            if let Some(gate) = &gate {
+                assert!(registry.unarmed.lock().unwrap().is_empty());
+                assert_eq!(registry.foreground_instances.lock().unwrap().len(), 1);
+                gate.release.notify_one();
+            }
+            if arm_first {
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    loop {
+                        if !registry.unarmed.lock().unwrap().is_empty() {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
                     }
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-            .expect("dropping the call must withdraw its foreground row");
-            if !arm_first {
+                })
+                .await
+                .expect("dropping the call must withdraw its foreground row");
+            } else {
                 tokio::time::sleep(FOREGROUND_ARMING_DELAY + std::time::Duration::from_millis(100))
                     .await;
                 assert!(
                     registry.armed.lock().unwrap().is_empty(),
                     "detached arming timer published a phantom task after call drop"
+                );
+                assert!(
+                    registry.unarmed.lock().unwrap().is_empty(),
+                    "no row was registered to withdraw"
                 );
             }
             assert_eq!(
@@ -6991,18 +8209,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_foreground_arming_discards_output_after_withdrawal() {
+        let gate = Arc::new(ForegroundRegistrationGate::default());
+        let registry = Arc::new(RecordingRegistry {
+            registration_gate: Some(gate.clone()),
+            ..Default::default()
+        });
+        let request = Arc::new(tool_api::context::HostToolRequest::default());
+        assert!(request.cancel());
+        let arming = test_foreground_arming(registry.clone(), "cancelled-arming", Some(request));
+        tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+            .await
+            .expect("the row must be visible while TaskCreated is pending");
+        drop(arming);
+        assert!(registry.unarmed.lock().unwrap().is_empty());
+        assert!(registry.discarded.lock().unwrap().is_empty());
+        gate.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if registry
+                    .discarded
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|id| id == "cancelled-arming")
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            registry.unarmed.lock().unwrap().as_slice(),
+            ["cancelled-arming"]
+        );
+    }
+
+    #[tokio::test]
+    async fn foreground_arming_reports_unknown_when_owned_cleanup_fails() {
+        use lingxi_core::host::task_registry::{ForegroundTaskLease, TaskBackgroundOutcome};
+
+        let registry = RecordingRegistry::default();
+        let identity = Arc::new(());
+        registry
+            .foreground_instances
+            .lock()
+            .unwrap()
+            .insert("unverified-arming".into(), identity.clone());
+        let lease = ForegroundTaskLease::new("unverified-arming".into(), identity);
+        let request = tool_api::context::HostToolRequest::default();
+        request.record_cleanup_error("termination was not verified".into());
+        assert!(request.cancel());
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(2),
+            finish_foreground_arming(
+                &registry,
+                "unverified-arming",
+                Some(&lease),
+                Some(&request),
+                ForegroundArmingDecision::CallerDropped,
+            ),
+        )
+        .await
+        .expect("a known cleanup failure must not wait indefinitely");
+        assert_eq!(outcome, TaskBackgroundOutcome::Unknown);
+        assert!(registry
+            .foreground_instances
+            .lock()
+            .unwrap()
+            .contains_key("unverified-arming"));
+        assert!(registry.discarded.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn promoted_arming_does_not_withdraw_background_ownership_on_drop() {
-        let registry = Arc::new(RecordingRegistry::default());
-        let timer = tokio::spawn(std::future::pending::<()>());
-        ForegroundArming {
-            timer: Some(timer),
-            withdraw_on_drop: true,
-            task_id: "bpromoted".into(),
-            registry: registry.clone(),
-        }
-        .keep_for_background()
-        .await;
-        tokio::task::yield_now().await;
+        let gate = Arc::new(ForegroundRegistrationGate::default());
+        let registry = Arc::new(RecordingRegistry {
+            registration_gate: Some(gate.clone()),
+            ..Default::default()
+        });
+        let arming = test_foreground_arming(registry.clone(), "bpromoted", None);
+        tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+            .await
+            .expect("the row must be visible while TaskCreated is pending");
+        arming.keep_for_background().await;
+        gate.release.notify_one();
+        assert!(tokio::time::timeout(
+            Duration::from_millis(100),
+            registry.withdrawal_attempted.notified()
+        )
+        .await
+        .is_err());
+        assert!(registry
+            .foreground_instances
+            .lock()
+            .unwrap()
+            .contains_key("bpromoted"));
         assert!(registry.unarmed.lock().unwrap().is_empty());
     }
 
@@ -7085,6 +8389,271 @@ mod tests {
                 "{failure}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn foreground_background_request_reports_real_ack_outcome() {
+        use lingxi_core::host::task_registry::{
+            TaskBackgroundOutcome, TaskBackgroundReason, TaskBackgrounder,
+        };
+
+        struct ForegroundAckRunner {
+            fail_ack: bool,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for ForegroundAckRunner {
+            fn supports_foreground_backgrounding(&self) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                command: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+                let binding = command.background_task().expect("registry identity");
+                let task_id = binding.task_id.clone();
+                let notify = binding.on_demand.clone().expect("on-demand trigger");
+                notify.notified().await;
+                Ok(lingxi_core::host::ForegroundRunResult {
+                    outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(
+                        ProcessHandle { task_id, pid: 4242 },
+                    ),
+                    output_file: None,
+                })
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn acknowledge_shell(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                if self.fail_ack {
+                    Err(ProcessError::Io("ack was not confirmed".into()))
+                } else {
+                    Ok(())
+                }
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        for fail_ack in [false, true] {
+            let registry = Arc::new(RecordingRegistry::default());
+            let mut context = shell_test_ctx(ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            });
+            context.task_registry = Some(registry.clone());
+            context.process = Arc::new(ForegroundAckRunner { fail_ack });
+            let call = tokio::spawn(async move {
+                BashTool::new(context)
+                    .call(source_json!({"command":"sleep 10"}), use_ctx(), fresh_tx())
+                    .await
+            });
+            let requester = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let requester = registry.requester.lock().unwrap().clone();
+                    if let Some(requester) = requester {
+                        break requester;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the foreground requester must be bound");
+            let background = tokio::spawn(async move {
+                requester
+                    .background_with_outcome(TaskBackgroundReason::User)
+                    .await
+            });
+            let result = tokio::time::timeout(Duration::from_secs(2), call)
+                .await
+                .expect("the Bash call must settle")
+                .unwrap();
+            assert_eq!(result.is_err(), fail_ack);
+            let outcome = tokio::time::timeout(Duration::from_secs(2), background)
+                .await
+                .expect("an ack failure must report unknown without blocking the batch")
+                .unwrap();
+            assert_eq!(
+                outcome,
+                if fail_ack {
+                    TaskBackgroundOutcome::Unknown
+                } else {
+                    TaskBackgroundOutcome::Backgrounded
+                }
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn foreground_background_timeout_does_not_cancel_engine_handoff() {
+        use lingxi_core::host::task_registry::{TaskBackgroundOutcome, TaskBackgroundReason};
+
+        struct DelayedRunner {
+            requested: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+            kills: std::sync::atomic::AtomicUsize,
+            acknowledgements: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for DelayedRunner {
+            fn supports_foreground_backgrounding(&self) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                command: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+                let binding = command.background_task().expect("registry identity");
+                let task_id = binding.task_id.clone();
+                let notify = binding.on_demand.clone().expect("on-demand trigger");
+                notify.notified().await;
+                self.requested.notify_one();
+                self.release.notified().await;
+                Ok(lingxi_core::host::ForegroundRunResult {
+                    outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(
+                        ProcessHandle { task_id, pid: 4242 },
+                    ),
+                    output_file: None,
+                })
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn acknowledge_shell(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                self.acknowledgements
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                self.kills.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let registry = Arc::new(RecordingRegistry::default());
+        let runner = Arc::new(DelayedRunner {
+            requested: Default::default(),
+            release: Default::default(),
+            kills: Default::default(),
+            acknowledgements: Default::default(),
+        });
+        let mut context = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        context.task_registry = Some(registry.clone());
+        context.process = runner.clone();
+        let call = tokio::spawn(async move {
+            BashTool::new(context)
+                .call(source_json!({"command":"sleep 10"}), use_ctx(), fresh_tx())
+                .await
+        });
+        let requester = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let requester = registry.requester.lock().unwrap().clone();
+                if let Some(requester) = requester {
+                    break requester;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the foreground requester must be bound");
+        assert!(requester.outcome_wait_is_cancellation_safe());
+        let timed_out = tokio::task::spawn_blocking({
+            let requester = requester.clone();
+            move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    tokio::time::timeout(
+                        Duration::from_millis(100),
+                        requester.background_with_outcome(TaskBackgroundReason::TurnAbort),
+                    )
+                    .await
+                    .is_err()
+                })
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), runner.requested.notified())
+            .await
+            .expect("the engine runner must receive the background signal");
+        assert!(
+            timed_out.await.unwrap(),
+            "the temporary runtime must time out"
+        );
+        assert!(
+            !call.is_finished(),
+            "the engine still owns the pending runner"
+        );
+        assert_eq!(runner.kills.load(std::sync::atomic::Ordering::SeqCst), 0);
+        let retry_timed_out = tokio::task::spawn_blocking({
+            let requester = requester.clone();
+            move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(async {
+                    tokio::time::timeout(
+                        Duration::from_millis(100),
+                        requester.background_with_outcome(TaskBackgroundReason::User),
+                    )
+                    .await
+                    .is_err()
+                })
+            }
+        });
+        assert!(retry_timed_out.await.unwrap());
+        runner.release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(2), call)
+            .await
+            .unwrap()
+            .unwrap()
+            .expect("the independently owned runner must finish its handoff");
+        assert!(
+            data_value(&result.data).get("backgroundedByUser").is_none(),
+            "the later retry must not change the first trigger reason"
+        );
+        assert_eq!(
+            requester
+                .background_with_outcome(TaskBackgroundReason::User)
+                .await,
+            TaskBackgroundOutcome::Backgrounded
+        );
+        assert_eq!(
+            runner
+                .acknowledgements
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(runner.kills.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -7241,6 +8810,12 @@ mod tests {
         tool.call(source_json!({"command": "sleep 3"}), use_context, progress)
             .await
             .expect("ok");
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.withdrawal_attempted.notified(),
+        )
+        .await
+        .expect("the completed foreground command must eventually give its row back");
 
         let hint = progress_rx
             .try_recv()
@@ -7314,6 +8889,7 @@ mod tests {
                 cmd: &SandboxedCommand,
                 _max: Option<usize>,
             ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+                assert!(!cmd.requires_group_cleanup_on_exit());
                 self.seen
                     .lock()
                     .unwrap()
@@ -7520,6 +9096,9 @@ mod tests {
     }
     #[async_trait]
     impl ProcessRunner for CapturingRunner {
+        fn supports_background_lifetime_guard(&self) -> bool {
+            true
+        }
         async fn run(&self, cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
             self.last_args.lock().unwrap().clone_from(&cmd.inner().args);
             Ok(self.out.clone())
@@ -7816,7 +9395,7 @@ mod tests {
         assert_eq!(unwrapped.as_deref(), Some("Bash"));
     }
 
-    /// A `SandboxRunner` that records every `wrap`/`cleanup_after_command` call
+    /// A `SandboxRunner` that records each wrap and lease cleanup
     /// and returns a sentinel-prefixed wrapped command, so a test can prove the
     /// Bash tool routes through `ctx.sandbox_runner` (not the sync free fn) with
     /// the right args and invokes cleanup after the command finishes.
@@ -7830,32 +9409,34 @@ mod tests {
     #[derive(Default)]
     struct RecordingSandboxRunner {
         wrap_calls: std::sync::Mutex<Vec<WrapCall>>,
-        cleanups: std::sync::atomic::AtomicUsize,
+        cleanups: std::sync::Arc<std::sync::atomic::AtomicUsize>,
         violations: std::sync::Mutex<Vec<String>>,
     }
 
     #[async_trait]
     impl tool_api::SandboxRunner for RecordingSandboxRunner {
-        async fn wrap(
+        async fn wrap_with_lease(
             &self,
             command: &str,
             cfg: &sandbox::runtime_config::SandboxRuntimeConfig,
             _platform: sandbox::runtime_config::Platform,
             bin_shell: Option<&str>,
             cwd: Option<&std::path::Path>,
-        ) -> Result<String, sandbox::wrap::SandboxWrapError> {
+        ) -> Result<tool_api::sandbox_runner::SandboxWrappedCommand, sandbox::wrap::SandboxWrapError>
+        {
             self.wrap_calls.lock().unwrap().push(WrapCall {
                 command: command.to_string(),
                 bin_shell: bin_shell.map(ToString::to_string),
                 cwd: cwd.map(std::path::Path::to_path_buf),
                 allow_write: cfg.filesystem.allow_write.clone(),
             });
-            Ok(format!("WRAPPED::{command}"))
-        }
-
-        async fn cleanup_after_command(&self) {
-            self.cleanups
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let cleanups = self.cleanups.clone();
+            Ok(tool_api::sandbox_runner::SandboxWrappedCommand {
+                command: format!("WRAPPED::{command}"),
+                lease: tool_api::sandbox_runner::SandboxLease::new(move || {
+                    cleanups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+            })
         }
 
         async fn command_violations(
@@ -7908,11 +9489,11 @@ mod tests {
             "the runner's wrapped command must be spawned, got: {spawned}"
         );
 
-        // cleanup_after_command ran after the command finished.
+        // The invocation's lease was released after the command finished.
         assert_eq!(
             runner.cleanups.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "cleanup_after_command must be invoked once"
+            "the invocation lease must be cleaned once"
         );
     }
 
@@ -8447,19 +10028,24 @@ mod tests {
     }
     #[tokio::test]
     async fn background_request_waits_for_process_detachment_before_host_cancel() {
-        use lingxi_core::host::task_registry::{TaskBackgroundReason, TaskBackgrounder};
+        use lingxi_core::host::task_registry::{
+            TaskBackgroundOutcome, TaskBackgroundReason, TaskBackgrounder,
+        };
         let notify = Arc::new(tokio::sync::Notify::new());
         let reason = Arc::new(std::sync::atomic::AtomicU8::new(0));
-        let settled = Arc::new(tokio::sync::watch::channel(false).0);
+        let settled = Arc::new(tokio::sync::watch::channel(None).0);
+        let (arming_settled, arming_settled_rx) = tokio::sync::watch::channel(None);
         let requester = Arc::new(BackgroundBashRequester {
             notify: notify.clone(),
             reason: reason.clone(),
             settled: settled.clone(),
+            active: Arc::new(std::sync::Mutex::new(true)),
+            arming_settled: arming_settled_rx,
         });
         let task = tokio::spawn(async move {
             requester
-                .background_with_reason(TaskBackgroundReason::DeliverMessage)
-                .await;
+                .background_with_outcome(TaskBackgroundReason::DeliverMessage)
+                .await
         });
         notify.notified().await;
         assert!(
@@ -8470,11 +10056,21 @@ mod tests {
             reason.load(std::sync::atomic::Ordering::SeqCst),
             TaskBackgroundReason::DeliverMessage as u8
         );
-        drop(BackgroundRequestSettled(settled));
-        tokio::time::timeout(Duration::from_secs(1), task)
+        drop(BackgroundRequestSettled {
+            sender: settled,
+            outcome: TaskBackgroundOutcome::Backgrounded,
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "the registry must also wait for the foreground row to settle"
+        );
+        arming_settled.send_replace(Some(TaskBackgroundOutcome::Backgrounded));
+        let outcome = tokio::time::timeout(Duration::from_secs(1), task)
             .await
             .unwrap()
             .unwrap();
+        assert_eq!(outcome, TaskBackgroundOutcome::Backgrounded);
     }
 
     #[test]
@@ -8587,6 +10183,1190 @@ mod tests {
                 "test must exercise the pre-2s path"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn host_foreground_timeout_keeps_lease_until_late_verified_exit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct SlowRunner {
+            entered: Arc<tokio::sync::Notify>,
+            finish: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for SlowRunner {
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                _: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<ForegroundRunResult, ProcessError> {
+                self.entered.notify_one();
+                self.finish.notified().await;
+                Ok(ForegroundRunResult {
+                    outcome: lingxi_core::host::ForegroundOutcome::Completed(ok_output()),
+                    output_file: None,
+                })
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                unreachable!()
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let finish = Arc::new(tokio::sync::Notify::new());
+        let runner = Arc::new(SlowRunner {
+            entered: entered.clone(),
+            finish: finish.clone(),
+        });
+        let context = shell_test_ctx(ok_output());
+        let command = context.sandbox.bypass_with_audit(
+            SbxCommand {
+                command: "bash".into(),
+                args: vec![],
+                cwd: None,
+                env: Default::default(),
+                timeout: None,
+                stdin: None,
+            },
+            "test",
+        );
+        let releases = Arc::new(AtomicUsize::new(0));
+        let lease = tool_api::sandbox_runner::SandboxLease::new({
+            let releases = releases.clone();
+            move || {
+                releases.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let request = Arc::new(tool_api::context::HostToolRequest::default());
+        let owner = request.process_owner();
+        let task = tokio::spawn({
+            let request = request.clone();
+            async move {
+                run_host_foreground_with_timeout(
+                    runner,
+                    command,
+                    None,
+                    Default::default(),
+                    request,
+                    owner,
+                    None,
+                    Some(lease),
+                    Duration::from_millis(20),
+                )
+                .await
+            }
+        });
+        entered.notified().await;
+        assert!(request.cancel());
+        assert!(task.await.unwrap().is_err());
+        assert!(request.cancel_and_reap().await.is_err());
+        drop(request);
+        assert_eq!(releases.load(Ordering::SeqCst), 0);
+        finish.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while releases.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn host_foreground_unverified_start_error_fails_cleanup() {
+        struct FailedStart;
+        #[async_trait::async_trait]
+        impl ProcessRunner for FailedStart {
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                _: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<ForegroundRunResult, ProcessError> {
+                Err(ProcessError::Io(format!(
+                    "{} lost control connection",
+                    lingxi_core::host::process::OWNED_SHELL_CLEANUP_UNVERIFIED
+                )))
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                unreachable!()
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let context = shell_test_ctx(ok_output());
+        let command = context.sandbox.bypass_with_audit(
+            SbxCommand {
+                command: "bash".into(),
+                args: vec![],
+                cwd: None,
+                env: Default::default(),
+                timeout: None,
+                stdin: None,
+            },
+            "test",
+        );
+        let request = Arc::new(tool_api::context::HostToolRequest::default());
+        let owner = request.process_owner();
+        let result = run_host_foreground_with_timeout(
+            Arc::new(FailedStart),
+            command,
+            None,
+            Default::default(),
+            request.clone(),
+            owner,
+            None,
+            None,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(ProcessError::Io(_))));
+        let error = request.cancel_and_reap().await.unwrap_err();
+        assert!(error.contains("owned shell cleanup unverified:"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn host_foreground_runner_panic_keeps_lease_after_request_drop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct PanickingRunner;
+        #[async_trait::async_trait]
+        impl ProcessRunner for PanickingRunner {
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                _: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<ForegroundRunResult, ProcessError> {
+                panic!("simulated panic after process launch");
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                unreachable!()
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let context = shell_test_ctx(ok_output());
+        let command = context.sandbox.bypass_with_audit(
+            SbxCommand {
+                command: "bash".into(),
+                args: vec![],
+                cwd: None,
+                env: Default::default(),
+                timeout: None,
+                stdin: None,
+            },
+            "test",
+        );
+        let released = Arc::new(AtomicUsize::new(0));
+        let lease = tool_api::sandbox_runner::SandboxLease::new({
+            let released = released.clone();
+            move || {
+                released.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let request = Arc::new(tool_api::context::HostToolRequest::default());
+        let owner = request.process_owner();
+        let result = run_host_foreground_with_timeout(
+            Arc::new(PanickingRunner),
+            command,
+            None,
+            Default::default(),
+            request.clone(),
+            owner,
+            None,
+            Some(lease),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(request.cancel_and_reap().await.is_err());
+        drop(request);
+        assert_eq!(
+            released.load(Ordering::SeqCst),
+            0,
+            "a panic is not termination proof"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_background_timeout_reaps_late_spawn_before_releasing_lease() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct LateSpawn {
+            started: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+            stopped: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for LateSpawn {
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                self.started.notify_one();
+                self.release.notified().await;
+                Ok(ProcessHandle {
+                    task_id: "late".into(),
+                    pid: 42,
+                })
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                unreachable!()
+            }
+            async fn terminate_and_wait_owned_background(
+                &self,
+                handle: &ProcessHandle,
+                owner: &str,
+            ) -> Result<(), ProcessError> {
+                assert_eq!(handle.task_id, "late");
+                assert!(owner.starts_with("host-tool:"));
+                self.stopped.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let runner = Arc::new(LateSpawn {
+            started: started.clone(),
+            release: release.clone(),
+            stopped: stopped.clone(),
+        });
+        let context = shell_test_ctx(ok_output());
+        let command = context.sandbox.bypass_with_audit(
+            SbxCommand {
+                command: "bash".into(),
+                args: vec![],
+                cwd: None,
+                env: Default::default(),
+                timeout: None,
+                stdin: None,
+            },
+            "test",
+        );
+        let released = Arc::new(AtomicUsize::new(0));
+        let lease = tool_api::sandbox_runner::SandboxLease::new({
+            let released = released.clone();
+            move || {
+                released.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let request = Arc::new(tool_api::context::HostToolRequest::default());
+        let owner = request.process_owner();
+        let launch = tokio::spawn({
+            let request = request.clone();
+            async move {
+                spawn_host_background_with_timeout(
+                    runner,
+                    command,
+                    request,
+                    owner,
+                    None,
+                    Some(lease),
+                    Duration::from_millis(20),
+                )
+                .await
+            }
+        });
+        started.notified().await;
+        assert!(launch.await.unwrap().is_err());
+        assert!(request.cancel_and_reap().await.is_err());
+        drop(request);
+        assert_eq!(released.load(Ordering::SeqCst), 0);
+        assert_eq!(stopped.load(Ordering::SeqCst), 0);
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while released.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn host_cancel_stops_only_its_owner_and_never_polls_unstarted_runner() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        struct HostRunner {
+            registered: bool,
+            entered: Arc<tokio::sync::Notify>,
+            released: Arc<tokio::sync::Notify>,
+            polls: Arc<AtomicUsize>,
+            dropped: Arc<AtomicBool>,
+            owners: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for HostRunner {
+            fn supports_verified_background_stop(&self, _: &SandboxedCommand) -> bool {
+                true
+            }
+            fn supports_foreground_backgrounding(&self) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                cmd: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<ForegroundRunResult, ProcessError> {
+                self.polls.fetch_add(1, Ordering::SeqCst);
+                let _drop = DropFlag(self.dropped.clone());
+                assert!(cmd.process_owner().unwrap().starts_with("host-tool:"));
+                self.entered.notify_one();
+                self.released.notified().await;
+                Err(ProcessError::Io("supervisor command cancelled".into()))
+            }
+            async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+                self.owners.lock().unwrap().push(owner.to_owned());
+                self.released.notify_one();
+                if self.registered {
+                    vec![42]
+                } else {
+                    Vec::new()
+                }
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                unreachable!()
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        for (registered, with_token) in [(false, false), (true, true)] {
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let polls = Arc::new(AtomicUsize::new(0));
+            let dropped = Arc::new(AtomicBool::new(false));
+            let owners = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let mut context = shell_test_ctx(ok_output());
+            let registry = Arc::new(RecordingRegistry::default());
+            context.task_registry = Some(registry.clone());
+            context.process = Arc::new(HostRunner {
+                registered,
+                entered: entered.clone(),
+                released: Arc::new(tokio::sync::Notify::new()),
+                polls: polls.clone(),
+                dropped: dropped.clone(),
+                owners: owners.clone(),
+            });
+            let tool = BashTool::new(context);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let id = lingxi_core::types::ToolUseId::new();
+            let request = Arc::new(tool_api::context::HostToolRequest::default());
+            let expected_owner = request.process_owner();
+            let mut use_context = use_ctx();
+            use_context.tool_use_id = Some(id);
+            use_context.cancel = with_token.then(|| cancel.clone());
+            use_context.host_tool_cancellation =
+                tool_api::context::HostToolCancellation::TerminateOwnedProcess(request.clone());
+            assert!(matches!(
+                tool.interrupt_behavior(&source_json!({"command":"sleep 30"})),
+                tool_api::tool_trait::InterruptBehavior::Block
+            ));
+            let run = tokio::spawn(async move {
+                tool.call(
+                    source_json!({"command":"sleep 30"}),
+                    use_context,
+                    fresh_tx(),
+                )
+                .await
+            });
+            entered.notified().await;
+            if with_token {
+                cancel.cancel();
+            } else {
+                assert!(request.cancel());
+            }
+            let outcome = tokio::time::timeout(Duration::from_secs(2), run)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(outcome, Err(ToolError::Aborted)));
+            assert_eq!(polls.load(Ordering::SeqCst), 1);
+            assert!(dropped.load(Ordering::SeqCst));
+            assert!(registry
+                .discarded
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|id| id == "b1a2b3c4d"));
+            let owners = owners.lock().unwrap();
+            assert!(!owners.is_empty());
+            assert!(owners.iter().all(|owner| owner == &expected_owner));
+        }
+
+        let same_tool_use_id = lingxi_core::types::ToolUseId::from("duplicate-id");
+        let first = tool_api::context::HostToolRequest::default();
+        let second = tool_api::context::HostToolRequest::default();
+        assert_ne!(
+            first.process_owner(),
+            second.process_owner(),
+            "same tool use id {same_tool_use_id} must not share an owner"
+        );
+
+        // A pre-cancelled request must not even poll the runner: polling can
+        // itself begin a process after the client has already cancelled.
+        let polls = Arc::new(AtomicUsize::new(0));
+        let mut context = shell_test_ctx(ok_output());
+        context.task_registry = Some(Arc::new(RecordingRegistry::default()));
+        context.process = Arc::new(HostRunner {
+            registered: false,
+            entered: Arc::new(tokio::sync::Notify::new()),
+            released: Arc::new(tokio::sync::Notify::new()),
+            polls: polls.clone(),
+            dropped: Arc::new(AtomicBool::new(false)),
+            owners: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let tool = BashTool::new(context);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        let mut use_context = use_ctx();
+        use_context.cancel = Some(cancel);
+        use_context.host_tool_cancellation =
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(Arc::new(
+                Default::default(),
+            ));
+        assert!(matches!(
+            tool.call(
+                source_json!({"command":"sleep 30"}),
+                use_context,
+                fresh_tx()
+            )
+            .await,
+            Err(ToolError::Aborted)
+        ));
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn host_calls_with_same_tool_id_cancel_only_their_own_runner() {
+        struct ConcurrentRunner {
+            entered: tokio::sync::mpsc::UnboundedSender<String>,
+            owners: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Notify>>>,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for ConcurrentRunner {
+            fn supports_verified_background_stop(&self, _: &SandboxedCommand) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                command: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<ForegroundRunResult, ProcessError> {
+                let owner = command.process_owner().unwrap().to_owned();
+                let stop = Arc::new(tokio::sync::Notify::new());
+                self.owners
+                    .lock()
+                    .unwrap()
+                    .insert(owner.clone(), stop.clone());
+                self.entered.send(owner).unwrap();
+                stop.notified().await;
+                Err(ProcessError::Io("supervisor command cancelled".into()))
+            }
+            async fn kill_owner_processes(&self, owner: &str) -> Vec<u32> {
+                if let Some(stop) = self.owners.lock().unwrap().get(owner) {
+                    stop.notify_one();
+                }
+                vec![42]
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                unreachable!()
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let (entered, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let runner = Arc::new(ConcurrentRunner {
+            entered,
+            owners: std::sync::Mutex::new(HashMap::new()),
+        });
+        let mut context = shell_test_ctx(ok_output());
+        context.task_registry = Some(Arc::new(RecordingRegistry::default()));
+        context.process = runner;
+        let tool = BashTool::new(context);
+        let first = Arc::new(tool_api::context::HostToolRequest::default());
+        let second = Arc::new(tool_api::context::HostToolRequest::default());
+        let same_id = lingxi_core::types::ToolUseId::from("duplicate-external-id");
+        let launch = |request: Arc<tool_api::context::HostToolRequest>| {
+            let tool = tool.clone();
+            let mut context = use_ctx();
+            context.tool_use_id = Some(same_id.clone());
+            context.host_tool_cancellation =
+                tool_api::context::HostToolCancellation::TerminateOwnedProcess(request);
+            tokio::spawn(async move {
+                tool.call(source_json!({"command":"sleep 30"}), context, fresh_tx())
+                    .await
+            })
+        };
+        let one = launch(first.clone());
+        let two = launch(second.clone());
+        let owner_a = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let owner_b = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_ne!(owner_a, owner_b);
+        assert!(first.cancel());
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), one)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(ToolError::Aborted)
+        ));
+        assert!(!two.is_finished(), "other request must remain live");
+        assert!(second.cancel());
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), two)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(ToolError::Aborted)
+        ));
+        first.cancel_and_reap().await.unwrap();
+        second.cancel_and_reap().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_cancel_owns_pending_spawn_and_ack_and_reports_double_failure() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ControlledRunner {
+            spawn_entered: Arc<tokio::sync::Notify>,
+            spawn_release: Arc<tokio::sync::Notify>,
+            ack_entered: Arc<tokio::sync::Notify>,
+            ack_release: Arc<tokio::sync::Notify>,
+            cleanup_entered: Arc<tokio::sync::Notify>,
+            stops: Arc<AtomicUsize>,
+            fail_cleanup: bool,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for ControlledRunner {
+            fn supports_verified_background_stop(&self, _: &SandboxedCommand) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn spawn_background(
+                &self,
+                cmd: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                assert!(cmd.requires_group_cleanup_on_exit());
+                self.spawn_entered.notify_one();
+                self.spawn_release.notified().await;
+                Ok(ProcessHandle {
+                    task_id: "b1a2b3c4d".into(),
+                    pid: 42,
+                })
+            }
+            async fn acknowledge_shell(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                self.ack_entered.notify_one();
+                self.ack_release.notified().await;
+                Err(ProcessError::Io("injected ack failure".into()))
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Err(ProcessError::Io("injected kill failure".into()))
+            }
+            async fn terminate_and_wait_owned_background(
+                &self,
+                _: &ProcessHandle,
+                _: &str,
+            ) -> Result<(), ProcessError> {
+                self.stops.fetch_add(1, Ordering::SeqCst);
+                self.cleanup_entered.notify_one();
+                if self.fail_cleanup {
+                    Err(ProcessError::Io("injected verified stop failure".into()))
+                } else {
+                    Ok(())
+                }
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        for fail_cleanup in [false, true] {
+            let spawn_entered = Arc::new(tokio::sync::Notify::new());
+            let spawn_release = Arc::new(tokio::sync::Notify::new());
+            let ack_entered = Arc::new(tokio::sync::Notify::new());
+            let ack_release = Arc::new(tokio::sync::Notify::new());
+            let cleanup_entered = Arc::new(tokio::sync::Notify::new());
+            let stops = Arc::new(AtomicUsize::new(0));
+            let mut context = shell_test_ctx(ok_output());
+            context.task_registry = Some(Arc::new(RecordingRegistry::default()));
+            context.process = Arc::new(ControlledRunner {
+                spawn_entered: spawn_entered.clone(),
+                spawn_release: spawn_release.clone(),
+                ack_entered: ack_entered.clone(),
+                ack_release: ack_release.clone(),
+                cleanup_entered: cleanup_entered.clone(),
+                stops: stops.clone(),
+                fail_cleanup,
+            });
+            let tool = BashTool::new(context);
+            let request = Arc::new(tool_api::context::HostToolRequest::default());
+            let mut use_context = use_ctx();
+            use_context.host_tool_cancellation =
+                tool_api::context::HostToolCancellation::TerminateOwnedProcess(request.clone());
+            let call = tokio::spawn(async move {
+                tool.call(
+                    source_json!({"command":"sleep 30", "run_in_background":true}),
+                    use_context,
+                    fresh_tx(),
+                )
+                .await
+            });
+            spawn_entered.notified().await;
+            assert!(request.handoff_task_ids().is_err());
+            assert!(request.cancel());
+            call.abort(); // EOF: request task may be dropped while spawn is pending.
+            let cleanup = tokio::spawn({
+                let request = request.clone();
+                async move { request.cancel_and_reap().await }
+            });
+            tokio::task::yield_now().await;
+            assert!(!cleanup.is_finished());
+            spawn_release.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), ack_entered.notified())
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(2), cleanup_entered.notified())
+                .await
+                .unwrap();
+            assert!(
+                !cleanup.is_finished(),
+                "acknowledgement still owns the launch"
+            );
+            ack_release.notify_one();
+            let result = tokio::time::timeout(Duration::from_secs(2), cleanup)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stops.load(Ordering::SeqCst), 1);
+            if fail_cleanup {
+                assert!(result
+                    .unwrap_err()
+                    .contains("injected verified stop failure"));
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn host_automatic_background_ack_remains_owned_after_cancellation() {
+        struct AutomaticRunner {
+            ack_entered: Arc<tokio::sync::Notify>,
+            ack_release: Arc<tokio::sync::Notify>,
+            stop_entered: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for AutomaticRunner {
+            fn supports_verified_background_stop(&self, _: &SandboxedCommand) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                cmd: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<ForegroundRunResult, ProcessError> {
+                assert!(cmd.requires_group_cleanup_on_exit());
+                Ok(ForegroundRunResult {
+                    outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(
+                        ProcessHandle {
+                            task_id: "b1a2b3c4d".into(),
+                            pid: 42,
+                        },
+                    ),
+                    output_file: None,
+                })
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn acknowledge_shell(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                self.ack_entered.notify_one();
+                self.ack_release.notified().await;
+                Ok(())
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Ok(())
+            }
+            async fn terminate_and_wait_owned_background(
+                &self,
+                _: &ProcessHandle,
+                _: &str,
+            ) -> Result<(), ProcessError> {
+                self.stop_entered.notify_one();
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let ack_entered = Arc::new(tokio::sync::Notify::new());
+        let ack_release = Arc::new(tokio::sync::Notify::new());
+        let stop_entered = Arc::new(tokio::sync::Notify::new());
+        let mut context = shell_test_ctx(ok_output());
+        context.task_registry = Some(Arc::new(RecordingRegistry::default()));
+        context.process = Arc::new(AutomaticRunner {
+            ack_entered: ack_entered.clone(),
+            ack_release: ack_release.clone(),
+            stop_entered: stop_entered.clone(),
+        });
+        let tool = BashTool::new(context);
+        let request = Arc::new(tool_api::context::HostToolRequest::default());
+        let mut context = use_ctx();
+        context.host_tool_cancellation =
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(request.clone());
+        let call = tokio::spawn(async move {
+            tool.call(
+                source_json!({"command":"printf starting; sleep 30"}),
+                context,
+                fresh_tx(),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), ack_entered.notified())
+            .await
+            .unwrap();
+        assert!(request.cancel());
+        call.abort();
+        let cleanup = tokio::spawn({
+            let request = request.clone();
+            async move { request.cancel_and_reap().await }
+        });
+        tokio::time::timeout(Duration::from_secs(2), stop_entered.notified())
+            .await
+            .unwrap();
+        assert!(
+            !cleanup.is_finished(),
+            "acknowledgement remains part of the request"
+        );
+        ack_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), cleanup)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn powershell_only_owned_requests_require_group_cleanup() {
+        // The runner is a fake, but the tool still resolves its executable.
+        // Restore the process-global PATH even when an assertion panics.
+        struct PathRestore {
+            previous: Option<std::ffi::OsString>,
+            _guard: std::sync::RwLockWriteGuard<'static, ()>,
+        }
+        impl Drop for PathRestore {
+            fn drop(&mut self) {
+                if let Some(path) = self.previous.take() {
+                    std::env::set_var("PATH", path);
+                } else {
+                    std::env::remove_var("PATH");
+                }
+            }
+        }
+        struct PolicyRunner(Arc<std::sync::Mutex<Vec<bool>>>);
+        #[async_trait::async_trait]
+        impl ProcessRunner for PolicyRunner {
+            fn supports_verified_background_stop(&self, _: &SandboxedCommand) -> bool {
+                true
+            }
+            async fn run(&self, command: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(command.requires_group_cleanup_on_exit());
+                Ok(ok_output())
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                command: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<ForegroundRunResult, ProcessError> {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(command.requires_group_cleanup_on_exit());
+                Ok(ForegroundRunResult {
+                    outcome: lingxi_core::host::ForegroundOutcome::Completed(ok_output()),
+                    output_file: None,
+                })
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                unreachable!()
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let guard = crate::test_path_env::write();
+        let _path = PathRestore {
+            previous: std::env::var_os("PATH"),
+            _guard: guard,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("pwsh"), "stub").unwrap();
+        std::env::set_var("PATH", dir.path());
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut context = shell_test_ctx(ok_output());
+        context.process = Arc::new(PolicyRunner(seen.clone()));
+        context.task_registry = Some(Arc::new(RecordingRegistry::default()));
+        let tool = crate::powershell::PowerShellTool::new(context);
+        let mut owned = use_ctx();
+        owned.host_tool_cancellation =
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(Arc::new(
+                tool_api::context::HostToolRequest::default(),
+            ));
+        tool.call(source_json!({"command":"Get-Date"}), owned, fresh_tx())
+            .await
+            .unwrap();
+        tool.call(source_json!({"command":"Get-Date"}), use_ctx(), fresh_tx())
+            .await
+            .unwrap();
+        assert_eq!(seen.lock().unwrap().as_slice(), [true, false]);
+    }
+
+    #[tokio::test]
+    async fn host_reclaims_background_with_mismatched_registry_identity() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct MismatchedRunner {
+            acked: Arc<AtomicUsize>,
+            stopped: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for MismatchedRunner {
+            fn supports_verified_background_stop(&self, _: &SandboxedCommand) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                Ok(ProcessHandle {
+                    task_id: "wrong-id".into(),
+                    pid: 42,
+                })
+            }
+            async fn acknowledge_shell(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                self.acked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn terminate_and_wait_owned_background(
+                &self,
+                _: &ProcessHandle,
+                _: &str,
+            ) -> Result<(), ProcessError> {
+                self.stopped.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                unreachable!()
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let acked = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let registry = Arc::new(RecordingRegistry::default());
+        let mut context = shell_test_ctx(ok_output());
+        context.task_registry = Some(registry.clone());
+        context.process = Arc::new(MismatchedRunner {
+            acked: acked.clone(),
+            stopped: stopped.clone(),
+        });
+        let request = Arc::new(tool_api::context::HostToolRequest::default());
+        let mut host = use_ctx();
+        host.host_tool_cancellation =
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(request.clone());
+        assert!(BashTool::new(context)
+            .call(
+                source_json!({"command":"sleep 30", "run_in_background":true}),
+                host,
+                fresh_tx()
+            )
+            .await
+            .is_err());
+        assert!(request.handoff_task_ids().is_err());
+        assert!(request.cancel());
+        request.cancel_and_reap().await.unwrap();
+        assert_eq!(acked.load(Ordering::SeqCst), 0);
+        assert_eq!(stopped.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.discarded.lock().unwrap().as_slice(), ["b1a2b3c4d"]);
+    }
+
+    #[tokio::test]
+    async fn host_nontransferable_sandbox_keeps_foreground_and_reclaims_unexpected_handoff() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Runner {
+            moved: bool,
+            stopped: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for Runner {
+            fn supports_verified_background_stop(&self, _: &SandboxedCommand) -> bool {
+                true
+            }
+            fn supports_foreground_backgrounding(&self) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn run_foreground_with_output_limit(
+                &self,
+                command: &SandboxedCommand,
+                _: Option<usize>,
+            ) -> Result<ForegroundRunResult, ProcessError> {
+                assert!(!command.auto_background_on_timeout());
+                assert!(command.background_task().unwrap().on_demand.is_none());
+                let outcome = if self.moved {
+                    lingxi_core::host::ForegroundOutcome::MovedToBackground(ProcessHandle {
+                        task_id: "b1a2b3c4d".into(),
+                        pid: 42,
+                    })
+                } else {
+                    lingxi_core::host::ForegroundOutcome::Completed(ok_output())
+                };
+                Ok(ForegroundRunResult {
+                    outcome,
+                    output_file: None,
+                })
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                unreachable!()
+            }
+            async fn terminate_and_wait_owned_background(
+                &self,
+                _: &ProcessHandle,
+                _: &str,
+            ) -> Result<(), ProcessError> {
+                self.stopped.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        for moved in [false, true] {
+            let stopped = Arc::new(AtomicUsize::new(0));
+            let sandbox = Arc::new(RecordingSandboxRunner::default());
+            let mut context = shell_test_ctx(ok_output());
+            context.sandbox_available = true;
+            context.sandbox_runtime.excluded_commands = vec![];
+            context.sandbox_runner = sandbox.clone();
+            context.task_registry = Some(Arc::new(RecordingRegistry::default()));
+            context.process = Arc::new(Runner {
+                moved,
+                stopped: stopped.clone(),
+            });
+            let request = Arc::new(tool_api::context::HostToolRequest::default());
+            let mut host = use_ctx();
+            host.host_tool_cancellation =
+                tool_api::context::HostToolCancellation::TerminateOwnedProcess(request.clone());
+            let result = BashTool::new(context)
+                .call(
+                    source_json!({"command":"printf hello", "timeout": 10}),
+                    host,
+                    fresh_tx(),
+                )
+                .await;
+            if moved {
+                assert!(result.is_err());
+                assert!(request.cancel());
+                request.cancel_and_reap().await.unwrap();
+                assert_eq!(stopped.load(Ordering::SeqCst), 1);
+            } else {
+                assert!(result.is_ok());
+                assert!(request.handoff_task_ids().unwrap().is_empty());
+                assert!(request.commit());
+                assert_eq!(stopped.load(Ordering::SeqCst), 0);
+            }
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while sandbox.cleanups.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(sandbox.cleanups.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn host_background_refuses_an_unverified_runner_before_spawn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct UnverifiedRunner(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl ProcessRunner for UnverifiedRunner {
+            fn supports_background_lifetime_guard(&self) -> bool {
+                true
+            }
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                unreachable!()
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(ProcessHandle {
+                    task_id: "normal".into(),
+                    pid: 42,
+                })
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let spawned = Arc::new(AtomicUsize::new(0));
+        let mut context = shell_test_ctx(ok_output());
+        let sandbox_runner = Arc::new(RecordingSandboxRunner::default());
+        context.sandbox_available = true;
+        context.sandbox_runtime.excluded_commands = vec![];
+        context.sandbox_runner = sandbox_runner.clone();
+        context.process = Arc::new(UnverifiedRunner(spawned.clone()));
+        let tool = BashTool::new(context);
+        let input = source_json!({"command":"sleep 10", "run_in_background":true});
+        let mut host = use_ctx();
+        host.host_tool_cancellation =
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(Arc::new(
+                Default::default(),
+            ));
+        let error = tool
+            .call(input.clone(), host, fresh_tx())
+            .await
+            .unwrap_err();
+        match error {
+            ToolError::InvalidInput(message) => assert!(message
+                .string_at("")
+                .unwrap()
+                .contains("cannot transfer sandbox resources")),
+            error => panic!("expected refusal before spawn, got {error:?}"),
+        }
+        assert_eq!(spawned.load(Ordering::SeqCst), 0);
+        assert_eq!(sandbox_runner.wrap_calls.lock().unwrap().len(), 1);
+        assert_eq!(sandbox_runner.cleanups.load(Ordering::SeqCst), 1);
+        let mut host = use_ctx();
+        host.host_tool_cancellation =
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(Arc::new(
+                Default::default(),
+            ));
+        let error = tool
+            .call(source_json!({"command":"sleep 10"}), host, fresh_tx())
+            .await
+            .unwrap_err();
+        match error {
+            ToolError::InvalidInput(message) => assert!(message
+                .string_at("")
+                .unwrap()
+                .contains("cannot verify owned process cleanup")),
+            error => panic!("expected foreground runner refusal, got {error:?}"),
+        }
+        assert_eq!(spawned.load(Ordering::SeqCst), 0);
+        assert_eq!(sandbox_runner.cleanups.load(Ordering::SeqCst), 2);
+        assert!(tool.call(input, use_ctx(), fresh_tx()).await.is_ok());
+        assert_eq!(spawned.load(Ordering::SeqCst), 1);
     }
 
     // ===== CLI-5 `bashEditDiffEnabled` wiring =============================

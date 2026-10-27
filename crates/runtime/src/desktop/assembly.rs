@@ -5627,6 +5627,7 @@ pub async fn build_with_credential_stack(
     // move into the orchestrator. The actual cold restore runs later, after the
     // live model/provider selection cell is published.
     let hook_agent_inheritance = lingxi_core::host::subagent_spawn::SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(
             tool_api::tool_invoker_impl::RegistryToolInvoker::new(tools.clone())
                 .with_gate(perms.clone()),

@@ -212,7 +212,10 @@ impl MidTurnInputSource for SdkInputQueue {
         Ok(Some(inputs))
     }
 
-    async fn input_consumed(&self, inputs: &[MidTurnInput]) -> Result<(), String> {
+    async fn input_consumed(
+        &self,
+        inputs: &[MidTurnInput],
+    ) -> Result<(), orchestrator::prompt::mid_turn_input::MidTurnConsumptionError> {
         let mut state = self.state.lock().await;
         let turns = std::mem::take(&mut state.folded);
         drop(state);
@@ -899,7 +902,10 @@ mod tests {
             }
             Ok(Some(batch))
         }
-        async fn input_consumed(&self, inputs: &[MidTurnInput]) -> Result<(), String> {
+        async fn input_consumed(
+            &self,
+            inputs: &[MidTurnInput],
+        ) -> Result<(), orchestrator::prompt::mid_turn_input::MidTurnConsumptionError> {
             self.source.input_consumed(inputs).await
         }
     }

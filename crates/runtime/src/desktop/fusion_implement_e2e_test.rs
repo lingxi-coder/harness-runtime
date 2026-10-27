@@ -72,6 +72,20 @@ fn write(root: &Path, rel: &str, body: &[u8]) {
 /// edited tracked file, an untracked file, and an ignored build directory.
 fn user_repo(root: &Path) {
     git(root, &["init", "-q", "-b", "main"]);
+    // The production worktree manager inherits the process's Git settings.
+    // Keep the fixture independent of a user's global excludes while still
+    // exercising the repository's own `.gitignore` below.
+    let empty_excludes = root.join(".git/info/fusion-empty-excludes");
+    std::fs::write(&empty_excludes, b"").unwrap();
+    git(
+        root,
+        &[
+            "config",
+            "--local",
+            "core.excludesFile",
+            empty_excludes.to_str().unwrap(),
+        ],
+    );
     write(root, ".gitignore", b"target/\n");
     write(root, "src/lib.rs", b"pub fn retries() -> u32 { 1 }\n");
     write(root, "old.txt", b"obsolete\n");
@@ -86,6 +100,38 @@ fn user_repo(root: &Path) {
         "target/junk.o",
         b"build output that must never be copied\n",
     );
+}
+
+#[test]
+fn fixture_repo_is_independent_of_global_git_excludes() {
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    user_repo(&repo);
+
+    let ignore = dir.path().join("global-ignore");
+    let config = dir.path().join("global-config");
+    std::fs::write(&ignore, "src/retry.rs\nscratch.txt\n").unwrap();
+    assert!(std::process::Command::new("git")
+        .args(["config", "--file"])
+        .arg(&config)
+        .arg("core.excludesFile")
+        .arg(&ignore)
+        .status()
+        .unwrap()
+        .success());
+    let check = |path: &str| {
+        std::process::Command::new("git")
+            .args(["check-ignore", "-q", path])
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .status()
+            .unwrap()
+    };
+    assert_eq!(check("src/retry.rs").code(), Some(1));
+    assert_eq!(check("scratch.txt").code(), Some(1));
+    assert!(check("target/junk.o").success());
 }
 
 struct InertInvoker;
@@ -454,6 +500,7 @@ async fn run_fusion_with(
     .with_implement_host(host);
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: Arc::new(InertBudget),
         },
@@ -539,7 +586,12 @@ async fn implement_run_against_a_real_repo_snapshots_the_users_work_and_leaves_i
                     got == paths
                 })
             })
-            .unwrap_or_else(|| panic!("no panel changed exactly {paths:?}"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no panel changed exactly {paths:?}; spawns: {spawns:?}; panels: {:#?}",
+                    result.responses
+                )
+            })
     };
     let a = by_change(&["src/lib.rs", "src/retry.rs"]);
     let b = by_change(&["data.bin", "old.txt", "src/lib.rs"]);

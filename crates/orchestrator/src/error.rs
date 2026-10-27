@@ -84,6 +84,10 @@ pub enum OrchestratorError {
     #[error("orchestrator internal error: {0}")]
     Internal(String),
 
+    /// Side-effect admission observed the owning turn's cancellation.
+    #[error("turn was interrupted before side-effect admission")]
+    RecoveryInterrupted,
+
     /// Mid-stream byte-level error from the streaming transport. Surfaced
     /// when the SSE chunk fails to decode or the HTTP body is cut.
     ///

@@ -326,6 +326,7 @@ mod tests {
             on_exit: Some(sink),
             on_demand: Some(background.clone()),
         })
+        .with_require_group_cleanup_on_exit(mode == "strict")
         .with_auto_background_on_timeout(mode != "deadline");
         let runner = PosixProcess::new();
         if matches!(mode.as_str(), "pre_cap" | "pre_cap_delivery") {
@@ -476,7 +477,7 @@ mod tests {
             return;
         }
 
-        let handle = if matches!(mode.as_str(), "explicit" | "unregistered") {
+        let handle = if matches!(mode.as_str(), "explicit" | "unregistered" | "strict") {
             runner.spawn_background(&command).await.unwrap()
         } else {
             if mode == "demand" {
@@ -527,6 +528,30 @@ mod tests {
         .unwrap();
         // Returning ends this source process and its Tokio runtime. The child
         // must retain its independent supervisor and output descriptors.
+    }
+    #[tokio::test]
+    async fn supervisor_cross_process_strict_policy_runs_with_verified_group() {
+        let directory = tempfile::tempdir().unwrap();
+        launch_mode(
+            directory.path(),
+            "printf strict-supervisor; sleep 0.2; exit 0",
+            "strict",
+        )
+        .await;
+        let handoff: ShellProcessHandoff =
+            serde_json::from_slice(&std::fs::read(directory.path().join("handoff.json")).unwrap())
+                .unwrap();
+        assert!(handoff.require_group_cleanup_on_exit);
+        let sink = Arc::new(Sink::new(PathBuf::from(&handoff.output_path)));
+        let handle = adopt(&handoff, sink.clone()).await.unwrap();
+        assert_eq!(handle.pid, handoff.pid);
+        tokio::time::timeout(CROSS_PROCESS_WAIT, sink.done.notified())
+            .await
+            .unwrap();
+        assert_eq!(*sink.code.lock().unwrap(), Some(Some(0)));
+        let output = std::fs::read_to_string(&handoff.output_path).unwrap();
+        assert!(output.contains("strict-supervisor"));
+        release(&handoff).await.unwrap();
     }
 
     async fn owner_bridge_probe(directory: &Path) {

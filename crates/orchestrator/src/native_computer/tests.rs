@@ -263,6 +263,7 @@ struct Computer {
     fail_type: bool,
     partial: AtomicBool,
     invalidations: AtomicUsize,
+    sequence_starts: AtomicUsize,
     trace: Arc<SyncMutex<Vec<String>>>,
 }
 impl Computer {
@@ -274,6 +275,7 @@ impl Computer {
             fail_type,
             partial: AtomicBool::new(false),
             invalidations: AtomicUsize::new(0),
+            sequence_starts: AtomicUsize::new(0),
             trace,
         }
     }
@@ -441,6 +443,10 @@ impl Tool for Computer {
             height: 1,
             geometry_version: "frame-1".into(),
         }))
+    }
+    async fn begin_computer_sequence(&self, _: &ToolUseContext) -> Result<(), ToolError> {
+        self.sequence_starts.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
     async fn computer_model_output(
         &self,
@@ -1949,6 +1955,29 @@ async fn native_members_keep_their_position_among_ordinary_calls() {
         *fixture.trace.lock().unwrap(),
         ["left_click", "Read", "screenshot"]
     );
+}
+
+#[tokio::test]
+async fn native_sequence_requires_recovery_admission_before_setup() {
+    let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+    fixture.native().await;
+    let blocks = fixture
+        .bind(&openai(json!([{"type":"screenshot"}])))
+        .await
+        .unwrap();
+    let guard_calls = Arc::new(AtomicUsize::new(0));
+    let calls = guard_calls.clone();
+    fixture
+        .orch
+        .set_tool_dispatch_recovery_guard(Arc::new(move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err("checkpoint unavailable".into())
+        }));
+    assert!(fixture.dispatch_checked(blocks).await.is_err());
+    assert_eq!(guard_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.computer.sequence_starts.load(Ordering::SeqCst), 0);
+    assert!(fixture.computer.calls.lock().unwrap().is_empty());
+    assert!(fixture.hooks.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

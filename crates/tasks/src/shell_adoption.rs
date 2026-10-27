@@ -39,6 +39,36 @@ impl BackgroundExitSink for AdoptedExitSink {
             )
             .await;
     }
+    async fn on_exit_with_status(&self, id: &str, code: Option<i32>, killed: bool) {
+        if !killed {
+            self.on_exit(id, code).await;
+        } else if self.wait_until_activated().await {
+            if let Some(registry) = self.status.task_registry() {
+                let _ = registry.settle_background_bash(id, code, true).await;
+            }
+        }
+    }
+    async fn on_wait_failure(&self, id: &str, reason: &str) {
+        if self.wait_until_activated().await {
+            if let Some(registry) = self.status.task_registry() {
+                let _ = registry.settle_background_bash_unverified(id, reason).await;
+            }
+        }
+    }
+    async fn on_cleanup_verified(&self, id: &str) {
+        if self.wait_until_activated().await {
+            if let Some(registry) = self.status.task_registry() {
+                let _ = registry.settle_background_bash_unknown(id, None).await;
+            }
+        }
+    }
+    async fn on_exit_outcome_unknown(&self, id: &str, code: Option<i32>) {
+        if self.wait_until_activated().await {
+            if let Some(registry) = self.status.task_registry() {
+                let _ = registry.settle_background_bash_unknown(id, code).await;
+            }
+        }
+    }
     async fn on_background_deadline_exit(&self, id: &str, code: Option<i32>) {
         if self.wait_until_activated().await {
             if let Some(registry) = self.status.task_registry() {
@@ -81,6 +111,27 @@ impl lingxi_core::host::task_registry::TaskKiller for AdoptedKiller {
                 })
                 .await;
         }
+    }
+    async fn kill_verified(
+        &self,
+    ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
+        let owner = self.handoff.owner.as_deref().ok_or_else(|| {
+            lingxi_core::host::task_registry::TaskRegistryError::Internal(
+                "adopted owned shell has no owner".into(),
+            )
+        })?;
+        self.process
+            .terminate_and_wait_owned_background(
+                &ProcessHandle {
+                    task_id: self.handoff.task_id.clone(),
+                    pid: self.handoff.pid,
+                },
+                owner,
+            )
+            .await
+            .map_err(|error| {
+                lingxi_core::host::task_registry::TaskRegistryError::Internal(error.to_string())
+            })
     }
 }
 
@@ -311,7 +362,10 @@ impl TaskRegistry {
         let (process, _) = self.shell_runtime()?;
         let mut accepted = Vec::new();
         for id in ids {
-            let row = self.tasks.read().await.get(id).cloned();
+            let (row, row_identity) = {
+                let tasks = self.tasks.read().await;
+                (tasks.get(id).cloned(), self.tasks.identity(id))
+            };
             let Some(TaskState::LocalBash(shell)) = row else {
                 continue;
             };
@@ -338,6 +392,11 @@ impl TaskRegistry {
                 if tasks
                     .get(id)
                     .is_some_and(|state| state.base().status == TaskStatus::Running)
+                    && row_identity.as_ref().is_some_and(|captured| {
+                        self.tasks
+                            .identity(id)
+                            .is_some_and(|current| Arc::ptr_eq(captured, &current))
+                    })
                     && !self.stopping_shells.lock().unwrap().contains_key(id)
                 {
                     let mut routes = self.spawned.write().await;
@@ -345,14 +404,18 @@ impl TaskRegistry {
                     let mut aliases = self.aliases.write().await;
                     routes.remove(id);
                     cleanups.remove(id);
+                    self.owned_bash_stops
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(id);
                     aliases.retain(|_, target| target != id);
+                    self.backgrounders.lock().await.remove(id);
                     tasks.remove(id)
                 } else {
                     None
                 }
             };
             if let Some(row) = removed {
-                self.backgrounders.lock().await.remove(id);
                 self.pending_monitor_events
                     .lock()
                     .unwrap()
@@ -430,6 +493,12 @@ impl TaskRegistry {
             }
             for (record, state, _, _) in &staged {
                 let killer = Arc::new(AdoptedKiller { process: process.clone(), handoff: record.process.clone() });
+                if record.process.require_group_cleanup_on_exit {
+                    self.owned_bash_stops
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(record.task_id.clone(), Some(killer.clone()));
+                }
                 let cleanup: TaskCleanup = Arc::new(move || {
                     let killer = killer.clone();
                     tokio::spawn(async move { lingxi_core::host::task_registry::TaskKiller::kill(killer.as_ref()).await; });

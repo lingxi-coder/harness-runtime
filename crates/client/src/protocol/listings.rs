@@ -866,6 +866,8 @@ pub enum TaskStatusDto {
     Failed,
     /// Stopped by the user before completion.
     Cancelled,
+    /// Process termination was verified, but its outcome is unknown.
+    ExitedUnknown,
 }
 
 // ── Coordinator (T18 — per-worker roster) ─────────────────────────────────────

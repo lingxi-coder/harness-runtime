@@ -114,6 +114,7 @@ fn status_from_wire(s: &str) -> Result<TaskStatus, TaskRegistryError> {
         "completed" => TaskStatus::Completed,
         "failed" => TaskStatus::Failed,
         "killed" => TaskStatus::Killed,
+        "exited_unknown" => TaskStatus::ExitedUnknown,
         other => {
             return Err(TaskRegistryError::InvalidInput(format!(
                 "unknown status '{other}'"
@@ -130,6 +131,7 @@ pub(crate) fn status_to_wire(s: TaskStatus) -> &'static str {
         TaskStatus::Completed => "completed",
         TaskStatus::Failed => "failed",
         TaskStatus::Killed => "killed",
+        TaskStatus::ExitedUnknown => "exited_unknown",
     }
 }
 
@@ -305,11 +307,39 @@ pub(crate) fn state_to_record(s: &TaskState) -> TaskRecord {
     // reason on the state directly (registry `set_agent_outcome`). Fusion also
     // preserves a publication/storage error independently from its computed
     // answer. Every other task type has no reason seam and stays `None`.
+    let (shell_wait_unverified, shell_wait_verified) = match s {
+        TaskState::LocalBash(bash) => {
+            let cause = bash.stop_cause.as_deref().unwrap_or_default();
+            (
+                cause.strip_prefix("wait_unverified:"),
+                cause.strip_prefix("verified_after_unverified:"),
+            )
+        }
+        _ => (None, None),
+    };
     let error = match s {
         TaskState::LocalWorkflow(w) => w.outcome.error.clone(),
         TaskState::LocalAgent(a) => a.error.clone(),
         TaskState::LocalFusion(f) => f.error.clone().or_else(|| f.publication_error.clone()),
+        TaskState::LocalBash(_) if b.status == TaskStatus::Failed => shell_wait_verified
+            .map(|reason| format!("shell termination was initially unverified: {reason}")),
         _ => None,
+    };
+    let observation_error = if b.status == TaskStatus::ExitedUnknown {
+        let previous = match s {
+            TaskState::LocalBash(bash) => bash
+                .stop_cause
+                .as_deref()
+                .and_then(|cause| cause.strip_prefix(crate::registry::BASH_OUTCOME_UNKNOWN))
+                .filter(|reason| !reason.is_empty()),
+            _ => None,
+        };
+        Some(previous.map_or_else(
+            || "shell exit was verified, but its outcome is unknown".to_string(),
+            |reason| format!("shell exit was verified, but its outcome is unknown; earlier cleanup observation: {reason}"),
+        ))
+    } else {
+        shell_wait_unverified.map(|reason| format!("shell termination is unverified: {reason}"))
     };
     // F005: `local_fusion` carries its current progress-stage label (the same
     // text the Agent-tool path forwards as `subagent_activity`) so a
@@ -375,6 +405,7 @@ pub(crate) fn state_to_record(s: &TaskState) -> TaskRecord {
             _ => None,
         },
         error,
+        observation_error,
         stage,
         agent_facts: Some(agent_task_facts(s, 0)),
     }
@@ -499,6 +530,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
         },
         TaskType::LocalWorkflow => TaskSpawnInput::LocalWorkflow {
+            session_origin: None,
             session_uuid: None,
             workflow_id: String::new(),
             script: String::new(),
@@ -526,6 +558,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             command: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             source_description: lingxi_core::types::utf16_json::Utf16JsonProjection::from(""),
             spawn_command: None,
+            lifetime_guard: None,
             timeout: None,
             cwd: None,
             tool_use_id: None,
@@ -547,6 +580,7 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             max_iterations: None,
         },
         TaskType::LocalFusion => TaskSpawnInput::LocalFusion {
+            session_origin: None,
             request: lingxi_core::host::FusionRequest {
                 strategy: None,
                 strategy_revision: None,
@@ -569,6 +603,39 @@ fn placeholder_input(task_type: TaskType) -> TaskSpawnInput {
             conversation_id: String::new(),
         },
     }
+}
+
+async fn spawn_monitor_with_guard(
+    registry: &TaskRegistry,
+    reg: MonitorRegistration,
+    lifetime_guard: Option<lingxi_core::host::sandbox::BackendPlanHandle>,
+) -> Result<String, TaskRegistryError> {
+    let source_description = reg.description;
+    let row_description = source_description.clone();
+    let timeout = if reg.persistent || reg.timeout_ms == 0 {
+        None
+    } else {
+        Some(std::time::Duration::from_millis(reg.timeout_ms))
+    };
+    TaskRegistry::spawn(
+        registry,
+        TaskType::Monitor,
+        TaskSpawnInput::Monitor {
+            command: reg.command,
+            source_description,
+            spawn_command: reg.spawn_command,
+            lifetime_guard,
+            timeout,
+            cwd: reg.cwd.map(PathBuf::from),
+            tool_use_id: reg.tool_use_id,
+            creator_teammate_name: reg.creator_teammate_name,
+            creator_team_name: reg.creator_team_name,
+            creator_agent_id: reg.creator_agent_id,
+        },
+        row_description,
+    )
+    .await
+    .map_err(task_err_to_registry_err)
 }
 
 #[async_trait]
@@ -948,6 +1015,14 @@ impl TaskRegistryHandle for TaskRegistry {
                         TaskStatus::Failed => Some(AgentTerminalWaitOutcome::Failed(snapshot)),
                         TaskStatus::Killed => Some(AgentTerminalWaitOutcome::Killed(snapshot)),
                         TaskStatus::Pending | TaskStatus::Running | TaskStatus::Paused => None,
+                        TaskStatus::ExitedUnknown => {
+                            if let Some(claim) = active_claim.take() {
+                                claim.release().await;
+                            }
+                            return Err(TaskRegistryError::Internal(
+                                "agent cannot have an unknown shell outcome".into(),
+                            ));
+                        }
                     };
                     if let Some(outcome) = terminal_outcome {
                         if let Some(claim) = active_claim.take() {
@@ -1134,6 +1209,11 @@ impl TaskRegistryHandle for TaskRegistry {
 
     async fn set_status(&self, id: &str, status: &str) -> Result<TaskRecord, TaskRegistryError> {
         let s = status_from_wire(status)?;
+        if s == TaskStatus::ExitedUnknown {
+            return Err(TaskRegistryError::InvalidInput(
+                "unknown shell outcomes require a verified exit receipt".into(),
+            ));
+        }
         let state = self
             .set_status(id, s)
             .await
@@ -1225,31 +1305,15 @@ impl TaskRegistryHandle for TaskRegistry {
     }
 
     async fn spawn_monitor(&self, reg: MonitorRegistration) -> Result<String, TaskRegistryError> {
-        let source_description = reg.description;
-        let row_description = source_description.clone();
-        let timeout = if reg.persistent || reg.timeout_ms == 0 {
-            None
-        } else {
-            Some(std::time::Duration::from_millis(reg.timeout_ms))
-        };
-        TaskRegistry::spawn(
-            self,
-            TaskType::Monitor,
-            TaskSpawnInput::Monitor {
-                command: reg.command,
-                source_description,
-                spawn_command: reg.spawn_command,
-                timeout,
-                cwd: reg.cwd.map(PathBuf::from),
-                tool_use_id: reg.tool_use_id,
-                creator_teammate_name: reg.creator_teammate_name,
-                creator_team_name: reg.creator_team_name,
-                creator_agent_id: reg.creator_agent_id,
-            },
-            row_description,
-        )
-        .await
-        .map_err(task_err_to_registry_err)
+        spawn_monitor_with_guard(self, reg, None).await
+    }
+
+    async fn spawn_monitor_with_lifetime_guard(
+        &self,
+        reg: MonitorRegistration,
+        guard: lingxi_core::host::sandbox::BackendPlanHandle,
+    ) -> Result<String, TaskRegistryError> {
+        spawn_monitor_with_guard(self, reg, Some(guard)).await
     }
 
     async fn notify_monitor_event(
@@ -1476,6 +1540,21 @@ impl TaskRegistryHandle for TaskRegistry {
         })
     }
 
+    async fn allocate_owned_bash_output(
+        &self,
+    ) -> Result<lingxi_core::host::task_registry::BackgroundBashHandle, TaskRegistryError> {
+        let (task_id, path) = TaskRegistry::allocate_owned_bash_output(self)
+            .await
+            .map_err(task_err_to_registry_err)?;
+        let output_path = path.to_str().map(str::to_string).ok_or_else(|| {
+            TaskRegistryError::Internal("task output path is not valid UTF-8".into())
+        })?;
+        Ok(lingxi_core::host::task_registry::BackgroundBashHandle {
+            task_id,
+            output_path,
+        })
+    }
+
     async fn register_background_bash(
         &self,
         task_id: &str,
@@ -1556,8 +1635,46 @@ impl TaskRegistryHandle for TaskRegistry {
             .map_err(task_err_to_registry_err)
     }
 
+    async fn register_foreground_agent_owned(
+        &self,
+        registration: lingxi_core::host::task_registry::ForegroundAgentRegistration,
+    ) -> Result<
+        (
+            lingxi_core::host::task_registry::ForegroundAgentHandle,
+            lingxi_core::host::task_registry::ForegroundTaskLease,
+        ),
+        TaskRegistryError,
+    > {
+        TaskRegistry::register_foreground_agent_with_identity(self, registration)
+            .await
+            .map(|(state, lease)| {
+                (
+                    lingxi_core::host::task_registry::ForegroundAgentHandle {
+                        task_id: state.base().id.clone(),
+                        output_path: state.base().output_file.to_string_lossy().into_owned(),
+                    },
+                    lease,
+                )
+            })
+            .map_err(task_err_to_registry_err)
+    }
+
     async fn unregister_foreground_agent(&self, id: &str) {
         TaskRegistry::unregister_foreground_agent(self, id).await;
+    }
+
+    async fn unregister_foreground_agent_owned(
+        &self,
+        lease: &lingxi_core::host::task_registry::ForegroundTaskLease,
+    ) {
+        TaskRegistry::unregister_foreground_agent_owned(self, lease).await;
+    }
+
+    async fn commit_foreground_agent_background_owned(
+        &self,
+        lease: &lingxi_core::host::task_registry::ForegroundTaskLease,
+    ) -> Result<bool, TaskRegistryError> {
+        Ok(TaskRegistry::commit_foreground_agent_background_owned(self, lease).await)
     }
 
     async fn register_foreground_bash(
@@ -1571,8 +1688,31 @@ impl TaskRegistryHandle for TaskRegistry {
             .map_err(task_err_to_registry_err)
     }
 
+    async fn register_foreground_bash_owned(
+        &self,
+        task_id: &str,
+        registration: lingxi_core::host::task_registry::BackgroundBashRegistration,
+        auto_background_armed: bool,
+    ) -> Result<lingxi_core::host::task_registry::ForegroundTaskLease, TaskRegistryError> {
+        TaskRegistry::register_foreground_bash_owned(
+            self,
+            task_id,
+            registration,
+            auto_background_armed,
+        )
+        .await
+        .map_err(task_err_to_registry_err)
+    }
+
     async fn unregister_foreground_bash(&self, task_id: &str) {
         TaskRegistry::unregister_foreground_bash(self, task_id).await;
+    }
+
+    async fn unregister_foreground_bash_owned(
+        &self,
+        lease: &lingxi_core::host::task_registry::ForegroundTaskLease,
+    ) {
+        TaskRegistry::unregister_foreground_bash_owned(self, lease).await;
     }
 
     async fn bind_background_requester(
@@ -1585,8 +1725,25 @@ impl TaskRegistryHandle for TaskRegistry {
             .map_err(task_err_to_registry_err)
     }
 
+    async fn bind_background_requester_owned(
+        &self,
+        lease: &lingxi_core::host::task_registry::ForegroundTaskLease,
+        requester: std::sync::Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::bind_background_requester_owned(self, lease, requester)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
     async fn background_task(&self, task_id: &str) -> bool {
         TaskRegistry::background_task(self, task_id).await
+    }
+
+    async fn background_task_with_outcome(
+        &self,
+        task_id: &str,
+    ) -> lingxi_core::host::task_registry::TaskBackgroundOutcome {
+        TaskRegistry::background_task_with_outcome(self, task_id).await
     }
 
     async fn not_found_rosters(
@@ -1601,6 +1758,13 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::background_task_for_tool_use(self, tool_use_id).await
     }
 
+    async fn background_task_for_tool_use_with_outcome(
+        &self,
+        tool_use_id: &str,
+    ) -> lingxi_core::host::task_registry::TaskBackgroundOutcome {
+        TaskRegistry::background_task_for_tool_use_with_outcome(self, tool_use_id).await
+    }
+
     async fn background_all_tasks(&self) -> usize {
         TaskRegistry::background_all_tasks(self).await
     }
@@ -1609,6 +1773,13 @@ impl TaskRegistryHandle for TaskRegistry {
         reason: lingxi_core::host::task_registry::TaskBackgroundReason,
     ) -> usize {
         TaskRegistry::background_all_tasks_with_reason(self, reason).await
+    }
+
+    async fn background_all_tasks_with_outcome(
+        &self,
+        reason: lingxi_core::host::task_registry::TaskBackgroundReason,
+    ) -> lingxi_core::host::task_registry::TaskBackgroundBatchOutcome {
+        TaskRegistry::background_all_tasks_with_outcome(self, reason).await
     }
 
     async fn has_backgroundable_tasks(&self) -> bool {
@@ -1696,6 +1867,26 @@ impl TaskRegistryHandle for TaskRegistry {
         killed: bool,
     ) -> Result<(), TaskRegistryError> {
         TaskRegistry::settle_background_bash(self, id, exit_code, killed)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
+    async fn settle_background_bash_unverified(
+        &self,
+        id: &str,
+        reason: &str,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::settle_background_bash_unverified(self, id, reason)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
+    async fn settle_background_bash_unknown(
+        &self,
+        id: &str,
+        exit_code: Option<i32>,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::settle_background_bash_unknown(self, id, exit_code)
             .await
             .map_err(task_err_to_registry_err)
     }
@@ -2587,6 +2778,60 @@ mod tests {
             "local_bash record carries the shell command"
         );
         assert_eq!(rec.description.string_at(""), Some("build the workspace"));
+    }
+
+    #[test]
+    fn killed_shell_retains_unverified_observation_until_later_confirmation() {
+        let mut state = TaskState::LocalBash(crate::state::LocalBashTaskState {
+            is_adopted: false,
+            caller: None,
+            base: crate::state::TaskStateBase {
+                id: "shell-test".into(),
+                task_type: TaskType::LocalBash,
+                status: TaskStatus::Killed,
+                description: "shell".into(),
+                tool_use_id: None,
+                start_time: std::time::SystemTime::UNIX_EPOCH,
+                end_time: None,
+                total_paused_ms: 0,
+                output_file: PathBuf::from("/tmp/shell-test.output"),
+                evict_after: None,
+                output_offset: 0,
+                notified: false,
+                creator_teammate_name: None,
+                creator_team_name: None,
+                creator_agent_id: None,
+            },
+            command: "sleep 1".into(),
+            pid: None,
+            exit_code: None,
+            stop_cause: Some("wait_unverified:wait failed".into()),
+            cwd: None,
+            is_backgrounded: None,
+        });
+        let record = state_to_record(&state);
+        assert_eq!(
+            record.observation_error.as_deref(),
+            Some("shell termination is unverified: wait failed")
+        );
+        assert_eq!(record.error, None);
+
+        if let TaskState::LocalBash(shell) = &mut state {
+            shell.stop_cause = Some("verified_after_unverified:wait failed".into());
+        }
+        let record = state_to_record(&state);
+        assert_eq!(record.observation_error, None);
+        assert_eq!(record.error, None, "a verified stop is not a failure");
+
+        if let TaskState::LocalBash(shell) = &mut state {
+            shell.base.status = TaskStatus::Failed;
+        }
+        let record = state_to_record(&state);
+        assert_eq!(record.observation_error, None);
+        assert_eq!(
+            record.error.as_deref(),
+            Some("shell termination was initially unverified: wait failed")
+        );
     }
 
     #[tokio::test]

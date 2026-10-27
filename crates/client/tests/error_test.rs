@@ -42,6 +42,9 @@ fn client_error_round_trips() {
         ClientError::Internal {
             message: "unexpected nil orchestrator".to_string(),
         },
+        ClientError::SubmissionNotAdmitted {
+            message: "session changed".to_string(),
+        },
     ];
 
     for err in cases {
@@ -95,6 +98,12 @@ fn client_error_tags_are_snake_case() {
             },
             "internal",
         ),
+        (
+            ClientError::SubmissionNotAdmitted {
+                message: "x".into(),
+            },
+            "submission_not_admitted",
+        ),
     ];
     for (err, tag) in cases {
         let json = serde_json::to_value(&err).expect("serialize ClientError");
@@ -144,6 +153,13 @@ fn error_variants_are_ffi_flat() {
         }
         .to_string(),
         "internal error: unexpected nil orchestrator"
+    );
+    assert_eq!(
+        ClientError::SubmissionNotAdmitted {
+            message: "session changed".into()
+        }
+        .to_string(),
+        "submission not admitted: session changed"
     );
 }
 

@@ -871,6 +871,7 @@ mod tests {
     }
     fn inherit() -> SubagentInheritance {
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(NoInvoker),
             budget: Arc::new(NoBudget),
         }

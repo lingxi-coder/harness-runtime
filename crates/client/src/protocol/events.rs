@@ -32,6 +32,7 @@ use crate::protocol::media::{
     MediaServiceResponseDto,
 };
 use crate::protocol::message::MessageDto;
+use crate::protocol::mod_session_event::ModSessionEventPayload;
 use crate::protocol::permission::PermissionResolutionDto;
 use crate::protocol::text::ClientTextDto;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -498,15 +499,15 @@ define_client_event! {
         // Trusted owner, operation identity, budget, and requested operation.
         request: AudioOperationRequestDto,
     },
-    // Authoritative durable state for one mobile turn. Emitted on attach,
-    // resume, recovery gating, and every terminal transition.
+    // Authoritative durable state for one mobile turn. Emitted on resume,
+    // recovery gating, and every terminal transition. Attach uses its own
+    // correlated TurnAttachStarted snapshot.
     TurnRecoveryState {
         snapshot: TurnRecoverySnapshotDto,
     },
 
-    // Sequenced retained copy of a turn event. It is emitted beside live
-    // delivery and replayed after
-    // [`ClientCommand::AttachTurn`](crate::protocol::commands::ClientCommand::AttachTurn).
+    // Sequenced retained turn event. Used for both live delivery and replay
+    // after [`ClientCommand::AttachTurn`](crate::protocol::commands::ClientCommand::AttachTurn).
     // `event_json` is the original serialized `ClientEvent`; keeping it a
     // string avoids a recursive UniFFI enum while preserving the exact wire
     // payload for future SSE/WebSocket transports.
@@ -879,6 +880,42 @@ define_client_event! {
     /// Host-private peer audio barrier routed to the authenticated native adapter.
     MediaControlRequest {
         request: MediaControlRequestDto,
+    },
+    // Live turn event for which no durable sequence can be confirmed.
+    // The write may have reached storage despite its failure; consumers must
+    // not advance a replay cursor or assume the event is absent from replay.
+    // Appended to preserve all existing UniFFI event ordinals.
+    TurnEventLiveUnretained {
+        session_id: String,
+        turn_id: u64,
+        event_json: String,
+    },
+    // Detached Mod callbacks belong to the session captured at dispatch;
+    // their Mod turn UUID is distinct from the mobile durable turn ID.
+    ModSessionEvent {
+        session_id: String,
+        mod_turn_id: Option<String>,
+        payload: ModSessionEventPayload,
+    },
+    // Authoritative snapshot and beginning of this attach's replay batch.
+    TurnAttachStarted {
+        request_id: String,
+        snapshot: TurnRecoverySnapshotDto,
+    },
+    // End of this attach's replay batch. The caller may leave its attach phase
+    // only after this event is consumed by its own ordered projection queue.
+    TurnAttachFinished {
+        request_id: String,
+        session_id: String,
+        turn_id: u64,
+    },
+    // Read-only queue status for exactly the requested session, turn and
+    // correlation id. This is not a turn journal event.
+    QueuedTurnStatus {
+        session_id: String,
+        turn_id: u64,
+        request_id: String,
+        status: QueuedTurnStatusDto,
     },
 }
 
@@ -1499,6 +1536,51 @@ impl From<ClientEventWire> for ClientEvent {
             ClientEventWire::PromptSuggestionState { enabled, notice } => {
                 Self::PromptSuggestionState { enabled, notice }
             }
+            ClientEventWire::TurnEventLiveUnretained {
+                session_id,
+                turn_id,
+                event_json,
+            } => Self::TurnEventLiveUnretained {
+                session_id,
+                turn_id,
+                event_json,
+            },
+            ClientEventWire::ModSessionEvent {
+                session_id,
+                mod_turn_id,
+                payload,
+            } => Self::ModSessionEvent {
+                session_id,
+                mod_turn_id,
+                payload,
+            },
+            ClientEventWire::TurnAttachStarted {
+                request_id,
+                snapshot,
+            } => Self::TurnAttachStarted {
+                request_id,
+                snapshot,
+            },
+            ClientEventWire::TurnAttachFinished {
+                request_id,
+                session_id,
+                turn_id,
+            } => Self::TurnAttachFinished {
+                request_id,
+                session_id,
+                turn_id,
+            },
+            ClientEventWire::QueuedTurnStatus {
+                session_id,
+                turn_id,
+                request_id,
+                status,
+            } => Self::QueuedTurnStatus {
+                session_id,
+                turn_id,
+                request_id,
+                status,
+            },
         }
     }
 }
@@ -1787,6 +1869,41 @@ pub enum TurnRecoveryStateDto {
     Cancelled,
 }
 
+/// Durable disposition of a queued mobile turn. A delivered aggregate may
+/// represent several client turns; its UUID identifies their shared user row,
+/// not the currently active turn or an individual member's transcript row.
+/// Clients reconcile it only against a successfully projected user row with
+/// the same session and UUID. Missing, filtered or unprojectable rows do not
+/// prove that the queued input has been displayed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+#[serde(tag = "type", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum QueuedTurnStatusDto {
+    /// The request is still waiting in the durable queue.
+    Pending,
+    /// A side-effecting claim or incomplete admission has an uncertain outcome.
+    ClaimedUncertain,
+    /// All members were durably accepted into one aggregate transcript row.
+    Delivered {
+        /// First queued member, which owns the durable batch commit marker.
+        batch_owner_turn_id: u64,
+        /// Ordered queued members covered by that exact commit marker.
+        member_turn_ids: Vec<u64>,
+        /// Stable UUID of the shared, durably written user transcript row.
+        transcript_uuid: String,
+    },
+    /// The queued input was cancelled.
+    Cancelled,
+    /// The input was claimed as a live turn; use its turn recovery protocol.
+    Running,
+    /// The input became a turn that reached a terminal durable state.
+    Terminal {
+        /// Completed, failed or cancelled state.
+        state: TurnRecoveryStateDto,
+    },
+}
+
 impl TurnRecoveryStateDto {
     /// Terminal durable states must never be resurrected by attach/resume.
     #[must_use]
@@ -1804,6 +1921,14 @@ pub struct TurnRecoverySnapshotDto {
     pub session_id: String,
     /// Stable client-provided turn identity.
     pub turn_id: u64,
+    /// Version of the durably committed turn metadata, scoped to this session
+    /// and turn. A snapshot with a lower revision must not replace a newer
+    /// recovery state. Equal revisions can repeat for acknowledgements and
+    /// can carry a different attach-specific reason.
+    ///
+    /// Event appends advance the sequence window independently, so this is
+    /// neither a replay cursor nor an acknowledgement of client processing.
+    pub revision: u64,
     /// Current durable lifecycle state.
     pub state: TurnRecoveryStateDto,
     /// First event sequence still retained for replay.
@@ -1812,6 +1937,10 @@ pub struct TurnRecoverySnapshotDto {
     pub last_sequence: u64,
     /// Whether replaying from the persisted boundary is known to be safe.
     pub safe_to_resume: bool,
+    /// Previously observed output may not be completely represented by the
+    /// durable journal. This is independent of lifecycle state and reason;
+    /// it does not assert that any particular event was lost.
+    pub projection_uncertain: bool,
     /// Optional machine-readable explanation for a paused or terminal state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,

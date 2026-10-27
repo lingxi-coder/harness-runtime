@@ -607,6 +607,14 @@ pub(super) fn process_visible_response<'a>(
             .await;
         let tool_requested_end_turn = tool_result_turn_end.is_some() && !hook_prevent_continuation;
         if !hook_prevent_continuation {
+            let batch_leases = if post_tool_batch_calls.is_empty() {
+                None
+            } else {
+                orch.mark_tool_dispatch_unsafe()?
+            };
+            let batch_work_lease = batch_leases
+                .as_ref()
+                .map(|leases| Arc::clone(&leases.turn_work));
             if let Some(turn_end) = tool_result_turn_end {
                 // Oracle order: results first, then the single end-turn telemetry
                 // event, then PostToolBatch, then forced Stop hooks.
@@ -618,6 +626,7 @@ pub(super) fn process_visible_response<'a>(
                     super::PostToolBatchDispatch {
                         tool_calls: post_tool_batch_calls,
                         publication_guard: Some(Arc::new(publication_fence.clone())),
+                        async_work_lease: batch_work_lease,
                     },
                 )
                 .await
@@ -627,6 +636,7 @@ pub(super) fn process_visible_response<'a>(
                     super::PostToolBatchDispatch {
                         tool_calls: post_tool_batch_calls,
                         publication_guard: Some(Arc::new(publication_fence.clone())),
+                        async_work_lease: batch_work_lease,
                     },
                 )
                 .await

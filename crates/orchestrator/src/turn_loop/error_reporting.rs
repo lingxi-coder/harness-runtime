@@ -715,12 +715,16 @@ pub(crate) async fn surface_terminal_api_error(
 ///   Overloaded errors" surface (`errors.ts:166`).
 /// - `PermissionAbort` — the auto-mode denial breaker deliberately terminates
 ///   a prompt-avoiding agent and must not be converted into `model_error`.
+/// - `RecoveryInterrupted` — lifecycle cancellation must reach the host as
+///   an interruption rather than a provider failure or user rejection.
 /// Mirrors claude-code, whose top-level `catch` is reached only AFTER the retry
 /// layer has handled 429/529; everything else falls through to `model_error`.
 #[must_use]
 pub(crate) fn is_carveout_propagated(e: &OrchestratorError) -> bool {
     match e {
-        OrchestratorError::PermissionAbort { .. } | OrchestratorError::RepeatedOverloaded => true,
+        OrchestratorError::PermissionAbort { .. }
+        | OrchestratorError::RepeatedOverloaded
+        | OrchestratorError::RecoveryInterrupted => true,
         OrchestratorError::ApiCall(error) | OrchestratorError::Streaming(error) => matches!(
             error.classification_source(),
             LlmError::RateLimited { .. }
@@ -1193,5 +1197,15 @@ mod model_error_kind_regression {
         assert_eq!(model_error_kind(&error), "invalid_request");
         let error = OrchestratorError::Internal("private path and request".into());
         assert_eq!(model_error_kind(&error), "internal_error");
+    }
+
+    #[test]
+    fn recovery_interruption_propagates_without_a_provider_error_category() {
+        let interruption = OrchestratorError::RecoveryInterrupted;
+        assert!(is_carveout_propagated(&interruption));
+        let envelope = crate::conversation::classify_api_error(&interruption);
+        assert_eq!(envelope.error, None);
+        assert_eq!(envelope.api_error_status, None);
+        assert_eq!(envelope.terminal_reason, None);
     }
 }

@@ -17,10 +17,12 @@ commits; imported records retain the original reviewer and notes.
 It has no generated exemptions, publisher-trust rules or claimed local audits.
 The empty local `audits.toml` is intentional until a real review is recorded.
 
-On 2026-10-26 the locked check reports 526 unvetted package versions (510
-`safe-to-deploy`, 16 `safe-to-run`) for Cargo.lock SHA-256
+On 2026-10-27, `cargo vet check --locked --frozen` reports 506 unvetted
+package versions (490 `safe-to-deploy`, 16 `safe-to-run`) for Cargo.lock SHA-256
 `58ea0be446b31d9e31088ad3ca09d28411c5dd11ec8165e8ea3a83eb9963c025`.
-Published reviews of different versions do not certify these locked versions.
+The root and independent WebRTC graphs can contain the same package versions,
+so their unvetted counts must not be added. Published reviews of different
+versions do not certify these locked versions.
 Resolving that gate requires source reviews (including justified version
 deltas) or existing trustworthy audit records; a vulnerability scan is not a
 substitute.

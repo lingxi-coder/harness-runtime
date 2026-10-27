@@ -203,7 +203,7 @@ impl Platform for HostFakePlatform {
 /// off-device stand-in for a Swift/Kotlin listener.
 #[derive(Default)]
 pub struct FakeListener {
-    /// Every [`ClientEvent`] the adapter delivered, in arrival order.
+    /// Client-projected events and their retained envelopes, in arrival order.
     pub received: Mutex<Vec<ClientEvent>>,
     /// Every direct structured workflow update, in arrival order.
     pub workflow_progress: Mutex<
@@ -219,7 +219,20 @@ pub struct FakeListener {
 #[async_trait]
 impl ClientEventListener for FakeListener {
     async fn on_event(&self, event: ClientEvent) {
-        self.received.lock().await.push(event);
+        let projection = match &event {
+            ClientEvent::TurnEventReplay { event_json, .. }
+            | ClientEvent::TurnEventLiveUnretained { event_json, .. } => {
+                serde_json::from_str::<ClientEvent>(event_json).ok()
+            }
+            _ => None,
+        };
+        let mut received = self.received.lock().await;
+        if let Some(projected) = projection {
+            received.push(projected);
+        }
+        if !matches!(event, ClientEvent::TurnEventLiveUnretained { .. }) {
+            received.push(event);
+        }
     }
 
     async fn on_workflow_progress(

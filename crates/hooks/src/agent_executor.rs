@@ -431,6 +431,7 @@ mod tests {
 
     fn dummy_inherit() -> SubagentInheritance {
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: Arc::new(InertBudget),
         }

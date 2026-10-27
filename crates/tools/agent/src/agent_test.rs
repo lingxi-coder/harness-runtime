@@ -85,6 +85,37 @@ mod tests {
     /// binary's `Dh(undefined) === false`.
     const LONG_MODEL: Option<&str> = Some("claude-sonnet-4-5");
 
+    #[derive(Debug)]
+    struct TestSessionOrigin {
+        session_id: lingxi_core::types::SessionId,
+        root: std::path::PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl lingxi_core::host::subagent_spawn::SessionOriginCapability for TestSessionOrigin {
+        fn owner_id(&self) -> usize {
+            1
+        }
+        fn session_id(&self) -> lingxi_core::types::SessionId {
+            self.session_id
+        }
+        fn generation(&self) -> u64 {
+            7
+        }
+        fn cwd(&self) -> &std::path::Path {
+            &self.root
+        }
+        fn root(&self) -> &std::path::Path {
+            &self.root
+        }
+        async fn admit(
+            &self,
+        ) -> Result<Arc<dyn Send + Sync>, lingxi_core::host::subagent_spawn::SessionOriginError>
+        {
+            Ok(Arc::new(()))
+        }
+    }
+
     struct EnvVarRestore {
         key: &'static str,
         previous: Option<std::ffi::OsString>,
@@ -356,6 +387,7 @@ mod tests {
 
     fn fresh_ctx_with_registry(registry: Arc<ToolRegistry>) -> ToolUseContext {
         ToolUseContext {
+            session_origin: None,
             is_scheduled_turn: false,
             available_tool_names: None,
             agent_spawn_provenance: Default::default(),
@@ -388,6 +420,7 @@ mod tests {
             session: None,
             subagent_registry: Some(registry),
             cancel: None,
+            host_tool_cancellation: tool_api::context::HostToolCancellation::Ordinary,
             fork_parent_system_prompt: None,
             cwd: None,
             depth: 0,
@@ -533,6 +566,43 @@ mod tests {
             Arc::ptr_eq(&parent_registry, captured.as_ref().unwrap()),
             "recursion lock: child must inherit parent's Arc<ToolRegistry> verbatim"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_spawn_inherits_the_exact_runtime_session_origin() {
+        let registry = Arc::new(ToolRegistry::new());
+        let spawner = arc_mock_spawner();
+        let tool = AgentTool::new(wired_ctx(
+            spawner.clone(),
+            arc_mock_task_registry(),
+            arc_mock_mailbox(),
+            arc_mock_budget(u64::MAX),
+        ));
+        let session_id = lingxi_core::types::SessionId::new();
+        let origin: Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability> =
+            Arc::new(TestSessionOrigin {
+                session_id,
+                root: "/workspace".into(),
+            });
+        let mut ctx = fresh_ctx_with_registry(registry);
+        ctx.origin_session_id = Some(session_id);
+        ctx.session_origin = Some(origin.clone());
+        tool.call(
+            json!({"description":"inspect", "subagent_type":"general-purpose", "prompt":"hi"}),
+            ctx,
+            fresh_tx(),
+        )
+        .await
+        .unwrap();
+        let invocations = spawner.invocations();
+        let inherited = invocations[0]
+            .inherit
+            .session_origin
+            .as_ref()
+            .expect("origin survives Agent admission");
+        assert!(Arc::ptr_eq(inherited, &origin));
+        assert_eq!(inherited.generation(), 7);
+        assert_eq!(inherited.session_id(), session_id);
     }
 
     // =====================================================================
@@ -2319,6 +2389,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                     "Agent",
                     fusion_input(Some("implement")),
                     SubagentInvocationContext {
+                        session_origin: None,
                         available_tool_names: None,
                         cancellation_token: tokio_util::sync::CancellationToken::new(),
                         permission_pause_observer: None,
@@ -5891,6 +5962,7 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 "NoopTool",
                 source_fixture(&serde_json::json!({})),
                 lingxi_core::host::tool_invoker::SubagentInvocationContext {
+                    session_origin: None,
                     available_tool_names: None,
                     cancellation_token: lingxi_core::host::CancellationToken::new(),
                     permission_pause_observer: None,
@@ -7627,6 +7699,8 @@ If more agents are genuinely needed, ask the user to raise LINGXI_MAX_SUBAGENTS_
                 model: None,
                 model_profile: None,
                 workflow_authoring_available: false,
+                session_origin: None,
+                require_session_origin: false,
                 bash_precommit_skills: Default::default(),
                 bash_precommit_session_generation: 0,
             })

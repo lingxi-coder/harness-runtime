@@ -12,6 +12,7 @@ use crate::types::{MessageId, SessionId};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 use thiserror::Error;
 
@@ -2703,6 +2704,15 @@ pub trait OrchestratorHandle: Send + Sync {
     }
     /// The session id currently driving the conversation.
     async fn current_session_id(&self) -> SessionId;
+
+    /// Capture a runtime-only capability for the currently authenticated
+    /// session. Hosts without mutable session origins may leave this unset.
+    async fn capture_session_origin(
+        &self,
+    ) -> Result<Option<Arc<dyn crate::host::subagent_spawn::SessionOriginCapability>>, HandleError>
+    {
+        Ok(None)
+    }
 
     /// Clear the in-memory session and start fresh.
     async fn clear_session(&self) -> Result<(), HandleError>;

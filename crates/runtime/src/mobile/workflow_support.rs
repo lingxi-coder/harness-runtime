@@ -539,6 +539,7 @@ impl MobileWorkflowStatusSink {
                     tasks::TaskStatus::Completed => "completed",
                     tasks::TaskStatus::Failed => "failed",
                     tasks::TaskStatus::Killed => "killed",
+                    tasks::TaskStatus::ExitedUnknown => "exited_unknown",
                 }),
                 origin_session_id: Some(origin_session_id),
                 // Only a real failure carries a reason; a completed/killed
@@ -1110,6 +1111,7 @@ impl tool_workflow::WorkflowLauncher for MobileWorkflowLauncher {
                     tasks::TaskType::LocalWorkflow,
                     tasks::TaskSpawnInput::LocalWorkflow {
                         session_uuid: Some(session_uuid.clone()),
+                        session_origin: spec.session_origin.clone(),
                         workflow_id: workflow_id.clone(),
                         script,
                         resume_from_run_id: spec.resume_from_run_id.clone(),
@@ -1726,6 +1728,7 @@ mod deferred_invoker_tests {
 
     fn bare_ctx() -> SubagentInvocationContext {
         SubagentInvocationContext {
+            session_origin: None,
             available_tool_names: None,
             cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,

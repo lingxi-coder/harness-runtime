@@ -55,6 +55,100 @@ pub(super) fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Observe an owned child exiting without reaping it. Until `Child::wait`
+/// reaps the leader, its PID cannot be reused as another process-group ID.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(super) fn child_exited_without_reaping(pid: u32) -> io::Result<bool> {
+    let pid = i32::try_from(pid)
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid child pid"))?;
+    loop {
+        // SAFETY: a zeroed siginfo_t is a valid output buffer for waitid.
+        // The positive PID identifies our still-owned child; WNOHANG prevents
+        // blocking and WNOWAIT leaves its exit status and identity untouched.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            // SAFETY: waitid initialized siginfo_t; it remains zero when no
+            // child has exited. With P_PID any reported PID must match ours.
+            let observed = unsafe { info.si_pid() };
+            return match observed {
+                0 => Ok(false),
+                observed if observed == pid => Ok(true),
+                _ => Err(io::Error::other("waitid returned a different child pid")),
+            };
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(super) fn child_exited_without_reaping(_pid: u32) -> io::Result<bool> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "non-reaping child observation is unavailable on this platform",
+    ))
+}
+
+/// Check a still-held process group without reaping its leader. The kernel's
+/// PID and PGRP queries return records of the same size, including zombies.
+/// Requiring the PID query to return exactly one record prevents an empty or
+/// denied query from being mistaken for a group containing only the leader.
+#[cfg(target_os = "macos")]
+pub(super) fn macos_process_group_has_only_leader(pid: u32) -> io::Result<bool> {
+    let pid = i32::try_from(pid)
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid process group"))?;
+    fn query(kind: libc::c_int, pid: libc::c_int, buffer: &mut [u8]) -> io::Result<usize> {
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROC, kind, pid];
+        let mut len = buffer.len();
+        // SAFETY: the MIB selects a read-only process query, buffer and len
+        // point to writable, initialized storage, and no new value is supplied.
+        let result = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as libc::c_uint,
+                buffer.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if result == 0 {
+            Ok(len)
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    // A deliberately bounded buffer. Unknown record sizes fail closed.
+    let mut buffer = [0u8; 4096];
+    let leader_len = query(libc::KERN_PROC_PID, pid, &mut buffer)?;
+    if leader_len == 0 || leader_len > buffer.len() {
+        return Err(io::Error::other("held leader is absent from process table"));
+    }
+    match query(libc::KERN_PROC_PGRP, pid, &mut buffer[..leader_len]) {
+        Ok(len) if len == leader_len => Ok(true),
+        Ok(_) => Err(io::Error::other(
+            "held leader is absent from its process group",
+        )),
+        Err(error) if error.raw_os_error() == Some(libc::ENOMEM) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Fork with the ordinary exec-error pipe intact, but do not exec the approved
 /// program until the source has received its process capability. Cancellation
 /// drops the parent socket; the child sees EOF and leaves without running it.

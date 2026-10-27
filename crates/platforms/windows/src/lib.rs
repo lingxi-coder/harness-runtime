@@ -10,11 +10,8 @@
 //! Windows-only fast paths) so cross-compile CI gates work without a
 //! Windows runner.
 
-// Relaxed from `forbid` to `deny` for parity with `lingxi-platform-posix`,
-// which `#[allow(unsafe_code)]`s a single module (`process::spawn_unsafe`).
-// The Windows crate currently has no `unsafe`, but `deny` lets a future
-// module opt in via an explicit `#[allow]` attribute (e.g. if a Job Object
-// implementation needs `windows-sys` calls).
+// Keep unsafe denied crate-wide; narrowly scoped Windows OS integration modules
+// opt in explicitly around the APIs whose contracts they uphold.
 #![deny(unsafe_code)]
 
 pub mod bridge;
@@ -27,6 +24,8 @@ pub mod process;
 pub mod runtime;
 pub mod sandbox;
 pub mod secure_storage;
+#[cfg(windows)]
+pub mod stdio_cancel;
 pub mod swarm;
 pub(crate) mod watch_helper;
 pub mod worktree;

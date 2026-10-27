@@ -468,6 +468,7 @@ async fn spawn_without_registry_cannot_launch_an_unmanaged_observer() {
         spawner.spawn(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -677,6 +678,7 @@ async fn a_persistent_spawn_tears_down_its_agent_scoped_mcp_on_stop() {
         .spawn_persistent(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -793,6 +795,7 @@ async fn agent_scoped_mcp_tools_reach_the_wire_and_are_torn_down_on_exit() {
         .spawn(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -843,6 +846,7 @@ async fn blocked_lifecycle_observer_does_not_stall_child_event_pump() {
         spawner.spawn(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -881,6 +885,7 @@ async fn allocation_receipt_is_immediate_even_when_global_observer_is_blocked() 
         spawner.spawn_with_observer(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -1004,6 +1009,7 @@ async fn observer_receives_resolved_type_and_ordered_terminal_event() {
         .spawn(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -1144,6 +1150,7 @@ async fn dropped_spawn_future_during_mcp_cleanup_still_emits_one_terminal_event(
         spawner.spawn(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -1413,6 +1420,7 @@ async fn dropped_spawn_future_lets_runner_reach_cancelled_before_hard_abort() {
         spawner.spawn(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -1566,6 +1574,7 @@ async fn dropped_spawn_future_still_runs_its_mcp_cleanups() {
         spawner.spawn(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -1634,6 +1643,7 @@ fn minimal_spawn_request(prompt: &str) -> SubagentSpawnRequest {
 
 fn dummy_inherit() -> SubagentInheritance {
     SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(DummyInvoker),
         budget: Arc::new(DummyBudget),
     }
@@ -1735,6 +1745,7 @@ async fn handback_spawn_keeps_registered_sender_separate_from_anonymous_type_dis
         .build_subagent_context(
             &request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(ModeReportingInvoker("default")),
                 budget: Arc::new(DummyBudget),
             },
@@ -2067,6 +2078,7 @@ async fn dropped_spawn_future_emits_terminal_event_even_when_its_own_mcp_cleanup
         spawner.spawn(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -2151,6 +2163,7 @@ async fn dropped_spawn_future_releases_pool_slot_before_full_grace_elapses() {
         spawner.spawn(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -3585,6 +3598,7 @@ async fn provider_qualified_live_selection_drives_spawn_and_explore_metadata() {
         .build_subagent_context(
             &request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -3620,6 +3634,7 @@ async fn custom_anthropic_live_selection_keeps_first_party_explore_cap() {
         .build_subagent_context(
             &request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -3656,6 +3671,7 @@ async fn nested_custom_anthropic_parent_uses_catalog_identity_not_profile_name()
         .build_subagent_context(
             &request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -3692,6 +3708,7 @@ async fn statusline_setup_inherits_parent_model_and_profile() {
         .build_subagent_context(
             &request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -3816,6 +3833,7 @@ async fn build_test_spawn(
         .build_subagent_context(
             request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -4158,6 +4176,7 @@ async fn unavailable_live_selection_does_not_fall_back_to_boot_provider() {
         .build_subagent_context(
             &request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -4192,6 +4211,7 @@ async fn explicit_provider_qualified_spawn_does_not_require_live_selection() {
         .build_subagent_context(
             &request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -4237,6 +4257,7 @@ async fn provider_qualified_spawn_still_obeys_managed_model_restriction() {
         .build_subagent_context(
             &request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -4271,6 +4292,7 @@ async fn live_provider_identity_is_used_without_a_profile_name() {
         .build_subagent_context(
             &request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -4367,6 +4389,7 @@ async fn build_subagent_context_inherit_resolves_to_parent_model_override() {
         restore_handback_start: None,
     };
     let inherit = SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(DummyInvoker),
         budget: Arc::new(DummyBudget),
     };
@@ -4530,6 +4553,7 @@ async fn spawned_subagent_prompt_ends_with_the_append_suffix() {
             .build_subagent_context(
                 &request,
                 SubagentInheritance {
+                    session_origin: None,
                     tool_invoker: Arc::new(DummyInvoker),
                     budget: Arc::new(DummyBudget),
                 },
@@ -5531,6 +5555,7 @@ async fn resolve_required_mcp_servers_reads_catalog_definition() {
 #[test]
 fn inheritance_carries_invoker_and_budget_arcs() {
     let inherit = SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(DummyInvoker),
         budget: Arc::new(DummyBudget),
     };
@@ -5555,6 +5580,7 @@ async fn build_subagent_context_ignores_deprecated_mode_param() {
     // Parent live mode = Default (the common case).
     let spawner = test_spawner(pool).with_permission_mode(PermissionMode::Default);
     let mk_inherit = || SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(DummyInvoker),
         budget: Arc::new(DummyBudget),
     };
@@ -5690,6 +5716,7 @@ async fn build_subagent_context_trusted_parent_mode_replaces_root_dispatch_mode(
         let mut request = minimal_spawn_request("inspect");
         request.parent_permission_mode = parent_mode.map(str::to_owned);
         let inherit = SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(ModeReportingInvoker("default")),
             budget: Arc::new(DummyBudget),
         };
@@ -5738,6 +5765,7 @@ async fn build_subagent_context_trusted_auto_parent_suppresses_definition_plan_n
         .build_subagent_context(
             &request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(ModeReportingInvoker("default")),
                 budget: Arc::new(DummyBudget),
             },
@@ -5772,6 +5800,7 @@ async fn build_subagent_context_fork_preserves_trusted_parent_mode_and_exact_too
         .build_subagent_context(
             &request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(ModeReportingInvoker("default")),
                 budget: Arc::new(DummyBudget),
             },
@@ -5809,6 +5838,7 @@ async fn build_subagent_context_definition_plan_mode_overrides() {
         .with_permission_mode(PermissionMode::Default)
         .with_agent_catalog(catalog);
     let inherit = SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(DummyInvoker),
         budget: Arc::new(DummyBudget),
     };
@@ -5902,6 +5932,7 @@ async fn build_subagent_context_plan_mode_narrows_advertised_schemas() {
         .with_tool_registry(registry_with(&["Read", "Bash", "Grep"]))
         .with_agent_catalog(catalog);
     let inherit = SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(DummyInvoker),
         budget: Arc::new(DummyBudget),
     };
@@ -6047,6 +6078,7 @@ async fn build_subagent_context_threads_persistent_flag() {
         restore_handback_start: None,
     };
     let mk_inherit = || SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(DummyInvoker),
         budget: Arc::new(DummyBudget),
     };
@@ -6095,6 +6127,7 @@ async fn build_subagent_context_copies_structured_output_parse_retries() {
         .build_subagent_context(
             &request,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(DummyInvoker),
                 budget: Arc::new(DummyBudget),
             },
@@ -6174,6 +6207,7 @@ async fn build_subagent_context_copies_correlation_id() {
         restore_handback_start: None,
     };
     let mk_inherit = || SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(DummyInvoker),
         budget: Arc::new(DummyBudget),
     };
@@ -6492,6 +6526,7 @@ async fn spawn_persistent_cancellation_cleans_up_runner_started_during_allocate(
         restore_handback_start: None,
     };
     let inherit = SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(DummyInvoker),
         budget: Arc::new(DummyBudget),
     };
@@ -6554,6 +6589,7 @@ async fn build_subagent_context_appends_env_block_nonfork_only() {
             )
         }));
     let mk_inherit = || SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(DummyInvoker),
         budget: Arc::new(DummyBudget),
     };
@@ -6740,6 +6776,7 @@ async fn build_subagent_context_preserves_spawn_name_and_team() {
         restore_handback_start: None,
     };
     let inherit = SubagentInheritance {
+        session_origin: None,
         tool_invoker: Arc::new(DummyInvoker),
         budget: Arc::new(DummyBudget),
     };
@@ -7398,6 +7435,7 @@ async fn spawn_async_default_returns_internal_error() {
         .spawn_async(
             req,
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: invoker,
                 budget,
             },

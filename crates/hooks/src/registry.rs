@@ -61,6 +61,13 @@ pub struct HookContext {
     /// Tool dispatches set it to their executor generation; lifecycle and
     /// standalone hook calls leave it absent.
     pub publication_guard: Option<Arc<dyn crate::attachment::HookPublicationGuard>>,
+    /// Originating turn's residual-work lease. It is held by actual asynchronous
+    /// hook work only, never by the completion envelope's publication guard.
+    pub async_work_lease: Option<Arc<dyn Send + Sync>>,
+    /// Execution slot retained while a foreground hook can still run.
+    pub recovery_execution_lease: Option<Arc<dyn Send + Sync>>,
+    /// Shared typed failure from a recovery-managed hook executor.
+    pub recovery_failure: Option<Arc<std::sync::Mutex<Option<crate::RecoveryAdmissionError>>>>,
     /// Live history for prompt evaluation; never serialized into command/HTTP input.
     pub prompt_transcript: Option<crate::PromptHookTranscript>,
     /// Session this event belongs to.
@@ -177,7 +184,9 @@ pub struct HookContext {
 /// are indexed by their owning agent so the registry can scope them to that
 /// agent's lifetime — that index is plumbed in Plan 09 alongside the agent
 /// loader.
+#[derive(Clone)]
 pub struct HookRegistry {
+    generation: u64,
     /// Shared session Mod host, installed when the first plugin Mod loads.
     mod_host: Option<Arc<crate::mods::ModHost>>,
     mod_background_context: Option<Weak<dyn crate::mods::ModSessionContext>>,
@@ -199,6 +208,9 @@ pub struct HookRegistry {
     /// registered with `is_agent == false` are main-thread/session buckets;
     /// real subagent buckets are eligible only for their exact owner.
     frontmatter_is_agent: HashMap<AgentId, bool>,
+    /// Weak tokens let overlapping strict snapshots observe successful once
+    /// consumption even if the original definition was reloaded meanwhile.
+    once_snapshot_states: HashMap<HookId, Weak<std::sync::atomic::AtomicBool>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +248,7 @@ impl HookRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            generation: 0,
             mod_host: None,
             mod_background_context: None,
             mod_model_policy: None,
@@ -244,7 +257,19 @@ impl HookRegistry {
             session_named: HashMap::new(),
             frontmatter: HashMap::new(),
             frontmatter_is_agent: HashMap::new(),
+            once_snapshot_states: HashMap::new(),
         }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn bump_generation(&mut self) {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("hook registry generation exhausted");
     }
 
     /// Expose the session's Mod host without keeping the registry lock while
@@ -264,6 +289,7 @@ impl HookRegistry {
     }
 
     pub fn attach_mod_model_policy(&mut self, reader: Arc<dyn crate::mods::ModSettingsReader>) {
+        self.bump_generation();
         if let Some(host) = &self.mod_host {
             host.attach_model_policy(reader.clone());
         }
@@ -281,6 +307,7 @@ impl HookRegistry {
 
     /// Install the host shared by plugin lifecycle and event dispatch.
     pub fn set_mod_host(&mut self, host: Arc<crate::mods::ModHost>) {
+        self.bump_generation();
         if let Some(context) = &self.mod_background_context {
             host.attach_background_context(context.clone());
         }
@@ -295,6 +322,7 @@ impl HookRegistry {
         &mut self,
         context: Weak<dyn crate::mods::ModSessionContext>,
     ) {
+        self.bump_generation();
         if let Some(host) = &self.mod_host {
             host.attach_background_context(context.clone());
         }
@@ -303,11 +331,13 @@ impl HookRegistry {
 
     /// Stop dispatching through a Mod host when no modules remain active.
     pub fn clear_mod_host(&mut self) {
+        self.bump_generation();
         self.mod_host = None;
     }
 
     /// Register a hook under its declared source.
     pub fn register(&mut self, hook: HookDefinition) {
+        self.bump_generation();
         warn_if_bare_mcp_matcher(&hook);
         self.sources.entry(hook.source).or_default().push(hook);
     }
@@ -324,6 +354,7 @@ impl HookRegistry {
         source: HookSource,
         hooks: Vec<HookDefinition>,
     ) -> HookSourceReplaceResult {
+        self.bump_generation();
         let before = self.file_changed_matchers();
         for hook in &hooks {
             warn_if_bare_mcp_matcher(hook);
@@ -345,6 +376,7 @@ impl HookRegistry {
     /// Register a batch of hooks owned by `plugin_id`. Replaces any previous
     /// registration under that plugin.
     pub fn register_plugin_hooks(&mut self, plugin_id: PluginId, hooks: Vec<HookDefinition>) {
+        self.bump_generation();
         for hook in &hooks {
             warn_if_bare_mcp_matcher(hook);
         }
@@ -353,6 +385,7 @@ impl HookRegistry {
 
     /// Drop every hook owned by `plugin_id` (used when a plugin unloads).
     pub fn unregister_plugin(&mut self, plugin_id: &PluginId) {
+        self.bump_generation();
         self.plugin.remove(plugin_id);
     }
 
@@ -364,6 +397,7 @@ impl HookRegistry {
         name: String,
         mut hook: HookDefinition,
     ) -> Option<HookDefinition> {
+        self.bump_generation();
         warn_if_bare_mcp_matcher(&hook);
         hook.name = name.clone();
         hook.source = HookSource::Session;
@@ -389,6 +423,7 @@ impl HookRegistry {
         session_id: SessionId,
         name: &str,
     ) -> Option<HookDefinition> {
+        self.bump_generation();
         let removed = self.session_named.get_mut(&session_id)?.remove(name);
         if self
             .session_named
@@ -402,6 +437,7 @@ impl HookRegistry {
 
     /// Remove every named runtime hook scoped to `session_id`.
     pub fn clear_session_hooks(&mut self, session_id: SessionId) -> usize {
+        self.bump_generation();
         self.session_named
             .remove(&session_id)
             .map_or(0, |hooks| hooks.len())
@@ -428,6 +464,7 @@ impl HookRegistry {
         if hooks.is_empty() {
             return;
         }
+        self.bump_generation();
         self.frontmatter_is_agent.insert(agent_id, is_agent);
         let bucket = self.frontmatter.entry(agent_id).or_default();
         for hook in hooks {
@@ -450,6 +487,7 @@ impl HookRegistry {
     /// `clearSessionHooks(rootSetAppState, agentId)`, runAgent.ts finally).
     /// Returns the number of hooks dropped.
     pub fn clear_agent_hooks(&mut self, agent_id: AgentId) -> usize {
+        self.bump_generation();
         self.frontmatter_is_agent.remove(&agent_id);
         self.frontmatter
             .remove(&agent_id)
@@ -471,6 +509,14 @@ impl HookRegistry {
     /// `once` hook is removed wherever it was registered. `HookId`s are unique
     /// per definition, so at most one entry is dropped.
     pub fn remove_once_hook(&mut self, hook_id: HookId) -> bool {
+        self.bump_generation();
+        if let Some(state) = self
+            .once_snapshot_states
+            .get(&hook_id)
+            .and_then(Weak::upgrade)
+        {
+            state.store(true, std::sync::atomic::Ordering::Release);
+        }
         for hooks in self.sources.values_mut() {
             if let Some(pos) = hooks.iter().position(|h| h.id == hook_id) {
                 hooks.remove(pos);
@@ -499,6 +545,30 @@ impl HookRegistry {
             }
         }
         false
+    }
+
+    pub(crate) fn snapshot_once_states(
+        &mut self,
+    ) -> HashMap<HookId, Arc<std::sync::atomic::AtomicBool>> {
+        let ids: Vec<_> = self
+            .all_hooks()
+            .into_iter()
+            .filter(|hook| hook.once)
+            .map(|hook| hook.id)
+            .collect();
+        self.once_snapshot_states
+            .retain(|_, state| state.strong_count() > 0);
+        ids.into_iter()
+            .map(|id| {
+                let state = self
+                    .once_snapshot_states
+                    .get(&id)
+                    .and_then(Weak::upgrade)
+                    .unwrap_or_else(|| Arc::new(std::sync::atomic::AtomicBool::new(false)));
+                self.once_snapshot_states.insert(id, Arc::downgrade(&state));
+                (id, state)
+            })
+            .collect()
     }
 
     /// Return every hook subscribed to `event`'s type that ALSO satisfies its
@@ -550,6 +620,27 @@ impl HookRegistry {
         ctx: &HookContext,
         partition: HookSourcePartition,
     ) -> Vec<&HookDefinition> {
+        self.match_event_partition_for_input(event, ctx, partition, false)
+    }
+
+    /// Match a possible future tool event when its input may still be
+    /// rewritten by a hook, permission decision, or Mod. Tool-name and
+    /// ownership filters remain exact; input predicates are conservative.
+    pub fn match_possible_tool_event(
+        &self,
+        event: &HookEvent,
+        ctx: &HookContext,
+    ) -> Vec<&HookDefinition> {
+        self.match_event_partition_for_input(event, ctx, HookSourcePartition::All, true)
+    }
+
+    fn match_event_partition_for_input(
+        &self,
+        event: &HookEvent,
+        ctx: &HookContext,
+        partition: HookSourcePartition,
+        unknown_input: bool,
+    ) -> Vec<&HookDefinition> {
         let et = event.event_type();
         // Native 2.1.295's `J9` membership selects the widened simple-pattern
         // matcher for this event. The port has no `toolAliases`, so the `r`
@@ -577,7 +668,9 @@ impl HookRegistry {
                     match &if_target {
                         // if-evaluable event → both tool-name + content must match.
                         Some((tool_name, tool_input)) => {
-                            if !matches_if_condition_projection(if_cond, tool_name, tool_input) {
+                            if !unknown_input
+                                && !matches_if_condition_projection(if_cond, tool_name, tool_input)
+                            {
                                 return false;
                             }
                         }

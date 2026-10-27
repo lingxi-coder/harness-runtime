@@ -223,6 +223,9 @@ pub struct SubagentContext {
     /// Unlike the hook session id, this is the budget/accounting owner for
     /// descendants and is never inferred by a receiver.
     pub origin_session_id: Option<SessionId>,
+    /// Runtime-only origin capability inherited from the launch admission.
+    /// It does not hold the session work lock while this agent is idle.
+    pub session_origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
     /// MCP connections the agent should attach to.
     pub mcp_clients: Vec<McpConnectionId>,
     /// Directory under which this agent writes its transcript.

@@ -2226,6 +2226,7 @@ fn fresh_subagent_ctx() -> SubagentContext {
         can_show_permission_prompts: true,
         session_interactive: None,
         origin_session_id: None,
+        session_origin: None,
         mcp_clients: vec![],
         transcript_subdir: "/tmp".into(),
         transcript_fs: None,

@@ -91,6 +91,14 @@ jobs:
           bun-version: '1.4.3'
       - name: Install runtime integration test dependencies
         run: sudo apt-get update && sudo apt-get install -y bubblewrap socat
+      - name: Verify real bubblewrap filesystem isolation
+        shell: bash
+        run: |
+          bwrap --version
+          bwrap --ro-bind / / --unshare-user --unshare-pid --proc /proc -- /bin/true
+          test_name='linux::tests::bwrap_missing_directory_is_empty_readonly_and_user_files_are_preserved'
+          cargo test --locked -p sandbox-runtime --all-features --lib "$test_name" -- --ignored --exact | tee "$RUNNER_TEMP/bubblewrap-regression.log"
+          grep -Fx "test $test_name ... ok" "$RUNNER_TEMP/bubblewrap-regression.log"
       - name: cargo test
         # `--no-fail-fast` is load-bearing, not tidiness. Without it cargo stops
         # at the first failing test BINARY and never runs the rest, so one red
@@ -369,6 +377,39 @@ jobs:
       - name: Test Windows volume identity and junction targets
         if: runner.os == 'Windows'
         run: cargo test --locked -p tool-skill --lib native_path_device -- --nocapture
+      - name: Test the complete Windows platform library
+        if: runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 45
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $log = Join-Path $env:RUNNER_TEMP 'platform-windows-lib-tests.log'
+          cargo test --locked -p platform-windows --lib 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # A successful Cargo invocation must have run the full library and
+          # the native capability/stdio regressions, not an empty test binary.
+          $summary = Select-String -Path $log -Quiet -Pattern '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;'
+          if (-not $summary) { throw 'Windows platform tests did not complete unfiltered with zero ignored tests' }
+          $required = @(
+            'process::owned_job::tests::owned_job_native_regressions_in_dedicated_helpers',
+            'process::owned_job::tests::outer_job_kills_descendant_after_helper_crash',
+            'process::owned_job::tests::payload_does_not_inherit_helper_standard_control_handles',
+            'process::supervisor_gate::tests::armed_payload_job_drop_still_terminates_its_child',
+            'process::supervisor::integration_tests::real_supervisor_preserves_detached_child_after_normal_foreground',
+            'process::supervisor::integration_tests::real_supervisor_strict_cancel_reaps_the_payload_tree',
+            'process::background::native_background_stop_tests::supervised_leader_and_group_proofs_follow_actual_job_cleanup',
+            'process::background::native_background_stop_tests::supervised_stop_after_leader_exit_verifies_descendant_job',
+            'stdio_cancel::tests::full_stdout_and_empty_stdin_are_cancelled_and_joined',
+            'stdio_cancel::tests::cancellation_retries_when_the_first_request_precedes_readfile',
+            'stdio_cancel::tests::unverified_timeout_is_an_error_and_preserves_the_worker_for_retry'
+          )
+          foreach ($test in $required) {
+            $pattern = '^test ' + [regex]::Escape($test) + ' \.\.\. ok$'
+            if (-not (Select-String -Path $log -Quiet -Pattern $pattern)) {
+              throw "Required native Windows test did not pass: $test"
+            }
+          }
 
   harness-ios:
     name: Harness iOS (${{ matrix.target }})

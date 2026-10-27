@@ -11,6 +11,16 @@
 /// Marks a foreground cleanup failure that must retain its Side Chat owner.
 pub const SIDE_CHAT_CLEANUP_FAILURE: &str = "Side Chat foreground cleanup failed:";
 
+/// Prefix for streaming process failures that do not prove owned-tree reaping.
+pub const OWNED_STREAMING_CLEANUP_UNVERIFIED: &str = "owned streaming cleanup unverified:";
+
+/// A supervisor may have launched a host-owned shell but cannot prove its
+/// termination. Callers must retain its sandbox resources and report failure.
+pub const OWNED_SHELL_CLEANUP_UNVERIFIED: &str = "owned shell cleanup unverified:";
+
+/// Owner namespace for calls that require the owned-streaming cleanup contract.
+pub const OWNED_STREAMING_OWNER_PREFIX: &str = "owned-streaming:";
+
 use crate::host::sandbox::SandboxedCommand;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -38,6 +48,13 @@ pub trait HookOutputObserver: Send + Sync {
     /// Consume one newly read chunk. Exactly one of the two slices is non-empty
     /// per call (the runner reads the two pipes independently).
     async fn on_chunk(&self, stdout_delta: &[u8], stderr_delta: &[u8]);
+}
+
+/// Lifetimes carried by a recovery-managed command hook. A runner retains
+/// `execution` for foreground work and `turn_work` through detached work.
+pub struct RecoveryHookProcessLeases {
+    pub execution: std::sync::Mutex<Option<Arc<dyn Send + Sync>>>,
+    pub turn_work: Arc<dyn Send + Sync>,
 }
 
 /// Runs sandbox-vetted commands on the host.
@@ -81,6 +98,48 @@ pub trait ProcessRunner: Send + Sync {
     /// pre-signal PID snapshot, not a count of retained background task rows.
     async fn kill_owner_processes(&self, _owner: &str) -> Vec<u32> {
         Vec::new()
+    }
+
+    /// Whether streaming execution supports request-owned cancellation for
+    /// owners prefixed with `OWNED_STREAMING_OWNER_PREFIX` and
+    /// returns only after the held leader and its owned process group have
+    /// stopped and inherited stdout/stderr reach EOF, or reports
+    /// `OWNED_STREAMING_CLEANUP_UNVERIFIED`. This does not prove that a
+    /// descendant which deliberately leaves the owned group has exited.
+    fn supports_owned_streaming_cleanup(&self) -> bool {
+        false
+    }
+
+    /// Whether recovery-managed command hooks retain their lifetime guard
+    /// until the held child and its owned process group are verified stopped.
+    /// This does not prove termination of descendants that leave that group.
+    /// Runners without this capability must not start a protected hook.
+    fn supports_recovery_hook_group_cleanup(&self) -> bool {
+        false
+    }
+
+    /// Whether background reapers retain `SandboxedCommand`'s resource guard
+    /// until the process and its output drain have finished.
+    fn supports_background_lifetime_guard(&self) -> bool {
+        false
+    }
+
+    /// Whether this command can be stopped with verified background reaping.
+    fn supports_verified_background_stop(&self, _command: &SandboxedCommand) -> bool {
+        false
+    }
+
+    /// Stop a background process and verify termination of its exact identity.
+    /// Disappearance of an observer or owner registration is not proof of exit.
+    /// The guarantee covers the platform-owned POSIX process group or Windows
+    /// process tree; it is not a security boundary against descendants which
+    /// intentionally escape that ownership. Unsupported runners report failure.
+    async fn terminate_and_wait_owned_background(
+        &self,
+        _handle: &ProcessHandle,
+        _owner: &str,
+    ) -> Result<(), ProcessError> {
+        Err(ProcessError::Unsupported)
     }
 
     /// Run a sandboxed command to completion and collect its output.
@@ -391,12 +450,34 @@ pub trait BackgroundExitSink: Send + Sync {
     fn stop_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
         None
     }
+    /// Whether a requested stop needs verified group/Job cleanup before the
+    /// runner may publish its exit. Runners must preserve the necessary OS
+    /// identity from spawn until either natural completion or verified stop.
+    /// A failed verification is reported via `on_wait_failure`, not as exit.
+    /// Sinks without this capability retain their existing stop behavior.
+    fn requires_verified_supervised_stop(&self) -> bool {
+        false
+    }
     /// Output ownership moved to an independent supervisor before handle publication.
     async fn on_supervised_start(&self, _task_id: &str) {}
     /// Completion from a supervisor that owns the terminal output trailer.
     async fn on_supervised_exit(&self, task_id: &str, code: Option<i32>) {
         self.on_exit(task_id, code).await;
     }
+    /// Deliver a verified supervised exit with the native runner's stop outcome.
+    async fn on_supervised_exit_with_status(&self, task_id: &str, code: Option<i32>, killed: bool) {
+        self.on_supervised_start(task_id).await;
+        self.on_exit_with_status(task_id, code, killed).await;
+    }
+    /// A supervised process exited, but its stop versus natural outcome is unknown.
+    async fn on_supervised_exit_unknown(&self, task_id: &str, code: Option<i32>) {
+        self.on_supervised_start(task_id).await;
+        self.on_exit_outcome_unknown(task_id, code).await;
+    }
+    /// A prior wait failure has subsequently been resolved by a successful
+    /// leader wait and verified empty process group/Job. It must not be used
+    /// as a normal exit notification.
+    async fn on_cleanup_verified(&self, _task_id: &str) {}
     /// A held background child was killed at its elapsed lifetime limit.
     async fn on_background_deadline_exit(&self, task_id: &str, code: Option<i32>) {
         self.on_exit_with_status(task_id, code, true).await;
@@ -410,6 +491,29 @@ pub trait BackgroundExitSink: Send + Sync {
     /// Distinguish an explicit stop from an unknown/signaled exit.
     async fn on_exit_with_status(&self, task_id: &str, code: Option<i32>, _killed: bool) {
         self.on_exit(task_id, code).await;
+    }
+
+    /// Report a successfully waited leader and its independently verified
+    /// process group/Job status. `killed` is `None` if the cause cannot be
+    /// attributed. A true group proof requires the held group/Job to be empty;
+    /// it must never be inferred from the leader's exit alone.
+    async fn on_exit_with_proof(
+        &self,
+        task_id: &str,
+        code: Option<i32>,
+        killed: Option<bool>,
+        _group_cleanup_verified: bool,
+    ) {
+        match killed {
+            Some(killed) => self.on_exit_with_status(task_id, code, killed).await,
+            None => self.on_exit_outcome_unknown(task_id, code).await,
+        }
+    }
+
+    /// A verified exit whose stop versus natural outcome cannot be attributed.
+    /// Do not translate it into a failed or killed outcome without evidence.
+    async fn on_exit_outcome_unknown(&self, task_id: &str, code: Option<i32>) {
+        tracing::warn!(task_id, ?code, "background process exit outcome is unknown");
     }
 
     /// The independent supervisor and its durable receipt are both unavailable.
@@ -445,9 +549,20 @@ pub trait BackgroundExitSink: Send + Sync {
 
     /// Called exactly once after the background child is reaped.
     ///
-    /// `exit_code` is `None` when the platform could not report one (signalled
-    /// death, or a reaper that lost the child).
+    /// `exit_code` is `None` when a successfully waited child has no numeric
+    /// code (for example signal termination). Failed waits use `on_wait_failure`.
     async fn on_exit(&self, task_id: &str, exit_code: Option<i32>);
+
+    /// The runner could not verify termination of its held process or group.
+    /// This is not an exit receipt. Observers with persistent state should keep
+    /// the diagnostic without marking the task terminal or discarding ownership.
+    async fn on_wait_failure(&self, task_id: &str, error: &str) {
+        tracing::warn!(
+            task_id,
+            error,
+            "background process termination is unverified"
+        );
+    }
 
     /// A background shell has stopped producing output at an interactive prompt.
     /// This is advisory: it neither settles the task nor consumes its completion.
@@ -483,10 +598,17 @@ pub struct ShellProcessHandoff {
     /// Agent whose live process ownership follows this shell.
     #[serde(default)]
     pub owner: Option<String>,
+    /// Trusted completion policy. Old handoffs without it require group proof.
+    #[serde(default = "require_group_cleanup_by_default")]
+    pub require_group_cleanup_on_exit: bool,
     pub socket_path: String,
     pub receipt_path: String,
     pub output_path: String,
     pub nonce: String,
+}
+
+fn require_group_cleanup_by_default() -> bool {
+    true
 }
 
 /// Handle to a background process previously spawned by

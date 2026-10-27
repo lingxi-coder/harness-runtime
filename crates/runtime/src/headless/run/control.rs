@@ -622,12 +622,27 @@ pub(super) async fn dispatch_control_request(
                     writer.reply_error(request_id, "Background tasks are disabled in this session.")
                 }
                 Target::One(id) => {
-                    let backgrounded = task_registry.background_task_for_tool_use(&id).await;
-                    writer.reply_success(request_id, Some(json!({"backgrounded": backgrounded})));
+                    use lingxi_core::host::task_registry::TaskBackgroundOutcome;
+                    match task_registry.background_task_for_tool_use_with_outcome(&id).await {
+                        TaskBackgroundOutcome::Backgrounded => {
+                            writer.reply_success(request_id, Some(json!({"backgrounded": true})))
+                        }
+                        TaskBackgroundOutcome::NotBackgrounded => {
+                            writer.reply_success(request_id, Some(json!({"backgrounded": false})))
+                        }
+                        TaskBackgroundOutcome::Unknown => writer.reply_error(
+                            request_id,
+                            "background_tasks: could not confirm whether the task moved to the background",
+                        ),
+                    }
                 }
                 Target::All => {
-                    task_registry.background_all_tasks().await;
-                    writer.reply_success(request_id, Some(json!({})));
+                    let result = task_registry
+                        .background_all_tasks_with_outcome(
+                            lingxi_core::host::task_registry::TaskBackgroundReason::User,
+                        )
+                        .await;
+                    reply_background_all_result(&writer, request_id, result);
                 }
             }
         }
@@ -1455,6 +1470,21 @@ struct RequestReplyWriter<'a> {
     request_id: Utf16JsonProjection,
 }
 
+fn reply_background_all_result(
+    writer: &RequestReplyWriter<'_>,
+    request_id: &str,
+    result: lingxi_core::host::task_registry::TaskBackgroundBatchOutcome,
+) {
+    if result.capture_unknown || result.unknown != 0 {
+        writer.reply_error(
+            request_id,
+            "background_tasks: could not confirm every background transition; some tasks may already have moved",
+        );
+    } else {
+        writer.reply_success(request_id, Some(json!({})));
+    }
+}
+
 fn validate_ui_attach(
     request: &Utf16JsonProjection,
 ) -> Result<
@@ -1615,6 +1645,215 @@ impl RequestReplyWriter<'_> {
 mod tests {
     use super::*;
     use crate::headless::run::PrintAuxTaskGroup;
+
+    async fn dispatch_background_request(
+        runtime: &Runtime,
+        request: serde_json::Value,
+    ) -> serde_json::Value {
+        let (tx, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let outbound = Arc::new(tx);
+        let writer = ControlPlaneWriter::new(outbound.clone());
+        let cancel = tokio::sync::watch::channel(false).0;
+        let lifecycle = crate::headless::queued_commands::QueueLifecycle::new(
+            outbound.clone(),
+            "background-control-test".into(),
+        );
+        let plane = crate::headless::control_plane::StdioControlPlane::new(outbound);
+        let frame = projection_from_value(&json!({
+            "type": "control_request",
+            "request_id": "background-test",
+            "request": request,
+        }));
+        dispatch_control_request(
+            "background_tasks",
+            "background-test",
+            &frame,
+            &writer,
+            &cancel,
+            &lifecycle,
+            &runtime.orchestrator,
+            &runtime.task_registry,
+            &runtime.session_cwd,
+            &plane,
+            &Arc::new(tokio::sync::Notify::new()),
+            &[],
+            &[],
+            &[],
+            &json!({}),
+            "off",
+            None,
+            &StreamFileSuggestionIndex::default(),
+            &runtime.prompt_suggestions,
+            runtime.services.as_ref(),
+            &Arc::new(PrintAuxTaskGroup::default()),
+            &runtime.execution_errors,
+        )
+        .await
+        .unwrap();
+        let Some(crate::headless::stream_json::OutboundMsg::Line(line)) = receiver.recv().await
+        else {
+            panic!("background control must return one response");
+        };
+        serde_json::from_str(&line).unwrap()
+    }
+
+    struct FixedBackgroundOutcome {
+        outcome: lingxi_core::host::task_registry::TaskBackgroundOutcome,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl lingxi_core::host::task_registry::TaskBackgrounder for FixedBackgroundOutcome {
+        async fn background(&self) {}
+        async fn background_with_outcome(
+            &self,
+            _: lingxi_core::host::task_registry::TaskBackgroundReason,
+        ) -> lingxi_core::host::task_registry::TaskBackgroundOutcome {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.outcome
+        }
+    }
+
+    async fn arm_background_control_task(
+        runtime: &Runtime,
+        tool_use_id: &str,
+        outcome: lingxi_core::host::task_registry::TaskBackgroundOutcome,
+    ) -> (String, Arc<FixedBackgroundOutcome>) {
+        let (id, _) = runtime.task_registry.allocate_bash_output().await.unwrap();
+        runtime
+            .task_registry
+            .register_foreground_bash(
+                &id,
+                lingxi_core::host::task_registry::BackgroundBashRegistration {
+                    command: "sleep 10".into(),
+                    description: "test".into(),
+                    tool_use_id: Some(tool_use_id.into()),
+                    cwd: None,
+                    creator_agent_id: None,
+                },
+                true,
+            )
+            .await
+            .unwrap();
+        let requester = Arc::new(FixedBackgroundOutcome {
+            outcome,
+            calls: Default::default(),
+        });
+        runtime
+            .task_registry
+            .bind_background_requester(&id, requester.clone())
+            .await
+            .unwrap();
+        (id, requester)
+    }
+
+    #[tokio::test]
+    async fn sdk_background_control_reports_individual_and_batch_uncertainty() {
+        use lingxi_core::host::task_registry::TaskBackgroundOutcome;
+
+        let root = tempfile::tempdir().unwrap();
+        let stream = Arc::new(
+            crate::headless::stream_json::StreamJsonStream::new_placeholder(
+                crate::headless::io::Output::new(tokio::io::sink()),
+            ),
+        );
+        let runtime = super::super::tests::fixture_runtime(stream, root.path()).await;
+        let (unknown_id, unknown) =
+            arm_background_control_task(&runtime, "tool-unknown", TaskBackgroundOutcome::Unknown)
+                .await;
+        let single = dispatch_background_request(
+            &runtime,
+            json!({"subtype":"background_tasks", "tool_use_id":"tool-unknown"}),
+        )
+        .await;
+        assert_eq!(single["response"]["subtype"], "error");
+        assert!(single["response"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("could not confirm"));
+
+        for (tool_id, outcome, expected) in [
+            (
+                "tool-not-moved",
+                TaskBackgroundOutcome::NotBackgrounded,
+                false,
+            ),
+            ("tool-moved", TaskBackgroundOutcome::Backgrounded, true),
+        ] {
+            arm_background_control_task(&runtime, tool_id, outcome).await;
+            let response = dispatch_background_request(
+                &runtime,
+                json!({"subtype":"background_tasks", "tool_use_id":tool_id}),
+            )
+            .await;
+            assert_eq!(response["response"]["subtype"], "success");
+            assert_eq!(response["response"]["response"]["backgrounded"], expected);
+        }
+
+        let (_, confirmed) = arm_background_control_task(
+            &runtime,
+            "tool-batch-confirmed",
+            TaskBackgroundOutcome::Backgrounded,
+        )
+        .await;
+        let batch =
+            dispatch_background_request(&runtime, json!({"subtype":"background_tasks"})).await;
+        assert_eq!(batch["response"]["subtype"], "error");
+        assert!(batch["response"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("some tasks may already have moved"));
+        assert_eq!(confirmed.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(unknown.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Rebind the unknown instance to a definite no-op; the same real
+        // dispatch must then retain the established empty success response.
+        runtime
+            .task_registry
+            .bind_background_requester(
+                &unknown_id,
+                Arc::new(FixedBackgroundOutcome {
+                    outcome: TaskBackgroundOutcome::NotBackgrounded,
+                    calls: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        let settled =
+            dispatch_background_request(&runtime, json!({"subtype":"background_tasks"})).await;
+        assert_eq!(settled["response"]["subtype"], "success");
+        assert_eq!(settled["response"]["response"], json!({}));
+    }
+
+    #[test]
+    fn sdk_background_control_reports_unknown_capture_without_fabricating_a_count() {
+        let (tx, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let writer = ControlPlaneWriter::new(Arc::new(tx));
+        let reply = RequestReplyWriter {
+            writer: &writer,
+            delivery_error: std::sync::Mutex::new(None),
+            request_id: Utf16JsonProjection::from("capture"),
+        };
+        reply_background_all_result(
+            &reply,
+            "capture",
+            lingxi_core::host::task_registry::TaskBackgroundBatchOutcome {
+                backgrounded: 0,
+                unknown: 0,
+                capture_unknown: true,
+            },
+        );
+        let crate::headless::stream_json::OutboundMsg::Line(line) = receiver.try_recv().unwrap()
+        else {
+            panic!("capture uncertainty must produce a control response");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(frame["response"]["subtype"], "error");
+        assert!(frame["response"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("could not confirm"));
+    }
 
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_initialize_alias_request(

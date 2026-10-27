@@ -572,6 +572,7 @@ impl Task for LocalFusionHandler {
         let TaskSpawnInput::LocalFusion {
             request,
             conversation_id,
+            session_origin,
         } = input
         else {
             return Err(TaskError::Internal(
@@ -589,6 +590,14 @@ impl Task for LocalFusionHandler {
             .ok_or_else(|| {
                 TaskError::Internal("fusion task conversation_id must be a valid session id".into())
             })?;
+        if session_origin
+            .as_ref()
+            .is_some_and(|origin| origin.session_id() != trusted_session)
+        {
+            return Err(TaskError::Internal(
+                "fusion session capability does not match its owner".into(),
+            ));
+        }
         let terminal_recorder = self
             .terminal_recorder_factory
             .recorder_for(trusted_session)
@@ -611,6 +620,7 @@ impl Task for LocalFusionHandler {
             SubagentInheritance {
                 tool_invoker: self.tool_invoker.clone(),
                 budget: self.budget.clone(),
+                session_origin,
             },
             cancel.clone(),
         );

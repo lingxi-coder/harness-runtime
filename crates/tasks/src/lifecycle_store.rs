@@ -11,12 +11,15 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::ops::{Deref, DerefMut};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 #[derive(Default)]
 pub(crate) struct TaskRows {
     rows: RwLock<HashMap<String, TaskState>>,
+    // A task ID can be reused. These tokens distinguish actual row instances;
+    // access them only while the corresponding rows lock is held.
+    identities: Mutex<HashMap<String, Arc<()>>>,
     /// JavaScript object property order is observable by `$.agent.list`'s
     /// duplicate reducer. Keep insertion order separately from the hash table.
     order: Mutex<Vec<String>>,
@@ -218,6 +221,13 @@ fn natural_terminal_receipt(state: &TaskState, status: &str) -> Utf16JsonProject
 }
 
 impl TaskRows {
+    pub(crate) fn identity(&self, id: &str) -> Option<Arc<()>> {
+        self.identities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned()
+    }
     /// Emit an explicitly claimed SDK event after its task mutation is committed.
     pub(crate) fn emit(&self, event: Utf16JsonProjection) {
         self.subscribers
@@ -283,6 +293,7 @@ impl TaskRows {
         TaskWriteGuard {
             rows,
             order: &self.order,
+            identities: &self.identities,
             before,
             subscribers: &self.subscribers,
         }
@@ -292,6 +303,7 @@ impl TaskRows {
 pub(crate) struct TaskWriteGuard<'a> {
     rows: RwLockWriteGuard<'a, HashMap<String, TaskState>>,
     order: &'a Mutex<Vec<String>>,
+    identities: &'a Mutex<HashMap<String, Arc<()>>>,
     before: Option<HashMap<String, Projection>>,
     subscribers: &'a Mutex<Vec<mpsc::UnboundedSender<Utf16JsonProjection>>>,
 }
@@ -316,6 +328,10 @@ impl TaskWriteGuard<'_> {
         let id = id.into();
         let existed = self.rows.contains_key(&id);
         let previous = self.rows.insert(id.clone(), state);
+        self.identities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.clone(), Arc::new(()));
         if !existed {
             self.order
                 .lock()
@@ -334,6 +350,10 @@ impl TaskWriteGuard<'_> {
     {
         let removed = self.rows.remove(id);
         if removed.is_some() {
+            self.identities
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|candidate, _| candidate.borrow() != id);
             self.order
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -348,6 +368,10 @@ impl TaskWriteGuard<'_> {
         F: FnMut(&String, &mut TaskState) -> bool,
     {
         self.rows.retain(|id, state| keep(id, state));
+        self.identities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|id, _| self.rows.contains_key(id));
         self.order
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -425,8 +449,9 @@ impl TaskWriteGuard<'_> {
                     .find(|(key, _)| key == "status")
                     .and_then(|(_, value)| value.string_at(""))
             });
-            if old_status.is_some_and(|status| !matches!(status, "completed" | "failed" | "killed"))
-                && matches!(new_status, "completed" | "failed")
+            if old_status.is_some_and(|status| {
+                !matches!(status, "completed" | "failed" | "killed" | "exited_unknown")
+            }) && matches!(new_status, "completed" | "failed" | "exited_unknown")
             {
                 let receipt = natural_terminal_receipt(state, new_status);
                 for sender in senders.iter() {

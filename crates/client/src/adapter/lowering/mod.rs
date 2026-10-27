@@ -163,6 +163,7 @@ pub fn lower_task_status(wire: &str) -> TaskStatusDto {
         "completed" => TaskStatusDto::Completed,
         "failed" => TaskStatusDto::Failed,
         "killed" => TaskStatusDto::Cancelled,
+        "exited_unknown" => TaskStatusDto::ExitedUnknown,
         // "pending" and any unknown/future status fall back to Pending.
         _ => TaskStatusDto::Pending,
     }

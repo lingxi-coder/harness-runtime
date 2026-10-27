@@ -85,6 +85,7 @@ pub(crate) fn stream(
     input: Utf16JsonProjection,
     request: ChildStepRequest,
     cwd: PathBuf,
+    session: Option<Arc<dyn hooks::mods::ModSessionContext>>,
     physical_responses: Arc<Mutex<Vec<HistoryResponse>>>,
 ) -> BoxStream<'static, Result<HistoryEvent, LlmError>> {
     let wire = Arc::new(Mutex::new(TurnStepEncoder::default()));
@@ -255,10 +256,11 @@ pub(crate) fn stream(
             }
         };
         let result = host
-            .dispatch_turn_step_stream_at_and_origin(
+            .dispatch_turn_step_stream_at_and_origin_with_session(
                 input,
                 &cwd,
                 inherited_hook_origin,
+                session,
                 source,
                 on_chunk,
             )
@@ -392,4 +394,220 @@ pub(crate) fn input(
             .expect("turn.step input is an object");
     }
     input
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use lingxi_core::host::subagent_spawn::{SessionOriginCapability, SessionOriginError};
+    use lingxi_core::types::SessionId;
+    use std::path::Path;
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Debug)]
+    pub(crate) struct Origin {
+        pub(crate) id: SessionId,
+        pub(crate) generation: u64,
+        pub(crate) active: Arc<Mutex<(SessionId, u64)>>,
+        pub(crate) root: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl SessionOriginCapability for Origin {
+        fn owner_id(&self) -> usize {
+            1
+        }
+        fn session_id(&self) -> SessionId {
+            self.id
+        }
+        fn generation(&self) -> u64 {
+            self.generation
+        }
+        fn cwd(&self) -> &Path {
+            &self.root
+        }
+        fn root(&self) -> &Path {
+            &self.root
+        }
+
+        async fn admit(&self) -> Result<Arc<dyn Send + Sync>, SessionOriginError> {
+            if *self.active.lock().unwrap() != (self.id, self.generation) {
+                return Err(SessionOriginError::SessionChanged);
+            }
+            Ok(Arc::new(()))
+        }
+    }
+
+    #[derive(Clone)]
+    pub(crate) struct Session {
+        pub(crate) root: PathBuf,
+        pub(crate) origin: Option<Arc<dyn SessionOriginCapability>>,
+        pub(crate) model_reads: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl hooks::mods::ModSessionContext for Session {
+        fn bind_session_origin(
+            &self,
+            origin: Arc<dyn SessionOriginCapability>,
+        ) -> Result<Option<Arc<dyn hooks::mods::ModSessionContext>>, ModError> {
+            if origin.owner_id() != 1 {
+                return Ok(None);
+            }
+            let mut bound = self.clone();
+            bound.origin = Some(origin);
+            Ok(Some(Arc::new(bound)))
+        }
+
+        async fn acquire_session_work_lease(
+            &self,
+        ) -> Result<Option<Arc<dyn Send + Sync>>, ModError> {
+            match &self.origin {
+                Some(origin) => origin
+                    .admit()
+                    .await
+                    .map(Some)
+                    .map_err(|error| ModError::Unavailable(error.to_string())),
+                None => Ok(None),
+            }
+        }
+
+        fn ui_invalidation_context(&self) -> Option<Arc<dyn hooks::mods::ModSessionContext>> {
+            Some(Arc::new(self.clone()))
+        }
+        fn cwd(&self) -> PathBuf {
+            self.root.clone()
+        }
+        fn root(&self) -> PathBuf {
+            self.root.clone()
+        }
+        async fn model(&self) -> String {
+            self.model_reads.fetch_add(1, Ordering::SeqCst);
+            "current-session-model".into()
+        }
+        async fn id(&self) -> String {
+            "test-session".into()
+        }
+        async fn turns(&self) -> u64 {
+            0
+        }
+    }
+
+    struct Provider(Arc<AtomicUsize>);
+
+    #[async_trait::async_trait]
+    impl crate::api::SubagentApiClient for Provider {
+        async fn stream(
+            &self,
+            _request: crate::api::SubagentApiRequest,
+        ) -> Result<BoxStream<'static, Result<HistoryEvent, LlmError>>, LlmError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let response = HistoryResponse {
+                id: "response".into(),
+                model: "test-model".into(),
+                content: vec![llm_runtime::ContentBlock::Text {
+                    text: "provider answer".into(),
+                    cache_control: None,
+                    citations: None,
+                }],
+                stop_reason: Some("end_turn".into()),
+                stop_details: None,
+                resumable: None,
+                usage: llm_runtime::ExecutionUsage::default(),
+                cost: None,
+                provider_metadata: Default::default(),
+            };
+            Ok(stream::iter(
+                llm_runtime::stream_accumulator::response_to_stream_events(response)
+                    .into_iter()
+                    .map(Ok),
+            )
+            .boxed())
+        }
+    }
+
+    #[tokio::test]
+    async fn child_step_keeps_launch_origin_after_switch_and_allows_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("child-step.js");
+        std::fs::write(
+            &module,
+            r#"export function register(on) {
+          on('turn.step', async function* ($, e, next) {
+            try { await $.session.model(); } catch (_) {}
+            const below = next(e);
+            for await (const chunk of below) yield chunk;
+            return await below.result;
+          });
+        }"#,
+        )
+        .unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        host.load(
+            "child-step-origin",
+            dir.path(),
+            &module,
+            Utf16JsonProjection::from_serde_value(&json!({})).unwrap(),
+        )
+        .await
+        .unwrap();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let session: Arc<dyn hooks::mods::ModSessionContext> = Arc::new(Session {
+            root: dir.path().to_path_buf(),
+            origin: None,
+            model_reads: reads.clone(),
+        });
+        host.attach_background_context(Arc::downgrade(&session));
+        let original = SessionId::new();
+        let other = SessionId::new();
+        let active = Arc::new(Mutex::new((original, 1)));
+        let origin: Arc<dyn SessionOriginCapability> = Arc::new(Origin {
+            id: original,
+            generation: 1,
+            active: active.clone(),
+            root: dir.path().to_path_buf(),
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        for (active_id, generation, capability) in [
+            (other, 2, Some(origin.clone())),
+            (original, 3, Some(origin.clone())),
+            (original, 3, None),
+        ] {
+            *active.lock().unwrap() = (active_id, generation);
+            let bound = host
+                .bind_child_turn_step_session(capability, true, dir.path())
+                .await
+                .unwrap();
+            let request = ChildStepRequest {
+                api: Arc::new(Provider(calls.clone())),
+                model: "test-model".into(),
+                profile: None,
+                system: None,
+                messages: Vec::new(),
+                tools: Vec::new(),
+                effort: None,
+                forced_tool: None,
+                call_opts: Default::default(),
+                fallback_target: Default::default(),
+                agent_spawn_provenance: Default::default(),
+            };
+            let events = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stream(
+                    host.clone(),
+                    input("child-turn", 0, "agent", "test-model", None, 0),
+                    request,
+                    dir.path().to_path_buf(),
+                    bound,
+                    Arc::new(Mutex::new(Vec::new())),
+                )
+                .collect::<Vec<_>>(),
+            )
+            .await
+            .expect("child step completes");
+            assert!(events.iter().all(Result::is_ok), "{events:?}");
+        }
+        assert_eq!(reads.load(Ordering::SeqCst), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
 }

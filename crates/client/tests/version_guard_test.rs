@@ -464,6 +464,73 @@ fn current_contract_index() -> ContractIndex {
     put("ClientEvent::TurnEventReplay.sequence", "u64");
     put("ClientEvent::TurnEventReplay.event_json", "String");
 
+    put(
+        "ClientEvent::TurnEventLiveUnretained",
+        "turn_event_live_unretained",
+    );
+    put("ClientEvent::TurnEventLiveUnretained.session_id", "String");
+    put("ClientEvent::TurnEventLiveUnretained.turn_id", "u64");
+    put("ClientEvent::TurnEventLiveUnretained.event_json", "String");
+
+    put("ClientEvent::TurnAttachStarted", "turn_attach_started");
+    put("ClientEvent::TurnAttachStarted.request_id", "String");
+    put(
+        "ClientEvent::TurnAttachStarted.snapshot",
+        "TurnRecoverySnapshotDto",
+    );
+    put("ClientEvent::TurnAttachFinished", "turn_attach_finished");
+    put("ClientEvent::TurnAttachFinished.request_id", "String");
+    put("ClientEvent::TurnAttachFinished.session_id", "String");
+    put("ClientEvent::TurnAttachFinished.turn_id", "u64");
+    put("ClientEvent::QueuedTurnStatus", "queued_turn_status");
+    put("ClientEvent::QueuedTurnStatus.session_id", "String");
+    put("ClientEvent::QueuedTurnStatus.turn_id", "u64");
+    put("ClientEvent::QueuedTurnStatus.request_id", "String");
+    put(
+        "ClientEvent::QueuedTurnStatus.status",
+        "QueuedTurnStatusDto",
+    );
+    put("QueuedTurnStatusDto::Pending", "pending");
+    put("QueuedTurnStatusDto::ClaimedUncertain", "claimed_uncertain");
+    put("QueuedTurnStatusDto::Delivered", "delivered");
+    put("QueuedTurnStatusDto::Delivered.batch_owner_turn_id", "u64");
+    put("QueuedTurnStatusDto::Delivered.member_turn_ids", "Vec<u64>");
+    put("QueuedTurnStatusDto::Delivered.transcript_uuid", "String");
+    put("QueuedTurnStatusDto::Cancelled", "cancelled");
+    put("QueuedTurnStatusDto::Running", "running");
+    put("QueuedTurnStatusDto::Terminal", "terminal");
+    put(
+        "QueuedTurnStatusDto::Terminal.state",
+        "TurnRecoveryStateDto",
+    );
+
+    put("ClientEvent::ModSessionEvent", "mod_session_event");
+    put("ClientEvent::ModSessionEvent.session_id", "String");
+    put("ClientEvent::ModSessionEvent.mod_turn_id", "Option<String>");
+    put(
+        "ClientEvent::ModSessionEvent.payload",
+        "ModSessionEventPayload",
+    );
+    put("ModSessionEventPayload::Notice", "notice");
+    put("ModSessionEventPayload::Notice.message", "ClientTextDto");
+    put("ModSessionEventPayload::Notice.is_error", "bool");
+    put("ModSessionEventPayload::Notify", "notify");
+    put("ModSessionEventPayload::Notify.plugin", "String");
+    put("ModSessionEventPayload::Notify.text", "ClientTextDto");
+    put("ModSessionEventPayload::Log", "log");
+    put("ModSessionEventPayload::Log.plugin", "String");
+    put("ModSessionEventPayload::Log.text", "ClientTextDto");
+    put("ModSessionEventPayload::Toast", "toast");
+    put("ModSessionEventPayload::Toast.plugin", "String");
+    put("ModSessionEventPayload::Toast.text", "ClientTextDto");
+    put("ModSessionEventPayload::Toast.timeout_ms", "u64");
+    put("ModSessionEventPayload::Status", "status");
+    put("ModSessionEventPayload::Status.plugin", "String");
+    put(
+        "ModSessionEventPayload::Status.text",
+        "Option<ClientTextDto>",
+    );
+
     put("ClientEvent::CostUpdate", "cost_update");
     put("ClientEvent::CostUpdate.total_usd", "f64");
     put("ClientEvent::CostUpdate.input_tokens", "u64");
@@ -953,10 +1020,12 @@ fn current_contract_index() -> ContractIndex {
     put("TurnRecoveryStateDto::Cancelled", "cancelled");
     put("TurnRecoverySnapshotDto.session_id", "String");
     put("TurnRecoverySnapshotDto.turn_id", "u64");
+    put("TurnRecoverySnapshotDto.revision", "u64");
     put("TurnRecoverySnapshotDto.state", "TurnRecoveryStateDto");
     put("TurnRecoverySnapshotDto.first_sequence", "u64");
     put("TurnRecoverySnapshotDto.last_sequence", "u64");
     put("TurnRecoverySnapshotDto.safe_to_resume", "bool");
+    put("TurnRecoverySnapshotDto.projection_uncertain", "bool");
     put("TurnRecoverySnapshotDto.reason", "Option<String>");
 
     // ── CostDto (events.rs) ───────────────────────────────────────────────
@@ -969,6 +1038,7 @@ fn current_contract_index() -> ContractIndex {
 
     // ── ClientCommand (commands.rs) ───────────────────────────────────────
     put("ClientCommand::SendPrompt", "send_prompt");
+    put("ClientCommand::SendPrompt.session_id", "Option<String>");
     put("ClientCommand::SendPrompt.text", "ClientTextDto");
     put(
         "ClientCommand::SendPrompt.prompt_mode",
@@ -982,16 +1052,25 @@ fn current_contract_index() -> ContractIndex {
     );
 
     put("ClientCommand::Cancel", "cancel");
+    put("ClientCommand::Cancel.session_id", "Option<String>");
     put("ClientCommand::Cancel.turn_id", "Option<u64>");
 
     put("ClientCommand::AttachTurn", "attach_turn");
+    put("ClientCommand::AttachTurn.session_id", "String");
     put("ClientCommand::AttachTurn.turn_id", "u64");
     put("ClientCommand::AttachTurn.after_sequence", "Option<u64>");
+    put("ClientCommand::AttachTurn.request_id", "String");
+    put("ClientCommand::QueryQueuedTurn", "query_queued_turn");
+    put("ClientCommand::QueryQueuedTurn.session_id", "String");
+    put("ClientCommand::QueryQueuedTurn.turn_id", "u64");
+    put("ClientCommand::QueryQueuedTurn.request_id", "String");
 
     put("ClientCommand::ResumeTurn", "resume_turn");
+    put("ClientCommand::ResumeTurn.session_id", "String");
     put("ClientCommand::ResumeTurn.turn_id", "u64");
 
     put("ClientCommand::PauseTurn", "pause_turn");
+    put("ClientCommand::PauseTurn.session_id", "String");
     put("ClientCommand::PauseTurn.turn_id", "u64");
     put("ClientCommand::PauseTurn.reason", "String");
 
@@ -1117,6 +1196,10 @@ fn current_contract_index() -> ContractIndex {
     put("ClientCommand::SetFastMode", "set_fast_mode");
     put("ClientCommand::SetFastMode.enabled", "bool");
     put("ClientCommand::RunSlashCommand", "run_slash_command");
+    put(
+        "ClientCommand::RunSlashCommand.session_id",
+        "Option<String>",
+    );
     put("ClientCommand::RunSlashCommand.raw", "ClientTextDto");
     put("ClientCommand::RunSlashCommand.images", "Vec<ImageRefDto>");
     put("ClientCommand::RunSlashCommand.turn_id", "Option<u64>");
@@ -1905,6 +1988,11 @@ fn current_contract_index() -> ContractIndex {
     put("ClientError::NotFound.message", "String");
     put("ClientError::Internal", "internal");
     put("ClientError::Internal.message", "String");
+    put(
+        "ClientError::SubmissionNotAdmitted",
+        "submission_not_admitted",
+    );
+    put("ClientError::SubmissionNotAdmitted.message", "String");
 
     // ── Listing row / payload structs + enums (listings.rs) ───────────────
     put("SessionRowDto.uuid", "String");
@@ -3237,10 +3325,12 @@ fn contract_index_covers_every_dto() {
             snapshot: TurnRecoverySnapshotDto {
                 session_id: String::new(),
                 turn_id: 0,
+                revision: 1,
                 state: TurnRecoveryStateDto::Running,
                 first_sequence: 0,
                 last_sequence: 0,
                 safe_to_resume: true,
+                projection_uncertain: false,
                 reason: None,
             },
         },
@@ -3249,6 +3339,48 @@ fn contract_index_covers_every_dto() {
             turn_id: 0,
             sequence: 0,
             event_json: String::new(),
+        },
+        ClientEvent::TurnEventLiveUnretained {
+            session_id: String::new(),
+            turn_id: 0,
+            event_json: String::new(),
+        },
+        ClientEvent::TurnAttachStarted {
+            request_id: String::new(),
+            snapshot: TurnRecoverySnapshotDto {
+                session_id: String::new(),
+                turn_id: 0,
+                revision: 0,
+                state: TurnRecoveryStateDto::Running,
+                first_sequence: 0,
+                last_sequence: 0,
+                safe_to_resume: false,
+                projection_uncertain: false,
+                reason: None,
+            },
+        },
+        ClientEvent::TurnAttachFinished {
+            request_id: String::new(),
+            session_id: String::new(),
+            turn_id: 0,
+        },
+        ClientEvent::QueuedTurnStatus {
+            session_id: String::new(),
+            turn_id: 0,
+            request_id: String::new(),
+            status: client::protocol::events::QueuedTurnStatusDto::Delivered {
+                batch_owner_turn_id: 0,
+                member_turn_ids: Vec::new(),
+                transcript_uuid: String::new(),
+            },
+        },
+        ClientEvent::ModSessionEvent {
+            session_id: String::new(),
+            mod_turn_id: None,
+            payload: client::protocol::mod_session_event::ModSessionEventPayload::Status {
+                plugin: String::new(),
+                text: None,
+            },
         },
         ClientEvent::AudioSessionContext {
             session_id: String::new(),
@@ -3527,6 +3659,20 @@ fn contract_index_covers_every_dto() {
     };
     let _skill_admin = skill_admin_command.clone();
     let _cmd: Vec<ClientCommand> = vec![
+        ClientCommand::SendPrompt {
+            session_id: Some(String::new()),
+            text: ClientTextDto::default(),
+            prompt_mode: None,
+            images: Vec::new(),
+            turn_id: None,
+            visualization_context: None,
+        },
+        ClientCommand::RunSlashCommand {
+            session_id: Some(String::new()),
+            raw: ClientTextDto::default(),
+            images: Vec::new(),
+            turn_id: None,
+        },
         ClientCommand::ListProviderCredentials {
             operation_id: 0,
             provider_ids: Vec::new(),
@@ -3557,11 +3703,26 @@ fn contract_index_covers_every_dto() {
         },
         ClientCommand::DenyComputerAccess { request_id: 0 },
         ClientCommand::AttachTurn {
+            session_id: String::new(),
             turn_id: 0,
             after_sequence: None,
+            request_id: String::new(),
         },
-        ClientCommand::ResumeTurn { turn_id: 0 },
+        ClientCommand::QueryQueuedTurn {
+            session_id: String::new(),
+            turn_id: 0,
+            request_id: String::new(),
+        },
+        ClientCommand::Cancel {
+            session_id: None,
+            turn_id: None,
+        },
+        ClientCommand::ResumeTurn {
+            session_id: String::new(),
+            turn_id: 0,
+        },
         ClientCommand::PauseTurn {
+            session_id: String::new(),
             turn_id: 0,
             reason: String::new(),
         },
@@ -4446,6 +4607,9 @@ fn contract_index_covers_every_dto() {
     };
     let _lk = ListingKindDto::Mcp;
     let _err = ClientError::Internal {
+        message: String::new(),
+    };
+    let _not_admitted = ClientError::SubmissionNotAdmitted {
         message: String::new(),
     };
     let _msg = MessageDto {

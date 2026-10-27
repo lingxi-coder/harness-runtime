@@ -1214,6 +1214,10 @@ mod tests {
     }
     #[async_trait]
     impl lingxi_core::host::process::ProcessRunner for CapturingProcess {
+        fn supports_background_lifetime_guard(&self) -> bool {
+            true
+        }
+
         async fn run(
             &self,
             cmd: &lingxi_core::host::sandbox::SandboxedCommand,
@@ -1286,7 +1290,7 @@ mod tests {
         );
     }
 
-    /// Records `wrap`/`cleanup_after_command` calls so a test can prove the
+    /// Records wrap and per-command cleanup so a test can prove the
     /// skill `!command` expansion routes through `ctx.sandbox_runner`.
     struct WrapCall {
         command: String,
@@ -1297,37 +1301,39 @@ mod tests {
     #[derive(Default)]
     struct RecordingSandboxRunner {
         wrap_calls: std::sync::Mutex<Vec<WrapCall>>,
-        cleanups: std::sync::atomic::AtomicUsize,
+        cleanups: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     #[async_trait]
     impl tool_api::SandboxRunner for RecordingSandboxRunner {
-        async fn wrap(
+        async fn wrap_with_lease(
             &self,
             command: &str,
             _cfg: &sandbox::runtime_config::SandboxRuntimeConfig,
             _platform: sandbox::runtime_config::Platform,
             bin_shell: Option<&str>,
             cwd: Option<&std::path::Path>,
-        ) -> Result<String, sandbox::wrap::SandboxWrapError> {
+        ) -> Result<tool_api::sandbox_runner::SandboxWrappedCommand, sandbox::wrap::SandboxWrapError>
+        {
             self.wrap_calls.lock().unwrap().push(WrapCall {
                 command: command.to_string(),
                 bin_shell: bin_shell.map(ToString::to_string),
                 cwd: cwd.map(std::path::Path::to_path_buf),
             });
-            Ok(format!("WRAPPED::{command}"))
-        }
-
-        async fn cleanup_after_command(&self) {
-            self.cleanups
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let cleanups = self.cleanups.clone();
+            Ok(tool_api::sandbox_runner::SandboxWrappedCommand {
+                command: format!("WRAPPED::{command}"),
+                lease: tool_api::sandbox_runner::SandboxLease::new(move || {
+                    cleanups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+            })
         }
     }
 
     /// The embedded `!command` shell expansion routes through the injected
     /// `ctx.sandbox_runner` (not the sync free fn): the runner's wrapped output
     /// is what gets spawned, it sees the resolved shell + workspace cwd, and
-    /// `cleanup_after_command` runs after the command finishes.
+    /// the lease is released after the command finishes.
     #[tokio::test]
     async fn shell_expansion_routes_through_injected_runner_and_cleans_up() {
         let capture = Arc::new(CapturingProcess {
@@ -1381,8 +1387,67 @@ mod tests {
         assert_eq!(
             runner.cleanups.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "cleanup_after_command must be invoked once"
+            "the command lease must be released once"
         );
+    }
+
+    #[tokio::test]
+    async fn shell_expansion_releases_its_lease_when_process_start_fails() {
+        struct FailedProcess;
+        #[async_trait]
+        impl lingxi_core::host::ProcessRunner for FailedProcess {
+            fn supports_background_lifetime_guard(&self) -> bool {
+                true
+            }
+
+            async fn run(
+                &self,
+                _: &lingxi_core::host::sandbox::SandboxedCommand,
+            ) -> Result<ProcessOutput, mobile_linux_api::ProcessError> {
+                Err(mobile_linux_api::ProcessError::Io("spawn failed".into()))
+            }
+
+            async fn spawn_background(
+                &self,
+                _: &lingxi_core::host::sandbox::SandboxedCommand,
+            ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError>
+            {
+                Err(mobile_linux_api::ProcessError::Unsupported)
+            }
+
+            async fn kill(
+                &self,
+                _: &lingxi_core::host::ProcessHandle,
+            ) -> Result<(), mobile_linux_api::ProcessError> {
+                Err(mobile_linux_api::ProcessError::Unsupported)
+            }
+
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+
+        let runner = Arc::new(RecordingSandboxRunner::default());
+        let mut ctx = shell_test_ctx(dummy_out());
+        ctx.process = Arc::new(FailedProcess);
+        ctx.sandbox_available = true;
+        ctx.session_cwd
+            .swap(std::path::PathBuf::from("/tmp"), ctx.trusted_dirs());
+        ctx.sandbox_runner = runner.clone();
+        let desc = SkillDescriptor {
+            body: "pre !`echo hi` post".into(),
+            ..prompt_desc("wrap-failed")
+        };
+        let tool = SkillTool::with_loader(ctx, Arc::new(FixedLoader(Some(desc))));
+        let _ = tool
+            .call(
+                source_json!({"skill": "wrap-failed"}),
+                fresh_ctx(),
+                fresh_tx(),
+            )
+            .await;
+        assert_eq!(runner.wrap_calls.lock().unwrap().len(), 1);
+        assert_eq!(runner.cleanups.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

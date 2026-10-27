@@ -564,7 +564,12 @@ mod tests {
         Arc<dyn lingxi_core::host::Platform>,
     ) {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("runtime");
+        // The host fixture's user files must be separate from the runtime's
+        // protected root: an identity mount of their common parent would also
+        // expose the managed rootfs and is correctly rejected by Android.
+        let root = temp.path().join("user-data");
+        let managed_root = temp.path().join("managed-runtime");
+        std::fs::create_dir_all(&managed_root).unwrap();
         let directories =
             crate::mobile::mobile_user_directories(root.display().to_string()).unwrap();
         directories.prepare().unwrap();
@@ -574,7 +579,7 @@ mod tests {
         std::fs::create_dir_all(&b).unwrap();
         let runtime = Arc::new(mobile_linux_android::AndroidProotRuntime::new(
             mobile_linux_android::AndroidProotRuntimeConfig {
-                managed_root: root,
+                managed_root: managed_root.clone(),
                 brand_profile: mobile_linux_api::BrandRuntimeProfile::default(),
                 app_sandbox_root: temp.path().to_path_buf(),
                 abi: "arm64-v8a".into(),
@@ -584,6 +589,16 @@ mod tests {
             },
         ));
         let rt = tokio::runtime::Runtime::new().unwrap();
+        let forbidden = mobile_linux_api::MountSpec {
+            host_path: managed_root,
+            guest_path: "/tmp/exposed-managed-root".into(),
+            read_only: false,
+            purpose: mobile_linux_api::MountPurpose::Temp,
+        };
+        let denied = rt
+            .block_on(runtime.configure_mounts(vec![forbidden]))
+            .unwrap_err();
+        assert!(denied.to_string().contains("managed rootfs"), "{denied}");
         rt.block_on(runtime.configure_mounts(vec![
             mobile_linux_api::MountSpec {
                 host_path: PathBuf::from(&directories.projects),
@@ -591,13 +606,19 @@ mod tests {
                 read_only: false,
                 purpose: mobile_linux_api::MountPurpose::Workspace,
             },
-            // Linux CI's host fixture lives under /tmp, which is also fenced
-            // guest scratch space. Explicitly back only this private fixture
-            // tree so native session paths behave like Android/iOS app data;
-            // unrelated guest scratch paths must remain inaccessible.
+            // Keep logical transcript paths mapped to the native config home.
             mobile_linux_api::MountSpec {
-                host_path: temp.path().to_path_buf(),
-                guest_path: temp.path().to_string_lossy().into_owned(),
+                host_path: PathBuf::from(&directories.config_home),
+                guest_path: directories.config_guest_path.clone(),
+                read_only: false,
+                purpose: mobile_linux_api::MountPurpose::Temp,
+            },
+            // Linux CI's native user home lives below /tmp, also a fenced
+            // guest scratch root. Back only this user-owned subtree so native
+            // paths work without admitting other scratch or the managed root.
+            mobile_linux_api::MountSpec {
+                host_path: PathBuf::from(&directories.home),
+                guest_path: directories.home.clone(),
                 read_only: false,
                 purpose: mobile_linux_api::MountPurpose::Temp,
             },
@@ -607,6 +628,12 @@ mod tests {
         let platform =
             Arc::new(HostFakePlatform::new(temp.path().to_path_buf()).with_mobile_linux(runtime))
                 as Arc<dyn lingxi_core::host::Platform>;
+        assert!(matches!(
+            platform
+                .filesystem()
+                .translate_model_path("/tmp/unmounted-guest-scratch", false),
+            Err(lingxi_core::host::FsError::PermissionDenied(_))
+        ));
         let mut cfg = test_config(&a);
         cfg.cwd = a;
         cfg.logical_cwd = Some(Path::new(&directories.projects_guest_path).join("a"));
@@ -649,6 +676,14 @@ mod tests {
             assert_eq!(state.session_id, id);
             assert_eq!(state.cwd, b);
             assert_eq!(state.project_root, a);
+            let transcript_prefix = format!("{}/projects/", directories.config_guest_path);
+            assert!(
+                state
+                    .transcript_path
+                    .starts_with(transcript_prefix.as_str()),
+                "transcript retains its logical guest path: {}",
+                state.transcript_path
+            );
             assert!(!source.exists());
             handle
                 .fs

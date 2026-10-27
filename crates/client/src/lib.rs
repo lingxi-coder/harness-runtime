@@ -8,6 +8,7 @@ pub mod presentation;
 pub mod protocol;
 #[cfg(feature = "slash-hints")]
 mod slash_argument_hint;
+pub mod turn_journal;
 #[cfg(feature = "slash-hints")]
 pub use slash_argument_hint::slash_command_argument_count;
 

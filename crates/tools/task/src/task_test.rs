@@ -2527,10 +2527,12 @@ Running background agents: a1b2c3d4e (survey the crate)"
             /// Successive `output()` results; the last entry repeats once drained.
             chunks: StdMutex<VecDeque<TaskOutputChunk>>,
             kill_calls: StdMutex<u32>,
+            kill_result_status: StdMutex<Option<String>>,
             pending_departure: StdMutex<bool>,
             departure_failures: StdMutex<u32>,
             output_calls: StdMutex<u32>,
             evict_after_first_read: bool,
+            clear_observation_on_output: bool,
             live_loop: bool,
             /// Ids passed to `mark_notified`, in call order (T9).
             notified_ids: StdMutex<Vec<String>>,
@@ -2603,7 +2605,12 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 let mut guard = self.record.lock().unwrap();
                 match guard.as_mut() {
                     Some(r) => {
-                        r.status = "killed".into();
+                        r.status = self
+                            .kill_result_status
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .unwrap_or_else(|| "killed".into());
                         Ok(r.clone())
                     }
                     None => Err(TaskRegistryError::NotFound(id.into())),
@@ -2621,6 +2628,11 @@ Running background agents: a1b2c3d4e (survey the crate)"
                 *calls += 1;
                 if self.evict_after_first_read && *calls > 1 {
                     return Err(TaskRegistryError::NotFound(id.into()));
+                }
+                if self.clear_observation_on_output {
+                    if let Some(record) = self.record.lock().unwrap().as_mut() {
+                        record.observation_error = None;
+                    }
                 }
                 let mut q = self.chunks.lock().unwrap();
                 if q.len() > 1 {
@@ -2816,6 +2828,32 @@ Running background agents: a1b2c3d4e (survey the crate)"
         }
 
         #[tokio::test]
+        async fn task_stop_reports_verified_unknown_and_natural_exit_without_claiming_kill() {
+            for (status, message) in [
+                (
+                    "exited_unknown",
+                    "Task exited; its outcome is unknown: b12345678 (echo hi > out.txt)",
+                ),
+                (
+                    "completed",
+                    "Task exited with status completed: b12345678 (echo hi > out.txt)",
+                ),
+                (
+                    "failed",
+                    "Task exited with status failed: b12345678 (echo hi > out.txt)",
+                ),
+            ] {
+                let reg = MockRegistry::with_record(Some(rec("running")));
+                *reg.kill_result_status.lock().unwrap() = Some(status.into());
+                let result = TaskStopTool::new(bctx(reg))
+                    .call(json!({ "task_id": "b12345678" }), fresh_ctx(), fresh_tx())
+                    .await
+                    .unwrap();
+                assert_eq!(result.data["message"], message);
+            }
+        }
+
+        #[tokio::test]
         async fn task_stop_falls_back_to_description_for_non_bash() {
             // T10: a non-bash task (no `command`) falls back to `description`
             // (claude-code stopTask.ts:97 `: task.description`).
@@ -2995,6 +3033,33 @@ Running background agents: a1b2c3d4e (survey the crate)"
         }
 
         #[tokio::test]
+        async fn task_output_verified_unknown_is_terminal_and_preserves_diagnostic() {
+            let mut record = rec("exited_unknown");
+            record.observation_error =
+                Some("shell exit was verified, but its outcome is unknown".into());
+            let reg = MockRegistry::with_record(Some(record));
+            reg.push_chunk(chunk(
+                "exited_unknown",
+                true,
+                None,
+                "[exited; outcome unknown]\n",
+            ));
+            let result = TaskOutputTool::new(bctx(reg))
+                .call(
+                    json!({ "task_id": "b12345678", "block": false }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result.data["retrieval_status"], "success");
+            assert_eq!(result.data["task"]["status"], "exited_unknown");
+            let content = result.data["content"].as_str().unwrap();
+            assert!(content.contains("<status>exited_unknown</status>"));
+            assert!(content.contains("shell exit was verified, but its outcome is unknown"));
+        }
+
+        #[tokio::test]
         async fn task_output_nonblock_running_is_not_ready() {
             let reg = MockRegistry::with_record(Some(rec("running")));
             reg.push_chunk(chunk("running", false, None, ""));
@@ -3129,6 +3194,96 @@ Running background agents: a1b2c3d4e (survey the crate)"
             assert_eq!(res.data["task"]["status"], "running");
             let content = res.data["content"].as_str().unwrap();
             assert!(content.contains("<retrieval_status>timeout</retrieval_status>"));
+        }
+
+        #[tokio::test]
+        async fn running_shell_observation_is_visible_and_can_still_be_stopped() {
+            let mut record = rec("running");
+            record.observation_error = Some("shell termination is unverified: wait failed".into());
+            let reg = MockRegistry::with_record(Some(record));
+            reg.push_chunk(chunk("running", false, None, "partial\n"));
+            let output = TaskOutputTool::new(bctx(reg.clone()))
+                .call(
+                    json!({ "task_id": "b12345678", "block": false }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(output.data["retrieval_status"], "not_ready");
+            assert_eq!(output.data["task"]["status"], "running");
+            assert_eq!(
+                output.data["task"]["observation_error"],
+                "shell termination is unverified: wait failed"
+            );
+            assert!(output.data["task"].get("error").is_none());
+            assert!(output.data["content"].as_str().unwrap().contains("<observation_error>shell termination is unverified: wait failed</observation_error>"));
+            TaskStopTool::new(bctx(reg.clone()))
+                .call(json!({ "task_id": "b12345678" }), fresh_ctx(), fresh_tx())
+                .await
+                .unwrap();
+            assert_eq!(*reg.kill_calls.lock().unwrap(), 1);
+
+            let mut failed = rec("failed");
+            failed.error = Some("shell termination was initially unverified".into());
+            let completed = MockRegistry::with_record(Some(failed));
+            completed.push_chunk(chunk("failed", true, None, "partial\n"));
+            let output = TaskOutputTool::new(bctx(completed))
+                .call(
+                    json!({ "task_id": "b12345678", "block": false }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                output.data["task"]["error"],
+                "shell termination was initially unverified"
+            );
+            assert!(output.data["task"].get("observation_error").is_none());
+
+            let mut stopped = rec("killed");
+            stopped.observation_error = Some("shell termination is unverified: wait failed".into());
+            let unverified_stop = MockRegistry::with_record(Some(stopped));
+            unverified_stop.push_chunk(chunk("killed", true, None, "partial\n"));
+            let output = TaskOutputTool::new(bctx(unverified_stop))
+                .call(
+                    json!({ "task_id": "b12345678", "block": false }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                output.data["task"]["observation_error"],
+                "shell termination is unverified: wait failed"
+            );
+            assert!(output.data["task"].get("error").is_none());
+        }
+
+        #[tokio::test]
+        async fn task_output_does_not_repeat_a_cleared_observation() {
+            let mut record = rec("running");
+            record.observation_error = Some("old wait observation".into());
+            let reg = Arc::new(MockRegistry {
+                record: StdMutex::new(Some(record)),
+                clear_observation_on_output: true,
+                ..Default::default()
+            });
+            reg.push_chunk(chunk("running", false, None, "partial\n"));
+            let output = TaskOutputTool::new(bctx(reg))
+                .call(
+                    json!({ "task_id": "b12345678", "block": false }),
+                    fresh_ctx(),
+                    fresh_tx(),
+                )
+                .await
+                .unwrap();
+            assert!(output.data["task"].get("observation_error").is_none());
+            assert!(!output.data["content"]
+                .as_str()
+                .unwrap()
+                .contains("old wait observation"));
         }
 
         // ── TaskOutput agent-specific semantics (T3) ─────────────────────
@@ -4064,6 +4219,7 @@ waiting on the user: an elicitation dialog is open"
                 output: source_text(&out),
                 exit_code: Some(0),
                 error: None,
+                observation_error: None,
                 output_path: None,
                 is_raw_transcript: false,
                 harness_head: None,
@@ -4089,6 +4245,7 @@ waiting on the user: an elicitation dialog is open"
                         .into(),
                 exit_code: None,
                 error: None,
+                observation_error: None,
                 output_path: None,
                 is_raw_transcript: false,
                 harness_head: None,
@@ -4122,6 +4279,7 @@ waiting on the user: an elicitation dialog is open"
                 output,
                 exit_code: None,
                 error: None,
+                observation_error: None,
                 output_path: None,
                 is_raw_transcript: true,
                 harness_head: None,
@@ -4149,6 +4307,7 @@ waiting on the user: an elicitation dialog is open"
                         .into(),
                 exit_code: Some(0),
                 error: None,
+                observation_error: None,
                 output_path: None,
                 is_raw_transcript: false,
                 harness_head: None,
@@ -4181,6 +4340,7 @@ waiting on the user: an elicitation dialog is open"
                         .into(),
                 exit_code: None,
                 error: None,
+                observation_error: None,
                 output_path: None,
                 is_raw_transcript: true,
                 harness_head: None,
@@ -4212,6 +4372,7 @@ waiting on the user: an elicitation dialog is open"
                 output: source_text(&out),
                 exit_code: Some(0),
                 error: None,
+                observation_error: None,
                 output_path: Some(abs.into()),
                 is_raw_transcript: false,
                 harness_head: None,

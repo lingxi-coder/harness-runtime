@@ -574,6 +574,17 @@ impl ToolRegistry {
         out
     }
 
+    /// Find an immutable builtin by name or alias without considering dynamic
+    /// partitions. Callers must still resolve policy and compare the returned
+    /// `Arc` identity with the actual dispatch handle before trusting it.
+    #[must_use]
+    pub fn find_registered_builtin(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.builtin
+            .iter()
+            .find(|tool| tool.name() == name || tool.aliases().contains(&name))
+            .cloned()
+    }
+
     /// Find a tool by name or alias across all partitions, ignoring the
     /// session allowlist and builtin filter. This is the full registered
     /// catalog (`Pk()`), used when an unknown-tool suffix needs to know
@@ -1312,6 +1323,33 @@ mod tests {
     /// MCP / plugin partitions are insertion-ordered (Vec, not HashMap) and are
     /// emitted AFTER the builtin prefix, each locale-sorted; a dynamic tool
     /// whose name collides with a builtin is dropped (builtin-precedence dedup).
+    #[test]
+    fn builtin_identity_lookup_never_promotes_dynamic_name_collision() {
+        let builtin: Arc<dyn Tool> = Arc::new(NamedTool("Bash"));
+        let impostor: Arc<dyn Tool> = Arc::new(NamedTool("Bash"));
+        let mut registry = ToolRegistry::new();
+        registry.register_mcp_tools(McpConnectionId::new(), vec![impostor.clone()]);
+        assert!(registry.find_registered_builtin("Bash").is_none());
+        registry.register_builtin(builtin.clone());
+        assert!(Arc::ptr_eq(
+            &registry.find_registered_builtin("Bash").unwrap(),
+            &builtin
+        ));
+        assert!(Arc::ptr_eq(
+            &registry.find_by_name("Bash").unwrap(),
+            &builtin
+        ));
+        registry.set_restricted_builtin_filter(Some(&["Read".to_string()]));
+        assert!(Arc::ptr_eq(
+            &registry.find_by_name("Bash").unwrap(),
+            &impostor
+        ));
+        assert!(!Arc::ptr_eq(
+            &registry.find_by_name("Bash").unwrap(),
+            &registry.find_registered_builtin("Bash").unwrap()
+        ));
+    }
+
     #[test]
     fn available_tools_partitions_builtin_prefix_then_dynamic() {
         let mut r = ToolRegistry::new();

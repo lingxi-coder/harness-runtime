@@ -1,0 +1,11 @@
+{
+  "type": "mod_session_event",
+  "session_id": "session-1",
+  "mod_turn_id": "mod-turn-1",
+  "payload": {
+    "type": "toast",
+    "plugin": "review",
+    "text": "Found a mismatch",
+    "timeout_ms": 4000
+  }
+}

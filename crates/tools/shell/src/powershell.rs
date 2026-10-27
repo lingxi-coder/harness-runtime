@@ -176,6 +176,14 @@ impl Tool for PowerShellTool {
     fn persistence_threshold(&self) -> Option<usize> {
         Some(MAX_TOOL_OUTPUT_LENGTH)
     }
+    fn interrupt_behavior(
+        &self,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> tool_api::tool_trait::InterruptBehavior {
+        // The owned runner must observe cancellation and reap its process tree.
+        tool_api::tool_trait::InterruptBehavior::Block
+    }
+
     fn is_concurrency_safe(&self, _: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
         false
     }
@@ -342,6 +350,7 @@ impl Tool for PowerShellTool {
             &sandbox_runtime,
             workspace.clone(),
         );
+        let mut sandbox_lease = None;
         let final_cmd = match decision {
             // HP-6: `sandbox.credentials` holds on the unsandboxed path too —
             // see the same arm in `bash.rs` for why `excludedCommands` and
@@ -361,7 +370,7 @@ impl Tool for PowerShellTool {
                 match self
                     .ctx
                     .sandbox_runner
-                    .wrap(
+                    .wrap_with_lease(
                         &cmd_str,
                         &rooted_runtime,
                         self.ctx.platform,
@@ -370,7 +379,10 @@ impl Tool for PowerShellTool {
                     )
                     .await
                 {
-                    Ok(w) => w,
+                    Ok(wrapped) => {
+                        sandbox_lease = Some(wrapped.lease);
+                        wrapped.command
+                    }
                     Err(sandbox::wrap::SandboxWrapError::Unsupported(s)) => {
                         return Err(ToolError::InvalidInput(s.into()));
                     }
@@ -393,11 +405,83 @@ impl Tool for PowerShellTool {
             .ctx
             .sandbox
             .bypass_with_audit(pcmd, "powershell_tool_call");
+        let sandboxed = if let Some(lease) = sandbox_lease.clone() {
+            sandboxed.with_lifetime_guard(lease)
+        } else {
+            sandboxed
+        };
 
-        let run_result = self.ctx.process.run(&sandboxed).await;
+        let run_result =
+            if let tool_api::context::HostToolCancellation::TerminateOwnedProcess(request) =
+                &ctx.host_tool_cancellation
+            {
+                // Use the same supervisor and verified per-request owner as Bash;
+                // the ordinary PowerShell path retains its original runner behavior.
+                let shell = crate::bash::BashTool::new(self.ctx.clone());
+                let bound = shell.allocate_task_identity().await;
+                let owner = request.process_owner();
+                let supervised = shell
+                    .bind_identity(sandboxed, bound.as_ref(), None, sandbox_lease.clone())
+                    .with_process_owner(Some(owner.clone()))
+                    .with_require_group_cleanup_on_exit(true)
+                    .with_auto_background_on_timeout(false);
+                if bound.is_none()
+                    || self.ctx.task_registry.is_none()
+                    || !self
+                        .ctx
+                        .process
+                        .supports_verified_background_stop(&supervised)
+                {
+                    if let (Some(registry), Some((id, _))) = (&self.ctx.task_registry, &bound) {
+                        registry.discard_bash_output(id).await;
+                    }
+                    return Err(ToolError::InvalidInput(
+                        "This host cannot verify owned PowerShell process cleanup".into(),
+                    ));
+                }
+                let result = crate::bash::run_host_foreground(
+                    self.ctx.process.clone(),
+                    supervised,
+                    None,
+                    ctx.cancel.clone().unwrap_or_default(),
+                    request.clone(),
+                    owner,
+                    self.ctx
+                        .task_registry
+                        .clone()
+                        .zip(bound.as_ref().map(|(id, _)| id.clone())),
+                    sandbox_lease.clone(),
+                )
+                .await;
+                let result = match result {
+                    Ok(Ok(result)) => match result.outcome {
+                        lingxi_core::host::ForegroundOutcome::Completed(output)
+                            if output.timed_out =>
+                        {
+                            Err(mobile_linux_api::ProcessError::Timeout)
+                        }
+                        lingxi_core::host::ForegroundOutcome::Completed(output) => Ok(output),
+                        lingxi_core::host::ForegroundOutcome::MovedToBackground(_) => {
+                            return Err(ToolError::Internal(
+                                "PowerShell unexpectedly moved to the background".into(),
+                            ));
+                        }
+                    },
+                    Ok(Err(error)) => Err(error),
+                    Err(ToolError::Aborted) => return Err(ToolError::Aborted),
+                    Err(error) => {
+                        return Err(error);
+                    }
+                };
+                if let (Some(registry), Some((id, _))) = (&self.ctx.task_registry, &bound) {
+                    registry.discard_bash_output(id).await;
+                }
+                result
+            } else {
+                self.ctx.process.run(&sandboxed).await
+            };
         // The wrapped command has finished: tear down any per-command sandbox
         // state. No-op for the default `LegacyWrapRunner`.
-        self.ctx.sandbox_runner.cleanup_after_command().await;
         match run_result {
             Ok(out) => {
                 // OTEL `claude_code.commit.count` / `claude_code.pull_request.count`
@@ -813,7 +897,7 @@ mod tests {
         assert_eq!(err.to_string(), "sandbox not supported on this platform");
     }
 
-    /// Records `wrap`/`cleanup_after_command` calls so a test can prove the
+    /// Records wrapping and lease cleanup so a test can prove the
     /// PowerShell tool routes through `ctx.sandbox_runner`.
     struct WrapCall {
         command: String,
@@ -824,30 +908,32 @@ mod tests {
     #[derive(Default)]
     struct RecordingSandboxRunner {
         wrap_calls: std::sync::Mutex<Vec<WrapCall>>,
-        cleanups: std::sync::atomic::AtomicUsize,
+        cleanups: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     #[async_trait::async_trait]
     impl tool_api::SandboxRunner for RecordingSandboxRunner {
-        async fn wrap(
+        async fn wrap_with_lease(
             &self,
             command: &str,
             _cfg: &sandbox::runtime_config::SandboxRuntimeConfig,
             _platform: sandbox::runtime_config::Platform,
             bin_shell: Option<&str>,
             cwd: Option<&std::path::Path>,
-        ) -> Result<String, sandbox::wrap::SandboxWrapError> {
+        ) -> Result<tool_api::sandbox_runner::SandboxWrappedCommand, sandbox::wrap::SandboxWrapError>
+        {
             self.wrap_calls.lock().unwrap().push(WrapCall {
                 command: command.to_string(),
                 bin_shell: bin_shell.map(ToString::to_string),
                 cwd: cwd.map(std::path::Path::to_path_buf),
             });
-            Ok(format!("WRAPPED::{command}"))
-        }
-
-        async fn cleanup_after_command(&self) {
-            self.cleanups
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let cleanups = self.cleanups.clone();
+            Ok(tool_api::sandbox_runner::SandboxWrappedCommand {
+                command: format!("WRAPPED::{command}"),
+                lease: tool_api::sandbox_runner::SandboxLease::new(move || {
+                    cleanups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }),
+            })
         }
     }
 
@@ -904,7 +990,7 @@ mod tests {
         assert_eq!(
             runner.cleanups.load(std::sync::atomic::Ordering::SeqCst),
             1,
-            "cleanup_after_command must be invoked once"
+            "the invocation lease must be cleaned once"
         );
     }
 

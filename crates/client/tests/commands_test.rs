@@ -2,8 +2,9 @@
 //!
 //! Freezes every inbound command and ENCODES governing decision §0.5:
 //! `session_id` is a CONNECTION ATTRIBUTE (carried in `SessionStarted` /
-//! `SessionResumed`), NOT a per-live-command param. The ONE allowed occurrence
-//! is [`ClientCommand::ResumeSession`], which NAMES a target to resume.
+//! `SessionResumed`), NOT a general per-live-command param. `ResumeSession`
+//! names a target; mobile durable-turn commands fence an expected owner without
+//! switching it.
 //!
 //! Each command gets a serialize → assert-tag → deserialize → assert-eq
 //! round-trip so the wire shape is locked before the F1-08 snapshot golden is
@@ -26,10 +27,11 @@ use client::protocol::text::ClientTextDto;
 
 /// `SendPrompt` — the core inbound command. Carries the text, an optional
 /// prompt mode, inline image bytes (decision §0.8), and an optional client
-/// turn correlator. Notably it carries NO `session_id` (decision §0.5).
+/// turn correlator and a captured mobile session owner.
 #[test]
 fn send_prompt_round_trips() {
     let cmd = ClientCommand::SendPrompt {
+        session_id: Some("session-a".into()),
         text: ClientTextDto::from_utf8("summarize this repo"),
         prompt_mode: Some(PromptModeDto::Plan),
         images: vec![ImageRefDto {
@@ -41,6 +43,7 @@ fn send_prompt_round_trips() {
     };
     let json = serde_json::to_value(&cmd).expect("serialize SendPrompt");
     assert_eq!(json["type"], "send_prompt");
+    assert_eq!(json["session_id"], "session-a");
     assert_eq!(json["text"], "summarize this repo");
     assert_eq!(json["prompt_mode"]["type"], "plan");
     assert_eq!(json["images"][0]["media_type"], "image/png");
@@ -55,6 +58,7 @@ fn send_prompt_round_trips() {
 #[test]
 fn send_prompt_optional_fields_skip_when_none() {
     let cmd = ClientCommand::SendPrompt {
+        session_id: None,
         text: ClientTextDto::from_utf8("hi"),
         prompt_mode: None,
         images: vec![],
@@ -62,6 +66,7 @@ fn send_prompt_optional_fields_skip_when_none() {
         visualization_context: None,
     };
     let json = serde_json::to_value(&cmd).expect("serialize minimal SendPrompt");
+    assert!(json.get("session_id").is_none());
     assert!(
         json.get("prompt_mode").is_none(),
         "None prompt_mode must be skipped"
@@ -114,13 +119,26 @@ fn image_ref_round_trips() {
     assert_eq!(back, img);
 }
 
-/// `Cancel` — carries an optional turn correlator, no `session_id`.
+/// `Cancel` preserves both owner-scoped and connection-scoped forms.
 #[test]
 fn cancel_round_trips() {
-    for turn_id in [Some(3u64), None] {
-        let cmd = ClientCommand::Cancel { turn_id };
+    for (session_id, turn_id) in [
+        (Some("session-a".to_string()), Some(3u64)),
+        (Some("session-a".to_string()), None),
+        (None, Some(3u64)),
+        (None, None),
+    ] {
+        let cmd = ClientCommand::Cancel {
+            session_id: session_id.clone(),
+            turn_id,
+        };
         let json = serde_json::to_value(&cmd).expect("serialize Cancel");
         assert_eq!(json["type"], "cancel");
+        if let Some(owner) = session_id {
+            assert_eq!(json["session_id"], owner);
+        } else {
+            assert!(json.get("session_id").is_none());
+        }
         if turn_id.is_none() {
             assert!(
                 json.get("turn_id").is_none(),
@@ -297,6 +315,7 @@ fn session_agent_commands_round_trip() {
 #[test]
 fn run_slash_command_round_trips() {
     let cmd = ClientCommand::RunSlashCommand {
+        session_id: Some("session-a".into()),
         raw: ClientTextDto::from_utf8("/model opus"),
         images: vec![ImageRefDto {
             media_type: "image/png".to_string(),
@@ -306,6 +325,7 @@ fn run_slash_command_round_trips() {
     };
     let json = serde_json::to_value(&cmd).expect("serialize RunSlashCommand");
     assert_eq!(json["type"], "run_slash_command");
+    assert_eq!(json["session_id"], "session-a");
     assert_eq!(json["raw"], "/model opus");
     assert_eq!(json["images"][0]["media_type"], "image/png");
     assert_eq!(json["images"][0]["base64"], "aGVsbG8=");
@@ -314,11 +334,13 @@ fn run_slash_command_round_trips() {
     assert_eq!(back, cmd);
 
     let without_turn = ClientCommand::RunSlashCommand {
+        session_id: None,
         raw: ClientTextDto::from_utf8("/help"),
         images: Vec::new(),
         turn_id: None,
     };
     let json = serde_json::to_value(&without_turn).expect("serialize RunSlashCommand");
+    assert!(json.get("session_id").is_none());
     assert!(
         json.get("turn_id").is_none(),
         "None turn_id must be skipped"
@@ -454,8 +476,7 @@ fn new_session_round_trips() {
     assert_eq!(back_min, minimal);
 }
 
-/// `ResumeSession` — the ONE allowed `session_id`-carrying command (decision
-/// §0.5): it NAMES a target to resume. Carries an optional `cwd`.
+/// `ResumeSession` names a target to resume. Carries an optional `cwd`.
 #[test]
 fn resume_session_round_trips_and_carries_session_id() {
     let cmd = ClientCommand::ResumeSession {
@@ -466,7 +487,7 @@ fn resume_session_round_trips_and_carries_session_id() {
     assert_eq!(json["type"], "resume_session");
     assert_eq!(
         json["session_id"], "9f1c2e3a-...",
-        "ResumeSession is the ONE command that names a session_id target (§0.5)"
+        "ResumeSession names the session target (§0.5)"
     );
     assert!(json.get("cwd").is_none(), "None cwd must be skipped");
     let back: ClientCommand = serde_json::from_value(json).expect("deserialize ResumeSession");
@@ -736,21 +757,15 @@ fn task_stop_round_trips() {
     assert_eq!(back, cmd);
 }
 
-/// THE LIFECYCLE LOCK (decision §0.5). For EVERY `ClientCommand` variant except
-/// `ResumeSession`, serialize a canonical instance and assert the wire frame
-/// carries NO `session_id` key. `ResumeSession` is the ONE allowed occurrence —
-/// it names a target to resume — and is asserted to carry `session_id`
-/// separately in `resume_session_round_trips_and_carries_session_id`.
-///
-/// This is a structural assertion over the live wire shape: any future command
-/// that smuggles a `session_id` field (other than `ResumeSession`) breaks this
-/// test, enforcing that `session_id` stays a CONNECTION ATTRIBUTE.
+/// Representative live commands keep the session as a connection attribute.
+/// ResumeSession names a target, while durable-turn commands fence their owner.
 #[test]
 #[allow(clippy::too_many_lines)]
 fn no_live_command_carries_session_id() {
-    // One canonical instance of every command EXCEPT ResumeSession.
+    // Representative commands that do not select or fence a session.
     let commands: Vec<ClientCommand> = vec![
         ClientCommand::SendPrompt {
+            session_id: None,
             text: ClientTextDto::from_utf8("x"),
             prompt_mode: Some(PromptModeDto::Normal),
             images: vec![ImageRefDto {
@@ -760,7 +775,10 @@ fn no_live_command_carries_session_id() {
             turn_id: Some(1),
             visualization_context: None,
         },
-        ClientCommand::Cancel { turn_id: Some(1) },
+        ClientCommand::Cancel {
+            session_id: None,
+            turn_id: Some(1),
+        },
         ClientCommand::ApprovePermission {
             request_id: 1,
             response: PermissionResponseDto::AllowOnce,
@@ -775,6 +793,7 @@ fn no_live_command_carries_session_id() {
             selection: ReasoningSelectionDto::Automatic,
         },
         ClientCommand::RunSlashCommand {
+            session_id: None,
             raw: ClientTextDto::from_utf8("/x"),
             images: Vec::new(),
             turn_id: None,
@@ -813,15 +832,14 @@ fn no_live_command_carries_session_id() {
         assert!(
             !obj.contains_key("session_id"),
             "live command {cmd:?} must NOT carry session_id (decision §0.5) — \
-             session_id is a connection attribute; only ResumeSession names a target"
+             session_id is a connection attribute"
         );
         // Sanity: it actually round-trips too.
         let back: ClientCommand = serde_json::from_value(json).expect("deserialize command");
         assert_eq!(&back, cmd);
     }
 
-    // The ONE allowed occurrence DOES carry session_id (proves the test isn't
-    // vacuously passing because no command ever has the key).
+    // A session-selecting command does carry session_id.
     let resume = ClientCommand::ResumeSession {
         session_id: "target-id".to_string(),
         cwd: None,
@@ -832,8 +850,60 @@ fn no_live_command_carries_session_id() {
             .as_object()
             .expect("object")
             .contains_key("session_id"),
-        "ResumeSession is the ONE command that names a session_id target (§0.5)"
+        "ResumeSession names a session target (§0.5)"
     );
+}
+
+#[test]
+fn attach_turn_requires_session_and_attempt_identity() {
+    let command = ClientCommand::AttachTurn {
+        session_id: "session-a".into(),
+        turn_id: 7,
+        after_sequence: None,
+        request_id: "attempt-1".into(),
+    };
+    let value = serde_json::to_value(&command).unwrap();
+    assert_eq!(value["session_id"], "session-a");
+    assert_eq!(value["turn_id"], 7);
+    assert_eq!(value["request_id"], "attempt-1");
+    assert!(value.get("after_sequence").is_none());
+    assert_eq!(
+        serde_json::from_value::<ClientCommand>(value.clone()).unwrap(),
+        command
+    );
+
+    for required in ["session_id", "request_id"] {
+        let mut missing = value.clone();
+        missing.as_object_mut().unwrap().remove(required);
+        assert!(
+            serde_json::from_value::<ClientCommand>(missing).is_err(),
+            "{required}"
+        );
+    }
+}
+
+#[test]
+fn resume_and_pause_require_session_identity() {
+    for command in [
+        ClientCommand::ResumeTurn {
+            session_id: "session-a".into(),
+            turn_id: 7,
+        },
+        ClientCommand::PauseTurn {
+            session_id: "session-a".into(),
+            turn_id: 7,
+            reason: "lease_expired".into(),
+        },
+    ] {
+        let mut value = serde_json::to_value(&command).unwrap();
+        assert_eq!(value["session_id"], "session-a");
+        assert_eq!(
+            serde_json::from_value::<ClientCommand>(value.clone()).unwrap(),
+            command
+        );
+        value.as_object_mut().unwrap().remove("session_id");
+        assert!(serde_json::from_value::<ClientCommand>(value).is_err());
+    }
 }
 
 #[test]

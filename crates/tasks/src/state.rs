@@ -22,13 +22,18 @@ pub enum TaskStatus {
     Failed,
     /// Killed by the user or the runtime.
     Killed,
+    /// The process was verified to have exited, but its outcome is unknown.
+    ExitedUnknown,
 }
 
 impl TaskStatus {
     /// Whether the status represents a terminal (non-recoverable) state.
     #[must_use]
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed | Self::Killed)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Killed | Self::ExitedUnknown
+        )
     }
 }
 

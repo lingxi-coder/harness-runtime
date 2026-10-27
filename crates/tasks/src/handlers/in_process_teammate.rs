@@ -1055,6 +1055,8 @@ impl InProcessTeammateHandler {
             None,
             environmental_model.as_deref(),
             definition,
+            None,
+            false,
         )
         .await
         .map(|(context, _)| context)
@@ -1072,6 +1074,8 @@ impl InProcessTeammateHandler {
         parent_profile_override: Option<&str>,
         environmental_model: Option<&str>,
         mut definition: AgentDefinition,
+        session_origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
+        require_session_origin: bool,
     ) -> Result<
         (
             SubagentContext,
@@ -1259,7 +1263,7 @@ impl InProcessTeammateHandler {
                     Some(gate) => gate.native_mcp_deny_context().await,
                     None => lingxi_core::host::permission_gate::NativeMcpDenyContext::default(),
                 };
-                agent::resolve_subagent_tools(
+                agent::resolve_subagent_tools_with_origin(
                     registry,
                     &definition,
                     &deny_context,
@@ -1274,6 +1278,8 @@ impl InProcessTeammateHandler {
                     // equivalent connect step, so this is always empty
                     // (byte-identical to before this feature).
                     &[],
+                    session_origin,
+                    require_session_origin,
                 )
                 .await
                 .map_err(|e| TaskError::Internal(e.to_string()))?
@@ -1363,6 +1369,7 @@ impl InProcessTeammateHandler {
             // Teammates run in the shared session (no per-agent worktree).
             cwd: None,
             origin_session_id: None,
+            session_origin: None,
             is_async: false,
             // The defining trait of a teammate: park between turn-sets and
             // resume on the next injected UserMessage.
@@ -1728,6 +1735,14 @@ impl Task for InProcessTeammateHandler {
         let environmental_model = std::env::var(branding::SUBAGENT_MODEL_ENV)
             .ok()
             .filter(|model| !model.is_empty());
+        let trusted_session_id = spawn_request
+            .as_ref()
+            .and_then(|request| request.origin_session_id);
+        let session_origin = inheritance
+            .as_ref()
+            .and_then(|inherit| inherit.session_origin.clone())
+            .filter(|origin| trusted_session_id.is_none_or(|id| id == origin.session_id()));
+        let require_session_origin = trusted_session_id.is_some() || session_origin.is_some();
         let (mut subagent_ctx, admitted_route) = self
             .build_context_for_selection(
                 agent_id,
@@ -1743,12 +1758,19 @@ impl Task for InProcessTeammateHandler {
                     .and_then(|request| request.parent_model_profile_override.as_deref()),
                 environmental_model.as_deref(),
                 definition,
+                session_origin,
+                require_session_origin,
             )
             .await?;
         if let Some(request) = spawn_request {
             apply_spawn_context(&mut subagent_ctx, request);
         }
         if let Some(inherit) = inheritance {
+            subagent_ctx.session_origin = inherit.session_origin.filter(|origin| {
+                subagent_ctx
+                    .origin_session_id
+                    .is_none_or(|id| id == origin.session_id())
+            });
             subagent_ctx.tool_invoker = Some(inherit.tool_invoker);
             subagent_ctx.budget = Some(inherit.budget);
         }

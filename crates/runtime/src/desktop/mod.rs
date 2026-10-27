@@ -1201,6 +1201,7 @@ impl tool_workflow::WorkflowLauncher for TaskRegistryWorkflowLauncher {
                     tasks::TaskType::LocalWorkflow,
                     tasks::TaskSpawnInput::LocalWorkflow {
                         session_uuid: Some(session_uuid.clone()),
+                        session_origin: spec.session_origin.clone(),
                         // Display name = the script's `meta.name` (claude-code
                         // `workflowName`), so an INLINE workflow shows its real name
                         // in `/workflows` rather than the empty fallback; a named

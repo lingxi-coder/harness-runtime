@@ -390,9 +390,9 @@ impl ShellRunner for PromptShellRunner {
             &self.sandbox_runtime,
             self.workspace.clone(),
         );
-        let inner = match decision {
+        let (inner, lease) = match decision {
             // No sandbox: run the (extglob-guarded) command unchanged.
-            SandboxDecision::NoSandbox => spawn_cmd,
+            SandboxDecision::NoSandbox => (spawn_cmd, None),
             // Wrap the command string for the sandbox; on failure surface a
             // `ShellRunError` (the TS `errorMessage(e)` generic path) so the
             // command does NOT run. Bash splits this into two arms purely to emit
@@ -413,7 +413,7 @@ impl ShellRunner for PromptShellRunner {
                 );
                 match self
                     .sandbox_runner
-                    .wrap(
+                    .wrap_with_lease(
                         &spawn_cmd,
                         &rooted_runtime,
                         self.platform,
@@ -422,7 +422,7 @@ impl ShellRunner for PromptShellRunner {
                     )
                     .await
                 {
-                    Ok(wrapped) => wrapped,
+                    Ok(wrapped) => (wrapped.command, Some(wrapped.lease)),
                     Err(
                         sandbox::wrap::SandboxWrapError::Unsupported(s)
                         | sandbox::wrap::SandboxWrapError::SbplWrite(s),
@@ -438,6 +438,20 @@ impl ShellRunner for PromptShellRunner {
             }
         };
 
+        if lease.as_ref().is_some_and(|lease| !lease.is_noop())
+            && !self.process.supports_background_lifetime_guard()
+        {
+            return Err(ShellRunError {
+                stdout: String::new(),
+                stderr: String::new(),
+                interrupted: false,
+                generic_message: Some(
+                    "The process runner cannot retain sandbox resources for background execution"
+                        .into(),
+                ),
+            });
+        }
+
         let pcmd = ProcessCommand {
             command: shell_path.to_string(),
             // A valid snapshot replaces per-command login-shell startup. If the
@@ -452,7 +466,7 @@ impl ShellRunner for PromptShellRunner {
             timeout: self.side_chat.then(|| std::time::Duration::from_secs(120)),
             stdin: None,
         };
-        let sandboxed = if self.force_platform_sandbox {
+        let mut sandboxed = if self.force_platform_sandbox {
             let policy = lingxi_core::host::sandbox::SandboxPolicy {
                 network: mobile_linux_api::NetworkPolicy::Disabled,
                 writable_paths: vec![],
@@ -472,8 +486,10 @@ impl ShellRunner for PromptShellRunner {
             self.sandbox
                 .bypass_with_audit(pcmd, "prompt_shell_expansion")
         };
+        if let Some(lease) = &lease {
+            sandboxed = sandboxed.with_lifetime_guard(lease.clone());
+        }
         if cancellation.is_cancelled() {
-            self.sandbox_runner.cleanup_after_command().await;
             return Err(ShellRunError {
                 stdout: String::new(),
                 stderr: String::new(),
@@ -493,9 +509,6 @@ impl ShellRunner for PromptShellRunner {
             owner_prefix,
         )
         .await;
-        // The wrapped command has finished and been joined: tear down any
-        // per-command sandbox state. No-op for the default `LegacyWrapRunner`.
-        self.sandbox_runner.cleanup_after_command().await;
         if let Err(error) = &run_result {
             if self.side_chat
                 && error

@@ -35,7 +35,7 @@
 //! strict no-op and the turn behaves exactly as before — the locked streaming
 //! fixtures are unaffected.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -51,7 +51,7 @@ pub enum MidTurnInputPoint {
 /// Why the active turn's [`tokio_util::sync::CancellationToken`] was fired.
 ///
 /// Shared between the queue adapter (which sets it) and the streaming loop
-/// (which reads it at the cancel-check points). Backed by an [`AtomicU8`] in
+/// (which reads it at the cancel-check points). Backed by an [`AtomicU64`] in
 /// [`CancelReasonFlag`] so it is `Copy`, lock-free, and cheap to poll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelReason {
@@ -65,18 +65,23 @@ pub enum CancelReason {
     /// the urgent command runs next. The loop ends the turn WITHOUT injecting
     /// the user-interrupt message (the command is the "interruption").
     QueueNowCommand,
+    /// The host is quiescing a turn for later recovery. This is not a user
+    /// interruption and must not add an interruption row to durable history.
+    LifecyclePause,
 }
 
 impl CancelReason {
     const USER_INTERRUPT: u8 = 0;
     const QUEUE_NOW_COMMAND: u8 = 1;
     const SERVICE_SHUTDOWN: u8 = 2;
+    const LIFECYCLE_PAUSE: u8 = 3;
 
     const fn to_u8(self) -> u8 {
         match self {
             Self::UserInterrupt => Self::USER_INTERRUPT,
             Self::QueueNowCommand => Self::QUEUE_NOW_COMMAND,
             Self::ServiceShutdown => Self::SERVICE_SHUTDOWN,
+            Self::LifecyclePause => Self::LIFECYCLE_PAUSE,
         }
     }
 
@@ -84,10 +89,15 @@ impl CancelReason {
         match v {
             Self::QUEUE_NOW_COMMAND => Self::QueueNowCommand,
             Self::SERVICE_SHUTDOWN => Self::ServiceShutdown,
+            Self::LIFECYCLE_PAUSE => Self::LifecyclePause,
             // Any other value (including the un-set sentinel) is a plain user interrupt —
             // the safe-backward default so an un-set flag never mislabels.
             _ => Self::UserInterrupt,
         }
+    }
+
+    pub(crate) const fn records_user_interruption(self) -> bool {
+        matches!(self, Self::UserInterrupt | Self::ServiceShutdown)
     }
 }
 
@@ -100,41 +110,80 @@ impl CancelReason {
 /// queue (Ctrl+C, ESC, a pre-cancelled token) keeps today's interrupt UX.
 #[derive(Debug, Clone)]
 pub struct CancelReasonFlag {
-    inner: Arc<AtomicU8>,
+    inner: Arc<AtomicU64>,
+}
+
+/// A reason setter bound to one turn generation. A delayed callback from an
+/// older owner cannot change the reason of a newly reserved turn.
+#[derive(Debug, Clone)]
+pub struct CancelReasonLease {
+    inner: Arc<AtomicU64>,
+    generation: u64,
+}
+
+impl CancelReasonLease {
+    /// Record the first reason only if this lease's turn is still current.
+    pub fn set(&self, reason: CancelReason) {
+        let _ = self.inner.compare_exchange(
+            self.generation | CancelReasonFlag::UNSET,
+            self.generation | u64::from(reason.to_u8()),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+    }
 }
 
 impl CancelReasonFlag {
-    const UNSET: u8 = 3;
+    const REASON_BITS: u32 = 3;
+    const REASON_MASK: u64 = (1 << Self::REASON_BITS) - 1;
+    const UNSET: u64 = 4;
 
     /// A fresh flag defaulting to [`CancelReason::UserInterrupt`].
     #[must_use]
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(AtomicU8::new(Self::UNSET)),
+            inner: Arc::new(AtomicU64::new(Self::UNSET)),
         }
     }
 
     /// Record the first reason the turn is being cancelled. Call BEFORE firing
     /// the token so a racing later cancellation source cannot relabel the cause.
     pub fn set(&self, reason: CancelReason) {
-        let _ = self.inner.compare_exchange(
-            Self::UNSET,
-            reason.to_u8(),
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-        );
+        let generation = self.inner.load(Ordering::SeqCst) & !Self::REASON_MASK;
+        CancelReasonLease {
+            inner: self.inner.clone(),
+            generation,
+        }
+        .set(reason);
     }
 
     /// Read the current reason. An un-set flag reads [`CancelReason::UserInterrupt`].
     #[must_use]
     pub fn get(&self) -> CancelReason {
-        CancelReason::from_u8(self.inner.load(Ordering::SeqCst))
+        CancelReason::from_u8((self.inner.load(Ordering::SeqCst) & Self::REASON_MASK) as u8)
     }
 
     /// Reset to the default ([`CancelReason::UserInterrupt`]) at turn start so a
     /// stale `QueueNowCommand` from a prior turn cannot mislabel this one.
     pub fn reset(&self) {
-        self.inner.store(Self::UNSET, Ordering::SeqCst);
+        let _ = self.reset_and_bind();
+    }
+
+    /// Start a fresh turn generation and return a setter scoped to it.
+    #[must_use]
+    pub fn reset_and_bind(&self) -> CancelReasonLease {
+        let previous = self
+            .inner
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                (value & !Self::REASON_MASK)
+                    .checked_add(1 << Self::REASON_BITS)
+                    .map(|generation| generation | Self::UNSET)
+            })
+            .expect("cancel reason generation exhausted");
+        CancelReasonLease {
+            inner: self.inner.clone(),
+            generation: (previous & !Self::REASON_MASK) + (1 << Self::REASON_BITS),
+        }
     }
 }
 
@@ -166,7 +215,10 @@ pub trait MidTurnInputSource: Send + Sync {
 
     /// Called after post-tool input has entered canonical session history.
     /// Hosts retire delivery identities and publish consumption acknowledgments here.
-    async fn input_consumed(&self, _inputs: &[MidTurnInput]) -> Result<(), String> {
+    async fn input_consumed(
+        &self,
+        _inputs: &[MidTurnInput],
+    ) -> Result<(), MidTurnConsumptionError> {
         Ok(())
     }
     /// Whether this host can admit cancellable goal wake-ups.
@@ -207,6 +259,21 @@ pub trait MidTurnInputSource: Send + Sync {
                 pending_prompt_identity: None,
             }]
         }))
+    }
+}
+
+/// A stopped owner is distinct from a failure to persist a consumed input.
+#[derive(Debug, thiserror::Error)]
+pub enum MidTurnConsumptionError {
+    #[error("the turn stopped before the input was acknowledged")]
+    Interrupted,
+    #[error("{0}")]
+    Failure(String),
+}
+
+impl From<String> for MidTurnConsumptionError {
+    fn from(message: String) -> Self {
+        Self::Failure(message)
     }
 }
 
@@ -281,6 +348,28 @@ mod tests {
         flag.set(CancelReason::ServiceShutdown);
         flag.set(CancelReason::UserInterrupt);
         assert_eq!(flag.get(), CancelReason::ServiceShutdown);
+
+        flag.reset();
+        flag.set(CancelReason::LifecyclePause);
+        flag.set(CancelReason::UserInterrupt);
+        assert_eq!(flag.get(), CancelReason::LifecyclePause);
+
+        flag.reset();
+        flag.set(CancelReason::UserInterrupt);
+        flag.set(CancelReason::LifecyclePause);
+        assert_eq!(flag.get(), CancelReason::UserInterrupt);
+    }
+
+    #[test]
+    fn a_stale_turn_lease_cannot_set_the_new_turn_reason() {
+        let flag = CancelReasonFlag::new();
+        let old = flag.reset_and_bind();
+        let current = flag.reset_and_bind();
+        old.set(CancelReason::QueueNowCommand);
+        assert_eq!(flag.get(), CancelReason::UserInterrupt);
+        current.set(CancelReason::LifecyclePause);
+        old.set(CancelReason::UserInterrupt);
+        assert_eq!(flag.get(), CancelReason::LifecyclePause);
     }
 
     #[test]
@@ -296,6 +385,10 @@ mod tests {
         assert_eq!(
             CancelReason::from_u8(CancelReason::ServiceShutdown.to_u8()),
             CancelReason::ServiceShutdown
+        );
+        assert_eq!(
+            CancelReason::from_u8(CancelReason::LifecyclePause.to_u8()),
+            CancelReason::LifecyclePause
         );
         // An out-of-range byte falls back to UserInterrupt (safe default).
         assert_eq!(CancelReason::from_u8(99), CancelReason::UserInterrupt);

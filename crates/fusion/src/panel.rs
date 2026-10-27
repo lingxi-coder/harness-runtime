@@ -893,6 +893,7 @@ fn spawn_panel_tasks(
             let mut inherit = lingxi_core::host::subagent_spawn::SubagentInheritance {
                 tool_invoker: subagent.tool_invoker,
                 budget: subagent.budget,
+                session_origin: subagent.session_origin,
             };
             if let Some(Some(workspace)) = &workspace {
                 request.subagent_type = FUSION_IMPLEMENTER_TYPE.to_string();
@@ -2839,6 +2840,7 @@ mod panels_dispatched_emission_tests {
         let cancel = CancellationToken::new();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },
@@ -2903,6 +2905,7 @@ returns, before it can possibly have collected a completion — got {:?} instead
         cancel.cancel();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },
@@ -3021,6 +3024,7 @@ emitted — got {stages:?}"
         };
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },
@@ -3093,6 +3097,7 @@ the consumer takes a max over every event it sees: {last_running:?}"
         };
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },
@@ -3185,6 +3190,7 @@ this run exits through the completed arm — got {stages:?}"
         let cancel = CancellationToken::new();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },
@@ -3283,6 +3289,7 @@ reservation is released for subagents that really exist — got {stages:?}"
         let cancel = CancellationToken::new();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },
@@ -3376,6 +3383,7 @@ reservation is released for subagents that really exist — got {stages:?}"
         let cancel = CancellationToken::new();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },
@@ -3612,6 +3620,7 @@ mod cancel_drain_settlement_tests {
         };
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },
@@ -3692,6 +3701,7 @@ mod cancel_drain_settlement_tests {
             let cancel = CancellationToken::new();
             let inherit = FusionInheritance::new(
                 SubagentInheritance {
+                    session_origin: None,
                     tool_invoker: Arc::new(InertInvoker),
                     budget: Arc::new(InertBudget),
                 },
@@ -4034,6 +4044,7 @@ mod cancel_drain_settlement_tests {
         let cancel = CancellationToken::new();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },
@@ -4175,6 +4186,7 @@ tokens and 0 output tokens"
         let cancel = CancellationToken::new();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },
@@ -4320,6 +4332,7 @@ output tokens, not the in-flight floor's 0"
         let cancel = CancellationToken::new();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },
@@ -4430,6 +4443,7 @@ cancel commits exact $0 for real, already-billed spend"
         let cancel = CancellationToken::new();
         let inherit = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: Arc::new(InertBudget),
             },

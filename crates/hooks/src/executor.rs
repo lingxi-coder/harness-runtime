@@ -60,7 +60,7 @@ use mobile_linux_api::ProcessError;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::Duration;
 use tokio::sync::RwLock;
 
@@ -71,6 +71,98 @@ pub const HOOK_HTTP_TIMEOUT_MS: u64 = 600_000;
 /// Default command hook timeout (10 minutes — matches
 /// `claude-code/src/utils/hooks.ts:166` `TOOL_HOOK_EXECUTION_TIMEOUT_MS`).
 pub const HOOK_COMMAND_TIMEOUT_MS: u64 = 600_000;
+
+// Unknown physical work must retain its originating turn identity until this
+// process ends. The durable checkpoint also remains unsafe across restart.
+static UNCERTAIN_RECOVERY_HOOKS: OnceLock<StdMutex<Vec<Arc<dyn Send + Sync>>>> = OnceLock::new();
+
+fn retain_uncertain_hook(lease: Arc<dyn Send + Sync>) {
+    UNCERTAIN_RECOVERY_HOOKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(lease);
+}
+
+struct UnverifiedHookOwner(Option<Arc<lingxi_core::host::process::RecoveryHookProcessLeases>>);
+
+impl Drop for UnverifiedHookOwner {
+    fn drop(&mut self) {
+        if let Some(lease) = self.0.take() {
+            retain_uncertain_hook(lease);
+        }
+    }
+}
+
+async fn run_unverified_recovery_hook(
+    process: Arc<dyn ProcessRunner>,
+    runtime: Arc<dyn RuntimeSpawner>,
+    command: lingxi_core::host::SandboxedCommand,
+    timeout: Duration,
+    observer: Option<Arc<dyn lingxi_core::host::HookOutputObserver>>,
+    cancellation: Option<lingxi_core::host::CancellationToken>,
+    leases: Arc<lingxi_core::host::process::RecoveryHookProcessLeases>,
+) -> Result<lingxi_core::host::HookRunOutcome, crate::RecoveryAdmissionError> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let task = Box::pin(async move {
+        let mut owner = UnverifiedHookOwner(Some(leases));
+        let result = process
+            .run_hook_with_async_detection_observed_cancellable(
+                &command,
+                timeout,
+                observer,
+                cancellation,
+            )
+            .await;
+        let is_marker = match &result {
+            Ok(lingxi_core::host::HookRunOutcome::Backgrounded { .. }) => true,
+            Ok(lingxi_core::host::HookRunOutcome::Completed(output)) => output
+                .stdout
+                .lines()
+                .next()
+                .and_then(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .is_some_and(|value| value.get("async") == Some(&serde_json::Value::Bool(true))),
+            Err(_) => false,
+        };
+        let result = if is_marker {
+            owner
+                .0
+                .as_ref()
+                .unwrap()
+                .execution
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            Err(crate::RecoveryAdmissionError::Failure(
+                "background command hook has no verified cleanup capability; its outcome is unknown".into(),
+            ))
+        } else {
+            match result {
+                Ok(output) => {
+                    owner.0.take();
+                    Ok(output)
+                }
+                Err(error) => Err(crate::RecoveryAdmissionError::Failure(format!(
+                    "command hook failed without verified cleanup; its outcome is unknown: {error}"
+                ))),
+            }
+        };
+        let _ = sender.send(result);
+    });
+    runtime
+        .spawn("recovery_command_hook", task)
+        .await
+        .map_err(|error| {
+            crate::RecoveryAdmissionError::Failure(format!(
+                "could not start recovery hook owner: {error}"
+            ))
+        })?;
+    receiver.await.map_err(|_| {
+        crate::RecoveryAdmissionError::Failure(
+            "command hook owner stopped before its outcome could be verified".into(),
+        )
+    })?
+}
 
 /// Keep host-visible hook side effects inside the executor generation that
 /// admitted them. With no guard, standalone/lifecycle hooks retain their
@@ -273,6 +365,11 @@ pub trait BuiltinHookHandler: Send + Sync {
     /// avoid blocking work — long operations should be deferred to the
     /// background async registry.
     async fn handle(&self, event: &HookEvent, ctx: &HookContext) -> HookResult;
+    /// Opt in only after auditing that this handler neither starts unowned
+    /// processes nor detaches work from a strict host request.
+    fn supports_owned_host_request(&self) -> bool {
+        false
+    }
     /// Stable handler identifier matching the `handler_id` carried by
     /// [`HookExecutor::Builtin`] definitions.
     fn id(&self) -> &str;
@@ -408,6 +505,122 @@ pub struct HookExecutorImpl {
     /// completions require this sink because their aggregate has already been
     /// returned.
     attachment_sink: Option<Arc<dyn HookAttachmentSink>>,
+}
+
+/// The hook definitions fixed at admission of a strict host request.
+#[derive(Clone)]
+pub struct OwnedHostRegistrySnapshot {
+    registry: Arc<HookRegistry>,
+    once_states: HashMap<lingxi_core::types::HookId, Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl OwnedHostRegistrySnapshot {
+    pub fn mod_host(&self) -> Option<Arc<crate::mods::ModHost>> {
+        self.registry.mod_host()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.registry.generation()
+    }
+}
+
+#[derive(Clone)]
+pub struct OwnedHostHookSnapshot {
+    registry: Arc<HookRegistry>,
+    once_states: HashMap<lingxi_core::types::HookId, Arc<std::sync::atomic::AtomicBool>>,
+    ownership_denial: Arc<std::sync::Mutex<Option<String>>>,
+    mod_host: Option<(Arc<crate::mods::ModHost>, crate::mods::OwnedModRegistration)>,
+    tool_names: std::collections::HashSet<String>,
+    session_id: lingxi_core::types::SessionId,
+    agent_id: Option<lingxi_core::types::AgentId>,
+}
+
+impl OwnedHostHookSnapshot {
+    /// Use the same admission-time managed hook set at the Mod boundary.
+    pub fn has_managed_pre_tool_use_match(&self, event: &HookEvent, ctx: &HookContext) -> bool {
+        self.registry
+            .match_possible_tool_event(event, ctx)
+            .into_iter()
+            .any(|hook| {
+                hook.source
+                    == crate::definition::HookSource::Settings(
+                        lingxi_core::types::SettingsScope::Managed,
+                    )
+            })
+    }
+
+    /// Use the same Mod host that determined possible nested shell calls.
+    pub fn mod_host(&self) -> Option<Arc<crate::mods::ModHost>> {
+        self.mod_host.as_ref().map(|(host, _)| host.clone())
+    }
+
+    pub fn mod_registration(&self) -> Option<crate::mods::OwnedModRegistration> {
+        self.mod_host
+            .as_ref()
+            .map(|(_, registration)| registration.clone())
+    }
+
+    pub fn note_ownership_denial(&self, reason: &str) {
+        let mut denial = self
+            .ownership_denial
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if denial.is_none() {
+            *denial = Some(reason.to_owned());
+        }
+    }
+
+    pub fn ownership_denial(&self) -> Option<String> {
+        self.ownership_denial
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// A nested shell may run only if its hook set was part of preflight.
+    pub fn includes_tool(&self, name: &str) -> bool {
+        self.tool_names.contains(name)
+    }
+}
+
+impl std::fmt::Debug for OwnedHostHookSnapshot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedHostHookSnapshot")
+            .finish_non_exhaustive()
+    }
+}
+
+tokio::task_local! {
+    static OWNED_HOST_HOOK_SNAPSHOT: Arc<OwnedHostHookSnapshot>;
+}
+
+/// Capture the current snapshot for a callback that may move to another task.
+pub fn current_owned_host_hook_snapshot() -> Option<OwnedHostHookSnapshot> {
+    OWNED_HOST_HOOK_SNAPSHOT
+        .try_with(|snapshot| snapshot.as_ref().clone())
+        .ok()
+}
+
+/// Share the exact physical request's snapshot without extending its lifetime
+/// through detached timer contexts.
+pub fn current_owned_host_hook_snapshot_arc() -> Option<Arc<OwnedHostHookSnapshot>> {
+    OWNED_HOST_HOOK_SNAPSHOT.try_with(Clone::clone).ok()
+}
+
+/// Re-enter the fixed hook snapshot when a host-owned callback moves tasks.
+pub async fn with_owned_host_hook_snapshot<F: Future>(
+    snapshot: OwnedHostHookSnapshot,
+    future: F,
+) -> F::Output {
+    with_owned_host_hook_snapshot_arc(Arc::new(snapshot), future).await
+}
+
+/// Re-enter the same request snapshot from a nested callback or spawned task.
+pub async fn with_owned_host_hook_snapshot_arc<F: Future>(
+    snapshot: Arc<OwnedHostHookSnapshot>,
+    future: F,
+) -> F::Output {
+    OWNED_HOST_HOOK_SNAPSHOT.scope(snapshot, future).await
 }
 
 /// Admission-time authority lookup for context-light hook events. Existing
@@ -1271,6 +1484,51 @@ impl HookExecutorImpl {
         self.execute_excluding_hook(event, ctx, None).await
     }
 
+    /// Admit side effects only after the exact hook set has been snapshotted.
+    /// The execution lease covers synchronous dispatch; detached work receives
+    /// the separate turn-work lease through its context.
+    pub async fn execute_with_recovery_admission<F>(
+        &self,
+        event: HookEvent,
+        ctx: HookContext,
+        admission: F,
+    ) -> Result<AggregateHookResult, crate::RecoveryAdmissionError>
+    where
+        F: Fn() -> Result<
+                Option<(Arc<dyn Send + Sync>, Arc<dyn Send + Sync>)>,
+                crate::RecoveryAdmissionError,
+            > + Send
+            + Sync,
+    {
+        self.execute_partitioned_excluding_hook(
+            event,
+            ctx,
+            None,
+            HookSourcePartition::All,
+            None,
+            Some(&admission),
+        )
+        .await
+    }
+
+    /// Dispatch already admitted tool hooks while preserving a typed
+    /// recovery failure from the physical hook runner.
+    pub async fn execute_recovery_checked(
+        &self,
+        event: HookEvent,
+        ctx: HookContext,
+    ) -> Result<AggregateHookResult, crate::RecoveryAdmissionError> {
+        self.execute_partitioned_excluding_hook(
+            event,
+            ctx,
+            None,
+            HookSourcePartition::All,
+            None,
+            None,
+        )
+        .await
+    }
+
     /// Execute one explicit registry source partition through the same hook
     /// matching, dispatch, and aggregate fold as ordinary execution.
     ///
@@ -1283,8 +1541,9 @@ impl HookExecutorImpl {
         ctx: HookContext,
         partition: HookSourcePartition,
     ) -> AggregateHookResult {
-        self.execute_partitioned_excluding_hook(event, ctx, None, partition)
+        self.execute_partitioned_excluding_hook(event, ctx, None, partition, None, None)
             .await
+            .expect("ordinary hook execution does not reject hooks")
     }
 
     /// Cheap event-type gate for one explicit registry source partition.
@@ -1306,8 +1565,178 @@ impl HookExecutorImpl {
         ctx: HookContext,
         excluded: Option<lingxi_core::types::HookId>,
     ) -> AggregateHookResult {
-        self.execute_partitioned_excluding_hook(event, ctx, excluded, HookSourcePartition::All)
+        self.execute_partitioned_excluding_hook(
+            event,
+            ctx,
+            excluded,
+            HookSourcePartition::All,
+            None,
+            None,
+        )
+        .await
+        .expect("ordinary hook execution does not reject hooks")
+    }
+
+    fn unowned_host_hook_kind(&self, hook: &HookDefinition) -> Option<&'static str> {
+        match &hook.executor {
+            HookExecutor::Command { .. } => Some("command"),
+            HookExecutor::Agent { .. } => Some("agent"),
+            HookExecutor::McpTool { .. } => Some("MCP tool"),
+            // Non-blocking hooks use a separate background lifecycle, or an
+            // unfenced inline fallback when no registry is configured.
+            _ if !hook.blocking => Some("background"),
+            HookExecutor::Builtin { handler_id }
+                if !self
+                    .builtin_handlers
+                    .get(handler_id)
+                    .is_some_and(|handler| handler.supports_owned_host_request()) =>
+            {
+                Some("unverified builtin")
+            }
+            _ => None,
+        }
+    }
+
+    /// Freeze definitions and reject any unowned hook that could run during
+    /// this strict shell call. Later hook or Mod rewrites can change input,
+    /// so input predicates are conservative; tool-name and owner filters are
+    /// still applied. The returned snapshot must be used through batch hooks.
+    pub async fn snapshot_for_owned_host_request(
+        &self,
+        tool_names: &[String],
+        ctx: &HookContext,
+        mod_host: Option<(Arc<crate::mods::ModHost>, crate::mods::OwnedModRegistration)>,
+    ) -> Result<OwnedHostHookSnapshot, String> {
+        let registry = self.snapshot_owned_registry().await;
+        self.snapshot_for_owned_host_request_from_registry(tool_names, ctx, mod_host, registry)
             .await
+    }
+
+    /// Capture hook definitions, once tokens and their ModHost under one lock.
+    pub async fn snapshot_owned_registry(&self) -> OwnedHostRegistrySnapshot {
+        let mut registry = self.registry.write().await;
+        let once_states = registry.snapshot_once_states();
+        OwnedHostRegistrySnapshot {
+            registry: Arc::new(registry.clone()),
+            once_states,
+        }
+    }
+
+    pub fn uses_registry(&self, registry: &Arc<RwLock<HookRegistry>>) -> bool {
+        Arc::ptr_eq(&self.registry, registry)
+    }
+
+    pub async fn registry_snapshot_is_current(&self, snapshot: &OwnedHostRegistrySnapshot) -> bool {
+        self.registry.read().await.generation() == snapshot.generation()
+    }
+
+    pub async fn snapshot_for_owned_host_request_from_registry(
+        &self,
+        tool_names: &[String],
+        ctx: &HookContext,
+        mod_host: Option<(Arc<crate::mods::ModHost>, crate::mods::OwnedModRegistration)>,
+        captured: OwnedHostRegistrySnapshot,
+    ) -> Result<OwnedHostHookSnapshot, String> {
+        if !self.registry_snapshot_is_current(&captured).await {
+            return Err("hook registry changed during host admission".into());
+        }
+        let snapshot = OwnedHostHookSnapshot {
+            registry: captured.registry,
+            once_states: captured.once_states,
+            ownership_denial: Arc::new(std::sync::Mutex::new(None)),
+            mod_host,
+            tool_names: tool_names.iter().cloned().collect(),
+            session_id: ctx.session_id,
+            agent_id: ctx.agent_id,
+        };
+        if self.policy_disable_all_hooks {
+            return Ok(snapshot);
+        }
+        let empty = lingxi_core::types::utf16_json::Utf16JsonProjection::parse("{}")
+            .expect("empty object is valid JSON");
+        let id = lingxi_core::types::ToolUseId::new();
+        let mut events = Vec::new();
+        for name in tool_names {
+            events.extend([
+                HookEvent::PreToolUse {
+                    tool_name: name.clone(),
+                    tool_input: empty.clone(),
+                    tool_use_id: id.clone(),
+                },
+                HookEvent::PermissionRequest {
+                    tool_name: name.clone(),
+                    tool_input: empty.clone(),
+                    reason: String::new(),
+                },
+                HookEvent::PermissionDenied {
+                    tool_name: name.clone(),
+                    tool_input: empty.clone(),
+                    tool_use_id: id.clone(),
+                    reason: "".into(),
+                },
+                HookEvent::PostToolUse {
+                    tool_name: name.clone(),
+                    tool_input: empty.clone(),
+                    tool_output: empty.clone(),
+                    tool_use_id: id.clone(),
+                    duration_ms: None,
+                },
+                HookEvent::PostToolUseFailure {
+                    tool_name: name.clone(),
+                    tool_input: empty.clone(),
+                    error: "".into(),
+                    tool_use_id: id.clone(),
+                    duration_ms: None,
+                },
+            ]);
+        }
+        events.push(HookEvent::PostToolBatch {
+            tool_calls: Vec::new(),
+        });
+        for event in events {
+            for hook in snapshot.registry.match_possible_tool_event(&event, ctx) {
+                if let Some(kind) = self.unowned_host_hook_kind(hook) {
+                    return Err(format!(
+                        "{kind} hook '{}' for {:?} cannot be owned by this host request",
+                        hook.name,
+                        event.event_type()
+                    ));
+                }
+            }
+        }
+        Ok(snapshot)
+    }
+
+    /// Execute one strict host hook event from its admission-time snapshot.
+    pub async fn execute_for_owned_host_request(
+        &self,
+        event: HookEvent,
+        mut ctx: HookContext,
+    ) -> Result<AggregateHookResult, String> {
+        let snapshot = current_owned_host_hook_snapshot()
+            .ok_or_else(|| "owned host hook snapshot is missing".to_string())?;
+        if ctx.publication_guard.is_none() {
+            return Err("owned host hook lifecycle guard is missing".into());
+        }
+        if ctx
+            .publication_guard
+            .as_ref()
+            .is_some_and(|guard| !guard.is_current())
+        {
+            return Err("owned host request is no longer active".into());
+        }
+        ctx.session_id = snapshot.session_id;
+        ctx.agent_id = snapshot.agent_id;
+        self.execute_partitioned_excluding_hook(
+            event,
+            ctx,
+            None,
+            HookSourcePartition::All,
+            Some(snapshot),
+            None,
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 
     async fn execute_partitioned_excluding_hook(
@@ -1316,35 +1745,99 @@ impl HookExecutorImpl {
         mut ctx: HookContext,
         excluded: Option<lingxi_core::types::HookId>,
         partition: HookSourcePartition,
-    ) -> AggregateHookResult {
+        owned_snapshot: Option<OwnedHostHookSnapshot>,
+        recovery_admission: Option<
+            &(dyn Fn() -> Result<
+                Option<(Arc<dyn Send + Sync>, Arc<dyn Send + Sync>)>,
+                crate::RecoveryAdmissionError,
+            > + Send
+                  + Sync),
+        >,
+    ) -> Result<AggregateHookResult, crate::RecoveryAdmissionError> {
+        if ctx.async_work_lease.is_some() || recovery_admission.is_some() {
+            ctx.recovery_failure.get_or_insert_with(Default::default);
+        }
         self.prepare_context(&mut ctx).await;
         // #41 runner-head gate (`h$`): `policySettings.disableAllHooks` skips
         // ALL hooks before any matching/dispatch.
         if let Some(skipped) = self.policy_disable_gate(&event) {
-            return skipped;
+            return Ok(skipped);
         }
-        let reg = self.registry.read().await;
-        let matched: Vec<HookDefinition> = reg
-            .match_event_partition(&event, &ctx, partition)
-            .into_iter()
-            .filter(|hook| Some(hook.id) != excluded)
-            .cloned()
-            .collect();
-        drop(reg);
+        let matched: Vec<HookDefinition> = if let Some(snapshot) = &owned_snapshot {
+            // A live reload must not remove an admitted policy. Only a once
+            // hook successfully consumed by this request is skipped.
+            snapshot
+                .registry
+                .match_event_partition(&event, &ctx, partition)
+                .into_iter()
+                .filter(|hook| {
+                    Some(hook.id) != excluded
+                        && !snapshot
+                            .once_states
+                            .get(&hook.id)
+                            .is_some_and(|state| state.load(std::sync::atomic::Ordering::Acquire))
+                })
+                .cloned()
+                .collect()
+        } else {
+            let reg = self.registry.read().await;
+            reg.match_event_partition(&event, &ctx, partition)
+                .into_iter()
+                .filter(|hook| Some(hook.id) != excluded)
+                .cloned()
+                .collect()
+        };
+        let unowned_hook = owned_snapshot.as_ref().and_then(|_| {
+            matched
+                .iter()
+                .find_map(|hook| self.unowned_host_hook_kind(hook).map(|kind| (hook, kind)))
+        });
+        if let Some((hook, kind)) = unowned_hook {
+            return Err(format!(
+                "{kind} hook '{}' for {:?} cannot be owned by this host request",
+                hook.name,
+                event.event_type()
+            )
+            .into());
+        }
+        let _execution_lease = if !matched.is_empty() {
+            match recovery_admission
+                .map(|admit| admit())
+                .transpose()?
+                .flatten()
+            {
+                Some((execution, turn_work)) => {
+                    ctx.recovery_execution_lease = Some(execution.clone());
+                    ctx.async_work_lease = Some(turn_work);
+                    Some(execution)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
         // Native's UserPromptExpansion runner starts its matched hook work as a
         // batch and consumes each result as it settles. Keep the ordinary
         // priority-ordered path for every other event; non-blocking UPE hooks
         // retain their separate background lifecycle inside the batch helper.
         if matches!(&event, HookEvent::UserPromptExpansion { .. }) {
-            return self
+            return Ok(self
                 .execute_prompt_expansion_blocking_concurrently(event, ctx, matched)
-                .await;
+                .await);
         }
         let mut agg = AggregateHookResult::default();
         let hook_event = format!("{:?}", event.event_type());
         // One `toolUseID` per dispatch, shared by every matched hook.
         let attachment_id = attachment_identity(&event);
         for hook in &matched {
+            if owned_snapshot.is_some()
+                && ctx
+                    .publication_guard
+                    .as_ref()
+                    .is_none_or(|guard| !guard.is_current())
+            {
+                return Err("owned host request is no longer active".into());
+            }
             if ctx
                 .idle_compaction_cancellation
                 .as_ref()
@@ -1361,6 +1854,17 @@ impl HookExecutorImpl {
                 hook_name: hook.name.clone(),
                 status_message: hook.status_message.clone(),
             });
+            let must_wait_for_unverified_command = ctx.async_work_lease.is_some()
+                && matches!(&hook.executor, HookExecutor::Command { .. })
+                && self
+                    .process
+                    .as_ref()
+                    .is_some_and(|process| !process.supports_recovery_hook_group_cleanup());
+            if !hook.blocking && must_wait_for_unverified_command {
+                return Err(crate::RecoveryAdmissionError::Failure(
+                    "asynchronous command hook requires verified process-group cleanup".into(),
+                ));
+            }
             if hook.blocking {
                 let progress_id = self
                     .begin_hook_progress(
@@ -1380,11 +1884,36 @@ impl HookExecutorImpl {
                 }
                 // Synchronous path — unchanged from M5-06.
                 let run_started = std::time::Instant::now();
-                let result = match self
-                    .dispatcher()
-                    .dispatch_with_idle_cancellation(hook, &event, &ctx, progress_id.as_deref())
-                    .await
-                {
+                let dispatcher = self.dispatcher();
+                let dispatched = if owned_snapshot.is_some() {
+                    let mut completed = None;
+                    let guard = ctx
+                        .publication_guard
+                        .as_ref()
+                        .expect("strict hook has a guard");
+                    let admitted = guard
+                        .commit_if_current(Box::pin(async {
+                            completed = dispatcher
+                                .dispatch_with_idle_cancellation(
+                                    hook,
+                                    &event,
+                                    &ctx,
+                                    progress_id.as_deref(),
+                                )
+                                .await;
+                        }))
+                        .await;
+                    if admitted {
+                        completed
+                    } else {
+                        None
+                    }
+                } else {
+                    dispatcher
+                        .dispatch_with_idle_cancellation(hook, &event, &ctx, progress_id.as_deref())
+                        .await
+                };
+                let result = match dispatched {
                     Some(result) => result,
                     None => {
                         self.finish_hook_progress(
@@ -1392,9 +1921,28 @@ impl HookExecutorImpl {
                             ctx.publication_guard.as_deref(),
                         )
                         .await;
+                        if owned_snapshot.is_some() {
+                            return Err("owned host request is no longer active".into());
+                        }
                         break;
                     }
                 };
+                if let Some(error) = ctx.recovery_failure.as_ref().and_then(|failure| {
+                    failure
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                }) {
+                    return Err(error);
+                }
+                if owned_snapshot.is_some()
+                    && ctx
+                        .publication_guard
+                        .as_ref()
+                        .is_none_or(|guard| !guard.is_current())
+                {
+                    return Err("owned host request is no longer active".into());
+                }
                 // hook runs are bounded by the runner timeout — u128 ms fits u64
                 #[allow(clippy::cast_possible_truncation)]
                 let run_ms = run_started.elapsed().as_millis() as u64;
@@ -1516,10 +2064,33 @@ impl HookExecutorImpl {
                 if let Some(attachments) = self.background_hook(hook, &event, &ctx).await {
                     agg.hook_attachments.extend(attachments);
                 }
+                if let Some(error) = ctx.recovery_failure.as_ref().and_then(|failure| {
+                    failure
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                }) {
+                    return Err(error);
+                }
             }
         }
-        publish_classifier_host_contexts(&agg, &attachment_id);
-        agg
+        if owned_snapshot.is_some() {
+            let guard = ctx
+                .publication_guard
+                .as_ref()
+                .expect("strict hook has a guard");
+            if !guard
+                .commit_if_current(Box::pin(async {
+                    publish_classifier_host_contexts(&agg, &attachment_id);
+                }))
+                .await
+            {
+                return Err("owned host request is no longer active".into());
+            }
+        } else {
+            publish_classifier_host_contexts(&agg, &attachment_id);
+        }
+        Ok(agg)
     }
 
     /// Execute the blocking portion of a UserPromptExpansion batch concurrently,
@@ -2186,7 +2757,10 @@ impl HookExecutorImpl {
         let dispatcher = self.dispatcher();
         let hook_owned = hook.clone();
         let event_owned = event.clone();
-        let ctx_owned = ctx.clone();
+        let mut ctx_owned = ctx.clone();
+        // Configured asynchronous hooks may outlive this turn. Their actual
+        // work retains only the old turn identity, not the execution slot.
+        ctx_owned.recovery_execution_lease = None;
         let hook_registry = self.registry.clone();
         let hook_id = hook.id;
         let once = hook.once;
@@ -2595,6 +3169,14 @@ impl Dispatcher {
                 // only accepts a `SandboxedCommand`, which only the sandbox can
                 // mint (D2 / spec A1). Either missing ⇒ structured "not wired".
                 let (Some(process), Some(sandbox)) = (&self.process, &self.sandbox) else {
+                    if let Some(failure) = ctx.recovery_failure.as_ref() {
+                        *failure
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                            Some(crate::RecoveryAdmissionError::Failure(
+                                "recovery-managed command hook executor is unavailable".into(),
+                            ));
+                    }
                     return HookResult {
                         outcome: HookOutcome::Error,
                         stdout: ExactHookText::default(),
@@ -2813,9 +3395,21 @@ impl Dispatcher {
                 // Hooks require workspace trust upstream (claude-code
                 // `shouldSkipHookDueToTrust`), so an audited bypass is the
                 // parity-honest construction here.
-                let sandboxed = sandbox
+                let mut sandboxed = sandbox
                     .bypass_with_audit(pcmd, "hook_command")
                     .with_process_owner(ctx.idle_compaction_process_owner.clone());
+                let recovery_leases = ctx.async_work_lease.as_ref().map(|work_lease| {
+                    Arc::new(lingxi_core::host::process::RecoveryHookProcessLeases {
+                        execution: StdMutex::new(ctx.recovery_execution_lease.clone()),
+                        turn_work: work_lease.clone(),
+                    })
+                });
+                if let Some(leases) = recovery_leases.as_ref() {
+                    sandboxed = sandboxed.with_lifetime_guard(leases.clone());
+                    if process.supports_recovery_hook_group_cleanup() {
+                        sandboxed = sandboxed.with_require_group_cleanup_on_exit(true);
+                    }
+                }
                 // SH-07: start the `hook_progress` poll (claude-code `tWi`)
                 // BEFORE the child is spawned, exactly where upstream attaches
                 // its `stdout`/`stderr` `data` listeners, and hand the runner a
@@ -2844,15 +3438,56 @@ impl Dispatcher {
                     Duration::from_millis(crate::async_registry::DEFAULT_ASYNC_HOOK_TIMEOUT_MS)
                 });
                 let run_started = std::time::Instant::now();
-                let (result, timed_out) = match process
-                    .run_hook_with_async_detection_observed_cancellable(
-                        &sandboxed,
+                let recovery_managed = recovery_leases.is_some();
+                let run = if let Some(leases) =
+                    recovery_leases.filter(|_| !process.supports_recovery_hook_group_cleanup())
+                {
+                    match run_unverified_recovery_hook(
+                        process.clone(),
+                        self.runtime.clone(),
+                        sandboxed,
                         default_async_timeout,
                         live_observer,
                         ctx.idle_compaction_cancellation.clone(),
+                        leases,
                     )
                     .await
-                {
+                    {
+                        Ok(outcome) => Ok(outcome),
+                        Err(error) => {
+                            if let Some(failure) = ctx.recovery_failure.as_ref() {
+                                *failure
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                    Some(error.clone());
+                            }
+                            Err(ProcessError::Io(error.to_string()))
+                        }
+                    }
+                } else {
+                    let result = process
+                        .run_hook_with_async_detection_observed_cancellable(
+                            &sandboxed,
+                            default_async_timeout,
+                            live_observer,
+                            ctx.idle_compaction_cancellation.clone(),
+                        )
+                        .await;
+                    if recovery_managed {
+                        if let (Err(error), Some(failure)) =
+                            (&result, ctx.recovery_failure.as_ref())
+                        {
+                            *failure
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                Some(crate::RecoveryAdmissionError::Failure(format!(
+                                    "recovery-managed hook failed: {error}"
+                                )));
+                        }
+                    }
+                    result
+                };
+                let (result, timed_out) = match run {
                     Ok(lingxi_core::host::HookRunOutcome::Backgrounded {
                         async_timeout,
                         output,
@@ -2879,7 +3514,9 @@ impl Dispatcher {
                                 self.hook_observer.clone(),
                                 progress_id.map(str::to_owned),
                             );
+                            let async_work_lease = ctx.async_work_lease.clone();
                             let work: HookWork = Box::pin(async move {
+                                let _async_work_lease = async_work_lease;
                                 let out = output_rx.await.unwrap_or_else(|_| {
                                     mobile_linux_api::ProcessOutput {
                                         stdout: String::new(),

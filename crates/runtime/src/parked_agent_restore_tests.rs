@@ -371,6 +371,7 @@ async fn actual_cold_batch_retains_later_caller_and_inactive_archive_without_reu
         &(main.clone() as Arc<dyn ReportingAdmission>),
     ));
     let inheritance = SubagentInheritance {
+        session_origin: None,
         tool_invoker: invoker,
         budget,
     };
@@ -591,6 +592,7 @@ async fn actual_cold_batch_releases_async_pool_full_actor_before_waiting_peer_st
         &(main.clone() as Arc<dyn ReportingAdmission>),
     ));
     let inheritance = SubagentInheritance {
+        session_origin: None,
         tool_invoker: invoker,
         budget,
     };

@@ -5,7 +5,7 @@
 version = "0.10"
 
 [imports.bytecode-alliance]
-url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/main/supply-chain/audits.toml"
+url = "https://raw.githubusercontent.com/bytecodealliance/wasmtime/ec63b69f3da9783db784eef6ba67635385926a2a/supply-chain/audits.toml"
 
 [imports.embark-studios]
 url = "https://raw.githubusercontent.com/EmbarkStudios/rust-ecosystem/bc9f6c527108a8b79b74d44121aed574e7b5e526/audits.toml"
@@ -83,7 +83,7 @@ exclude = [
 ]
 
 [imports.google]
-url = "https://raw.githubusercontent.com/google/supply-chain/main/audits.toml"
+url = "https://raw.githubusercontent.com/google/supply-chain/8cec794c38751495cf7a6c083220c207af1303d6/audits.toml"
 
 [imports.isrg]
 url = "https://raw.githubusercontent.com/divviup/libprio-rs/5defe3844ce04982818746d7589b83a6b47cd1b3/supply-chain/audits.toml"
@@ -112,13 +112,8 @@ exclude = [
     "rustix",
     "ryu",
     "scopeguard",
-    "serde",
-    "serde_core",
-    "serde_derive",
     "serde_json",
     "syn",
-    "thiserror",
-    "thiserror-impl",
     "thread_local",
     "wasi",
     "wasm-bindgen",
@@ -140,7 +135,7 @@ exclude = [
 ]
 
 [imports.mozilla]
-url = "https://raw.githubusercontent.com/mozilla/supply-chain/main/audits.toml"
+url = "https://raw.githubusercontent.com/mozilla/supply-chain/8458d3629a0da68de4eacc057aab3b70175e18eb/audits.toml"
 
 [imports.zcash]
 url = "https://raw.githubusercontent.com/zcash/rust-ecosystem/ce132d7abdd52f2b3b0d55ed5dc9f152331535c2/supply-chain/audits.toml"
@@ -173,7 +168,6 @@ exclude = [
     "windows-future",
     "windows-implement",
     "windows-interface",
-    "windows-link",
     "windows-numerics",
     "windows-registry",
     "windows-result",

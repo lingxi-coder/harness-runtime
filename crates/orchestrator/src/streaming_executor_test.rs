@@ -1479,6 +1479,19 @@ mod tests {
         Arc<Notify>,
         Arc<TokioHookRuntime>,
     ) {
+        delayed_async_hook(hooks::HookEventType::PostToolUse)
+    }
+
+    fn delayed_async_hook(
+        event: hooks::HookEventType,
+    ) -> (
+        Arc<hooks::executor::HookExecutorImpl>,
+        tokio::sync::mpsc::Receiver<hooks::async_registry::HookCompletionEnvelope>,
+        Arc<Notify>,
+        Arc<Notify>,
+        Arc<Notify>,
+        Arc<TokioHookRuntime>,
+    ) {
         let runtime = TokioHookRuntime::new();
         let runtime_spawner: Arc<dyn lingxi_core::host::RuntimeSpawner> = runtime.clone();
         let (completion_tx, completion_rx) =
@@ -1491,7 +1504,7 @@ mod tests {
         registry.register(hooks::HookDefinition {
             id: lingxi_core::types::HookId::new(),
             name: "delayed-post-tool".into(),
-            events: vec![hooks::HookEventType::PostToolUse],
+            events: vec![event],
             if_condition: None,
             executor: hooks::definition::HookExecutor::McpTool {
                 server: "test".into(),
@@ -3439,6 +3452,179 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn unknown_tool_persists_admission_before_post_tool_batch_hook() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct BatchHook {
+            admitted: Arc<AtomicBool>,
+            calls: Arc<AtomicUsize>,
+        }
+        #[async_trait]
+        impl hooks::executor::BuiltinHookHandler for BatchHook {
+            fn id(&self) -> &str {
+                "unknown-batch-guard"
+            }
+            async fn handle(
+                &self,
+                _: &hooks::events::HookEvent,
+                _: &hooks::registry::HookContext,
+            ) -> hooks::HookResult {
+                assert!(
+                    self.admitted.load(Ordering::SeqCst),
+                    "checkpoint precedes PostToolBatch"
+                );
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                hooks::HookResult {
+                    outcome: hooks::HookOutcome::Success,
+                    stdout: String::new().into(),
+                    stderr: String::new().into(),
+                    exit_code: Some(0),
+                    response: None,
+                }
+            }
+        }
+        let admitted = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = hooks::HookRegistry::new();
+        registry.register(hooks::HookDefinition {
+            id: lingxi_core::types::HookId::new(),
+            name: "unknown-batch-guard".into(),
+            events: vec![hooks::HookEventType::PostToolBatch],
+            if_condition: None,
+            executor: hooks::definition::HookExecutor::Builtin {
+                handler_id: "unknown-batch-guard".into(),
+            },
+            source: hooks::definition::HookSource::Session,
+            blocking: true,
+            timeout: None,
+            priority: 0,
+            once: false,
+            status_message: None,
+            async_rewake: false,
+            async_timeout: None,
+            rewake_message: None,
+            on_failure: None,
+        });
+        let mut hooks = hooks::executor::HookExecutorImpl::new(
+            Arc::new(tokio::sync::RwLock::new(registry)),
+            Arc::new(UnusedHookHttp),
+            Arc::new(UnusedHookRuntime),
+        );
+        hooks.register_builtin(Arc::new(BatchHook {
+            admitted: admitted.clone(),
+            calls: calls.clone(),
+        }));
+        let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            Arc::new(hooks),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        ));
+        let checkpoint = admitted.clone();
+        orch.set_tool_dispatch_recovery_guard(Arc::new(move || {
+            checkpoint.store(true, Ordering::SeqCst);
+            Ok(None)
+        }));
+        let mut exec = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)
+            .await
+            .unwrap();
+        exec.add_tool(
+            ToolUseId::new(),
+            "Unknown".into(),
+            project_test_tool_input(json!({})),
+            None,
+            MessageId::new(),
+        )
+        .await;
+        assert_eq!(exec.drain_ready().await, 1);
+        let drained = exec.take_newly_completed();
+        let batch = crate::turn_loop::PostToolBatchDispatch::unguarded(
+            drained[0].post_tool_batch_calls.clone(),
+        );
+        crate::turn_loop::run_post_tool_batch_hooks(&orch, batch).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn async_post_tool_batch_holds_only_live_work_until_completion() {
+        let (hook_executor, mut completed, started, release, _, _runtime) =
+            delayed_async_hook(hooks::HookEventType::PostToolBatch);
+        let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(ToolRegistry::new()),
+            hook_executor,
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        ));
+        let execution = Arc::new(());
+        let work = Arc::new(());
+        let weak_execution = Arc::downgrade(&execution);
+        let weak_work = Arc::downgrade(&work);
+        let admission = Arc::new(Mutex::new(Some((execution.clone(), work.clone()))));
+        let admission_for_guard = admission.clone();
+        orch.set_tool_dispatch_recovery_guard(Arc::new(move || {
+            let pair = admission_for_guard.lock().unwrap();
+            let (execution, turn_work) =
+                pair.as_ref().expect("admission remains bound to old turn");
+            Ok(Some(crate::conversation::ToolDispatchRecoveryLeases {
+                execution: execution.clone(),
+                turn_work: turn_work.clone(),
+            }))
+        }));
+        let mut exec = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)
+            .await
+            .unwrap();
+        exec.add_tool(
+            ToolUseId::new(),
+            "Unknown".into(),
+            project_test_tool_input(json!({})),
+            None,
+            MessageId::new(),
+        )
+        .await;
+        assert_eq!(exec.drain_ready().await, 1);
+        let drained = exec.take_newly_completed();
+        let mut batch = crate::turn_loop::PostToolBatchDispatch::unguarded(
+            drained[0].post_tool_batch_calls.clone(),
+        );
+        batch.async_work_lease = exec.batch_recovery_work_lease();
+        crate::turn_loop::run_post_tool_batch_hooks(&orch, batch).await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        *admission.lock().unwrap() = None;
+        drop(execution);
+        drop(work);
+        drop(exec);
+        assert!(
+            weak_execution.upgrade().is_none(),
+            "background hook must not hold the execution slot"
+        );
+        assert!(
+            weak_work.upgrade().is_some(),
+            "live hook protects the originating turn from replay"
+        );
+        release.notify_one();
+        let envelope = tokio::time::timeout(std::time::Duration::from_secs(2), completed.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(envelope.publication_guard.is_some());
+        assert!(
+            weak_work.upgrade().is_none(),
+            "completion envelope must not keep the work lease alive until the next prompt"
+        );
+        drop(envelope);
+    }
+
     /// A completed unknown tool behind a running unsafe call remains withheld
     /// from ordinary Tn until the barrier settles, then drains in registration order.
     #[tokio::test]
@@ -3572,6 +3758,41 @@ mod tests {
         started: Option<Arc<Notify>>,
         captured_cancel_tokens: Option<Arc<Mutex<Vec<tokio_util::sync::CancellationToken>>>>,
         concurrency_safe: bool,
+    }
+
+    struct DeferredUserDenial {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl lingxi_core::host::permission_gate::PermissionGate for DeferredUserDenial {
+        async fn check(
+            &self,
+            _: &str,
+            _: &Utf16JsonProjection,
+        ) -> lingxi_core::host::permission_gate::PermissionDecision {
+            panic!("typed transport is used")
+        }
+        async fn resolve_detailed(
+            &self,
+            _: &str,
+            _: &Utf16JsonProjection,
+        ) -> lingxi_core::host::permission_gate::PermissionResolution {
+            lingxi_core::host::permission_gate::PermissionResolution::Ask
+        }
+        async fn check_with_context(
+            &self,
+            _: &str,
+            _: &Utf16JsonProjection,
+            _: &lingxi_core::host::permission_gate::PermissionCheckContext,
+        ) -> lingxi_core::host::permission_gate::PermissionOutcome {
+            self.started.notify_one();
+            self.release.notified().await;
+            lingxi_core::host::permission_gate::PermissionOutcome::Deny {
+                reason: "user explicitly denied".into(),
+            }
+        }
     }
 
     #[async_trait]
@@ -3945,6 +4166,342 @@ mod tests {
                 .and_then(|result| result.string_at("")),
             Some("User rejected tool use"),
             "the accepted synthetic result remains in transcript metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_pause_pairs_in_flight_tool_without_claiming_user_rejection() {
+        use crate::prompt::mid_turn_input::{CancelReason, CancelReasonFlag};
+
+        let started = Arc::new(Notify::new());
+        let sink = Arc::new(MockOutputStream::new());
+        let orch = ConversationOrchestrator::into_shared(
+            orch_with_cancel_and_block_tools_started_with_output(
+                Some(started.clone()),
+                sink.clone(),
+            ),
+        );
+        let reason = CancelReasonFlag::new();
+        orch.set_cancel_reason(reason.clone());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut exec =
+            StreamingToolExecutor::try_new_with_user_cancel(&orch, Vec::new(), 0, cancel.clone())
+                .await
+                .unwrap();
+        orch.set_tool_frame_buffering(true).await;
+        let tool_id = ToolUseId::new();
+        exec.add_tool(
+            tool_id.clone(),
+            "CancelTool".into(),
+            project_test_tool_input(json!({})),
+            None,
+            MessageId::new(),
+        )
+        .await;
+        started.notified().await;
+        reason.set(CancelReason::LifecyclePause);
+        cancel.cancel();
+        let results = exec.run_to_completion().await.unwrap();
+        assert!(matches!(
+            &results[0],
+            ContentBlock::ToolResult { tool_use_id, content, is_error: Some(true), .. }
+                if tool_use_id == &tool_id
+                    && content.string_at("") == Some(LIFECYCLE_INTERRUPTED_MESSAGE)
+        ));
+        let drained = exec.take_newly_completed();
+        let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+        orch.settle_stream_tool_results(
+            &mut settlement,
+            drained,
+            &std::collections::HashMap::new(),
+            &None,
+        )
+        .await;
+        orch.set_tool_frame_buffering(false).await;
+        assert!(sink.denial_snapshot().await.is_empty());
+        assert_eq!(
+            orch.transcript
+                .tool_use_results
+                .lock()
+                .await
+                .get(tool_id.as_str())
+                .and_then(|result| result.string_at("")),
+            Some(LIFECYCLE_INTERRUPTED_MESSAGE)
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_pause_of_in_flight_mcp_preserves_uncertain_server_outcome() {
+        use crate::prompt::mid_turn_input::{CancelReason, CancelReasonFlag};
+
+        let started = Arc::new(Notify::new());
+        let sink = Arc::new(MockOutputStream::new());
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(CancelBehaviorTool {
+            name: "McpCancelTool",
+            is_mcp: true,
+            started: Some(started.clone()),
+            captured_cancel_tokens: None,
+            concurrency_safe: true,
+        }));
+        let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            sink.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        ));
+        let reason = CancelReasonFlag::new();
+        orch.set_cancel_reason(reason.clone());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut exec =
+            StreamingToolExecutor::try_new_with_user_cancel(&orch, Vec::new(), 0, cancel.clone())
+                .await
+                .unwrap();
+        orch.set_tool_frame_buffering(true).await;
+        let id = ToolUseId::new();
+        exec.add_tool(
+            id.clone(),
+            "McpCancelTool".into(),
+            project_test_tool_input(json!({})),
+            Some("mcp-provider-id".into()),
+            MessageId::new(),
+        )
+        .await;
+        started.notified().await;
+        reason.set(CancelReason::LifecyclePause);
+        cancel.cancel();
+        let results = exec.run_to_completion().await.unwrap();
+        assert!(matches!(&results[0],
+            ContentBlock::ToolResult { tool_use_id, content, is_error: Some(true), provider_tool_use_id: Some(provider_id), .. }
+                if tool_use_id == &id && provider_id == "mcp-provider-id"
+                    && content.string_at("") == Some(LIFECYCLE_INTERRUPTED_MESSAGE)
+        ));
+        let drained = exec.take_newly_completed();
+        let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+        orch.settle_stream_tool_results(
+            &mut settlement,
+            drained,
+            &std::collections::HashMap::new(),
+            &None,
+        )
+        .await;
+        orch.set_tool_frame_buffering(false).await;
+        assert!(sink.denial_snapshot().await.is_empty());
+        assert_eq!(
+            orch.transcript
+                .tool_use_results
+                .lock()
+                .await
+                .get(id.as_str())
+                .and_then(|v| v.string_at("")),
+            Some(LIFECYCLE_INTERRUPTED_MESSAGE)
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_pause_does_not_replace_a_completed_user_permission_denial() {
+        use crate::prompt::mid_turn_input::{CancelReason, CancelReasonFlag};
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let sink = Arc::new(MockOutputStream::new());
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(CancelBehaviorTool {
+            name: "CancelTool",
+            is_mcp: false,
+            started: None,
+            captured_cancel_tokens: None,
+            concurrency_safe: true,
+        }));
+        let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(DeferredUserDenial {
+                started: started.clone(),
+                release: release.clone(),
+            }),
+            sink.clone(),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        ));
+        let reason = CancelReasonFlag::new();
+        orch.set_cancel_reason(reason.clone());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut exec =
+            StreamingToolExecutor::try_new_with_user_cancel(&orch, Vec::new(), 0, cancel.clone())
+                .await
+                .unwrap();
+        orch.set_tool_frame_buffering(true).await;
+        let id = ToolUseId::new();
+        exec.add_tool(
+            id.clone(),
+            "CancelTool".into(),
+            project_test_tool_input(json!({})),
+            None,
+            MessageId::new(),
+        )
+        .await;
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified())
+            .await
+            .unwrap();
+        reason.set(CancelReason::LifecyclePause);
+        cancel.cancel();
+        release.notify_one();
+        let results =
+            tokio::time::timeout(std::time::Duration::from_secs(2), exec.run_to_completion())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(
+            matches!(&results[0], ContentBlock::ToolResult { tool_use_id, content, is_error: Some(true), .. }
+            if tool_use_id == &id && content.string_at("") == Some("user explicitly denied"))
+        );
+        let drained = exec.take_newly_completed();
+        let mut settlement = crate::streaming_loop::StreamToolSettlement::default();
+        orch.settle_stream_tool_results(
+            &mut settlement,
+            drained,
+            &std::collections::HashMap::new(),
+            &None,
+        )
+        .await;
+        orch.set_tool_frame_buffering(false).await;
+        assert_eq!(
+            sink.denial_snapshot().await,
+            vec![(id, "permission-rule".into())]
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_pause_marks_running_and_queued_block_before_actor_can_execute() {
+        use crate::prompt::mid_turn_input::{CancelReason, CancelReasonFlag};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (orch, mut started, mut releases) = actor_queue_orch(&["A", "B"]);
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let observed = admissions.clone();
+        orch.set_tool_dispatch_recovery_guard(Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }));
+        let reason = CancelReasonFlag::new();
+        orch.set_cancel_reason(reason.clone());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut exec =
+            StreamingToolExecutor::try_new_with_user_cancel(&orch, Vec::new(), 0, cancel.clone())
+                .await
+                .unwrap();
+        let assistant = MessageId::new();
+        add_actor_queue_call(&mut exec, "A", false, true, assistant).await;
+        assert_eq!(next_actor_start(&mut started).await, "A");
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
+        add_actor_queue_call(&mut exec, "B", false, true, assistant).await;
+        assert_eq!(
+            admissions.load(Ordering::SeqCst),
+            2,
+            "queued Block is unsafe before pause"
+        );
+        assert_no_actor_start(&mut started).await;
+
+        reason.set(CancelReason::LifecyclePause);
+        cancel.cancel();
+        exec.apply_abort_to_pending().await;
+        assert_no_actor_start(&mut started).await;
+        release_actor_call(&mut releases, "A").await;
+        assert_eq!(
+            next_actor_start(&mut started).await,
+            "B",
+            "Block keeps its existing promotion semantics"
+        );
+        assert_eq!(
+            admissions.load(Ordering::SeqCst),
+            2,
+            "detached actor does not rebind the guard"
+        );
+        release_actor_call(&mut releases, "B").await;
+        let results = exec.run_to_completion().await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results
+            .iter()
+            .all(|result| matches!(result, ContentBlock::ToolResult { is_error: None, .. })));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_pause_synthesizes_queued_cancel_without_starting_it() {
+        use crate::prompt::mid_turn_input::{CancelReason, CancelReasonFlag};
+
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let mut releases = std::collections::HashMap::new();
+        releases.insert("block".to_string(), release_rx);
+        let cancel_started = Arc::new(Notify::new());
+        let mut registry = ToolRegistry::new();
+        registry.register_builtin(Arc::new(ActorQueueTool {
+            started: started_tx,
+            releases: Arc::new(Mutex::new(releases)),
+        }));
+        registry.register_builtin(Arc::new(CancelBehaviorTool {
+            name: "CancelTool",
+            is_mcp: false,
+            started: Some(cancel_started.clone()),
+            captured_cancel_tokens: None,
+            concurrency_safe: true,
+        }));
+        let orch = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
+            OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(vec![])),
+            Arc::new(registry),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            PathBuf::from("/tmp"),
+        ));
+        let reason = CancelReasonFlag::new();
+        orch.set_cancel_reason(reason.clone());
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let mut exec =
+            StreamingToolExecutor::try_new_with_user_cancel(&orch, Vec::new(), 0, cancel.clone())
+                .await
+                .unwrap();
+        let assistant = MessageId::new();
+        add_actor_queue_call(&mut exec, "block", false, true, assistant).await;
+        assert_eq!(next_actor_start(&mut started_rx).await, "block");
+        let id = ToolUseId::new();
+        exec.add_tool(
+            id.clone(),
+            "CancelTool".into(),
+            project_test_tool_input(json!({})),
+            Some("queued-provider".into()),
+            assistant,
+        )
+        .await;
+        exec.sync_statuses().await;
+        assert_eq!(exec.tools[1].status, ToolStatus::Queued);
+        reason.set(CancelReason::LifecyclePause);
+        cancel.cancel();
+        exec.apply_abort_to_pending().await;
+        release_tx.send(()).unwrap();
+        let results = exec.run_to_completion().await.unwrap();
+        assert!(matches!(&results[1],
+            ContentBlock::ToolResult { tool_use_id, content, is_error: Some(true), provider_tool_use_id: Some(provider_id), .. }
+                if tool_use_id == &id && provider_id == "queued-provider"
+                    && content.string_at("") == Some(LIFECYCLE_INTERRUPTED_MESSAGE)
+        ));
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                cancel_started.notified()
+            )
+            .await
+            .is_err(),
+            "queued Cancel never entered the tool"
         );
     }
 
@@ -5728,6 +6285,7 @@ mod tests {
 
     #[tokio::test]
     async fn dropping_executor_without_reset_fences_late_w1_publication() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let (started, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
         let (dropped, mut dropped_rx) = tokio::sync::mpsc::unbounded_channel();
         let (release_old_tx, release_old_rx) = tokio::sync::oneshot::channel();
@@ -5761,6 +6319,20 @@ mod tests {
             Arc::new(StaticMemoryProvider::empty()),
             PathBuf::from("/tmp"),
         ));
+        let old_owner = Arc::new(());
+        let old_owner_weak = Arc::downgrade(&old_owner);
+        let current_owner = Arc::new(Mutex::new(old_owner.clone()));
+        let current_for_guard = current_owner.clone();
+        let admissions = Arc::new(AtomicUsize::new(0));
+        let observed_admissions = admissions.clone();
+        orch.set_tool_dispatch_recovery_guard(Arc::new(move || {
+            observed_admissions.fetch_add(1, Ordering::SeqCst);
+            let lease: Arc<dyn Send + Sync> = current_for_guard.lock().unwrap().clone();
+            Ok(Some(crate::conversation::ToolDispatchRecoveryLeases {
+                execution: lease,
+                turn_work: Arc::new(()),
+            }))
+        }));
         orch.set_tool_frame_buffering(true).await;
         let mut executor = StreamingToolExecutor::try_new(&orch, Vec::new(), 0)
             .await
@@ -5776,6 +6348,10 @@ mod tests {
             )
             .await;
         assert_eq!(started_rx.recv().await.as_deref(), Some("old"));
+        // The old task must retain the admission's owner, never reacquire the
+        // current owner after another session has become active.
+        *current_owner.lock().unwrap() = Arc::new(());
+        drop(old_owner);
         let actor_terminated = executor.scheduler.actor_termination_notifier();
 
         // No reset occurs here: executor Drop itself must invalidate the owner
@@ -5787,6 +6363,11 @@ mod tests {
         )
         .await
         .expect("executor Drop shuts down the actor promptly");
+        assert!(
+            old_owner_weak.upgrade().is_some(),
+            "detached W1 retains its old owner"
+        );
+        assert_eq!(admissions.load(Ordering::SeqCst), 1);
         orch.set_tool_frame_buffering(false).await;
         let history_before_late_return = orch.session.lock().await.history.len();
         release_old_tx
@@ -5812,6 +6393,15 @@ mod tests {
             .await
             .expect("the detached W1 dispatch eventually settles")
             .expect("the detached dispatch acknowledges completion");
+        assert!(
+            old_owner_weak.upgrade().is_none(),
+            "old owner releases after W1 finishes"
+        );
+        assert_eq!(
+            admissions.load(Ordering::SeqCst),
+            1,
+            "old W1 never read the replacement owner"
+        );
 
         let events = sink.snapshot().await;
         assert!(

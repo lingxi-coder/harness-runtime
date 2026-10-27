@@ -1,0 +1,4 @@
+{
+  "type": "submission_not_admitted",
+  "message": "prompt request belongs to a different session"
+}

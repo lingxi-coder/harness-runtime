@@ -2,6 +2,45 @@
 
 use super::*;
 
+#[cfg(test)]
+mod mcp_host_catalog_tests {
+    include!("tests/mcp_host_catalog_tests.rs");
+}
+
+struct BaseToolWireSnapshot {
+    tools: Vec<std::sync::Arc<dyn tool_api::tool_trait::Tool>>,
+    wire: Vec<lingxi_core::host::SourceToolWireDefinition>,
+    available_tool_names: Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    model: String,
+    model_profile: Option<String>,
+    model_source: Option<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+    cache_key: WireToolSchemaCacheKey,
+}
+
+/// A host call bound to the tool identity resolved at admission.
+///
+/// The handle is opaque to callers and is rechecked against the current
+/// capability and policy filters before it is dispatched.
+pub struct PreparedHostToolCall {
+    name: String,
+    tool: std::sync::Arc<dyn tool_api::tool_trait::Tool>,
+    managed_shell: bool,
+}
+
+impl PreparedHostToolCall {
+    /// Whether this exact handle is a built-in shell supporting owned cleanup.
+    #[must_use]
+    pub fn supports_owned_process_cancellation(&self) -> bool {
+        self.managed_shell
+    }
+
+    /// Whether this exact handle is the built-in Bash background producer.
+    #[must_use]
+    pub fn supports_explicit_background_handoff(&self) -> bool {
+        self.managed_shell && self.tool.name() == "Bash"
+    }
+}
+
 fn effective_tool_name_projections(
     tools: &[std::sync::Arc<dyn tool_api::tool_trait::Tool>],
 ) -> Vec<lingxi_core::types::utf16_json::Utf16JsonProjection> {
@@ -426,11 +465,14 @@ impl ConversationOrchestrator {
                     Vec::new(),
                 )
             }
-            lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => (
-                crate::test_support::PermissionDecision::Deny { reason },
-                input,
-                Vec::new(),
-            ),
+            lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason }
+            | lingxi_core::host::permission_gate::PermissionOutcome::TransportClosed { reason } => {
+                (
+                    crate::test_support::PermissionDecision::Deny { reason },
+                    input,
+                    Vec::new(),
+                )
+            }
         };
         if !permission_updates.is_empty() {
             self.perms.apply_permission_updates(&permission_updates);
@@ -615,26 +657,13 @@ impl ConversationOrchestrator {
         Ok((wire, skip_global_cache_for_system_prompt))
     }
 
-    /// Return the exact pre-deferral schema snapshot alongside the final
-    /// request tools. Native mid-conversation additions are built from the same
-    /// once-produced descriptions and schemas, without rerunning Tool prompts
-    /// or registry filters.
-    pub(crate) async fn build_wire_tools_with_complete(
+    /// Build the shared, policy-filtered schema snapshot before any model-only
+    /// ToolSearch deferral or provider token counting takes place.
+    async fn build_base_tool_wire(
         &self,
-    ) -> Result<
-        (
-            Vec<lingxi_core::host::SourceToolWireDefinition>,
-            bool,
-            Vec<lingxi_core::host::SourceToolWireDefinition>,
-            Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
-        ),
-        lingxi_core::settings::SettingsError,
-    > {
+        host_catalog: bool,
+    ) -> Result<BaseToolWireSnapshot, lingxi_core::settings::SettingsError> {
         use tool_api::tool_trait::PromptOptions;
-        // Native `rls()` initializes the host's GCe latch before declared-pool
-        // helpers run. Initialize it before this builder assembles the tool view
-        // and before the later pfr/reminder producer reads the shared cache.
-        let _ = self.native_kept_deferred_tools_enabled();
         // claude-code builds the wire `tools` array with `prompt({model})`; the
         // session model gates model-dependent tool prompts (TodoWrite's
         // `Xla(model)=Dh(model)?FWd:UWd`). Snapshot it from the live session.
@@ -662,7 +691,20 @@ impl ConversationOrchestrator {
             .ok()
             .map(|route| route.main.profile_name)
             .or(selected_model_profile);
-        let tools = self.filtered_available_tools().await;
+        let mut tools = if host_catalog {
+            self.filtered_available_tools_for_host().await
+        } else {
+            self.filtered_available_tools().await
+        };
+        if host_catalog {
+            // Dynamic registry entries can be disabled or shadowed even when
+            // they appear in the assembled pool. Export only the very handle
+            // that the host dispatcher would resolve for the canonical name.
+            tools.retain(|tool| {
+                self.find_dispatchable_tool_for_host(tool.name())
+                    .is_some_and(|resolved| std::sync::Arc::ptr_eq(tool, &resolved))
+            });
+        }
         // Capture canonical names and aliases from the exact post-filter vector
         // used below to build this request's wire tool declarations. A later
         // catalog read could diverge if settings or hooks refresh mid-query.
@@ -704,6 +746,13 @@ impl ConversationOrchestrator {
         let prompt_options = PromptOptions {
             include_examples: true,
             session_id: Some(session_id),
+            session_origin: self
+                .capture_session_origin_capability()
+                .await
+                .ok()
+                .flatten()
+                .filter(|origin| origin.session_id() == session_id),
+            require_session_origin: true,
             is_scheduled_turn: crate::scheduled_turn::current().is_some(),
             model: Some(model.clone()),
             model_profile: model_profile.clone(),
@@ -773,8 +822,47 @@ impl ConversationOrchestrator {
                 }
             }
         }
-        self.apply_mod_tool_descriptions(mod_host.as_ref(), &tools, &mut wire)
+        self.apply_mod_tool_descriptions(mod_host.as_ref(), &tools, &mut wire, !host_catalog)
             .await;
+        Ok(BaseToolWireSnapshot {
+            tools,
+            wire,
+            available_tool_names,
+            model,
+            model_profile,
+            model_source,
+            cache_key,
+        })
+    }
+
+    /// Return the exact pre-deferral schema snapshot alongside the final
+    /// request tools. Native mid-conversation additions are built from the same
+    /// once-produced descriptions and schemas, without rerunning Tool prompts
+    /// or registry filters.
+    pub(crate) async fn build_wire_tools_with_complete(
+        &self,
+    ) -> Result<
+        (
+            Vec<lingxi_core::host::SourceToolWireDefinition>,
+            bool,
+            Vec<lingxi_core::host::SourceToolWireDefinition>,
+            Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
+        ),
+        lingxi_core::settings::SettingsError,
+    > {
+        // Native `rls()` initializes the host's GCe latch before declared-pool
+        // helpers run. Initialize it before this builder assembles the tool view
+        // and before the later pfr/reminder producer reads the shared cache.
+        let _ = self.native_kept_deferred_tools_enabled();
+        let BaseToolWireSnapshot {
+            tools,
+            mut wire,
+            available_tool_names,
+            model,
+            model_profile,
+            model_source,
+            cache_key,
+        } = self.build_base_tool_wire(false).await?;
         let tool_search_present = tools.iter().any(|tool| tool.name() == "ToolSearch");
         let has_deferred_candidates = tools.iter().any(|tool| {
             self.tools
@@ -971,11 +1059,14 @@ impl ConversationOrchestrator {
         host: Option<&std::sync::Arc<hooks::mods::ModHost>>,
         tools: &[std::sync::Arc<dyn tool_api::tool_trait::Tool>],
         wire: &mut [lingxi_core::host::SourceToolWireDefinition],
+        publish_model_deferral: bool,
     ) {
         let Some(host) = host.filter(|host| host.has_event("tool.describe")) else {
-            self.tools
-                .deferral()
-                .set_mod_overrides(std::collections::HashMap::new());
+            if publish_model_deferral {
+                self.tools
+                    .deferral()
+                    .set_mod_overrides(std::collections::HashMap::new());
+            }
             return;
         };
         let identity = host.registration_identity();
@@ -1132,7 +1223,9 @@ impl ConversationOrchestrator {
                 .unwrap_or(raw_deferred);
             overrides.insert(name.to_owned(), deferred);
         }
-        self.tools.deferral().set_mod_overrides(overrides);
+        if publish_model_deferral {
+            self.tools.deferral().set_mod_overrides(overrides);
+        }
     }
 
     async fn apply_prompt_snapshot_tool_descriptions(
@@ -1222,6 +1315,19 @@ impl ConversationOrchestrator {
     pub(crate) async fn filtered_available_tools(
         &self,
     ) -> Vec<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
+        self.filtered_available_tools_inner(true).await
+    }
+
+    async fn filtered_available_tools_for_host(
+        &self,
+    ) -> Vec<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
+        self.filtered_available_tools_inner(false).await
+    }
+
+    async fn filtered_available_tools_inner(
+        &self,
+        model_wait_gate: bool,
+    ) -> Vec<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
         use tool_api::tool_trait::ToolStaticContext;
 
         // `eZf()` — refresh the registry's synchronous pending-server mirror
@@ -1241,7 +1347,14 @@ impl ConversationOrchestrator {
                 !self.is_tool_pool_denied_with_context(tool.as_ref(), &deny_context)
             });
         }
-        Self::apply_wait_for_mcp_servers_gate(&mut tools);
+        // Model presentation historically applies this gate before the agent
+        // policy. Preserve that order without polluting the shared host policy
+        // cache, which must continue to contain every callable host tool.
+        let model_tools = {
+            let mut model_tools = tools.clone();
+            Self::apply_wait_for_mcp_servers_gate(&mut model_tools);
+            model_tools
+        };
         {
             let guard = self.lifecycle_runtime.main_thread_agent.read().await;
             if let Some(agent) = guard.as_ref() {
@@ -1267,16 +1380,43 @@ impl ConversationOrchestrator {
                     }
                 }
                 *self
-                    .main_agent_tool_names
+                    .main_agent_host_tool_names
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) =
                     Some(tools.iter().map(|tool| tool.name().to_string()).collect());
+                *self
+                    .main_agent_tool_names
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(
+                    tools
+                        .iter()
+                        .filter(|tool| {
+                            model_tools
+                                .iter()
+                                .any(|model| std::sync::Arc::ptr_eq(tool, model))
+                        })
+                        .map(|tool| tool.name().to_string())
+                        .collect(),
+                );
             } else {
                 *self
                     .main_agent_tool_names
                     .write()
                     .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                *self
+                    .main_agent_host_tool_names
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
             }
+        }
+        // Each refresh records separate model and host views so a host catalog
+        // refresh cannot make a model-hidden tool dispatchable, or vice versa.
+        if model_wait_gate {
+            tools.retain(|tool| {
+                model_tools
+                    .iter()
+                    .any(|model_tool| std::sync::Arc::ptr_eq(tool, model_tool))
+            });
         }
         if self.is_coordinator_mode_enabled() {
             tools.retain(|t| self.is_coordinator_pool_tool(t.as_ref()));
@@ -1313,16 +1453,17 @@ impl ConversationOrchestrator {
     }
 
     /// Return the live, policy-filtered tool catalog in MCP's 2025-06-18
-    /// `tools/list` shape. This deliberately reuses the normal model-facing
-    /// schema builder so tool enablement, permission-wide denies, active-agent
-    /// restrictions, descriptions, and ordering cannot drift between hosts.
+    /// `tools/list` shape. Reuse the base schema and description snapshot, but
+    /// never apply model-only deferral or perform provider token counting.
     pub async fn mcp_tool_definitions(
         &self,
     ) -> Result<
         Vec<lingxi_core::types::utf16_json::Utf16JsonProjection>,
         lingxi_core::settings::SettingsError,
     > {
-        let (wire, _) = self.build_wire_tools().await?;
+        let BaseToolWireSnapshot { mut wire, .. } = self.build_base_tool_wire(true).await?;
+        self.apply_prompt_snapshot_tool_descriptions(&mut wire)
+            .await;
         Ok(wire
             .into_iter()
             .filter_map(|wire| {
@@ -1392,12 +1533,195 @@ impl ConversationOrchestrator {
         input: lingxi_core::types::utf16_json::Utf16JsonProjection,
         cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Option<lingxi_core::types::ContentBlock>, OrchestratorError> {
-        if self.find_dispatchable_tool(&name).is_none() {
+        self.call_tool_from_host_with_cancellation(
+            tool_use_id,
+            name,
+            input,
+            cancel,
+            tool_api::context::HostToolCancellation::Ordinary,
+        )
+        .await
+    }
+
+    /// Resolve and bind the exact tool identity for a host-originated call.
+    ///
+    /// Preparation is synchronous so accepting input does not wait for policy
+    /// refresh or output. Dispatch rechecks current enablement and policy.
+    #[must_use]
+    pub fn prepare_host_tool_call(&self, name: &str) -> Option<PreparedHostToolCall> {
+        let tool = self.tools.find_by_name(name)?;
+        let managed_shell = matches!(tool.name(), "Bash" | "PowerShell")
+            && self
+                .tools
+                .find_registered_builtin(tool.name())
+                .is_some_and(|builtin| std::sync::Arc::ptr_eq(&tool, &builtin));
+        Some(PreparedHostToolCall {
+            name: name.to_owned(),
+            tool,
+            managed_shell,
+        })
+    }
+
+    /// Dispatch a host tool call with an explicit, per-call cancellation policy.
+    pub async fn call_tool_from_host_with_cancellation(
+        &self,
+        tool_use_id: lingxi_core::types::ToolUseId,
+        name: String,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+        cancellation: tool_api::context::HostToolCancellation,
+    ) -> Result<Option<lingxi_core::types::ContentBlock>, OrchestratorError> {
+        let Some(prepared) = self.prepare_host_tool_call(&name) else {
+            return Ok(None);
+        };
+        self.call_prepared_tool_from_host(prepared, tool_use_id, input, cancel, cancellation)
+            .await
+    }
+
+    /// Dispatch an admitted host tool using the same immutable identity that
+    /// determined its cancellation capability.
+    pub async fn call_prepared_tool_from_host(
+        &self,
+        prepared: PreparedHostToolCall,
+        tool_use_id: lingxi_core::types::ToolUseId,
+        input: lingxi_core::types::utf16_json::Utf16JsonProjection,
+        cancel: Option<tokio_util::sync::CancellationToken>,
+        cancellation: tool_api::context::HostToolCancellation,
+    ) -> Result<Option<lingxi_core::types::ContentBlock>, OrchestratorError> {
+        if matches!(
+            &cancellation,
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(_)
+        ) && !prepared.managed_shell
+        {
+            return Err(OrchestratorError::Internal(
+                "owned-process cancellation requires a built-in shell handle".into(),
+            ));
+        }
+        // Refresh the same live filters used by the host catalog even when the
+        // caller invokes a name before tools/list or policy changes afterward.
+        let (model, profile) = {
+            let session = self.session.lock().await;
+            (session.model.clone(), session.model_profile.clone())
+        };
+        self.refresh_main_loop_model_for_route(&model, profile.as_deref());
+        let available = self.filtered_available_tools_for_host().await;
+        let Some(resolved) = self.find_dispatchable_tool_for_host(&prepared.name) else {
+            return Ok(None);
+        };
+        if !std::sync::Arc::ptr_eq(&resolved, &prepared.tool)
+            || !available
+                .iter()
+                .any(|tool| std::sync::Arc::ptr_eq(tool, &resolved))
+        {
             return Ok(None);
         }
-        let tool_uses = vec![(tool_use_id, name, input, None)];
+        // Preflight all shell names a Mod may dispatch inside this same owned
+        // request. The same frozen definitions are used until the batch hook
+        // finishes, even if the live registry changes while the shell runs.
+        let owned_hook_snapshot = if matches!(
+            &cancellation,
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(_)
+        ) {
+            let session_id = self.session.lock().await.session_id;
+            let context = hooks::HookContext {
+                session_id,
+                cwd: self.current_cwd(),
+                ..Default::default()
+            };
+            // In production the lifecycle and hook executor share a registry.
+            // Freeze its definitions and ModHost in the same locked read so a
+            // single reload cannot combine old and new policy generations.
+            let captured_registry = self.hooks.snapshot_owned_registry().await;
+            let (mod_host, lifecycle_generation) =
+                if let Some(registry) = &self.lifecycle_runtime.hook_registry {
+                    if self.hooks.uses_registry(registry) {
+                        (captured_registry.mod_host(), None)
+                    } else {
+                        let lifecycle = registry.read().await;
+                        (lifecycle.mod_host(), Some(lifecycle.generation()))
+                    }
+                } else {
+                    (None, None)
+                };
+            let mod_registration = match mod_host {
+                Some(host) => {
+                    let registration =
+                        host.snapshot_owned_registration().await.map_err(|error| {
+                            OrchestratorError::Internal(format!("Mod admission failed: {error}"))
+                        })?;
+                    Some((host, registration))
+                }
+                None => None,
+            };
+            if !self
+                .hooks
+                .registry_snapshot_is_current(&captured_registry)
+                .await
+            {
+                return Err(OrchestratorError::Internal(
+                    "hook registry changed during host admission".into(),
+                ));
+            }
+            if let (Some(registry), Some(generation)) =
+                (&self.lifecycle_runtime.hook_registry, lifecycle_generation)
+            {
+                if registry.read().await.generation() != generation {
+                    return Err(OrchestratorError::Internal(
+                        "Mod registry changed during host admission".into(),
+                    ));
+                }
+            }
+            let mut names = vec![prepared.name.clone()];
+            if !names.iter().any(|name| name == prepared.tool.name()) {
+                names.push(prepared.tool.name().to_string());
+            }
+            let mod_can_invoke_tools = mod_registration
+                .as_ref()
+                .is_some_and(|(_, registration)| registration.can_invoke_tools());
+            if mod_can_invoke_tools {
+                for name in ["Bash", "PowerShell"] {
+                    if !names.iter().any(|existing| existing == name) {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+            Some(
+                self.hooks
+                    .snapshot_for_owned_host_request_from_registry(
+                        &names,
+                        &context,
+                        mod_registration,
+                        captured_registry,
+                    )
+                    .await
+                    .map_err(OrchestratorError::Internal)?,
+            )
+        } else {
+            None
+        };
+        let tool_uses = vec![(tool_use_id, prepared.name, input, None)];
+        let host_fence =
+            crate::turn_loop::tool_dispatch::host_request_publication_guard(&cancellation, None);
         let (mut results, _prevent_continuation, _injected, modifiers) =
-            crate::turn_loop::dispatch_tool_uses_tracked(self, &tool_uses, cancel).await?;
+            tool_api::context::with_host_tool_cancellation(
+                cancellation,
+                async {
+                    let dispatch = async {
+                        let dispatched = crate::turn_loop::tool_dispatch::dispatch_tool_uses_tracked_deferred_with_facts(
+                            self, &tool_uses, cancel, None, None, Some(prepared.tool), None, None, host_fence,
+                        )
+                        .await?;
+                        crate::turn_loop::tool_dispatch::finish_direct_tool_dispatch(self, dispatched)
+                            .await
+                    };
+                    if let Some(snapshot) = owned_hook_snapshot {
+                        hooks::executor::with_owned_host_hook_snapshot(snapshot, dispatch).await
+                    } else {
+                        dispatch.await
+                    }
+                },
+            )
+            .await?;
         crate::turn_loop::apply_model_context_modifiers(self, modifiers).await?;
         // O3: this host-driven path writes NO transcript line at all (the block
         // is handed back to the caller), so a queued hook attachment would be a

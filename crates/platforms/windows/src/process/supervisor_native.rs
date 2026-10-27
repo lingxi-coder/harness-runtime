@@ -320,3 +320,21 @@ pub(super) fn process_is_alive(pid: u32) -> Option<bool> {
         _ => None,
     }
 }
+
+/// Retain a process object until the background cleanup test drops the handle.
+#[cfg(test)]
+pub(super) fn hold_process_handle_for_test(
+    pid: u32,
+) -> std::io::Result<std::os::windows::io::OwnedHandle> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+
+    // SAFETY: OpenProcess takes only scalar arguments and returns an owned,
+    // non-inheritable handle on success. SYNCHRONIZE suffices for the test.
+    let handle = unsafe { OpenProcess(0x0010_0000, 0, pid) };
+    if handle.is_null() {
+        return Err(last_error());
+    }
+    // SAFETY: a successful OpenProcess returned a unique handle which is now
+    // transferred to OwnedHandle and closed exactly once when it is dropped.
+    Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+}

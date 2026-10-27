@@ -284,6 +284,7 @@ async fn implicit_agent_spawn_flows_active_workers_to_client_event() {
                 ..Default::default()
             },
             lingxi_core::host::subagent_spawn::SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(MockInvoker),
                 budget: Arc::new(MockBudget),
             },
@@ -554,6 +555,7 @@ async fn taskstop_retries_failed_departure_after_real_inprocess_worker_is_killed
                 ..Default::default()
             },
             lingxi_core::host::subagent_spawn::SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(MockInvoker),
                 budget: Arc::new(MockBudget),
             },

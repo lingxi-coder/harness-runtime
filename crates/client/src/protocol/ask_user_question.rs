@@ -354,7 +354,10 @@ mod tests {
             serde_json::from_str(r#"{"type":"cancel","turn_id":7}"#).unwrap();
         assert_eq!(
             cancel,
-            crate::protocol::commands::ClientCommand::Cancel { turn_id: Some(7) }
+            crate::protocol::commands::ClientCommand::Cancel {
+                session_id: None,
+                turn_id: Some(7),
+            }
         );
     }
 

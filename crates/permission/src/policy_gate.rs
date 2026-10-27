@@ -1983,7 +1983,10 @@ impl PolicyPermissionGate {
                         PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
                             PermissionDecision::Allow
                         }
-                        PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
+                        PermissionOutcome::Deny { reason }
+                        | PermissionOutcome::TransportClosed { reason } => {
+                            PermissionDecision::Deny { reason }
+                        }
                     };
                     if matches!(decision, PermissionDecision::Allow) {
                         self.record_auto_mode_non_deny(mode);
@@ -3341,7 +3344,7 @@ impl PermissionGate for PolicyPermissionGate {
                 }
             }
             PermissionOutcome::AllowAuto { .. } => self.record_auto_mode_non_deny(mode),
-            PermissionOutcome::Deny { .. } => {}
+            PermissionOutcome::Deny { .. } | PermissionOutcome::TransportClosed { .. } => {}
         }
         outcome
     }
@@ -3463,7 +3466,7 @@ impl PermissionGate for PolicyPermissionGate {
             PermissionOutcome::AllowAuto { .. } => {
                 self.record_auto_mode_non_deny(self.effective_mode_for_tool(name));
             }
-            PermissionOutcome::Deny { .. } => {}
+            PermissionOutcome::Deny { .. } | PermissionOutcome::TransportClosed { .. } => {}
         }
         outcome
     }
@@ -3717,7 +3720,10 @@ impl PermissionGate for PolicyPermissionGate {
                 PermissionOutcome::Allow { .. } | PermissionOutcome::AllowAuto { .. } => {
                     PermissionDecision::Allow
                 }
-                PermissionOutcome::Deny { reason } => PermissionDecision::Deny { reason },
+                PermissionOutcome::Deny { reason }
+                | PermissionOutcome::TransportClosed { reason } => {
+                    PermissionDecision::Deny { reason }
+                }
             };
         }
         self.decide(

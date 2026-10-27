@@ -43,6 +43,8 @@ use thiserror::Error;
 /// - [`NotFound`](ClientError::NotFound): a named target (session, task, model)
 ///   does not exist.
 /// - [`Internal`](ClientError::Internal): any other server-side failure.
+/// - [`SubmissionNotAdmitted`](ClientError::SubmissionNotAdmitted): a mobile
+///   prompt or slash submission is known to have produced no side effects.
 ///
 /// Internally tagged on `type` with `snake_case` variant names (the frozen serde
 /// convention, §0.1), so it round-trips byte-stably alongside every other DTO.
@@ -87,6 +89,16 @@ pub enum ClientError {
     #[error("internal error: {message}")]
     Internal {
         /// The internal-failure detail.
+        message: String,
+    },
+
+    /// This specific mobile `SendPrompt` or `RunSlashCommand` was refused
+    /// before admission and caused no side effects. This guarantee does not
+    /// apply to other attempts, to generic errors, or to the message text.
+    /// Appended to preserve existing UniFFI error variant ordinals.
+    #[error("submission not admitted: {message}")]
+    SubmissionNotAdmitted {
+        /// Human-readable reason; do not parse it to infer admission state.
         message: String,
     },
 }

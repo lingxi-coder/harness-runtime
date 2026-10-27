@@ -766,7 +766,8 @@ impl Tool for ExitPlanModeTool {
                     input = updated;
                 }
             }
-            lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason } => {
+            lingxi_core::host::permission_gate::PermissionOutcome::Deny { reason }
+            | lingxi_core::host::permission_gate::PermissionOutcome::TransportClosed { reason } => {
                 let dur = started_at.elapsed().as_millis() as u64;
                 self.emit_failed(&invocation_id, "permission_denied", dur)
                     .await;
@@ -1631,6 +1632,7 @@ mod tests {
         let invoker = tool_api::tool_invoker_impl::RegistryToolInvoker::new(Arc::new(registry))
             .with_gate(gate);
         let context = || lingxi_core::host::tool_invoker::SubagentInvocationContext {
+            session_origin: None,
             available_tool_names: None,
             cancellation_token: lingxi_core::host::CancellationToken::new(),
             permission_pause_observer: None,

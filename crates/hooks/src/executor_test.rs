@@ -2,6 +2,42 @@
 
 use super::*;
 
+struct OwnedTestGuard;
+
+impl crate::attachment::HookPublicationGuard for OwnedTestGuard {
+    fn is_current(&self) -> bool {
+        true
+    }
+    fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
+        None
+    }
+    fn publish_if_current<'a>(
+        &'a self,
+        future: std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            future.await;
+            true
+        })
+    }
+    fn commit_if_current<'a>(
+        &'a self,
+        future: std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'a>>,
+    ) -> std::pin::Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            future.await;
+            true
+        })
+    }
+}
+
+fn owned_test_context() -> HookContext {
+    HookContext {
+        publication_guard: Some(Arc::new(OwnedTestGuard)),
+        ..Default::default()
+    }
+}
+
 fn hook_json(source: &str) -> lingxi_core::types::utf16_json::Utf16JsonProjection {
     lingxi_core::types::utf16_json::Utf16JsonProjection::parse(source)
         .expect("event fixture is valid JSON")
@@ -585,6 +621,323 @@ mod command_arm_tests {
         let reg = Arc::new(RwLock::new(registry));
         HookExecutorImpl::new(reg, Arc::new(UnusedHttp), Arc::new(UnusedRuntime))
             .with_process_runner(process, Arc::new(StubSandbox))
+    }
+
+    #[tokio::test]
+    async fn owned_host_reuses_preflight_snapshot_when_registry_changes() {
+        let runner = MockRunner::ok(output("{}", "", 0));
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        let exec = HookExecutorImpl::new(
+            registry.clone(),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_process_runner(runner.clone(), Arc::new(StubSandbox));
+        let ctx = owned_test_context();
+        let snapshot = exec
+            .snapshot_for_owned_host_request(&["Bash".into()], &ctx, None)
+            .await
+            .unwrap();
+        registry.write().await.register(command_hook());
+
+        with_owned_host_hook_snapshot(
+            snapshot,
+            exec.execute_for_owned_host_request(pre_event(), ctx.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(runner.recorded_command.lock().unwrap().is_none());
+        assert!(exec
+            .snapshot_for_owned_host_request(&["Bash".into()], &ctx, None)
+            .await
+            .unwrap_err()
+            .contains("command hook"));
+        exec.execute(pre_event(), ctx).await;
+        assert!(runner.recorded_command.lock().unwrap().is_some());
+    }
+
+    struct OwnedFixtureBuiltin {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        audited: bool,
+        block: bool,
+    }
+
+    #[async_trait]
+    impl BuiltinHookHandler for OwnedFixtureBuiltin {
+        fn id(&self) -> &str {
+            "owned-fixture-builtin"
+        }
+        fn supports_owned_host_request(&self) -> bool {
+            self.audited
+        }
+        async fn handle(&self, _: &HookEvent, _: &HookContext) -> HookResult {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            HookResult {
+                outcome: HookOutcome::Success,
+                stdout: "".into(),
+                stderr: "".into(),
+                exit_code: None,
+                response: self.block.then(|| HookResponse {
+                    decision: Some(HookDecision::Block),
+                    ..Default::default()
+                }),
+            }
+        }
+    }
+
+    fn owned_fixture_builtin(once: bool) -> HookDefinition {
+        let mut hook = command_hook();
+        hook.source = HookSource::Settings(lingxi_core::types::SettingsScope::Managed);
+        hook.executor = DefHookExecutor::Builtin {
+            handler_id: "owned-fixture-builtin".into(),
+        };
+        hook.once = once;
+        hook
+    }
+
+    #[tokio::test]
+    async fn owned_host_keeps_removed_managed_blocker_after_reload() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry
+            .write()
+            .await
+            .register(owned_fixture_builtin(false));
+        let mut exec = HookExecutorImpl::new(
+            registry.clone(),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        exec.register_builtin(Arc::new(OwnedFixtureBuiltin {
+            calls: calls.clone(),
+            audited: true,
+            block: true,
+        }));
+        let ctx = owned_test_context();
+        let snapshot = exec
+            .snapshot_for_owned_host_request(&["Bash".into()], &ctx, None)
+            .await
+            .unwrap();
+        registry.write().await.replace_source_hooks(
+            HookSource::Settings(lingxi_core::types::SettingsScope::Managed),
+            vec![],
+        );
+        let aggregate = with_owned_host_hook_snapshot(
+            snapshot,
+            exec.execute_for_owned_host_request(pre_event(), ctx),
+        )
+        .await
+        .unwrap();
+        assert_eq!(aggregate.decision, Some(HookDecision::Block));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            exec.execute(pre_event(), HookContext::default())
+                .await
+                .decision,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn owned_host_registry_capture_does_not_mix_hook_and_mod_generations() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry
+            .write()
+            .await
+            .register(owned_fixture_builtin(false));
+        let mut exec = HookExecutorImpl::new(
+            registry.clone(),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        exec.register_builtin(Arc::new(OwnedFixtureBuiltin {
+            calls: calls.clone(),
+            audited: true,
+            block: true,
+        }));
+        let captured = exec.snapshot_owned_registry().await;
+        assert!(captured.mod_host().is_none());
+        let new_host = crate::mods::ModHost::start(None).await.unwrap();
+        {
+            let mut live = registry.write().await;
+            live.replace_source_hooks(
+                HookSource::Settings(lingxi_core::types::SettingsScope::Managed),
+                vec![],
+            );
+            live.set_mod_host(new_host);
+        }
+        let ctx = owned_test_context();
+        let error = exec
+            .snapshot_for_owned_host_request_from_registry(&["Bash".into()], &ctx, None, captured)
+            .await
+            .unwrap_err();
+        assert!(error.contains("registry changed during host admission"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(registry.read().await.mod_host().is_some());
+    }
+
+    #[tokio::test]
+    async fn owned_host_worker_snapshot_rejects_changed_registry_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let module = directory.path().join("deny.js");
+        std::fs::write(
+            &module,
+            "export function register(on) { on('tool.call', () => ({deny:'blocked'})); }",
+        )
+        .unwrap();
+        let host = crate::mods::ModHost::start(None).await.unwrap();
+        host.load("deny", directory.path(), &module, hook_json("{}"))
+            .await
+            .unwrap();
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry.write().await.set_mod_host(host.clone());
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut exec = HookExecutorImpl::new(
+            registry.clone(),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        exec.register_builtin(Arc::new(OwnedFixtureBuiltin {
+            calls: calls.clone(),
+            audited: true,
+            block: true,
+        }));
+        let captured = exec.snapshot_owned_registry().await;
+        {
+            let mut live = registry.write().await;
+            host.unload("deny").await.unwrap();
+            live.register(owned_fixture_builtin(false));
+        }
+        let registration = host.snapshot_owned_registration().await.unwrap();
+        assert!(!registration.can_invoke_tools());
+        let error = exec
+            .snapshot_for_owned_host_request_from_registry(
+                &["Bash".into()],
+                &owned_test_context(),
+                Some((host, registration)),
+                captured,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("registry changed during host admission"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn owned_host_once_is_shared_across_overlapping_snapshots() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry.write().await.register(owned_fixture_builtin(true));
+        let mut exec = HookExecutorImpl::new(
+            registry.clone(),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        exec.register_builtin(Arc::new(OwnedFixtureBuiltin {
+            calls: calls.clone(),
+            audited: true,
+            block: false,
+        }));
+        let ctx = owned_test_context();
+        let a = exec
+            .snapshot_for_owned_host_request(&["Bash".into()], &ctx, None)
+            .await
+            .unwrap();
+        let b = exec
+            .snapshot_for_owned_host_request(&["Bash".into()], &ctx, None)
+            .await
+            .unwrap();
+        registry.write().await.replace_source_hooks(
+            HookSource::Settings(lingxi_core::types::SettingsScope::Managed),
+            vec![],
+        );
+        with_owned_host_hook_snapshot(
+            a,
+            exec.execute_for_owned_host_request(pre_event(), ctx.clone()),
+        )
+        .await
+        .unwrap();
+        with_owned_host_hook_snapshot(b, exec.execute_for_owned_host_request(pre_event(), ctx))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn owned_host_rejects_unaudited_builtin_before_execution() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry
+            .write()
+            .await
+            .register(owned_fixture_builtin(false));
+        let mut exec =
+            HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(OwnedFixtureBuiltin {
+            calls: calls.clone(),
+            audited: false,
+            block: false,
+        }));
+        let error = exec
+            .snapshot_for_owned_host_request(&["Bash".into()], &HookContext::default(), None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("unverified builtin"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn owned_host_rejects_nonblocking_inline_fallback_without_async_registry() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        let mut hook = owned_fixture_builtin(false);
+        hook.blocking = false;
+        registry.write().await.register(hook);
+        let mut exec =
+            HookExecutorImpl::new(registry, Arc::new(UnusedHttp), Arc::new(UnusedRuntime));
+        exec.register_builtin(Arc::new(OwnedFixtureBuiltin {
+            calls: calls.clone(),
+            audited: true,
+            block: false,
+        }));
+        let error = exec
+            .snapshot_for_owned_host_request(&["Bash".into()], &owned_test_context(), None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("background hook"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn owned_host_preflights_inputs_that_a_later_hook_can_rewrite() {
+        let mut hook = command_hook();
+        hook.events = vec![HookEventType::PostToolUse];
+        hook.if_condition = Some(crate::HookCondition {
+            pattern: "Bash".into(),
+            match_tool_name: true,
+            match_input: true,
+            if_pattern: Some("Bash(rm:*)".into()),
+        });
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        );
+        assert!(exec
+            .snapshot_for_owned_host_request(&["Bash".into()], &HookContext::default(), None)
+            .await
+            .unwrap_err()
+            .contains("PostToolUse"));
+        exec.snapshot_for_owned_host_request(&["Read".into()], &HookContext::default(), None)
+            .await
+            .unwrap();
     }
 
     struct IdleBlockingRunner {
@@ -3888,6 +4241,179 @@ mod async_path_tests {
         }
     }
 
+    #[tokio::test]
+    async fn recovery_default_runner_preserves_synchronous_command_hooks() {
+        let runner = CountingRunner::new(out("", "", 0));
+        let mut registry = HookRegistry::new();
+        registry.register(command_hook(true));
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner.clone(), Arc::new(StubSandbox));
+        let result = exec
+            .execute_with_recovery_admission(pre_event(), HookContext::default(), || {
+                Ok(Some((
+                    Arc::new(()) as Arc<dyn Send + Sync>,
+                    Arc::new(()) as Arc<dyn Send + Sync>,
+                )))
+            })
+            .await
+            .expect("ordinary foreground hook is supported");
+        assert_eq!(runner.runs.load(Ordering::SeqCst), 1);
+        assert_eq!(result.all_results[0].1.outcome, HookOutcome::Success);
+    }
+
+    #[tokio::test]
+    async fn recovery_interrupted_admission_never_runs_the_matched_hook() {
+        let runner = CountingRunner::new(out("", "", 0));
+        let mut registry = HookRegistry::new();
+        registry.register(command_hook(true));
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner.clone(), Arc::new(StubSandbox));
+        let error = exec
+            .execute_with_recovery_admission(pre_event(), HookContext::default(), || {
+                Err(crate::RecoveryAdmissionError::Interrupted)
+            })
+            .await
+            .expect_err("interrupted owner must not start a hook");
+        assert_eq!(error, crate::RecoveryAdmissionError::Interrupted);
+        assert_eq!(runner.runs.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn recovery_default_runner_marker_is_a_typed_failure_and_retains_work() {
+        let runner = CountingRunner::new(out("{\"async\":true}\n", "", 0));
+        let mut registry = HookRegistry::new();
+        registry.register(command_hook(true));
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner, Arc::new(StubSandbox));
+        let work = Arc::new(());
+        let weak = Arc::downgrade(&work);
+        let work_for_guard = work.clone();
+        let error = exec
+            .execute_with_recovery_admission(pre_event(), HookContext::default(), move || {
+                Ok(Some((
+                    Arc::new(()) as Arc<dyn Send + Sync>,
+                    work_for_guard.clone() as Arc<dyn Send + Sync>,
+                )))
+            })
+            .await
+            .expect_err("unverified background work must stop the turn");
+        assert!(
+            matches!(error, crate::RecoveryAdmissionError::Failure(message) if message.contains("outcome is unknown"))
+        );
+        drop(work);
+        assert!(
+            weak.upgrade().is_some(),
+            "unknown work retains the old turn identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_default_runner_keeps_foreground_owner_after_caller_drop() {
+        let gate = Arc::new(Notify::new());
+        let ran = Arc::new(Notify::new());
+        let runner = GatedRunner::new(gate.clone(), ran.clone(), out("", "", 0));
+        let mut registry = HookRegistry::new();
+        registry.register(command_hook(true));
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            TestRuntime::new(),
+        )
+        .with_process_runner(runner, Arc::new(StubSandbox));
+        let execution = Arc::new(());
+        let weak = Arc::downgrade(&execution);
+        let execution_for_guard = execution.clone();
+        let task = tokio::spawn(async move {
+            exec.execute_with_recovery_admission(pre_event(), HookContext::default(), move || {
+                Ok(Some((
+                    execution_for_guard.clone() as Arc<dyn Send + Sync>,
+                    Arc::new(()) as Arc<dyn Send + Sync>,
+                )))
+            })
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), ran.notified())
+            .await
+            .unwrap();
+        task.abort();
+        let _ = task.await;
+        drop(execution);
+        assert!(
+            weak.upgrade().is_some(),
+            "physical runner still owns execution"
+        );
+        gate.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("execution releases when the foreground runner returns");
+    }
+
+    #[tokio::test]
+    async fn recovery_default_runner_failure_is_typed_and_blocks_dispatch() {
+        struct FailingRunner(bool);
+        #[async_trait]
+        impl ProcessRunner for FailingRunner {
+            fn supports_recovery_hook_group_cleanup(&self) -> bool {
+                self.0
+            }
+            async fn run(&self, _cmd: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                Err(ProcessError::Io("transport lost".into()))
+            }
+            async fn spawn_background(
+                &self,
+                _cmd: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                Err(ProcessError::Unsupported)
+            }
+            async fn kill(&self, _handle: &ProcessHandle) -> Result<(), ProcessError> {
+                Ok(())
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        for verified in [false, true] {
+            let runner = Arc::new(FailingRunner(verified));
+            let mut registry = HookRegistry::new();
+            // No registry makes a configured async hook execute inline.
+            registry.register(command_hook(!verified));
+            let exec = HookExecutorImpl::new(
+                Arc::new(RwLock::new(registry)),
+                Arc::new(UnusedHttp),
+                TestRuntime::new(),
+            )
+            .with_process_runner(runner, Arc::new(StubSandbox));
+            let error = exec
+                .execute_with_recovery_admission(pre_event(), HookContext::default(), || {
+                    Ok(Some((
+                        Arc::new(()) as Arc<dyn Send + Sync>,
+                        Arc::new(()) as Arc<dyn Send + Sync>,
+                    )))
+                })
+                .await
+                .expect_err("a recovery hook process failure must stop the turn");
+            assert!(
+                matches!(error, crate::RecoveryAdmissionError::Failure(message) if message.contains("transport lost"))
+            );
+        }
+    }
+
     #[derive(Default)]
     struct AsyncProgressObserver {
         events: StdMutex<Vec<(bool, String)>>,
@@ -5103,6 +5629,7 @@ mod http_agent_dispatch_tests {
     }
     fn dummy_inherit() -> SubagentInheritance {
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: Arc::new(InertBudget),
         }
@@ -5176,6 +5703,44 @@ mod http_agent_dispatch_tests {
             rewake_message: None,
             on_failure: None,
         }
+    }
+
+    #[tokio::test]
+    async fn owned_host_rejects_matching_agent_hook_without_starting_the_spawner() {
+        let spawner = Arc::new(RecordingSpawner {
+            recorded: Mutex::new(Vec::new()),
+            result: Mutex::new(Some(Err(SubagentSpawnError::Internal("fixture".into())))),
+        });
+        let mut hook = agent_hook();
+        hook.if_condition = Some(crate::HookCondition {
+            pattern: "Bash".into(),
+            match_tool_name: true,
+            match_input: false,
+            if_pattern: None,
+        });
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_agent_spawner(spawner.clone());
+        let context = HookContext {
+            inherit: Some(dummy_inherit()),
+            ..Default::default()
+        };
+        exec.snapshot_for_owned_host_request(&["Read".into()], &context, None)
+            .await
+            .unwrap();
+        let error = exec
+            .snapshot_for_owned_host_request(&["Bash".into()], &context, None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("agent hook"));
+        assert!(spawner.recorded.lock().unwrap().is_empty());
+        exec.execute(pre_event(), context).await;
+        assert_eq!(spawner.recorded.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -5451,6 +6016,94 @@ mod prompt_dispatch_tests {
             rewake_message: None,
             on_failure: None,
         }
+    }
+
+    #[tokio::test]
+    async fn owned_host_rejects_matching_mcp_hook_before_invocation() {
+        let invoker = Arc::new(RecordingMcpInvoker {
+            recorded: Mutex::new(Vec::new()),
+            result: Mutex::new(vec![HookMcpInvocationResult::Success {
+                text_content: Vec::new(),
+            }]),
+        });
+        let mut hook = prompt_hook();
+        hook.executor = DefHookExecutor::McpTool {
+            server: "fixture".into(),
+            tool: "run".into(),
+            input: hook_json("{}"),
+        };
+        hook.if_condition = Some(crate::HookCondition {
+            pattern: "Bash".into(),
+            match_tool_name: true,
+            match_input: false,
+            if_pattern: None,
+        });
+        let mut registry = HookRegistry::new();
+        registry.register(hook);
+        let exec = HookExecutorImpl::new(
+            Arc::new(RwLock::new(registry)),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_mcp_invoker(invoker.clone());
+        exec.snapshot_for_owned_host_request(&["Read".into()], &HookContext::default(), None)
+            .await
+            .unwrap();
+        let error = exec
+            .snapshot_for_owned_host_request(&["Bash".into()], &HookContext::default(), None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("MCP tool hook"));
+        assert!(invoker.recorded.lock().unwrap().is_empty());
+        exec.execute(pre_event(), HookContext::default()).await;
+        assert_eq!(invoker.recorded.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn owned_host_allows_foreground_prompt_but_rejects_detached_prompt() {
+        let runner = Arc::new(RecordingRunner {
+            recorded: Mutex::new(Vec::new()),
+            result: Mutex::new(Some(Ok(hook_json_string(r#"{"ok":true}"#)))),
+        });
+        let registry = Arc::new(RwLock::new(HookRegistry::new()));
+        registry.write().await.register(prompt_hook());
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let exec = HookExecutorImpl::new(
+            registry.clone(),
+            Arc::new(UnusedHttp),
+            Arc::new(UnusedRuntime),
+        )
+        .with_prompt_runner(runner.clone())
+        .with_async_registry(Arc::new(AsyncHookRegistry::new(
+            Arc::new(UnusedRuntime),
+            tx,
+        )));
+        let snapshot = exec
+            .snapshot_for_owned_host_request(&["Bash".into()], &HookContext::default(), None)
+            .await
+            .unwrap();
+        let outcome = with_owned_host_hook_snapshot(
+            snapshot,
+            exec.execute_for_owned_host_request(pre_event(), owned_test_context()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(runner.recorded.lock().unwrap().len(), 1);
+        assert_eq!(outcome.all_results.len(), 1);
+        assert!(matches!(
+            outcome.all_results[0].1.outcome,
+            HookOutcome::Success
+        ));
+
+        let mut background = prompt_hook();
+        background.blocking = false;
+        registry.write().await.register(background);
+        let error = exec
+            .snapshot_for_owned_host_request(&["Bash".into()], &HookContext::default(), None)
+            .await
+            .unwrap_err();
+        assert!(error.contains("background hook"));
+        assert_eq!(runner.recorded.lock().unwrap().len(), 1);
     }
 
     struct AggregateOnlyGuard {

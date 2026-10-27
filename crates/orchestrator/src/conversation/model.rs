@@ -2013,6 +2013,101 @@ impl ConversationOrchestrator {
         let _ = self.cancel_reason.set(flag);
     }
 
+    /// Install a synchronous host durability barrier before tool dispatch.
+    /// If the barrier fails, the tool must not be started.
+    pub fn set_tool_dispatch_recovery_guard(&self, guard: ToolDispatchRecoveryGuard) {
+        let _ = self.tool_dispatch_recovery_guard.set(guard);
+    }
+
+    /// Set an origin-bound output factory for queued Mod session events.
+    /// Hosts that do not install one retain the ordinary conversation output.
+    pub fn set_mod_session_event_output_factory(&self, factory: ModSessionEventOutputFactory) {
+        let _ = self.mod_session_event_output_factory.set(factory);
+    }
+
+    /// Scope a writer to the actual switch task. Tokio does not implicitly
+    /// propagate this capability to unrelated spawned tasks.
+    pub(crate) async fn with_mod_session_switch_writer<F>(
+        &self,
+        writer: ModSessionSwitchWriter,
+        future: F,
+    ) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        SCOPED_MOD_SESSION_SWITCH_WRITER
+            .scope((self as *const Self as usize, writer), future)
+            .await
+    }
+
+    /// Capture the currently executing switch's writer only for this owner.
+    pub(crate) fn current_mod_session_switch_writer(&self) -> Option<ModSessionSwitchWriter> {
+        SCOPED_MOD_SESSION_SWITCH_WRITER
+            .try_with(|(owner, writer)| {
+                (*owner == self as *const Self as usize).then(|| writer.clone())
+            })
+            .ok()
+            .flatten()
+    }
+
+    pub(crate) fn mod_session_event_output(
+        &self,
+        origin: ModSessionEventOrigin,
+    ) -> Arc<dyn OutputStream> {
+        self.mod_session_event_output_factory
+            .get()
+            .map_or_else(|| self.output.clone(), |factory| factory(origin))
+    }
+
+    /// Capture this invocation's immutable admission guard for work which is
+    /// handed to another task. Task-local context is not inherited by spawn.
+    pub fn capture_tool_dispatch_recovery_guard(&self) -> Option<ToolDispatchRecoveryGuard> {
+        SCOPED_TOOL_DISPATCH_RECOVERY_GUARD
+            .try_with(|(owner, guard)| {
+                (*owner == self as *const Self as usize).then(|| guard.clone())
+            })
+            .ok()
+            .flatten()
+            .or_else(|| self.tool_dispatch_recovery_guard.get().cloned())
+    }
+
+    /// Run one owned turn with its own recovery admission context. Spawned
+    /// work must retain the lease returned at admission; task-local values do
+    /// not implicitly propagate to a new Tokio task.
+    pub async fn with_tool_dispatch_recovery_guard<F>(
+        &self,
+        guard: ToolDispatchRecoveryGuard,
+        future: F,
+    ) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        SCOPED_TOOL_DISPATCH_RECOVERY_GUARD
+            .scope((self as *const Self as usize, guard), future)
+            .await
+    }
+
+    pub(crate) fn mark_tool_dispatch_unsafe(
+        &self,
+    ) -> Result<Option<ToolDispatchRecoveryLeases>, crate::OrchestratorError> {
+        let map_error = |error| match error {
+            hooks::RecoveryAdmissionError::Interrupted => {
+                crate::OrchestratorError::RecoveryInterrupted
+            }
+            hooks::RecoveryAdmissionError::Failure(message) => {
+                crate::OrchestratorError::Internal(message)
+            }
+        };
+        if let Ok(Some(result)) = SCOPED_TOOL_DISPATCH_RECOVERY_GUARD
+            .try_with(|(owner, guard)| (*owner == self as *const Self as usize).then(|| guard()))
+        {
+            return result.map_err(map_error);
+        }
+        self.tool_dispatch_recovery_guard
+            .get()
+            .map_or(Ok(None), |guard| guard().map_err(map_error))
+    }
+
     /// Byte-exact `/recap` prompt (probed from the 2.1.198 binary). Sent as the
     /// single user turn of the isolated recap side query. Kept in lockstep with
     /// the byte-audit copy in `command-core`'s `recap.rs` test.

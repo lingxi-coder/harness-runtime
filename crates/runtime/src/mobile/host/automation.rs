@@ -426,6 +426,43 @@ impl MobileTurnFirer {
             })?;
 
         let handle: Arc<dyn OrchestratorHandle> = rt.orchestrator.clone();
+        // Scheduled runs use a separate orchestrator, but can target a session
+        // currently visible in another engine. Hold the same shared owner
+        // lease through any tool work that outlives this caller.
+        let session_id = match target_uuid {
+            Some(uuid) => uuid.to_string(),
+            None => handle.current_session_id().await.as_uuid().to_string(),
+        };
+        let durable_turns = crate::mobile::turn_durability::DurableTurnStore::open_shared(
+            self.cfg.lingxi_home.join("mobile-turns"),
+        )
+        .map_err(|error| format!("scheduled turn storage unavailable: {error}"))?;
+        let live_owner = durable_turns
+            .reserve_live_owner(&session_id, None)
+            .map_err(|error| format!("busy: Conversation has an active turn: {error}"))?;
+        rt.orchestrator
+            .set_tool_dispatch_recovery_guard(Arc::new(|| {
+                Err("scheduled mobile tool dispatch has no turn ownership context".into())
+            }));
+        let recovery_guard: orchestrator::conversation::ToolDispatchRecoveryGuard = {
+            let store = durable_turns.clone();
+            let session_id = session_id.clone();
+            Arc::new(move || {
+                let lease = live_owner.clone();
+                store
+                    .with_live_owner(&session_id, &lease, None, || Ok(()))
+                    .map_err(|error| {
+                        format!("scheduled turn owner is no longer current: {error}")
+                    })?;
+                let work = lease.detached_work_lease();
+                Ok(Some(
+                    orchestrator::conversation::ToolDispatchRecoveryLeases {
+                        execution: Arc::new(lease),
+                        turn_work: Arc::new(work),
+                    },
+                ))
+            })
+        };
         if let Some(uuid) = target_uuid {
             let replayed = cron_replay_session(
                 &self.cfg.lingxi_home,
@@ -463,7 +500,6 @@ impl MobileTurnFirer {
             )
             .await;
         }
-        let session_id = handle.current_session_id().await.as_uuid().to_string();
         if target_uuid.is_none() && automation.is_some() {
             // A configured turn can fail validation before appending a prompt.
             // Anchor newly allocated identities before publishing the binding,
@@ -538,7 +574,10 @@ impl MobileTurnFirer {
             }
         };
 
-        match tokio::time::timeout(CRON_TURN_TIMEOUT, run).await {
+        let scoped_run = rt
+            .orchestrator
+            .with_tool_dispatch_recovery_guard(recovery_guard, run);
+        match tokio::time::timeout(CRON_TURN_TIMEOUT, scoped_run).await {
             Ok(Ok(_outcome)) => Ok(cron::AutomationRunResult {
                 session_id,
                 summary: captured.lock().await.clone(),

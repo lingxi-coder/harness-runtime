@@ -77,7 +77,9 @@ pub use handle::{
     with_transcript_subdir_override, workflow_transcript_subdir_override, DefaultModelSelection,
     DefaultModelSelectionProvider, PoolSubagentSpawner, RuntimeLink, StreamingSubagentSpawner,
 };
-pub use mod_agent_offer::{filter_agent_offer_candidates, AgentOfferContext};
+pub use mod_agent_offer::{
+    filter_agent_offer_candidates, filter_agent_offer_candidates_with_origin, AgentOfferContext,
+};
 // Shared renderer for the current per-turn agent catalog reminder.
 pub use lingxi_core::host::subagent_spawn::format_agent_line;
 // Fork-subagent helpers live in the leaf `platform-api` crate (reachable by both
@@ -97,7 +99,9 @@ pub use observer::{
     propagation_for_spawn, validate_observer_graph, ObserverPropagation, ObserverValidationError,
     DEFAULT_OBSERVER_FANOUT_DEPTH,
 };
-pub use tool_resolver::{augment_teammate_tool_policy, resolve_subagent_tools};
+pub use tool_resolver::{
+    augment_teammate_tool_policy, resolve_subagent_tools, resolve_subagent_tools_with_origin,
+};
 // Re-export `ToolRegistry` (from `tool_api`, an existing `agent` dep) so the
 // `tasks` in-process-teammate handler can hold one for per-spawn tool resolution
 // without widening its own dep graph.

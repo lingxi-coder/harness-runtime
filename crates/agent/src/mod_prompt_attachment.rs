@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use hooks::mods::{ModError, ModHost};
+use hooks::mods::{ModError, ModHost, ModSessionContext};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{AgentId, ContentBlock, ConversationMessage, MessageId};
 use serde_json::{json, Value};
@@ -162,6 +162,7 @@ impl ChildPromptAttachments {
         &mut self,
         messages: &mut Vec<ConversationMessage>,
         host: Option<&Arc<ModHost>>,
+        session: Option<Arc<dyn ModSessionContext>>,
         cwd: &Path,
         agent_id: AgentId,
     ) {
@@ -171,9 +172,13 @@ impl ChildPromptAttachments {
         if self.descriptors.is_empty() {
             return;
         }
-        let session = host.bound_session();
         let generation = match session.as_ref() {
-            Some(session) => session.prompt_attachment_generation().await,
+            Some(session) => {
+                let Ok(_lease) = session.acquire_session_work_lease().await else {
+                    return;
+                };
+                session.prompt_attachment_generation().await
+            }
             None => 0,
         };
         let identity = host.registration_identity();
@@ -310,10 +315,13 @@ impl ChildPromptAttachments {
                     }
                 };
                 let current_generation = match session.as_ref() {
-                    Some(session) => session.prompt_attachment_generation().await,
-                    None => 0,
+                    Some(session) => match session.acquire_session_work_lease().await {
+                        Ok(_lease) => Some(session.prompt_attachment_generation().await),
+                        Err(_) => None,
+                    },
+                    None => Some(0),
                 };
-                if current_generation == generation {
+                if current_generation == Some(generation) {
                     self.answers
                         .insert(message_id, (input, identity, generation, answer.clone()));
                 }
@@ -534,7 +542,13 @@ export function register(on) {
         let original = vec![kept.clone(), dropped.clone()];
         let mut first = original.clone();
         attachments
-            .screen(&mut first, Some(&host), &child_cwd, agent_id)
+            .screen(
+                &mut first,
+                Some(&host),
+                host.bound_session(),
+                &child_cwd,
+                agent_id,
+            )
             .await;
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].id(), kept.id());
@@ -548,7 +562,13 @@ export function register(on) {
         );
         let mut second = original.clone();
         attachments
-            .screen(&mut second, Some(&host), &child_cwd, agent_id)
+            .screen(
+                &mut second,
+                Some(&host),
+                host.bound_session(),
+                &child_cwd,
+                agent_id,
+            )
             .await;
         assert_eq!(second, first, "attachment answers are cached by message id");
         assert_eq!(original, vec![kept, dropped], "history stays original");
@@ -572,7 +592,13 @@ export function register(on) {
         .unwrap();
         let mut third = original;
         attachments
-            .screen(&mut third, Some(&host), &child_cwd, agent_id)
+            .screen(
+                &mut third,
+                Some(&host),
+                host.bound_session(),
+                &child_cwd,
+                agent_id,
+            )
             .await;
         assert!(third[0].text_content().ends_with(":3\n</system-reminder>"));
     }

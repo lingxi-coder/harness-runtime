@@ -1,0 +1,9 @@
+{
+  "type": "queued_turn_status",
+  "session_id": "session-1",
+  "turn_id": 11,
+  "request_id": "request-1",
+  "status": {
+    "type": "cancelled"
+  }
+}

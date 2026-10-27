@@ -1003,6 +1003,11 @@ fn render_one_with_options(n: &TaskNotification, push_enabled: bool) -> Utf16Jso
                         exit.map_or(String::new(), |code| format!(" with exit code {code}"))
                     ),
                 ),
+                "exited_unknown" => summary_with_description(
+                    "Background command \"",
+                    &n.description,
+                    "\" exited; its outcome is unknown",
+                ),
                 _ if n.killed_by.as_deref() == Some("deadline") => summary_with_description(
                     "Background command \"",
                     &n.description,
@@ -1417,6 +1422,16 @@ mod tests {
         n.killed_by = Some("deadline".into());
         let rendered = render_one(&n);
         assert!(rendered.contains("<summary>Background command \"watch build\" was stopped after reaching its background time limit</summary>"));
+    }
+
+    #[test]
+    fn verified_unknown_shell_outcome_is_not_rendered_as_stopped_or_failed() {
+        let n = base("b12345678", "local_bash", "exited_unknown", "watch build");
+        let rendered = render_one(&n);
+        assert!(rendered.contains("<status>exited_unknown</status>"));
+        assert!(rendered.contains("exited; its outcome is unknown"));
+        assert!(!rendered.contains("was stopped"));
+        assert!(!rendered.contains("failed"));
     }
 
     #[test]

@@ -366,6 +366,7 @@ impl Task for DreamHandler {
         let inherit = SubagentInheritance {
             tool_invoker: self.tool_invoker.clone(),
             budget: self.budget.clone(),
+            session_origin: None,
         };
 
         // 5. Drive the subagent to completion inside a runtime-spawned worker
@@ -816,6 +817,7 @@ mod tests {
         let result = handler
             .spawn(
                 TaskSpawnInput::LocalWorkflow {
+                    session_origin: None,
                     session_uuid: None,
                     workflow_id: "wf".into(),
                     script: String::new(),

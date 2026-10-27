@@ -13,13 +13,11 @@
 //!
 //! # Divergence from the TS (documented, intentional)
 //!
-//! The TS uses a module-global `bwrapMountPoints: Set<string>` plus
-//! `registerExitCleanupHandler()` (`linux-sandbox-utils.js:202-284`) to track and
-//! later delete the host mount-point files bwrap creates for non-existent deny
-//! paths. This port has **no global state**: [`generate_filesystem_args`]
-//! RETURNS `(args, mount_points)` so the caller (P4-2c) owns cleanup. This is
-//! cleaner and testable; the security behavior (which mount points are created)
-//! is identical.
+//! The TS tracks and later deletes host mount-point files bwrap may create for
+//! missing deny paths. This port returns the potentially affected paths, but
+//! retains them because pathname-based deletion cannot prove current ownership.
+//! Missing intermediate directories use a read-only tmpfs instead of a newly
+//! allocated host bind source.
 //!
 //! All path splitting uses `/` as the separator, matching `path.sep` on the
 //! Linux target these functions are written for (bwrap is Linux-only).
@@ -70,6 +68,103 @@ pub struct WriteConfig {
     /// Paths to deny writes to even inside an allowed region.
     #[serde(default)]
     pub deny_within_allow: Vec<String>,
+}
+
+/// A later read-deny tmpfs hides earlier mounts except for explicit restores.
+struct ReadDenyUnit {
+    destination: String,
+    restored_writes: Vec<String>,
+    restored_reads: Vec<ReadRestore>,
+}
+
+struct ReadRestore {
+    source: String,
+    destination: String,
+}
+
+struct ReadPath {
+    requested: String,
+    landing: String,
+    error: Option<std::io::ErrorKind>,
+}
+
+/// Propagates a fail-closed read-deny resolution failure to the Linux wrapper.
+pub(crate) const READ_DENY_RESOLUTION_FAILED: &str = "--lingxi-unresolved-read-deny";
+
+fn at_or_under(path: &str, ancestor: &str) -> bool {
+    Path::new(path).starts_with(Path::new(ancestor))
+}
+
+fn normalized_read_path(path: &str, cwd: &str) -> ReadPath {
+    let home = dirs::home_dir().unwrap_or_default();
+    let expanded = if path == "~" {
+        home
+    } else if let Some(suffix) = path.strip_prefix("~/") {
+        home.join(suffix)
+    } else {
+        PathBuf::from(path)
+    };
+    let absolute = if expanded.is_absolute() {
+        expanded
+    } else {
+        let base = if Path::new(cwd).is_absolute() {
+            PathBuf::from(cwd)
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+        };
+        base.join(expanded)
+    };
+    // Do not collapse `..` lexically: the kernel resolves a preceding symlink
+    // first, so the actual target can be outside the textual parent.
+    let requested = absolute.to_string_lossy().into_owned();
+    let (landing, error) = match std::fs::canonicalize(&absolute) {
+        Ok(resolved) => (resolved.to_string_lossy().into_owned(), None),
+        Err(error) => (requested.clone(), Some(error.kind())),
+    };
+    ReadPath {
+        requested,
+        landing,
+        error,
+    }
+}
+
+fn relative_landing_under(requested: &str, landing: &str) -> Option<PathBuf> {
+    let requested = Path::new(requested);
+    for ancestor in requested.ancestors() {
+        let Ok(resolved) = std::fs::canonicalize(ancestor) else {
+            continue;
+        };
+        let Ok(prefix) = resolved.strip_prefix(landing) else {
+            continue;
+        };
+        let suffix = requested.strip_prefix(ancestor).ok()?;
+        let relative = prefix.join(suffix);
+        if relative
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+        {
+            continue;
+        }
+        return Some(relative);
+    }
+    None
+}
+
+fn hidden_by_read_tmpfs(path: &str, units: &[ReadDenyUnit]) -> bool {
+    let mut hidden = false;
+    for unit in units {
+        if at_or_under(path, &unit.destination) {
+            hidden = true;
+        }
+        if unit
+            .restored_writes
+            .iter()
+            .any(|write| at_or_under(path, write))
+        {
+            hidden = false;
+        }
+    }
+    hidden
 }
 
 /// Find if any component of the path is a symlink within the allowed write
@@ -432,10 +527,10 @@ fn run_ripgrep(
 
 /// Generate filesystem bind-mount arguments for bwrap.
 ///
-/// Returns `(args, mount_points)`: `args` is the flat `--ro-bind`/`--bind`/
-/// `--tmpfs` triple vector to pass to bwrap; `mount_points` are the host files
-/// bwrap will create for non-existent deny paths, which the caller must clean up
-/// (see the module-level divergence note — the TS uses a global `Set` instead).
+/// Returns `(args, mount_points)`: `args` is the flat bwrap argument vector;
+/// `mount_points` are the host files
+/// bwrap may create for non-existent deny paths. Their ownership cannot be
+/// established safely, so callers must not delete them by pathname.
 ///
 /// `read_config` / `write_config` are the read/write restrictions (`None` =
 /// unrestricted). `ripgrep_cmd`/`max_depth`/`allow_git_config`/`cwd` feed
@@ -460,9 +555,13 @@ pub fn generate_filesystem_args(
     // Normalized allowed write paths; populated in the writeConfig block, read
     // again in the denyRead loop to re-bind writes under tmpfs.
     let mut allowed_write_paths: Vec<String> = Vec::new();
-    // denyWrite binds buffered and emitted after denyRead processing (flat triples).
-    let mut deny_write_args: Vec<String> = Vec::new();
-    // Mount points to return for caller cleanup (TS: module-global bwrapMountPoints).
+    enum DenyWriteMount {
+        Bind { source: String, destination: String },
+        ReadOnlyTmpfs { destination: String },
+    }
+    // Deny-write mounts are buffered and emitted after deny-read processing.
+    let mut deny_write_args: Vec<DenyWriteMount> = Vec::new();
+    // Potential bwrap-created paths, retained because ownership is unknown.
     let mut mount_points: Vec<PathBuf> = Vec::new();
 
     // --- Initial root mount based on write restrictions (linux-sandbox-utils.js:537-671) ---
@@ -523,6 +622,7 @@ pub fn generate_filesystem_args(
         // `mount_original` is the `d` map (mount point -> original deny path),
         // kept for the mount bookkeeping.
         let mut seen_deny_write: HashSet<String> = HashSet::new();
+        let mut seen_missing_mounts: HashSet<String> = HashSet::new();
         let mut mount_original: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for path_pattern in &deny_paths {
@@ -537,9 +637,10 @@ pub fn generate_filesystem_args(
             let Some(h_path) = partial_realpath(&i_path) else {
                 if let Some(symlink_in_path) = find_symlink_in_path(&i_path, &allowed_write_paths) {
                     if seen_deny_write.insert(symlink_in_path.clone()) {
-                        deny_write_args.push("--ro-bind".to_string());
-                        deny_write_args.push("/dev/null".to_string());
-                        deny_write_args.push(symlink_in_path.clone());
+                        deny_write_args.push(DenyWriteMount::Bind {
+                            source: "/dev/null".into(),
+                            destination: symlink_in_path.clone(),
+                        });
                         mount_original.insert(symlink_in_path, i_path.clone());
                     }
                 }
@@ -562,9 +663,10 @@ pub fn generate_filesystem_args(
             // checked against the RESOLVED path. (:V6c(H,c))
             if let Some(symlink_in_path) = find_symlink_in_path(&h_path, &allowed_write_paths) {
                 if seen_deny_write.insert(symlink_in_path.clone()) {
-                    deny_write_args.push("--ro-bind".to_string());
-                    deny_write_args.push("/dev/null".to_string());
-                    deny_write_args.push(symlink_in_path.clone());
+                    deny_write_args.push(DenyWriteMount::Bind {
+                        source: "/dev/null".into(),
+                        destination: symlink_in_path.clone(),
+                    });
                     mount_original.insert(symlink_in_path, i_path.clone());
                 }
                 continue;
@@ -588,21 +690,26 @@ pub fn generate_filesystem_args(
                 });
                 if ancestor_is_within_allowed_path {
                     let first_non_existent = find_first_non_existent_component(&h_path);
+                    if !seen_missing_mounts.insert(first_non_existent.clone()) {
+                        continue;
+                    }
                     // TS: `if (firstNonExistent !== H) { emptyDir } else { /dev/null }`.
                     // Inverted here (== first) to satisfy clippy::if_not_else.
                     if first_non_existent == h_path {
                         // Leaf -> /dev/null. (:644-649)
-                        deny_write_args.push("--ro-bind".to_string());
-                        deny_write_args.push("/dev/null".to_string());
-                        deny_write_args.push(first_non_existent.clone());
+                        deny_write_args.push(DenyWriteMount::Bind {
+                            source: "/dev/null".into(),
+                            destination: first_non_existent.clone(),
+                        });
                         mount_original.insert(first_non_existent.clone(), i_path.clone());
                         mount_points.push(PathBuf::from(first_non_existent));
                     } else {
-                        // Fix 2: intermediate component -> empty dir mount. (:637-643)
-                        let empty_dir = make_empty_dir();
-                        deny_write_args.push("--ro-bind".to_string());
-                        deny_write_args.push(empty_dir);
-                        deny_write_args.push(first_non_existent.clone());
+                        // An empty read-only tmpfs masks the absent directory
+                        // without allocating a host-side bind source that
+                        // cannot later be deleted atomically by identity.
+                        deny_write_args.push(DenyWriteMount::ReadOnlyTmpfs {
+                            destination: first_non_existent.clone(),
+                        });
                         mount_original.insert(first_non_existent.clone(), i_path.clone());
                         mount_points.push(PathBuf::from(first_non_existent));
                     }
@@ -610,22 +717,20 @@ pub fn generate_filesystem_args(
                 // else: not within allowed -> already read-only, skip. (:651-653)
                 continue;
             }
-            // Existent resolved path within allowed write path -> ro-bind H H. (:658-665)
-            let is_within_allowed_path = allowed_write_paths
+            // A deny also wins when it contains an allowed write subtree.
+            let touches_allowed_path = allowed_write_paths
                 .iter()
-                .any(|allowed| h_path.starts_with(&format!("{allowed}/")) || h_path == *allowed);
-            if is_within_allowed_path {
-                deny_write_args.push("--ro-bind".to_string());
-                deny_write_args.push(h_path.clone());
-                deny_write_args.push(h_path.clone());
+                .any(|allowed| at_or_under(&h_path, allowed) || at_or_under(allowed, &h_path));
+            if touches_allowed_path {
+                deny_write_args.push(DenyWriteMount::Bind {
+                    source: h_path.clone(),
+                    destination: h_path.clone(),
+                });
                 mount_original.insert(h_path.clone(), i_path.clone());
             }
             // else: outside allowed -> already read-only, skip.
         }
-        // `mount_original` (2.1.211 `d`) currently backs the mount bookkeeping;
-        // the 2.1.211 denyWrite flush additionally consults it for the
-        // denyRead-tmpfs re-exposure check (`S(x)`/`E`), which is a separate,
-        // not-yet-ported parity item — see the flush below.
+        // Retain the original spellings for mount bookkeeping.
         let _ = &mount_original;
     } else {
         // No write restrictions: allow all writes. (:668-671)
@@ -636,23 +741,24 @@ pub fn generate_filesystem_args(
 
     // --- Read restrictions: tmpfs over denied paths (linux-sandbox-utils.js:673-760) ---
     let mut read_deny_paths: Vec<String> = Vec::new();
-    let read_allow_paths: Vec<String> = read_config
+    let read_allow_paths: Vec<ReadPath> = read_config
         .map(|c| {
             c.allow_within_deny
                 .iter()
-                .map(|p| normalize_path_for_sandbox_in(p, Some(cwd)))
+                .map(|p| normalized_read_path(p, cwd))
                 .collect()
         })
         .unwrap_or_default();
     // Files masked by --ro-bind /dev/null below. Filters denyWriteArgs so a
     // re-bind doesn't undo the mask. (:678)
     let mut masked_files: HashSet<String> = HashSet::new();
+    let mut read_deny_units: Vec<ReadDenyUnit> = Vec::new();
 
     // Expand a root deny into its direct children (skip proc/dev/sys). (:684-695)
     let root_skip: HashSet<&str> = ["proc", "dev", "sys"].into_iter().collect();
     if let Some(read_config) = read_config {
         for p in &read_config.deny_only {
-            if normalize_path_for_sandbox_in(p, Some(cwd)) == "/" {
+            if normalized_read_path(p, cwd).landing == "/" {
                 if let Ok(entries) = std::fs::read_dir("/") {
                     for entry in entries.flatten() {
                         let child = entry.file_name().to_string_lossy().into_owned();
@@ -673,57 +779,128 @@ pub fn generate_filesystem_args(
     }
 
     // Normalize then sort shallow-first (by component count). (:705-707)
-    let mut normalized_deny_paths: Vec<String> = read_deny_paths
+    let mut normalized_deny_paths: Vec<ReadPath> = read_deny_paths
         .iter()
-        .map(|p| normalize_path_for_sandbox_in(p, Some(cwd)))
+        .map(|p| normalized_read_path(p, cwd))
         .collect();
-    normalized_deny_paths.sort_by_key(|p| p.split('/').count());
+    normalized_deny_paths.sort_by_key(|p| Path::new(&p.landing).components().count());
 
-    for normalized_path in &normalized_deny_paths {
-        if !Path::new(normalized_path).exists() {
-            continue; // Skip non-existent read deny path. (:709-712)
+    let mut seen_read_denies = HashSet::new();
+    for deny in &normalized_deny_paths {
+        let normalized_path = &deny.landing;
+        if !seen_read_denies.insert(normalized_path.clone()) {
+            continue;
+        }
+        if deny.error.is_some_and(|error| {
+            !matches!(
+                error,
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            )
+        }) {
+            args.push(READ_DENY_RESOLUTION_FAILED.into());
+            continue;
         }
         let deny_sep = if normalized_path == "/" {
             "/".to_string()
         } else {
             format!("{normalized_path}/")
         };
-        let Ok(read_deny_stat) = std::fs::metadata(normalized_path) else {
-            continue;
+        let read_deny_stat = match std::fs::metadata(normalized_path) {
+            Ok(metadata) => metadata,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => {
+                args.push(READ_DENY_RESOLUTION_FAILED.into());
+                continue;
+            }
         };
         if read_deny_stat.is_dir() {
             args.push("--tmpfs".to_string());
             args.push(normalized_path.clone());
+            let mut unit = ReadDenyUnit {
+                destination: normalized_path.clone(),
+                restored_writes: Vec::new(),
+                restored_reads: Vec::new(),
+            };
             // Restore write binds wiped by the tmpfs. (:718-723)
             for write_path in &allowed_write_paths {
                 if write_path.starts_with(&deny_sep) || write_path == normalized_path {
                     args.push("--bind".to_string());
                     args.push(write_path.clone());
                     args.push(write_path.clone());
+                    unit.restored_writes.push(write_path.clone());
                 }
             }
             // Re-allow specific paths within the denied directory. (:727-745)
             for allow_path in &read_allow_paths {
-                if allow_path.starts_with(&deny_sep) || allow_path == normalized_path {
-                    if !Path::new(allow_path).exists() {
-                        continue; // (:729-732)
-                    }
-                    // Skip only if a write path re-bound above AND covers allowPath. (:737-740)
-                    let covered_by_rebound_write = allowed_write_paths.iter().any(|w| {
-                        (w.starts_with(&deny_sep) || w == normalized_path)
-                            && (allow_path == w || allow_path.starts_with(&format!("{w}/")))
-                    });
-                    if covered_by_rebound_write {
-                        continue;
-                    }
-                    args.push("--ro-bind".to_string());
-                    args.push(allow_path.clone());
-                    args.push(allow_path.clone());
+                if !Path::new(&allow_path.landing).exists() {
+                    continue;
                 }
+                // The source follows the original symlink, while its landing
+                // preserves the spelling inside the hidden directory. The
+                // original symlink itself disappeared under the tmpfs.
+                let relative = normalized_deny_paths
+                    .iter()
+                    .filter(|candidate| candidate.landing == *normalized_path)
+                    .find_map(|candidate| {
+                        Path::new(&allow_path.requested)
+                            .strip_prefix(&candidate.requested)
+                            .ok()
+                            .filter(|relative| {
+                                !relative
+                                    .components()
+                                    .any(|component| component == std::path::Component::ParentDir)
+                            })
+                            .map(Path::to_path_buf)
+                    })
+                    .or_else(|| relative_landing_under(&allow_path.requested, normalized_path))
+                    .or_else(|| {
+                        Path::new(&allow_path.landing)
+                            .strip_prefix(normalized_path)
+                            .ok()
+                            .map(Path::to_path_buf)
+                    });
+                let Some(relative) = relative else {
+                    continue;
+                };
+                if relative
+                    .components()
+                    .any(|component| component == std::path::Component::ParentDir)
+                {
+                    continue;
+                }
+                let destination = Path::new(normalized_path)
+                    .join(relative)
+                    .to_string_lossy()
+                    .into_owned();
+                let covered_by_rebound_write = unit
+                    .restored_writes
+                    .iter()
+                    .any(|write| at_or_under(&destination, write));
+                if covered_by_rebound_write {
+                    continue;
+                }
+                args.push("--ro-bind".to_string());
+                args.push(allow_path.landing.clone());
+                args.push(destination.clone());
+                unit.restored_reads.push(ReadRestore {
+                    source: allow_path.landing.clone(),
+                    destination,
+                });
             }
+            read_deny_units.push(unit);
         } else {
             // File: only an exact allowRead match overrides the deny. (:748-755)
-            if read_allow_paths.contains(normalized_path) {
+            if read_allow_paths
+                .iter()
+                .any(|allow| allow.landing == *normalized_path)
+            {
                 continue;
             }
             // Bind /dev/null instead of tmpfs. (:756-758)
@@ -734,46 +911,121 @@ pub fn generate_filesystem_args(
         }
     }
 
-    // Emit buffered denyWrite LAST, skipping any dest already masked. (:766-771)
-    let mut i = 0;
-    while i < deny_write_args.len() {
-        let dest = &deny_write_args[i + 2];
-        if !masked_files.contains(dest) {
-            args.push(deny_write_args[i].clone());
-            args.push(deny_write_args[i + 1].clone());
-            args.push(deny_write_args[i + 2].clone());
+    // Emit buffered denyWrite after the read masks, but never bind a hidden
+    // host path back on top of its read-deny tmpfs.
+    let mut emitted_real_binds: Vec<String> = Vec::new();
+    let mut restored_readonly_writes: HashSet<String> = HashSet::new();
+    // Protect ancestors first; nested denies are redundant under a read-only
+    // directory and bwrap cannot create their missing targets there.
+    deny_write_args.sort_by_key(|mount| {
+        let destination = match mount {
+            DenyWriteMount::Bind { destination, .. }
+            | DenyWriteMount::ReadOnlyTmpfs { destination } => destination,
+        };
+        Path::new(destination).components().count()
+    });
+    let mut readonly_deny_dirs: Vec<String> = Vec::new();
+    for mount in deny_write_args {
+        let destination = match &mount {
+            DenyWriteMount::Bind { destination, .. }
+            | DenyWriteMount::ReadOnlyTmpfs { destination } => destination,
+        };
+        if masked_files.contains(destination) {
+            continue;
         }
-        i += 3;
+        if readonly_deny_dirs
+            .iter()
+            .any(|parent| destination != parent && at_or_under(destination, parent))
+        {
+            continue;
+        }
+        let readonly_dir = match &mount {
+            DenyWriteMount::Bind {
+                source,
+                destination,
+            } if source == destination && Path::new(destination).is_dir() => {
+                Some(destination.clone())
+            }
+            DenyWriteMount::ReadOnlyTmpfs { destination } => Some(destination.clone()),
+            _ => None,
+        };
+        if hidden_by_read_tmpfs(destination, &read_deny_units) {
+            // A writable subtree restored below this denied-write path still
+            // needs to be read-only. Rebind just that subtree, rather than
+            // exposing the surrounding read-denied host directory.
+            for unit in &read_deny_units {
+                for write in &unit.restored_writes {
+                    if at_or_under(write, destination)
+                        && !masked_files.contains(write)
+                        && restored_readonly_writes.insert(write.clone())
+                    {
+                        args.extend(["--ro-bind".into(), write.clone(), write.clone()]);
+                        emitted_real_binds.push(write.clone());
+                    }
+                }
+            }
+            if let Some(readonly_dir) = readonly_dir {
+                readonly_deny_dirs.push(readonly_dir);
+            }
+            continue;
+        }
+        match mount {
+            DenyWriteMount::Bind {
+                source,
+                destination,
+            } => {
+                if source == destination {
+                    emitted_real_binds.push(destination.clone());
+                }
+                args.extend(["--ro-bind".into(), source, destination]);
+            }
+            DenyWriteMount::ReadOnlyTmpfs { destination } => {
+                args.extend([
+                    "--tmpfs".into(),
+                    destination.clone(),
+                    "--remount-ro".into(),
+                    destination,
+                ]);
+            }
+        }
+        if let Some(readonly_dir) = readonly_dir {
+            readonly_deny_dirs.push(readonly_dir);
+        }
+    }
+
+    // A write-deny bind at an ancestor can cover earlier read masks. Restore
+    // each affected read-deny layer in its original order; subpaths restored
+    // beneath the write-deny remain visible but read-only.
+    for unit in &read_deny_units {
+        if emitted_real_binds
+            .iter()
+            .any(|bound| unit.destination != *bound && at_or_under(&unit.destination, bound))
+        {
+            args.extend(["--tmpfs".into(), unit.destination.clone()]);
+            for restored in &unit.restored_writes {
+                args.extend(["--ro-bind".into(), restored.clone(), restored.clone()]);
+            }
+            for restored in &unit.restored_reads {
+                args.extend([
+                    "--ro-bind".into(),
+                    restored.source.clone(),
+                    restored.destination.clone(),
+                ]);
+            }
+        }
+    }
+    let mut masked_files: Vec<_> = masked_files.into_iter().collect();
+    masked_files.sort();
+    for masked in masked_files {
+        if emitted_real_binds
+            .iter()
+            .any(|bound| at_or_under(&masked, bound))
+        {
+            args.extend(["--ro-bind".into(), "/dev/null".into(), masked]);
+        }
     }
 
     (args, mount_points)
-}
-
-/// Create an empty temp dir under the system temp dir, mirroring the TS
-/// `fs.mkdtempSync(path.join(tmpdir(), 'claude-empty-'))`. Returns the path. On
-/// failure (extremely rare) falls back to `/dev/null` so the deny still applies
-/// as a file mask rather than panicking — bwrap then masks with a char device.
-fn make_empty_dir() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Per-process monotonic counter so repeated calls never collide even within
-    // the same nanosecond.
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    let base = std::env::temp_dir();
-    let pid = std::process::id();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    for _ in 0..16 {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let candidate = base.join(format!("claude-empty-{pid}-{nanos}-{n}"));
-        if std::fs::create_dir(&candidate).is_ok() {
-            return candidate.to_string_lossy().into_owned();
-        }
-    }
-    "/dev/null".to_string()
 }
 
 #[cfg(test)]
@@ -1174,7 +1426,7 @@ mod tests {
         let cwd = empty_cwd();
         let wc = WriteConfig {
             allow_only: vec![allow_path.clone()],
-            deny_within_allow: vec![deny_path.clone()],
+            deny_within_allow: vec![deny_path.clone(), cp(&allow, "missing/other/secret")],
         };
         let (args, mp) = generate_filesystem_args(
             None,
@@ -1184,18 +1436,23 @@ mod tests {
             false,
             &cwd.path().to_string_lossy(),
         );
-        // Intermediate component -> --ro-bind <emptydir> <missing>. The empty dir
-        // is a temp path, so match the dest + verb only.
-        let idx = (0..args.len().saturating_sub(2)).find(|&i| {
-            args[i] == "--ro-bind"
-                && args[i + 2] == first_non_existent
-                && args[i + 1] != "/dev/null"
-        });
-        assert!(
-            idx.is_some(),
-            "intermediate -> --ro-bind <emptydir> <component>; args={args:?}"
+        assert_eq!(
+            args.windows(4)
+                .filter(|op| {
+                    op[0] == "--tmpfs"
+                        && op[1] == first_non_existent
+                        && op[2] == "--remount-ro"
+                        && op[3] == first_non_existent
+                })
+                .count(),
+            1,
+            "shared missing ancestor must have one empty read-only tmpfs: {args:?}"
         );
         assert!(mp.contains(&PathBuf::from(&first_non_existent)));
+        assert!(
+            !Path::new(&first_non_existent).exists(),
+            "argument generation must not create a workspace path"
+        );
     }
 
     #[test]
@@ -1363,6 +1620,361 @@ mod tests {
         assert!(has_triple(&args, "--bind", "/", "/"));
         assert!(!has_triple(&args, "--ro-bind", "/", "/"));
         assert!(mp.is_empty());
+    }
+
+    #[test]
+    fn write_denies_do_not_reexpose_read_denied_children_and_keep_explicit_restores() {
+        let root = TempDir::new().unwrap();
+        let denied = root.path().join("secrets");
+        let readable = denied.join("readable");
+        let writable = denied.join("writable");
+        let sibling = root.path().join("secrets2");
+        for dir in [&readable, &writable, &sibling] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let private_file = denied.join("private");
+        let readonly_file = readable.join("file");
+        let write_denied_file = writable.join("file");
+        let sibling_file = sibling.join("file");
+        for file in [
+            &private_file,
+            &readonly_file,
+            &write_denied_file,
+            &sibling_file,
+        ] {
+            fs::write(file, "data").unwrap();
+        }
+        let canonical = |path: &Path| {
+            fs::canonicalize(path)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let root_s = canonical(root.path());
+        let denied_s = canonical(&denied);
+        let readable_s = canonical(&readable);
+        let writable_s = canonical(&writable);
+        let private_s = canonical(&private_file);
+        let readonly_s = canonical(&readonly_file);
+        let write_denied_s = canonical(&write_denied_file);
+        let sibling_s = canonical(&sibling_file);
+        let read = ReadConfig {
+            deny_only: vec![denied_s.clone()],
+            allow_within_deny: vec![readable_s.clone()],
+        };
+        let write = WriteConfig {
+            allow_only: vec![root_s.clone(), writable_s.clone()],
+            deny_within_allow: vec![
+                private_s.clone(),
+                readonly_s.clone(),
+                write_denied_s.clone(),
+                sibling_s.clone(),
+            ],
+        };
+        let (args, _) =
+            generate_filesystem_args(Some(&read), Some(&write), "rg", 3, false, &root_s);
+        assert!(args
+            .windows(2)
+            .any(|op| op[0] == "--tmpfs" && op[1] == denied_s));
+        assert!(!has_triple(&args, "--ro-bind", &private_s, &private_s));
+        assert!(!has_triple(&args, "--ro-bind", &readonly_s, &readonly_s));
+        assert!(has_triple(&args, "--ro-bind", &readable_s, &readable_s));
+        assert!(has_triple(&args, "--bind", &writable_s, &writable_s));
+        assert!(has_triple(
+            &args,
+            "--ro-bind",
+            &write_denied_s,
+            &write_denied_s
+        ));
+        assert!(
+            has_triple(&args, "--ro-bind", &sibling_s, &sibling_s),
+            "secrets2 must not be treated as a child of secrets"
+        );
+    }
+
+    #[test]
+    fn ancestor_write_deny_reapplies_read_masks_and_readonly_restores() {
+        let root = TempDir::new().unwrap();
+        let denied = root.path().join("secrets");
+        let readable = denied.join("readable");
+        fs::create_dir_all(&readable).unwrap();
+        let writable = root.path().join("writable");
+        fs::create_dir(&writable).unwrap();
+        let masked_file = root.path().join("credential");
+        fs::write(&masked_file, "secret").unwrap();
+        let root_s = fs::canonicalize(root.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let denied_s = fs::canonicalize(&denied)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let readable_s = fs::canonicalize(&readable)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let masked_s = fs::canonicalize(&masked_file)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let writable_s = fs::canonicalize(&writable)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let read = ReadConfig {
+            deny_only: vec![denied_s.clone(), masked_s.clone()],
+            allow_within_deny: vec![readable_s.clone()],
+        };
+        let write = WriteConfig {
+            allow_only: vec![writable_s.clone()],
+            deny_within_allow: vec![root_s.clone(), format!("{root_s}/missing-file")],
+        };
+        let (args, _) =
+            generate_filesystem_args(Some(&read), Some(&write), "rg", 3, false, &root_s);
+        let bound = triple_index(&args, "--ro-bind", &root_s, &root_s).expect("write deny");
+        let write_bind = triple_index(&args, "--bind", &writable_s, &writable_s).unwrap();
+        let final_tmpfs = args
+            .windows(2)
+            .rposition(|op| op[0] == "--tmpfs" && op[1] == denied_s)
+            .unwrap();
+        let final_readable = args
+            .windows(3)
+            .rposition(|op| op[0] == "--ro-bind" && op[1] == readable_s && op[2] == readable_s)
+            .unwrap();
+        let final_file_mask = args
+            .windows(3)
+            .rposition(|op| op[0] == "--ro-bind" && op[1] == "/dev/null" && op[2] == masked_s)
+            .unwrap();
+        assert!(
+            write_bind < bound
+                && bound < final_tmpfs
+                && final_tmpfs < final_readable
+                && bound < final_file_mask
+        );
+        assert!(
+            !has_triple(
+                &args,
+                "--ro-bind",
+                "/dev/null",
+                &format!("{root_s}/missing-file")
+            ),
+            "a nested missing deny is already protected by its read-only ancestor"
+        );
+    }
+
+    #[test]
+    fn symlinked_read_deny_uses_the_actual_mount_landing() {
+        let root = TempDir::new().unwrap();
+        let real = root.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let secret = real.join("secret");
+        fs::write(&secret, "secret").unwrap();
+        let link = root.path().join("alias");
+        symlink(&real, &link).unwrap();
+        let root_s = fs::canonicalize(root.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let real_s = fs::canonicalize(&real)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let secret_s = fs::canonicalize(&secret)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let read = ReadConfig {
+            deny_only: vec![link.to_string_lossy().into_owned()],
+            allow_within_deny: Vec::new(),
+        };
+        let write = WriteConfig {
+            allow_only: vec![root_s.clone()],
+            deny_within_allow: vec![secret_s.clone()],
+        };
+        let (args, _) =
+            generate_filesystem_args(Some(&read), Some(&write), "rg", 3, false, &root_s);
+        assert!(args
+            .windows(2)
+            .any(|op| op[0] == "--tmpfs" && op[1] == real_s));
+        assert!(!has_triple(&args, "--ro-bind", &secret_s, &secret_s));
+    }
+
+    #[test]
+    fn read_deny_resolves_parent_after_symlink_before_normalizing() {
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let sub = outside.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let secret = outside.path().join("secret");
+        fs::write(&secret, "hidden").unwrap();
+        let link = root.path().join("link");
+        symlink(&sub, &link).unwrap();
+        let raw_deny = link.join("../secret");
+        assert!(raw_deny.exists());
+        assert!(!root.path().join("secret").exists());
+        let root_s = fs::canonicalize(root.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let secret_s = fs::canonicalize(&secret)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let read = ReadConfig {
+            deny_only: vec![raw_deny.to_string_lossy().into_owned()],
+            allow_within_deny: Vec::new(),
+        };
+        let (args, _) = generate_filesystem_args(Some(&read), None, "rg", 3, false, &root_s);
+        assert!(has_triple(&args, "--ro-bind", "/dev/null", &secret_s));
+    }
+
+    #[test]
+    fn unreadable_or_cyclic_read_deny_fails_closed() {
+        let root = TempDir::new().unwrap();
+        let cycle = root.path().join("cycle");
+        symlink("cycle", &cycle).unwrap();
+        let root_s = fs::canonicalize(root.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let read = ReadConfig {
+            deny_only: vec![cycle.to_string_lossy().into_owned()],
+            allow_within_deny: Vec::new(),
+        };
+        let (args, _) = generate_filesystem_args(Some(&read), None, "rg", 3, false, &root_s);
+        assert!(args.iter().any(|arg| arg == READ_DENY_RESOLUTION_FAILED));
+    }
+
+    #[test]
+    fn allow_read_through_symlink_restores_its_name_inside_the_hidden_directory() {
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let secrets = root.path().join("secrets");
+        fs::create_dir(&secrets).unwrap();
+        let source = outside.path().join("public");
+        fs::write(&source, "allowed").unwrap();
+        let alias = secrets.join("link");
+        symlink(&source, &alias).unwrap();
+        let root_s = fs::canonicalize(root.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let secrets_s = fs::canonicalize(&secrets)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let source_s = fs::canonicalize(&source)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let alias_s = Path::new(&secrets_s)
+            .join("link")
+            .to_string_lossy()
+            .into_owned();
+        let read = ReadConfig {
+            deny_only: vec![secrets_s.clone()],
+            allow_within_deny: vec![alias.to_string_lossy().into_owned()],
+        };
+        let write = WriteConfig {
+            allow_only: vec![root_s.clone()],
+            deny_within_allow: vec![root_s.clone()],
+        };
+        let (args, _) =
+            generate_filesystem_args(Some(&read), Some(&write), "rg", 3, false, &root_s);
+        let ancestor = triple_index(&args, "--ro-bind", &root_s, &root_s).unwrap();
+        let restored = args
+            .windows(3)
+            .rposition(|op| op[0] == "--ro-bind" && op[1] == source_s && op[2] == alias_s)
+            .expect("restore source must land at the alias name");
+        assert!(
+            ancestor < restored,
+            "the explicit allow must survive ancestor deny re-application"
+        );
+    }
+
+    #[test]
+    fn allow_read_fallback_cannot_escape_hidden_directory_through_parent_components() {
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let secrets = root.path().join("secrets");
+        fs::create_dir(&secrets).unwrap();
+        let sub = outside.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let source = outside.path().join("public");
+        fs::write(&source, "public").unwrap();
+        let alias = secrets.join("link");
+        symlink(&sub, &alias).unwrap();
+        let requested = alias.join("../public");
+        assert!(
+            requested.exists(),
+            "kernel resolution follows the symlink before .."
+        );
+        let root_s = fs::canonicalize(root.path())
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let secrets_s = fs::canonicalize(&secrets)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let source_s = fs::canonicalize(&source)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let read = ReadConfig {
+            deny_only: vec![secrets_s],
+            allow_within_deny: vec![requested.to_string_lossy().into_owned()],
+        };
+        let (args, _) = generate_filesystem_args(Some(&read), None, "rg", 3, false, &root_s);
+        assert!(
+            !args
+                .windows(3)
+                .any(|op| op[0] == "--ro-bind" && op[1] == source_s),
+            "an allow outside the denied directory must not be rebound through ..: {args:?}"
+        );
+    }
+
+    #[test]
+    fn nested_read_deny_survives_a_restored_write_subtree_and_write_deny() {
+        let root = TempDir::new().unwrap();
+        let denied = root.path().join("secrets");
+        let restored = denied.join("public");
+        fs::create_dir_all(&restored).unwrap();
+        let nested_secret = restored.join("private");
+        fs::write(&nested_secret, "hidden").unwrap();
+        let canonical = |path: &Path| {
+            fs::canonicalize(path)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let root_s = canonical(root.path());
+        let denied_s = canonical(&denied);
+        let restored_s = canonical(&restored);
+        let nested_s = canonical(&nested_secret);
+        let read = ReadConfig {
+            deny_only: vec![denied_s, nested_s.clone()],
+            allow_within_deny: vec![restored_s.clone()],
+        };
+        let write = WriteConfig {
+            allow_only: vec![root_s.clone(), restored_s.clone()],
+            deny_within_allow: vec![restored_s.clone()],
+        };
+        let (args, _) =
+            generate_filesystem_args(Some(&read), Some(&write), "rg", 3, false, &root_s);
+        let readonly = args
+            .windows(3)
+            .rposition(|op| op[0] == "--ro-bind" && op[1] == restored_s && op[2] == restored_s)
+            .unwrap();
+        let final_mask = args
+            .windows(3)
+            .rposition(|op| op[0] == "--ro-bind" && op[1] == "/dev/null" && op[2] == nested_s)
+            .unwrap();
+        assert!(
+            readonly < final_mask,
+            "a write-deny bind must not expose a nested read-denied file"
+        );
     }
 
     #[test]

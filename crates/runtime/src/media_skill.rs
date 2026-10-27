@@ -69,6 +69,7 @@ fn supported_sections(body: &str, available_tool_names: &[String]) -> String {
 ///
 /// Reuse after a tool-catalog reload so withdrawn operations remove only their
 /// instruction sections and an empty media catalog removes the skill itself.
+#[cfg(any(feature = "mobile", test))]
 pub(crate) fn register_media_skill(
     registry: &mut CommandRegistry,
     available_tool_names: &[String],

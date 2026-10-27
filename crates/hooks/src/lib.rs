@@ -21,6 +21,29 @@
 // line.
 #![allow(missing_docs)]
 
+/// Result of admitting a side effect for a durable turn.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RecoveryAdmissionError {
+    /// The owning turn has already been paused or explicitly cancelled.
+    #[error("turn was interrupted before side-effect admission")]
+    Interrupted,
+    /// The durability barrier itself failed.
+    #[error("side-effect admission failed: {0}")]
+    Failure(String),
+}
+
+impl From<String> for RecoveryAdmissionError {
+    fn from(error: String) -> Self {
+        Self::Failure(error)
+    }
+}
+
+impl From<&str> for RecoveryAdmissionError {
+    fn from(error: &str) -> Self {
+        Self::Failure(error.to_owned())
+    }
+}
+
 mod agent_executor;
 pub mod async_registry;
 pub mod attachment;

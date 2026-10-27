@@ -3,10 +3,11 @@ use crate::mobile::{
     turn_durability::DurableTurnStore,
 };
 use client::adapter::{
-    AdapterOutputStream, AdapterPermissionGate, ClientEventListener, ListenerSink,
+    AdapterOutputStream, AdapterPermissionGate, ClientEventListener, ClientEventSink, ListenerSink,
     PermissionRequestSink,
 };
 use client::protocol::events::ClientEvent;
+use client::protocol::mod_session_event::ModSessionEventPayload;
 use command_api::model::BuiltinCommandHandler;
 use command_api::parse_slash_command;
 use command_api::RegistrySlashDispatcher;
@@ -46,11 +47,59 @@ use super::{
     mobile_typescript_lsp_mode, mobile_typescript_lsp_ready, model_listings, model_preference,
     model_visible_mobile_cwd, permission_preference, provider_catalog_from_profiles,
     provider_model_catalog_from_listings, rebuild_mobile_prompt_dispatch_cache,
-    resolve_default_model_ref, settings_commands, settle_mobile_loop_turn, ActiveTurn,
-    MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle, MobileMcpReloadJob,
-    MobileMediaAgentHandoffQueue, MobileMsgQueueInput, MobileOAuthManager, MobileRuntime,
-    MobileSessionAgentObserver, MobileWakeupDelivery, TurnLifecycleListener, MOBILE_CRON_HANDLES,
+    release_active_turn, report_owned_turn_error, resolve_default_model_ref, settings_commands,
+    settle_mobile_loop_turn, ActiveTurn, MobileBuildError, MobileConfig, MobileEngineError,
+    MobileEngineHandle, MobileMcpReloadJob, MobileMediaAgentHandoffQueue, MobileMsgQueueInput,
+    MobileOAuthManager, MobileRuntime, MobileSessionAgentObserver, MobileWakeupDelivery,
+    TurnLifecycleListener, MOBILE_CRON_HANDLES,
 };
+
+/// Bind output from a queued Mod to the identity captured when it was queued.
+/// Its callback can run after the foreground owner has changed, so it must not
+/// pass through the turn lifecycle listener or be sent as an unowned raw turn
+/// event that a client could attribute to its current response.
+struct MobileModSessionEventSink {
+    connection: Arc<dyn ClientEventSink>,
+    origin: orchestrator::conversation::ModSessionEventOrigin,
+}
+
+#[async_trait::async_trait]
+impl ClientEventSink for MobileModSessionEventSink {
+    async fn emit(&self, event: ClientEvent) {
+        let payload = match event {
+            ClientEvent::SystemNotice { message, is_error } => {
+                ModSessionEventPayload::Notice { message, is_error }
+            }
+            ClientEvent::UiLog { plugin, text } => ModSessionEventPayload::Log { plugin, text },
+            ClientEvent::UiToast {
+                plugin,
+                text,
+                timeout_ms,
+            } => ModSessionEventPayload::Toast {
+                plugin,
+                text,
+                timeout_ms,
+            },
+            ClientEvent::UiNotify { plugin, text } => {
+                ModSessionEventPayload::Notify { plugin, text }
+            }
+            ClientEvent::UiStatus { plugin, text } => {
+                ModSessionEventPayload::Status { plugin, text }
+            }
+            _ => {
+                tracing::warn!("unsupported detached Mod session event");
+                return;
+            }
+        };
+        self.connection
+            .emit(ClientEvent::ModSessionEvent {
+                session_id: self.origin.session_id.clone(),
+                mod_turn_id: self.origin.mod_turn_id.clone(),
+                payload,
+            })
+            .await;
+    }
+}
 
 // Recompute from admitted mobile settings for each plugin-owner connect. This
 // keeps a settings refresh from reviving a server that the current local
@@ -2576,6 +2625,8 @@ pub(super) async fn build_mobile_inner_with_ask(
             tool_api::RegistryToolInvoker::new(tools.clone()).with_gate(perms.clone()),
         ),
         budget: budget_enforcer.clone(),
+        // The parked restore target has not yet been authenticated or selected.
+        session_origin: None,
     };
 
     // MEM-1 ACTIVATION on mobile — the same gate as desktop,
@@ -3493,17 +3544,20 @@ fn build_mobile_engine_on_worker(
     // event is filtered/reclassified by the same connection-scoped lifecycle
     // listener used by the eventual handle.
     let active_cancel: Arc<Mutex<Option<Arc<ActiveTurn>>>> = Arc::new(Mutex::new(None));
-    let durable_turns = Arc::new(DurableTurnStore::new(lingxi_home.join("mobile-turns")));
+    let durable_turns = DurableTurnStore::open_shared(lingxi_home.join("mobile-turns"))
+        .map_err(|error| MobileEngineError::Internal(format!("open mobile turn store: {error}")))?;
     // Taken before the wrap: the gate below is what a connection-scoped notice
     // has to get past, so it cannot be reached through the wrapped listener.
     let connection_sink = ListenerSink::arc(listener.clone());
     let media_agent_handoffs = Arc::new(MobileMediaAgentHandoffQueue::default());
+    let cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
     let lifecycle_listener: Arc<dyn ClientEventListener> =
         Arc::new(TurnLifecycleListener::new_durable_with_media_handoffs(
             listener,
             active_cancel.clone(),
             durable_turns.clone(),
             media_agent_handoffs.clone(),
+            Some(cancel_reason.clone()),
         ));
 
     // `build_mobile` is async; drive it on the owned runtime so any spawned work
@@ -3521,6 +3575,16 @@ fn build_mobile_engine_on_worker(
             Some(media_agent_handoffs),
         ))
         .map_err(|e| MobileEngineError::Internal(e.to_string()))?;
+    let mod_connection = connection_sink.clone();
+    inner
+        .orchestrator
+        .set_mod_session_event_output_factory(Arc::new(move |origin| {
+            let sink: Arc<dyn ClientEventSink> = Arc::new(MobileModSessionEventSink {
+                connection: mod_connection.clone(),
+                origin,
+            });
+            Arc::new(AdapterOutputStream::new(sink)) as Arc<dyn OutputStream>
+        }));
     let initial_session_key = runtime.block_on(async {
         inner
             .orchestrator
@@ -3597,9 +3661,14 @@ fn build_mobile_engine_on_worker(
             loop_state: loop_state.clone(),
             durable_turns: durable_turns.clone(),
             active_session_uuid: inner.active_session_uuid.clone(),
+            active_turn: Some(active_cancel.clone()),
         }));
-    let cancel_reason = orchestrator::prompt::mid_turn_input::CancelReasonFlag::new();
     inner.orchestrator.set_cancel_reason(cancel_reason.clone());
+    inner
+        .orchestrator
+        .set_tool_dispatch_recovery_guard(Arc::new(|| {
+            Err("mobile tool dispatch has no turn ownership context".into())
+        }));
     runtime.block_on({
         let message_queue = message_queue.clone();
         let cancel_reason = cancel_reason.clone();
@@ -3661,11 +3730,14 @@ fn build_mobile_engine_on_worker(
                             .is_empty()
                         && !lingxi_core::host::env::background_tasks_disabled()
                     {
-                        registry
-                            .background_all_tasks_with_reason(
+                        let outcome = registry
+                            .background_all_tasks_with_outcome(
                                 lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
                             )
                             .await;
+                        if outcome.capture_unknown || outcome.unknown != 0 {
+                            tracing::warn!(unknown = outcome.unknown, capture_unknown = outcome.capture_unknown, "mobile: unable to confirm background transitions");
+                        }
                         continue;
                     }
                     let notifications = registry.has_pending_task_notifications_for(None).await;
@@ -3803,7 +3875,6 @@ fn build_mobile_engine_on_worker(
                                         checkpoint.queue_delivery,
                                         crate::mobile::turn_durability::QueueDeliveryState::Pending
                                             | crate::mobile::turn_durability::QueueDeliveryState::CoalescedPending
-                                            | crate::mobile::turn_durability::QueueDeliveryState::CoalescedClaimed
                                     ) => Some((checkpoint, inputs)),
                             Ok((checkpoint, _, _)) => {
                                 let stale_ids = checkpoint
@@ -3860,19 +3931,37 @@ fn build_mobile_engine_on_worker(
                     let claimed_turn_id = mobile_delivery
                         .as_ref()
                         .map(|(checkpoint, _)| checkpoint.turn_id);
+                    let live_owner = match durable_turns.reserve_live_owner(&session_id, claimed_turn_id) {
+                        Ok(owner) => owner,
+                        Err(error) => {
+                            drop(active);
+                            if let Some(command) = scheduled.clone() {
+                                message_queue.enqueue(command).await;
+                            }
+                            tracing::debug!(%session_id, %error, "mobile queued turn owner is busy");
+                            continue;
+                        }
+                    };
                     let permission_owner_id =
                         permission_gate.begin_main_turn(Some(session_id.clone()), claimed_turn_id);
-                    let turn = Arc::new(ActiveTurn::new_owned(
+                    let turn = Arc::new(ActiveTurn::with_live_owner(
                         claimed_turn_id,
                         session_id,
                         permission_owner_id,
+                        live_owner,
                     ));
+                    let turn_reason = cancel_reason.reset_and_bind();
+                    message_queue.register_owned_active_turn(
+                        turn.queue_owner.clone(),
+                        turn.cancel.clone(),
+                        Arc::new(move || {
+                            turn_reason.set(
+                                orchestrator::prompt::mid_turn_input::CancelReason::QueueNowCommand,
+                            );
+                        }),
+                    );
                     *active = Some(turn.clone());
                     drop(active);
-                    cancel_reason.reset();
-                    message_queue
-                        .register_active_turn(turn.cancel.clone())
-                        .await;
                     message_output.reset_message_buffer().await;
                     if mobile_delivery.is_some() {
                         if let Err(error) = super::ensure_mobile_session_identity(
@@ -3884,17 +3973,11 @@ fn build_mobile_engine_on_worker(
                         .await
                         {
                             let mut active = active_cancel.lock().await;
-                            if active
-                                .as_ref()
-                                .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
-                            {
-                                *active = None;
-                            }
+                            release_active_turn(&mut active, &message_queue, &turn);
                             drop(active);
                             if let Some(owner_id) = turn.permission_owner_id {
                                 permission_gate.end_main_turn(owner_id);
                             }
-                            message_queue.clear_active_turn().await;
                             turn.mark_completed();
                             if let Some(command) = scheduled.clone() {
                                 message_queue.enqueue(command).await;
@@ -3913,7 +3996,7 @@ fn build_mobile_engine_on_worker(
                             .as_ref()
                             .map(|(checkpoint, _)| checkpoint.turn_id)
                             .expect("mobile delivery has a checkpoint");
-                        match durable_turns.claim_pending(&turn.session_id, claim_id) {
+                        match durable_turns.with_no_pending_admission(&turn.session_id, claim_id, || durable_turns.claim_pending(&turn.session_id, claim_id)) {
                             Ok(checkpoint) => {
                                 if let Some((loaded, _)) = mobile_delivery.as_mut() {
                                     *loaded = checkpoint.clone();
@@ -3925,6 +4008,15 @@ fn build_mobile_engine_on_worker(
                                 client::adapter::TurnEventEmitter::new(sink.clone())
                                     .emit_turn_started(Some(checkpoint.turn_id))
                                     .await;
+                            }
+                            Err(crate::mobile::turn_durability::DurableTurnStoreError::PendingAdmission { .. }) => {
+                                let mut active = active_cancel.lock().await;
+                                release_active_turn(&mut active, &message_queue, &turn);
+                                drop(active);
+                                if let Some(owner_id) = turn.permission_owner_id { permission_gate.end_main_turn(owner_id); }
+                                turn.mark_completed();
+                                if let Some(command) = scheduled.clone() { message_queue.enqueue(command).await; }
+                                continue;
                             }
                             Err(crate::mobile::turn_durability::DurableTurnStoreError::Terminal { .. })
                             | Err(crate::mobile::turn_durability::DurableTurnStoreError::NotFound { .. }) => {
@@ -3940,33 +4032,21 @@ fn build_mobile_engine_on_worker(
                                 )
                                 .await;
                                 let mut active = active_cancel.lock().await;
-                                if active
-                                    .as_ref()
-                                    .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
-                                {
-                                    *active = None;
-                                }
+                                release_active_turn(&mut active, &message_queue, &turn);
                                 drop(active);
                                 if let Some(owner_id) = turn.permission_owner_id {
                                     permission_gate.end_main_turn(owner_id);
                                 }
-                                message_queue.clear_active_turn().await;
                                 turn.mark_completed();
                                 continue;
                             }
                             Err(error) => {
                                 let mut active = active_cancel.lock().await;
-                                if active
-                                    .as_ref()
-                                    .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
-                                {
-                                    *active = None;
-                                }
+                                release_active_turn(&mut active, &message_queue, &turn);
                                 drop(active);
                                 if let Some(owner_id) = turn.permission_owner_id {
                                     permission_gate.end_main_turn(owner_id);
                                 }
-                                message_queue.clear_active_turn().await;
                                 turn.mark_completed();
                                 if let Some(command) = scheduled.clone() {
                                     message_queue.enqueue(command).await;
@@ -4065,11 +4145,16 @@ fn build_mobile_engine_on_worker(
                     );
                     let scheduler = loop_scheduler.clone();
                     let reason = cancel_reason.clone();
+                    let recovery_guard = task_turn.tool_recovery_guard(durable_turns.clone());
+                    let scope_orch = orch.clone();
+                    let origin = Arc::downgrade(&task_turn);
                     // The turn task embeds the streaming + Mod lifecycle state
                     // machine. Box it at the spawn boundary so the worker does
                     // not materialize the full queued-turn future inline while
                     // creating the Tokio task.
                     let task = tokio::spawn(Box::pin(async move {
+                        super::MOBILE_TURN_ORIGIN.scope(origin, async move {
+                        scope_orch.with_tool_dispatch_recovery_guard(recovery_guard, async move {
                         let result = if let Some((_, inputs)) = mobile_delivery {
                             orch.run_queued_prompt_batch(inputs, task_turn.cancel.clone()).await
                         } else {
@@ -4126,9 +4211,7 @@ fn build_mobile_engine_on_worker(
                             }
                         };
                         if let Err(error) = result {
-                            message_output.reset_message_buffer().await;
-                            sink.emit(client::adapter::map_orchestrator_error(&error))
-                                .await;
+                            report_owned_turn_error(&orch, &task_turn, &sink, &message_output, &error).await;
                         }
                         settle_mobile_loop_turn(
                             &orch,
@@ -4139,18 +4222,14 @@ fn build_mobile_engine_on_worker(
                         )
                         .await;
                         let mut active = active_cancel.lock().await;
-                        if active
-                            .as_ref()
-                            .is_some_and(|owner| Arc::ptr_eq(owner, &task_turn))
-                        {
-                            *active = None;
-                        }
+                        release_active_turn(&mut active, &message_queue, &task_turn);
                         drop(active);
                         if let Some(owner_id) = task_turn.permission_owner_id {
                             permission_gate.end_main_turn(owner_id);
                         }
-                        message_queue.clear_active_turn().await;
                         task_turn.mark_completed();
+                        }).await;
+                        }).await;
                     }));
                     turn.set_task_handle(task);
                 }
@@ -4190,6 +4269,7 @@ fn build_mobile_engine_on_worker(
         active_cancel,
         message_queue,
         loop_transition,
+        pending_submissions: Arc::new(StdMutex::new(Vec::new())),
         cancel_reason,
         ask_user_question_broker,
         durable_turns,

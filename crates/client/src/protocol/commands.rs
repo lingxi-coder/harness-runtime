@@ -6,10 +6,9 @@
 //! `ConversationOrchestrator` in place on New/Resume. **`session_id` is a
 //! CONNECTION ATTRIBUTE** — it is carried in the [`SessionStarted`] /
 //! [`SessionResumed`] events ([`crate::protocol::events::ClientEvent`]), NOT as a
-//! per-live-command param. The ONE allowed occurrence is
-//! [`ClientCommand::ResumeSession`], which NAMES a target session to resume;
-//! the `no_live_command_carries_session_id` test in
-//! `tests/commands_test.rs` enforces this lock structurally.
+//! per-live-command param. [`ClientCommand::ResumeSession`] names a target
+//! session to resume. Mobile durable-turn commands carry their expected owner
+//! as a fence; they do not themselves switch sessions.
 //!
 //! **Explicitly NOT commands** (client-local; the adapter does not back them,
 //! decision per plan line 171) — these are intentionally absent from the
@@ -281,8 +280,13 @@ define_client_command! {
     // ── Turn driving ──────────────────────────────────────────────────────
     // Submit a user prompt to drive a turn. Carries the text, an optional
     // [`PromptModeDto`], inline image bytes (decision §0.8), and an optional
-    // client turn correlator. Carries NO `session_id` (decision §0.5).
+    // client turn correlator. Mobile main-conversation callers must also
+    // supply the owner captured when the user submitted the prompt.
     SendPrompt {
+        // Captured session owner, or None for transports whose connection or
+        // side-chat routing supplies the owner independently.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         // The user prompt text.
         text: ClientTextDto,
         // Optional prompt-input mode. Skipped from the wire when `None`.
@@ -304,9 +308,14 @@ define_client_command! {
         visualization_context: Option<crate::protocol::message::VisualizationRefDto>,
     },
 
-    // Cancel the in-flight turn. The optional `turn_id` narrows the cancel to
-    // a specific turn; `None` cancels the current one.
+    // Cancel the in-flight turn. Mobile main-conversation clients must provide
+    // the captured session owner, even for a current-turn cancel. Other
+    // connection types may use None for their own current connection or side
+    // chat semantics. The optional `turn_id` narrows the cancel to one turn.
     Cancel {
+        // Expected session owner, or None for connection-scoped cancellation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         // Optional turn correlator to cancel. Skipped when `None`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<u64>,
@@ -426,6 +435,9 @@ define_client_command! {
     // [`crate::protocol::events::ClientEvent::SlashCommandResult`]; prompt-expanding
     // commands reuse `turn_id` for the ordinary turn stream.
     RunSlashCommand {
+        // Captured session owner, or None for independently scoped transports.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
         // The raw command line (e.g. `"/model opus"`), leading `/` included.
         raw: ClientTextDto,
         // Ordered inline image attachments supplied with this slash command.
@@ -709,28 +721,38 @@ define_client_command! {
         // Terminal operation outcome, including structured errors.
         result: AudioOperationResultDto,
     },
-    // Reattach a mobile client to a durable turn on the connection's active
-    // session. The engine first emits the current recovery snapshot and then
-    // replays events whose sequence is greater than `after_sequence`.
+    // Reattach to a durable turn owned by the expected active session. Each
+    // attempt must use a fresh request id; the host validates it is nonempty
+    // and at most 128 UTF-8 bytes and echoes it without modification. The
+    // host emits a matching TurnAttachStarted, retained events after the
+    // cursor, and TurnAttachFinished in order under the turn delivery gate.
     AttachTurn {
+        // Expected session owner; does not switch the connection's session.
+        session_id: String,
         // Stable client turn id originally supplied to [`Self::SendPrompt`].
         turn_id: u64,
-        // Last event sequence the client durably observed. `None` requests the
-        // full retained event window.
+        // Last event sequence actually projected by the client. `None`
+        // requests the full retained event window.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         after_sequence: Option<u64>,
+        // Unique opaque correlation id for this attempt.
+        request_id: String,
     },
 
     // Resume a checkpointed durable turn when its recovery policy allows it.
     // Unsafe or permission-bound checkpoints remain `waiting_for_user` rather
     // than silently replaying external side effects.
     ResumeTurn {
+        // Expected active session owner; this does not switch sessions.
+        session_id: String,
         // Stable client turn id to resume on the active session.
         turn_id: u64,
     },
 
     // Persist a platform-lease expiration without converting it to cancel.
     PauseTurn {
+        // Expected active session owner; this does not switch sessions.
+        session_id: String,
         // Stable client turn id to pause on the active session.
         turn_id: u64,
         // Machine-readable platform reason such as `background_time_expired`.
@@ -929,6 +951,14 @@ define_client_command! {
     UpdateMediaSessionModes {
         modes: Vec<MediaSessionModeDto>,
     },
+    // Inspect one queued mobile turn without executing or resuming it. The
+    // request id follows AttachTurn's nonempty, 128-byte maximum contract.
+    // The host replies with a session/turn/request-correlated status.
+    QueryQueuedTurn {
+        session_id: String,
+        turn_id: u64,
+        request_id: String,
+    },
 }
 
 impl From<ClientCommandWire> for ClientCommand {
@@ -963,19 +993,27 @@ impl From<ClientCommandWire> for ClientCommand {
             ClientCommandWire::StopRealtimeAudio => Self::StopRealtimeAudio,
             ClientCommandWire::GetAudioSessionContext => Self::GetAudioSessionContext,
             ClientCommandWire::SendPrompt {
+                session_id,
                 text,
                 prompt_mode,
                 images,
                 turn_id,
                 visualization_context,
             } => Self::SendPrompt {
+                session_id,
                 text,
                 prompt_mode,
                 images,
                 turn_id,
                 visualization_context,
             },
-            ClientCommandWire::Cancel { turn_id } => Self::Cancel { turn_id },
+            ClientCommandWire::Cancel {
+                session_id,
+                turn_id,
+            } => Self::Cancel {
+                session_id,
+                turn_id,
+            },
             ClientCommandWire::ApprovePermission {
                 request_id,
                 response,
@@ -1033,10 +1071,12 @@ impl From<ClientCommandWire> for ClientCommand {
             ClientCommandWire::SetModel { model } => Self::SetModel { model },
             ClientCommandWire::ListModels => Self::ListModels,
             ClientCommandWire::RunSlashCommand {
+                session_id,
                 raw,
                 images,
                 turn_id,
             } => Self::RunSlashCommand {
+                session_id,
                 raw,
                 images,
                 turn_id,
@@ -1123,14 +1163,32 @@ impl From<ClientCommandWire> for ClientCommand {
                 Self::AudioResponse { identity, result }
             }
             ClientCommandWire::AttachTurn {
+                session_id,
                 turn_id,
                 after_sequence,
+                request_id,
             } => Self::AttachTurn {
+                session_id,
                 turn_id,
                 after_sequence,
+                request_id,
             },
-            ClientCommandWire::ResumeTurn { turn_id } => Self::ResumeTurn { turn_id },
-            ClientCommandWire::PauseTurn { turn_id, reason } => Self::PauseTurn { turn_id, reason },
+            ClientCommandWire::ResumeTurn {
+                session_id,
+                turn_id,
+            } => Self::ResumeTurn {
+                session_id,
+                turn_id,
+            },
+            ClientCommandWire::PauseTurn {
+                session_id,
+                turn_id,
+                reason,
+            } => Self::PauseTurn {
+                session_id,
+                turn_id,
+                reason,
+            },
             ClientCommandWire::SetTypescriptLspMode { mode } => Self::SetTypescriptLspMode { mode },
             ClientCommandWire::ForkSession {
                 session_id,
@@ -1307,6 +1365,15 @@ impl From<ClientCommandWire> for ClientCommand {
             ClientCommandWire::UpdateMediaSessionModes { modes } => {
                 Self::UpdateMediaSessionModes { modes }
             }
+            ClientCommandWire::QueryQueuedTurn {
+                session_id,
+                turn_id,
+                request_id,
+            } => Self::QueryQueuedTurn {
+                session_id,
+                turn_id,
+                request_id,
+            },
         }
     }
 }
@@ -1414,6 +1481,7 @@ impl<'de> Deserialize<'de> for ClientCommand {
             // tokens directly so serde's internally-tagged Content buffer
             // cannot normalize isolated UTF-16 surrogates first.
             "send_prompt" => Ok(Self::SendPrompt {
+                session_id: command_raw_optional(&mut fields, "session_id")?,
                 text: command_raw_required(&mut fields, "text")?,
                 prompt_mode: command_raw_optional(&mut fields, "prompt_mode")?,
                 images: command_raw_required(&mut fields, "images")?,
@@ -1421,6 +1489,7 @@ impl<'de> Deserialize<'de> for ClientCommand {
                 visualization_context: command_raw_optional(&mut fields, "visualization_context")?,
             }),
             "run_slash_command" => Ok(Self::RunSlashCommand {
+                session_id: command_raw_optional(&mut fields, "session_id")?,
                 raw: command_raw_required(&mut fields, "raw")?,
                 images: command_raw_required(&mut fields, "images")?,
                 turn_id: command_raw_optional(&mut fields, "turn_id")?,

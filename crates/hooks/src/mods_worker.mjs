@@ -8,6 +8,9 @@ import { ClientSurfaceManager } from './mod_ui_client_worker.mjs';
 import { decodeModsIpcFrame, encodeModsIpcFrame } from './mods_ipc_codec.mjs';
 
 const registrations = [];
+// Increment in the same JS turn as every registration-table mutation. Strict
+// host requests capture this value from this worker, not the delayed Rust mirror.
+let registrationVersion = 0;
 const pendingCore = new Map();
 const pendingStreamCore = new Map();
 const activeStreams = new Map();
@@ -3371,6 +3374,7 @@ async function load(message) {
   uiStorageEpochs.set(storageId, randomUUID());
   uiPressCounters.set(storageId, 0);
   registrations.push(...pending);
+  registrationVersion++;
   await registerApiCallersWithHost(message, pending);
   if (pending.some(item => item.event === 'ui.render' || item.event === 'ui.resolve')) {
     await resolveUiElementsForStorage(
@@ -3390,6 +3394,10 @@ async function load(message) {
 
 async function dispatch(message) {
   if (cancelledRequests.has(message.id)) throw new Error('dispatch cancelled');
+  if (message.ownedRegistrationVersion !== undefined
+      && message.ownedRegistrationVersion !== registrationVersion) {
+    throw new Error('owned host Mod registrations changed before dispatch');
+  }
   let uiRenderContext;
   let uiPressActionAvailable = true;
   let uiInputSelectActionAvailable = true;
@@ -4502,6 +4510,12 @@ async function processMessage(message) {
       send({ id: message.id, kind: 'discarded' });
     }
     else if (message.kind === 'load') await load(message);
+    else if (message.kind === 'host.registration.snapshot') {
+      send({ id: message.id, kind: 'host.registration.snapshot.result',
+        version: registrationVersion,
+        canInvokeTools: registrations.some(item =>
+          selectsEvent(item.event, 'tool.call') || selectsEvent(item.event, 'tool.check')) });
+    }
     else if (message.kind === 'dispatch') await dispatch(message);
     else if (message.kind === 'stream.dispatch') await dispatchStream(message);
     else if (message.kind === 'ui.listener') {
@@ -4538,6 +4552,7 @@ async function processMessage(message) {
       for (let i = registrations.length - 1; i >= 0; i--) {
         if (registrations[i].storageId === message.storageId) registrations.splice(i, 1);
       }
+      registrationVersion++;
       for (const key of resolvedUiElements.keys()) {
         if (key.startsWith(`${message.storageId}\u0000`)) resolvedUiElements.delete(key);
       }

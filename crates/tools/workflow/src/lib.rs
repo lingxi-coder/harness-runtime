@@ -128,6 +128,9 @@ pub struct WorkflowLaunchSpec {
     /// launch time; mobile UI resumes set it so a concurrent session switch
     /// cannot retarget the run. The value is always a canonical bare UUID.
     pub session_uuid: Option<String>,
+    /// Host-captured session generation for agents launched by this workflow.
+    /// Kept in memory only; it is never derived from the workflow script.
+    pub session_origin: Option<Arc<dyn lingxi_core::host::subagent_spawn::SessionOriginCapability>>,
     /// Originating Workflow tool-use id for the terminal task notification.
     pub tool_use_id: Option<String>,
     /// Whether the Workflow call came from a subagent context.
@@ -1350,6 +1353,7 @@ impl WorkflowTool {
             args: input.subprojection("/args").ok(),
             resume_from_run_id: string_field("resumeFromRunId")?,
             session_uuid: None,
+            session_origin: None,
             tool_use_id: None,
             launched_from_subagent: false,
             creator_teammate_name: None,
@@ -1939,7 +1943,10 @@ impl Tool for WorkflowTool {
         // owning session at this boundary so later `agent()` calls continue
         // to use the original session-scoped budget after a clear/resume or
         // model/router change.
-        if let Some(session) = ctx.session.as_ref() {
+        spec.session_origin = ctx.session_origin.clone();
+        if let Some(origin) = spec.session_origin.as_ref() {
+            spec.session_uuid = Some(origin.session_id().as_uuid().to_string());
+        } else if let Some(session) = ctx.session.as_ref() {
             // WorkflowLaunchSpec is a host boundary: desktop/mobile task
             // launchers use the bare UUID for transcript directory identity.
             spec.session_uuid = Some(session.lock().await.session_id.as_uuid().to_string());

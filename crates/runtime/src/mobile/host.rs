@@ -1177,6 +1177,7 @@ pub struct MobileEngineHandle {
     /// prompts enter at `Next` and are consumed inside the existing turn loop.
     message_queue: Arc<msgqueue::MessageQueueManager>,
     loop_transition: Arc<Mutex<()>>,
+    pending_submissions: Arc<StdMutex<Vec<Arc<PendingSubmission>>>>,
     cancel_reason: orchestrator::prompt::mid_turn_input::CancelReasonFlag,
     /// Correlates interactive `AskUserQuestion` events with inbound answers.
     ask_user_question_broker: Arc<client::adapter::AskUserQuestionBroker>,
@@ -1368,15 +1369,19 @@ impl Drop for MobileEngineHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let active_turn = self
-            .active_cancel
-            .try_lock()
-            .ok()
-            .and_then(|active| active.clone());
-        if let Some(turn) = active_turn.as_ref() {
-            turn.cancel.cancel();
-        }
+        let active_turn = self.active_cancel.try_lock().ok().and_then(|active| {
+            active.as_ref().map(|turn| {
+                if matches!(
+                    turn.try_request_lifecycle_quiesce(&self.cancel_reason),
+                    Some(false)
+                ) {
+                    turn.cancel.cancel();
+                }
+                turn.clone()
+            })
+        });
         let active_cancel = self.active_cancel.clone();
+        let cancel_reason = self.cancel_reason.clone();
         let media_service = self.inner.media_service.clone();
         let media_agent_handoffs = self.inner.media_agent_handoffs.clone();
         let lsp_registry = self.inner.lsp_registry.clone();
@@ -1392,14 +1397,22 @@ impl Drop for MobileEngineHandle {
             let active_turn = match active_turn {
                 Some(turn) => Some(turn),
                 None => tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                    active_cancel.lock().await.clone()
+                    let active = active_cancel.lock().await;
+                    active.as_ref().map(|turn| {
+                        if !turn.request_lifecycle_quiesce(&cancel_reason) {
+                            turn.cancel.cancel();
+                        }
+                        turn.clone()
+                    })
                 })
                 .await
                 .ok()
                 .flatten(),
             };
             if let Some(turn) = active_turn {
-                turn.cancel.cancel();
+                if !turn.request_lifecycle_quiesce(&cancel_reason) {
+                    turn.cancel.cancel();
+                }
                 if tokio::time::timeout(crate::media_handoff::CLEANUP_BUDGET, turn.wait_completed())
                     .await
                     .is_err()
@@ -2346,6 +2359,103 @@ impl cron::scheduler::SessionCronDelivery for MobileWakeupDelivery {
 /// passes `5`).
 const DEFAULT_SESSION_LIST_LIMIT: usize = 5;
 
+/// One received command awaiting its admission result. The registry contains
+/// only real submissions, so an unknown Cancel cannot create a tombstone.
+struct PendingSubmission {
+    session_id: String,
+    turn_id: u64,
+    shared_lease: StdMutex<Option<crate::mobile::turn_durability::PendingAdmissionLease>>,
+    cancel_requested: AtomicBool,
+    suppressed: AtomicBool,
+    cancel_without_checkpoint: AtomicBool,
+    local_command_started: AtomicBool,
+    owner: StdMutex<Option<std::sync::Weak<ActiveTurn>>>,
+    result: StdMutex<Option<Result<(), ClientError>>>,
+    finished: Notify,
+    #[cfg(test)]
+    test_stage: std::sync::atomic::AtomicU8,
+    #[cfg(test)]
+    owner_barrier: StdMutex<Option<(Arc<Notify>, Arc<Notify>)>>,
+}
+
+impl PendingSubmission {
+    fn new(
+        session_id: String,
+        turn_id: u64,
+        shared_lease: crate::mobile::turn_durability::PendingAdmissionLease,
+    ) -> Self {
+        Self {
+            session_id,
+            turn_id,
+            shared_lease: StdMutex::new(Some(shared_lease)),
+            cancel_requested: AtomicBool::new(false),
+            suppressed: AtomicBool::new(false),
+            cancel_without_checkpoint: AtomicBool::new(false),
+            local_command_started: AtomicBool::new(false),
+            owner: StdMutex::new(None),
+            result: StdMutex::new(None),
+            finished: Notify::new(),
+            #[cfg(test)]
+            test_stage: std::sync::atomic::AtomicU8::new(0),
+            #[cfg(test)]
+            owner_barrier: StdMutex::new(None),
+        }
+    }
+
+    fn bind_owner(&self, owner: &Arc<ActiveTurn>) {
+        *self.owner.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::downgrade(owner));
+    }
+
+    fn complete(&self, result: Result<(), ClientError>) {
+        let mut slot = self.result.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.is_none() {
+            *slot = Some(result);
+            // Once admission and its cleanup are finished, observers may retain
+            // this object while waiting for the result without fencing the store.
+            self.shared_lease
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+        }
+        drop(slot);
+        self.finished.notify_waiters();
+    }
+
+    async fn wait(&self) -> Result<(), ClientError> {
+        loop {
+            let notified = self.finished.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if let Some(result) = self
+                .result
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+            {
+                return result;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct PendingSubmissionGuard {
+    registry: Arc<StdMutex<Vec<Arc<PendingSubmission>>>>,
+    pending: Arc<PendingSubmission>,
+}
+
+impl Drop for PendingSubmissionGuard {
+    fn drop(&mut self) {
+        self.pending.complete(Err(ClientError::Internal {
+            message: "pending mobile submission terminated before admission".into(),
+        }));
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|item| !Arc::ptr_eq(item, &self.pending));
+    }
+}
+
 /// Connection-scoped ownership record for one streamed turn.
 struct ActiveTurn {
     /// Optional client correlator supplied by `SendPrompt`. `Cancel(Some(id))`
@@ -2354,21 +2464,46 @@ struct ActiveTurn {
     turn_id: Option<u64>,
     /// Stable session captured when the owner slot was reserved.
     session_id: String,
+    /// Shared across handles; clones travel with tool work that can outlive
+    /// the primary turn task.
+    live_owner: Option<crate::mobile::turn_durability::LiveTurnOwnerLease>,
     permission_owner_id: Option<u64>,
     cancel: CancellationToken,
+    /// Linearizes synchronous side-effect admission with lifecycle stop.
+    admission: StdMutex<()>,
+    queue_owner: Arc<()>,
+    /// Members actually claimed by this live owner during its mid-turn drain.
+    /// Durable batch metadata alone does not identify the active parent.
+    mid_turn_members: StdMutex<std::collections::HashSet<u64>>,
     task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     completed: AtomicBool,
     /// Set before asking the orchestrator to unwind for a platform pause.
     /// Unlike an explicit cancel, a quiesced turn must not surface the
     /// orchestrator's `Cancelled` outcome or any late live payloads.
     quiescing: AtomicBool,
+    /// An explicit Cancel still terminalizes a turn whose lifecycle pause won
+    /// the executor's cancellation reason first.
+    explicit_cancel_requested: AtomicBool,
     /// Set before the terminal event is forwarded to the foreign listener.
     /// Any subsequent live-turn event is stale and must be discarded.
     terminal_emitted: AtomicBool,
+    /// Emit at most one reconnect notice if ordered delivery fails closed.
+    delivery_failed: AtomicBool,
+    /// Journal persistence failed ambiguously; keep live delivery but never
+    /// advance this turn's recovery cursor again in this execution.
+    journal_degraded: AtomicBool,
+    /// A durable unsafe boundary precedes every material event delivered to
+    /// the client, including appends which have not yet reached an fsync.
+    output_recovery_fenced: AtomicBool,
     /// Ordinary terminal event held until a requested media continuation has
     /// either started or been rejected by the current turn owner.
     deferred_terminal: StdMutex<Option<ClientEvent>>,
     completion: Notify,
+}
+
+tokio::task_local! {
+    /// Captured by the actual turn task, never inferred from a later slot.
+    static MOBILE_TURN_ORIGIN: std::sync::Weak<ActiveTurn>;
 }
 
 struct MobileWakeupDelivery {
@@ -2600,6 +2735,7 @@ struct MobileMsgQueueInput {
     loop_state: Arc<tool_cron::LoopRuntime>,
     durable_turns: Arc<DurableTurnStore>,
     active_session_uuid: Arc<std::sync::Mutex<String>>,
+    active_turn: Option<Arc<Mutex<Option<Arc<ActiveTurn>>>>>,
 }
 
 #[async_trait]
@@ -2683,9 +2819,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueue
                 && owner.state.is_none()
                 && matches!(
                     owner.queue_delivery,
-                    QueueDeliveryState::Pending
-                        | QueueDeliveryState::CoalescedPending
-                        | QueueDeliveryState::CoalescedClaimed
+                    QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
                 )
             {
                 break Some((commands, owner));
@@ -2740,11 +2874,52 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueue
                 }
                 member_turn_ids
             };
-            let batch = match self
-                .durable_turns
-                .prepare_mid_turn_batch(&session_id, &member_turn_ids)
-            {
+            let active_guard = match &self.active_turn {
+                Some(active) => Some(active.lock().await),
+                None => None,
+            };
+            let origin = MOBILE_TURN_ORIGIN
+                .try_with(std::sync::Weak::upgrade)
+                .ok()
+                .flatten();
+            let live_owner = active_guard
+                .as_ref()
+                .and_then(|guard| guard.as_ref())
+                .filter(|owner| {
+                    origin
+                        .as_ref()
+                        .is_some_and(|origin| Arc::ptr_eq(owner, origin))
+                        && owner.session_id == session_id
+                        && !owner.is_quiescing()
+                        && !owner.cancel.is_cancelled()
+                });
+            if self.active_turn.is_some() && live_owner.is_none() {
+                return Ok(None);
+            }
+            // Pin the prospective members before persistence. An atomic
+            // rename may succeed even when its sync reports failure; in that
+            // case a subsequent Stop must still find this exact live owner.
+            // The route additionally checks the durable batch, so a failed
+            // write that never claimed anything cannot misroute a Stop.
+            if let Some(owner) = live_owner {
+                owner
+                    .mid_turn_members
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .extend(member_turn_ids.iter().copied());
+            }
+            let batch_result = self.durable_turns.with_no_pending_admissions(
+                &session_id,
+                &member_turn_ids,
+                || {
+                    self.durable_turns
+                        .prepare_mid_turn_batch(&session_id, &member_turn_ids)
+                },
+            );
+            drop(active_guard);
+            let batch = match batch_result {
                 Ok(batch) => batch,
+                Err(DurableTurnStoreError::PendingAdmission { .. }) => return Ok(None),
                 Err(DurableTurnStoreError::Terminal { .. })
                 | Err(DurableTurnStoreError::NotFound { .. }) => {
                     // A cancellation can win before the owner envelope is
@@ -2860,20 +3035,56 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueue
     async fn input_consumed(
         &self,
         inputs: &[orchestrator::prompt::mid_turn_input::MidTurnInput],
-    ) -> Result<(), String> {
+    ) -> Result<(), orchestrator::prompt::mid_turn_input::MidTurnConsumptionError> {
         let Some(identity) = inputs
             .iter()
             .find_map(|input| input.pending_prompt_identity.as_ref())
         else {
             return Ok(());
         };
+        #[cfg(test)]
+        if let Some((entered, release)) = self.durable_turns.take_midturn_ack_barrier() {
+            entered.notify_one();
+            release.notified().await;
+        }
+        // Serialize the durable acknowledgement with cancellation of this
+        // exact producer. A stopped owner must not turn an uncertain batch
+        // back into a replayable one after the cancellation fence is written.
+        let active = match &self.active_turn {
+            Some(active) => Some(active.lock().await),
+            None => None,
+        };
+        if let Some(active) = &active {
+            let origin = MOBILE_TURN_ORIGIN
+                .try_with(std::sync::Weak::upgrade)
+                .ok()
+                .flatten();
+            let matches = active.as_ref().is_some_and(|owner| {
+                origin
+                    .as_ref()
+                    .is_some_and(|origin| Arc::ptr_eq(owner, origin))
+                    && owner.session_id == identity.session_id
+                    && !owner.is_quiescing()
+                    && !owner.cancel.is_cancelled()
+            });
+            if !matches {
+                return Err(
+                    orchestrator::prompt::mid_turn_input::MidTurnConsumptionError::Interrupted,
+                );
+            }
+        }
         self.durable_turns
             .acknowledge_mid_turn_batch(
                 &identity.session_id,
                 identity.owner_turn_id,
                 &identity.member_turn_ids,
             )
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                orchestrator::prompt::mid_turn_input::MidTurnConsumptionError::Failure(
+                    error.to_string(),
+                )
+            })?;
+        drop(active);
         let command_ids = identity
             .member_turn_ids
             .iter()
@@ -2886,30 +3097,42 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for MobileMsgQueue
     }
 }
 
+struct MobileBashExecution {
+    result: DurableBashResult,
+    interrupted: bool,
+}
+
 async fn execute_mobile_bash_tool(
     orchestrator: &ConversationOrchestrator,
     command: &Utf16JsonProjection,
     cancellation: CancellationToken,
-) -> DurableBashResult {
+) -> MobileBashExecution {
     let result = orchestrator
         .call_direct_bash_from_host(command.clone(), cancellation)
         .await;
     let result = match result {
         Ok(result) => result,
         Err(tool_api::ToolError::Aborted) => {
-            return DurableBashResult {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: 130,
+            return MobileBashExecution {
+                result: DurableBashResult {
+                    stdout: String::new(),
+                    stderr: "The shell command was interrupted before a result was available."
+                        .into(),
+                    exit_code: 130,
+                    interrupted: false,
+                },
                 interrupted: true,
             };
         }
         Err(error) => {
             let message = error.model_facing_message();
-            return DurableBashResult {
-                stdout: String::new(),
-                stderr: message.string_at("").unwrap_or_default().to_owned(),
-                exit_code: 1,
+            return MobileBashExecution {
+                result: DurableBashResult {
+                    stdout: String::new(),
+                    stderr: message.string_at("").unwrap_or_default().to_owned(),
+                    exit_code: 1,
+                    interrupted: false,
+                },
                 interrupted: false,
             };
         }
@@ -2917,6 +3140,10 @@ async fn execute_mobile_bash_tool(
     let payload = result.data;
     let stdout = payload.string_at("/stdout").unwrap_or_default().to_owned();
     let mut stderr = payload.string_at("/stderr").unwrap_or_default().to_owned();
+    let interrupted = payload
+        .at_pointer("/interrupted")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
     let is_error = result.is_error
         || payload
             .at_pointer("/is_error")
@@ -2930,11 +3157,17 @@ async fn execute_mobile_bash_tool(
     if is_error && stderr.is_empty() {
         stderr = "mobile Shell command failed".into();
     }
-    DurableBashResult {
-        stdout,
-        stderr,
-        exit_code,
-        interrupted: false,
+    MobileBashExecution {
+        result: DurableBashResult {
+            stdout,
+            stderr,
+            exit_code,
+            // Only an explicit user cancellation is projected as the Native
+            // user-interruption row. A Shell timeout also sets its payload's
+            // interrupted bit, but must retain its partial output instead.
+            interrupted: false,
+        },
+        interrupted,
     }
 }
 
@@ -3095,12 +3328,20 @@ impl ActiveTurn {
         Self {
             turn_id,
             session_id: String::new(),
+            live_owner: None,
             permission_owner_id: None,
             cancel: CancellationToken::new(),
+            admission: StdMutex::new(()),
+            queue_owner: Arc::new(()),
+            mid_turn_members: StdMutex::new(std::collections::HashSet::new()),
             task: StdMutex::new(None),
             completed: AtomicBool::new(false),
             quiescing: AtomicBool::new(false),
+            explicit_cancel_requested: AtomicBool::new(false),
             terminal_emitted: AtomicBool::new(false),
+            delivery_failed: AtomicBool::new(false),
+            journal_degraded: AtomicBool::new(false),
+            output_recovery_fenced: AtomicBool::new(false),
             deferred_terminal: StdMutex::new(None),
             completion: Notify::new(),
         }
@@ -3111,6 +3352,66 @@ impl ActiveTurn {
         turn.session_id = session_id;
         turn.permission_owner_id = Some(permission_owner_id);
         turn
+    }
+
+    fn with_live_owner(
+        turn_id: Option<u64>,
+        session_id: String,
+        permission_owner_id: u64,
+        live_owner: crate::mobile::turn_durability::LiveTurnOwnerLease,
+    ) -> Self {
+        let mut turn = Self::new_owned(turn_id, session_id, permission_owner_id);
+        turn.live_owner = Some(live_owner);
+        turn
+    }
+
+    fn tool_recovery_guard(
+        self: &Arc<Self>,
+        store: Arc<DurableTurnStore>,
+    ) -> orchestrator::conversation::ToolDispatchRecoveryGuard {
+        let session_id = self.session_id.clone();
+        let turn_id = self.turn_id;
+        let weak_owner = Arc::downgrade(self);
+        Arc::new(move || {
+            let owner = weak_owner
+                .upgrade()
+                .ok_or(hooks::RecoveryAdmissionError::Interrupted)?;
+            let _admission = owner
+                .admission
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let is_interrupted =
+                || owner.is_quiescing() || owner.explicit_cancel_requested.load(Ordering::Acquire);
+            if is_interrupted() {
+                return Err(hooks::RecoveryAdmissionError::Interrupted);
+            }
+            let lease = owner.live_owner.clone().ok_or_else(|| {
+                hooks::RecoveryAdmissionError::Failure("missing mobile turn owner".into())
+            })?;
+            store
+                .with_live_owner(&session_id, &lease, turn_id, || {
+                    if let Some(turn_id) = turn_id {
+                        store.mark_tool_dispatch_unsafe(&session_id, turn_id)?;
+                    }
+                    Ok(())
+                })
+                .map_err(|error| {
+                    if is_interrupted() {
+                        hooks::RecoveryAdmissionError::Interrupted
+                    } else {
+                        hooks::RecoveryAdmissionError::Failure(format!(
+                            "could not persist tool recovery boundary: {error}"
+                        ))
+                    }
+                })?;
+            let work = lease.detached_work_lease();
+            Ok(Some(
+                orchestrator::conversation::ToolDispatchRecoveryLeases {
+                    execution: Arc::new(lease),
+                    turn_work: Arc::new(work),
+                },
+            ))
+        })
     }
 
     fn set_task_handle(&self, handle: tokio::task::JoinHandle<()>) {
@@ -3165,6 +3466,43 @@ impl ActiveTurn {
         self.cancel.cancel();
     }
 
+    /// Called while holding the active-owner lock. The first cancellation
+    /// source determines whether a later lifecycle request may quiesce it.
+    fn request_lifecycle_quiesce(
+        &self,
+        reason: &orchestrator::prompt::mid_turn_input::CancelReasonFlag,
+    ) -> bool {
+        let _admission = self
+            .admission
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        self.request_lifecycle_quiesce_locked(reason)
+    }
+
+    fn try_request_lifecycle_quiesce(
+        &self,
+        reason: &orchestrator::prompt::mid_turn_input::CancelReasonFlag,
+    ) -> Option<bool> {
+        let _admission = match self.admission.try_lock() {
+            Ok(guard) => guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return None,
+        };
+        Some(self.request_lifecycle_quiesce_locked(reason))
+    }
+
+    fn request_lifecycle_quiesce_locked(
+        &self,
+        reason: &orchestrator::prompt::mid_turn_input::CancelReasonFlag,
+    ) -> bool {
+        reason.set(orchestrator::prompt::mid_turn_input::CancelReason::LifecyclePause);
+        if reason.get() == orchestrator::prompt::mid_turn_input::CancelReason::UserInterrupt {
+            return false;
+        }
+        self.request_quiesce();
+        true
+    }
+
     fn is_quiescing(&self) -> bool {
         self.quiescing.load(Ordering::Acquire)
     }
@@ -3185,6 +3523,49 @@ impl ActiveTurn {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
     }
+}
+
+/// Release the queue registration and owner slot as one synchronous decision.
+/// The caller holds the active-owner lock, never across a callback or await.
+fn release_active_turn(
+    active: &mut Option<Arc<ActiveTurn>>,
+    queue: &msgqueue::MessageQueueManager,
+    turn: &Arc<ActiveTurn>,
+) {
+    if active
+        .as_ref()
+        .is_some_and(|current| Arc::ptr_eq(current, turn))
+    {
+        queue.clear_owned_active_turn(&turn.queue_owner);
+        *active = None;
+    }
+}
+
+async fn report_owned_turn_error(
+    orchestrator: &ConversationOrchestrator,
+    turn: &Arc<ActiveTurn>,
+    sink: &Arc<dyn client::adapter::ClientEventSink>,
+    message_output: &client::adapter::AdapterOutputStream,
+    error: &orchestrator::OrchestratorError,
+) {
+    message_output.reset_message_buffer().await;
+    if matches!(error, orchestrator::OrchestratorError::RecoveryInterrupted)
+        && (turn.is_quiescing() || turn.explicit_cancel_requested.load(Ordering::Acquire))
+    {
+        if !turn.is_quiescing() && !turn.terminal_emitted.load(Ordering::Acquire) {
+            sink.emit(ClientEvent::TurnEnded {
+                outcome: TurnOutcomeDto::Cancelled,
+                stop_reason: Some("cancelled".into()),
+                cost: client::adapter::lowering::lower_cost_snapshot(
+                    &orchestrator.snapshot_cost_real().await,
+                ),
+            })
+            .await;
+        }
+        return;
+    }
+    sink.emit(client::adapter::map_orchestrator_error(error))
+        .await;
 }
 
 type PendingMediaAgentHandoff = crate::media_handoff::MediaHandoffInvocation;
@@ -3506,6 +3887,9 @@ struct TurnLifecycleListener {
     active_turn: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
     durable_turns: Option<Arc<DurableTurnStore>>,
     media_agent_handoffs: Option<Arc<MobileMediaAgentHandoffQueue>>,
+    cancel_reason: Option<orchestrator::prompt::mid_turn_input::CancelReasonFlag>,
+    #[cfg(test)]
+    fail_next_serialization: AtomicBool,
 }
 
 impl TurnLifecycleListener {
@@ -3518,6 +3902,9 @@ impl TurnLifecycleListener {
             active_turn,
             durable_turns: None,
             media_agent_handoffs: None,
+            cancel_reason: None,
+            #[cfg(test)]
+            fail_next_serialization: AtomicBool::new(false),
         }
     }
 
@@ -3531,6 +3918,9 @@ impl TurnLifecycleListener {
             active_turn,
             durable_turns: Some(durable_turns),
             media_agent_handoffs: None,
+            cancel_reason: None,
+            #[cfg(test)]
+            fail_next_serialization: AtomicBool::new(false),
         }
     }
 
@@ -3539,13 +3929,25 @@ impl TurnLifecycleListener {
         active_turn: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
         durable_turns: Arc<DurableTurnStore>,
         media_agent_handoffs: Arc<MobileMediaAgentHandoffQueue>,
+        cancel_reason: Option<orchestrator::prompt::mid_turn_input::CancelReasonFlag>,
     ) -> Self {
         Self {
             inner,
             active_turn,
             durable_turns: Some(durable_turns),
             media_agent_handoffs: Some(media_agent_handoffs),
+            cancel_reason,
+            #[cfg(test)]
+            fail_next_serialization: AtomicBool::new(false),
         }
+    }
+
+    fn serialize_journal_event(&self, event: &ClientEvent) -> Result<String, String> {
+        #[cfg(test)]
+        if self.fail_next_serialization.swap(false, Ordering::AcqRel) {
+            return Err("injected event serialization failure".into());
+        }
+        serde_json::to_string(event).map_err(|error| error.to_string())
     }
 
     fn is_live_turn_payload(event: &ClientEvent) -> bool {
@@ -3588,15 +3990,16 @@ impl TurnLifecycleListener {
     /// `turn_durability::event_requires_durable_flush` already names, plus the
     /// live-turn payloads.
     fn is_turn_journal_event(event: &ClientEvent) -> bool {
+        // Permission requests and their resolutions are connection-scoped:
+        // the request arrives through a separate sink and neither native
+        // retained-event decoder consumes the resolution. Deliver it live
+        // without taking the turn gate so a listener can resolve a request.
         Self::is_live_turn_payload(event)
             || matches!(
                 event,
                 ClientEvent::TurnStarted { .. }
                     | ClientEvent::TurnEnded { .. }
                     | ClientEvent::Error { .. }
-                    | ClientEvent::AskUserQuestion { .. }
-                    | ClientEvent::AskUserQuestionResolved { .. }
-                    | ClientEvent::PermissionRequestResolved { .. }
                     | ClientEvent::PlanUpdated { .. }
             )
     }
@@ -3605,7 +4008,55 @@ impl TurnLifecycleListener {
 #[async_trait]
 impl ClientEventListener for TurnLifecycleListener {
     async fn on_event(&self, mut event: ClientEvent) {
-        let active = self.active_turn.lock().await.clone();
+        // Acquire the shared turn gate before reserving a journal sequence.
+        // Waiting never holds the owner lock or an external callback.
+        let expected_owner = if Self::is_turn_journal_event(&event) {
+            self.active_turn.lock().await.clone()
+        } else {
+            None
+        };
+        let mut delivery_guard = if let (Some(turn), Some(store)) =
+            (expected_owner.as_ref(), self.durable_turns.as_ref())
+        {
+            match turn.turn_id.filter(|_| !turn.session_id.is_empty()) {
+                Some(turn_id) => match store.delivery_gate(&turn.session_id, turn_id) {
+                    Ok(gate) => match gate.lock().await {
+                        Ok(guard) => Some(guard),
+                        Err(error) => {
+                            tracing::error!(%error, "mobile turn event delivery failed closed");
+                            if !turn.delivery_failed.swap(true, Ordering::AcqRel) {
+                                self.inner.on_event(ClientEvent::Error {
+                                    kind: ErrorKindDto::Internal,
+                                    message: "Turn event delivery was interrupted; close the engine and reconnect to replay this turn.".into(),
+                                }).await;
+                            }
+                            return;
+                        }
+                    },
+                    Err(error) => {
+                        tracing::error!(%error, "invalid mobile turn delivery identity");
+                        return;
+                    }
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+        // Decide event ownership and commit its durable state while holding
+        // the same short-lived lock used by pause. This makes terminal
+        // admission and lifecycle quiescence mutually exclusive; the lock is
+        // released before awaiting any foreign listener callback.
+        let active_guard = self.active_turn.lock().await;
+        let active = active_guard.clone();
+        if let Some(expected) = expected_owner.as_ref() {
+            if !active
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, expected))
+            {
+                return;
+            }
+        }
         if let (Some(turn), ClientEvent::TurnEnded { .. }) = (active.as_ref(), &event) {
             let handoff_pending = self
                 .media_agent_handoffs
@@ -3675,9 +4126,12 @@ impl ClientEventListener for TurnLifecycleListener {
         };
 
         if should_forward {
+            if let Some(guard) = delivery_guard.as_mut() {
+                guard.arm();
+            }
             let durable_identity = active
                 .as_ref()
-                .filter(|turn| !turn.is_quiescing())
+                .filter(|turn| !turn.is_quiescing() && self.durable_turns.is_some())
                 .and_then(|turn| {
                     turn.turn_id
                         .filter(|_| !turn.session_id.is_empty())
@@ -3685,82 +4139,102 @@ impl ClientEventListener for TurnLifecycleListener {
                 });
             let is_recovery_event = matches!(
                 event,
-                ClientEvent::TurnRecoveryState { .. } | ClientEvent::TurnEventReplay { .. }
+                ClientEvent::TurnRecoveryState { .. }
+                    | ClientEvent::TurnEventReplay { .. }
+                    | ClientEvent::TurnEventLiveUnretained { .. }
+                    | ClientEvent::TurnAttachStarted { .. }
+                    | ClientEvent::TurnAttachFinished { .. }
+                    | ClientEvent::QueuedTurnStatus { .. }
             );
-            // The sequenced `TurnEventReplay` envelope — not the raw event — is
-            // what advances a recovery cursor. Withholding ONLY that envelope
-            // keeps the invariant "never acknowledge a sequence for an event
-            // that was never retained" while a journal failure degrades replay
-            // instead of live delivery.
-            //
-            // Suppressing the raw event too is not a disk-full edge case:
-            // `cancel_active_turn` marks the checkpoint `Cancelled` (terminal)
-            // BEFORE the executor unwinds, so on every Stop each non-terminal
-            // event the unwinding executor emits gets `Err(Terminal)` from
-            // `append_event`. The old `return` therefore dropped a completing
-            // Block tool's `ToolUseResult` on the floor — the client kept the
-            // tool "running" forever, and the journal could not recover it
-            // either. Worse, `TurnEnded` had already consumed the
-            // `terminal_emitted` latch above, so a dropped terminal silenced
-            // every later terminal event and left the client streaming with no
-            // path back to Send.
-            let retained_event = if is_recovery_event {
+            let mut delivery_failure = None;
+            let mut recovery_notice = false;
+            let outbound = if is_recovery_event {
                 None
-            } else {
-                durable_identity
-                    .filter(|_| Self::is_turn_journal_event(&event))
-                    .and_then(|(session_id, turn_id)| {
-                        let store = self.durable_turns.as_ref()?;
-                        let event_json = match serde_json::to_string(&event) {
-                            Ok(event_json) => event_json,
-                            Err(error) => {
-                                tracing::warn!(
-                                    %error,
-                                    session_id,
-                                    turn_id,
-                                    "mobile: failed to serialize turn event for durability; delivering without a replay sequence"
-                                );
-                                return None;
+            } else if let Some((session_id, turn_id)) =
+                durable_identity.filter(|_| Self::is_turn_journal_event(&event))
+            {
+                let store = self
+                    .durable_turns
+                    .as_ref()
+                    .expect("durable identity has a store");
+                let serialized = self.serialize_journal_event(&event).and_then(|json| {
+                    let turn = active.as_ref().expect("durable identity has an owner");
+                    // The existing safe-recovery rule treats TurnStarted as
+                    // the sole non-material turn event. All other output must
+                    // cross a durable unsafe fence before publication: normal
+                    // journal appends can be acknowledged before their fsync.
+                    if !matches!(event, ClientEvent::TurnStarted { .. })
+                        && !turn.output_recovery_fenced.load(Ordering::Acquire)
+                    {
+                        store
+                            .fence_observed_turn_output(session_id, turn_id)
+                            .map_err(|error| format!("turn output recovery boundary: {error}"))?;
+                        turn.output_recovery_fenced.store(true, Ordering::Release);
+                    }
+                    Ok(json)
+                });
+                match serialized {
+                    Ok(event_json) => {
+                        let turn = active.as_ref().expect("durable identity has an owner");
+                        let retained = if turn.journal_degraded.load(Ordering::Acquire) {
+                            None
+                        } else {
+                            match store.append_event(session_id, turn_id, event_json.clone()) {
+                                Ok(retained) => Some(retained),
+                                Err(error) => {
+                                    tracing::warn!(%error, session_id, turn_id, "mobile: turn event not acknowledged by journal");
+                                    if matches!(error, DurableTurnStoreError::Storage(_)) {
+                                        recovery_notice =
+                                            !turn.journal_degraded.swap(true, Ordering::AcqRel);
+                                    }
+                                    None
+                                }
                             }
                         };
-                        match store.append_event(session_id, turn_id, event_json) {
-                            Ok(retained) => Some((session_id.to_string(), turn_id, retained)),
-                            Err(error) => {
-                                tracing::warn!(%error, session_id, turn_id, "mobile: failed to checkpoint turn event; delivering without a replay sequence");
-                                None
+                        Some(match retained {
+                            Some(retained) => ClientEvent::TurnEventReplay {
+                                session_id: session_id.to_owned(),
+                                turn_id,
+                                sequence: retained.sequence,
+                                event_json: retained.event_json,
+                            },
+                            None => ClientEvent::TurnEventLiveUnretained {
+                                session_id: session_id.to_owned(),
+                                turn_id,
+                                event_json,
+                            },
+                        })
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, session_id, turn_id, "mobile: turn event delivery failed closed");
+                        if let Some(turn) = active.as_ref() {
+                            if let Some(reason) = &self.cancel_reason {
+                                turn.request_lifecycle_quiesce(reason);
+                            } else {
+                                turn.request_quiesce();
                             }
+                            turn.terminal_emitted.store(true, Ordering::Release);
+                            turn.delivery_failed.store(true, Ordering::Release);
                         }
-                    })
+                        delivery_failure = Some(error);
+                        Some(ClientEvent::Error {
+                            kind: ErrorKindDto::Internal,
+                            message: "Turn output could not be saved safely; reconnect to recover the conversation.".into(),
+                        })
+                    }
+                }
+            } else {
+                None
             };
 
             let recovery_snapshot = durable_identity.and_then(|(session_id, turn_id)| {
-                let (state, safe_to_resume, reason) = match &event {
+                let (state, safe_to_resume, reason) = if let Some(error) = &delivery_failure {
+                    (TurnRecoveryStateDto::Failed, false, Some(format!("turn_event_delivery_failed: {error}")))
+                } else { match &event {
                     ClientEvent::ToolUseStarted { .. } => (
                         TurnRecoveryStateDto::Running,
                         false,
                         Some("tool_boundary_requires_confirmation".to_string()),
-                    ),
-                    // AskUserQuestion is connection-scoped (see
-                    // `is_live_turn_payload`): a background workflow can park
-                    // on it while the conversation turn streams normally. The
-                    // forward edge is kept because a turn whose slot is held
-                    // while a question is outstanding must not auto-resume,
-                    // but it MUST have a reverse edge — the broker always
-                    // emits `AskUserQuestionResolved` on answer, cancel,
-                    // timeout, and owner unwind. Without it the turn stayed
-                    // labelled `WaitingForUser` for the rest of its life even
-                    // though it was still running.
-                    ClientEvent::AskUserQuestion { .. } => (
-                        TurnRecoveryStateDto::WaitingForUser,
-                        false,
-                        Some("waiting_for_user".to_string()),
-                    ),
-                    // `safe_to_resume` stays false: a question was asked, so
-                    // re-running the prompt is still not side-effect free.
-                    ClientEvent::AskUserQuestionResolved { .. } => (
-                        TurnRecoveryStateDto::Running,
-                        false,
-                        Some("ask_user_question_resolved".to_string()),
                     ),
                     ClientEvent::TurnEnded { outcome, .. } => match outcome {
                         TurnOutcomeDto::EndTurn => {
@@ -3780,7 +4254,7 @@ impl ClientEventListener for TurnLifecycleListener {
                         Some(message.display()),
                     ),
                     _ => return None,
-                };
+                }};
                 match self.durable_turns.as_ref()?.transition_if_live(
                     session_id,
                     turn_id,
@@ -3797,28 +4271,41 @@ impl ClientEventListener for TurnLifecycleListener {
                 }
             });
 
-            if let Some((session_id, turn_id, retained)) = retained_event {
-                self.inner.on_event(event).await;
-                // The raw event must reach reducers before the sequenced
-                // envelope is acknowledged, otherwise a crash can advance the
-                // cursor without the UI ever materializing the payload.
-                self.inner
-                    .on_event(ClientEvent::TurnEventReplay {
-                        session_id,
-                        turn_id,
-                        sequence: retained.sequence,
-                        event_json: retained.event_json,
-                    })
-                    .await;
+            drop(active_guard);
+            let inner = self.inner.clone();
+            let fail_closed = delivery_failure.is_some();
+            let deliver = async move {
+                inner.on_event(outbound.unwrap_or(event)).await;
+                if recovery_notice {
+                    inner.on_event(ClientEvent::SystemNotice {
+                        message: "Some live turn events could not be saved; reconnect to rebuild the conversation.".into(),
+                        is_error: true,
+                    }).await;
+                }
+                if let Some(snapshot) = recovery_snapshot {
+                    inner
+                        .on_event(ClientEvent::TurnRecoveryState { snapshot })
+                        .await;
+                }
+            };
+            if let Some(guard) = delivery_guard {
+                // There is no await between durable commit and spawning this
+                // completion task. A dropped producer cannot release its gate
+                // before the raw event and its replay envelope are delivered.
+                let delivery = tokio::spawn(async move {
+                    deliver.await;
+                    if !fail_closed {
+                        guard.complete();
+                    }
+                });
+                if let Err(error) = delivery.await {
+                    tracing::error!(%error, "mobile turn event callback terminated");
+                }
             } else {
-                self.inner.on_event(event).await;
-            }
-            if let Some(snapshot) = recovery_snapshot {
-                self.inner
-                    .on_event(ClientEvent::TurnRecoveryState { snapshot })
-                    .await;
+                deliver.await;
             }
         } else {
+            drop(active_guard);
             tracing::debug!("mobile: dropped stale live-turn event");
         }
     }
@@ -4640,6 +5127,49 @@ impl MobileEngineHandle {
         self.reserve_turn_for_session(turn_id, None).await
     }
 
+    async fn lock_turn_delivery(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+    ) -> Result<crate::mobile::turn_delivery::TurnDeliveryGuard, ClientError> {
+        let gate = self
+            .durable_turns
+            .delivery_gate(session_id, turn_id)
+            .map_err(Self::map_durable_turn_error)?;
+        gate.lock().await.map_err(|error| ClientError::Rejected {
+            message: error.to_string(),
+        })
+    }
+
+    /// Wait until callbacks already admitted for this turn have returned.
+    /// This does not fence a producer which begins after this barrier.
+    async fn drain_turn_delivery(&self, turn: &ActiveTurn) -> Result<(), ClientError> {
+        if let Some(turn_id) = turn.turn_id.filter(|_| !turn.session_id.is_empty()) {
+            self.lock_turn_delivery(&turn.session_id, turn_id)
+                .await?
+                .complete();
+        }
+        Ok(())
+    }
+
+    fn spawn_recovery_delivery(
+        &self,
+        guard: crate::mobile::turn_delivery::TurnDeliveryGuard,
+        snapshot: client::protocol::events::TurnRecoverySnapshotDto,
+    ) -> tokio::task::JoinHandle<()> {
+        let sink = self.connection_sink.clone();
+        tokio::spawn(async move {
+            sink.emit(ClientEvent::TurnRecoveryState { snapshot }).await;
+            guard.complete();
+        })
+    }
+
+    async fn await_recovery_delivery(task: tokio::task::JoinHandle<()>) -> Result<(), ClientError> {
+        task.await.map_err(|error| ClientError::Internal {
+            message: format!("turn recovery event delivery failed: {error}"),
+        })
+    }
+
     async fn reserve_turn_for_session(
         &self,
         turn_id: Option<u64>,
@@ -4662,17 +5192,244 @@ impl MobileEngineHandle {
                 message: "queued mobile slash belongs to a session that is no longer active".into(),
             });
         }
+        let live_owner = self
+            .durable_turns
+            .reserve_live_owner(&session_id, turn_id)
+            .map_err(Self::map_durable_turn_error)?;
         let permission_owner_id = self
             .inner
             .permission_gate
             .begin_main_turn(Some(session_id.clone()), turn_id);
-        let turn = Arc::new(ActiveTurn::new_owned(
+        let turn = Arc::new(ActiveTurn::with_live_owner(
             turn_id,
             session_id,
             permission_owner_id,
+            live_owner,
         ));
+        // Bind the queue abort callback to this generation before publishing
+        // the owner; a late callback from an older turn cannot relabel it.
+        let reason = self.cancel_reason.reset_and_bind();
+        self.message_queue.register_owned_active_turn(
+            turn.queue_owner.clone(),
+            turn.cancel.clone(),
+            Arc::new(move || {
+                reason.set(orchestrator::prompt::mid_turn_input::CancelReason::QueueNowCommand);
+            }),
+        );
         *active = Some(turn.clone());
         Ok(turn)
+    }
+
+    /// Called while the active-owner lock is held. Batch membership must be
+    /// bound to this exact live owner, not inferred from an old checkpoint.
+    fn live_owner_matches_cancel(&self, turn: &ActiveTurn, requested_turn_id: Option<u64>) -> bool {
+        if turn.matches_cancel(requested_turn_id) {
+            return true;
+        }
+        let Some(requested_id) = requested_turn_id else {
+            return false;
+        };
+        let owner = self
+            .durable_turns
+            .coalesced_owner_for_member(&turn.session_id, requested_id)
+            .ok()
+            .flatten()
+            .and_then(|owner_id| self.durable_turns.load(&turn.session_id, owner_id).ok());
+        owner.is_some_and(|owner| {
+            owner
+                .coalesced_batch
+                .as_ref()
+                .is_some_and(|batch| batch.member_turn_ids.contains(&requested_id))
+                && ((matches!(
+                    owner.queue_delivery,
+                    QueueDeliveryState::CoalescedClaimed | QueueDeliveryState::Delivered
+                ) && turn
+                    .mid_turn_members
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&requested_id))
+                    || (owner.queue_delivery == QueueDeliveryState::Claimed
+                        && owner.state == Some(TurnRecoveryStateDto::Running)
+                        && turn.turn_id == Some(owner.turn_id)))
+        })
+    }
+
+    async fn cancel_inactive_turn(
+        &self,
+        session_id: &str,
+        turn_id: u64,
+        original_owner: Option<&Arc<ActiveTurn>>,
+    ) -> Result<(), ClientError> {
+        let mut delivery = self.lock_turn_delivery(session_id, turn_id).await?;
+        let active = self.active_cancel.lock().await;
+        let (snapshot, member_ids) = {
+            // Retarget publishes under this mutex. Keep it through the synchronous
+            // checkpoint change, so an old command cannot land on a new session.
+            let current_session = self
+                .inner
+                .active_session_uuid
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if current_session.as_str() != session_id {
+                return Err(ClientError::Rejected {
+                    message: "cancel request belongs to a different session".into(),
+                });
+            }
+            if active.as_ref().is_some_and(|owner| {
+                owner.session_id == session_id
+                    && self.live_owner_matches_cancel(owner, Some(turn_id))
+            }) {
+                if original_owner.is_some_and(|original| {
+                    !active
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, original))
+                }) {
+                    return Err(ClientError::Rejected {
+                        message: "the original turn owner has changed".into(),
+                    });
+                }
+                let expected = active.as_ref().expect("checked active owner").clone();
+                // A queue claim may have won after the first routing check.
+                // Retry with the pinned session/member and revalidate the
+                // owner after reacquiring its delivery gate.
+                drop(current_session);
+                drop(active);
+                drop(delivery);
+                return Box::pin(self.cancel_active_turn_for_owner(
+                    session_id,
+                    Some(turn_id),
+                    Some(expected),
+                ))
+                .await;
+            }
+            let cancel = || -> Result<_, DurableTurnStoreError> {
+                if let Some(owner_id) = self
+                    .durable_turns
+                    .coalesced_owner_for_member(session_id, turn_id)?
+                {
+                    let checkpoint = self.durable_turns.load(session_id, owner_id)?;
+                    let own_paused = owner_id == turn_id
+                        && matches!(
+                            checkpoint.state,
+                            Some(
+                                TurnRecoveryStateDto::PausedRecoverable
+                                    | TurnRecoveryStateDto::WaitingForUser
+                            )
+                        );
+                    if !own_paused
+                        && (checkpoint.state.is_some()
+                            || !matches!(
+                                checkpoint.queue_delivery,
+                                QueueDeliveryState::Pending | QueueDeliveryState::CoalescedPending
+                            ))
+                    {
+                        return Err(DurableTurnStoreError::BatchAlreadyClaimed {
+                            session_id: session_id.to_string(),
+                            turn_id,
+                        });
+                    }
+                }
+                Ok(
+                    match self.durable_turns.cancel_pending(session_id, turn_id) {
+                        Ok(Some(ids)) => (
+                            Some(
+                                self.durable_turns
+                                    .expose_cancelled_pending(session_id, turn_id)?,
+                            ),
+                            ids,
+                        ),
+                        Ok(None) => match self.durable_turns.load(session_id, turn_id) {
+                            Ok(checkpoint)
+                                if matches!(
+                                    checkpoint.state,
+                                    Some(
+                                        TurnRecoveryStateDto::PausedRecoverable
+                                            | TurnRecoveryStateDto::WaitingForUser
+                                    )
+                                ) =>
+                            {
+                                (
+                                    self.durable_turns.cancel(session_id, turn_id)?,
+                                    vec![turn_id],
+                                )
+                            }
+                            Ok(_) | Err(DurableTurnStoreError::NotFound { .. }) => {
+                                (None, Vec::new())
+                            }
+                            Err(error) => return Err(error),
+                        },
+                        Err(DurableTurnStoreError::NotFound { .. })
+                        | Err(DurableTurnStoreError::Terminal { .. }) => (None, Vec::new()),
+                        Err(error) => return Err(error),
+                    },
+                )
+            };
+            let owned_lease = original_owner
+                .and_then(|turn| turn.live_owner.as_ref())
+                .or_else(|| {
+                    active
+                        .as_ref()
+                        .filter(|turn| turn.session_id == session_id)
+                        .and_then(|turn| turn.live_owner.as_ref())
+                });
+            delivery.arm();
+            let cancelled =
+                self.durable_turns
+                    .with_no_pending_admission(session_id, turn_id, || match owned_lease {
+                        Some(lease) => self.durable_turns.with_live_owner(
+                            session_id,
+                            lease,
+                            Some(turn_id),
+                            cancel,
+                        ),
+                        None => {
+                            self.durable_turns
+                                .with_no_live_owner(session_id, Some(turn_id), cancel)
+                        }
+                    });
+            match cancelled {
+                Ok(result) => result,
+                Err(error) => {
+                    if !matches!(error, DurableTurnStoreError::Storage(_)) {
+                        delivery.complete();
+                    }
+                    return Err(Self::map_durable_turn_error(error));
+                }
+            }
+        };
+        drop(active);
+        let delivery_task = if let Some(snapshot) = snapshot {
+            Some(self.spawn_recovery_delivery(delivery, snapshot))
+        } else {
+            delivery.complete();
+            None
+        };
+        remove_mobile_prompt_dispatches(&self.message_queue, session_id, &member_ids).await;
+        if let Some(task) = delivery_task {
+            Self::await_recovery_delivery(task).await?;
+        }
+        // A persisted private batch may contain more than the requested turn.
+        // Each member needs its own correlated terminal callback and gate.
+        for member_id in member_ids.into_iter().filter(|id| *id != turn_id) {
+            let mut member_delivery = self.lock_turn_delivery(session_id, member_id).await?;
+            member_delivery.arm();
+            match self
+                .durable_turns
+                .expose_cancelled_pending(session_id, member_id)
+            {
+                Ok(snapshot) => {
+                    let task = self.spawn_recovery_delivery(member_delivery, snapshot);
+                    Self::await_recovery_delivery(task).await?;
+                }
+                Err(error) => {
+                    if !matches!(error, DurableTurnStoreError::Storage(_)) {
+                        member_delivery.complete();
+                    }
+                    return Err(Self::map_durable_turn_error(error));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Cooperatively cancel exactly the requested turn and wait until every
@@ -4680,70 +5437,80 @@ impl MobileEngineHandle {
     /// naturally; force-aborting the outer task would violate their mutation
     /// safety contract. A stale specific id is a no-op and cannot drain or
     /// otherwise disturb the current turn.
-    async fn cancel_active_turn(&self, requested_turn_id: Option<u64>) -> Result<(), ClientError> {
-        let active = self.active_cancel.lock().await.clone();
+    async fn cancel_active_turn(
+        &self,
+        requested_session_id: &str,
+        requested_turn_id: Option<u64>,
+    ) -> Result<(), ClientError> {
+        self.cancel_active_turn_for_owner(requested_session_id, requested_turn_id, None)
+            .await
+    }
+
+    async fn cancel_active_turn_for_owner(
+        &self,
+        requested_session_id: &str,
+        requested_turn_id: Option<u64>,
+        expected_owner: Option<Arc<ActiveTurn>>,
+    ) -> Result<(), ClientError> {
+        let active = {
+            let active = self.active_cancel.lock().await;
+            let session = self
+                .inner
+                .active_session_uuid
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if requested_session_id.is_empty() || session.as_str() != requested_session_id {
+                return Err(ClientError::Rejected {
+                    message: "cancel request belongs to a different session".into(),
+                });
+            }
+            active.clone()
+        };
+        if let Some(expected) = expected_owner.as_ref() {
+            if !active
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, expected))
+            {
+                if let Some(turn_id) = requested_turn_id.or(expected.turn_id) {
+                    return self
+                        .cancel_inactive_turn(requested_session_id, turn_id, Some(expected))
+                        .await;
+                }
+                return Err(ClientError::Rejected {
+                    message: "the original turn owner has changed".into(),
+                });
+            }
+        }
         let Some(turn) = active else {
             if requested_turn_id.is_none() {
+                // An idle cancel affects the shared scheduler. Exclude session
+                // retargeting while it executes, without waiting on a long
+                // transition that may itself depend on cancellation.
+                let _transition =
+                    self.loop_transition
+                        .try_lock()
+                        .map_err(|_| ClientError::Rejected {
+                            message: "session transition is in progress; retry cancellation".into(),
+                        })?;
+                if self.active_session_id() != requested_session_id {
+                    return Err(ClientError::Rejected {
+                        message: "cancel request belongs to a different session".into(),
+                    });
+                }
+                if self.active_cancel.lock().await.is_some() {
+                    return Err(ClientError::Rejected {
+                        message: "a turn became active; retry cancellation".into(),
+                    });
+                }
                 if let Some(scheduler) = self.inner.wakeup_scheduler.get() {
                     tool_cron::cancel_dynamic_loop_on_user_abort(scheduler).await;
                 }
             }
 
-            // A paused / waiting turn has no executor owner, but its durable
-            // checkpoint remains cancellable. Re-check the owner slot while
-            // holding the lock so a newly reserved turn cannot be confused
-            // with this inactive request. Cancel(None) deliberately remains a
-            // no-op when there is no live executor.
             if let Some(turn_id) = requested_turn_id {
-                let active_guard = self.active_cancel.lock().await;
-                if active_guard.is_some() {
-                    tracing::debug!(
-                        requested_turn_id = turn_id,
-                        "mobile: ignored inactive cancel raced by a new active turn"
-                    );
-                    return Ok(());
-                }
-                let session_id = self.active_session_id();
-                let snapshot = match self.durable_turns.cancel_pending(&session_id, turn_id) {
-                    Ok(Some(member_ids)) => {
-                        remove_mobile_prompt_dispatches(
-                            &self.message_queue,
-                            &session_id,
-                            &member_ids,
-                        )
-                        .await;
-                        None
-                    }
-                    Ok(None) => match self.durable_turns.cancel(&session_id, turn_id) {
-                        Ok(snapshot) => snapshot,
-                        Err(DurableTurnStoreError::NotFound { .. })
-                        | Err(DurableTurnStoreError::Terminal { .. }) => None,
-                        Err(error) => {
-                            tracing::warn!(
-                                %error,
-                                requested_turn_id = turn_id,
-                                "mobile: failed to persist inactive explicit cancel"
-                            );
-                            None
-                        }
-                    },
-                    Err(DurableTurnStoreError::NotFound { .. })
-                    | Err(DurableTurnStoreError::Terminal { .. }) => None,
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            requested_turn_id = turn_id,
-                            "mobile: failed to persist inactive explicit cancel"
-                        );
-                        None
-                    }
-                };
-                drop(active_guard);
-                if let Some(snapshot) = snapshot {
-                    self.event_sink
-                        .emit(ClientEvent::TurnRecoveryState { snapshot })
-                        .await;
-                }
+                return self
+                    .cancel_inactive_turn(requested_session_id, turn_id, None)
+                    .await;
             }
             tracing::debug!(
                 requested_turn_id,
@@ -4751,96 +5518,158 @@ impl MobileEngineHandle {
             );
             return Ok(());
         };
-        let requested_turn_is_in_active_batch = requested_turn_id.is_some_and(|requested_id| {
-            let owner = self
-                .durable_turns
-                .coalesced_owner_for_member(&turn.session_id, requested_id)
-                .ok()
-                .flatten()
-                .and_then(|owner_id| self.durable_turns.load(&turn.session_id, owner_id).ok());
-            owner.is_some_and(|owner| {
-                owner
-                    .coalesced_batch
-                    .as_ref()
-                    .is_some_and(|batch| batch.member_turn_ids.contains(&requested_id))
-                    && (owner.queue_delivery == QueueDeliveryState::CoalescedClaimed
-                        || (owner.queue_delivery == QueueDeliveryState::Claimed
-                            && owner.state == Some(TurnRecoveryStateDto::Running)))
-            })
-        });
-        if !turn.matches_cancel(requested_turn_id) && !requested_turn_is_in_active_batch {
-            if let Some(turn_id) = requested_turn_id {
-                match self.durable_turns.cancel_pending(&turn.session_id, turn_id) {
-                    Ok(Some(member_ids)) => {
-                        remove_mobile_prompt_dispatches(
-                            &self.message_queue,
-                            &turn.session_id,
-                            &member_ids,
-                        )
-                        .await;
-                    }
-                    Ok(None)
-                    | Err(DurableTurnStoreError::NotFound { .. })
-                    | Err(DurableTurnStoreError::Terminal { .. }) => {}
-                    Err(error) => tracing::warn!(
-                        %error,
-                        requested_turn_id = turn_id,
-                        "mobile: failed to persist queued prompt cancellation"
-                    ),
+        if turn.session_id != requested_session_id {
+            return match requested_turn_id {
+                Some(turn_id) => {
+                    self.cancel_inactive_turn(requested_session_id, turn_id, None)
+                        .await
                 }
-            }
-            tracing::debug!(
-                requested_turn_id,
-                active_turn_id = turn.turn_id,
-                "mobile: ignored stale turn cancellation"
-            );
-            return Ok(());
-        }
-
-        let finalize_claimed_bash_cancel = if let Some(turn_id) = turn.turn_id {
-            self.durable_turns
-                .load(&turn.session_id, turn_id)
-                .ok()
-                .is_some_and(|checkpoint| {
-                    checkpoint.queue_operation
-                        == crate::mobile::turn_durability::QueueOperationKind::Prompt
-                        && checkpoint.prompt_mode == Some(PromptModeDto::Bash)
-                        && checkpoint.state == Some(TurnRecoveryStateDto::Running)
-                        && (checkpoint.queue_delivery == QueueDeliveryState::BashClaimed
-                            || (checkpoint.queue_delivery == QueueDeliveryState::Claimed
-                                && checkpoint.bash_result.is_some()))
-                })
-        } else {
-            false
-        };
-        if let Some(turn_id) = turn.turn_id {
-            let queued_member_ids = self
-                .durable_turns
-                .load(&turn.session_id, turn_id)
-                .ok()
-                .and_then(|checkpoint| checkpoint.coalesced_batch)
-                .map(|batch| batch.member_turn_ids)
-                .unwrap_or_else(|| vec![turn_id]);
-            let cancel_result = if finalize_claimed_bash_cancel {
-                self.durable_turns
-                    .mark_claimed_bash_cancel_pending(&turn.session_id, turn_id)
-                    .map(Some)
-            } else {
-                self.durable_turns.cancel(&turn.session_id, turn_id)
+                None => Ok(()),
             };
+        }
+        let mut delivery = match turn.turn_id {
+            Some(turn_id) => Some(self.lock_turn_delivery(&turn.session_id, turn_id).await?),
+            None => None,
+        };
+        // Persist the cancellation boundary and fire the token while this
+        // exact owner still holds the slot, without an await between them.
+        // A cancelled command future cannot leave an alleged user interrupt
+        // with a still-running owner, nor relabel a later owner's reason.
+        let (finalize_claimed_bash_cancel, cancel_result, background_snapshot) = {
+            let active = self.active_cancel.lock().await;
+            if self.active_session_id() != requested_session_id {
+                return Err(ClientError::Rejected {
+                    message: "cancel request belongs to a different session".into(),
+                });
+            }
+            if !active
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
+            {
+                // The owner may have finished a lifecycle pause after this
+                // command observed it. Cancel that exact durable turn without
+                // touching a different live owner or its cancellation token.
+                let Some(turn_id) = requested_turn_id.or(turn.turn_id) else {
+                    return Ok(());
+                };
+                drop(active);
+                drop(delivery);
+                return self
+                    .cancel_inactive_turn(&turn.session_id, turn_id, Some(&turn))
+                    .await;
+            }
+            if !self.live_owner_matches_cancel(&turn, requested_turn_id) {
+                drop(active);
+                drop(delivery);
+                if let Some(turn_id) = requested_turn_id {
+                    return self
+                        .cancel_inactive_turn(requested_session_id, turn_id, Some(&turn))
+                        .await;
+                }
+                return Ok(());
+            }
+            if turn.terminal_emitted.load(Ordering::Acquire) {
+                // The outcome already won, but its callback and owner cleanup
+                // may still be running. Preserve Cancel's release guarantee
+                // without relabeling or interrupting the completed turn.
+                drop(active);
+                drop(delivery);
+                self.wait_for_turn_release(&turn, false).await;
+                return self.drain_turn_delivery(&turn).await;
+            }
+            let (finalize, result) = {
+                let current_session = self
+                    .inner
+                    .active_session_uuid
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if current_session.as_str() != requested_session_id {
+                    return Err(ClientError::Rejected {
+                        message: "cancel request belongs to a different session".into(),
+                    });
+                }
+                if let Some(guard) = delivery.as_mut() {
+                    guard.arm();
+                }
+                let _admission = turn
+                    .admission
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                turn.explicit_cancel_requested
+                    .store(true, Ordering::Release);
+                let finalize = turn.turn_id.is_some_and(|turn_id| {
+                    self.durable_turns
+                        .load(&turn.session_id, turn_id)
+                        .ok()
+                        .is_some_and(|checkpoint| {
+                            checkpoint.queue_operation
+                                == crate::mobile::turn_durability::QueueOperationKind::Prompt
+                                && checkpoint.prompt_mode == Some(PromptModeDto::Bash)
+                                && checkpoint.state == Some(TurnRecoveryStateDto::Running)
+                                && (checkpoint.queue_delivery == QueueDeliveryState::BashClaimed
+                                    || (checkpoint.queue_delivery == QueueDeliveryState::Claimed
+                                        && checkpoint.bash_result.is_some()))
+                        })
+                });
+                let result = turn.turn_id.map(|turn_id| {
+                    let member_ids = self
+                        .durable_turns
+                        .load(&turn.session_id, turn_id)
+                        .ok()
+                        .and_then(|checkpoint| checkpoint.coalesced_batch)
+                        .map(|batch| batch.member_turn_ids)
+                        .unwrap_or_else(|| vec![turn_id]);
+                    let result = if finalize {
+                        self.durable_turns
+                            .mark_claimed_bash_cancel_pending(&turn.session_id, turn_id)
+                            .map(Some)
+                    } else {
+                        self.durable_turns.cancel(&turn.session_id, turn_id)
+                    };
+                    (turn_id, member_ids, result)
+                });
+                self.cancel_reason
+                    .set(orchestrator::prompt::mid_turn_input::CancelReason::UserInterrupt);
+                turn.cancel.cancel();
+                (finalize, result)
+            };
+            // Prevent the owner slot from being replaced while the registry
+            // captures its current concrete task/requester instances. This
+            // awaits only registry locks, never a task or listener callback.
+            let snapshot = if lingxi_core::host::env::background_tasks_disabled() {
+                None
+            } else {
+                Some(
+                    self.inner
+                        .task_registry
+                        .snapshot_backgroundable_tasks()
+                        .await,
+                )
+            };
+            (finalize, result, snapshot)
+        };
+        let mut persistence_error = None;
+        if let Some((turn_id, queued_member_ids, cancel_result)) = cancel_result {
             match cancel_result {
                 Ok(Some(snapshot)) => {
-                    self.event_sink
-                        .emit(ClientEvent::TurnRecoveryState { snapshot })
-                        .await;
+                    let task = self.spawn_recovery_delivery(
+                        delivery.take().expect("durable owner has delivery gate"),
+                        snapshot,
+                    );
                     remove_mobile_prompt_dispatches(
                         &self.message_queue,
                         &turn.session_id,
                         &queued_member_ids,
                     )
                     .await;
+                    if let Err(error) = Self::await_recovery_delivery(task).await {
+                        persistence_error = Some(error);
+                    }
                 }
                 Ok(None) => {
+                    if let Some(guard) = delivery.take() {
+                        guard.complete();
+                    }
                     remove_mobile_prompt_dispatches(
                         &self.message_queue,
                         &turn.session_id,
@@ -4848,9 +5677,21 @@ impl MobileEngineHandle {
                     )
                     .await;
                 }
-                Err(DurableTurnStoreError::NotFound { .. }) => {}
+                Err(DurableTurnStoreError::NotFound { .. }) => {
+                    if let Some(guard) = delivery.take() {
+                        guard.complete();
+                    }
+                }
                 Err(error) => {
+                    if !matches!(error, DurableTurnStoreError::Storage(_)) {
+                        if let Some(guard) = delivery.take() {
+                            guard.complete();
+                        }
+                    } else {
+                        drop(delivery.take());
+                    }
                     tracing::warn!(%error, turn_id, "mobile: failed to persist explicit cancel");
+                    persistence_error = Some(Self::map_durable_turn_error(error));
                 }
             }
         }
@@ -4862,32 +5703,55 @@ impl MobileEngineHandle {
         };
         let permission_count = cancelled_permissions.len();
         drop(cancelled_permissions);
-        if !lingxi_core::host::env::background_tasks_disabled() {
-            self.inner
+        if let Some(snapshot) = background_snapshot {
+            let background = self
+                .inner
                 .task_registry
-                .background_all_tasks_with_reason(
+                .background_snapshot_with_outcome(
+                    snapshot,
                     lingxi_core::host::task_registry::TaskBackgroundReason::TurnAbort,
                 )
                 .await;
+            if background.capture_unknown || background.unknown != 0 {
+                persistence_error.get_or_insert(ClientError::Internal {
+                    message: if background.capture_unknown {
+                        "could not determine the full set of background tasks".into()
+                    } else {
+                        format!(
+                            "could not confirm background transition for {} task(s)",
+                            background.unknown
+                        )
+                    },
+                });
+            }
         }
-        turn.cancel.cancel();
         self.wait_for_turn_release(&turn, true).await;
         if finalize_claimed_bash_cancel {
             if let Some(turn_id) = turn.turn_id {
+                let mut final_delivery = self.lock_turn_delivery(&turn.session_id, turn_id).await?;
+                final_delivery.arm();
                 match self.durable_turns.cancel(&turn.session_id, turn_id) {
                     Ok(Some(snapshot)) => {
-                        self.event_sink
-                            .emit(ClientEvent::TurnRecoveryState { snapshot })
-                            .await;
+                        let task = self.spawn_recovery_delivery(final_delivery, snapshot);
+                        if let Err(error) = Self::await_recovery_delivery(task).await {
+                            persistence_error.get_or_insert(error);
+                        }
                     }
                     Ok(None)
                     | Err(DurableTurnStoreError::NotFound { .. })
-                    | Err(DurableTurnStoreError::Terminal { .. }) => {}
-                    Err(error) => tracing::warn!(
-                        %error,
-                        turn_id,
-                        "mobile: failed to finalize interrupted Bash checkpoint"
-                    ),
+                    | Err(DurableTurnStoreError::Terminal { .. }) => final_delivery.complete(),
+                    Err(error) => {
+                        if !matches!(error, DurableTurnStoreError::Storage(_)) {
+                            final_delivery.complete();
+                        }
+                        tracing::warn!(
+                            %error,
+                            turn_id,
+                            "mobile: failed to finalize interrupted Bash checkpoint"
+                        );
+                        persistence_error
+                            .get_or_insert_with(|| Self::map_durable_turn_error(error));
+                    }
                 }
             }
         }
@@ -4896,6 +5760,9 @@ impl MobileEngineHandle {
         // those closed requests after the owner has unwound; unrelated
         // workflow questions remain parked until connection/session teardown.
         let question_count = self.ask_user_question_broker.cancel_closed().await;
+        if let Err(error) = self.drain_turn_delivery(&turn).await {
+            persistence_error.get_or_insert(error);
+        }
         tracing::debug!(
             requested_turn_id,
             active_turn_id = turn.turn_id,
@@ -4904,7 +5771,11 @@ impl MobileEngineHandle {
             "mobile: waiting for cancelled turn to release its owner slot"
         );
         tracing::debug!(active_turn_id = turn.turn_id, "mobile: cancel completed");
-        Ok(())
+        if let Some(error) = persistence_error {
+            Err(error)
+        } else {
+            Ok(())
+        }
     }
 
     /// Ask a live turn to unwind and wait until its owner slot is released.
@@ -4915,14 +5786,8 @@ impl MobileEngineHandle {
         if let Some(task) = turn.take_task_handle() {
             if task.await.is_err() {
                 let mut active = self.active_cancel.lock().await;
-                if active
-                    .as_ref()
-                    .is_some_and(|owner| Arc::ptr_eq(owner, turn))
-                {
-                    *active = None;
-                }
+                release_active_turn(&mut active, &self.message_queue, turn);
                 drop(active);
-                self.message_queue.clear_active_turn().await;
                 turn.mark_completed();
                 if let Some(owner_id) = turn.permission_owner_id {
                     self.inner.permission_gate.end_main_turn(owner_id);
@@ -4948,14 +5813,30 @@ impl MobileEngineHandle {
     /// The cancellation token is still used to stop the orchestrator, but the
     /// lifecycle listener observes `quiescing` and drops the resulting
     /// cancellation/late live events rather than exposing `Cancelled`.
-    async fn pause_active_turn(&self, turn_id: u64, reason: String) -> Result<(), ClientError> {
-        let active = self.active_cancel.lock().await.clone();
-        let owns_live_slot = active
-            .as_ref()
-            .is_some_and(|turn| turn.turn_id == Some(turn_id));
+    async fn pause_active_turn(
+        &self,
+        requested_session_id: String,
+        turn_id: u64,
+        reason: String,
+    ) -> Result<(), ClientError> {
+        let active_guard = self.active_cancel.lock().await;
+        let active = active_guard.clone();
+        let owns_live_slot = active.as_ref().is_some_and(|turn| {
+            turn.session_id == requested_session_id && turn.turn_id == Some(turn_id)
+        });
+        if let Some(turn) = active.as_ref().filter(|_| owns_live_slot) {
+            if turn.terminal_emitted.load(Ordering::Acquire) {
+                return Err(ClientError::Rejected {
+                    message: "the turn has already ended".into(),
+                });
+            }
+            // If an explicit user cancel won first, do not suppress its
+            // terminal delivery or relabel its transcript as a pause.
+            turn.request_lifecycle_quiesce(&self.cancel_reason);
+        }
+        drop(active_guard);
         let session_id = if let Some(turn) = active.clone().filter(|_| owns_live_slot) {
             let session_id = turn.session_id.clone();
-            turn.request_quiesce();
             if let Some(owner_id) = turn.permission_owner_id {
                 let _ = self.inner.permission_gate.cancel_owner(owner_id).await;
             }
@@ -4987,30 +5868,58 @@ impl MobileEngineHandle {
                 active_turn_id = ?active.as_ref().and_then(|turn| turn.turn_id),
                 "mobile: pausing a turn that does not own the live executor slot"
             );
-            self.active_session_id()
+            requested_session_id
         };
 
-        // Read only after the owner has unwound. This captures all events that
-        // were already in-flight before quiescence and prevents a later live
-        // producer from racing the paused snapshot.
-        let checkpoint = self
-            .durable_turns
-            .load(&session_id, turn_id)
-            .map_err(Self::map_durable_turn_error)?;
-        let snapshot = self
-            .durable_turns
-            .transition(
+        // Read only after the owner has unwound. Serialize the final decision
+        // with an explicit Cancel, including one arriving while pause waits.
+        let mut delivery = self.lock_turn_delivery(&session_id, turn_id).await?;
+        let active_guard = self.active_cancel.lock().await;
+        if active
+            .as_ref()
+            .filter(|_| owns_live_slot)
+            .is_some_and(|turn| turn.explicit_cancel_requested.load(Ordering::Acquire))
+        {
+            return Err(ClientError::Rejected {
+                message: "the turn was explicitly cancelled".into(),
+            });
+        }
+        let pause = || {
+            let checkpoint = self.durable_turns.load(&session_id, turn_id)?;
+            self.durable_turns.transition(
                 &session_id,
                 turn_id,
                 TurnRecoveryStateDto::PausedRecoverable,
                 checkpoint.safe_to_resume,
                 Some(reason),
             )
-            .map_err(Self::map_durable_turn_error)?;
-        self.event_sink
-            .emit(ClientEvent::TurnRecoveryState { snapshot })
-            .await;
-        Ok(())
+        };
+        let live_owner = active
+            .as_ref()
+            .filter(|turn| turn.session_id == session_id)
+            .and_then(|turn| turn.live_owner.as_ref());
+        delivery.arm();
+        let pause_result = match live_owner {
+            Some(lease) => {
+                self.durable_turns
+                    .with_live_owner(&session_id, lease, Some(turn_id), pause)
+            }
+            None => self
+                .durable_turns
+                .with_no_live_owner(&session_id, Some(turn_id), pause),
+        };
+        let snapshot = match pause_result {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if !matches!(error, DurableTurnStoreError::Storage(_)) {
+                    delivery.complete();
+                }
+                return Err(Self::map_durable_turn_error(error));
+            }
+        };
+        drop(active_guard);
+        let task = self.spawn_recovery_delivery(delivery, snapshot);
+        Self::await_recovery_delivery(task).await
     }
 
     async fn submit_slash_command(
@@ -5019,20 +5928,21 @@ impl MobileEngineHandle {
         images: Vec<ImageRefDto>,
         client_turn_id: Option<u64>,
         transition: tokio::sync::MutexGuard<'_, ()>,
+        pending: Option<Arc<PendingSubmission>>,
     ) -> Result<(), ClientError> {
-        if let Ok(raw_text) = String::from_utf16(&raw.code_units) {
-            let _ = self
-                .inner
-                .orchestrator
-                .record_prompt_suggestion_submission(&raw_text)
-                .await;
-        }
         let raw_source = raw.into_projection();
         // Workspace commands are explicit host navigation. They must never be
         // queued as model turns or accepted while another turn owns the session.
         if let Some(parsed) = command_api::parse_slash_command(&raw_source) {
             let name = parsed.name.string_at("").unwrap_or("");
             if matches!(name, "cd" | "add-dir") {
+                if let Some(raw_text) = raw_source.string_at("") {
+                    let _ = self
+                        .inner
+                        .orchestrator
+                        .record_prompt_suggestion_submission(raw_text)
+                        .await;
+                }
                 let result = match parsed.raw_args_utf8().filter(|input| !input.is_empty()) {
                     Some(input) if name == "cd" => self.change_workspace_inner(input).await,
                     Some(input) => self.add_workspace_inner(input).await,
@@ -5117,17 +6027,27 @@ impl MobileEngineHandle {
             return Ok(());
         }
 
-        let owner = match self.reserve_turn(client_turn_id).await {
+        // Allocate the durable id before reserving, including when the client
+        // omitted a correlator. Detached work is fenced by that actual id.
+        let checkpoint = self
+            .durable_turns
+            .admit_queued_slash(
+                &session_id,
+                client_turn_id,
+                client_turn_id,
+                raw_source.clone(),
+                images.clone(),
+            )
+            .map_err(Self::map_durable_turn_error)?;
+        let owner = match self
+            .reserve_turn_for_session(Some(checkpoint.turn_id), Some(&session_id))
+            .await
+        {
             Ok(owner) => owner,
             Err(ClientError::Rejected { .. }) => {
-                if let Some(active) = self.active_cancel.lock().await.clone() {
-                    self.persist_and_enqueue_mobile_slash(
-                        &active.session_id,
-                        client_turn_id,
-                        raw_source,
-                        images.clone(),
-                    )
-                    .await?;
+                if self.active_session_id() == session_id {
+                    enqueue_mobile_slash_dispatch(&self.message_queue, &session_id, &checkpoint)
+                        .await;
                     return Ok(());
                 }
                 return Err(ClientError::Rejected {
@@ -5136,34 +6056,100 @@ impl MobileEngineHandle {
             }
             Err(error) => return Err(error),
         };
-        let checkpoint = match self.durable_turns.admit_queued_slash(
-            &owner.session_id,
-            client_turn_id,
-            client_turn_id,
-            raw_source.clone(),
-            images.clone(),
-        ) {
-            Ok(checkpoint) => checkpoint,
-            Err(error) => {
-                self.release_unspawned_turn(&owner).await;
-                return Err(Self::map_durable_turn_error(error));
+        if let Some(pending) = &pending {
+            pending.bind_owner(&owner);
+        }
+        let mut delivery = self
+            .lock_turn_delivery(&owner.session_id, checkpoint.turn_id)
+            .await?;
+        let mut active = self.active_cancel.lock().await;
+        if !active
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &owner))
+        {
+            delivery.complete();
+            return Err(ClientError::Rejected {
+                message: "slash owner changed before admission".into(),
+            });
+        }
+        if pending
+            .as_ref()
+            .is_some_and(|item| item.cancel_requested.load(Ordering::Acquire))
+        {
+            delivery.arm();
+            let result = self
+                .durable_turns
+                .cancel_pending(&owner.session_id, checkpoint.turn_id)
+                .and_then(|ids| {
+                    if ids.is_some() {
+                        self.durable_turns
+                            .expose_cancelled_pending(&owner.session_id, checkpoint.turn_id)
+                            .map(Some)
+                    } else {
+                        Ok(None)
+                    }
+                });
+            let snapshot = match result {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => {
+                    delivery.complete();
+                    return Err(ClientError::Rejected {
+                        message: "slash cancellation could not be confirmed".into(),
+                    });
+                }
+                Err(error) => {
+                    if !matches!(error, DurableTurnStoreError::Storage(_)) {
+                        delivery.complete();
+                    }
+                    return Err(Self::map_durable_turn_error(error));
+                }
+            };
+            release_active_turn(&mut active, &self.message_queue, &owner);
+            drop(active);
+            if let Some(owner_id) = owner.permission_owner_id {
+                self.inner.permission_gate.end_main_turn(owner_id);
             }
-        };
+            if let Some(pending) = &pending {
+                pending.suppressed.store(true, Ordering::Release);
+            }
+            let task = self.spawn_recovery_delivery(delivery, snapshot);
+            owner.mark_completed();
+            drop(transition);
+            Self::await_recovery_delivery(task).await?;
+            return Ok(());
+        }
         let claimed = match self
             .durable_turns
             .claim_queued_slash(&owner.session_id, checkpoint.turn_id)
         {
             Ok(checkpoint) => checkpoint,
             Err(error) => {
+                delivery.complete();
+                drop(active);
                 self.release_unspawned_turn(&owner).await;
                 return Err(Self::map_durable_turn_error(error));
             }
         };
-        self.cancel_reason.reset();
-        self.message_queue
-            .register_active_turn(owner.cancel.clone())
-            .await;
+        delivery.complete();
+        drop(active);
         drop(transition);
+        #[cfg(test)]
+        if let Some(pending) = &pending {
+            let barrier = pending.owner_barrier.lock().unwrap().clone();
+            if let Some((entered, release)) = barrier {
+                entered.notify_one();
+                release.notified().await;
+            }
+        }
+        if !owner.cancel.is_cancelled() {
+            if let Some(raw_text) = raw_source.string_at("") {
+                let _ = self
+                    .inner
+                    .orchestrator
+                    .record_prompt_suggestion_submission(raw_text)
+                    .await;
+            }
+        }
         let execution_images = claimed.images.clone();
         self.execute_claimed_slash(raw_source, client_turn_id, owner, claimed, execution_images)
             .await
@@ -5244,7 +6230,7 @@ impl MobileEngineHandle {
         {
             Ok(owner) => owner,
             Err(ClientError::Rejected { .. }) => {
-                if self.active_cancel.lock().await.is_some() {
+                if self.active_session_id() == session_id {
                     enqueue_mobile_slash_dispatch(&self.message_queue, session_id, &checkpoint)
                         .await;
                 } else {
@@ -5255,22 +6241,29 @@ impl MobileEngineHandle {
             }
             Err(error) => return Err(error),
         };
-        let claimed = match self.durable_turns.claim_queued_slash(session_id, turn_id) {
-            Ok(checkpoint) => checkpoint,
-            Err(DurableTurnStoreError::Terminal { .. })
-            | Err(DurableTurnStoreError::NotFound { .. }) => {
-                self.release_unspawned_turn(&owner).await;
-                return Ok(());
-            }
-            Err(error) => {
-                self.release_unspawned_turn(&owner).await;
-                return Err(Self::map_durable_turn_error(error));
-            }
-        };
-        self.cancel_reason.reset();
-        self.message_queue
-            .register_active_turn(owner.cancel.clone())
-            .await;
+        let claimed =
+            match self
+                .durable_turns
+                .with_no_pending_admission(session_id, turn_id, || {
+                    self.durable_turns.claim_queued_slash(session_id, turn_id)
+                }) {
+                Ok(checkpoint) => checkpoint,
+                Err(DurableTurnStoreError::PendingAdmission { .. }) => {
+                    self.release_unspawned_turn(&owner).await;
+                    enqueue_mobile_slash_dispatch(&self.message_queue, session_id, &checkpoint)
+                        .await;
+                    return Ok(());
+                }
+                Err(DurableTurnStoreError::Terminal { .. })
+                | Err(DurableTurnStoreError::NotFound { .. }) => {
+                    self.release_unspawned_turn(&owner).await;
+                    return Ok(());
+                }
+                Err(error) => {
+                    self.release_unspawned_turn(&owner).await;
+                    return Err(Self::map_durable_turn_error(error));
+                }
+            };
         drop(transition);
         let execution_images = claimed.images.clone();
         self.execute_claimed_slash(
@@ -5305,7 +6298,7 @@ impl MobileEngineHandle {
         {
             Ok(owner) => owner,
             Err(ClientError::Rejected { .. }) => {
-                if self.active_cancel.lock().await.is_some() {
+                if self.active_session_id() == session_id {
                     enqueue_mobile_prompt_dispatch(&self.message_queue, session_id, &checkpoint)
                         .await;
                 } else {
@@ -5329,23 +6322,33 @@ impl MobileEngineHandle {
             return Err(error);
         }
         let should_query = self.mobile_bash_respond_to_command();
-        let claimed = match self
-            .durable_turns
-            .claim_queued_bash(session_id, turn_id, should_query)
-        {
-            Ok(checkpoint) => checkpoint,
-            Err(DurableTurnStoreError::Terminal { .. })
-            | Err(DurableTurnStoreError::NotFound { .. }) => {
-                self.release_unspawned_turn(&owner).await;
-                remove_mobile_prompt_dispatches(&self.message_queue, session_id, &[turn_id]).await;
-                return Ok(());
-            }
-            Err(error) => {
-                self.release_unspawned_turn(&owner).await;
-                return Err(Self::map_durable_turn_error(error));
-            }
-        };
-        self.prepare_mobile_bash_owner(&owner, &claimed).await;
+        let claimed =
+            match self
+                .durable_turns
+                .with_no_pending_admission(session_id, turn_id, || {
+                    self.durable_turns
+                        .claim_queued_bash(session_id, turn_id, should_query)
+                }) {
+                Ok(checkpoint) => checkpoint,
+                Err(DurableTurnStoreError::PendingAdmission { .. }) => {
+                    self.release_unspawned_turn(&owner).await;
+                    enqueue_mobile_prompt_dispatch(&self.message_queue, session_id, &checkpoint)
+                        .await;
+                    return Ok(());
+                }
+                Err(DurableTurnStoreError::Terminal { .. })
+                | Err(DurableTurnStoreError::NotFound { .. }) => {
+                    self.release_unspawned_turn(&owner).await;
+                    remove_mobile_prompt_dispatches(&self.message_queue, session_id, &[turn_id])
+                        .await;
+                    return Ok(());
+                }
+                Err(error) => {
+                    self.release_unspawned_turn(&owner).await;
+                    return Err(Self::map_durable_turn_error(error));
+                }
+            };
+        self.prepare_mobile_bash_owner(&claimed).await;
         drop(transition);
         self.spawn_mobile_bash_turn(owner, claimed);
         Ok(())
@@ -5503,6 +6506,7 @@ impl MobileEngineHandle {
                     Some(queued_inputs),
                     None,
                     Some(owner),
+                    None,
                 )
                 .await
             }
@@ -5552,6 +6556,7 @@ impl MobileEngineHandle {
                     Some(queued_inputs),
                     Some(skill_prompt),
                     Some(owner),
+                    None,
                 )
                 .await
             }
@@ -5648,19 +6653,13 @@ impl MobileEngineHandle {
 
     async fn release_unspawned_turn(&self, owner: &Arc<ActiveTurn>) {
         let mut active = self.active_cancel.lock().await;
-        if active
-            .as_ref()
-            .is_some_and(|current| Arc::ptr_eq(current, owner))
-        {
-            *active = None;
-        }
+        release_active_turn(&mut active, &self.message_queue, owner);
         drop(active);
         if let Some(permission_owner_id) = owner.permission_owner_id {
             self.inner
                 .permission_gate
                 .end_main_turn(permission_owner_id);
         }
-        self.message_queue.clear_active_turn().await;
         owner.mark_completed();
     }
 
@@ -5674,6 +6673,7 @@ impl MobileEngineHandle {
         images: Vec<ImageRefDto>,
         turn_id: Option<u64>,
         queue_if_busy: bool,
+        pending: Option<Arc<PendingSubmission>>,
     ) -> Result<(), ClientError> {
         self.start_streaming_turn_inner(
             text,
@@ -5686,6 +6686,7 @@ impl MobileEngineHandle {
             None,
             None,
             None,
+            pending,
         )
         .await
     }
@@ -5696,6 +6697,7 @@ impl MobileEngineHandle {
         images: Vec<ImageRefDto>,
         client_turn_id: Option<u64>,
         transition: tokio::sync::MutexGuard<'_, ()>,
+        pending: Option<Arc<PendingSubmission>>,
     ) -> Result<(), ClientError> {
         if let Some(active) = self.active_cancel.lock().await.clone() {
             self.persist_and_enqueue_mobile_prompt(
@@ -5762,6 +6764,9 @@ impl MobileEngineHandle {
                 return Err(error);
             }
         };
+        if let Some(pending) = &pending {
+            pending.bind_owner(&owner);
+        }
         if let Err(error) = self
             .ensure_reserved_session_identity(&owner.session_id)
             .await
@@ -5784,9 +6789,53 @@ impl MobileEngineHandle {
                 return Err(Self::map_durable_turn_error(error));
             }
         };
-        self.prepare_mobile_bash_owner(&owner, &claimed).await;
+        self.prepare_mobile_bash_owner(&claimed).await;
+        let admission_guard = if let Some(pending) = pending.as_ref() {
+            let mut delivery = self
+                .lock_turn_delivery(&owner.session_id, pending.turn_id)
+                .await?;
+            let active = self.active_cancel.lock().await;
+            if !active
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &owner))
+            {
+                delivery.complete();
+                return Err(ClientError::Rejected {
+                    message: "Bash owner changed before startup".into(),
+                });
+            }
+            if pending.cancel_requested.load(Ordering::Acquire) {
+                delivery.arm();
+                let result = {
+                    let _admission = owner.admission.lock().unwrap_or_else(|e| e.into_inner());
+                    owner
+                        .explicit_cancel_requested
+                        .store(true, Ordering::Release);
+                    self.cancel_reason
+                        .set(orchestrator::prompt::mid_turn_input::CancelReason::UserInterrupt);
+                    owner.cancel.cancel();
+                    self.durable_turns
+                        .mark_claimed_bash_cancel_pending(&owner.session_id, pending.turn_id)
+                };
+                match result {
+                    Ok(_) | Err(DurableTurnStoreError::Terminal { .. }) => delivery.complete(),
+                    Err(error) => {
+                        if !matches!(error, DurableTurnStoreError::Storage(_)) {
+                            delivery.complete();
+                        }
+                        return Err(Self::map_durable_turn_error(error));
+                    }
+                }
+            } else {
+                delivery.complete();
+            }
+            Some(active)
+        } else {
+            None
+        };
         drop(transition);
         self.spawn_mobile_bash_turn(owner, claimed);
+        drop(admission_guard);
         Ok(())
     }
 
@@ -5805,10 +6854,8 @@ impl MobileEngineHandle {
 
     async fn prepare_mobile_bash_owner(
         &self,
-        owner: &Arc<ActiveTurn>,
         checkpoint: &crate::mobile::turn_durability::DurableTurnCheckpoint,
     ) {
-        self.cancel_reason.reset();
         if let Some(state) = self
             .inner
             .wakeup_scheduler
@@ -5819,9 +6866,6 @@ impl MobileEngineHandle {
             state.invalidate_noop_streak();
         }
         self.inner.orchestrator.turn_span().reset();
-        self.message_queue
-            .register_active_turn(owner.cancel.clone())
-            .await;
         self.inner.message_output.reset_message_buffer().await;
         self.event_sink
             .emit(ClientEvent::TurnRecoveryState {
@@ -5848,28 +6892,49 @@ impl MobileEngineHandle {
         let task_turn = owner.clone();
         let loop_scheduler = self.inner.wakeup_scheduler.get().cloned();
         let cancel_reason = self.cancel_reason.clone();
+        let recovery_guard = task_turn.tool_recovery_guard(durable_turns.clone());
+        let scope_orch = orchestrator.clone();
+        let origin = Arc::downgrade(&task_turn);
         let task = self.runtime().spawn(async move {
-            let shell_result = if task_turn.cancel.is_cancelled() {
-                DurableBashResult {
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    exit_code: 130,
+            MOBILE_TURN_ORIGIN.scope(origin, async move {
+            scope_orch.with_tool_dispatch_recovery_guard(recovery_guard, async move {
+            let execution = if task_turn.cancel.is_cancelled() {
+                MobileBashExecution {
+                    result: DurableBashResult {
+                        stdout: String::new(),
+                        stderr: "The shell command was interrupted before a result was available.".into(),
+                        exit_code: 130,
+                        interrupted: false,
+                    },
                     interrupted: true,
                 }
             } else {
                 execute_mobile_bash_tool(&orchestrator, &claimed.prompt, task_turn.cancel.clone())
                     .await
             };
+            let paused_with_uncertain_result = task_turn.is_quiescing() && execution.interrupted;
+            let mut shell_result = execution.result;
+            shell_result.interrupted = execution.interrupted
+                && task_turn.explicit_cancel_requested.load(Ordering::Acquire)
+                && !task_turn.is_quiescing();
             let still_should_query = claimed.bash_should_query.unwrap_or(true)
-                && !task_turn.cancel.is_cancelled()
+                && (!task_turn.cancel.is_cancelled() || task_turn.is_quiescing())
                 && !shell_result.interrupted;
-            match durable_turns.prepare_claimed_bash_turn(
-                &task_turn.session_id,
-                claimed.turn_id,
-                shell_result,
-                still_should_query,
-            ) {
-                Ok(checkpoint) => {
+            // A lifecycle pause that interrupted Shell (including before the
+            // task started) cannot establish a completed result. Keep the
+            // unsafe claim so cold recovery asks the user and never reruns a
+            // possibly side-effectful command. A known result can be stored
+            // for recovery without executing the command a second time.
+            let prepared = (!paused_with_uncertain_result).then(|| {
+                durable_turns.prepare_claimed_bash_turn(
+                    &task_turn.session_id,
+                    claimed.turn_id,
+                    shell_result,
+                    still_should_query,
+                )
+            });
+            match prepared {
+                Some(Ok(checkpoint)) if !task_turn.is_quiescing() => {
                     sink.emit(ClientEvent::TurnRecoveryState {
                         snapshot: checkpoint.snapshot(),
                     })
@@ -5909,9 +6974,7 @@ impl MobileEngineHandle {
                                     .run_queued_prompt_batch(inputs, append_cancel)
                                     .await
                                 {
-                                    message_output.reset_message_buffer().await;
-                                    sink.emit(client::adapter::map_orchestrator_error(&error))
-                                        .await;
+                                    report_owned_turn_error(&orchestrator, &task_turn, &sink, &message_output, &error).await;
                                 }
                             }
                         }
@@ -5927,14 +6990,15 @@ impl MobileEngineHandle {
                         }
                     }
                 }
-                Err(error) if !task_turn.cancel.is_cancelled() => {
+                Some(Ok(_)) | None => {}
+                Some(Err(error)) if !task_turn.cancel.is_cancelled() => {
                     sink.emit(ClientEvent::Error {
                         kind: ErrorKindDto::Internal,
                         message: format!("could not persist mobile Bash result: {error}").into(),
                     })
                     .await;
                 }
-                Err(_) => {}
+                Some(Err(_)) => {}
             }
             if let Some(scheduler) = &loop_scheduler {
                 settle_mobile_loop_turn(
@@ -5947,18 +7011,14 @@ impl MobileEngineHandle {
                 .await;
             }
             let mut active = active_cancel.lock().await;
-            if active
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, &task_turn))
-            {
-                *active = None;
-            }
+            release_active_turn(&mut active, &message_queue, &task_turn);
             drop(active);
             if let Some(owner_id) = task_turn.permission_owner_id {
                 permission_gate.end_main_turn(owner_id);
             }
-            message_queue.clear_active_turn().await;
             task_turn.mark_completed();
+            }).await;
+            }).await;
         });
         owner.set_task_handle(task);
     }
@@ -5975,6 +7035,7 @@ impl MobileEngineHandle {
         mut queued_inputs: Option<Vec<orchestrator::QueuedPromptInput>>,
         skill_prompt: Option<DurableSkillPrompt>,
         reserved_owner: Option<Arc<ActiveTurn>>,
+        pending: Option<Arc<PendingSubmission>>,
     ) -> Result<(), ClientError> {
         if queue_if_busy && queued_inputs.is_none() {
             let session_id = self.active_session_id();
@@ -6058,6 +7119,17 @@ impl MobileEngineHandle {
                 }
             }
         };
+        if let Some(pending) = &pending {
+            pending.bind_owner(&turn);
+        }
+        #[cfg(test)]
+        if let Some(pending) = &pending {
+            let barrier = pending.owner_barrier.lock().unwrap().clone();
+            if let Some((entered, release)) = barrier {
+                entered.notify_one();
+                release.notified().await;
+            }
+        }
         // Pending prompt rows append through the same Host-only identity ledger
         // as ordinary durable rows. Import an existing Native transcript before
         // checkpointing or starting the producer; session retargets do this at
@@ -6073,12 +7145,7 @@ impl MobileEngineHandle {
                     .cancel_pending(&checkpoint.session_id, checkpoint.turn_id);
             }
             let mut active = self.active_cancel.lock().await;
-            if active
-                .as_ref()
-                .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
-            {
-                *active = None;
-            }
+            release_active_turn(&mut active, &self.message_queue, &turn);
             drop(active);
             if let Some(owner_id) = turn.permission_owner_id {
                 self.inner.permission_gate.end_main_turn(owner_id);
@@ -6086,7 +7153,6 @@ impl MobileEngineHandle {
             turn.mark_completed();
             return Err(error);
         }
-        self.cancel_reason.reset();
         if let Some(state) = self
             .inner
             .wakeup_scheduler
@@ -6097,10 +7163,6 @@ impl MobileEngineHandle {
             state.invalidate_noop_streak();
         }
         self.inner.orchestrator.turn_span().reset();
-        self.message_queue
-            .register_active_turn(turn.cancel.clone())
-            .await;
-
         // Resume-only non-checkpointed paths can still carry inline image
         // sources directly. New direct prompts always have a stable identity.
         let direct_image_sources =
@@ -6166,13 +7228,15 @@ impl MobileEngineHandle {
                             .await;
                     }
                     Err(error) => {
-                        let mut active = self.active_cancel.lock().await;
-                        if active
-                            .as_ref()
-                            .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
-                        {
-                            *active = None;
+                        if pending.is_some() {
+                            // A failed write may have reached disk. Keep this
+                            // exact unspawned owner visible to the outer
+                            // admission cleanup so it can conservatively
+                            // reconcile the checkpoint before releasing it.
+                            return Err(error);
                         }
+                        let mut active = self.active_cancel.lock().await;
+                        release_active_turn(&mut active, &self.message_queue, &turn);
                         drop(active);
                         if let Some(owner_id) = turn.permission_owner_id {
                             self.inner.permission_gate.end_main_turn(owner_id);
@@ -6188,6 +7252,69 @@ impl MobileEngineHandle {
         self.inner.message_output.reset_message_buffer().await;
         wrapper.emit_turn_started(turn_id).await;
 
+        // The owner lock linearizes a pending Stop with producer startup.
+        // Stop recorded during any earlier await wins before model work starts;
+        // after this lock is held, installing the task is synchronous.
+        let admission_guard = if let Some(pending) = pending.as_ref() {
+            let mut delivery = self
+                .lock_turn_delivery(&turn.session_id, pending.turn_id)
+                .await?;
+            let mut active = self.active_cancel.lock().await;
+            if !active
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, &turn))
+            {
+                delivery.complete();
+                return Err(ClientError::Rejected {
+                    message: "submission owner changed before startup".into(),
+                });
+            }
+            if pending.cancel_requested.load(Ordering::Acquire) {
+                delivery.arm();
+                let result = {
+                    let _admission = turn.admission.lock().unwrap_or_else(|e| e.into_inner());
+                    turn.explicit_cancel_requested
+                        .store(true, Ordering::Release);
+                    self.cancel_reason
+                        .set(orchestrator::prompt::mid_turn_input::CancelReason::UserInterrupt);
+                    turn.cancel.cancel();
+                    self.durable_turns.cancel(&turn.session_id, pending.turn_id)
+                };
+                release_active_turn(&mut active, &self.message_queue, &turn);
+                drop(active);
+                if let Some(owner_id) = turn.permission_owner_id {
+                    self.inner.permission_gate.end_main_turn(owner_id);
+                }
+                turn.mark_completed();
+                match result {
+                    Ok(snapshot) => {
+                        pending.suppressed.store(true, Ordering::Release);
+                        if let Some(snapshot) = snapshot {
+                            drop(self.spawn_recovery_delivery(delivery, snapshot));
+                        } else {
+                            delivery.complete();
+                        }
+                        return Ok(());
+                    }
+                    Err(DurableTurnStoreError::Terminal { .. }) => {
+                        pending.suppressed.store(true, Ordering::Release);
+                        delivery.complete();
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        if !matches!(error, DurableTurnStoreError::Storage(_)) {
+                            delivery.complete();
+                        }
+                        return Err(Self::map_durable_turn_error(error));
+                    }
+                }
+            }
+            delivery.complete();
+            Some(active)
+        } else {
+            None
+        };
+
         let orch = self.inner.orchestrator.clone();
         let sink = self.event_sink.clone();
         let active_cancel = self.active_cancel.clone();
@@ -6200,129 +7327,147 @@ impl MobileEngineHandle {
         let media_agent_handoffs = self.inner.media_agent_handoffs.clone();
         let media_service = self.inner.media_service.clone();
         let media_conversation_attachment = self.inner.media_conversation_attachment.clone();
-        let task = self.runtime().spawn(async move {
-            let result = match queued_inputs {
-                Some(inputs) => {
-                    orch.run_queued_prompt_batch(inputs, task_turn.cancel.clone())
+        let recovery_guard = task_turn.tool_recovery_guard(self.durable_turns.clone());
+        let scope_orch = orch.clone();
+        let origin = Arc::downgrade(&task_turn);
+        let task =
+            self.runtime().spawn(async move {
+                MOBILE_TURN_ORIGIN
+                    .scope(origin, async move {
+                        scope_orch
+                .with_tool_dispatch_recovery_guard(recovery_guard, async move {
+                    let result = match queued_inputs {
+                        Some(inputs) => {
+                            orch.run_queued_prompt_batch(inputs, task_turn.cancel.clone())
+                                .await
+                        }
+                        None => {
+                            orch.run_turn_streaming_with_cancel_image_sources(
+                                &text,
+                                direct_image_sources,
+                                task_turn.cancel.clone(),
+                            )
+                            .await
+                        }
+                    };
+                    if let Err(err) = &result {
+                        report_owned_turn_error(&orch, &task_turn, &sink, &message_output, err)
+                            .await;
+                    }
+
+                    let (media_handoff_end, media_handoff_error) =
+                        match continue_media_agent_handoff(
+                            orch.clone(),
+                            task_turn.clone(),
+                            media_agent_handoffs,
+                            media_service,
+                            media_conversation_attachment,
+                            result.is_ok(),
+                        )
                         .await
-                }
-                None => {
-                    orch.run_turn_streaming_with_cancel_image_sources(
-                        &text,
-                        direct_image_sources,
-                        task_turn.cancel.clone(),
-                    )
-                    .await
-                }
-            };
-            if let Err(err) = &result {
-                message_output.reset_message_buffer().await;
-                sink.emit(client::adapter::map_orchestrator_error(err))
-                    .await;
-            }
+                        {
+                            Ok(end) => (end, None),
+                            Err(error) => {
+                                report_owned_turn_error(
+                                    &orch,
+                                    &task_turn,
+                                    &sink,
+                                    &message_output,
+                                    &error,
+                                )
+                                .await;
+                                (None, Some(error))
+                            }
+                        };
+                    let deferred_terminal = task_turn.take_deferred_terminal();
 
-            let (media_handoff_end, media_handoff_error) = match continue_media_agent_handoff(
-                orch.clone(),
-                task_turn.clone(),
-                media_agent_handoffs,
-                media_service,
-                media_conversation_attachment,
-                result.is_ok(),
-            )
-            .await
-            {
-                Ok(end) => (end, None),
-                Err(error) => {
-                    message_output.reset_message_buffer().await;
-                    sink.emit(client::adapter::map_orchestrator_error(&error))
+                    if let Some(scheduler) = &loop_scheduler {
+                        settle_mobile_loop_turn(
+                            &orch,
+                            scheduler,
+                            &task_turn.cancel,
+                            &cancel_reason,
+                            true,
+                        )
                         .await;
-                    (None, Some(error))
-                }
-            };
-            let deferred_terminal = task_turn.take_deferred_terminal();
-
-            if let Some(scheduler) = &loop_scheduler {
-                settle_mobile_loop_turn(&orch, scheduler, &task_turn.cancel, &cancel_reason, true)
-                    .await;
-            }
-            if let Some(end) = media_handoff_end {
-                let (outcome, stop_reason) = match end {
-                    orchestrator::RealtimeAgentEnd::Cancelled => (
-                        client::protocol::events::TurnOutcomeDto::Cancelled,
-                        "cancelled",
-                    ),
-                    orchestrator::RealtimeAgentEnd::Closed => (
-                        client::protocol::events::TurnOutcomeDto::EndTurn,
-                        "media_realtime_closed",
-                    ),
-                    orchestrator::RealtimeAgentEnd::Deadline => (
-                        client::protocol::events::TurnOutcomeDto::EndTurn,
-                        "media_realtime_deadline",
-                    ),
-                    orchestrator::RealtimeAgentEnd::Idle => (
-                        client::protocol::events::TurnOutcomeDto::EndTurn,
-                        "media_realtime_idle",
-                    ),
-                    orchestrator::RealtimeAgentEnd::ToolStopped => (
-                        client::protocol::events::TurnOutcomeDto::EndTurn,
-                        "media_realtime_tool_stopped",
-                    ),
-                };
-                sink.emit(ClientEvent::TurnEnded {
-                    outcome,
-                    stop_reason: Some(stop_reason.into()),
-                    cost: client::adapter::lowering::lower_cost_snapshot(
-                        &orch.snapshot_cost_real().await,
-                    ),
+                    }
+                    if let Some(end) = media_handoff_end {
+                        let (outcome, stop_reason) = match end {
+                            orchestrator::RealtimeAgentEnd::Cancelled => (
+                                client::protocol::events::TurnOutcomeDto::Cancelled,
+                                "cancelled",
+                            ),
+                            orchestrator::RealtimeAgentEnd::Closed => (
+                                client::protocol::events::TurnOutcomeDto::EndTurn,
+                                "media_realtime_closed",
+                            ),
+                            orchestrator::RealtimeAgentEnd::Deadline => (
+                                client::protocol::events::TurnOutcomeDto::EndTurn,
+                                "media_realtime_deadline",
+                            ),
+                            orchestrator::RealtimeAgentEnd::Idle => (
+                                client::protocol::events::TurnOutcomeDto::EndTurn,
+                                "media_realtime_idle",
+                            ),
+                            orchestrator::RealtimeAgentEnd::ToolStopped => (
+                                client::protocol::events::TurnOutcomeDto::EndTurn,
+                                "media_realtime_tool_stopped",
+                            ),
+                        };
+                        sink.emit(ClientEvent::TurnEnded {
+                            outcome,
+                            stop_reason: Some(stop_reason.into()),
+                            cost: client::adapter::lowering::lower_cost_snapshot(
+                                &orch.snapshot_cost_real().await,
+                            ),
+                        })
+                        .await;
+                    } else if !task_turn.terminal_emitted.load(Ordering::Acquire) {
+                        // A requested handoff can be cleaned up without entering
+                        // realtime (ordinary turn failure/cancellation). In that
+                        // case restore the terminal event held by the lifecycle gate
+                        // so the client still leaves its running state exactly once.
+                        if let Some(mut event @ ClientEvent::TurnEnded { .. }) = deferred_terminal {
+                            let terminal_cost = client::adapter::lowering::lower_cost_snapshot(
+                                &orch.snapshot_cost_real().await,
+                            );
+                            if let ClientEvent::TurnEnded {
+                                outcome,
+                                stop_reason,
+                                cost,
+                            } = &mut event
+                            {
+                                if task_turn.cancel.is_cancelled() {
+                                    *outcome = client::protocol::events::TurnOutcomeDto::Cancelled;
+                                    *stop_reason = Some("cancelled".into());
+                                } else if media_handoff_error.is_some() {
+                                    *outcome = client::protocol::events::TurnOutcomeDto::EndTurn;
+                                    *stop_reason = Some("media_handoff_error".into());
+                                } else if result.is_err() {
+                                    *outcome = client::protocol::events::TurnOutcomeDto::EndTurn;
+                                    *stop_reason = Some("error".into());
+                                }
+                                *cost = terminal_cost;
+                            }
+                            sink.emit(event).await;
+                        }
+                    }
+                    let mut active = active_cancel.lock().await;
+                    release_active_turn(&mut active, &message_queue, &task_turn);
+                    drop(active);
+                    if let Some(owner_id) = task_turn.permission_owner_id {
+                        permission_gate.end_main_turn(owner_id);
+                    }
+                    // Notify only after the slot is released: Cancel returning is the
+                    // guarantee that New/Resume/Clear can no longer observe this turn.
+                    task_turn.mark_completed();
                 })
                 .await;
-            } else if !task_turn.terminal_emitted.load(Ordering::Acquire) {
-                // A requested handoff can be cleaned up without entering
-                // realtime (ordinary turn failure/cancellation). In that
-                // case restore the terminal event held by the lifecycle gate
-                // so the client still leaves its running state exactly once.
-                if let Some(mut event @ ClientEvent::TurnEnded { .. }) = deferred_terminal {
-                    let terminal_cost = client::adapter::lowering::lower_cost_snapshot(
-                        &orch.snapshot_cost_real().await,
-                    );
-                    if let ClientEvent::TurnEnded {
-                        outcome,
-                        stop_reason,
-                        cost,
-                    } = &mut event
-                    {
-                        if task_turn.cancel.is_cancelled() {
-                            *outcome = client::protocol::events::TurnOutcomeDto::Cancelled;
-                            *stop_reason = Some("cancelled".into());
-                        } else if media_handoff_error.is_some() {
-                            *outcome = client::protocol::events::TurnOutcomeDto::EndTurn;
-                            *stop_reason = Some("media_handoff_error".into());
-                        } else if result.is_err() {
-                            *outcome = client::protocol::events::TurnOutcomeDto::EndTurn;
-                            *stop_reason = Some("error".into());
-                        }
-                        *cost = terminal_cost;
-                    }
-                    sink.emit(event).await;
-                }
-            }
-            let mut active = active_cancel.lock().await;
-            if active
-                .as_ref()
-                .is_some_and(|owner| Arc::ptr_eq(owner, &task_turn))
-            {
-                *active = None;
-            }
-            drop(active);
-            if let Some(owner_id) = task_turn.permission_owner_id {
-                permission_gate.end_main_turn(owner_id);
-            }
-            message_queue.clear_active_turn().await;
-            // Notify only after the slot is released: Cancel returning is the
-            // guarantee that New/Resume/Clear can no longer observe this turn.
-            task_turn.mark_completed();
-        });
+                    })
+                    .await;
+            });
         turn.set_task_handle(task);
+        drop(admission_guard);
         Ok(())
     }
 
@@ -6354,12 +7499,22 @@ impl MobileEngineHandle {
             "mobile: durable queued prompt accepted"
         );
         if !lingxi_core::host::env::background_tasks_disabled() {
-            self.inner
+            let background = self
+                .inner
                 .task_registry
-                .background_all_tasks_with_reason(
+                .background_all_tasks_with_outcome(
                     lingxi_core::host::task_registry::TaskBackgroundReason::DeliverMessage,
                 )
                 .await;
+            if background.capture_unknown || background.unknown != 0 {
+                return Err(ClientError::Internal {
+                    message: if background.capture_unknown {
+                        "prompt was queued, but the full set of background tasks could not be determined".into()
+                    } else {
+                        format!("prompt was queued, but the background transition for {} task(s) could not be confirmed", background.unknown)
+                    },
+                });
+            }
         }
         Ok(())
     }
@@ -6589,17 +7744,87 @@ impl MobileEngineHandle {
             .ok_or_else(|| ClientError::Internal {
                 message: "mobile engine is shutting down".into(),
             })?;
-        let task = self
-            .runtime()
-            .spawn(async move { handle.submit_on_runtime(command).await });
-        // Preserve cancellation when a foreign caller drops its Rust future.
+        // Turn-owning commands and lifecycle changes must finish their
+        // reservation or cleanup even if the foreign caller drops its future.
+        let finish_lifecycle = matches!(
+            &command,
+            ClientCommand::SendPrompt { .. }
+                | ClientCommand::RunSlashCommand { .. }
+                | ClientCommand::ResumeTurn { .. }
+                | ClientCommand::Cancel { .. }
+                | ClientCommand::PauseTurn { .. }
+        );
+        let pending = match &command {
+            ClientCommand::SendPrompt {
+                session_id: Some(session_id),
+                turn_id: Some(turn_id),
+                ..
+            }
+            | ClientCommand::RunSlashCommand {
+                session_id: Some(session_id),
+                turn_id: Some(turn_id),
+                ..
+            } if !session_id.is_empty() => {
+                let mut registry = self
+                    .pending_submissions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if registry
+                    .iter()
+                    .any(|item| item.session_id == *session_id && item.turn_id == *turn_id)
+                {
+                    return Err(ClientError::Rejected {
+                        message: "a submission with this turn id is already pending".into(),
+                    });
+                }
+                let lease = self
+                    .durable_turns
+                    .register_pending_admission(session_id, *turn_id)
+                    .map_err(Self::map_durable_turn_error)?;
+                let pending = Arc::new(PendingSubmission::new(session_id.clone(), *turn_id, lease));
+                registry.push(pending.clone());
+                Some(pending)
+            }
+            _ => None,
+        };
+        let registry = self.pending_submissions.clone();
+        let task = self.runtime().spawn(async move {
+            use futures_util::FutureExt as _;
+            let guard = pending.as_ref().map(|pending| PendingSubmissionGuard {
+                registry,
+                pending: pending.clone(),
+            });
+            let mut result = std::panic::AssertUnwindSafe(handle.submit_on_runtime(command, pending.clone()))
+                .catch_unwind().await.unwrap_or_else(|_| Err(ClientError::Internal { message: "mobile submission panicked during admission".into() }));
+            if result.is_ok() {
+                if let Some(pending) = &pending {
+                    let owner_is_unbound = pending.owner.lock().unwrap_or_else(|e| e.into_inner()).is_none();
+                    if !pending.suppressed.load(Ordering::Acquire) && owner_is_unbound {
+                        result = handle.finish_received_queue_admission(pending).await;
+                    }
+                }
+            }
+            if result.is_err() {
+                if let Some(pending) = &pending {
+                    if let Err(error) = handle.cleanup_failed_pending_submission(pending).await {
+                        tracing::warn!(%error, "mobile: failed to clean up a failed pending submission");
+                    }
+                }
+            }
+            if let Some(pending) = &pending {
+                pending.complete(result.clone());
+            }
+            drop(guard);
+            result
+        });
+        // Preserve caller cancellation for other commands.
         struct AbortCommand(tokio::task::AbortHandle);
         impl Drop for AbortCommand {
             fn drop(&mut self) {
                 self.0.abort();
             }
         }
-        let _abort = AbortCommand(task.abort_handle());
+        let _abort = (!finish_lifecycle).then(|| AbortCommand(task.abort_handle()));
         task.await.map_err(|error| ClientError::Internal {
             message: format!("mobile command task failed: {error}"),
         })?
@@ -6627,9 +7852,441 @@ impl MobileEngineHandle {
         Ok(())
     }
 
-    async fn submit_impl(&self, command: ClientCommand) -> Result<(), ClientError> {
+    async fn cancel_received_submission(
+        &self,
+        command: &ClientCommand,
+        pending: &Arc<PendingSubmission>,
+    ) -> Result<(), ClientError> {
+        let session_id = &pending.session_id;
+        let turn_id = pending.turn_id;
+        let mut delivery = self.lock_turn_delivery(session_id, turn_id).await?;
+        let active = self.active_cancel.lock().await;
+        let operation = || -> Result<Option<TurnRecoverySnapshotDto>, DurableTurnStoreError> {
+            match command {
+                ClientCommand::SendPrompt {
+                    text,
+                    prompt_mode,
+                    images,
+                    ..
+                } if active.is_none() => {
+                    self.durable_turns.begin_direct_with_skill_prompt(
+                        session_id,
+                        turn_id,
+                        Some(turn_id),
+                        text.clone().into_projection(),
+                        *prompt_mode,
+                        images.clone(),
+                        None,
+                    )?;
+                    self.durable_turns.cancel(session_id, turn_id)
+                }
+                ClientCommand::SendPrompt {
+                    text,
+                    prompt_mode,
+                    images,
+                    ..
+                } => {
+                    self.durable_turns.admit_queued_prompt(
+                        session_id,
+                        Some(turn_id),
+                        Some(turn_id),
+                        text.clone().into_projection(),
+                        *prompt_mode,
+                        images.clone(),
+                    )?;
+                    self.durable_turns
+                        .cancel_pending(session_id, turn_id)?
+                        .ok_or_else(|| DurableTurnStoreError::Terminal {
+                            session_id: session_id.clone(),
+                            turn_id,
+                        })?;
+                    self.durable_turns
+                        .expose_cancelled_pending(session_id, turn_id)
+                        .map(Some)
+                }
+                ClientCommand::RunSlashCommand { raw, images, .. } => {
+                    self.durable_turns.admit_queued_slash(
+                        session_id,
+                        Some(turn_id),
+                        Some(turn_id),
+                        raw.clone().into_projection(),
+                        images.clone(),
+                    )?;
+                    self.durable_turns
+                        .cancel_pending(session_id, turn_id)?
+                        .ok_or_else(|| DurableTurnStoreError::Terminal {
+                            session_id: session_id.clone(),
+                            turn_id,
+                        })?;
+                    self.durable_turns
+                        .expose_cancelled_pending(session_id, turn_id)
+                        .map(Some)
+                }
+                _ => unreachable!("only turn submissions have pending admission"),
+            }
+        };
+        delivery.arm();
+        let result = match active.as_ref() {
+            Some(owner) if owner.session_id == *session_id => match owner.live_owner.as_ref() {
+                Some(lease) => {
+                    self.durable_turns
+                        .with_live_owner(session_id, lease, Some(turn_id), operation)
+                }
+                None => Err(DurableTurnStoreError::Storage(
+                    "missing active turn lease".into(),
+                )),
+            },
+            Some(_) => {
+                delivery.complete();
+                return Err(ClientError::Rejected {
+                    message: "submission owner changed".into(),
+                });
+            }
+            None => self
+                .durable_turns
+                .with_no_live_owner(session_id, Some(turn_id), operation),
+        };
+        let snapshot = match result {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if !matches!(error, DurableTurnStoreError::Storage(_)) {
+                    delivery.complete();
+                }
+                return Err(Self::map_durable_turn_error(error));
+            }
+        };
+        pending.suppressed.store(true, Ordering::Release);
+        drop(active);
+        if let Some(snapshot) = snapshot {
+            // A submitted cancellation is durable before this delivery task is
+            // scheduled; callback execution never holds the owner lock.
+            drop(self.spawn_recovery_delivery(delivery, snapshot));
+        } else {
+            delivery.complete();
+        }
+        Ok(())
+    }
+
+    async fn cleanup_failed_pending_submission(
+        &self,
+        pending: &Arc<PendingSubmission>,
+    ) -> Result<(), ClientError> {
+        let owner = pending
+            .owner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade);
+        let Some(owner) = owner else {
+            return Ok(());
+        };
+        // Even an already-poisoned delivery gate must not strand an unspawned
+        // owner. Preserve the gate error while still releasing that owner.
+        let (mut delivery, delivery_error) = match self
+            .lock_turn_delivery(&owner.session_id, pending.turn_id)
+            .await
+        {
+            Ok(guard) => (Some(guard), None),
+            Err(error) => (None, Some(error)),
+        };
+        let mut active = self.active_cancel.lock().await;
+        if !active
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &owner))
+            || owner
+                .task
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        {
+            if let Some(guard) = delivery {
+                guard.complete();
+            }
+            return Ok(());
+        }
+        let mut snapshot = None;
+        let recovery = if pending.cancel_requested.load(Ordering::Acquire) {
+            if let Some(guard) = delivery.as_mut() {
+                guard.arm();
+            }
+            match self
+                .durable_turns
+                .cancel(&owner.session_id, pending.turn_id)
+            {
+                Ok(value) => {
+                    snapshot = value;
+                    pending.suppressed.store(true, Ordering::Release);
+                    Ok(())
+                }
+                Err(DurableTurnStoreError::Terminal { .. }) => Ok(()),
+                Err(error) => Err(Self::map_durable_turn_error(error)),
+            }
+        } else {
+            match self.durable_turns.load(&owner.session_id, pending.turn_id) {
+                Ok(checkpoint)
+                    if checkpoint
+                        .state
+                        .as_ref()
+                        .is_some_and(|state| !state.is_terminal()) =>
+                {
+                    self.durable_turns
+                        .transition(
+                            &owner.session_id,
+                            pending.turn_id,
+                            TurnRecoveryStateDto::WaitingForUser,
+                            false,
+                            Some("admission_failed".into()),
+                        )
+                        .map(|_| ())
+                        .map_err(Self::map_durable_turn_error)
+                }
+                Ok(_) | Err(DurableTurnStoreError::NotFound { .. }) => Ok(()),
+                Err(error) => Err(Self::map_durable_turn_error(error)),
+            }
+        };
+        owner.request_lifecycle_quiesce(&self.cancel_reason);
+        release_active_turn(&mut active, &self.message_queue, &owner);
+        drop(active);
+        if let Some(owner_id) = owner.permission_owner_id {
+            self.inner.permission_gate.end_main_turn(owner_id);
+        }
+        let delivery_task = match (delivery.take(), snapshot) {
+            (Some(guard), Some(snapshot)) => Some(self.spawn_recovery_delivery(guard, snapshot)),
+            (Some(guard), None) if recovery.is_ok() => {
+                guard.complete();
+                None
+            }
+            (Some(guard), None) => {
+                drop(guard);
+                None
+            }
+            (None, _) => None,
+        };
+        owner.mark_completed();
+        if let Some(task) = delivery_task {
+            Self::await_recovery_delivery(task).await?;
+        }
+        recovery?;
+        if let Some(error) = delivery_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Complete a received queued admission under the same owner boundary used
+    /// by Cancel. The shared lease prevents queue consumers from claiming this
+    /// identity until the cancellation decision has been durably made.
+    async fn finish_received_queue_admission(
+        &self,
+        pending: &Arc<PendingSubmission>,
+    ) -> Result<(), ClientError> {
+        let mut delivery = self
+            .lock_turn_delivery(&pending.session_id, pending.turn_id)
+            .await?;
+        let active = self.active_cancel.lock().await;
+        if !pending.cancel_requested.load(Ordering::Acquire) {
+            pending.complete(Ok(()));
+            delivery.complete();
+            return Ok(());
+        }
+        let cancel = || -> Result<Option<TurnRecoverySnapshotDto>, DurableTurnStoreError> {
+            match self
+                .durable_turns
+                .cancel_pending(&pending.session_id, pending.turn_id)
+            {
+                Ok(Some(_)) => self
+                    .durable_turns
+                    .expose_cancelled_pending(&pending.session_id, pending.turn_id)
+                    .map(Some),
+                Ok(None)
+                | Err(DurableTurnStoreError::NotFound { .. })
+                | Err(DurableTurnStoreError::Terminal { .. }) => Ok(None),
+                Err(error) => Err(error),
+            }
+        };
+        delivery.arm();
+        let result = match active
+            .as_ref()
+            .filter(|owner| owner.session_id == pending.session_id)
+            .and_then(|owner| owner.live_owner.as_ref())
+        {
+            Some(lease) => self.durable_turns.with_live_owner(
+                &pending.session_id,
+                lease,
+                Some(pending.turn_id),
+                cancel,
+            ),
+            None => self.durable_turns.with_no_live_owner(
+                &pending.session_id,
+                Some(pending.turn_id),
+                cancel,
+            ),
+        };
+        let snapshot = match result {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => {
+                pending
+                    .cancel_without_checkpoint
+                    .store(true, Ordering::Release);
+                pending.complete(Ok(()));
+                delivery.complete();
+                return Ok(());
+            }
+            Err(error) => {
+                if !matches!(error, DurableTurnStoreError::Storage(_)) {
+                    delivery.complete();
+                }
+                return Err(Self::map_durable_turn_error(error));
+            }
+        };
+        pending.suppressed.store(true, Ordering::Release);
+        drop(active);
+        let task = self.spawn_recovery_delivery(delivery, snapshot);
+        pending.complete(Ok(()));
+        remove_mobile_prompt_dispatches(
+            &self.message_queue,
+            &pending.session_id,
+            &[pending.turn_id],
+        )
+        .await;
+        Self::await_recovery_delivery(task).await
+    }
+
+    async fn cancel_received_or_active(
+        &self,
+        session_id: &str,
+        turn_id: Option<u64>,
+    ) -> Result<(), ClientError> {
+        let Some(turn_id) = turn_id else {
+            return self.cancel_active_turn(session_id, None).await;
+        };
+        let (pending, live_owner) = {
+            let active = self.active_cancel.lock().await;
+            let current = self
+                .inner
+                .active_session_uuid
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if session_id.is_empty() || current.as_str() != session_id {
+                return Err(ClientError::Rejected {
+                    message: "cancel request belongs to a different session".into(),
+                });
+            }
+            let pending = self
+                .pending_submissions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter(|item| item.session_id == session_id && item.turn_id == turn_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            if pending
+                .iter()
+                .any(|item| item.local_command_started.load(Ordering::Acquire))
+            {
+                return Err(ClientError::Rejected {
+                    message: "the local command has already started and cannot be cancelled".into(),
+                });
+            }
+            for item in &pending {
+                item.cancel_requested.store(true, Ordering::Release);
+            }
+            let live_owner = active
+                .as_ref()
+                .filter(|owner| owner.session_id == session_id && owner.turn_id == Some(turn_id))
+                .cloned();
+            (pending, live_owner)
+        };
+        if let Some(owner) = live_owner {
+            return self
+                .cancel_active_turn_for_owner(session_id, Some(turn_id), Some(owner))
+                .await;
+        }
+        for item in &pending {
+            if let Err(error) = item.wait().await {
+                if !item.suppressed.load(Ordering::Acquire) {
+                    return Err(error);
+                }
+            }
+        }
+        if pending
+            .iter()
+            .any(|item| item.cancel_without_checkpoint.load(Ordering::Acquire))
+        {
+            return Err(ClientError::Rejected {
+                message: "the local command has already crossed its cancellation boundary".into(),
+            });
+        }
+        if !pending.is_empty()
+            && pending
+                .iter()
+                .all(|item| item.suppressed.load(Ordering::Acquire))
+        {
+            // Submission queued its terminal callback without awaiting foreign
+            // code; Cancel acknowledges only after that delivery has returned.
+            let delivery = self.lock_turn_delivery(session_id, turn_id).await?;
+            delivery.complete();
+            return Ok(());
+        }
+        self.cancel_active_turn(session_id, Some(turn_id)).await
+    }
+
+    async fn submit_impl(
+        &self,
+        command: ClientCommand,
+        pending: Option<Arc<PendingSubmission>>,
+    ) -> Result<(), ClientError> {
         // Serialize session mutation and turn reservation with wakeup publication.
         let _transition = self.loop_transition.lock().await;
+        if let ClientCommand::SendPrompt { session_id, .. }
+        | ClientCommand::RunSlashCommand { session_id, .. } = &command
+        {
+            if session_id.as_deref().filter(|id| !id.is_empty())
+                != Some(self.active_session_id().as_str())
+            {
+                return Err(ClientError::SubmissionNotAdmitted {
+                    message: "prompt request belongs to a different session".into(),
+                });
+            }
+        }
+        if let ClientCommand::ResumeTurn { session_id, .. }
+        | ClientCommand::PauseTurn { session_id, .. } = &command
+        {
+            if session_id.is_empty() || session_id != &self.active_session_id() {
+                return Err(ClientError::Rejected {
+                    message: "turn request belongs to a different session".into(),
+                });
+            }
+        }
+        if let ClientCommand::AttachTurn {
+            session_id,
+            request_id,
+            ..
+        }
+        | ClientCommand::QueryQueuedTurn {
+            session_id,
+            request_id,
+            ..
+        } = &command
+        {
+            if session_id != &self.active_session_id() {
+                return Err(ClientError::Rejected {
+                    message: "attach request belongs to a different session".into(),
+                });
+            }
+            if request_id.is_empty() || request_id.len() > 128 {
+                return Err(ClientError::Rejected {
+                    message: "attach request id must contain 1 to 128 UTF-8 bytes".into(),
+                });
+            }
+        }
+        if let Some(pending) = pending.as_ref() {
+            if pending.cancel_requested.load(Ordering::Acquire) {
+                return self.cancel_received_submission(&command, pending).await;
+            }
+            #[cfg(test)]
+            pending.test_stage.store(1, Ordering::Release);
+        }
         if (matches!(
             &command,
             ClientCommand::ClearSession
@@ -6674,6 +8331,50 @@ impl MobileEngineHandle {
             }
         }
 
+        // A scheduled reload can replace session-owned state. Recheck the
+        // original command owner before any prompt admission or side effect.
+        if let ClientCommand::SendPrompt { session_id, .. }
+        | ClientCommand::RunSlashCommand { session_id, .. } = &command
+        {
+            if session_id.as_deref() != Some(self.active_session_id().as_str()) {
+                return Err(ClientError::Rejected {
+                    message: "prompt request belongs to a different session".into(),
+                });
+            }
+        }
+        if let ClientCommand::QueryQueuedTurn { session_id, .. } = &command {
+            if session_id != &self.active_session_id() {
+                return Err(ClientError::Rejected {
+                    message: "queued turn request belongs to a different session".into(),
+                });
+            }
+        }
+        if let Some(pending) = pending.as_ref() {
+            if pending.cancel_requested.load(Ordering::Acquire) {
+                return self.cancel_received_submission(&command, pending).await;
+            }
+        }
+
+        // Workspace navigation is an immediate, non-cancellable host action.
+        // Arbitrate its start against an already received Stop under the same
+        // owner lock; a later Stop gets an explicit rejection instead of a
+        // false successful cancellation receipt.
+        if let (Some(pending), ClientCommand::RunSlashCommand { raw, .. }) =
+            (pending.as_ref(), &command)
+        {
+            let source = raw.clone().into_projection();
+            let is_local = command_api::parse_slash_command(&source)
+                .is_some_and(|parsed| matches!(parsed.name.string_at(""), Some("cd" | "add-dir")));
+            if is_local {
+                let active = self.active_cancel.lock().await;
+                if pending.cancel_requested.load(Ordering::Acquire) {
+                    drop(active);
+                    return self.cancel_received_submission(&command, pending).await;
+                }
+                pending.local_command_started.store(true, Ordering::Release);
+            }
+        }
+
         if matches!(
             &command,
             ClientCommand::SendPrompt { .. }
@@ -6710,6 +8411,7 @@ impl MobileEngineHandle {
                 Ok(())
             }
             ClientCommand::SendPrompt {
+                session_id: _,
                 text,
                 prompt_mode,
                 images,
@@ -6732,7 +8434,7 @@ impl MobileEngineHandle {
                 let source_text = text.into_projection();
                 if prompt_mode == Some(PromptModeDto::Bash) {
                     return self
-                        .start_mobile_bash_turn(source_text, images, turn_id, _transition)
+                        .start_mobile_bash_turn(source_text, images, turn_id, _transition, pending)
                         .await;
                 }
                 let text = crate::inline_visualization::followup_text(
@@ -6743,66 +8445,208 @@ impl MobileEngineHandle {
                     source_text,
                 )
                 .await;
-                self.start_streaming_turn(text, prompt_mode, images, turn_id, true)
+                self.start_streaming_turn(text, prompt_mode, images, turn_id, true, pending)
                     .await
             }
 
-            ClientCommand::Cancel { turn_id } => self.cancel_active_turn(turn_id).await,
+            ClientCommand::Cancel {
+                session_id,
+                turn_id,
+            } => {
+                let session_id = session_id.filter(|id| !id.is_empty()).ok_or_else(|| {
+                    ClientError::Rejected {
+                        message: "mobile cancel requires a session id".into(),
+                    }
+                })?;
+                self.cancel_received_or_active(&session_id, turn_id).await
+            }
+
+            ClientCommand::QueryQueuedTurn {
+                session_id,
+                turn_id,
+                request_id,
+            } => {
+                let status =
+                    match self
+                        .durable_turns
+                        .with_no_pending_admission(&session_id, turn_id, || {
+                            self.durable_turns.queued_turn_status(&session_id, turn_id)
+                        }) {
+                        Ok(status) => status,
+                        Err(DurableTurnStoreError::NotFound { .. }) => {
+                            return Err(ClientError::NotFound {
+                                message: "queued turn checkpoint not found".into(),
+                            })
+                        }
+                        Err(error) => return Err(Self::map_durable_turn_error(error)),
+                    };
+                let sink = self.connection_sink.clone();
+                // Never hold session or store locks while invoking a foreign
+                // callback. The request identity lets a later source ignore a
+                // response from an abandoned query.
+                drop(self.runtime().spawn(async move {
+                    sink.emit(ClientEvent::QueuedTurnStatus {
+                        session_id,
+                        turn_id,
+                        request_id,
+                        status,
+                    })
+                    .await;
+                }));
+                Ok(())
+            }
 
             ClientCommand::AttachTurn {
+                session_id,
                 turn_id,
                 after_sequence,
+                request_id,
             } => {
-                let session_id = self.active_session_id();
-                let checkpoint = self
-                    .durable_turns
-                    .load(&session_id, turn_id)
-                    .map_err(Self::map_durable_turn_error)?;
+                let mut delivery = self.lock_turn_delivery(&session_id, turn_id).await?;
+                // Another handle does not subscribe to this handle's live
+                // event stream. Do not return a Running snapshot that would
+                // otherwise leave the attaching client waiting indefinitely.
+                let active = self.active_cancel.lock().await;
+                let lease = active
+                    .as_ref()
+                    .filter(|turn| turn.session_id == session_id)
+                    .and_then(|turn| turn.live_owner.as_ref());
+                let mut checkpoint = {
+                    // The store is shared across handles. Registration and
+                    // this authoritative load use the same short boundary,
+                    // so an earlier received submission cannot be reported
+                    // absent merely because it belongs to another handle.
+                    let load = || {
+                        let read = || self.durable_turns.load(&session_id, turn_id);
+                        match lease {
+                            Some(lease) => self.durable_turns.with_live_owner(
+                                &session_id,
+                                lease,
+                                Some(turn_id),
+                                read,
+                            ),
+                            None => self.durable_turns.with_no_live_owner(
+                                &session_id,
+                                Some(turn_id),
+                                read,
+                            ),
+                        }
+                    };
+                    match self
+                        .durable_turns
+                        .with_no_pending_admission(&session_id, turn_id, load)
+                    {
+                        Ok(checkpoint) => checkpoint,
+                        Err(DurableTurnStoreError::NotFound { .. }) => {
+                            return Err(ClientError::NotFound {
+                                message: "turn checkpoint not found".into(),
+                            })
+                        }
+                        Err(error) => return Err(Self::map_durable_turn_error(error)),
+                    }
+                };
+                drop(active);
                 if checkpoint.state.is_none() {
                     return Err(ClientError::Rejected {
                         message: "queued prompt has not been claimed for execution".into(),
                     });
                 }
-                let snapshot = if checkpoint.has_replay_gap(after_sequence) {
-                    tracing::warn!(
-                        %session_id,
-                        turn_id,
-                        after_sequence,
-                        first_sequence = checkpoint.first_sequence,
-                        last_sequence = checkpoint.last_sequence,
-                        "mobile: attach cursor fell behind retained durable turn history"
-                    );
-                    if checkpoint
-                        .state
-                        .as_ref()
-                        .is_some_and(TurnRecoveryStateDto::is_terminal)
-                    {
-                        // A replay gap is not permission to resurrect a
-                        // completed/failed/cancelled turn. Preserve the
-                        // terminal state and explain why no suffix was sent.
-                        checkpoint
-                            .snapshot_with_reason(Some("replay_history_truncated".to_string()))
+                let snapshot =
+                    if let Some(gap_reason) = checkpoint.replay_gap_reason(after_sequence) {
+                        tracing::warn!(
+                            %session_id,
+                            turn_id,
+                            after_sequence,
+                            first_sequence = checkpoint.first_sequence,
+                            last_sequence = checkpoint.last_sequence,
+                            gap_reason,
+                            "mobile: attach cursor fell behind retained durable turn history"
+                        );
+                        if checkpoint
+                            .state
+                            .as_ref()
+                            .is_some_and(TurnRecoveryStateDto::is_terminal)
+                        {
+                            // A replay gap is not permission to resurrect a
+                            // completed/failed/cancelled turn. Preserve the
+                            // terminal state and explain why no suffix was sent.
+                            checkpoint.snapshot_with_reason(Some(gap_reason.to_string()))
+                        } else {
+                            let active = self.active_cancel.lock().await;
+                            let lease = active
+                                .as_ref()
+                                .filter(|turn| turn.session_id == session_id)
+                                .and_then(|turn| turn.live_owner.as_ref());
+                            let update = || {
+                                let latest = self.durable_turns.load(&session_id, turn_id)?;
+                                let snapshot = if let Some(gap_reason) =
+                                    latest.replay_gap_reason(after_sequence)
+                                {
+                                    if latest
+                                        .state
+                                        .as_ref()
+                                        .is_some_and(TurnRecoveryStateDto::is_terminal)
+                                    {
+                                        latest.snapshot_with_reason(Some(gap_reason.to_string()))
+                                    } else {
+                                        self.durable_turns.transition(
+                                            &session_id,
+                                            turn_id,
+                                            TurnRecoveryStateDto::WaitingForUser,
+                                            false,
+                                            Some(gap_reason.to_string()),
+                                        )?
+                                    }
+                                } else {
+                                    latest.snapshot()
+                                };
+                                Ok((latest, snapshot))
+                            };
+                            delivery.arm();
+                            let update_result = match lease {
+                                Some(lease) => self.durable_turns.with_live_owner(
+                                    &session_id,
+                                    lease,
+                                    Some(turn_id),
+                                    update,
+                                ),
+                                None => self.durable_turns.with_no_live_owner(
+                                    &session_id,
+                                    Some(turn_id),
+                                    update,
+                                ),
+                            };
+                            let (latest, snapshot) = match update_result {
+                                Ok(result) => result,
+                                Err(error) => {
+                                    if !matches!(error, DurableTurnStoreError::Storage(_)) {
+                                        delivery.complete();
+                                    }
+                                    return Err(Self::map_durable_turn_error(error));
+                                }
+                            };
+                            checkpoint = latest;
+                            snapshot
+                        }
                     } else {
-                        self.durable_turns
-                            .transition(
-                                &session_id,
-                                turn_id,
-                                TurnRecoveryStateDto::WaitingForUser,
-                                false,
-                                Some("replay_history_truncated".to_string()),
-                            )
-                            .map_err(Self::map_durable_turn_error)?
+                        checkpoint.snapshot()
+                    };
+                if !checkpoint.has_replay_gap(after_sequence) {
+                    // Validate the entire batch before announcing it. A
+                    // malformed or unsupported record cannot be skipped while
+                    // claiming that the cursor is continuous.
+                    for event in checkpoint.replay_after(after_sequence) {
+                        client::turn_journal::decode_turn_journal_event(event.event_json.clone())
+                            .map_err(|error| ClientError::Internal {
+                            message: format!("turn replay contains an invalid event: {error}"),
+                        })?;
                     }
-                } else {
-                    checkpoint.snapshot()
-                };
+                }
                 tracing::debug!(
                     %session_id,
                     turn_id,
                     after_sequence,
-                    replayed_event_count = if snapshot.reason.as_deref()
-                        == Some("replay_history_truncated")
-                    {
+                    replayed_event_count = if checkpoint.has_replay_gap(after_sequence) {
                         0
                     } else {
                         checkpoint.replay_after(after_sequence).len()
@@ -6810,46 +8654,81 @@ impl MobileEngineHandle {
                     checkpoint_revision = checkpoint.revision,
                     "mobile: attached durable turn"
                 );
-                self.event_sink
-                    .emit(ClientEvent::TurnRecoveryState { snapshot })
+                delivery.arm();
+                let sink = self.connection_sink.clone();
+                let task = tokio::spawn(async move {
+                    sink.emit(ClientEvent::TurnAttachStarted {
+                        request_id: request_id.clone(),
+                        snapshot,
+                    })
                     .await;
-                if !checkpoint.has_replay_gap(after_sequence) {
-                    for retained in checkpoint.replay_after(after_sequence) {
-                        self.event_sink
-                            .emit(ClientEvent::TurnEventReplay {
+                    if !checkpoint.has_replay_gap(after_sequence) {
+                        for retained in checkpoint.replay_after(after_sequence) {
+                            sink.emit(ClientEvent::TurnEventReplay {
                                 session_id: session_id.clone(),
                                 turn_id,
                                 sequence: retained.sequence,
                                 event_json: retained.event_json.clone(),
                             })
                             .await;
+                        }
                     }
-                }
-                Ok(())
+                    sink.emit(ClientEvent::TurnAttachFinished {
+                        request_id,
+                        session_id,
+                        turn_id,
+                    })
+                    .await;
+                    delivery.complete();
+                });
+                Self::await_recovery_delivery(task).await
             }
 
-            ClientCommand::ResumeTurn { turn_id } => {
-                if self.active_cancel.lock().await.is_some() {
-                    return Err(ClientError::Rejected {
-                        message: "a turn is already in flight".to_string(),
-                    });
-                }
-                let session_id = self.active_session_id();
-                let checkpoint = self
-                    .durable_turns
-                    .load(&session_id, turn_id)
-                    .map_err(Self::map_durable_turn_error)?;
-                let (disposition, snapshot) = self
-                    .durable_turns
-                    .resume(&session_id, turn_id)
-                    .map_err(Self::map_durable_turn_error)?;
+            ClientCommand::ResumeTurn {
+                session_id,
+                turn_id,
+            } => {
+                let mut delivery = self.lock_turn_delivery(&session_id, turn_id).await?;
+                // Reserve before changing the checkpoint so another handle or
+                // a detached tool cannot start the same session in between.
+                let owner = self
+                    .reserve_turn_for_session(Some(turn_id), Some(&session_id))
+                    .await?;
+                delivery.arm();
+                let resumed =
+                    self.durable_turns
+                        .load(&session_id, turn_id)
+                        .and_then(|checkpoint| {
+                            self.durable_turns
+                                .resume(&session_id, turn_id)
+                                .map(|result| (checkpoint, result))
+                        });
+                let (checkpoint, (disposition, snapshot)) = match resumed {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if !matches!(error, DurableTurnStoreError::Storage(_)) {
+                            delivery.complete();
+                        } else {
+                            drop(delivery);
+                        }
+                        self.release_unspawned_turn(&owner).await;
+                        return Err(Self::map_durable_turn_error(error));
+                    }
+                };
                 if let Some(snapshot) = snapshot {
-                    self.event_sink
-                        .emit(ClientEvent::TurnRecoveryState { snapshot })
-                        .await;
+                    let task = self.spawn_recovery_delivery(delivery, snapshot);
+                    if let Err(error) = Self::await_recovery_delivery(task).await {
+                        self.release_unspawned_turn(&owner).await;
+                        return Err(error);
+                    }
+                } else {
+                    delivery.complete();
                 }
                 match disposition {
-                    ResumeDisposition::Queued => Ok(()),
+                    ResumeDisposition::Queued => {
+                        self.release_unspawned_turn(&owner).await;
+                        Ok(())
+                    }
                     ResumeDisposition::Ready => {
                         tracing::info!(
                             %session_id,
@@ -6858,20 +8737,18 @@ impl MobileEngineHandle {
                             "mobile: resuming turn from pre-execution checkpoint"
                         );
                         let skill_prompt = checkpoint.skill_prompt.clone();
-                        let mut queued_inputs =
-                            if checkpoint.prompt_mode == Some(PromptModeDto::Bash) {
-                                Some(
-                                    checkpoint
-                                        .queued_prompt_inputs(&self.durable_turns)
-                                        .map_err(Self::map_durable_turn_error)?,
-                                )
-                            } else {
-                                Some(
-                                    checkpoint
-                                        .initial_prompt_inputs()
-                                        .map_err(Self::map_durable_turn_error)?,
-                                )
-                            };
+                        let queued_result = if checkpoint.prompt_mode == Some(PromptModeDto::Bash) {
+                            checkpoint.queued_prompt_inputs(&self.durable_turns)
+                        } else {
+                            checkpoint.initial_prompt_inputs()
+                        };
+                        let mut queued_inputs = match queued_result {
+                            Ok(inputs) => Some(inputs),
+                            Err(error) => {
+                                self.release_unspawned_turn(&owner).await;
+                                return Err(Self::map_durable_turn_error(error));
+                            }
+                        };
                         if let Some(inputs) = queued_inputs.as_mut() {
                             checkpoint.correlate_prompt_inputs(inputs);
                         }
@@ -6885,17 +8762,23 @@ impl MobileEngineHandle {
                             false,
                             queued_inputs,
                             skill_prompt,
+                            Some(owner),
                             None,
                         )
                         .await
                     }
-                    ResumeDisposition::WaitingForUser | ResumeDisposition::Terminal => Ok(()),
+                    ResumeDisposition::WaitingForUser | ResumeDisposition::Terminal => {
+                        self.release_unspawned_turn(&owner).await;
+                        Ok(())
+                    }
                 }
             }
 
-            ClientCommand::PauseTurn { turn_id, reason } => {
-                self.pause_active_turn(turn_id, reason).await
-            }
+            ClientCommand::PauseTurn {
+                session_id,
+                turn_id,
+                reason,
+            } => self.pause_active_turn(session_id, turn_id, reason).await,
 
             // ── Permission resolution (resolve the parked oneshot, F1-14) ───
             ClientCommand::ApprovePermission {
@@ -7289,11 +9172,12 @@ impl MobileEngineHandle {
             // `SendPrompt` (claude-code injects the expanded prompt as the user
             // message), so a typed `/loop` actually schedules + executes.
             ClientCommand::RunSlashCommand {
+                session_id: _,
                 raw,
                 images,
                 turn_id,
             } => {
-                self.submit_slash_command(raw, images, turn_id, _transition)
+                self.submit_slash_command(raw, images, turn_id, _transition, pending)
                     .await
             }
 
@@ -7736,6 +9620,9 @@ impl MobileEngineHandle {
                             client::protocol::listings::TaskStatusDto::Paused => "paused",
                             client::protocol::listings::TaskStatusDto::Completed => "completed",
                             client::protocol::listings::TaskStatusDto::Failed => "failed",
+                            client::protocol::listings::TaskStatusDto::ExitedUnknown => {
+                                "exited_unknown"
+                            }
                             // The DTO's user-stop variant maps back to the
                             // engine's terminal "killed" wire status (the same
                             // reconciliation as `lower_task_status`).
@@ -7906,6 +9793,14 @@ impl MobileEngineHandle {
                     args,
                     resume_from_run_id: Some(run_id.clone()),
                     session_uuid: Some(resume_session.clone()),
+                    session_origin: self
+                        .inner
+                        .orchestrator
+                        .capture_session_origin()
+                        .await
+                        .map_err(|error| ClientError::Rejected {
+                            message: error.to_string(),
+                        })?,
                     ..Default::default()
                 };
                 let launched = self
@@ -8114,14 +10009,27 @@ impl MobileEngineHandle {
 }
 
 impl MobileEngineHandle {
-    async fn submit_on_runtime(&self, command: ClientCommand) -> Result<(), ClientError> {
+    async fn submit_on_runtime(
+        &self,
+        command: ClientCommand,
+        pending: Option<Arc<PendingSubmission>>,
+    ) -> Result<(), ClientError> {
         // A questionnaire parks work that can itself be holding the transition
         // lock (for example, a long-running workflow). Its answer is
         // connection-scoped and only resolves the broker's oneshot, so waiting
         // behind that lock turns the native sheet's submit spinner into a
         // deadlock. Resolve these commands before serializing session state.
         match command {
-            ClientCommand::Cancel { turn_id } => self.cancel_active_turn(turn_id).await,
+            ClientCommand::Cancel { session_id, turn_id } => {
+                let session_id = session_id.filter(|id| !id.is_empty()).ok_or_else(|| ClientError::Rejected { message: "mobile cancel requires a session id".into() })?;
+                self.cancel_received_or_active(&session_id, turn_id).await
+            },
+            ClientCommand::ApprovePermission { request_id, response } => {
+                self.resolve_permission(request_id, response).await
+            }
+            ClientCommand::DenyPermission { request_id } => {
+                self.resolve_permission(request_id, PermissionResponseDto::Deny).await
+            }
             ClientCommand::UpdatePromptSuggestionContext {
                 session_id,
                 focus,
@@ -8269,7 +10177,7 @@ impl MobileEngineHandle {
             | ClientCommand::MediaControlResponse { .. } => Err(ClientError::Rejected {
                 message: "host-private media transport is not accepted by the mobile session command path".into(),
             }),
-            command => Box::pin(self.submit_impl(command)).await,
+            command => Box::pin(self.submit_impl(command, pending)).await,
         }
     }
 

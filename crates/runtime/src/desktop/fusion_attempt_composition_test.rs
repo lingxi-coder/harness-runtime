@@ -207,6 +207,7 @@ fn submission(
         request,
         lingxi_core::host::FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(Offline),
                 budget,
             },

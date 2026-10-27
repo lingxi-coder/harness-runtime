@@ -1,0 +1,6 @@
+{
+  "type": "query_queued_turn",
+  "session_id": "session-1",
+  "turn_id": 11,
+  "request_id": "request-1"
+}

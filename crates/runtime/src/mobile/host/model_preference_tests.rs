@@ -366,6 +366,7 @@ mod model_preference_tests {
         handle.runtime().block_on(async {
             handle
                 .submit(ClientCommand::RunSlashCommand {
+                    session_id: Some(handle.active_session_id()),
                     raw: "/model".into(),
                     images: Vec::new(),
                     turn_id: Some(1),
@@ -375,6 +376,7 @@ mod model_preference_tests {
             assert!(!home.join("last-model.json").exists());
             handle
                 .submit(ClientCommand::RunSlashCommand {
+                    session_id: Some(handle.active_session_id()),
                     raw: "/model github-copilot/gpt-5.6-sol".into(),
                     images: Vec::new(),
                     turn_id: Some(2),
@@ -390,6 +392,7 @@ mod model_preference_tests {
             listener.received.lock().await.clear();
             handle
                 .submit(ClientCommand::RunSlashCommand {
+                    session_id: Some(handle.active_session_id()),
                     raw: "/model removed-provider/missing".into(),
                     images: Vec::new(),
                     turn_id: Some(3),
@@ -410,6 +413,7 @@ mod model_preference_tests {
                 .any(|event| matches!(event, Ev::ModelChanged { .. })));
             handle
                 .submit(ClientCommand::RunSlashCommand {
+                    session_id: Some(handle.active_session_id()),
                     raw: "/model".into(),
                     images: Vec::new(),
                     turn_id: Some(4),

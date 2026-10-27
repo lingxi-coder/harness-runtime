@@ -637,6 +637,7 @@ mod tests {
     }
     fn inherit(h: &Arc<Harness>) -> SubagentInheritance {
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: h.clone(),
             budget: h.clone(),
         }

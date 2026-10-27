@@ -243,6 +243,7 @@ async fn registered_attempts_all_stages_and_repair_keep_authoritative_settlement
         let legacy_budget = RecordingBudget::new();
         let parent = FusionInheritance::new(
             SubagentInheritance {
+                session_origin: None,
                 tool_invoker: Arc::new(InertInvoker),
                 budget: legacy_budget.clone(),
             },
@@ -743,6 +744,7 @@ impl AnalyticsSink for BlockingStartedSink {
 fn inherit() -> FusionInheritance {
     FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: Arc::new(InertBudget),
         },
@@ -753,6 +755,7 @@ fn inherit() -> FusionInheritance {
 fn inherit_cancel(cancel: CancellationToken) -> FusionInheritance {
     FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: Arc::new(InertBudget),
         },
@@ -2799,6 +2802,7 @@ async fn commit_failure_emits_exactly_one_failed_terminal_event() {
     let orch = orch.with_price_book(Arc::new(priced_book()));
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: Arc::new(FailingCommitBudget),
         },
@@ -3169,6 +3173,7 @@ async fn injected_system_reminder_in_evidence_id_and_refs_is_sanitized_before_an
 fn inherit_capped() -> FusionInheritance {
     FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: Arc::new(DenyReserveBudget),
         },
@@ -3373,6 +3378,7 @@ impl BudgetEnforcerHandle for RecordingBudget {
 fn inherit_recording(budget: Arc<RecordingBudget>) -> FusionInheritance {
     FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget,
         },
@@ -3386,6 +3392,7 @@ fn inherit_recording_cancel(
 ) -> FusionInheritance {
     FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget,
         },
@@ -4210,6 +4217,7 @@ async fn cancel_landing_mid_finalize_commit_does_not_discard_a_completed_run() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -4295,6 +4303,7 @@ async fn cancel_mid_panel_bar_commit_keeps_known_spend_and_releases_no_hold() {
     let cancel = CancellationToken::new();
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -4916,6 +4925,7 @@ async fn prepared_run_reserves_the_captured_quote_after_prices_change() {
     let budget = Arc::new(QuoteRecordingBudget::default());
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5021,6 +5031,7 @@ async fn prepared_identity_requires_and_uses_its_scoped_budget_view() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget,
         },
@@ -5088,6 +5099,7 @@ async fn prepared_cancel_before_allocation_seals_exact_zero_facts() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5229,6 +5241,7 @@ async fn prepared_cancel_interrupts_a_blocked_budget_reservation() {
     let cancel = CancellationToken::new();
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget,
         },
@@ -5279,6 +5292,7 @@ async fn prepared_deadline_interrupts_a_blocked_budget_reservation() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget,
         },
@@ -5578,6 +5592,7 @@ async fn prepared_run_uses_captured_prices_after_live_source_becomes_unreadable(
     let budget = Arc::new(QuoteRecordingBudget::default());
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5623,6 +5638,7 @@ async fn production_run_compatibility_shim_contains_runner_panics() {
     let budget = Arc::new(QuoteRecordingBudget::default());
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5656,6 +5672,7 @@ async fn prepared_runner_panic_waits_for_commit_before_terminal_publication() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5716,6 +5733,7 @@ async fn captured_prices_keep_analyst_facts_and_commit_barrier_after_source_revo
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5829,6 +5847,7 @@ async fn captured_prices_keep_lease_owned_until_commit_ack_after_source_revocati
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -5901,6 +5920,7 @@ async fn prepared_finalizing_claim_outlives_cancel_and_seals_after_commit() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -7035,6 +7055,7 @@ async fn a_cancel_before_any_panel_is_dispatched_commits_exactly_zero() {
     let orch = orch_scripted(spawner.clone(), side).with_price_book(Arc::new(priced_book()));
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: Arc::new(InertInvoker),
             budget: budget.clone(),
         },
@@ -7294,6 +7315,7 @@ async fn evidence_checks_reach_the_analyst_the_material_and_telemetry() {
     });
     let inherit = FusionInheritance::new(
         SubagentInheritance {
+            session_origin: None,
             tool_invoker: grep.clone(),
             budget: Arc::new(InertBudget),
         },

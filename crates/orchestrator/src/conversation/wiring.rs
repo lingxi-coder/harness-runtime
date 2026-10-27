@@ -143,6 +143,9 @@ impl ConversationOrchestrator {
             session_end_fired: Mutex::new(HashSet::new()),
             mod_turn: std::sync::Mutex::new(None),
             mod_session_event_sender: std::sync::Mutex::new(None),
+            mod_session_event_output_factory: std::sync::OnceLock::new(),
+            mod_session_work_gate: Arc::new(tokio::sync::RwLock::new(())),
+            mod_session_generation: std::sync::atomic::AtomicU64::new(0),
             mod_session_measure_sampler: Arc::new(
                 mod_session_measure_sampler::ModSessionMeasureSampler::default(),
             ),
@@ -206,6 +209,7 @@ impl ConversationOrchestrator {
             orphan_forced_decisions: Mutex::new(std::collections::HashMap::new()),
             mid_turn_input: std::sync::OnceLock::new(),
             cancel_reason: std::sync::OnceLock::new(),
+            tool_dispatch_recovery_guard: std::sync::OnceLock::new(),
             end_conversation_slot: None,
             loop_wakeup_armed_slot: None,
             turn_span: crate::turn_span::TurnSpanTally::default(),
@@ -216,6 +220,7 @@ impl ConversationOrchestrator {
             coordinator_pool_override: None,
             tool_pool_deny_context: std::sync::RwLock::new(Default::default()),
             main_agent_tool_names: std::sync::RwLock::new(None),
+            main_agent_host_tool_names: std::sync::RwLock::new(None),
         }
     }
 
@@ -1026,7 +1031,14 @@ impl ConversationOrchestrator {
         &self,
         name: &str,
     ) -> Option<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
-        self.lookup_tool(name, true)
+        self.lookup_tool(name, true, false)
+    }
+
+    pub(crate) fn find_dispatchable_tool_for_host(
+        &self,
+        name: &str,
+    ) -> Option<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
+        self.lookup_tool(name, true, true)
     }
 
     /// The lookup a `tool_use` DISPATCH must use: identical, except a tool-pool
@@ -1047,7 +1059,7 @@ impl ConversationOrchestrator {
         &self,
         name: &str,
     ) -> Option<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
-        self.lookup_tool(name, false)
+        self.lookup_tool(name, false, false)
     }
 
     /// Resolve `$.tool.call` against the live Native-equivalent active tool
@@ -1076,10 +1088,15 @@ impl ConversationOrchestrator {
         &self,
         name: &str,
         honor_pool_deny: bool,
+        host_catalog: bool,
     ) -> Option<std::sync::Arc<dyn tool_api::tool_trait::Tool>> {
         let tool = self.tools.find_by_name(name)?;
-        if self
-            .main_agent_tool_names
+        let agent_tools = if host_catalog {
+            &self.main_agent_host_tool_names
+        } else {
+            &self.main_agent_tool_names
+        };
+        if agent_tools
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()

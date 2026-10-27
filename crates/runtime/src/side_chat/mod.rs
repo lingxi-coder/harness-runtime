@@ -441,6 +441,7 @@ impl SideChatManager {
                 &side_id,
                 format!("create:{request_id}"),
                 ClientCommand::SendPrompt {
+                    session_id: None,
                     text,
                     prompt_mode: None,
                     images: vec![],
@@ -588,7 +589,7 @@ impl SideChatManager {
                 .await;
             return Ok(());
         }
-        if let ClientCommand::Cancel { turn_id } = command {
+        if let ClientCommand::Cancel { turn_id, .. } = command {
             let wait = state
                 .running
                 .as_ref()
@@ -636,6 +637,7 @@ impl SideChatManager {
                 images,
                 ..
             } if text_starts_with_slash(&text) => ClientCommand::RunSlashCommand {
+                session_id: None,
                 raw: text,
                 images,
                 turn_id,
@@ -1076,6 +1078,7 @@ async fn dispatch(
             raw,
             images,
             turn_id,
+            ..
         } => {
             if cancel.is_cancelled() {
                 emit_cancelled_slash_result(side, turn_id).await;
@@ -1805,7 +1808,10 @@ mod tests {
                     manager.submit(
                         &id,
                         "stop".into(),
-                        ClientCommand::Cancel { turn_id: Some(1) },
+                        ClientCommand::Cancel {
+                            session_id: None,
+                            turn_id: Some(1),
+                        },
                     ),
                 )
                 .await
@@ -1846,7 +1852,10 @@ mod tests {
             manager.submit(
                 &id,
                 "stop".into(),
-                ClientCommand::Cancel { turn_id: Some(1) },
+                ClientCommand::Cancel {
+                    session_id: None,
+                    turn_id: Some(1),
+                },
             ),
         )
         .await
@@ -1892,7 +1901,10 @@ mod tests {
             .submit(
                 &id,
                 "stale-stop".into(),
-                ClientCommand::Cancel { turn_id: Some(2) },
+                ClientCommand::Cancel {
+                    session_id: None,
+                    turn_id: Some(2),
+                },
             )
             .await
             .unwrap();
@@ -1946,6 +1958,7 @@ mod tests {
                 &id,
                 "slash-image".into(),
                 ClientCommand::RunSlashCommand {
+                    session_id: None,
                     raw: "/review".into(),
                     images: vec![client::protocol::commands::ImageRefDto {
                         media_type: "image/png".into(),
@@ -2064,6 +2077,7 @@ mod tests {
                 &id,
                 "cancel-during-dispatch".into(),
                 ClientCommand::RunSlashCommand {
+                    session_id: None,
                     raw: "/review".into(),
                     images: Vec::new(),
                     turn_id: Some(502),
@@ -2410,11 +2424,25 @@ mod tests {
             .await
             .unwrap();
         manager
-            .submit(&id, "stop".into(), ClientCommand::Cancel { turn_id: None })
+            .submit(
+                &id,
+                "stop".into(),
+                ClientCommand::Cancel {
+                    session_id: None,
+                    turn_id: None,
+                },
+            )
             .await
             .unwrap();
         manager
-            .submit(&id, "stop".into(), ClientCommand::Cancel { turn_id: None })
+            .submit(
+                &id,
+                "stop".into(),
+                ClientCommand::Cancel {
+                    session_id: None,
+                    turn_id: None,
+                },
+            )
             .await
             .unwrap();
         assert_eq!(sink.0.lock().await.iter().filter(|event|matches!(event,ClientEvent::SideChatSubmitted{request_id,..} if request_id=="stop")).count(),2);
@@ -2444,6 +2472,7 @@ mod tests {
                 &id,
                 "image-slash".into(),
                 ClientCommand::SendPrompt {
+                    session_id: None,
                     text: "/review".into(),
                     prompt_mode: None,
                     images: vec![client::protocol::commands::ImageRefDto {
@@ -2522,6 +2551,7 @@ mod tests {
                 &id,
                 "submit-1".into(),
                 ClientCommand::RunSlashCommand {
+                    session_id: None,
                     raw: "/side hi".into(),
                     images: Vec::new(),
                     turn_id: Some(1)

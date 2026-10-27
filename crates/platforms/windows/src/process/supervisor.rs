@@ -58,6 +58,14 @@ impl Platform for WindowsPlatform {
         // Windows driver's held-child StreamingProcessTreeGuard synchronously
         // invokes taskkill when the cancelled run future is dropped.
     }
+    fn complete_foreground(&self, strict_host: bool) -> Result<(), ProcessError> {
+        if strict_host {
+            // A strict host only completes after its payload Job is empty.
+            Ok(())
+        } else {
+            super::supervisor_gate::disarm_supervisor_on_close()
+        }
+    }
     async fn connect(&self, endpoint: &str, expected_pid: u32) -> Result<BoxStream, ProcessError> {
         // Tokio defaults to SECURITY_IDENTIFICATION (no impersonation privilege).
         let client = ClientOptions::new().open(endpoint).map_err(error)?;
@@ -151,4 +159,281 @@ pub async fn adopt(
 ) -> Result<ProcessHandle, ProcessError> {
     configure();
     shared::adopt(handoff, sink).await
+}
+
+#[cfg(all(test, windows))]
+mod integration_tests {
+    use super::*;
+    use lingxi_core::host::{ForegroundOutcome, ProcessCommand, SandboxedTag};
+    use std::time::Duration;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    const HELPER: &str = "process::supervisor::integration_tests::supervisor_process_helper";
+    const DETACHED_HELPER: &str =
+        "process::supervisor_gate::tests::windows_foreground_detached_helper";
+    const JOB_LIFECYCLE_HELPER: &str =
+        "process::supervisor_gate::tests::windows_job_lifecycle_fixture";
+
+    struct Sink;
+    #[async_trait::async_trait]
+    impl BackgroundExitSink for Sink {
+        async fn on_exit(&self, _: &str, _: Option<i32>) {}
+    }
+    fn sink(_: &Path) -> Arc<dyn BackgroundExitSink> {
+        Arc::new(Sink)
+    }
+
+    #[tokio::test]
+    async fn supervisor_process_helper() {
+        let Some(directory) = std::env::var_os("LINGXI_WINDOWS_SUPERVISOR_TEST_DIR") else {
+            return;
+        };
+        serve_supervisor(PathBuf::from(directory), sink)
+            .await
+            .unwrap();
+    }
+
+    struct Cleanup {
+        release: PathBuf,
+        directories: Vec<PathBuf>,
+    }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::write(&self.release, "release");
+            for directory in &self.directories {
+                let _ = std::fs::remove_dir_all(directory);
+            }
+        }
+    }
+
+    async fn connect(endpoint: &str, pid: u32) -> shared::BoxStream {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Ok(stream) = WindowsPlatform.connect(endpoint, pid).await {
+                    break stream;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("supervisor endpoint did not become ready")
+    }
+    async fn send(stream: &mut shared::BoxStream, value: serde_json::Value) {
+        let mut bytes = serde_json::to_vec(&value).unwrap();
+        bytes.push(b'\n');
+        stream.write_all(&bytes).await.unwrap();
+    }
+    async fn receive(stream: &mut shared::BoxStream) -> serde_json::Value {
+        let mut line = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            BufReader::new(stream).read_line(&mut line),
+        )
+        .await
+        .expect("supervisor response timed out")
+        .unwrap();
+        serde_json::from_str(&line).expect("invalid supervisor response")
+    }
+    async fn rpc(endpoint: &str, pid: u32, value: serde_json::Value) -> serde_json::Value {
+        let mut stream = connect(endpoint, pid).await;
+        send(&mut stream, value).await;
+        receive(&mut stream).await
+    }
+
+    async fn start(
+        command: ProcessCommand,
+        owner: Option<&str>,
+        require_group_cleanup_on_exit: bool,
+        release: PathBuf,
+    ) -> (
+        tokio::process::Child,
+        shared::BoxStream,
+        String,
+        String,
+        u32,
+        Cleanup,
+    ) {
+        let nonce = WindowsPlatform.nonce().unwrap();
+        let directory = WindowsPlatform.create_directory(&nonce).unwrap();
+        let output_directory = WindowsPlatform
+            .create_directory(&WindowsPlatform.nonce().unwrap())
+            .unwrap();
+        let cleanup = Cleanup {
+            release,
+            directories: vec![directory.clone(), output_directory.clone()],
+        };
+        let directory_identity = lingxi_core::host::rooted_fs::root_identity(&directory).unwrap();
+        let output_root_identity =
+            lingxi_core::host::rooted_fs::root_identity(&output_directory).unwrap();
+        let output_path = output_directory.join("output");
+        let file = lingxi_core::host::rooted_fs::open_append_file_pinned(
+            &output_directory,
+            Path::new("output"),
+            Some(&output_root_identity),
+        )
+        .unwrap();
+        let output_file_identity =
+            lingxi_core::host::rooted_fs::opened_file_identity(&file).unwrap();
+        drop(file);
+        let endpoint = WindowsPlatform.endpoint(&directory);
+        let supervisor = tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args([HELPER, "--exact", "--nocapture"])
+            .env("LINGXI_WINDOWS_SUPERVISOR_TEST_DIR", &directory)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = supervisor.id().unwrap();
+        let mut stream = connect(&endpoint, pid).await;
+        send(&mut stream, serde_json::json!({
+            "request": "Start", "command": command,
+            "tag": SandboxedTag::BypassAuditedWithReason { reason: "Windows supervisor integration test".into() },
+            "owner": owner, "auto_background": false, "background_timeout": null,
+            "require_group_cleanup_on_exit": require_group_cleanup_on_exit,
+            "explicit": false, "limit": null, "task_id": "windows-supervisor-test",
+            "output": output_path, "nonce": nonce,
+            "supervisor_directory_identity": directory_identity,
+            "output_root_identity": output_root_identity,
+            "output_file_identity": output_file_identity,
+        })).await;
+        let spawned = rpc(
+            &endpoint,
+            pid,
+            serde_json::json!({
+                "request": "AwaitSpawn", "nonce": nonce,
+            }),
+        )
+        .await;
+        assert_eq!(spawned["response"], "Spawned", "{spawned}");
+        let payload = spawned["handoff"]["pid"].as_u64().unwrap() as u32;
+        let accepted = rpc(
+            &endpoint,
+            pid,
+            serde_json::json!({
+                "request": "SpawnAccepted", "nonce": nonce,
+            }),
+        )
+        .await;
+        assert_eq!(accepted["response"], "Ack", "{accepted}");
+        (supervisor, stream, endpoint, nonce, payload, cleanup)
+    }
+
+    async fn wait_file(path: &Path) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !path.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fixture file did not appear");
+    }
+
+    #[tokio::test]
+    async fn real_supervisor_preserves_detached_child_after_normal_foreground() {
+        let fixture = tempfile::tempdir().unwrap();
+        let command = ProcessCommand {
+            command: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                DETACHED_HELPER.into(),
+                "--exact".into(),
+                "--nocapture".into(),
+            ],
+            cwd: Some(fixture.path().to_path_buf()),
+            env: std::collections::HashMap::from([(
+                "LINGXI_DETACHED_JOB_TEST_DIR".into(),
+                fixture.path().to_string_lossy().into_owned(),
+            )]),
+            timeout: Some(Duration::from_secs(20)),
+            stdin: None,
+        };
+        let (mut supervisor, mut stream, _, _, _, _cleanup) =
+            start(command, None, false, fixture.path().join("release")).await;
+        let response = receive(&mut stream).await;
+        assert_eq!(response["response"], "Started", "{response}");
+        let result: ForegroundRunResult =
+            serde_json::from_value(response["result"].clone()).unwrap();
+        assert!(
+            matches!(result.outcome, ForegroundOutcome::Completed(output) if !output.timed_out && output.exit_code == 0)
+        );
+        let status = tokio::time::timeout(Duration::from_secs(30), supervisor.wait())
+            .await
+            .expect("supervisor did not exit")
+            .unwrap();
+        assert!(status.success());
+        // The detached process must do useful work after the real supervisor has
+        // exited; mere PID existence before that point would not test its Job.
+        std::fs::write(fixture.path().join("release"), "release").unwrap();
+        wait_file(&fixture.path().join("finished")).await;
+    }
+
+    #[tokio::test]
+    async fn real_supervisor_strict_cancel_reaps_the_payload_tree() {
+        let fixture = tempfile::tempdir().unwrap();
+        let command = ProcessCommand {
+            command: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                JOB_LIFECYCLE_HELPER.into(),
+                "--exact".into(),
+                "--nocapture".into(),
+            ],
+            cwd: Some(fixture.path().to_path_buf()),
+            env: std::collections::HashMap::from([
+                ("LINGXI_JOB_LIFECYCLE_ROLE".into(), "leader".into()),
+                (
+                    "LINGXI_JOB_LIFECYCLE_DIR".into(),
+                    fixture.path().to_string_lossy().into_owned(),
+                ),
+            ]),
+            timeout: Some(Duration::from_secs(60)),
+            stdin: None,
+        };
+        let (mut supervisor, mut stream, endpoint, nonce, payload, _cleanup) = start(
+            command,
+            Some("host-tool:windows-supervisor-test"),
+            true,
+            fixture.path().join("release"),
+        )
+        .await;
+        wait_file(&fixture.path().join("leader.ready")).await;
+        assert!(fixture.path().join("descendant.ready").exists());
+        let descendant_file = fixture.path().join("descendant.pid");
+        let descendant: u32 = std::fs::read_to_string(descendant_file)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(native::process_is_alive(payload), Some(true));
+        assert_eq!(native::process_is_alive(descendant), Some(true));
+        let ack = rpc(
+            &endpoint,
+            supervisor.id().unwrap(),
+            serde_json::json!({
+                "request": "Kill", "nonce": nonce,
+            }),
+        )
+        .await;
+        assert_eq!(ack["response"], "Ack", "{ack}");
+        let response = receive(&mut stream).await;
+        assert_eq!(response["response"], "Error", "{response}");
+        assert!(response["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cancelled"));
+        let status = tokio::time::timeout(Duration::from_secs(30), supervisor.wait())
+            .await
+            .expect("supervisor did not exit")
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(native::process_is_alive(payload), Some(false));
+        assert_eq!(native::process_is_alive(descendant), Some(false));
+        assert!(!fixture.path().join("leader.completed").exists());
+        assert!(!fixture.path().join("descendant.completed").exists());
+    }
 }
