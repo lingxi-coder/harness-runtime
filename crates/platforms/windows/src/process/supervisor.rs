@@ -174,6 +174,11 @@ mod integration_tests {
     const JOB_LIFECYCLE_HELPER: &str =
         "process::supervisor_gate::tests::windows_job_lifecycle_fixture";
 
+    // Keep the same test-only environment names as the supervisor-gate helpers.
+    fn test_env(suffix: &str) -> String {
+        format!("{}{suffix}", branding::ENV_PREFIX)
+    }
+
     struct Sink;
     #[async_trait::async_trait]
     impl BackgroundExitSink for Sink {
@@ -185,7 +190,7 @@ mod integration_tests {
 
     #[tokio::test]
     async fn supervisor_process_helper() {
-        let Some(directory) = std::env::var_os("LINGXI_WINDOWS_SUPERVISOR_TEST_DIR") else {
+        let Some(directory) = std::env::var_os(test_env("WINDOWS_SUPERVISOR_TEST_DIR")) else {
             return;
         };
         serve_supervisor(PathBuf::from(directory), sink)
@@ -278,7 +283,7 @@ mod integration_tests {
         let endpoint = WindowsPlatform.endpoint(&directory);
         let supervisor = tokio::process::Command::new(std::env::current_exe().unwrap())
             .args([HELPER, "--exact", "--nocapture"])
-            .env("LINGXI_WINDOWS_SUPERVISOR_TEST_DIR", &directory)
+            .env(test_env("WINDOWS_SUPERVISOR_TEST_DIR"), &directory)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -345,7 +350,7 @@ mod integration_tests {
             ],
             cwd: Some(fixture.path().to_path_buf()),
             env: std::collections::HashMap::from([(
-                "LINGXI_DETACHED_JOB_TEST_DIR".into(),
+                test_env("DETACHED_JOB_TEST_DIR"),
                 fixture.path().to_string_lossy().into_owned(),
             )]),
             timeout: Some(Duration::from_secs(20)),
@@ -386,9 +391,9 @@ mod integration_tests {
             ],
             cwd: Some(fixture.path().to_path_buf()),
             env: std::collections::HashMap::from([
-                ("LINGXI_JOB_LIFECYCLE_ROLE".into(), "leader".into()),
+                (test_env("JOB_LIFECYCLE_ROLE"), "leader".into()),
                 (
-                    "LINGXI_JOB_LIFECYCLE_DIR".into(),
+                    test_env("JOB_LIFECYCLE_DIR"),
                     fixture.path().to_string_lossy().into_owned(),
                 ),
             ]),

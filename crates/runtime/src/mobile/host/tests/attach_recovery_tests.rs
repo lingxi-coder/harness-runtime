@@ -536,7 +536,7 @@ fn cancel_received_prompt_before_admission_is_durable_and_never_runs() {
     });
     drop(handle);
     let reopened = crate::mobile::turn_durability::DurableTurnStore::open_shared(
-        tmp.path().join(".lingxi/mobile-turns"),
+        tmp.path().join(branding::DOT_DIR).join("mobile-turns"),
     )
     .unwrap();
     assert_eq!(

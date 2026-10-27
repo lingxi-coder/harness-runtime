@@ -153,7 +153,9 @@ use client::protocol::commands::{
 };
 use client::protocol::controls::{ConversationControlsDto, ReasoningSelectionDto};
 use client::protocol::error::ClientError;
-use client::protocol::events::{ClientEvent, ErrorKindDto, TurnOutcomeDto, TurnRecoveryStateDto};
+use client::protocol::events::{
+    ClientEvent, ErrorKindDto, TurnOutcomeDto, TurnRecoverySnapshotDto, TurnRecoveryStateDto,
+};
 use client::protocol::listings::{
     ModelDetailsDto, ProviderModelCatalogEntryDto, SessionAgentSummaryDto, SessionModeDto,
     SlashCommandDto,
@@ -539,6 +541,35 @@ mod mobile_oauth_callback_tests;
 #[cfg(test)]
 #[path = "host/tests/mobile_tool_gate_tests.rs"]
 mod mobile_tool_gate_tests;
+
+#[cfg(test)]
+#[test]
+fn mobile_cancellation_and_submission_futures_are_send() {
+    fn assert_send<T: Send>(_: T) {}
+    fn check(handle: &MobileEngineHandle) {
+        assert_send(handle.cancel_inactive_turn("session", 1, None));
+        assert_send(handle.cancel_active_turn("session", Some(1)));
+        assert_send(handle.submit(ClientCommand::Cancel {
+            session_id: Some("session".into()),
+            turn_id: Some(1),
+        }));
+    }
+    let _ = check as fn(&MobileEngineHandle);
+}
+
+#[cfg(all(test, feature = "uniffi"))]
+#[test]
+fn mobile_command_methods_remain_in_uniffi_metadata() {
+    // These methods straddle the private admission helpers. Referencing the
+    // generated metadata verifies both public export blocks are retained.
+    assert!(!UNIFFI_META_HARNESS_RUNTIME_METHOD_MOBILEENGINEHANDLE_SUBMIT.is_empty());
+    assert!(
+        !UNIFFI_META_HARNESS_RUNTIME_METHOD_MOBILEENGINEHANDLE_TEST_PROVIDER_CONNECTION.is_empty()
+    );
+    assert!(
+        !UNIFFI_META_HARNESS_RUNTIME_METHOD_MOBILEENGINEHANDLE_RESET_MOBILE_LINUX_ROOTFS.is_empty()
+    );
+}
 
 // Phase 2a-mobile: the multi-provider client config / chains / credential
 // sources / pricing catalog are now assembled by `provider_config::assemble`
@@ -5262,9 +5293,7 @@ impl MobileEngineHandle {
     ) -> Result<(), ClientError> {
         let mut delivery = self.lock_turn_delivery(session_id, turn_id).await?;
         let active = self.active_cancel.lock().await;
-        let (snapshot, member_ids) = {
-            // Retarget publishes under this mutex. Keep it through the synchronous
-            // checkpoint change, so an old command cannot land on a new session.
+        let reroute_owner = {
             let current_session = self
                 .inner
                 .active_session_uuid
@@ -5288,19 +5317,35 @@ impl MobileEngineHandle {
                         message: "the original turn owner has changed".into(),
                     });
                 }
-                let expected = active.as_ref().expect("checked active owner").clone();
-                // A queue claim may have won after the first routing check.
-                // Retry with the pinned session/member and revalidate the
-                // owner after reacquiring its delivery gate.
-                drop(current_session);
-                drop(active);
-                drop(delivery);
-                return Box::pin(self.cancel_active_turn_for_owner(
-                    session_id,
-                    Some(turn_id),
-                    Some(expected),
-                ))
-                .await;
+                Some(active.as_ref().expect("checked active owner").clone())
+            } else {
+                None
+            }
+        };
+        if let Some(expected) = reroute_owner {
+            // A claim may have won after the first routing check. Release both
+            // gates before rechecking this exact owner and awaiting callbacks.
+            drop(active);
+            drop(delivery);
+            return Box::pin(self.cancel_active_turn_for_owner(
+                session_id,
+                Some(turn_id),
+                Some(expected),
+            ))
+            .await;
+        }
+        let (snapshot, member_ids) = {
+            // Recheck after reacquiring the session guard, and keep it through
+            // the synchronous checkpoint change. No std guard crosses await.
+            let current_session = self
+                .inner
+                .active_session_uuid
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if current_session.as_str() != session_id {
+                return Err(ClientError::Rejected {
+                    message: "cancel request belongs to a different session".into(),
+                });
             }
             let cancel = || -> Result<_, DurableTurnStoreError> {
                 if let Some(owner_id) = self
@@ -7829,7 +7874,11 @@ impl MobileEngineHandle {
             message: format!("mobile command task failed: {error}"),
         })?
     }
+}
 
+// These helpers carry internal admission state and must not be part of the
+// UniFFI surface. Only the public wrapper above crosses the foreign boundary.
+impl MobileEngineHandle {
     async fn resolve_ask_user_question(
         &self,
         request_id: u64,
@@ -9844,7 +9893,10 @@ impl MobileEngineHandle {
             }
         }
     }
+}
 
+#[cfg_attr(feature = "uniffi", uniffi::export(async_runtime = "tokio"))]
+impl MobileEngineHandle {
     /// Test a provider endpoint without exposing a stored credential to the
     /// foreign host or mutating the live engine configuration.
     ///

@@ -109,16 +109,22 @@ async fn real_marker_hook_retains_work_when_registry_missing_or_rejects_spawn() 
 #[test]
 fn mobile_prompt_hook_side_effect_is_not_repeated_on_cold_resume() {
     let tmp = tempfile::tempdir().expect("temporary mobile workspace");
-    let settings = tmp.path().join(".lingxi");
+    let settings = tmp.path().join(branding::DOT_DIR);
     std::fs::create_dir_all(&settings).unwrap();
+    let command = format!(
+        "printf 'hook\\n' >> \"${project_dir_env}/side-effect.txt\"",
+        project_dir_env = branding::PROJECT_DIR_ENV,
+    );
     std::fs::write(
         settings.join("settings.json"),
         serde_json::to_vec(&serde_json::json!({
             "hooks": { "UserPromptSubmit": [{
-                "hooks": [{ "type": "command", "command": "printf 'hook\\n' >> \"$LINGXI_PROJECT_DIR/side-effect.txt\"" }]
+                "hooks": [{ "type": "command", "command": command }]
             }] }
-        })).unwrap(),
-    ).unwrap();
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 
     let (entered, provider_started) = tokio::sync::oneshot::channel();
     let first_provider = Arc::new(PendingPromptStreamClient::new(entered));

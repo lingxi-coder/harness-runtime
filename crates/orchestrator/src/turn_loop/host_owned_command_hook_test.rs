@@ -256,10 +256,10 @@ async fn fixture(
             command: "/bin/sh".into(),
             args: vec![
                 "-c".into(),
-                "printf started > \"$LINGXI_TEST_HOOK_MARKER\"; printf '{}\\n'".into(),
+                "printf started > \"$TEST_HOOK_MARKER\"; printf '{}\\n'".into(),
             ],
             env: HashMap::from([(
-                "LINGXI_TEST_HOOK_MARKER".into(),
+                "TEST_HOOK_MARKER".into(),
                 marker.to_string_lossy().into_owned(),
             )]),
             cwd: None,

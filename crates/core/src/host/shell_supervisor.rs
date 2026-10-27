@@ -1776,8 +1776,27 @@ pub async fn run_at(
     let mut retry = tokio::time::interval(Duration::from_secs(1));
     let bootstrap_deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
-        let mut stream = tokio::select! { accepted=listener.accept()=>accepted.map_err(error)?,
-        _=retry.tick()=>{let mut current=state.lock().await;if !current.receipt_persisted {persist_server_receipt(&mut current,&directory);}if server_can_finish(&current){done.cancel();}continue;}, ()=tokio::time::sleep_until(bootstrap_deadline), if state.lock().await.nonce.is_none()=>{let _=std::fs::remove_file(&socket);return Ok(());}, ()=done.cancelled()=>{let _=std::fs::remove_file(&socket);return Ok(());} };
+        let mut stream = tokio::select! {
+            accepted = listener.accept() => accepted.map_err(error)?,
+            _ = retry.tick() => {
+                let mut current = state.lock().await;
+                if !current.receipt_persisted {
+                    persist_server_receipt(&mut current, &directory);
+                }
+                if server_can_finish(&current) {
+                    done.cancel();
+                }
+                continue;
+            },
+            () = tokio::time::sleep_until(bootstrap_deadline), if state.lock().await.nonce.is_none() => {
+                let _ = std::fs::remove_file(&socket);
+                return Ok(());
+            },
+            () = done.cancelled() => {
+                let _ = std::fs::remove_file(&socket);
+                return Ok(());
+            },
+        };
         let state = state.clone();
         let background = background.clone();
         let stop = stop.clone();
