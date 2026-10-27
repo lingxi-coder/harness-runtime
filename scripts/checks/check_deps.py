@@ -22,7 +22,7 @@ API_CRATES = {"tool-api", "command-api"}
 
 # Leaf libraries: they depend on nothing in the workspace but each other, so anything can name a camera, an MCP wire
 # type or the rooted filesystem without compiling the engine. `core` re-exports them.
-LEAF_LIBRARIES = {"device-api", "json-projection", "mcp-wire", "rooted-fs"}
+LEAF_LIBRARIES = {"device-api", "json-projection", "mcp-wire", "media-api", "rooted-fs"}
 
 # The crates that implemented Local App when it was a host feature, matched by NAME because an old git revision of
 # the local-app-builder repository still resolves. That repository now ships only a plugin (skills and templates);
