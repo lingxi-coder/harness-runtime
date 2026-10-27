@@ -253,7 +253,11 @@ async fn run_supervisor_fixture(role: &str, marker: &str) {
         .status()
         .await
         .unwrap();
-    assert!(status.success());
+    assert!(
+        status.success(),
+        "typed Bash supervisor fixture {role:?} failed: status={status}; supervisor stderr={:?}",
+        std::fs::read_to_string(directory.path().join("preaccept-supervisor.stderr"))
+    );
     assert_eq!(
         std::fs::read_to_string(directory.path().join(marker)).unwrap(),
         "verified"
@@ -281,6 +285,8 @@ async fn preaccept_disconnect(directory: &std::path::Path) {
     .unwrap();
     let output_file_identity = lingxi_core::host::rooted_fs::opened_file_identity(&file).unwrap();
     drop(file);
+    let supervisor_stderr = directory.join("preaccept-supervisor.stderr");
+    let stderr = std::fs::File::create(&supervisor_stderr).unwrap();
     let mut supervisor =
         tokio::process::Command::new(std::env::var_os("HARNESS_TYPED_SUPERVISOR_WRAPPER").unwrap())
             .args([
@@ -289,7 +295,7 @@ async fn preaccept_disconnect(directory: &std::path::Path) {
             ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(stderr))
             .kill_on_drop(true)
             .spawn()
             .unwrap();
@@ -330,15 +336,41 @@ async fn preaccept_disconnect(directory: &std::path::Path) {
     bytes.push(b'\n');
     spawn.write_all(&bytes).await.unwrap();
     let mut response = String::new();
-    tokio::time::timeout(
+    let read = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         BufReader::new(spawn).read_line(&mut response),
     )
-    .await
-    .unwrap()
-    .unwrap();
-    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
-    assert_eq!(response["response"], "Spawned", "{response}");
+    .await;
+    let spawned = match read {
+        Ok(Ok(0)) => Err("AwaitSpawn returned EOF".to_string()),
+        Ok(Ok(_)) => serde_json::from_str::<serde_json::Value>(&response)
+            .map_err(|error| format!("invalid AwaitSpawn response {response:?}: {error}")),
+        Ok(Err(error)) => Err(format!("AwaitSpawn read failed: {error}")),
+        Err(error) => Err(format!("AwaitSpawn read timed out: {error}")),
+    };
+    let response = match spawned {
+        Ok(response) if response["response"] == "Spawned" => response,
+        other => {
+            // A failed Start can close AwaitSpawn before publishing a handoff.
+            // Read the separate Start response only on failure: on success the
+            // original socket must remain untouched until the deliberate drop.
+            let mut start_response = String::new();
+            let start_read = tokio::time::timeout(
+                std::time::Duration::from_millis(250),
+                BufReader::new(&mut start).read_line(&mut start_response),
+            )
+            .await;
+            let diagnostic = serde_json::json!({
+                "await_spawn": format!("{other:?}"),
+                "start_read": format!("{start_read:?}"),
+                "start_response": serde_json::from_str::<serde_json::Value>(&start_response).ok(),
+                "start_raw": start_response,
+                "supervisor_status": format!("{:?}", supervisor.try_wait()),
+                "supervisor_stderr": format!("{:?}", std::fs::read_to_string(&supervisor_stderr)),
+            });
+            panic!("pre-accept supervisor did not publish Spawned: {diagnostic}");
+        }
+    };
     let pid = response["handoff"]["pid"].as_u64().unwrap() as u32;
     assert!(
         exists(pid),
@@ -352,7 +384,8 @@ async fn preaccept_disconnect(directory: &std::path::Path) {
         .unwrap();
     assert!(
         status.success(),
-        "supervisor finishes only after its held runner joins"
+        "supervisor finishes only after its held runner joins: status={status}; stderr={:?}",
+        std::fs::read_to_string(&supervisor_stderr)
     );
     assert!(
         !exists(pid),
