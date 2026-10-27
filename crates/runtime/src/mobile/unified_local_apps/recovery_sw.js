@@ -3,6 +3,7 @@
   const config = __LINGXI_RECOVERY_CONFIGURATION__;
   const cacheName = `lingxi-local-app-recovery:${config.appId}`;
   const recoveryUrl = new URL('/__lingxi-offline-recovery', self.location.origin).href;
+  const diagnosticPlaceholder = '<div id="recovery-diagnostic" data-reason="" data-ready-marker="unavailable" hidden></div>';
   const recoveryDocument = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'">
@@ -11,11 +12,27 @@ body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:12vh auto;padding
 </style></head><body><main><h1>LingXi is paused or unavailable</h1>
 <p>This saved page contains no prompt, files, or Agent result. Return to LingXi, then reopen this app in the external browser. Pending runs expire after 24 hours; accepted run receipts expire after 7 days. Expired records are deleted and are never sent again automatically.</p>
 <p><a class="return" id="return" href="#">Return to LingXi</a></p>
+<h2>Recovery diagnostics</h2><dl>
+<dt>Reason</dt><dd id="recovery-reason">Not available for this cached page.</dd>
+<dt>App ID</dt><dd id="recovery-app-id"></dd>
+<dt>Revision</dt><dd id="recovery-revision"></dd>
+<dt>Ready marker present</dt><dd id="recovery-ready-marker">Unavailable</dd>
+</dl>
 <h2>Runs saved in this browser</h2><p id="status">Checking this app's saved run IDs…</p><ul id="runs"></ul>
+<div id="recovery-diagnostic" data-reason="" data-ready-marker="unavailable" hidden></div>
 <script>
 const config=__LINGXI_RECOVERY_CONFIGURATION__;
 const returnUrl='lingxi://apps/'+encodeURIComponent(config.appId);
 document.querySelector('#return').href=returnUrl;
+document.querySelector('#recovery-app-id').textContent=String(config.appId);
+document.querySelector('#recovery-revision').textContent=String(config.revision);
+const diagnostic=document.querySelector('#recovery-diagnostic');
+if(diagnostic.dataset.reason){
+ document.querySelector('#recovery-reason').textContent=/^\\d{3}$/u.test(diagnostic.dataset.reason)
+  ?'HTTP '+diagnostic.dataset.reason
+  :diagnostic.dataset.reason==='network_error'?'Network error':'Not available for this cached page.';
+ document.querySelector('#recovery-ready-marker').textContent=diagnostic.dataset.readyMarker==='true'?'true':'false';
+}
 const list=document.querySelector('#runs');
 const status=document.querySelector('#status');
 function showMessage(text){status.textContent=text;}
@@ -59,7 +76,7 @@ else{
 }
 </script></main></body></html>`;
 
-  const cachedResponse = () => new Response(recoveryDocument, {
+  const htmlResponse = document => new Response(document, {
     status: 200,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
@@ -67,6 +84,15 @@ else{
       'X-Content-Type-Options': 'nosniff'
     }
   });
+  const cachedResponse = () => htmlResponse(recoveryDocument);
+
+  const recoveryResponse = (request, reason) => {
+    const readyMarker = new URL(request.url).searchParams.has('__lingxi_ready');
+    const diagnosticReason = Number.isInteger(reason) ? String(reason) : reason === 'network_error' ? reason : '';
+    const document = recoveryDocument.replace(diagnosticPlaceholder,
+      `<div id="recovery-diagnostic" data-reason="${diagnosticReason}" data-ready-marker="${readyMarker}" hidden></div>`);
+    return htmlResponse(document);
+  };
 
   self.addEventListener('install', event => {
     event.waitUntil((async () => {
@@ -88,12 +114,15 @@ else{
       return;
     }
     event.respondWith((async () => {
+      let reason;
       try {
         const response = await fetch(request);
         if (response.ok || response.status < 400) return response;
-      } catch (_) {}
-      const cache = await caches.open(cacheName);
-      return await cache.match(recoveryUrl) || cachedResponse();
+        reason = response.status;
+      } catch (_) {
+        reason = 'network_error';
+      }
+      return recoveryResponse(request, reason);
     })());
   });
 })();
