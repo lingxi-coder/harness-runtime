@@ -227,12 +227,35 @@ fn side_payloads_do_not_enter_enabled_otel_or_tracing_exports() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(exported.contains("MAIN_PROMPT_EXPORT_MARKER"), "{exported}");
+    // The OTEL allowlist strips prompt and tool input even when the legacy
+    // body-capture flags are enabled. Assert the main turn's diagnostic events
+    // actually arrived, and that the side turn emitted no extra copies.
+    assert_eq!(
+        exported.matches("EventName: \"user_prompt\"").count(),
+        1,
+        "{exported}"
+    );
+    assert_eq!(
+        exported.matches("EventName: \"tool_decision\"").count(),
+        1,
+        "{exported}"
+    );
+    assert_eq!(
+        exported
+            .matches("EventName: \"assistant_response\"")
+            .count(),
+        2,
+        "{exported}"
+    );
     assert!(
         exported.contains("MAIN_RESPONSE_EXPORT_MARKER"),
         "{exported}"
     );
-    assert!(exported.contains("MAIN_TOOL_EXPORT_MARKER"), "{exported}");
+    assert!(
+        !exported.contains("MAIN_PROMPT_EXPORT_MARKER"),
+        "{exported}"
+    );
+    assert!(!exported.contains("MAIN_TOOL_EXPORT_MARKER"), "{exported}");
     assert!(!exported.contains("SIDE_TOOL_PRIVATE_MARKER"), "{exported}");
     assert!(
         !exported.contains("SIDE_PROMPT_PRIVATE_MARKER"),

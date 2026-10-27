@@ -572,7 +572,7 @@ async fn realtime_tool_loop_keeps_idle_paused_during_permission_and_uses_common_
     let _ = driver.await;
     assert_eq!(orch.snapshot_history().await.len(), 2);
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn realtime_deadline_is_absolute_and_provider_tool_cancel_preserves_permission_boundary() {
     let gate = Arc::new(Gate {
         calls: AtomicUsize::new(0),
@@ -608,19 +608,41 @@ async fn realtime_deadline_is_absolute_and_provider_tool_cancel_preserves_permis
     events_tx
         .unbounded_send(Ok(RealtimeFrame::text("tool")))
         .unwrap();
-    wait_until(
-        || gate.calls.load(Ordering::SeqCst) > 0,
-        "permission gate called",
-    )
-    .await;
+    // Keep the runtime runnable while driving these events: paused Tokio time
+    // otherwise auto-advances when idle, racing the very deadline under test.
+    let wait_started = std::time::Instant::now();
+    while gate.calls.load(Ordering::SeqCst) == 0 {
+        assert!(
+            wait_started.elapsed() < Duration::from_secs(2),
+            "permission gate was not called"
+        );
+        tokio::task::yield_now().await;
+    }
     events_tx
         .unbounded_send(Ok(RealtimeFrame::text("cancel-tool")))
         .unwrap();
     // The host's owner cancellation drains a pending native permission ask.
-    while !matches!(
-        output_rx.recv().await.unwrap(),
-        RealtimeEvent::ToolCancelled { .. }
-    ) {}
+    let wait_started = std::time::Instant::now();
+    loop {
+        match output_rx.try_recv() {
+            Ok(RealtimeEvent::ToolCancelled { .. }) => break,
+            Ok(_) => {}
+            Err(mpsc::error::TryRecvError::Empty) => {
+                assert!(
+                    wait_started.elapsed() < Duration::from_secs(2),
+                    "provider cancellation was not forwarded"
+                );
+                tokio::task::yield_now().await;
+            }
+            Err(error) => panic!("realtime output closed before cancellation: {error}"),
+        }
+    }
+    tokio::time::advance(Duration::from_millis(40)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !task.is_finished(),
+        "the deadline must still drain the pending permission boundary"
+    );
     gate.release.as_ref().unwrap().notify_one();
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(2), task)
@@ -631,7 +653,11 @@ async fn realtime_deadline_is_absolute_and_provider_tool_cancel_preserves_permis
         RealtimeAgentEnd::Deadline
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    let _ = driver.await;
+    tokio::time::timeout(Duration::from_secs(2), driver)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

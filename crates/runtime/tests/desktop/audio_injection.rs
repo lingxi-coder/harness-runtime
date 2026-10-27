@@ -146,8 +146,17 @@ async fn desktop_build_exposes_the_injected_app_media_service() {
         .expect("the sandbox config must build");
     let service = runtime.media_service().expect("same injected media facade");
     assert_eq!(service.capabilities().service_epoch, 9);
+    // All operations are registered so a later capability update can expose
+    // them without rebuilding the runtime. Advertisement is capability-gated.
     let names = runtime.registered_tool_names();
-    assert!(names.iter().any(|name| name == "media_sources"));
-    assert!(names.iter().any(|name| name == "media_capture"));
-    assert!(!names.iter().any(|name| name == "media_record"));
+    for registered in ["media_sources", "media_capture", "media_record"] {
+        assert!(names.iter().any(|name| name == registered));
+    }
+    let advertised = runtime.orchestrator.advertised_tool_names().await;
+    for supported in ["media_sources", "media_capture"] {
+        assert!(advertised.iter().any(|name| name == supported));
+    }
+    for unsupported in ["media_record", "media_play", "media_speak"] {
+        assert!(!advertised.iter().any(|name| name == unsupported));
+    }
 }

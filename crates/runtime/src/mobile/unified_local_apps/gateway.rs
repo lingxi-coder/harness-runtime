@@ -111,9 +111,15 @@ where
     validate_private_spool_dir(directory)?;
     // The host chooses a per-App directory inside its private library. This
     // avoids Android's `/data/local/tmp` default and never accepts a page path.
-    // tempfile_in creates an owner-private anonymous file (0600 on Unix); the
-    // entry is unlinked on close, including timeout/cancellation/error paths.
+    // The file is anonymous/unlinked, including timeout/cancellation/error
+    // paths. Linux O_TMPFILE mode depends on the implementation and umask, so
+    // explicitly restrict the descriptor before writing any request bytes.
     let file = tempfile::tempfile_in(directory)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
     let mut writer = tokio::fs::File::from_std(file);
     writer.write_all(prefix).await?;
     let mut written = prefix.len();

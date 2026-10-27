@@ -7208,7 +7208,10 @@ mod pre_tool_hook_tests {
             trace_context.traceparent,
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
         );
-        assert_eq!(trace_context.tracestate.as_deref(), Some("foo=bar"));
+        assert!(
+            trace_context.tracestate.is_none(),
+            "vendor tracestate is intentionally removed at the serialized host boundary"
+        );
     }
 
     #[tokio::test]

@@ -584,12 +584,24 @@ mod tests {
             },
         ));
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(runtime.configure_mounts(vec![mobile_linux_api::MountSpec {
-            host_path: PathBuf::from(&directories.projects),
-            guest_path: directories.projects_guest_path.clone(),
-            read_only: false,
-            purpose: mobile_linux_api::MountPurpose::Workspace,
-        }]))
+        rt.block_on(runtime.configure_mounts(vec![
+            mobile_linux_api::MountSpec {
+                host_path: PathBuf::from(&directories.projects),
+                guest_path: directories.projects_guest_path.clone(),
+                read_only: false,
+                purpose: mobile_linux_api::MountPurpose::Workspace,
+            },
+            // Linux CI's host fixture lives under /tmp, which is also fenced
+            // guest scratch space. Explicitly back only this private fixture
+            // tree so native session paths behave like Android/iOS app data;
+            // unrelated guest scratch paths must remain inaccessible.
+            mobile_linux_api::MountSpec {
+                host_path: temp.path().to_path_buf(),
+                guest_path: temp.path().to_string_lossy().into_owned(),
+                read_only: false,
+                purpose: mobile_linux_api::MountPurpose::Temp,
+            },
+        ]))
         .unwrap();
         drop(rt);
         let platform =
