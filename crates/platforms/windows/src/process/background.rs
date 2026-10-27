@@ -390,6 +390,7 @@ fn retain_until_reaped(
         }
         drop(guard);
         drop(child);
+        #[cfg(windows)]
         drop(deadline);
         drop(lifetime_guard);
         if let Some((sink, task_id)) = verified_sink {
@@ -1351,6 +1352,7 @@ pub(super) async fn run(
             // output notification, even without a task registry.
             drop(guard);
             drop(child);
+            #[cfg(windows)]
             drop(deadline);
             drop(lifetime_guard);
         }
