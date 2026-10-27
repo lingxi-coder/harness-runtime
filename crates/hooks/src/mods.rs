@@ -1941,7 +1941,7 @@ impl ModSessionContext for WeakModSessionContext {
     }
 
     fn note_owned_denial(&self, reason: &str) {
-        if let Some(session) = self.upgrade().ok() {
+        if let Ok(session) = self.upgrade() {
             session.note_owned_denial(reason);
         }
     }
@@ -2019,7 +2019,7 @@ impl ModSessionContext for WeakModSessionContext {
     }
 
     async fn emit_mod_ui_client_frame(&self, runtime_id: &str, frame: &Utf16JsonProjection) {
-        if let Some(session) = self.upgrade().ok() {
+        if let Ok(session) = self.upgrade() {
             session.emit_mod_ui_client_frame(runtime_id, frame).await;
         }
     }
@@ -2030,7 +2030,7 @@ impl ModSessionContext for WeakModSessionContext {
         uuid: &str,
         session_id: &str,
     ) {
-        if let Some(session) = self.upgrade().ok() {
+        if let Ok(session) = self.upgrade() {
             session
                 .emit_mod_ui_invalidate(instances, uuid, session_id)
                 .await;
@@ -2261,7 +2261,7 @@ impl ModSessionContext for WeakModSessionContext {
     }
 
     async fn command_unregister_plugin(&self, plugin: &str) {
-        if let Some(session) = self.upgrade().ok() {
+        if let Ok(session) = self.upgrade() {
             session.command_unregister_plugin(plugin).await;
         }
     }
@@ -2276,7 +2276,7 @@ impl ModSessionContext for WeakModSessionContext {
     }
 
     fn tool_unregister_plugin(&self, plugin: &str) {
-        if let Some(session) = self.upgrade().ok() {
+        if let Ok(session) = self.upgrade() {
             session.tool_unregister_plugin(plugin);
         }
     }
@@ -2317,25 +2317,25 @@ impl ModSessionContext for WeakModSessionContext {
     }
 
     async fn emit_mod_log(&self, plugin: &str, text: Utf16JsonProjection) {
-        if let Some(session) = self.upgrade().ok() {
+        if let Ok(session) = self.upgrade() {
             session.emit_mod_log(plugin, text).await;
         }
     }
 
     async fn emit_mod_toast(&self, plugin: &str, text: Utf16JsonProjection, timeout_ms: u64) {
-        if let Some(session) = self.upgrade().ok() {
+        if let Ok(session) = self.upgrade() {
             session.emit_mod_toast(plugin, text, timeout_ms).await;
         }
     }
 
     async fn emit_mod_notify(&self, plugin: &str, text: Utf16JsonProjection) {
-        if let Some(session) = self.upgrade().ok() {
+        if let Ok(session) = self.upgrade() {
             session.emit_mod_notify(plugin, text).await;
         }
     }
 
     async fn emit_mod_status(&self, plugin: &str, text: Option<Utf16JsonProjection>) {
-        if let Some(session) = self.upgrade().ok() {
+        if let Ok(session) = self.upgrade() {
             session.emit_mod_status(plugin, text).await;
         }
     }
