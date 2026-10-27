@@ -115,6 +115,11 @@ function fakeIndexedDb({databaseName = 'lingxi-local-app-agui-app-one', pendingR
     getRecord(name, storeName, key) {
       return structuredClone(databases.get(name)?.stores.get(storeName)?.get(key));
     },
+    setRecord(name, storeName, key, value) {
+      const records = databases.get(name)?.stores.get(storeName);
+      assert.ok(records, 'Database must already be open before a second tab changes a record.');
+      records.set(key, structuredClone(value));
+    },
     open(name) {
       const request = {};
       setImmediate(() => {
@@ -721,10 +726,11 @@ test('iOS wake reports a missing request without posting and leaves other run wa
   assert.equal(otherSettled, true);
 });
 
-test('iOS wake preserves existing terminal, expired, and scope-mismatched record behavior',
+test('iOS wake reports ineligible records without submitting them',
   {timeout: 5000}, async () => {
   const now = Date.now();
   const cases = [
+    {label: 'pending', state: 'pending'},
     {label: 'accepted', state: 'accepted'},
     {label: 'sending', state: 'sending'},
     {label: 'uncertain', state: 'uncertain'},
@@ -746,8 +752,11 @@ test('iOS wake preserves existing terminal, expired, and scope-mismatched record
     b.window.addEventListener('localApp:agent-handoff-ready', event => ready.push(event.detail));
 
     await waitFor(() => !new URL(b.location.href).searchParams.has('__lingxi_ready'),
-      `The ${item.label} record did not preserve its existing marker semantics.`);
-    assert.equal(errors.length, 0, `${item.label} must not be misreported as missing.`);
+      `The ${item.label} record did not consume its ineligible marker.`);
+    assert.equal(errors.length, 1, `${item.label} must report its ineligible handoff.`);
+    assert.equal(errors[0].runId, runId);
+    assert.equal(errors[0].code, 'pending_request_not_waking');
+    assert.match(errors[0].message, /check.*status/i);
     assert.equal(ready.length, 0);
     assert.equal(b.requests.filter(request => request.envelope.method === 'agent.tasks.start').length, 0);
     if (item.label === 'expired') {
@@ -759,6 +768,164 @@ test('iOS wake preserves existing terminal, expired, and scope-mismatched record
         'A scope-mismatched row must keep its existing non-claim behavior.');
     }
   }
+});
+
+test('iOS wake rejects the original waiter if another tab changes its waking record',
+  {timeout: 5000}, async () => {
+  const b = browser({hostPlatform: 'ios', clock: fakeClock()});
+  const runInput = b.input(input({runId: 'cross-tab-run'}));
+  const promise = b.api.agent.run(runInput);
+  void promise.catch(() => {});
+  await waitFor(() => b.location.href.startsWith('lingxi://'), 'iOS wake link was not requested.');
+  const key = 'app-one:3:cross-tab-run';
+  const record = b.indexedDb.getRecord('lingxi-local-app-agui-app-one', 'pending', key);
+  assert.equal(record.state, 'waking');
+  b.indexedDb.setRecord('lingxi-local-app-agui-app-one', 'pending', key,
+    {...record, state: 'uncertain'});
+  const errors = [];
+  b.window.addEventListener('localApp:agent-handoff-error', event => errors.push(event.detail));
+
+  b.simulateWakeReturn(runInput.runId);
+  await assert.rejects(promise, error => error.code === 'pending_request_not_waking');
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].runId, runInput.runId);
+  assert.equal(errors[0].code, 'pending_request_not_waking');
+  assert.equal(b.indexedDb.getRecord('lingxi-local-app-agui-app-one', 'pending', key).state, 'uncertain');
+  assert.equal(b.requests.filter(request => request.envelope.method === 'agent.tasks.start').length, 0);
+  assert.equal(new URL(b.location.href).searchParams.has('__lingxi_ready'), false);
+  b.window.dispatchEvent({type: 'pageshow'});
+  b.document.dispatchEvent({type: 'visibilitychange'});
+  await b.flush();
+  assert.equal(errors.length, 1);
+  assert.equal(b.requests.filter(request => request.envelope.method === 'agent.tasks.start').length, 0);
+});
+
+test('iOS wake reconnects an accepted cross-tab run only when its full identity matches',
+  {timeout: 5000}, async () => {
+  const cases = [
+    {label: 'matching'},
+    {label: 'fingerprint', changes: {fingerprint: '0'.repeat(64)}},
+    {label: 'missing fingerprint', changes: {fingerprint: undefined}},
+    {label: 'method', changes: {method: 'agent.chats.send'}},
+    {label: 'thread', changes: {threadId: 'another-thread'}},
+    {label: 'app', changes: {appId: 'another-app'}},
+    {label: 'revision', changes: {revision: 4}},
+    {label: 'run', changes: {runId: 'another-run'}}
+  ];
+  for (const item of cases) {
+    const b = browser({hostPlatform: 'ios', clock: fakeClock()});
+    const runInput = b.input(input({runId: 'cross-tab-accepted'}));
+    const resultPromise = b.api.agent.run(runInput);
+    void resultPromise.catch(() => {});
+    await waitFor(() => b.location.href.startsWith('lingxi://'), 'iOS wake link was not requested.');
+    const key = 'app-one:3:cross-tab-accepted';
+    const original = b.indexedDb.getRecord('lingxi-local-app-agui-app-one', 'pending', key);
+    assert.equal(original.state, 'waking');
+    const receipt = {
+      key: original.key, appId: original.appId, revision: original.revision,
+      runId: original.runId, threadId: original.threadId, method: original.method,
+      fingerprint: original.fingerprint, state: 'accepted', acceptedAt: Date.now(),
+      ...item.changes
+    };
+    b.indexedDb.setRecord('lingxi-local-app-agui-app-one', 'pending', key, receipt);
+    const errors = [];
+    const ready = [];
+    b.window.addEventListener('localApp:agent-handoff-error', event => errors.push(event.detail));
+    b.window.addEventListener('localApp:agent-handoff-ready', event => ready.push(event.detail));
+
+    b.simulateWakeReturn(runInput.runId);
+    if (!item.changes) {
+      const result = await resultPromise;
+      assert.equal(result.result, 'answer');
+      assert.equal(result.newMessages[0].content, 'answer');
+      assert.equal(errors.length, 0);
+      assert.equal(ready.length, 1);
+      assert.equal(ready[0].runId, runInput.runId);
+      assert.ok(b.requests.some(request => request.envelope.method === 'agent.tasks.events'),
+        'The real SDK must read the accepted run events.');
+    } else {
+      await assert.rejects(resultPromise, error => error.code === 'pending_request_not_waking', item.label);
+      assert.equal(errors.length, 1, item.label);
+      assert.equal(ready.length, 0, item.label);
+      assert.equal(b.requests.filter(request => request.envelope.method === 'agent.tasks.events').length, 0, item.label);
+    }
+    assert.equal(b.requests.filter(request => request.envelope.method === 'agent.tasks.start').length, 0, item.label);
+    assert.equal(new URL(b.location.href).searchParams.has('__lingxi_ready'), false, item.label);
+    assert.equal(b.indexedDb.getRecord('lingxi-local-app-agui-app-one', 'pending', key).state, 'accepted', item.label);
+  }
+});
+
+test('iOS offline recovery offers native review only for waking records',
+  {timeout: 5000}, async () => {
+  const config = {appId: 'app-one', revision: 3, hostPlatform: 'ios'};
+  const workerListeners = new Map();
+  let recoveryHtml;
+  const self = {
+    location: {origin: 'http://127.0.0.1:24131'},
+    addEventListener(type, listener) { workerListeners.set(type, listener); },
+    skipWaiting: async () => {}, clients: {claim: async () => {}}
+  };
+  const caches = {open: async () => ({put: async (_url, response) => { recoveryHtml = await response.text(); }})};
+  vm.runInNewContext(recoverySource.replaceAll('__LINGXI_RECOVERY_CONFIGURATION__', JSON.stringify(config)),
+    {self, caches, URL, Response});
+  let installation;
+  workerListeners.get('install')({waitUntil(promise) { installation = promise; }});
+  await installation;
+  const pageScript = recoveryHtml.match(/<script>([\s\S]*?)<\/script>/u)?.[1];
+  assert.ok(pageScript, 'The actual recovery response must contain its page script.');
+
+  const now = Date.now();
+  const record = (state, options = {}) => ({
+    key: `app-one:3:${state}`, appId: 'app-one', revision: 3, runId: state,
+    state, createdAt: now, input: {secret: 'private input must never be rendered'}, ...options
+  });
+  const indexedDb = fakeIndexedDb({pendingRecords: [
+    ...['pending', 'sending', 'uncertain', 'waking', 'rejected'].map(state => record(state)),
+    record('accepted', {acceptedAt: now}),
+    record('foreign', {appId: 'other-app'}),
+    record('expired', {createdAt: now - 25 * 60 * 60 * 1000}),
+    record('waking', {key: 'app-one:3:different-key', runId: 'wrong-key'}),
+    record('waking', {key: `app-one:3:${'☕'.repeat(43)}`, runId: '☕'.repeat(43)}),
+    record('waking', {key: 'app-one:3:\ud800', runId: '\ud800'})
+  ]});
+  function element(tag) {
+    return {tag, children: [], textContent: '', append(...children) { this.children.push(...children); }};
+  }
+  const nodes = new Map([
+    ['#recovery-diagnostic', {dataset: {reason: '', readyMarker: 'unavailable'}}],
+    ...['return', 'recovery-app-id', 'recovery-revision', 'recovery-reason',
+      'recovery-ready-marker', 'runs', 'status'].map(name => [`#${name}`, element(name)])
+  ]);
+  let fetches = 0;
+  const document = {
+    querySelector: selector => nodes.get(selector),
+    createElement: tag => element(tag)
+  };
+  vm.runInNewContext(pageScript, {
+    document, indexedDB: indexedDb, URLSearchParams, TextEncoder,
+    fetch() { fetches++; throw new Error('Recovery must not send a request.'); }
+  });
+  await waitFor(() => nodes.get('#status').textContent.includes('run ID(s)'), 'Recovery did not render its saved runs.');
+  const rows = nodes.get('#runs').children;
+  assert.deepEqual(rows.map(row => row.children[0].textContent).sort(),
+    ['pending', 'sending', 'uncertain', 'waking', 'wrong-key', '☕'.repeat(43), '\ud800'].sort());
+  for (const row of rows) {
+    const state = row.children[0].textContent;
+    const links = row.children.filter(child => child && typeof child === 'object' && child.tag === 'a');
+    if (state === 'waking') {
+      assert.equal(links.length, 1);
+      const link = new URL(links[0].href);
+      assert.equal(link.protocol, 'lingxi:');
+      assert.equal(link.searchParams.get('review'), 'agent');
+      assert.equal(link.searchParams.get('runId'), state);
+      assert.equal(link.searchParams.get('revision'), '3');
+    } else {
+      assert.equal(links.length, 0, `${state} must not start an unusable native handoff.`);
+      assert.match(row.children.filter(child => typeof child === 'string').join(' '), /check.*status/i);
+    }
+  }
+  assert.equal(fetches, 0, 'Rendering recovery must never send or retry the model request.');
+  assert.doesNotMatch(JSON.stringify(rows), /private input must never be rendered/u);
 });
 
 test('iOS wake preserves its marker across an IDB failure, coalesces retries, and keeps current URL state',

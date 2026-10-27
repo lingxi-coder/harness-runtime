@@ -352,13 +352,17 @@
           store.delete(key);
           return;
         }
-        if (record && record.runId === runId && record.state === 'waking'
+        if (record && record.key === key && record.runId === runId
             && record.appId === config.appId && record.revision === config.revision) {
-          record.state = 'sending';
-          record.sendingAt = Date.now();
-          record.storageBytes = recordBytes(record);
-          store.put(record);
-          outcome = {status: 'claimed', record};
+          if (record.state === 'accepted') {
+            outcome = {status: 'accepted', record};
+          } else if (record.state === 'waking') {
+            record.state = 'sending';
+            record.sendingAt = Date.now();
+            record.storageBytes = recordBytes(record);
+            store.put(record);
+            outcome = {status: 'claimed', record};
+          }
         }
       };
       tx.oncomplete = () => { db.close(); resolve(outcome); };
@@ -467,7 +471,8 @@
     return {runId: record.runId};
   }
 
-  function waitForHandoff(runId) {
+  function waitForHandoff(record, threadId, method) {
+    const runId = record.runId;
     let waiter;
     const promise = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
@@ -475,6 +480,8 @@
         reject(makeError('Return to this app after LingXi confirms the Agent handoff.', 'handoff_timeout'));
       }, 120000);
       waiter = {
+        identity: {key: requestKey(runId), appId: config.appId, revision: config.revision,
+          runId, threadId, method, fingerprint: record.fingerprint},
         promise: null,
         resolve(value) { clearTimeout(timeout); handoffWaiters.delete(runId); resolve(value); },
         reject(error) { clearTimeout(timeout); handoffWaiters.delete(runId); reject(error); }
@@ -546,7 +553,7 @@
       }
       const waiter = handoffWaiters.get(normalized.runId);
       if (waiter) return waiter.promise;
-      const pending = waitForHandoff(normalized.runId);
+      const pending = waitForHandoff(record, normalized.threadId, method);
       try { location.assign(wakeLink(normalized.runId)); }
       catch (cause) {
         handoffWaiters.get(normalized.runId)?.reject(makeError('Could not open LingXi for the Agent handoff.', 'handoff_unavailable', cause));
@@ -753,7 +760,28 @@
         return;
       }
       consumeWakeMarker(runId);
-      if (outcome.status !== 'claimed') return;
+      if (outcome.status === 'accepted') {
+        const waiter = handoffWaiters.get(runId);
+        const identity = waiter?.identity;
+        const receipt = outcome.record;
+        if (identity && ['key', 'appId', 'revision', 'runId', 'threadId', 'method', 'fingerprint']
+          .every(key => receipt[key] === identity[key])) {
+          waiter.resolve({runId});
+          window.dispatchEvent(new CustomEvent('localApp:agent-handoff-ready', {detail: {runId}}));
+          return;
+        }
+      }
+      if (outcome.status !== 'claimed') {
+        const error = makeError(
+          'The saved Agent run is not waiting for this handoff. Reopen the app and check its status before choosing an explicit same-ID retry.',
+          'pending_request_not_waking');
+        error.runId = runId;
+        handoffWaiters.get(runId)?.reject(error);
+        window.dispatchEvent(new CustomEvent('localApp:agent-handoff-error', {
+          detail: {runId, code: error.code, message: error.message}
+        }));
+        return;
+      }
       const record = outcome.record;
       try {
         const accepted = await submitRecord(record);

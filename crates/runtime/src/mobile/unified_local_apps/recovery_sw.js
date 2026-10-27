@@ -58,19 +58,24 @@ else{
     item.delete();expired++;
    }else if(record.appId===config.appId&&record.revision===config.revision&&!accepted
       &&record.state!=='rejected'&&record.input&&typeof record.runId==='string'&&record.runId.length>0
-      &&!/[\\u0000-\\u001f\\u007f]/u.test(record.runId)){
+      &&!/[\\u0000-\\u001f\\u007f-\\u009f]/u.test(record.runId)){
     const row=document.createElement('li');const id=document.createElement('code');
     id.textContent=record.runId;row.append(id);
-    if(config.hostPlatform==='ios'){
+    if(config.hostPlatform==='ios'&&record.state==='waking'
+       &&record.key===config.appId+':'+config.revision+':'+record.runId
+       &&typeof TextEncoder==='function'&&new TextEncoder().encode(record.runId).byteLength<=128
+       &&new URLSearchParams({runId:record.runId}).get('runId')===record.runId){
      const query=new URLSearchParams({review:'agent',runId:record.runId,revision:String(config.revision)});
      const review=document.createElement('a');review.className='return';review.href=returnUrl+'?'+query.toString();
      review.textContent=' Review this run in LingXi';row.append(' ',review);
+    }else{
+     row.append(' — Reopen the app and check this run’s status before choosing an explicit same-ID retry.');
     }
     list.append(row);count++;
    }
    item.continue();
   };
-  tx.oncomplete=()=>{db.close();showMessage((count?String(count)+' run ID(s) are saved. Choose a run only after returning to LingXi.':'There are no saved run IDs.')+(expired?' '+String(expired)+' expired record(s) were deleted.':''));};
+  tx.oncomplete=()=>{db.close();showMessage((count?String(count)+' run ID(s) are saved. Return to LingXi to reopen the app or review an eligible run.':'There are no saved run IDs.')+(expired?' '+String(expired)+' expired record(s) were deleted.':''));};
   tx.onerror=()=>{db.close();showMessage('Saved run IDs are unavailable in this browser.');};
  };
 }
