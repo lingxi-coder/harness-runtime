@@ -128,11 +128,13 @@ async fn deepseek_auxiliary_search_reuses_credentials_and_keeps_conversation_rou
 }
 #[test]
 fn deepseek_search_does_not_redirect_custom_gateways() {
-    for (url, credential) in [("https://custom.example/v1", "DEEPSEEK_ROUTE_TEST_KEY")] {
-        let (adapter, transport, _) = adapter(url, credential, false);
-        assert!(!adapter.supports_request(&request("deepseek-flash")));
-        assert!(transport.requests.lock().unwrap().is_empty());
-    }
+    let (adapter, transport, _) = adapter(
+        "https://custom.example/v1",
+        "DEEPSEEK_ROUTE_TEST_KEY",
+        false,
+    );
+    assert!(!adapter.supports_request(&request("deepseek-flash")));
+    assert!(transport.requests.lock().unwrap().is_empty());
 }
 #[tokio::test]
 async fn deepseek_prose_without_native_results_is_an_error() {

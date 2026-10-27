@@ -893,11 +893,8 @@ impl JsonlWriter {
         &self,
         transcript_path: &Path,
     ) -> Result<SessionMessageIdentitySnapshot, WriterError> {
-        self.bootstrap_session_message_identity_snapshot_with_authority(
-            transcript_path,
-            None,
-        )
-        .await
+        self.bootstrap_session_message_identity_snapshot_with_authority(transcript_path, None)
+            .await
     }
 
     /// Import a resume target before publishing it as the active session.
@@ -3364,7 +3361,6 @@ impl JsonlWriter {
         }
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -4956,10 +4952,7 @@ mod tests {
 
         // A title recorded through the writer is remembered in its own state.
         writer
-            .append_custom_title(
-                session_id,
-                "Long Session".into(),
-            )
+            .append_custom_title(session_id, "Long Session".into())
             .await
             .unwrap();
 

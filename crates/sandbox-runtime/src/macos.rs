@@ -1162,6 +1162,7 @@ fn is_ecmascript_whitespace(ch: char) -> bool {
 /// must not be retained across reads: a later deny record without a `CMD64_`
 /// line has no recovered command. `Buffer.toString()` uses replacement
 /// characters for malformed UTF-8; `from_utf8_lossy` keeps that behavior.
+#[cfg(any(target_os = "macos", test))]
 fn consume_macos_log_stream<R, F>(
     mut reader: R,
     ignore_violations: Option<&std::collections::HashMap<String, Vec<String>>>,
@@ -1192,6 +1193,7 @@ where
 
 /// Terminate and reap an owned monitor process. `Child::drop` does not wait,
 /// so every monitor shutdown path must call this before releasing the child.
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn terminate_and_reap(
     child: &mut std::process::Child,
 ) -> std::io::Result<std::process::ExitStatus> {

@@ -549,15 +549,17 @@ To complete your request, I need to fetch content from the redirected URL. Pleas
         let mut ctx = fresh_ctx();
         ctx.options.main_loop_model = "deepseek-flash".into();
         ctx.options.model_profile = Some("deepseek".into());
-        let error = tool
+        let error = match tool
             .call(
                 generated(json!({"url":"https://example.com/page"})),
                 ctx,
                 fresh_tx(),
             )
             .await
-            .err()
-            .expect("provider failure");
+        {
+            Err(error) => error,
+            Ok(_) => panic!("expected provider failure"),
+        };
         assert!(error.to_string().contains("fetch denied"));
         assert_eq!(provider.seen.lock().unwrap().len(), 1);
         assert!(http.received_requests().is_empty());

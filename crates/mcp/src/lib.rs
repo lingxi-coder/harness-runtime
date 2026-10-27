@@ -81,7 +81,6 @@ pub mod env_expansion;
 pub mod headers_helper;
 pub mod hook_dispatch;
 pub mod identity;
-pub mod tool_identity;
 pub mod inbound;
 pub mod initialize_params;
 pub mod json_config;
@@ -95,6 +94,7 @@ pub mod protocol_negotiation;
 pub mod raw_conn;
 pub mod registry;
 pub mod server_gate;
+pub mod tool_identity;
 pub mod tool_schema;
 #[cfg(test)]
 mod tracing_capture;

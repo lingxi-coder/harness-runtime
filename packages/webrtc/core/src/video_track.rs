@@ -5,7 +5,10 @@ use rtc::{
         RtpCodecKind,
     },
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use webrtc::{
     media_stream::{MediaStreamTrack, track_local::static_sample::TrackLocalStaticSample},
     peer_connection::MediaEngine,
@@ -20,7 +23,11 @@ pub(crate) struct VideoTrack {
     ssrc: u32,
 }
 impl VideoTrack {
-    pub fn new(media: &mut MediaEngine, source: VideoSource) -> Result<Self, &'static str> {
+    pub fn new(
+        media: &mut MediaEngine,
+        source: VideoSource,
+        now: Instant,
+    ) -> Result<Self, &'static str> {
         let codec = video_codec();
         Self::register_codec(media)?;
         let ssrc = rand::random();
@@ -28,21 +35,24 @@ impl VideoTrack {
             VideoSource::Camera => "camera",
             VideoSource::Screen => "screen",
         };
-        let track = TrackLocalStaticSample::new(MediaStreamTrack::new(
-            "lingxi".into(),
-            format!("{label}-{ssrc}"),
-            label.into(),
-            RtpCodecKind::Video,
-            vec![RTCRtpEncodingParameters {
-                rtp_coding_parameters: RTCRtpCodingParameters {
-                    ssrc: Some(ssrc),
+        let track = TrackLocalStaticSample::new(
+            now,
+            MediaStreamTrack::new(
+                "lingxi".into(),
+                format!("{label}-{ssrc}"),
+                label.into(),
+                RtpCodecKind::Video,
+                vec![RTCRtpEncodingParameters {
+                    rtp_coding_parameters: RTCRtpCodingParameters {
+                        ssrc: Some(ssrc),
+                        ..Default::default()
+                    },
+                    codec,
+                    active: true,
                     ..Default::default()
-                },
-                codec,
-                active: true,
-                ..Default::default()
-            }],
-        ))
+                }],
+            ),
+        )
         .map_err(|_| "video track creation failed")?;
         Ok(Self {
             track: Arc::new(track),
@@ -79,7 +89,7 @@ impl VideoTrack {
                 &Sample {
                     data: data.into(),
                     duration,
-                    ..Default::default()
+                    ..Sample::new(Instant::now())
                 },
                 &[],
             ),

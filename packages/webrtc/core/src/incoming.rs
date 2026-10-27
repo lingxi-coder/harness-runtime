@@ -2,6 +2,7 @@
 //! Packet and byte permits follow owned data through the consumer, not merely through this queue.
 //! Stale or saturated media is discarded so a slow worker can resume with fresh speaker audio.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
@@ -10,11 +11,9 @@ use std::time::Duration;
 use std::time::Instant;
 
 use rtc::interceptor::Interceptor;
-use rtc::interceptor::NoopInterceptor;
 use rtc::interceptor::Packet;
 use rtc::interceptor::StreamInfo;
 use rtc::interceptor::TaggedPacket;
-use rtc::interceptor::interceptor;
 use rtc::sansio;
 use rtc::shared::error::Error;
 use rtc::shared::marshal::Marshal;
@@ -26,6 +25,8 @@ use tokio::sync::mpsc;
 const PACKETS: usize = 64;
 const BYTES: usize = 2 * 1024 * 1024;
 const PACKET_BYTES: usize = 64 * 1024;
+// Place this consuming interceptor after the upstream jitter-buffer slot.
+pub(crate) const INGRESS_SLOT: usize = 13_001;
 
 struct State {
     epoch: AtomicU64,
@@ -53,10 +54,8 @@ pub struct Incoming {
     receiver: mpsc::Receiver<ReceivedRtp>,
 }
 
-#[derive(Interceptor)]
 pub struct Ingress {
-    #[next]
-    next: NoopInterceptor,
+    outgoing: VecDeque<TaggedPacket>,
     state: Arc<State>,
     sender: mpsc::Sender<ReceivedRtp>,
     payload_type: u8,
@@ -80,7 +79,7 @@ impl Incoming {
                 receiver,
             },
             Ingress {
-                next: NoopInterceptor::new(),
+                outgoing: VecDeque::new(),
                 state,
                 sender,
                 payload_type: 111,
@@ -132,18 +131,21 @@ impl Incoming {
     }
 }
 
-#[interceptor]
-impl Ingress {
-    #[overrides]
+impl sansio::Protocol<TaggedPacket, TaggedPacket, ()> for Ingress {
+    type Rout = TaggedPacket;
+    type Wout = TaggedPacket;
+    type Eout = ();
+    type Error = Error;
+    type Time = Instant;
+
     fn handle_read(&mut self, message: TaggedPacket) -> Result<(), Self::Error> {
-        if let Packet::Rtp(packet) = &message.message {
-            if packet.header.payload_type == 96 {
-                if let Some(video) = &mut self.video {
-                    return video.handle_read(message);
-                }
-            }
+        if let Packet::Rtp(packet) = &message.message.packet
+            && packet.header.payload_type == 96
+            && let Some(video) = &mut self.video
+        {
+            return video.handle_read(message);
         }
-        let Packet::Rtp(packet) = message.message else {
+        let Packet::Rtp(packet) = message.message.packet else {
             return Ok(());
         };
         let epoch = self.state.epoch.load(Ordering::Acquire);
@@ -184,6 +186,26 @@ impl Ingress {
         // Consume here: no second copy is retained by the upstream track-event queue.
         Ok(())
     }
+
+    fn poll_read(&mut self) -> Option<Self::Rout> {
+        None
+    }
+
+    fn handle_write(&mut self, message: TaggedPacket) -> Result<(), Self::Error> {
+        self.outgoing.push_back(message);
+        Ok(())
+    }
+
+    fn poll_write(&mut self) -> Option<Self::Wout> {
+        self.outgoing.pop_front()
+    }
+}
+
+impl Interceptor for Ingress {
+    fn bind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_local_stream(&mut self, _info: &StreamInfo) {}
+    fn bind_remote_stream(&mut self, _info: &StreamInfo) {}
+    fn unbind_remote_stream(&mut self, _info: &StreamInfo) {}
 }
 
 #[cfg(test)]

@@ -19,7 +19,7 @@ telemetry = { path = "../telemetry" }
 branding = { path = "../branding" }
 serde.workspace = true
 serde_json.workspace = true
-serde_yaml = "0.9"
+yaml_serde = "0.10.7"
 thiserror.workspace = true
 # EXPERIMENTAL_SKILL_SEARCH skill-discovery prefetch (register-but-disable,
 # default OFF): the one-shot-backed background discovery handle + the async

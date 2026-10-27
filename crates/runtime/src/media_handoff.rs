@@ -101,6 +101,7 @@ pub(crate) async fn stop_media_session(
 /// Stop every active, owner-visible resource for one retired conversation
 /// session. The deadline bounds the entire enumeration and stop sequence, so a
 /// session with many resources cannot hold retarget or disposal indefinitely.
+#[cfg(feature = "mobile")]
 pub(crate) async fn stop_media_owner_resources(
     service: &Arc<dyn media_api::MediaService>,
     owner: media_api::MediaOwner,

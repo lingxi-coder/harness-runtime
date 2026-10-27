@@ -1,8 +1,8 @@
 //! Real macOS `ComputerControl` implementation.
 //!
 //! Backed entirely by pure-Rust crates rather than a bundled Swift module:
-//! `enigo` (mouse/keyboard), `xcap` (screen capture — `ScreenCaptureKit`
-//! under the hood), `arboard` (clipboard, functionally the same `pbcopy`/
+//! `enigo` (mouse/keyboard), `xcap` (CoreGraphics screen capture),
+//! `arboard` (clipboard, functionally the same `pbcopy`/
 //! `pbpaste` round trip claude-code's own executor uses), and
 //! `objc2-app-kit` (`NSWorkspace`/`NSRunningApplication` for app
 //! enumeration, frontmost detection, and hide/unhide).

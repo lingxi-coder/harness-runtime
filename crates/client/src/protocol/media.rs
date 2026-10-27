@@ -1378,7 +1378,7 @@ impl MediaPcmFrameDto {
         if self.sample_rate_hz == 0 || self.channels == 0 {
             return Err("PCM frame requires a sample rate and at least one channel".into());
         }
-        if self.pcm16le.is_empty() || self.pcm16le.len() % 2 != 0 {
+        if self.pcm16le.is_empty() || !self.pcm16le.len().is_multiple_of(2) {
             return Err("PCM16LE frame must contain a non-empty whole number of samples".into());
         }
         validate_frame_bytes(self.pcm16le.len())
@@ -1472,11 +1472,10 @@ impl MediaVideoFrameDto {
                         "I420 frame byte lengths do not match their strides and dimensions".into(),
                     );
                 }
-                let total = y_len
+                y_len
                     .checked_add(u_len)
                     .and_then(|total| total.checked_add(v_len))
-                    .ok_or_else(|| "I420 frame size overflow".to_owned())?;
-                total
+                    .ok_or_else(|| "I420 frame size overflow".to_owned())?
             }
         };
         validate_frame_bytes(payload_len)

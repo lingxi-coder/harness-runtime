@@ -145,14 +145,14 @@ pub(crate) fn trim_source_text(source: &Utf16JsonProjection) -> Utf16JsonProject
     source_from_units(units[start..end].to_vec())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "builtin-handlers"))]
 pub(crate) trait SourceTextTestExt {
     fn contains(&self, needle: &str) -> bool;
     fn starts_with(&self, prefix: &str) -> bool;
     fn ends_with(&self, suffix: &str) -> bool;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "builtin-handlers"))]
 impl SourceTextTestExt for Utf16JsonProjection {
     fn contains(&self, needle: &str) -> bool {
         self.string_at("").is_some_and(|text| text.contains(needle))

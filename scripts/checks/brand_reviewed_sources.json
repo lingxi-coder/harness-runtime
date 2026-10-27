@@ -1,0 +1,1134 @@
+{
+  "version": 1,
+  "description": "Exact reviewed findings: changed matched lines or counts require re-review; unrelated edits remain visible to all gate rules.",
+  "entries": [
+    {
+      "path": "crates/client/snapshots/event/workspace_changed.json",
+      "reason": "Workspace/session fixture preserves the current LingXi transcript and configuration namespace.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "e535e11fba9f2d46f069d57ca376ad598aa0f720a804b81ee065a05ed4945cfa"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "e535e11fba9f2d46f069d57ca376ad598aa0f720a804b81ee065a05ed4945cfa"
+        }
+      ]
+    },
+    {
+      "path": "crates/client/tests/version_guard_test.rs",
+      "reason": "Workspace/session fixture preserves the current LingXi transcript and configuration namespace.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "40bdca87391735ce0a7a470ff8e2d8d9e534c85d5ab3717e5aa5d4e2e2642851"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "40bdca87391735ce0a7a470ff8e2d8d9e534c85d5ab3717e5aa5d4e2e2642851"
+        }
+      ]
+    },
+    {
+      "path": "crates/command-api/src/builtins/bundled/mod.rs",
+      "reason": "Exact upstream compatibility setting is actively read at this Native-aligned runtime site.",
+      "findings": [
+        {
+          "rule": "G2",
+          "needle": "CLAUDE_CODE_DISABLE_CLAUDE_API_SKILL",
+          "count": 1,
+          "line_sha256": "4f65ec8432888e2527dcb5ac9f8afa4b6cee2bcf86502e453291fcd27631dd3d"
+        }
+      ]
+    },
+    {
+      "path": "crates/command-api/src/builtins/cd.rs",
+      "reason": "Directory-move notices describe the actual LingXi memory filename; the test retains the Native comparison and checks user paths are unchanged.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "b36c5508501f9267df689fa83010d87a9b2b27c01caf1f3aa32a7a51fec45f6b"
+        },
+        {
+          "rule": "G3",
+          "needle": "LINGXI.md",
+          "count": 1,
+          "line_sha256": "b36c5508501f9267df689fa83010d87a9b2b27c01caf1f3aa32a7a51fec45f6b"
+        }
+      ]
+    },
+    {
+      "path": "crates/command-api/src/builtins/list_agents.rs",
+      "reason": "Own product label in the subagent list or its dispatch fixture.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 2,
+          "line_sha256": "be6be02c6dfaf0747f6289c1b46b62b083bd25ee6b4f3752e4ab7ae1ddd3685e"
+        }
+      ]
+    },
+    {
+      "path": "crates/command-api/src/cd.rs",
+      "reason": "Directory-move notices describe the actual LingXi memory filename; the test retains the Native comparison and checks user paths are unchanged.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "CLAUDE\\.md",
+          "count": 2,
+          "line_sha256": "cca355bb47c7af59e35469bc77ad02c600eea1167ff843661e249cbfea9eea64"
+        },
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "3579cdb617b6984b38abced706ec167ca3beb3a4a2d78e397b32f995425f80f0"
+        },
+        {
+          "rule": "G3",
+          "needle": "LINGXI.md",
+          "count": 1,
+          "line_sha256": "3579cdb617b6984b38abced706ec167ca3beb3a4a2d78e397b32f995425f80f0"
+        }
+      ]
+    },
+    {
+      "path": "crates/command-api/src/dispatcher.rs",
+      "reason": "Own product label in the subagent list or its dispatch fixture.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "a5b4e196405d3cf3066fddce04d7dcf4e20bd49e7ffededa04efa16e30eb10ff"
+        }
+      ]
+    },
+    {
+      "path": "crates/command-api/src/registry.rs",
+      "reason": "Exact upstream compatibility setting is actively read at this Native-aligned runtime site.",
+      "findings": [
+        {
+          "rule": "G2",
+          "needle": "CLAUDE_CODE_LANTERN_PRISM",
+          "count": 1,
+          "line_sha256": "59274d7790e58b0753b8e08cdff4c82992c374f9a58912dcd1a7163684f32971"
+        }
+      ]
+    },
+    {
+      "path": "crates/command-api/src/workspace_directory.rs",
+      "reason": "Native 2.1.307 replay input uses the original upstream path or memory filename; preserve the capture for parity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.claude(?![A-Za-z0-9_.\\-])",
+          "count": 1,
+          "line_sha256": "7cb645051d6aac3847f8c5ef35dcb811ab00dd7312551fa20c1c45081ac357c1"
+        }
+      ]
+    },
+    {
+      "path": "crates/llm-runtime/src/model/request_trace.rs",
+      "reason": "Regression fixture uses an explicit LingXi test or telemetry environment key.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "5497e33066b250fc3c70f0851c322907baf4624c16986490c2ff3af2033e6b79"
+        }
+      ]
+    },
+    {
+      "path": "crates/llm-runtime/src/service.rs",
+      "reason": "Exact upstream compatibility setting is actively read at this Native-aligned runtime site.",
+      "findings": [
+        {
+          "rule": "G2",
+          "needle": "CLAUDE_CODE_INLINE_TOOLS",
+          "count": 1,
+          "line_sha256": "042d078caf2d69907dfdc50711c5b691d8949d0b5b6d0168013013df231534fe"
+        }
+      ]
+    },
+    {
+      "path": "crates/local-app/assets/skill/SKILL.md",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 2,
+          "line_sha256": "35a47d5994684c2caf5f1cd4a81f74f8fafec789ef560f2e6e7aaa382d68ebbc"
+        }
+      ]
+    },
+    {
+      "path": "crates/local-app/src/v2/agent/chat_store.rs",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "fee0e939af7147b08696387fe7339383af47bd97ba53aa43a277b3941f6e4ef9"
+        }
+      ]
+    },
+    {
+      "path": "crates/local-app/src/v2/agent/protocol.rs",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 3,
+          "line_sha256": "36051154b386a29ff7713cbcc5987687468b8190d863c4d07af19b059fda245c"
+        }
+      ]
+    },
+    {
+      "path": "crates/local-app/src/v2/library.rs",
+      "reason": "Local App source/package filtering protects the existing LingXi workspace and preparation state.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "da99da1a868258fa0a679713cddadccb5dfe5b5c4fa1510a47f29cee6191d7c2"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "da99da1a868258fa0a679713cddadccb5dfe5b5c4fa1510a47f29cee6191d7c2"
+        }
+      ]
+    },
+    {
+      "path": "crates/local-app/src/v2/tests.rs",
+      "reason": "Workspace/session fixture preserves the current LingXi transcript and configuration namespace.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 13,
+          "line_sha256": "285249e85ff3bb73030984c241cf0e6ecf288a9e7fb6bfe4f426cc961dec03a1"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 13,
+          "line_sha256": "285249e85ff3bb73030984c241cf0e6ecf288a9e7fb6bfe4f426cc961dec03a1"
+        }
+      ]
+    },
+    {
+      "path": "crates/orchestrator/src/turn_loop/refusal_retry.rs",
+      "reason": "Exact upstream compatibility setting is actively read at this Native-aligned runtime site.",
+      "findings": [
+        {
+          "rule": "G2",
+          "needle": "CLAUDE_CODE_DISABLE_REFUSAL_RETRY",
+          "count": 1,
+          "line_sha256": "ca0fa1174c2d4edadb3a31cd72004bb2960883876b08dff0727ae908bdb63930"
+        }
+      ]
+    },
+    {
+      "path": "crates/orchestrator/tests/current_alignment_refusal.rs",
+      "reason": "Regression fixture uses an explicit LingXi test or telemetry environment key.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "08c021726816f93899992260de4c4971b6b0ef094c442f45adc7d1cd917847cc"
+        }
+      ]
+    },
+    {
+      "path": "crates/orchestrator/tests/queued_prompt_batch_test.rs",
+      "reason": "Regression fixture uses an explicit LingXi test or telemetry environment key.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 2,
+          "line_sha256": "53836a2cc0211d66fb86c3ae0705c72a01802c9c8e623a30b61f8f83d0b53288"
+        }
+      ]
+    },
+    {
+      "path": "crates/platforms/common/src/mobile_linux.rs",
+      "reason": "Workspace/session fixture preserves the current LingXi transcript and configuration namespace.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "579e742c56dde6c4a270c5b319b919fa8153a45193d6aaa30a9fa43388b7cede"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "579e742c56dde6c4a270c5b319b919fa8153a45193d6aaa30a9fa43388b7cede"
+        }
+      ]
+    },
+    {
+      "path": "crates/runtime/src/desktop/app_invocation.rs",
+      "reason": "Regression verifies that private LingXi memory is not inherited by an app invocation.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "a41111c44d2ff23c6ec258568024294e1a3e221b3f799a2c1e6348ce3437280b"
+        },
+        {
+          "rule": "G3",
+          "needle": "LINGXI.md",
+          "count": 1,
+          "line_sha256": "a41111c44d2ff23c6ec258568024294e1a3e221b3f799a2c1e6348ce3437280b"
+        }
+      ]
+    },
+    {
+      "path": "crates/runtime/src/desktop/list_agents.rs",
+      "reason": "Exact upstream compatibility setting is actively read at this Native-aligned runtime site.",
+      "findings": [
+        {
+          "rule": "G2",
+          "needle": "CLAUDE_CODE_HARBOR_KITE",
+          "count": 1,
+          "line_sha256": "64cec5ec00b1a26b0540425d01566252de78d6878aade28094165bfed537bcb6"
+        }
+      ]
+    },
+    {
+      "path": "crates/runtime/src/desktop/tests/dynamic_auth_catalog.rs",
+      "reason": "Regression fixture uses an explicit LingXi test or telemetry environment key.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "df84dae546d02cdecba56ca98fa91539ccd3a6d6011cc05f5d196513cc1e50d6"
+        }
+      ]
+    },
+    {
+      "path": "crates/runtime/src/mobile/app_agent/mod.rs",
+      "reason": "Workspace/session fixture preserves the current LingXi transcript and configuration namespace.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "0800776f689614b6dd8f0c6552a23c810899568d72ca44f8ca47e07b986de4d1"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "0800776f689614b6dd8f0c6552a23c810899568d72ca44f8ca47e07b986de4d1"
+        }
+      ]
+    },
+    {
+      "path": "crates/runtime/src/mobile/app_agent/service.rs",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "ea95920aaf86da585be8cb52da93b26ae987195536aafa41863bcf5efe6b99d0"
+        }
+      ]
+    },
+    {
+      "path": "crates/runtime/src/mobile/host/workspace_commands.rs",
+      "reason": "Workspace/session fixture preserves the current LingXi transcript and configuration namespace.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "3069fbcc2dfd8d695780f97694307468231f6ff30aaac7f9934fde52cc69de87"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "3069fbcc2dfd8d695780f97694307468231f6ff30aaac7f9934fde52cc69de87"
+        }
+      ]
+    },
+    {
+      "path": "crates/runtime/src/mobile/unified_local_apps/README.md",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "dc94619537f16154952e94ce57878b57bc5cd00c709125319205e61ba3a55085"
+        }
+      ]
+    },
+    {
+      "path": "crates/runtime/src/mobile/unified_local_apps/browser_sdk.js",
+      "reason": "Local Apps browser bridge uses the LingXi product label, AG-UI global, configuration token and authenticated host request header.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 5,
+          "line_sha256": "599348760b858327d4c34ace01b71420faadd08d27c323616aee2d4181c749d5"
+        }
+      ]
+    },
+    {
+      "path": "crates/runtime/src/mobile/unified_local_apps/gateway.rs",
+      "reason": "Local Apps browser bridge uses the LingXi product label, AG-UI global, configuration token and authenticated host request header.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 3,
+          "line_sha256": "b0ebbc0a45b0a08318da0c96c1279bb5ca798d79e92e8f31b63f887618fe737e"
+        },
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "bb9f54d3c41fea13c0e030b67744666a79739bf03f9b2357bb56130e238452ac"
+        },
+        {
+          "rule": "G1",
+          "needle": "Lingxi",
+          "count": 2,
+          "line_sha256": "86749906d4a46a5bd425ae45d0050c1160b6ef2f607996d91545078a4700d9de"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 3,
+          "line_sha256": "9bf4bb943d0f4769e005a0c0265d9c2eace76dbb595f0361643f36a6bc0bde09"
+        }
+      ]
+    },
+    {
+      "path": "crates/runtime/src/mobile/unified_local_apps/recovery_sw.js",
+      "reason": "Local Apps browser bridge uses the LingXi product label, AG-UI global, configuration token and authenticated host request header.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 2,
+          "line_sha256": "e64eebf5b559abf35027f51b8c69979476a455f04d1377737ada3db07746fe24"
+        }
+      ]
+    },
+    {
+      "path": "crates/runtime/src/mobile/unified_local_apps/tests.rs",
+      "reason": "Local Apps browser bridge uses the LingXi product label, AG-UI global, configuration token and authenticated host request header.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "5ba0749ffcf8088f337175698874b4d14c872b4d2708d9f69b8befb746d5c556"
+        },
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 2,
+          "line_sha256": "be177de0ab02778256dab14b5dcc7a6d8ffaafd7e5df80a2a51bc55df272f905"
+        },
+        {
+          "rule": "G1",
+          "needle": "Lingxi",
+          "count": 1,
+          "line_sha256": "053888315994fbd174789616968e412da42ad405880ddab3befa3f72dd0fcb77"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 4,
+          "line_sha256": "595cf378f57f21edcec8b880c9425a6ece5097e968f57d064f95a340f057d467"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "e32519e2a9823b3dc3e19f4dbf369ebd4b134d557ce9a529a8a28c32357f06a7"
+        }
+      ]
+    },
+    {
+      "path": "crates/runtime/src/team_onboarding.rs",
+      "reason": "Onboarding uses the product name and memory identity; the test retains the upstream spelling only as data to reject or preserve.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "CLAUDE\\.md",
+          "count": 1,
+          "line_sha256": "337ab4df142721291be527aa69244e34af955529ddbb06185070be6257427781"
+        },
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "dd9698347e728db5e72e1945066314ab4e263bbccebf1641cf7d0c2320610f47"
+        },
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 2,
+          "line_sha256": "df83190ebd2cf495be05ce9842a2abaa27816de1fc06d742f2dcf5b515e19ac8"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 3,
+          "line_sha256": "29f72afbd86343c5575c14fe34234b17dcd192fb7a77f458575f2bfd421593b3"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "85b35f0ecd3f47d58ca2c6e0d9b2879014ab08dcc0ff417bbcc87806e7ccdeb3"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi.json",
+          "count": 2,
+          "line_sha256": "d9d926729fcd9e41afe4ba76717f635c5c7fc48ab7a73d2a321881318718f976"
+        },
+        {
+          "rule": "G3",
+          "needle": "LINGXI.md",
+          "count": 2,
+          "line_sha256": "ac7eb83450c0e11879d8b209718d2a87712e133815caa1655ec32fe195684cae"
+        }
+      ]
+    },
+    {
+      "path": "crates/runtime/tests/local_app.rs",
+      "reason": "Workspace/session fixture preserves the current LingXi transcript and configuration namespace.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 2,
+          "line_sha256": "a6d94df999b55c1a6217a1c783f4c63d87ade2d057c4e5fe77be505f19bcf799"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 2,
+          "line_sha256": "a6d94df999b55c1a6217a1c783f4c63d87ade2d057c4e5fe77be505f19bcf799"
+        }
+      ]
+    },
+    {
+      "path": "crates/session/src/jsonl/loader.rs",
+      "reason": "Native 2.1.307 replay input uses the original upstream path or memory filename; preserve the capture for parity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.claude(?![A-Za-z0-9_.\\-])",
+          "count": 1,
+          "line_sha256": "6022b5c3a6dd038f0f3ceeb0f8befca3831b87424b3d1420da8ed6137ec72644"
+        }
+      ]
+    },
+    {
+      "path": "crates/session/tests/fixtures/workspace_session_2_1_307.json",
+      "reason": "Native 2.1.307 replay input uses the original upstream path or memory filename; preserve the capture for parity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "CLAUDE\\.md",
+          "count": 39,
+          "line_sha256": "3f263287c88410e9142291bac68e694241ba870eec1c5eb9b02ef760f79dcd59"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.claude(?![A-Za-z0-9_.\\-])",
+          "count": 1040,
+          "line_sha256": "28b014bfe615ac9153d44cd8fbb7004f109b04360cc9bd2f1f15bd41265df71c"
+        }
+      ]
+    },
+    {
+      "path": "crates/session/tests/session_aliases_307_test.rs",
+      "reason": "Native 2.1.307 replay input uses the original upstream path or memory filename; preserve the capture for parity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.claude(?![A-Za-z0-9_.\\-])",
+          "count": 2,
+          "line_sha256": "a18cb18858d685b7fb8746fb85d5a0b48e84ad4f6e49ec37a70f78c64219cacb"
+        }
+      ]
+    },
+    {
+      "path": "crates/tools/computer-use/src/browser.rs",
+      "reason": "Computer Use reads its established desktop policy or browser descriptor key, or protects the application bundle identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "6643b5969cff67b97deca32a97897fdc24814907aa7f3cb426cb87d1cc0e54a3"
+        }
+      ]
+    },
+    {
+      "path": "crates/tools/computer-use/src/device_policy.rs",
+      "reason": "Computer Use reads its established desktop policy or browser descriptor key, or protects the application bundle identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 2,
+          "line_sha256": "2c7cfec9fb91dce73e4bac9589dd9ab9b49ea5143da2877bc4014aad622b3ffe"
+        }
+      ]
+    },
+    {
+      "path": "crates/tools/computer-use/src/lib.rs",
+      "reason": "Computer Use reads its established desktop policy or browser descriptor key, or protects the application bundle identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "b1b67d35a8a46d3c4cb07faf1457c742fcd3adf9852b60b47d502c4de8ab7f69"
+        }
+      ]
+    },
+    {
+      "path": "crates/tools/ui/src/desktop_local_app.rs",
+      "reason": "Local App source/package filtering protects the existing LingXi workspace and preparation state.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "d4df6f637e018bd2b7b3034c8dbd12887e1341443bb95af9d8975ee5edc0830f"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 3,
+          "line_sha256": "9426389dce87f0a4ba33a52b4f62504b616ff89a7cc3cb2e984018c7096ca302"
+        },
+        {
+          "rule": "G3",
+          "needle": ".lingxi-*",
+          "count": 3,
+          "line_sha256": "9426389dce87f0a4ba33a52b4f62504b616ff89a7cc3cb2e984018c7096ca302"
+        }
+      ]
+    },
+    {
+      "path": "packages/local-app-agui/README.md",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "79891041e809b1ed32351357f2094d0d62dc3901856af3f89887c07a502ea0da"
+        }
+      ]
+    },
+    {
+      "path": "packages/local-app-agui/dist/browser.entry.js",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "2a041b35dc2ff994f15e99d24394bffc37eb9137e3b64fb7fc4bfb6caa57b167"
+        }
+      ]
+    },
+    {
+      "path": "packages/local-app-agui/dist/browser.global.js",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "91452edf2302317537c659cefa7a5a898541d1c9952f6a44e956aa8ba9c4d738"
+        }
+      ]
+    },
+    {
+      "path": "packages/local-app-agui/dist/browser.source.js",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "Lingxi",
+          "count": 1,
+          "line_sha256": "5eaec7a0bbe7e9261441b06d6d565dc6286d908008b5b8c0132175dcb52dd0f6"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "5eaec7a0bbe7e9261441b06d6d565dc6286d908008b5b8c0132175dcb52dd0f6"
+        }
+      ]
+    },
+    {
+      "path": "packages/local-app-agui/dist/client.bundle.js",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "57ba568449bca20c4964bcb4c79f3c6aa43e814464fa2623a767ecb5c1c27f8a"
+        }
+      ]
+    },
+    {
+      "path": "packages/local-app-agui/dist/types/client.d.ts",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "bf3fcd72bba2c2479e25351d4b010b87f320319e63ff3d3bcb6b159e08d63857"
+        }
+      ]
+    },
+    {
+      "path": "packages/local-app-agui/scripts/build.mjs",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "Lingxi",
+          "count": 1,
+          "line_sha256": "d060606a4f72aaccc1e3ac41b3292dbdc54d5809c15efdf81a24e3568d0c10fd"
+        }
+      ]
+    },
+    {
+      "path": "packages/local-app-agui/scripts/generate-sdk-fixture.mjs",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "5b922f0e3f84605a72b762f179014a1533553431eb76032dd5ba9e415182bb38"
+        }
+      ]
+    },
+    {
+      "path": "packages/local-app-agui/src/client.d.ts",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "bf3fcd72bba2c2479e25351d4b010b87f320319e63ff3d3bcb6b159e08d63857"
+        }
+      ]
+    },
+    {
+      "path": "packages/local-app-agui/src/client.js",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 2,
+          "line_sha256": "4df0867e120daaefb23112f37e52a5cd735905b44472eb550f7e0476e053ecd6"
+        }
+      ]
+    },
+    {
+      "path": "packages/local-app-agui/src/file.js",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "7c19d687369d035dee0f17114678f46f20b3e05f6ff26907b17736dc1dc26fd8"
+        }
+      ]
+    },
+    {
+      "path": "packages/local-app-agui/tests/agui.test.mjs",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 7,
+          "line_sha256": "a3d6a264ca00547f4e7e8fcea37fde7e1106cd54be64719ba3442747adb74156"
+        }
+      ]
+    },
+    {
+      "path": "packages/local-app-agui/tests/fixtures/run-agent-input.ag-ui-1.0.3.json",
+      "reason": "Local Apps AG-UI contract uses the com.lingxi.localApp extension key; its SDK and fixtures must share that wire identity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 2,
+          "line_sha256": "ccf026bc8b51b003aa81ddf4ebc3a1817d545ed45b659a9a4081c6080bc11eb4"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/compose.turn.yaml",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 3,
+          "line_sha256": "dbe2a1e67e766c31a757de4562ddf5605697c69484a06173755b3393c275644e"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/compose.yaml",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "470a26fb88e8df7bc5323778b61f997a72cbf66dc860cfbdc470331ceb18acfa"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/core/src/transport_tests.rs",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 2,
+          "line_sha256": "39d38a5bcffbaa14256c4452cbf1eea0ae446b3c11e4ac3dae569755f3ee1dca"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/media/build.rs",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 2,
+          "line_sha256": "f86d71752aa4f5af39ccfd62244497e52407ae6482fcbf49803e61bf3bc25b6e"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/media/src/runtime.rs",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 3,
+          "line_sha256": "4ebc2beddc81e713fa068672a4a3a2b0f437377a8594e64e246e112b5d06d07e"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/media/src/video.rs",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 2,
+          "line_sha256": "06baac793cc09b48573bfe842f9c9cd31f1a4ad2569e19781cbd1b89a50bceaa"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/media/src/video_playout.rs",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "1caec2c7baa688a8f9eda25e0a63e94cfc1c5d3cf81464c4bc630e7a7e0ff908"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/mobile/src/probe_session.rs",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "62afc2e45c62f1a90ee725698fd89235235c6be681a0f5056b0384c16b3beb04"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/platform/android-probe/app/build.gradle.kts",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 2,
+          "line_sha256": "eef4f1df812fa7f218826a4da2d9ef88eb4913e80729c1df7cc26a714d2ffdea"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/platform/android-probe/app/src/main/AndroidManifest.xml",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "0bf110961c4baeabeb2645c3522a7d90d3d053f02c408f6952e858329920aa3a"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/platform/android-probe/app/src/main/java/com/lingxi/webrtc/probe/MainActivity.java",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 4,
+          "line_sha256": "0ea308f78ad1329badb746db32b4c8c7bffcb42a0052551fe7aff468765962d3"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/platform/android-probe/app/src/main/java/com/lingxi/webrtc/probe/MediaService.java",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 2,
+          "line_sha256": "13fb011fa0f43542279320061c18dd58fae3409fa8fbb720d6a3756b2e7a7841"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/platform/android-probe/settings.gradle.kts",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "24e118d45f93106f41a8f3e60a3592ac882fbefc1faab67f3939d4f06747fadf"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/platform/ios-probe/Broadcast/BroadcastHandler.m",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 2,
+          "line_sha256": "eeb74cb01d172791239e41811185d2a931fc15902846ccd9089ce7e26e5a2410"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "25d03ac32dfff87fede39cf46db57d79533ec1a8b06ad15f4d27cae3d828a217"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/platform/ios-probe/Sources/NativeDevices.m",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "Lingxi",
+          "count": 1,
+          "line_sha256": "18450613dbfa09918755e0de8aa42fb08131f740f4d69db45e04a2829e815c26"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/platform/ios-probe/Sources/main.m",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 4,
+          "line_sha256": "6671b1199b6133fba13d61a467fbfbbcb3f8d245b96aa09345eee8088f3a0361"
+        },
+        {
+          "rule": "G1",
+          "needle": "Lingxi",
+          "count": 2,
+          "line_sha256": "bda4481cb105840c1909c8ba01d98eed50a801aee46c5d3bb435daf1999eff1e"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 2,
+          "line_sha256": "986af54c47497a10211078e964411e32f974b898827b14deaa194b31c752c257"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/scripts/test-media.py",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "c8f9c39b9c53898963c5aec13ce64617f3946433755a218a572b826337158a0a"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/test-server/examples/probe.rs",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 2,
+          "line_sha256": "f0bbe056b50ee580ba17464006ec9e42d3c2d2a9e5ad5ee37d7a7515e0bc95a6"
+        }
+      ]
+    },
+    {
+      "path": "packages/webrtc/test-server/src/main.rs",
+      "reason": "WebRTC media and probe use current LingXi SDK, service, package and device-test identities.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 5,
+          "line_sha256": "66e7505ae810214ee1f0142ad05191fc4abc5e898313abd871abe806363a20a1"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/app-runtime.test.mjs",
+      "reason": "Electron-style preload API used as a fixture identity, not a persisted namespace path.",
+      "findings": [
+        {
+          "rule": "G3",
+          "needle": ".lingxi",
+          "count": 1,
+          "line_sha256": "938a22da637ae9c981d59a303c2eace9bc41f5d72ca9bba5a8250364801ee1f4"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/fixtures/local_app_browser_sdk_module.mjs",
+      "reason": "Local Apps browser bridge uses the LingXi product label, AG-UI global, configuration token and authenticated host request header.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "fe9d6a2a7f357fb7a63ead764c6ffbbdb82a3605cd101f95b0c1fa212c66ae92"
+        },
+        {
+          "rule": "G1",
+          "needle": "Lingxi",
+          "count": 1,
+          "line_sha256": "2ab20205dd0c8cd5ed069ef80ea16003c48575206888618a1ad4ff53f5ebad0a"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "302149790aa803ddcd62789c9c03d94ca6255beb53a1e0552cbf040fa9203131"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/local_app_browser_sdk.mjs",
+      "reason": "Local Apps browser bridge uses the LingXi product label, AG-UI global, configuration token and authenticated host request header.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "LINGXI",
+          "count": 1,
+          "line_sha256": "010994ab904486b5bcee21bfcb6c4b8c7fd26f686688534486f2f16690ba06e3"
+        },
+        {
+          "rule": "G1",
+          "needle": "LingXi",
+          "count": 1,
+          "line_sha256": "cfc1f87747c1fa147a81a2068882ab70f09c381a1fb688485d014aba4440c3e0"
+        },
+        {
+          "rule": "G1",
+          "needle": "\\.lingxi",
+          "count": 1,
+          "line_sha256": "b56151e1e0cbd27352bd3ce5e30f103051ce77efec2be21347964a931bd9a339"
+        }
+      ]
+    },
+    {
+      "path": "scripts/tests/workspace_session_307_oracle.mjs",
+      "reason": "Native 2.1.307 replay input uses the original upstream path or memory filename; preserve the capture for parity.",
+      "findings": [
+        {
+          "rule": "G1",
+          "needle": "\\.claude(?![A-Za-z0-9_.\\-])",
+          "count": 2,
+          "line_sha256": "163231adf01bd456114588387698cf0bffc4e680bc89bc6b8cf5e477b1905999"
+        }
+      ]
+    }
+  ]
+}

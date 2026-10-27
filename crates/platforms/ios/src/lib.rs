@@ -687,18 +687,16 @@ mod tests {
 
         let wrong_profile =
             mobile_linux_api::BrandRuntimeProfile::new("other", "other_guest", ".other");
-        assert!(
-            append_additional_workspace_mounts(
-                build_mobile_linux_mounts(
-                    Some(mounts[0].host_path.clone()),
-                    Some("projects".into()),
-                    &wrong_profile,
-                ),
-                vec![external_mount(app_host, app_guest)],
+        assert!(append_additional_workspace_mounts(
+            build_mobile_linux_mounts(
+                Some(mounts[0].host_path.clone()),
+                Some("projects".into()),
                 &wrong_profile,
-            )
-            .is_err()
-        );
+            ),
+            vec![external_mount(app_host, app_guest)],
+            &wrong_profile,
+        )
+        .is_err());
     }
 
     #[test]
@@ -743,14 +741,12 @@ mod tests {
         {
             let alias = home.join(".atlas/.apps/alias");
             std::os::unix::fs::symlink(&app_host, &alias).expect("create app alias symlink");
-            assert!(
-                append_additional_workspace_mounts(
-                    primary,
-                    vec![external_mount(alias, format!("{apps_guest}/alias"))],
-                    &profile,
-                )
-                .is_err()
-            );
+            assert!(append_additional_workspace_mounts(
+                primary,
+                vec![external_mount(alias, format!("{apps_guest}/alias"))],
+                &profile,
+            )
+            .is_err());
         }
     }
 
@@ -769,21 +765,21 @@ mod tests {
         let parent_guest = "/home/atlas_guest/.atlas/.apps/team";
         let nested_guest = "/home/atlas_guest/.atlas/.apps/team/nested";
         let app = external_mount(parent.clone(), parent_guest);
-        assert!(
-            append_additional_workspace_mounts(primary.clone(), vec![app.clone(), app], &profile,)
-                .is_err()
-        );
-        assert!(
-            append_additional_workspace_mounts(
-                primary,
-                vec![
-                    external_mount(parent, parent_guest),
-                    external_mount(nested, nested_guest)
-                ],
-                &profile,
-            )
-            .is_err()
-        );
+        assert!(append_additional_workspace_mounts(
+            primary.clone(),
+            vec![app.clone(), app],
+            &profile,
+        )
+        .is_err());
+        assert!(append_additional_workspace_mounts(
+            primary,
+            vec![
+                external_mount(parent, parent_guest),
+                external_mount(nested, nested_guest)
+            ],
+            &profile,
+        )
+        .is_err());
     }
 
     /// The assembly seam this pins: selecting mobile-linux mode must wrap the

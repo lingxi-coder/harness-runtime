@@ -19,10 +19,10 @@
 pub mod artifact;
 pub mod ask_user_question;
 pub mod brief;
+pub mod desktop_local_app;
 pub mod inline_visualization;
 pub mod list_agents;
 pub mod local_app;
-pub mod desktop_local_app;
 pub mod observer_report;
 pub mod push_notification;
 pub mod report_findings;

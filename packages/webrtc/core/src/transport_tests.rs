@@ -106,9 +106,11 @@ async fn check_negotiation(runtime: Arc<dyn webrtc::runtime::Runtime>) {
         timeout(Duration::from_secs(/*secs*/ 30), async {
             let (sender, mut channels) = mpsc::channel(/*buffer*/ 1);
             let gathered = Arc::new(Notify::new());
-            let mut settings = webrtc::peer_connection::SettingEngine::default();
-            settings.set_lite(/*lite*/ true);
-            let (media, mut remote_audio) = crate::audio_track::AudioTrack::new().unwrap();
+            let settings = webrtc::peer_connection::SettingEngineBuilder::new()
+                .with_lite(/*lite*/ true)
+                .build();
+            let (media, mut remote_audio) =
+                crate::audio_track::AudioTrack::new(runtime.now()).unwrap();
             let builder = PeerConnectionBuilder::new()
                 .with_media_engine(media)
                 .with_setting_engine(settings)
@@ -344,13 +346,23 @@ async fn camera_and_screen_rtp_do_not_poison_audio_ingress() {
     timeout(Duration::from_secs(15), async {
         let (sender, _channels) = mpsc::channel(1);
         let gathered = Arc::new(Notify::new());
-        let mut settings = webrtc::peer_connection::SettingEngine::default();
-        settings.set_lite(true);
-        let (mut media, mut audio) = crate::audio_track::AudioTrack::new().unwrap();
-        let camera =
-            crate::video_track::VideoTrack::new(&mut media, crate::VideoSource::Camera).unwrap();
-        let screen =
-            crate::video_track::VideoTrack::new(&mut media, crate::VideoSource::Screen).unwrap();
+        let settings = webrtc::peer_connection::SettingEngineBuilder::new()
+            .with_lite(true)
+            .build();
+        let (mut media, mut audio) =
+            crate::audio_track::AudioTrack::new(std::time::Instant::now()).unwrap();
+        let camera = crate::video_track::VideoTrack::new(
+            &mut media,
+            crate::VideoSource::Camera,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        let screen = crate::video_track::VideoTrack::new(
+            &mut media,
+            crate::VideoSource::Screen,
+            std::time::Instant::now(),
+        )
+        .unwrap();
         let remote = PeerConnectionBuilder::new()
             .with_media_engine(media)
             .with_setting_engine(settings)
@@ -433,6 +445,10 @@ async fn forced_turn_exchanges_binary_audio_and_two_video_tracks_without_host_fa
 }
 
 async fn forced_turn_case() {
+    use rtc::rtp::codec::vp8::Vp8Packet;
+    use rtc::rtp::packetizer::Depacketizer;
+    use rtc::shared::marshal::Unmarshal;
+
     fn config(answerer: bool, password: &str) -> crate::SessionConfig {
         crate::SessionConfig {
             // This Coturn publishes only loopback; do not gather through
@@ -484,6 +500,8 @@ async fn forced_turn_case() {
         AnswerOutcome::Ready
     );
     controller.wait_ready().await.unwrap();
+    let sources = controller.remote_video_sources().await.unwrap();
+    assert_eq!(sources.len(), 2);
     let bytes: Vec<u8> = (0..16384).map(|n| (n % 256) as u8).collect();
     host.send_bytes(&bytes).await.unwrap();
     let received = controller.receive().await.unwrap();
@@ -517,12 +535,29 @@ async fn forced_turn_case() {
     timeout(Duration::from_secs(10), async {
         while video.len() < 2 || !audio {
             if let Some(packet) = controller.take_video_packet().unwrap() {
-                let data = packet.as_ref();
-                assert_eq!(data[1] & 127, 96);
-                video.insert(u32::from_be_bytes(data[8..12].try_into().unwrap()));
+                let mut bytes = packet.as_ref();
+                let rtp = rtc::rtp::Packet::unmarshal(&mut bytes).unwrap();
+                assert_eq!(rtp.header.payload_type, 96);
+                assert!(rtp.header.marker);
+                let expected: &[u8] = match sources.get(&rtp.header.ssrc) {
+                    Some(crate::VideoSource::Camera) => &[1, 2, 3],
+                    Some(crate::VideoSource::Screen) => &[4, 5, 6],
+                    None => panic!("received an unnegotiated video SSRC"),
+                };
+                assert_eq!(
+                    Vp8Packet::default()
+                        .depacketize(&rtp.payload)
+                        .unwrap()
+                        .as_ref(),
+                    expected
+                );
+                video.insert(rtp.header.ssrc);
             }
             if let Some(packet) = controller.take_audio_packet().unwrap() {
-                assert_eq!(packet.as_ref()[1] & 127, 111);
+                let mut bytes = packet.as_ref();
+                let rtp = rtc::rtp::Packet::unmarshal(&mut bytes).unwrap();
+                assert_eq!(rtp.header.payload_type, 111);
+                assert_eq!(rtp.payload.as_ref(), &[0xf8, 0xff, 0xfe]);
                 audio = true;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -544,7 +579,7 @@ async fn forced_turn_case() {
     }
     rejected.close().await.unwrap();
     println!(
-        "forced TURN PASS: relay-only candidates {offer_count}/{answer_count}, exact 16384-byte binary roundtrip, Opus RTP, two video SSRCs; bad credentials have no direct fallback"
+        "forced TURN PASS: relay-only candidates {offer_count}/{answer_count}, exact 16384-byte binary roundtrip, Opus and camera/screen payloads; bad credentials have no direct fallback"
     );
 }
 

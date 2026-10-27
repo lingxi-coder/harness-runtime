@@ -194,8 +194,8 @@ fn decode_native_zip_path_name(raw_name: &[u8], flags: u16) -> String {
 
 /// Read the raw central-directory names, flags, and Unix creator/mode fields
 /// used by Native's Ht/x4t pair. `ZipFile::name()` cannot provide these exact
-/// semantics: it decodes unflagged names as CP437 and may apply Unicode path
-/// extra fields, whereas Ht uses the raw bytes and UTF-8 flag only.
+/// semantics: it applies its own filename decoding, whereas Ht uses the raw
+/// bytes and UTF-8 flag only.
 fn read_native_zip_entry_metadata(
     bytes: &[u8],
     expected_entries: usize,
@@ -396,9 +396,13 @@ fn unpack_zip_with_limits(bytes: &[u8], dest: &Path, limits: ZipLimits) -> Resul
             .by_index(i)
             .map_err(|e| format!("Failed to extract MCPB {}: {e}", dest.display()))?;
         let native_metadata = native_entries.as_ref().and_then(|entries| entries.get(i));
-        let entry_name = native_metadata
-            .map(|metadata| metadata.path_name.clone())
-            .unwrap_or_else(|| entry.name().to_owned());
+        let entry_name = match native_metadata {
+            Some(metadata) => metadata.path_name.clone(),
+            None => entry
+                .name()
+                .map_err(|e| format!("Failed to extract MCPB {}: {e}", dest.display()))?
+                .into_owned(),
+        };
         // Native x4t builds a name-keyed object from raw bytes decoded as
         // UTF-8, then Ft looks up the Ht-decoded path name in that object.
         // Do not substitute central-entry index matching here.

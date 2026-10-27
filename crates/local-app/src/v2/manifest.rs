@@ -3,7 +3,9 @@ use super::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Filename of the app package manifest.
 pub const MANIFEST_FILE: &str = "lingxi-app.json";
+/// Capabilities understood by the app manifest.
 pub const KNOWN_CAPABILITIES: &[&str] = &[
     "process",
     "files",
@@ -21,138 +23,199 @@ pub const KNOWN_CAPABILITIES: &[&str] = &[
     "agent",
     "background",
 ];
+/// Portable app package manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Manifest {
+    /// Manifest schema version.
     pub schema: u32,
+    /// Name of this item.
     pub name: String,
+    /// Short description.
     #[serde(default)]
     pub summary: String,
+    /// Entry point used to open the app.
     pub entry: Entry,
+    /// Commands used to install dependencies.
     #[serde(default)]
     pub install: Vec<Step>,
+    /// Commands used to build the app.
     #[serde(default)]
     pub build: Vec<Step>,
+    /// Processes declared by the app.
     #[serde(default)]
     pub processes: Vec<Process>,
+    /// Declared capabilities.
     #[serde(default)]
     pub capabilities: Vec<String>,
+    /// Supported host targets.
     pub targets: Vec<Target>,
+    /// Data schema compatibility declaration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_schema: Option<DataSchema>,
+    /// Remix policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remix: Option<Remix>,
+    /// Package file declaration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub package: Option<PackageFiles>,
+    /// Agent capabilities requested by this release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<AgentRequirements>,
 }
+/// Entry point of a local app.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum Entry {
+    /// A static file entry.
     Static {
+        /// Path associated with this item.
         path: String,
     },
+    /// An entry served by a declared process.
     Server {
+        /// Name of the serving process.
         process: String,
+        /// Path associated with this item.
         #[serde(default)]
         path: Option<String>,
     },
 }
+/// Install or build command declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Step {
+    /// Command to execute.
     pub command: String,
+    /// Working directory for the command.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Environment variables for the command.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Virtual environment used by the command.
     #[serde(default)]
     pub venv: Option<String>,
+    /// Python version or interpreter selector requested by the command.
     #[serde(default)]
     pub python: Option<String>,
 }
+/// App service process declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Process {
+    /// Name of this item.
     pub name: String,
+    /// Command to execute.
     pub command: String,
+    /// Working directory for the command.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Environment variables for the command.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Virtual environment used by the command.
     #[serde(default)]
     pub venv: Option<String>,
+    /// Python version or interpreter selector requested by the command.
     #[serde(default)]
     pub python: Option<String>,
+    /// Names of prerequisite processes.
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Process readiness condition.
     #[serde(default)]
     pub ready: Option<Readiness>,
 }
+/// Conditions used to determine process readiness.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Readiness {
+    /// Path associated with this item.
     #[serde(default)]
     pub path: Option<String>,
+    /// Structured output, when present.
     #[serde(default)]
     pub output: Option<String>,
+    /// Timeout in milliseconds.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
 }
+/// Runtime target supported by an app.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Target {
+    /// Target platform identifier.
     pub platform: String,
+    /// Runtime environment identifier.
     pub environment: String,
+    /// Supported machine architecture, when restricted.
     #[serde(default)]
     pub architecture: Option<String>,
     /// Minimum supported runtime semantic version.
     #[serde(default)]
     pub runtime_version: Option<String>,
+    /// Required runtime ABI, when restricted.
     #[serde(default)]
     pub runtime_abi: Option<String>,
+    /// Supported distribution channels.
     #[serde(default)]
     pub channels: Vec<String>,
+    /// Declared capabilities.
     #[serde(default)]
     pub capabilities: Vec<String>,
 }
+/// App data schema version and compatibility range.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DataSchema {
+    /// Schema version.
     pub version: u32,
+    /// Earliest compatible data schema version.
     pub compatible_from: u32,
 }
+/// Policy governing remixing of a release.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Remix {
+    /// Whether remixing is allowed.
     pub allowed: bool,
+    /// Declared remix license.
     #[serde(default)]
     pub license: Option<String>,
 }
+/// Files and lock files included in a package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PackageFiles {
+    /// Files included in the release or package.
     pub files: Vec<String>,
+    /// Paths to packaged dependency lock files.
     #[serde(default)]
     pub dependency_locks: Vec<String>,
 }
+/// Agent tools and skills declared by an app release.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentRequirements {
+    /// Tool names required by the app's Agent tasks.
     pub tools: Vec<String>,
     /// Release-local Skill instructions the native Agent may load. Each ID is
     /// stable within the immutable release and points to a packaged file.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skills: Vec<AgentSkill>,
 }
+/// Release-local skill declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSkill {
+    /// Stable identifier.
     pub id: String,
+    /// Path associated with this item.
     pub path: String,
 }
 
+/// Validate that a path is a contained relative path.
 pub fn relative_path(value: &str) -> Result<(), AppError> {
     if value.is_empty()
         || value.contains(['\\', '\0', ':'])
@@ -257,11 +320,13 @@ impl Manifest {
         }
         Ok(())
     }
+    /// Parse and validate a manifest.
     pub fn parse(json: &str) -> Result<Self, AppError> {
         let value: Self = serde_json::from_str(json)?;
         value.validate()?;
         Ok(value)
     }
+    /// Return whether opening the manifest requires execution.
     pub fn requires_execution(&self) -> bool {
         self.capabilities
             .iter()
@@ -271,14 +336,17 @@ impl Manifest {
             || !self.processes.is_empty()
             || matches!(self.entry, Entry::Server { .. })
     }
+    /// Return the manifest data schema version.
     pub fn schema_version(&self) -> u32 {
         self.data_schema.as_ref().map_or(1, |s| s.version)
     }
+    /// Returns whether the manifest accepts the current data schema.
     pub fn accepts_data_schema(&self, current: u32) -> bool {
         self.data_schema.as_ref().map_or(current == 1, |s| {
             current >= s.compatible_from && current <= s.version
         })
     }
+    /// Validate this value.
     pub fn validate(&self) -> Result<(), AppError> {
         if self.schema != 2 {
             return Err(AppError::Invalid(
@@ -447,6 +515,7 @@ impl Manifest {
         }
         Ok(())
     }
+    /// Check this target against the host target.
     pub fn compatible_with(&self, host: &Target) -> Result<bool, AppError> {
         host.validate()?;
         if self.requires_execution() && !host.capabilities.iter().any(|c| c == "process") {
@@ -462,6 +531,7 @@ impl Manifest {
     }
 }
 impl Target {
+    /// Validate this value.
     pub fn validate(&self) -> Result<(), AppError> {
         let environments: &[&str] = match self.platform.as_str() {
             "ios" | "android" => &["web", "mobile-linux"],

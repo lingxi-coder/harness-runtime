@@ -633,7 +633,7 @@ pub fn core_description(name: &str) -> &'static str {
         "ide" => "Manage IDE integrations and show status",
         "init-verifiers" => "Create verifier skill(s) for automated verification of code changes",
         "insights" => "Generate a report analyzing your LingXi sessions",
-        "team-onboarding" => "Help teammates ramp on Claude Code with a guide from your usage",
+        "team-onboarding" => "Help teammates ramp on LingXi with a guide from your usage",
         "install" => "Install LingXi native build",
         "install-github-app" => "Set up Claude GitHub Actions for a repository",
         "install-slack-app" => "Install the Claude Slack app",
@@ -944,7 +944,11 @@ mod tests {
                 ("upgrade", "DISABLE_UPGRADE_COMMAND"),
             ]
         );
+    }
 
+    #[cfg(feature = "builtin-handlers")]
+    #[test]
+    fn env_disable_gated_names_resolve_to_registered_commands() {
         // `doctor` is not a row in BUILTIN_COMMAND_NAMES in 2.1.295: its
         // command object comes from the bundled prompt factory (`Mo()`), with
         // canonical name `doctor` and alias `checkup`. The other four rows

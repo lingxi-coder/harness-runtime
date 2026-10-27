@@ -278,8 +278,6 @@ impl tool_api::SandboxRunner for SandboxRuntimeRunner {
 mod tests {
     use super::*;
     use sandbox::runtime_config::NetworkRestrictionConfig;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
     use tool_api::SandboxRunner as _;
 
     fn cfg_with_domains(domains: &[&str]) -> EngineConfig {
@@ -478,6 +476,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn unmatched_domain_reaches_host_ask_callback() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpStream;
 

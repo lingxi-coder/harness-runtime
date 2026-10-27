@@ -42,7 +42,7 @@ mod tests {
                 "The session's working directory has changed to /x (via /cd). ",
                 "The environment block at the start of this conversation still names the previous directory \u{2014} that information is stale. ",
                 "All tool calls and relative paths now resolve from /x. ",
-                "Project settings (permission rules, hooks), project MCP servers, and project skills now come from /x; its CLAUDE.md, if any, follows below. ",
+                "Project settings (permission rules, hooks), project MCP servers, and project skills now come from /x; its LINGXI.md, if any, follows below. ",
                 "Environment variables set by the previous directory's settings stay in effect for this process \u{2014} they cannot be unset \u{2014} and the new directory's settings env is applied on top of them.",
             )
         );

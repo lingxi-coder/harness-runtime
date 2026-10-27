@@ -4,7 +4,7 @@
 //! The runtime appends any gated-project notice and loaded memory separately.
 
 /// Confirmation copy used by the interactive directory-change view.
-pub const CONFIRM_PROMPT: &str = "? This moves the session's working directory and write access there, and loads project configuration (CLAUDE.md, settings) from that location.";
+pub const CONFIRM_PROMPT: &str = "? This moves the session's working directory and write access there, and loads project configuration (LINGXI.md, settings) from that location.";
 
 /// Native analytics name and the semantic source before analytics hashing.
 pub const TELEMETRY_EVENT: &str = "tengu_cd_command";
@@ -75,7 +75,7 @@ pub fn move_result_message(new_cwd: &str, options: MoveMessageOptions) -> String
     if options.request_built {
         message.push_str("The environment block at the start of this conversation still names the previous directory — that information is stale. ");
     }
-    message.push_str(&format!("All tool calls and relative paths now resolve from {new_cwd}. Project settings (permission rules, hooks), project MCP servers, and project skills now come from {new_cwd}; its CLAUDE.md, if any, follows below. Environment variables set by the previous directory's settings stay in effect for this process — they cannot be unset — and the new directory's settings env is applied on top of them."));
+    message.push_str(&format!("All tool calls and relative paths now resolve from {new_cwd}. Project settings (permission rules, hooks), project MCP servers, and project skills now come from {new_cwd}; its {}, if any, follows below. Environment variables set by the previous directory's settings stay in effect for this process — they cannot be unset — and the new directory's settings env is applied on top of them.", branding::MEMORY_FILE));
     message
 }
 
@@ -93,6 +93,23 @@ pub fn model_result_message(new_cwd: &str, options: MoveMessageOptions) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Keep the immutable Native capture and project only its memory-file name.
+    fn product_notice(native: &str) -> String {
+        native.replace(
+            "; its CLAUDE.md, if any, follows below.",
+            &format!("; its {}, if any, follows below.", branding::MEMORY_FILE),
+        )
+    }
+
+    #[test]
+    fn notices_name_product_memory_without_rewriting_the_user_path() {
+        assert!(CONFIRM_PROMPT.contains(branding::MEMORY_FILE));
+        let target = "/workspace/CLAUDE.md";
+        let notice = result_message(target);
+        assert!(notice.contains(target));
+        assert!(notice.contains(&format!("; its {}, if any", branding::MEMORY_FILE)));
+    }
 
     #[test]
     fn move_notice_bytes_follow_native_307_replay() {
@@ -121,7 +138,7 @@ mod tests {
             let target = input["target_dir"].as_str().unwrap();
             assert_eq!(
                 move_result_message(target, options),
-                case["expected"]["base_message"].as_str().unwrap(),
+                product_notice(case["expected"]["base_message"].as_str().unwrap()),
                 "{}",
                 case["name"]
             );
@@ -130,7 +147,7 @@ mod tests {
             {
                 assert_eq!(
                     model_result_message(target, options),
-                    case["expected"]["result"]["modelMessage"].as_str().unwrap(),
+                    product_notice(case["expected"]["result"]["modelMessage"].as_str().unwrap()),
                     "{}",
                     case["name"]
                 );
@@ -147,21 +164,25 @@ mod tests {
         let cases = fixture["cd_move_cases"].as_array().unwrap();
         assert_eq!(
             result_message("/workspace/B"),
-            cases
-                .iter()
-                .find(|case| case["name"] == "cd_used_session")
-                .unwrap()["expected"]["base_message"]
-                .as_str()
-                .unwrap()
+            product_notice(
+                cases
+                    .iter()
+                    .find(|case| case["name"] == "cd_used_session")
+                    .unwrap()["expected"]["base_message"]
+                    .as_str()
+                    .unwrap()
+            )
         );
         assert_eq!(
             user_result_message("/workspace/B"),
-            cases
-                .iter()
-                .find(|case| case["name"] == "remote_used_session")
-                .unwrap()["expected"]["base_message"]
-                .as_str()
-                .unwrap()
+            product_notice(
+                cases
+                    .iter()
+                    .find(|case| case["name"] == "remote_used_session")
+                    .unwrap()["expected"]["base_message"]
+                    .as_str()
+                    .unwrap()
+            )
         );
     }
 }
