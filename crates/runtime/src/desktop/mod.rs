@@ -2189,6 +2189,12 @@ impl lingxi_core::host::ProcessRunner for TypedBashProcess {
     ) -> Result<(), mobile_linux_api::ProcessError> {
         self.inner.kill(handle).await
     }
+    fn background_stop_requires_verified_cleanup(
+        &self,
+        handle: &lingxi_core::host::ProcessHandle,
+    ) -> bool {
+        self.inner.background_stop_requires_verified_cleanup(handle)
+    }
     fn is_available(&self) -> bool {
         self.inner.is_available()
     }

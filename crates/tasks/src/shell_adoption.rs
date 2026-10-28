@@ -99,6 +99,14 @@ struct AdoptedKiller {
 }
 #[async_trait::async_trait]
 impl lingxi_core::host::task_registry::TaskKiller for AdoptedKiller {
+    fn stop_requires_verified_cleanup(&self) -> bool {
+        self.process
+            .background_stop_requires_verified_cleanup(&ProcessHandle {
+                task_id: self.handoff.task_id.clone(),
+                pid: self.handoff.pid,
+            })
+    }
+
     async fn kill(&self) {
         // Validation proves the live supervisor still holds this child. The
         // native runner routes kill through that supervisor, never a raw PID.
@@ -115,11 +123,20 @@ impl lingxi_core::host::task_registry::TaskKiller for AdoptedKiller {
     async fn kill_verified(
         &self,
     ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
-        let owner = self.handoff.owner.as_deref().ok_or_else(|| {
-            lingxi_core::host::task_registry::TaskRegistryError::Internal(
-                "adopted owned shell has no owner".into(),
-            )
-        })?;
+        let Some(owner) = self.handoff.owner.as_deref() else {
+            let result = self
+                .process
+                .kill(&ProcessHandle {
+                    task_id: self.handoff.task_id.clone(),
+                    pid: self.handoff.pid,
+                })
+                .await;
+            return Err(
+                lingxi_core::host::task_registry::TaskRegistryError::Internal(format!(
+                    "adopted shell Stop remains unverified: {result:?}"
+                )),
+            );
+        };
         self.process
             .terminate_and_wait_owned_background(
                 &ProcessHandle {

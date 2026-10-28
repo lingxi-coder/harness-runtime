@@ -731,22 +731,34 @@ pub async fn kill(handle: &ProcessHandle) -> Option<Result<(), ProcessError>> {
     if handoff.pid != handle.pid || released {
         return Some(Err(error("shell ownership was relinquished")));
     }
+    let mut previous_unverified = None;
     if let Ok(Some(terminal)) = inspect_details(&handoff).await {
         if leader_only_natural(&terminal, handoff.require_group_cleanup_on_exit) {
             return Some(Err(error(
                 "naturally exited shell released its process group without group cleanup proof",
             )));
         }
-        return Some(match terminal_cleanup_is_verified(Some(&terminal)) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(error("supervised shell has no terminal cleanup proof")),
-            Err(cause) => Err(cause),
-        });
+        match terminal_cleanup_is_verified(Some(&terminal)) {
+            Ok(true) => return Some(Ok(())),
+            Ok(false) => {
+                previous_unverified = Some(error("supervised shell has no terminal cleanup proof"))
+            }
+            Err(cause) => previous_unverified = Some(cause),
+        }
     }
     if cancel.is_cancelled() {
         return Some(Err(error("shell owner no longer observes this process")));
     }
-    Some(stop_handoff(&handoff).await)
+    let request = stop_handoff(&handoff).await;
+    Some(match (request, previous_unverified) {
+        // An accepted Stop can initiate termination but cannot upgrade a
+        // previously unverified receipt into a successful cleanup proof.
+        (Ok(()), Some(cause)) => Err(cause),
+        (Err(stop), Some(cause)) => Err(error(format!(
+            "{cause}; supervisor stop request failed: {stop}"
+        ))),
+        (result, None) => result,
+    })
 }
 
 fn terminal_observation_is_valid(terminal: &TerminalInfo) -> Result<(), ProcessError> {

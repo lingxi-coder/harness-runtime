@@ -285,16 +285,10 @@ impl ProcessRunner for WindowsProcess {
         true
     }
 
-    fn supports_verified_background_stop(&self, command: &SandboxedCommand) -> bool {
-        #[cfg(windows)]
-        {
-            super::supervisor::enabled(command)
-        }
-        #[cfg(not(windows))]
-        {
-            let _ = command;
-            false
-        }
+    fn supports_verified_background_stop(&self, _command: &SandboxedCommand) -> bool {
+        // A held Job and its zero active count are not a complete retained
+        // descendant-handle proof. Reject callers requiring that capability.
+        false
     }
 
     async fn terminate_and_wait_owned_background(
@@ -488,6 +482,12 @@ impl ProcessRunner for WindowsProcess {
     }
 
     fn supports_foreground_backgrounding(&self) -> bool {
+        true
+    }
+
+    fn background_stop_requires_verified_cleanup(&self, _: &ProcessHandle) -> bool {
+        // No current Windows Job accounting result is a complete descendant
+        // process-handle proof. This also covers direct native backgrounding.
         true
     }
 

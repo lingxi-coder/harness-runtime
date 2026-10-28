@@ -377,11 +377,7 @@ mod tests {
     }
 
     fn held_leader(owner: &OwnedProcess) -> std::os::windows::io::OwnedHandle {
-        use std::os::windows::io::BorrowedHandle;
-        let raw = owner.child.raw_handle().expect("leader is still held");
-        // SAFETY: the Child retains this handle through the duplication.
-        unsafe { BorrowedHandle::borrow_raw(raw) }
-            .try_clone_to_owned()
+        supervisor_gate::duplicate_child_handle_for_test(&owner.child)
             .expect("duplicate original leader process handle")
     }
 

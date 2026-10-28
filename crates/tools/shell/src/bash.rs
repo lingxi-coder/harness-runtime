@@ -2178,6 +2178,11 @@ struct BackgroundBashKiller {
 
 #[async_trait::async_trait]
 impl lingxi_core::host::task_registry::TaskKiller for BackgroundBashKiller {
+    fn stop_requires_verified_cleanup(&self) -> bool {
+        self.process
+            .background_stop_requires_verified_cleanup(&self.handle)
+    }
+
     async fn kill(&self) {
         let _ = self.process.kill(&self.handle).await;
     }
@@ -2185,11 +2190,14 @@ impl lingxi_core::host::task_registry::TaskKiller for BackgroundBashKiller {
     async fn kill_verified(
         &self,
     ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
-        let owner = self.owner.as_deref().ok_or_else(|| {
-            lingxi_core::host::task_registry::TaskRegistryError::Internal(
-                "owned shell has no process owner".into(),
-            )
-        })?;
+        let Some(owner) = self.owner.as_deref() else {
+            let result = self.process.kill(&self.handle).await;
+            return Err(
+                lingxi_core::host::task_registry::TaskRegistryError::Internal(format!(
+                    "shell Stop remains unverified: {result:?}"
+                )),
+            );
+        };
         self.process
             .terminate_and_wait_owned_background(&self.handle, owner)
             .await
@@ -2663,10 +2671,23 @@ impl BashTool {
         .await;
         if let Err(error) = result {
             if !preserve_owned_cleanup {
-                let _ = self.ctx.process.kill(handle).await;
+                let stop = self.ctx.process.kill(handle).await;
                 if let (Some(registry), Some((id, _))) = (self.ctx.task_registry.as_ref(), bound) {
-                    let _ = registry.settle_background_bash(id, None, true).await;
-                    registry.discard_bash_output(id).await;
+                    if self
+                        .ctx
+                        .process
+                        .background_stop_requires_verified_cleanup(handle)
+                    {
+                        let _ = registry
+                            .settle_background_bash_unverified(
+                                id,
+                                &format!("background registration failed; stop remains unverified: {stop:?}"),
+                            )
+                            .await;
+                    } else {
+                        let _ = registry.settle_background_bash(id, None, true).await;
+                        registry.discard_bash_output(id).await;
+                    }
                 }
             }
             // An owned launch is already tracked by the host request. The

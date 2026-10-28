@@ -268,6 +268,32 @@ mod integration_tests {
         u32,
         Cleanup,
     ) {
+        start_with_auto_background(
+            command,
+            owner,
+            require_group_cleanup_on_exit,
+            release,
+            false,
+            "windows-supervisor-test",
+        )
+        .await
+    }
+
+    async fn start_with_auto_background(
+        command: ProcessCommand,
+        owner: Option<&str>,
+        require_group_cleanup_on_exit: bool,
+        release: PathBuf,
+        auto_background: bool,
+        task_id: &str,
+    ) -> (
+        tokio::process::Child,
+        shared::BoxStream,
+        String,
+        String,
+        u32,
+        Cleanup,
+    ) {
         let nonce = WindowsPlatform.nonce().unwrap();
         let directory = WindowsPlatform.create_directory(&nonce).unwrap();
         let output_directory = WindowsPlatform
@@ -305,9 +331,9 @@ mod integration_tests {
         send(&mut stream, serde_json::json!({
             "request": "Start", "command": command,
             "tag": SandboxedTag::BypassAuditedWithReason { reason: "Windows supervisor integration test".into() },
-            "owner": owner, "auto_background": false, "background_timeout": null,
+            "owner": owner, "auto_background": auto_background, "background_timeout": null,
             "require_group_cleanup_on_exit": require_group_cleanup_on_exit,
-            "explicit": false, "limit": null, "task_id": "windows-supervisor-test",
+            "explicit": false, "limit": null, "task_id": task_id,
             "output": output_path, "nonce": nonce,
             "supervisor_directory_identity": directory_identity,
             "output_root_identity": output_root_identity,
@@ -606,7 +632,15 @@ mod integration_tests {
             stdin: None,
         };
         let (mut supervisor, mut stream, endpoint, nonce, payload, cleanup) =
-            start(command, None, false, fixture.path().join("release")).await;
+            start_with_auto_background(
+                command,
+                None,
+                false,
+                fixture.path().join("release"),
+                true,
+                "windows-supervisor-test",
+            )
+            .await;
         let supervisor_pid = supervisor.id().unwrap();
         wait_file(&fixture.path().join("started")).await;
         let descendant: u32 = std::fs::read_to_string(fixture.path().join("descendant.pid"))
@@ -621,9 +655,12 @@ mod integration_tests {
         assert_eq!(response["response"], "Started", "{response}");
         let result: ForegroundRunResult =
             serde_json::from_value(response["result"].clone()).unwrap();
-        assert!(
-            matches!(result.outcome, ForegroundOutcome::MovedToBackground(ref handle) if handle.pid == payload)
-        );
+        let ForegroundOutcome::MovedToBackground(handle) = result.outcome else {
+            panic!("supervisor did not offer output handoff");
+        };
+        assert_eq!(handle.pid, payload);
+        let handoff: lingxi_core::host::process::ShellProcessHandoff =
+            serde_json::from_value(response["handoff"].clone()).unwrap();
         assert_eq!(response["handoff"]["pid"], payload);
         send(
             &mut stream,
@@ -672,13 +709,15 @@ mod integration_tests {
         // Even after EOF and an unverified terminal observation, a Stop must
         // still reach the original retained Job. The same held descendant
         // handle, not a PID lookup or delay, establishes actual exit.
-        let stopped = rpc(
-            &endpoint,
-            supervisor_pid,
-            serde_json::json!({"request":"Kill", "nonce":nonce}),
-        )
-        .await;
-        assert_eq!(stopped["response"], "Ack", "{stopped}");
+        // Exercise the same public ProcessRunner::kill path used by task
+        // owners, rather than sending a raw Kill request from the test.
+        configure();
+        let adopted = shared::adopt(&handoff, sink(&cleanup.directories[1].join("output")))
+            .await
+            .expect("adopt retained supervisor capability");
+        assert_eq!(adopted.task_id, handle.task_id);
+        let stopped = WindowsProcess::new().kill(&adopted).await;
+        assert!(stopped.is_err(), "an accepted Stop is not cleanup proof");
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 match native::process_handle_is_alive_for_test(&held) {
@@ -697,6 +736,7 @@ mod integration_tests {
         )
         .await;
         assert_eq!(after["group_cleanup_verified"], false, "{after}");
+        shared::release(&handoff).await.unwrap();
         // The test owns this supervisor and ends it after checking the held
         // descendant. Production keeps it parked while cleanup is unknown.
         supervisor.start_kill().unwrap();
@@ -732,7 +772,15 @@ mod integration_tests {
                 stdin: None,
             };
             let (mut supervisor, mut stream, endpoint, nonce, _, _cleanup) =
-                start(command, None, false, fixture.path().join("release")).await;
+                start_with_auto_background(
+                    command,
+                    None,
+                    false,
+                    fixture.path().join("release"),
+                    true,
+                    "windows-supervisor-test",
+                )
+                .await;
             let supervisor_pid = supervisor.id().unwrap();
             wait_file(&fixture.path().join("started")).await;
             let pid: u32 = std::fs::read_to_string(fixture.path().join("descendant.pid"))
@@ -806,6 +854,219 @@ mod integration_tests {
                 .unwrap()
                 .unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn real_registry_stop_does_not_claim_unverified_windows_job_exited() {
+        use lingxi_core::host::task_registry::{TaskKiller, TaskRegistryError};
+        use tasks::state::TaskState;
+
+        struct RegistrySink {
+            registry: Arc<tasks::registry::TaskRegistry>,
+            id: String,
+        }
+        #[async_trait::async_trait]
+        impl BackgroundExitSink for RegistrySink {
+            async fn on_exit(&self, _: &str, _: Option<i32>) {}
+            async fn on_wait_failure(&self, _: &str, cause: &str) {
+                self.registry
+                    .settle_background_bash_unverified(&self.id, cause)
+                    .await
+                    .unwrap();
+            }
+        }
+        struct RealKiller {
+            handle: ProcessHandle,
+            entered: Arc<tokio::sync::Notify>,
+            release: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait::async_trait]
+        impl TaskKiller for RealKiller {
+            fn stop_requires_verified_cleanup(&self) -> bool {
+                std::env::var_os("LINGXI_REGISTRY_LEGACY_BEST_EFFORT").is_none()
+                    && WindowsProcess::new().background_stop_requires_verified_cleanup(&self.handle)
+            }
+            async fn kill(&self) {
+                self.entered.notify_one();
+                self.release.notified().await;
+                let _ = WindowsProcess::new().kill(&self.handle).await;
+            }
+            async fn kill_verified(&self) -> Result<(), TaskRegistryError> {
+                self.entered.notify_one();
+                let result = WindowsProcess::new().kill(&self.handle).await;
+                Err(TaskRegistryError::Internal(format!(
+                    "Windows Job remains unverified: {result:?}"
+                )))
+            }
+        }
+
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::create_dir(fixture.path().join("registry-output")).unwrap();
+        let fs: Arc<dyn lingxi_core::host::FileSystem> = Arc::new(
+            crate::fs::WindowsFileSystem::new(fixture.path().to_path_buf()),
+        );
+        let output = Arc::new(tasks::output_manager::TaskOutputManager::new(
+            fixture.path().join("registry-output"),
+            fs.clone(),
+        ));
+        let registry = Arc::new(tasks::registry::TaskRegistry::new(
+            Arc::new(crate::runtime::WindowsRuntime::new()),
+            fs,
+            output,
+        ));
+        let (id, _) = registry.allocate_bash_output().await.unwrap();
+        registry
+            .register_background_bash(
+                id.clone(),
+                "fixture".into(),
+                "fixture".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let command = ProcessCommand {
+            command: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                DETACHED_HELPER.into(),
+                "--exact".into(),
+                "--nocapture".into(),
+            ],
+            cwd: Some(fixture.path().to_path_buf()),
+            env: std::collections::HashMap::from([
+                (
+                    test_env("DETACHED_JOB_TEST_DIR"),
+                    fixture.path().to_string_lossy().into_owned(),
+                ),
+                (test_env("DETACHED_JOB_HOLD_PIPE"), "1".into()),
+                (test_env("DETACHED_JOB_WRITE_AFTER_RELEASE"), "1".into()),
+                (test_env("DETACHED_JOB_LINGER_AFTER_STDOUT"), "1".into()),
+            ]),
+            timeout: Some(Duration::from_secs(5)),
+            stdin: None,
+        };
+        let (mut supervisor, mut stream, endpoint, nonce, _, _cleanup) =
+            start_with_auto_background(
+                command,
+                None,
+                false,
+                fixture.path().join("release"),
+                true,
+                &id,
+            )
+            .await;
+        let supervisor_pid = supervisor.id().unwrap();
+        wait_file(&fixture.path().join("started")).await;
+        let pid: u32 = std::fs::read_to_string(fixture.path().join("descendant.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let held = native::hold_process_handle_for_test(pid).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(12), receive(&mut stream))
+            .await
+            .unwrap();
+        let result: ForegroundRunResult =
+            serde_json::from_value(response["result"].clone()).unwrap();
+        let ForegroundOutcome::MovedToBackground(handle) = result.outcome else {
+            panic!("missing background handoff")
+        };
+        assert_eq!(handle.task_id, id);
+        let handoff: lingxi_core::host::process::ShellProcessHandoff =
+            serde_json::from_value(response["handoff"].clone()).unwrap();
+        configure();
+        let adopted = shared::adopt(
+            &handoff,
+            Arc::new(RegistrySink {
+                registry: registry.clone(),
+                id: id.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(adopted.task_id, handle.task_id);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        registry
+            .bind_background_bash_process(
+                &id,
+                Some(adopted.pid),
+                Arc::new(RealKiller {
+                    handle: adopted,
+                    entered: entered.clone(),
+                    release: release.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        send(
+            &mut stream,
+            serde_json::json!({"request":"Accepted", "nonce":nonce}),
+        )
+        .await;
+        assert_eq!(receive(&mut stream).await["response"], "Ack");
+        std::fs::write(fixture.path().join("release"), "release").unwrap();
+        wait_file(&fixture.path().join("pipe.closed")).await;
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(TaskState::LocalBash(shell)) = registry.get(&id).await {
+                    if shell
+                        .stop_cause
+                        .as_deref()
+                        .is_some_and(|cause| cause.starts_with("wait_unverified:"))
+                    {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("registry did not receive actual unverified observation");
+        let result = registry.kill(&id).await;
+        tokio::time::timeout(Duration::from_secs(5), entered.notified())
+            .await
+            .unwrap();
+        let state = registry.get(&id).await.unwrap();
+        let alive = native::process_handle_is_alive_for_test(&held);
+        eprintln!(
+            "registry-real-probe: stop={result:?}; status={:?}; held={alive:?}",
+            state.base().status
+        );
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while native::process_handle_is_alive_for_test(&held) == Some(true) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("actual Stop did not reach the held Job");
+        assert_eq!(native::process_handle_is_alive_for_test(&held), Some(false));
+        let inspect = rpc(
+            &endpoint,
+            supervisor_pid,
+            serde_json::json!({"request":"Inspect", "nonce":nonce}),
+        )
+        .await;
+        assert_eq!(inspect["group_cleanup_verified"], false, "{inspect}");
+        shared::release(&handoff).await.unwrap();
+        supervisor.start_kill().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), supervisor.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            result.is_err(),
+            "an accepted stop is not a termination proof"
+        );
+        assert!(
+            !state.base().status.is_terminal(),
+            "unverified TaskStop must not mark Killed"
+        );
     }
 
     #[tokio::test]

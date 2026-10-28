@@ -4,6 +4,64 @@
 #[path = "handback_regression_test.rs"]
 mod handback_regression;
 
+#[tokio::test]
+async fn ordinary_unverified_shell_stop_must_not_publish_killed() {
+    use lingxi_core::host::task_registry::{TaskKiller, TaskRegistryError};
+
+    struct UnverifiedOwner(Arc<tokio::sync::Notify>);
+    #[async_trait::async_trait]
+    impl TaskKiller for UnverifiedOwner {
+        fn stop_requires_verified_cleanup(&self) -> bool {
+            std::env::var_os("LINGXI_REGISTRY_LEGACY_BEST_EFFORT").is_none()
+        }
+        async fn kill(&self) {
+            self.0.notify_one();
+        }
+        async fn kill_verified(&self) -> Result<(), TaskRegistryError> {
+            self.kill().await;
+            Err(TaskRegistryError::Internal(
+                "no process termination proof".into(),
+            ))
+        }
+    }
+    let (_directory, registry) = make_registry();
+    let (id, _) = registry.allocate_bash_output().await.unwrap();
+    registry
+        .register_background_bash(
+            id.clone(),
+            "fixture".into(),
+            "fixture".into(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let attempted = Arc::new(tokio::sync::Notify::new());
+    registry
+        .bind_background_bash_process(&id, Some(7), Arc::new(UnverifiedOwner(attempted.clone())))
+        .await
+        .unwrap();
+    registry
+        .settle_background_bash_unverified(&id, "held Job cleanup is unverified")
+        .await
+        .unwrap();
+    let stop = registry.kill(&id).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), attempted.notified())
+        .await
+        .expect("the real registry did not dispatch its stop callback");
+    let state = registry.get(&id).await.unwrap();
+    eprintln!(
+        "registry-probe: stop={stop:?}; status={:?}",
+        state.base().status
+    );
+    assert!(stop.is_err(), "an unverified stop must not report success");
+    assert!(
+        !state.base().status.is_terminal(),
+        "unverified cleanup must remain nonterminal"
+    );
+}
+
 use super::*;
 use crate::task_trait::{Task, TaskContext, TaskHandle};
 use async_trait::async_trait;

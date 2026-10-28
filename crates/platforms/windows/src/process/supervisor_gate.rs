@@ -111,6 +111,20 @@ pub(super) fn hold_process_for_membership_test(pid: u32) -> Result<OwnedHandle, 
     Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
 }
 
+#[cfg(test)]
+pub(super) fn duplicate_child_handle_for_test(
+    child: &tokio::process::Child,
+) -> Result<OwnedHandle, ProcessError> {
+    use std::os::windows::io::BorrowedHandle;
+    let raw = child
+        .raw_handle()
+        .ok_or_else(|| ProcessError::Io("child no longer holds its process handle".into()))?;
+    // SAFETY: the Child retains the valid handle for this synchronous copy.
+    unsafe { BorrowedHandle::borrow_raw(raw) }
+        .try_clone_to_owned()
+        .map_err(|error| ProcessError::Io(error.to_string()))
+}
+
 /// Stop Rust's Windows CreateProcess call (which allows handle inheritance)
 /// from forwarding this dedicated helper's control streams to the payload.
 /// The payload's own separate piped stdio is created after this operation.

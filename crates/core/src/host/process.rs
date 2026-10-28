@@ -129,6 +129,12 @@ pub trait ProcessRunner: Send + Sync {
         false
     }
 
+    /// Whether a background Stop must preserve an unknown outcome unless the
+    /// runner independently supplies a verified cleanup receipt.
+    fn background_stop_requires_verified_cleanup(&self, _handle: &ProcessHandle) -> bool {
+        false
+    }
+
     /// Stop a background process and verify termination of its exact identity.
     /// Disappearance of an observer or owner registration is not proof of exit.
     /// The guarantee covers the platform-owned POSIX process group or Windows

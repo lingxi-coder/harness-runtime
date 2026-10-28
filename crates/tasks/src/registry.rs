@@ -1832,13 +1832,16 @@ impl TaskRegistry {
             return Ok(());
         }
         let mut cleanups = self.cleanups.lock().await;
-        if let Some(stop) = self
-            .owned_bash_stops
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get_mut(&task_id)
         {
-            *stop = Some(killer.clone());
+            let mut stops = self
+                .owned_bash_stops
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(stop) = stops.get_mut(&task_id) {
+                *stop = Some(killer.clone());
+            } else if killer.stop_requires_verified_cleanup() {
+                stops.insert(task_id.clone(), Some(killer.clone()));
+            }
         }
         bash.pid = pid;
         cleanups.insert(task_id, cleanup);

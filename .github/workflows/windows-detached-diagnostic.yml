@@ -15,7 +15,7 @@ env:
 jobs:
   detached:
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       - name: Enable long paths
         shell: pwsh
@@ -60,6 +60,7 @@ jobs:
             'process::supervisor_gate::tests::normal_foreground_completion_preserves_detached_descendants',
             'process::supervisor::integration_tests::real_supervisor_retains_output_and_job_until_explicit_stop',
             'process::supervisor::integration_tests::unaccepted_or_stopped_output_handoff_retains_job_and_reports_unknown',
+            'process::supervisor::integration_tests::real_registry_stop_does_not_claim_unverified_windows_job_exited',
             'process::owned_job::tests::job_unknown_and_suspended_start_are_proven_in_dedicated_helpers',
             'process::owned_job::tests::owned_job_native_regressions_in_dedicated_helpers',
             'process::background::native_background_stop_tests::stopped_resumed_job_reports_unknown_without_cleanup_receipt',
@@ -85,6 +86,39 @@ jobs:
           if (-not (Select-String -Path $log -Quiet -SimpleMatch 'detached-probe: result returned; live writer blocks supervisor shutdown')) { throw 'old behavior was not reproduced' }
           if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'legacy control did not execute' }
           exit 0
+      - name: Verify real Windows TaskRegistry legacy negative control
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:LINGXI_REGISTRY_LEGACY_BEST_EFFORT = '1'
+          $log = Join-Path $env:RUNNER_TEMP 'registry-real-legacy.log'
+          cargo test --locked -p platform-windows --lib process::supervisor::integration_tests::real_registry_stop_does_not_claim_unverified_windows_job_exited -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+          $testExit = $LASTEXITCODE
+          Remove-Item Env:LINGXI_REGISTRY_LEGACY_BEST_EFFORT
+          if ($testExit -eq 0) { throw 'real registry negative control unexpectedly passed' }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'registry-real-probe: stop=Ok(()); status=Killed; held=Some(true)')) { throw 'negative control did not observe Killed while the original process was alive' }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: FAILED. 0 passed; 1 failed; 0 ignored')) { throw 'real registry negative control did not execute exactly once' }
+          exit 0
+      - name: Build TaskRegistry tests
+        run: cargo test --locked -p tasks --lib --no-run
+      - name: Verify TaskRegistry unknown Stop and legacy negative control
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $test = 'registry::registry_test::ordinary_unverified_shell_stop_must_not_publish_killed'
+          $negative = Join-Path $env:RUNNER_TEMP 'registry-legacy.log'
+          $env:LINGXI_REGISTRY_LEGACY_BEST_EFFORT = '1'
+          cargo test --locked -p tasks --lib $test -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $negative
+          $negativeExit = $LASTEXITCODE
+          Remove-Item Env:LINGXI_REGISTRY_LEGACY_BEST_EFFORT
+          if ($negativeExit -eq 0) { throw 'legacy TaskRegistry negative control unexpectedly passed' }
+          if (-not (Select-String -Path $negative -Quiet -Pattern 'registry-probe: stop=Ok\(\(\)\); status=Killed')) { throw 'negative control did not reproduce false Killed status' }
+          if (-not (Select-String -Path $negative -Quiet -SimpleMatch 'test result: FAILED. 0 passed; 1 failed; 0 ignored')) { throw 'negative control did not run exactly once' }
+          $positive = Join-Path $env:RUNNER_TEMP 'registry-unknown.log'
+          cargo test --locked -p tasks --lib $test -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $positive
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Select-String -Path $positive -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'TaskRegistry unknown Stop did not pass' }
+          exit 0
       - name: Preserve diagnostic logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -93,5 +127,6 @@ jobs:
           path: |
             ${{ runner.temp }}/unsafe-inheritance.log
             ${{ runner.temp }}/legacy-blocking.log
+            ${{ runner.temp }}/registry-*.log
             ${{ runner.temp }}/process-supervisor*-*.log
           if-no-files-found: ignore

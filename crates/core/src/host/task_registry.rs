@@ -305,6 +305,11 @@ pub struct BackgroundBashHandle {
 /// Terminates a task whose process the registry does not own.
 #[async_trait]
 pub trait TaskKiller: Send + Sync {
+    /// Whether best-effort Stop cannot be treated as a terminal receipt.
+    fn stop_requires_verified_cleanup(&self) -> bool {
+        false
+    }
+
     /// Kill the underlying OS process. Best-effort.
     async fn kill(&self);
 

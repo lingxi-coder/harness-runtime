@@ -1166,6 +1166,7 @@ pub(super) async fn run(
             let preserve_legacy = false;
             retain_after_output_eof = cmd.is_supervisor_request()
                 && !deadline.strict_host
+                && cmd.auto_background_on_timeout()
                 && !eof.iter().all(|closed| *closed)
                 && !preserve_legacy;
             if !retain_after_output_eof {
