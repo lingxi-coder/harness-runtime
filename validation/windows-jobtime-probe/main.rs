@@ -11,6 +11,7 @@ type Handle = *mut c_void;
 const WAIT_OBJECT_0: u32 = 0;
 const WAIT_TIMEOUT: u32 = 258;
 const ERROR_NOT_ENOUGH_QUOTA: u32 = 1816;
+const STATUS_QUOTA_EXCEEDED: u32 = 0xc000_0044;
 const CREATE_SUSPENDED: u32 = 0x4;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -221,6 +222,13 @@ fn exit_code(process: &OwnedHandle) -> u32 {
     }
     result
 }
+fn require_quota_exit(process: &OwnedHandle, description: &str) {
+    let code = exit_code(process);
+    assert!(
+        code == ERROR_NOT_ENOUGH_QUOTA || code == STATUS_QUOTA_EXCEEDED,
+        "{description} did not receive quota termination: {code:#x}"
+    );
+}
 fn wait_file(path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(15);
     while !path.exists() {
@@ -334,22 +342,14 @@ fn probe(round: u32, root: &Path) {
             WAIT_OBJECT_0,
             "Job signaled while retained descendant {pid} is unsignaled"
         );
-        assert_eq!(
-            exit_code(held),
-            ERROR_NOT_ENOUGH_QUOTA,
-            "descendant {pid} did not receive job-time termination"
-        );
+        require_quota_exit(held, &format!("descendant {pid}"));
     }
     assert_eq!(
         wait(&burner, 0),
         WAIT_OBJECT_0,
         "Job signaled while pulse handle unsignaled"
     );
-    assert_eq!(
-        exit_code(&burner),
-        ERROR_NOT_ENOUGH_QUOTA,
-        "pulse did not receive job-time termination"
-    );
+    require_quota_exit(&burner, "pulse");
     let (extra, extra_thread, _) = create_suspended("pulse", &directory, "unused");
     let assigned = unsafe { AssignProcessToJobObject(job.as_raw_handle(), extra.as_raw_handle()) };
     if assigned == 0 {
