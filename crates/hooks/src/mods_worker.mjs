@@ -4700,6 +4700,11 @@ input.on('line', line => {
           && `${input.requestId}\u0000client\u0000${identity.key}` === identity.parent.requestId
           && input.element === identity.key && input.module === identity.module;
       });
+    if (process.env.LINGXI_ASYNC_TRACE === '1' && message.event === 'ui.message') {
+      console.error('TRACE dispatch', JSON.stringify({ input: message.input, pluginScope: message.pluginScope,
+        active: [...runningHeldByRuntime.keys()].map(id => clientSurfaceManager.runtimeInstances.get(id)?.identity),
+        belongsToHeldSurface }));
+    }
     if (belongsToHeldSurface) {
       void processMessage(message);
     } else {

@@ -6605,8 +6605,12 @@ mod tests {
         let mut task = tokio::spawn(async move {
             host_task.dispatch_client_ui_operation(operation, session_task.as_ref()).await
         });
-        tokio::time::timeout(Duration::from_secs(5), entered.notified()).await
-            .expect("the post reaches the real Host callback after the first await");
+        if tokio::time::timeout(Duration::from_secs(5), entered.notified()).await.is_err() {
+            eprintln!("TRACE action finished={} logs={:?} frames={:?}", task.is_finished(),
+                lock(&session_impl.logs), lock(&session_impl.frames));
+            if task.is_finished() { eprintln!("TRACE result {:?}", task.await); }
+            panic!("the post reaches the real Host callback after the first await");
+        }
         assert!(tokio::time::timeout(Duration::from_millis(60), &mut task).await.is_err(),
             "runHeld must not confirm the stale Input while its post is held");
         release.notify_one();

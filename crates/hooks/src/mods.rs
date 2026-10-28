@@ -4136,6 +4136,10 @@ async fn background_api_loop(
                         }
                     }
                     Some("ui.client.event") => {
+                        #[cfg(test)]
+                        if std::env::var_os("LINGXI_ASYNC_TRACE").is_some() {
+                            eprintln!("TRACE background Client event: {}", message.to_json_string().unwrap_or_default());
+                        }
                         if let Some(session) = worker.background_session() {
                             if let Err(error) = worker
                                 .handle_client_ui_background_event_in_epoch(
@@ -5062,7 +5066,7 @@ async fn spawn_mod_worker(
         .arg(worker_entry)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(if cfg!(test) && std::env::var_os("LINGXI_ASYNC_TRACE").is_some() { Stdio::inherit() } else { Stdio::null() })
         .kill_on_drop(true)
         .spawn()
         .map_err(|error| ModError::Unavailable(error.to_string()))?;

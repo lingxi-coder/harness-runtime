@@ -31,6 +31,7 @@ jobs:
         run: |
           set -euo pipefail
           export LINGXI_MOD_BUN_EXECUTABLE="$(command -v bun)"
+          export LINGXI_ASYNC_TRACE=1
           cargo test --locked -p hooks --lib real_worker_async_input_ -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/async-input.log"
           grep -F 'real_worker_async_input_waits_for_post_before_confirming ... ok' "$RUNNER_TEMP/async-input.log"
           grep -F 'real_worker_async_input_rejection_returns_unknown_and_fences_runtime ... ok' "$RUNNER_TEMP/async-input.log"
