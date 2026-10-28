@@ -6985,6 +6985,7 @@ impl ModHost {
                             | "error"
                             | "protocol.error"
                             | "ui.client.result"
+                            | "ui.client.finalized"
                             | "ui.listener.result"
                             | "ui.press.preflight.result"
                     )

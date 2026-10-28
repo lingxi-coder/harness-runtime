@@ -35,6 +35,8 @@ jobs:
           cargo test --locked -p hooks --lib real_worker_async_input_ -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/async-input.log"
           grep -F 'real_worker_async_input_waits_for_post_before_confirming ... ok' "$RUNNER_TEMP/async-input.log"
           grep -F 'real_worker_async_input_rejection_returns_unknown_and_fences_runtime ... ok' "$RUNNER_TEMP/async-input.log"
+          cargo test --locked -p hooks --lib real_worker_held_drop_after_callback_result_fences_before_next_action -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/held-drop.log"
+          grep -F 'real_worker_held_drop_after_callback_result_fences_before_next_action ... ok' "$RUNNER_TEMP/held-drop.log"
       - name: Run held Worker and sink admission tests
         shell: bash
         run: |

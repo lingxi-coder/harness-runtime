@@ -30,6 +30,9 @@ const pendingDispatch = new Set();
 // setProps work can run while the callback is suspended.
 const activeClientOperations = new Map();
 const runningHeldByRuntime = new Map();
+// The Host sets logRouteId to the originating dispatch request when a hook
+// invokes an API that re-enters the same Worker as nested middleware.
+const heldRelatedDispatches = new Set();
 const cancelledRequests = new Set();
 const moduleCache = new Map();
 const preparedModules = new Map();
@@ -4547,12 +4550,39 @@ async function processMessage(message) {
       }
       const operation = message.operation;
       const held = operation?.type === 'runHeld' ? {
-        id: message.id, generation: operation.generation,
+        id: message.id, generation: operation.generation, actionId: operation.postActionId,
       } : undefined;
       if (held) runningHeldByRuntime.set(operation.runtimeId, held);
       try {
         const result = await clientSurfaceManager.operation(operation, { signal: request.controller.signal });
-        if (!request.controller.signal.aborted) send({ id: message.id, kind: 'ui.client.result', result });
+        if (request.controller.signal.aborted) return;
+        if (!held || result?.accepted !== true) {
+          send({ id: message.id, kind: 'ui.client.result', result });
+          return;
+        }
+        // Retain ownership after the callback response. A Host that disappears
+        // before settling posts/frames must still be able to revoke this VM.
+        const instance = clientSurfaceManager.runtimeInstances.get(operation.runtimeId);
+        let timer;
+        let onAbort;
+        const decision = new Promise(resolve => {
+          request.finalize = actionId => {
+            if (actionId !== held.actionId) return false;
+            resolve(true);
+            return true;
+          };
+          onAbort = () => resolve(false);
+          request.controller.signal.addEventListener('abort', onAbort, { once: true });
+          timer = setTimeout(() => resolve(false), 30_000);
+        });
+        send({ id: message.id, kind: 'ui.client.result', result });
+        const committed = await decision;
+        clearTimeout(timer);
+        request.controller.signal.removeEventListener('abort', onAbort);
+        request.finalize = undefined;
+        if (!committed && instance) {
+          clientSurfaceManager.invalidateHeldEnvironment(instance, new Error('Client held action was not finalized'));
+        }
       } catch (error) {
         if (!request.controller.signal.aborted) send({ id: message.id, kind: 'ui.client.result', error: {
           phase: ['load', 'render', 'run'].includes(error?.phase) ? error.phase : 'load',
@@ -4647,6 +4677,13 @@ input.on('line', line => {
     pendingApiCallerRegistrations.delete(message.callId);
     if (message.kind === 'api.callers.result') reply.resolve();
     else reply.reject(new Error(message.message));
+  } else if (message.kind === 'ui.client.finalize') {
+    const request = activeClientOperations.get(message.id);
+    if (request?.finalize?.(message.postActionId)) {
+      send({ id: message.id, kind: 'ui.client.finalized' });
+    } else {
+      send({ id: message.id, kind: 'error', message: 'Client held action is not pending finalization' });
+    }
   } else if (message.kind === 'cancel') {
     activeClientOperations.get(message.id)?.controller.abort();
     for (const [callId, pending] of pendingApiCallerRegistrations) {
@@ -4705,8 +4742,11 @@ input.on('line', line => {
         active: [...runningHeldByRuntime.keys()].map(id => clientSurfaceManager.runtimeInstances.get(id)?.identity),
         belongsToHeldSurface }));
     }
-    if (belongsToHeldSurface) {
-      void processMessage(message);
+    const nestedHeldDispatch = message.kind === 'dispatch'
+      && heldRelatedDispatches.has(message.logRouteId);
+    if (belongsToHeldSurface || nestedHeldDispatch) {
+      heldRelatedDispatches.add(message.id);
+      void processMessage(message).finally(() => heldRelatedDispatches.delete(message.id));
     } else {
       void queue.then(() => processMessage(message));
     }
@@ -4714,8 +4754,11 @@ input.on('line', line => {
     const request = { controller: new AbortController() };
     activeClientOperations.set(message.id, request);
     const operation = message.operation;
-    const active = operation?.type === 'setProps' ? runningHeldByRuntime.get(operation.runtimeId) : undefined;
-    if (active && active.generation === operation.generation) {
+    const active = ['setProps', 'render'].includes(operation?.type)
+      ? runningHeldByRuntime.get(operation.runtimeId) : undefined;
+    const authorizedHeldWork = active && active.generation === operation.generation
+      && (operation.type === 'setProps' || operation.postActionId === active.actionId);
+    if (authorizedHeldWork) {
       void processMessage(message);
     } else {
       queue = queue.then(() => processMessage(message));

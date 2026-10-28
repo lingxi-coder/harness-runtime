@@ -8,7 +8,7 @@
 use super::client_source::PreparedClientModules;
 use super::{
     ModDispatchScope, ModError, ModHost, ModSessionContext, ModUiInvalidationUpdate,
-    ModUiRenderPace,
+    ModUiRenderPace, RequestChannel,
 };
 use crate::mod_ui_fault::{
     dispatch_client_ui_fault, ClientUiComponent, ClientUiFaultHost, ClientUiFaultRegistry,
@@ -255,6 +255,8 @@ pub(super) struct ClientUiHostState {
     next_runtime_id: AtomicU64,
     next_invalidation_id: AtomicU64,
     next_post_action_id: AtomicU64,
+    #[cfg(test)]
+    held_result_received: AtomicU64,
 }
 
 #[derive(Default)]
@@ -797,6 +799,41 @@ impl Drop for ClientFaultSnapshotClaim<'_> {
 struct ClientUiWorkerFault {
     phase: String,
     reason: ExactHookText,
+}
+
+/// Own the Worker action until Host post settlement and follow-up render have
+/// completed. Drop sends cancellation through RequestChannel and fences all
+/// surfaces that shared the possibly contaminated VM.
+struct ClientHeldLease<'a> {
+    host: &'a ModHost,
+    owner: ClientUiInstance,
+    request: RequestChannel,
+    committed: bool,
+}
+
+impl ClientHeldLease<'_> {
+    async fn finalize(&mut self, action_id: &str) -> Result<(), ModError> {
+        self.host.send_generated(&json!({
+            "id":self.request.id, "kind":"ui.client.finalize", "postActionId":action_id,
+        })).await?;
+        let reply = self.host.receive(&mut self.request).await?;
+        if reply.string_at("/kind") != Some("ui.client.finalized") {
+            self.request.completed = false;
+            return Err(ModError::Unavailable("Client held action finalization failed with outcome unknown".into()));
+        }
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for ClientHeldLease<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.host.record_client_environment_fault(
+                &self.owner, "run", &ExactHookText::from_text("Client held action ended with outcome unknown"),
+            );
+        }
+    }
 }
 
 fn remove_instance_if_current(
@@ -3607,14 +3644,14 @@ impl ModHost {
     ) -> Result<Utf16JsonProjection, ClientWorkerOperationError> {
         self.run_client_worker_operation_inner(operation, None)
             .await
-            .map(|(result, _)| result)
+            .map(|(result, _, _)| result)
     }
 
     async fn run_client_worker_operation_with_post_action(
         &self,
         operation: Utf16JsonProjection,
         post_action: &mut ClientPostActionGuard,
-    ) -> Result<(Utf16JsonProjection, u64), ClientWorkerOperationError> {
+    ) -> Result<(Utf16JsonProjection, u64, Option<RequestChannel>), ClientWorkerOperationError> {
         self.run_client_worker_operation_inner(operation, Some(post_action))
             .await
     }
@@ -3623,7 +3660,7 @@ impl ModHost {
         &self,
         operation: Utf16JsonProjection,
         post_action: Option<&mut ClientPostActionGuard>,
-    ) -> Result<(Utf16JsonProjection, u64), ClientWorkerOperationError> {
+    ) -> Result<(Utf16JsonProjection, u64, Option<RequestChannel>), ClientWorkerOperationError> {
         let mut envelope = host_generated_json(json!({
             "kind":"ui.client.operation",
         }));
@@ -3709,7 +3746,17 @@ impl ModHost {
                         "Client operation reply has no result".into(),
                     ))
                 })?;
-                Ok((result, worker_epoch))
+                let held_request = if cancellation.is_some()
+                    && result.at_pointer("/accepted").and_then(|value| value.as_bool()) == Some(true)
+                {
+                    // ui.client.result is provisional; Drop must still send
+                    // cancellation until a finalization acknowledgement.
+                    request.completed = false;
+                    #[cfg(test)]
+                    self.client_ui.held_result_received.fetch_add(1, Ordering::SeqCst);
+                    Some(request)
+                } else { None };
+                Ok((result, worker_epoch, held_request))
             }
             Some("error") => Err(ClientWorkerOperationError::Host(ModError::Hook(
                 reply
@@ -4230,10 +4277,14 @@ impl ModHost {
                 )
                 .map_err(|error| ModError::Protocol(error.to_string()))?;
         }
+        let mut pending_held_request = None;
         let result = match if let Some(post_action) = post_action.as_mut() {
             self.run_client_worker_operation_with_post_action(worker_operation, post_action)
                 .await
-                .map(|(result, _worker_epoch)| result)
+                .map(|(result, _worker_epoch, request)| {
+                    pending_held_request = request;
+                    result
+                })
         } else {
             self.run_client_worker_operation(worker_operation).await
         } {
@@ -4264,6 +4315,9 @@ impl ModHost {
             }
             Err(error) => return Err(error.into()),
         };
+        let mut held_lease = pending_held_request.map(|request| ClientHeldLease {
+            host: self, owner: instance.clone(), request, committed: false,
+        });
         if let Some(post_action) = post_action.as_mut() {
             match client_run_held_result(&result)? {
                 ClientRunHeldResult::Stale | ClientRunHeldResult::Rejected => {
@@ -4298,12 +4352,15 @@ impl ModHost {
             ));
         }
         if kind == "pointer" || kind == "key" || kind == "runHeld" {
+            let mut render_operation = host_generated_json(json!({
+                "type":"render", "runtimeId":runtime_id, "generation":instance.worker_generation,
+            }));
+            if let Some(action) = post_action.as_ref() {
+                render_operation.set_field("postActionId", plain_text_projection(action.action_id()))
+                    .map_err(|error| ModError::Protocol(error.to_string()))?;
+            }
             let rendered = match self
-                .run_client_worker_operation(host_generated_json(json!({
-                    "type":"render",
-                    "runtimeId":runtime_id,
-                    "generation":instance.worker_generation,
-                })))
+                .run_client_worker_operation(render_operation)
                 .await
             {
                 Ok(rendered) => rendered,
@@ -4350,6 +4407,19 @@ impl ModHost {
                     return Err(ModError::Unavailable(
                         "Client runHeld completed after its runtime changed or was cancelled"
                             .into(),
+                    ));
+                }
+            }
+            if kind == "runHeld" {
+                let action = post_action.as_ref().expect("runHeld has a post action");
+                let lease = held_lease.as_mut().ok_or_else(|| ModError::Protocol(
+                    "accepted Client runHeld has no pending finalization lease".into(),
+                ))?;
+                lease.finalize(action.action_id()).await?;
+                let data = lock(&self.client_ui.data);
+                if !self.client_instance_is_current(&data, &instance) || action.cancellation.is_cancelled() {
+                    return Err(ModError::Unavailable(
+                        "Client runHeld finalized after its runtime changed or was cancelled".into(),
                     ));
                 }
             }
@@ -6657,6 +6727,93 @@ mod tests {
         real_worker_async_input_waits_for_post_and_fences_rejection(true).await;
     }
 
+
+    #[tokio::test]
+    async fn real_worker_held_drop_after_callback_result_fences_before_next_action() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("card.tsx");
+        let entry = directory.path().join("register.tsx");
+        std::fs::write(&child, r#"
+          import { Box, Text, Button, h } from 'claude:surface-runtime';
+          export function Card(props, surface) {
+            return h(Box, {children:[h(Text, {children:props.title}),
+              h(Button, {key:'send', label:'Send', onPress:() => surface.post({title:'after effect'})})]});
+          }
+        "#).unwrap();
+        std::fs::write(&entry, r#"
+          export function register(on) {
+            on('ui.render', {surface:'desktop', component:'Pane'}, ($, event) => {
+              const {Client, h} = $.ui.resolve(event);
+              return h(Client, {key:'card', module:'./card.tsx', props:{title:'initial'}});
+            });
+            on('ui.message', async ($, event) => {
+              await $.session.model();
+              return {handled:true, props:{title:event.data.title}};
+            });
+          }
+        "#).unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        let session_impl = Arc::new(UiLifecycleSession {root:directory.path().to_path_buf(), ..Default::default()});
+        let session: Arc<dyn ModSessionContext> = session_impl.clone();
+        host.attach_background_context(Arc::downgrade(&session));
+        let prepared = host.prepare_module(directory.path(), &entry).await.unwrap();
+        host.load_with_tier_order_storage_prepared("review", "review@user", directory.path(), &entry,
+            Utf16JsonProjection::parse("{}").unwrap(), "user", None, Some(&prepared)).await.unwrap();
+        let render = host.dispatch_client_ui_control(host_generated_json(json!({
+            "subtype":"ui_render", "surface":"desktop", "component":"Pane", "instance_id":"drop-test",
+            "props":{}, "viewport":{"columns":80,"rows":24},
+        })), session.as_ref()).await.unwrap();
+        let revision = render.render_revision.unwrap();
+        let mount = host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"mount", "surface":"desktop", "component":"Pane", "instance_id":"drop-test",
+            "plugin":"review", "client":"card", "module":"card.tsx", "render_revision":revision,
+            "columns":80, "rows":24,
+        })), session.as_ref()).await.unwrap();
+        let mounted = test_value(&mount);
+        let runtime_id = mounted["runtimeId"].as_str().unwrap().to_owned();
+        let handle = tree_press_handle_for_key(&mounted["tree"], "send").unwrap();
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"draw_commit", "surface":"desktop", "component":"Pane", "instance_id":"drop-test",
+            "render_revision":revision, "clients":[{"plugin":"review","key":"card","module":"card.tsx"}],
+        })), session.as_ref()).await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let delivered = Arc::new(tokio::sync::Notify::new());
+        *lock(&session_impl.frame_gate) = Some(UiLifecycleFrameGate {
+            runtime_id:runtime_id.clone(), expected_text:"after effect",
+            entered:entered.clone(), release:release.clone(), delivered,
+        });
+        let host_task = host.clone();
+        let session_task = session.clone();
+        let operation = host_generated_json(json!({"type":"runHeld", "runtimeId":runtime_id,
+            "render_revision":revision, "handle":handle}));
+        let task = tokio::spawn(async move {
+            host_task.dispatch_client_ui_operation(operation, session_task.as_ref()).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while host.client_ui.held_result_received.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the Worker callback result was already received before dropping the Host future");
+        assert!(!task.is_finished(), "frame queue admission is still held");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_some(),
+            "dropping an unfinalized lease synchronously fences the Host runtime");
+        release.notify_one();
+        let next = host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"render", "runtimeId":runtime_id, "render_revision":revision,
+        })), session.as_ref()).await.unwrap();
+        assert_eq!(test_value(&next)["handled"], false);
+        let _fault = wait_for_client_frame(&session_impl, &runtime_id, "cancelled lease fault", |frame| {
+            frame.get("fault").is_some()
+        }).await;
+        assert!(!lock(&session_impl.frames).iter().any(|(id, frame)| {
+            id == &runtime_id && tree_contains_text(&frame["tree"], "after effect")
+        }), "a dropped frame admission cannot later appear as an acknowledged frame");
+    }
+
     #[tokio::test]
     async fn prepared_tsx_client_runs_the_host_render_mount_draw_post_and_unload_lifecycle() {
         let directory = tempfile::tempdir().unwrap();
@@ -7373,29 +7530,8 @@ mod tests {
             )
             .await
             .unwrap();
-        let after_cancel_handle =
-            tree_press_handle_for_key(&test_value(&after_cancel_render)["tree"], "query")
-                .expect("the still-mounted Client can receive a later action");
-        let after_cancel_result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            host.dispatch_client_ui_operation(
-                host_generated_json(json!({
-                    "type":"runHeld",
-                    "runtimeId":runtime_id,
-                    "render_revision":revision,
-                    "handle":after_cancel_handle,
-                    "event":{"kind":"change","value":"after-cancel"},
-                })),
-                session.as_ref(),
-            ),
-        )
-        .await
-        .expect("a later background event is not stuck behind the cancelled post")
-        .unwrap();
-        assert!(tree_contains_text(
-            &test_value(&after_cancel_result)["tree"],
-            "after cancellation"
-        ));
+        assert_eq!(test_value(&after_cancel_render)["handled"], false,
+            "a cancelled action fences its shared VM until an explicit remount");
         assert!(!lock(&session_impl.frames)
             .iter()
             .any(|(frame_runtime, frame)| {

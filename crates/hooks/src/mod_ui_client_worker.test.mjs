@@ -853,6 +853,127 @@ test('mods worker admits matching setProps while an async held action waits for 
     ['held-action', 'held-action']);
 });
 
+test('held post permits its nested Host API dispatch while unrelated dispatch remains queued', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mods-held-nested-'));
+  const hookPath = join(root, 'hook.mjs');
+  await writeFile(hookPath, `export function register(on) {
+    on('ui.message', async ($, event) => {
+      await $.session.model();
+      return {handled:true, props:{value:event.data.value}};
+    });
+  }`);
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const workerPath = fileURLToPath(new URL('./mods_worker.mjs', import.meta.url));
+  const worker = spawn(process.execPath, ['--experimental-vm-modules', workerPath], {stdio:['pipe','pipe','pipe']});
+  t.after(() => { if (!worker.killed) worker.kill(); });
+  const pending = new Map();
+  let postResolve;
+  const posted = new Promise(resolve => { postResolve = resolve; });
+  const request = (id, message) => new Promise((resolve,reject) => {
+    const timer = setTimeout(() => {pending.delete(id); reject(new Error(`request ${id} timed out`));}, 2_000);
+    pending.set(id, frame => {clearTimeout(timer); resolve(frame);});
+    worker.stdin.write(`${encodeModsIpcFrame({id,...message})}\n`);
+  });
+  createInterface({input:worker.stdout, crlfDelay:Infinity}).on('line', line => {
+    const frame = decodeModsIpcFrame(line);
+    if (frame.kind === 'api.callers') {
+      worker.stdin.write(`${encodeModsIpcFrame({id:frame.id, kind:'api.callers.result', callId:frame.callId})}\n`);
+    } else if (frame.kind === 'api' && frame.method === 'session.model') {
+      // Simulate the Host API middleware re-entry; logRouteId is the actual
+      // parent dispatch ID that Rust supplies in dispatch_host_api_inner.
+      request(5, {kind:'dispatch', event:'session.model', logRouteId:frame.id, input:{}}).then(() => {
+        worker.stdin.write(`${encodeModsIpcFrame({id:frame.id, kind:'api.result', callId:frame.callId, result:'test-model'})}\n`);
+      });
+    } else if (frame.kind === 'next') {
+      worker.stdin.write(`${encodeModsIpcFrame({id:frame.id, kind:'next.result', callId:frame.callId, result:{value:'test-model'}})}\n`);
+    } else if (frame.id === 0) {
+      if (frame.action === 'post') postResolve(frame);
+    } else if (frame.kind !== 'progress' && frame.kind !== 'trace') {
+      pending.get(frame.id)?.(frame); pending.delete(frame.id);
+    }
+  });
+  assert.equal((await loadPrepared(request, 1, {plugin:'example',storageId:'example@user',tier:'user',root,module:hookPath})).kind, 'loaded');
+  const source = `let latest=''; export function Board(props,surface) {
+    latest=props.value || '';
+    return surface.elements.Input({value:latest,onSubmit(){},onInput:async value => {
+      surface.post({value});
+      await new Promise(resolve => {const stop=surface.every(5,()=>{if(latest===value){stop();resolve();}})});
+    }});
+  }`;
+  const options=mountOptions({runtimeId:'nested-held',source});
+  options.parent.requestId = 'render-7\u0000client\u0000board';
+  const mounted=await request(2,{kind:'ui.client.operation',operation:{type:'mount',...options}});
+  const held=request(3,{kind:'ui.client.operation',operation:{type:'runHeld',runtimeId:'nested-held',
+    generation:mounted.result.generation,handle:mounted.result.tree.held,payload:{kind:'change',value:'typed'},postActionId:'nested-action'}});
+  await posted;
+  let unrelatedDone=false;
+  const unrelated=request(8,{kind:'dispatch',event:'session.model',logRouteId:999,input:{}}).then(result=>{unrelatedDone=true;return result;});
+  const response=await request(4,{kind:'dispatch',event:'ui.message',pluginScope:'example',
+    input:{surface:'desktop',component:'panel',requestId:'render-7',element:'board',module:'board.mjs',data:{value:'typed'}}});
+  assert.equal(response.kind,'result');
+  assert.equal(response.result.props.value,'typed');
+  assert.equal(unrelatedDone,false,'an unrelated nested request cannot bypass the held queue');
+  await request(6,{kind:'ui.client.operation',operation:{type:'setProps',runtimeId:'nested-held',
+    generation:mounted.result.generation,props:{value:'typed'}}});
+  assert.deepEqual((await held).result,{accepted:true,postIds:[0]});
+  assert.equal((await request(3,{kind:'ui.client.finalize',postActionId:'nested-action'})).kind,'ui.client.finalized');
+  assert.equal((await unrelated).kind,'result');
+});
+
+test('held action remains revocable after callback result until Host finalizes it', async t => {
+  const workerPath = fileURLToPath(new URL('./mods_worker.mjs', import.meta.url));
+  const worker = spawn(process.execPath, ['--experimental-vm-modules', workerPath], {stdio:['pipe','pipe','pipe']});
+  t.after(() => { if (!worker.killed) worker.kill(); });
+  const pending = new Map();
+  const events = [];
+  createInterface({input:worker.stdout, crlfDelay:Infinity}).on('line', line => {
+    const frame = decodeModsIpcFrame(line);
+    if (frame.id === 0) events.push(frame);
+    else { pending.get(frame.id)?.(frame); pending.delete(frame.id); }
+  });
+  const request = (id, message) => new Promise((resolve,reject) => {
+    const timer = setTimeout(() => {pending.delete(id); reject(new Error(`request ${id} timed out`));}, 2_000);
+    pending.set(id, frame => {clearTimeout(timer); resolve(frame);});
+    worker.stdin.write(`${encodeModsIpcFrame({id,...message})}\n`);
+  });
+  const source = `let hidden = '';
+    export function Board(_props, surface) {
+      return surface.elements.Input({value:hidden, onSubmit(){}, onInput:value => {hidden=value;}});
+    }`;
+  const mount = (id, runtimeId) => request(id, {kind:'ui.client.operation', operation:{type:'mount',
+    ...mountOptions({runtimeId, source})}});
+  const first = await mount(1, 'lease-one');
+  const sibling = await mount(2, 'lease-sibling');
+  assert.equal(first.result.environmentInstanceId, sibling.result.environmentInstanceId);
+  const outcome = await request(3, {kind:'ui.client.operation', operation:{type:'runHeld',
+    runtimeId:'lease-one', generation:first.result.generation, handle:first.result.tree.held,
+    payload:{kind:'change',value:'unconfirmed'}, postActionId:'abandoned'}});
+  assert.deepEqual(outcome.result, {accepted:true, postIds:[]});
+  let queuedDone = false;
+  const queuedRender = request(4, {kind:'ui.client.operation', operation:{type:'render',
+    runtimeId:'lease-sibling', generation:sibling.result.generation}}).then(value => {queuedDone=true; return value;});
+  await delay(20);
+  assert.equal(queuedDone, false, 'an unrelated operation cannot observe a result awaiting Host finalization');
+  worker.stdin.write(`${encodeModsIpcFrame({id:3,kind:'cancel'})}\n`);
+  assert.deepEqual((await queuedRender).result, {stale:true});
+  assert.equal(events.filter(event => event.action === 'fault').length, 2);
+
+  const fresh = await mount(5, 'lease-fresh');
+  assert.notEqual(fresh.result.environmentInstanceId, first.result.environmentInstanceId);
+  assert.equal(fresh.result.tree.props.value, '');
+  const accepted = await request(6, {kind:'ui.client.operation', operation:{type:'runHeld',
+    runtimeId:'lease-fresh', generation:fresh.result.generation, handle:fresh.result.tree.held,
+    payload:{kind:'change',value:'committed'}, postActionId:'accepted'}});
+  assert.deepEqual(accepted.result, {accepted:true, postIds:[]});
+  const ownRender = await request(7, {kind:'ui.client.operation', operation:{type:'render',
+    runtimeId:'lease-fresh', generation:fresh.result.generation, postActionId:'accepted'}});
+  assert.equal(ownRender.result.tree.props.value, 'committed');
+  assert.equal((await request(6, {kind:'ui.client.finalize', postActionId:'accepted'})).kind, 'ui.client.finalized');
+  const after = await request(8, {kind:'ui.client.operation', operation:{type:'render',
+    runtimeId:'lease-fresh', generation:fresh.result.generation}});
+  assert.equal(after.result.tree.props.value, 'committed');
+});
+
 test('mods worker accepts ui.client.operation and returns tree plus asynchronous event frames', async t => {
   const workerPath = fileURLToPath(new URL('./mods_worker.mjs', import.meta.url));
   const worker = spawn(process.execPath, ['--experimental-vm-modules', workerPath], {
