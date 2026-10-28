@@ -74,12 +74,39 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.94.0
       - name: Build macOS platform tests
         run: cargo test --locked -p platform-posix --lib --no-run
+      - name: Prepare portable bounded test runner
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/posix-test-timeout.py" <<'PYCODE'
+          import os
+          import signal
+          import subprocess
+          import sys
+
+          limit = float(sys.argv[1])
+          process = subprocess.Popen(sys.argv[2:], start_new_session=True)
+          try:
+              result = process.wait(timeout=limit)
+          except subprocess.TimeoutExpired:
+              try:
+                  os.killpg(process.pid, signal.SIGKILL)
+              except ProcessLookupError:
+                  pass
+              try:
+                  process.wait(timeout=5)
+              except subprocess.TimeoutExpired:
+                  print("test timed out; process termination unconfirmed after 5s", file=sys.stderr)
+                  sys.exit(125)
+              print(f"test timed out after {limit:g}s", file=sys.stderr)
+              sys.exit(124)
+          sys.exit(result if result >= 0 else 128 - result)
+          PYCODE
       - name: Verify real held zombie remains unknown
         shell: bash
         run: |
           set -euo pipefail
           test_name=process::kill_tree::tests::graceful_stop_reports_unknown_for_held_zombie
-          timeout 45s cargo test --locked -p platform-posix --lib "$test_name" -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/macos-zombie.log"
+          python3 "$RUNNER_TEMP/posix-test-timeout.py" 45 cargo test --locked -p platform-posix --lib "$test_name" -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/macos-zombie.log"
           grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored' "$RUNNER_TEMP/macos-zombie.log"
       - name: Verify old EPERM classification fails
         shell: bash
@@ -95,10 +122,10 @@ jobs:
           path.write_text(text.replace(fixed, old, 1))
           PYCODE
           set +e
-          timeout 45s cargo test --locked -p platform-posix --lib process::kill_tree::tests::graceful_stop_reports_unknown_for_held_zombie -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/macos-zombie-legacy.log"
+          python3 "$RUNNER_TEMP/posix-test-timeout.py" 45 cargo test --locked -p platform-posix --lib process::kill_tree::tests::graceful_stop_reports_unknown_for_held_zombie -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/macos-zombie-legacy.log"
           code=${PIPESTATUS[0]}
           set -e
-          if [ "$code" -eq 0 ] || [ "$code" -eq 124 ]; then echo "legacy negative control did not fail normally: $code"; exit 1; fi
+          if [ "$code" -eq 0 ] || [ "$code" -eq 124 ] || [ "$code" -eq 125 ]; then echo "legacy negative control did not fail normally: $code"; exit 1; fi
           grep -F 'numeric PGID must not turn EPERM into cleanup success' "$RUNNER_TEMP/macos-zombie-legacy.log"
           grep -F 'test result: FAILED. 0 passed; 1 failed; 0 ignored' "$RUNNER_TEMP/macos-zombie-legacy.log"
       - name: Preserve evidence
