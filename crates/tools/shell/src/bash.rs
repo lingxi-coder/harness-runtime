@@ -8527,7 +8527,7 @@ mod tests {
                 timed_out: false,
             });
             ctx.process = runner.clone();
-            ctx.task_registry = Some(registry);
+            ctx.task_registry = Some(registry.clone());
             let result = BashTool::new(ctx)
                 .call(
                     source_json!({"command":"sleep 5", "run_in_background":true}),
@@ -8536,6 +8536,16 @@ mod tests {
                 )
                 .await;
             assert_eq!(result.is_ok(), failure == "none", "{failure}");
+            if failure != "none" {
+                assert!(
+                    registry.settled.lock().unwrap().is_empty(),
+                    "{failure}: must not mark the child killed without proof"
+                );
+                assert!(
+                    registry.discarded.lock().unwrap().is_empty(),
+                    "{failure}: must preserve the bound output"
+                );
+            }
             assert_eq!(
                 runner.acks.load(std::sync::atomic::Ordering::SeqCst),
                 usize::from(matches!(failure, "none" | "ack")),
