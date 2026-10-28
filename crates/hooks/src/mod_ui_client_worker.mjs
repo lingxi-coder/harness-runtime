@@ -749,13 +749,13 @@ export class ClientSurfaceManager {
     this.invalidateEnvironment(instance.environment, error);
   }
 
-  invalidateEnvironment(environment, error) {
+  invalidateEnvironment(environment, error, phase = 'run') {
     if (environment.disposed) return;
     this.onEnvironmentInvalidated(environment);
     // Modules and module-level variables are shared by every surface in this
     // environment. A non-cancellable continuation could still mutate them, so
     // fence every member and never reuse this VM for a fresh mount.
-    for (const member of [...environment.instances.values()]) this.emitFault(member, 'run', error);
+    for (const member of [...environment.instances.values()]) this.emitFault(member, phase, error);
     environment.disposed = true;
     environment.instances.clear();
     environment.moduleCache.clear();
@@ -825,7 +825,7 @@ export class ClientSurfaceManager {
         { columns: instance.columns, rows: instance.rows },
       );
     } catch (error) {
-      this.emitFault(instance, 'load', error);
+      this.invalidateEnvironment(environment, error, 'load');
       this.unmount(identity.runtimeId);
       throw clientError('load', error);
     }
@@ -871,7 +871,7 @@ export class ClientSurfaceManager {
       };
     } catch (error) {
       instance.nextHeldCallback.clear();
-      this.emitFault(instance, 'render', error);
+      this.invalidateEnvironment(instance.environment, error, 'render');
       throw clientError('render', error);
     }
   }
@@ -883,7 +883,7 @@ export class ClientSurfaceManager {
       if (instance.failure) return { stale: true };
       instance.binding.setProps(instance.props);
     } catch (error) {
-      this.emitFault(instance, 'run', error);
+      this.invalidateEnvironment(instance.environment, error, 'run');
       throw clientError('run', error);
     }
     return this.render(runtimeId);
@@ -1083,6 +1083,13 @@ export class ClientSurfaceManager {
       if (!current || (operation.generation !== undefined && operation.generation !== current.generation)) {
         if (operation.type === 'unmount') return { unmounted: false, stale: true };
         return { stale: true };
+      }
+      if (current.failure && ['runHeld', 'pointer', 'key'].includes(operation.type)) {
+        // No callback was invoked by this operation. Report the previously
+        // fenced environment separately from an ordinary missing handle.
+        const failure = clientError(current.failure.phase, current.failure.reason);
+        failure.notStartedUnavailable = true;
+        throw failure;
       }
       if (operation.hostRenderRevision !== undefined && operation.type !== 'unmount') {
         if (!Number.isSafeInteger(operation.hostRenderRevision) || operation.hostRenderRevision <= 0) {

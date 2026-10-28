@@ -361,8 +361,9 @@ test('cancel invalidates every surface sharing the VM and remount isolates a lat
   await assert.rejects(pending, error => error.phase === 'run' && error.outcomeUnknown === true);
   assert.deepEqual(await manager.operation({type:'render', runtimeId:'old-one'}), {stale:true});
   assert.deepEqual(await manager.operation({type:'render', runtimeId:'old-two'}), {stale:true});
-  assert.deepEqual(await manager.operation({type:'runHeld', runtimeId:'old-two', handle:sibling.tree.held,
-    payload:{kind:'change',value:'must-not-run'}, postActionId:'stale'}), {accepted:false, postIds:[]});
+  await assert.rejects(manager.operation({type:'runHeld', runtimeId:'old-two', handle:sibling.tree.held,
+    payload:{kind:'change',value:'must-not-run'}, postActionId:'stale'}),
+    error => error.phase === 'run' && error.notStartedUnavailable === true);
   assert.equal(events.filter(event => event.action === 'fault').length, 2,
     'all surfaces sharing the invalidated environment receive a fault');
   const oldPostCount = events.filter(event => event.action === 'post' && event.runtimeId.startsWith('old-')).length;
@@ -1301,6 +1302,79 @@ async function timerFaultFencesSharedEnvironment(t, asynchronous) {
 
 test('synchronous timer failure fences every surface in its VM', async t => timerFaultFencesSharedEnvironment(t,false));
 test('async timer rejection fences every surface in its VM', async t => timerFaultFencesSharedEnvironment(t,true));
+
+test('render failure fences every surface that shares mutated module state', async t => {
+  const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));
+  const worker=spawn(process.execPath,['--experimental-vm-modules',workerPath],{stdio:['pipe','pipe','pipe']});
+  t.after(()=>{if(!worker.killed)worker.kill();});
+  const pending=new Map(),events=[];
+  createInterface({input:worker.stdout,crlfDelay:Infinity}).on('line',line=>{
+    const frame=decodeModsIpcFrame(line);
+    if(frame.id===0)events.push(frame);else{pending.get(frame.id)?.(frame);pending.delete(frame.id);}
+  });
+  const request=(id,message)=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{pending.delete(id);reject(new Error('request timeout'));},2_000);
+    pending.set(id,frame=>{clearTimeout(timer);resolve(frame);});
+    worker.stdin.write(`${encodeModsIpcFrame({id,...message})}\n`);
+  });
+  const source=`let shared='clean';export function Board(props,surface){
+    if(props.fail){shared='poison';throw new Error('render fault');}
+    return surface.elements.Text({children:shared});}`;
+  const mount=(id,runtimeId)=>request(id,{kind:'ui.client.operation',operation:{type:'mount',...mountOptions({runtimeId,source})}});
+  const owner=await mount(1,'render-fault-owner'),sibling=await mount(2,'render-fault-sibling');
+  assert.equal(owner.result.environmentInstanceId,sibling.result.environmentInstanceId);
+  const failed=await request(3,{kind:'ui.client.operation',operation:{type:'setProps',runtimeId:'render-fault-owner',
+    generation:owner.result.generation,props:{fail:true}}});
+  assert.equal(failed.error.phase,'render');
+  const old=await request(4,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'render-fault-sibling',generation:sibling.result.generation}});
+  assert.deepEqual(old.result,{stale:true},'the sibling cannot render partially-mutated module state');
+  assert.equal(events.filter(event=>event.action==='fault').length,2);
+  const refused=await request(5,{kind:'ui.client.operation',operation:{type:'runHeld',runtimeId:'render-fault-sibling',
+    generation:sibling.result.generation,handle:1,postActionId:'fenced-action'}});
+  assert.equal(refused.error?.notStartedUnavailable,true,
+    'a fenced callback is refused before execution with an explicit unavailable reason');
+  const fresh=await mount(6,'render-fault-fresh');
+  assert.notEqual(fresh.result.environmentInstanceId,owner.result.environmentInstanceId);
+  assert.deepEqual(fresh.result.tree.children,['clean']);
+});
+
+test('module load failure fences every surface that shares mutated module state', async t => {
+  const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));
+  const worker=spawn(process.execPath,['--experimental-vm-modules',workerPath],{stdio:['pipe','pipe','pipe']});
+  t.after(()=>{if(!worker.killed)worker.kill();});
+  const pending=new Map(),events=[];
+  createInterface({input:worker.stdout,crlfDelay:Infinity}).on('line',line=>{
+    const frame=decodeModsIpcFrame(line);
+    if(frame.id===0)events.push(frame);else{pending.get(frame.id)?.(frame);pending.delete(frame.id);}
+  });
+  const request=(id,message)=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{pending.delete(id);reject(new Error('request timeout'));},2_000);
+    pending.set(id,frame=>{clearTimeout(timer);resolve(frame);});
+    worker.stdin.write(`${encodeModsIpcFrame({id,...message})}\n`);
+  });
+  const source=`import {shared} from './shared.mjs';export function Board(_props,surface){
+    return surface.elements.Text({children:shared.value});}`;
+  const shared=`export const shared={value:'clean'};`;
+  const bad=`import {shared} from './shared.mjs';shared.value='poison';throw new Error('load fault');
+    export function Broken(){}`;
+  const options=runtimeId=>{
+    const input=mountOptions({runtimeId,source});
+    input.moduleGraph.modules.push({module:'shared.mjs',source:shared},{module:'bad.mjs',component:'Broken',source:bad});
+    input.moduleGraph.manifest.modules.push({module:'bad.mjs',entry:'bad.mjs',component:'Broken'});
+    input.moduleGraph.manifest.files.push({key:'shared.mjs',source:shared},{key:'bad.mjs',source:bad});
+    return input;
+  };
+  const healthy=await request(1,{kind:'ui.client.operation',operation:{type:'mount',...options('load-fault-sibling')}});
+  const failing=options('load-fault-owner');failing.client={key:'bad',module:'bad.mjs'};
+  const failed=await request(2,{kind:'ui.client.operation',operation:{type:'mount',...failing}});
+  assert.equal(failed.error.phase,'load');
+  const old=await request(3,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'load-fault-sibling',generation:healthy.result.generation}});
+  assert.deepEqual(old.result,{stale:true},'the sibling cannot render partially-mutated module state');
+  assert.equal(events.filter(event=>event.action==='fault').length,2);
+  const fresh=await request(4,{kind:'ui.client.operation',operation:{type:'mount',...options('load-fault-fresh')}});
+  assert.notEqual(fresh.result.environmentInstanceId,healthy.result.environmentInstanceId);
+  assert.deepEqual(fresh.result.tree.children,['clean']);
+});
 
 test('unmount interrupts a suspended held callback with an unknown result', async t => {
   const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));

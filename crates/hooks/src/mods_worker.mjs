@@ -4787,6 +4787,7 @@ async function processMessage(message) {
           phase: ['load', 'render', 'run'].includes(error?.phase) ? error.phase : 'load',
           reason: String(error?.message || error),
           ...(error?.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
+          ...(error?.notStartedUnavailable === true ? { notStartedUnavailable: true } : {}),
         } });
       } finally {
         if (!finalizationPending) release();

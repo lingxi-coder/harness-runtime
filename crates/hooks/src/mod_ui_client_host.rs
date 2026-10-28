@@ -698,6 +698,10 @@ enum ClientWorkerOperationError {
         phase: String,
         reason: ExactHookText,
     },
+    NotStartedUnavailable {
+        phase: String,
+        reason: ExactHookText,
+    },
     Host(ModError),
 }
 
@@ -714,7 +718,8 @@ impl From<ClientWorkerOperationError> for ModError {
                 "Client shared environment is busy; operation was not executed".into(),
             ),
             ClientWorkerOperationError::Fault { phase, reason }
-            | ClientWorkerOperationError::UnknownFault { phase, reason } => {
+            | ClientWorkerOperationError::UnknownFault { phase, reason }
+            | ClientWorkerOperationError::NotStartedUnavailable { phase, reason } => {
                 ModError::Hook(format!("Client surface {phase} failed: {}", reason.display))
             }
             ClientWorkerOperationError::Host(error) => error,
@@ -3630,6 +3635,20 @@ impl ModHost {
         response
     }
 
+    fn not_started_held_response(
+        &self, owner: &ClientUiInstance, revision: u64, phase: &str, reason: &ExactHookText,
+    ) -> Utf16JsonProjection {
+        self.record_client_environment_fault(owner, phase, reason);
+        let mut response = worker_fault_response(
+            Some(&owner.runtime_id), revision, owner.key.identity.plugin(),
+            owner.key.identity.module(), phase, reason,
+        );
+        response.set_field("outcome", host_generated_json(json!({
+            "status":"not_started", "runtime":"unavailable",
+        }))).expect("worker fault response accepts an outcome object");
+        response
+    }
+
     fn claim_client_worker_fault_dispatch(&self, runtime_id: &str) -> bool {
         let mut data = lock(&self.client_ui.data);
         let Some(instance) = data.instances.get_mut(runtime_id) else {
@@ -3843,12 +3862,19 @@ impl ModHost {
                                 "Client worker fault has no reason".into(),
                             ))
                         })?;
-                    if reply.at_pointer("/error/outcomeUnknown").and_then(|value| value.as_bool()) == Some(true) {
+                    let outcome_unknown = reply.at_pointer("/error/outcomeUnknown").and_then(|value| value.as_bool()) == Some(true);
+                    let not_started = reply.at_pointer("/error/notStartedUnavailable").and_then(|value| value.as_bool()) == Some(true);
+                    if outcome_unknown {
                         return Err(ClientWorkerOperationError::UnknownFault {
                             phase: phase.to_owned(), reason,
                         });
                     }
                     request.completed = true;
+                    if not_started {
+                        return Err(ClientWorkerOperationError::NotStartedUnavailable {
+                            phase: phase.to_owned(), reason,
+                        });
+                    }
                     return Err(ClientWorkerOperationError::Fault {
                         phase: phase.to_owned(),
                         reason,
@@ -4287,7 +4313,25 @@ impl ModHost {
                         json!({"handled":false,"renderRevision":revision}),
                     ));
                 }
-                if !instance.mounted || instance.worker_fault.is_some() {
+                if !instance.mounted {
+                    return Ok(host_generated_json(
+                        json!({"handled":false,"renderRevision":revision}),
+                    ));
+                }
+                if let Some(fault) = instance.worker_fault.as_ref() {
+                    if is_callback {
+                        // This operation is refused before dispatch. Preserve
+                        // that fact separately from a previously started
+                        // callback whose outcome is genuinely unknown.
+                        let mut response = worker_fault_response(
+                            Some(runtime_id), revision, instance.key.identity.plugin(),
+                            instance.key.identity.module(), &fault.phase, &fault.reason,
+                        );
+                        response.set_field("outcome", host_generated_json(json!({
+                            "status":"not_started", "runtime":"unavailable",
+                        }))).expect("worker fault response accepts an outcome object");
+                        return Ok(response);
+                    }
                     return Ok(host_generated_json(
                         json!({"handled":false,"renderRevision":revision}),
                     ));
@@ -4428,6 +4472,9 @@ impl ModHost {
             Ok(result) => result,
             Err(ClientWorkerOperationError::UnknownFault { phase, reason }) if is_callback => {
                 return Ok(self.unknown_held_response(&instance, revision, &phase, &reason));
+            }
+            Err(ClientWorkerOperationError::NotStartedUnavailable { phase, reason }) if is_callback => {
+                return Ok(self.not_started_held_response(&instance, revision, &phase, &reason));
             }
             Err(ClientWorkerOperationError::Host(error))
                 if is_callback && post_action.as_ref().is_some_and(|action| action.dispatch_attempted) => {
@@ -6814,6 +6861,23 @@ mod tests {
             assert_eq!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault_snapshot,
                 ClientFaultSnapshotState::Pending);
             assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault_event_dispatched);
+            for kind in ["runHeld", "pointer", "key"] {
+                let operation = if kind == "runHeld" {
+                    host_generated_json(json!({"type":kind,"runtimeId":runtime_id,
+                        "render_revision":revision,"handle":handle,"event":{}}))
+                } else {
+                    host_generated_json(json!({"type":kind,"runtimeId":runtime_id,
+                        "render_revision":revision,"event":{}}))
+                };
+                let result = host.dispatch_client_ui_operation(operation, session.as_ref()).await.unwrap();
+                let result = test_value(&result);
+                assert_eq!(result["runtimeId"], runtime_id);
+                assert_eq!(result["renderRevision"], revision);
+                assert_eq!(result["outcome"], json!({"status":"not_started","runtime":"unavailable"}),
+                    "a refused fault frame must not hide an unavailable runtime");
+            }
+            assert_eq!(observation.models.load(std::sync::atomic::Ordering::SeqCst), 1,
+                "the subsequent callbacks were not invoked");
             let claim = host.claim_client_worker_fault_snapshot(&runtime_id).unwrap();
             assert!(host.claim_client_worker_fault_snapshot(&runtime_id).is_none(),
                 "an in-flight publication excludes a duplicate");
@@ -6946,6 +7010,90 @@ mod tests {
             && frame.number_at("/renderRevision") == Some(fault_revision as f64)
             && frame.at_pointer("/fault").is_some()),
             "the fault snapshot is admitted against the current parent revision");
+    }
+
+    #[tokio::test]
+    async fn real_worker_fenced_callback_reports_not_started_without_fault_delivery() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("card.tsx");
+        let entry = directory.path().join("register.tsx");
+        std::fs::write(&child, r#"
+          import { Button, h } from 'claude:surface-runtime';
+          let shared = 'clean';
+          export function Card(props, surface) {
+            if (props.fail) { shared = 'poison'; throw new Error('render failed'); }
+            return h(Button, {key:'send', label:shared, onPress:()=>surface.post({kind:'executed'})});
+          }
+        "#).unwrap();
+        std::fs::write(&entry, r#"
+          export function register(on) {
+            on('ui.render', {surface:'desktop', component:'Pane'}, ($, event) => {
+              const {Box, Client, h} = $.ui.resolve(event);
+              return h(Box, {}, h(Client, {key:'owner', module:'./card.tsx', props:{}}),
+                h(Client, {key:'sibling', module:'./card.tsx', props:{}}));
+            });
+            on('ui.message', async ($, event) => {
+              await $.session.model(); return {handled:true};
+            });
+          }
+        "#).unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        let session = Arc::new(ReceiptTestSession {
+            root:directory.path().to_path_buf(), models:std::sync::atomic::AtomicUsize::new(0),
+        });
+        // Deliberately leave the weak background context unset: Worker fault
+        // events cannot reach Host or its frame sink in this test.
+        let prepared = host.prepare_module(directory.path(), &entry).await.unwrap();
+        host.load_with_tier_order_storage_prepared("review", "review@user", directory.path(), &entry,
+            Utf16JsonProjection::parse("{}").unwrap(), "user", None, Some(&prepared)).await.unwrap();
+        let revision = host.dispatch_client_ui_control(host_generated_json(json!({
+            "subtype":"ui_render", "surface":"desktop", "component":"Pane", "instance_id":"missing-fault",
+            "props":{}, "viewport":{"columns":80,"rows":24},
+        })), session.as_ref()).await.unwrap().render_revision.unwrap();
+        let mut mounted = Vec::new();
+        for client in ["owner", "sibling"] {
+            let frame = host.dispatch_client_ui_operation(host_generated_json(json!({
+                "type":"mount", "surface":"desktop", "component":"Pane", "instance_id":"missing-fault",
+                "plugin":"review", "client":client, "module":"card.tsx", "render_revision":revision,
+                "columns":80, "rows":24,
+            })), session.as_ref()).await.unwrap();
+            let frame = test_value(&frame);
+            mounted.push((frame["runtimeId"].as_str().unwrap().to_owned(),
+                tree_press_handle_for_key(&frame["tree"], "send").unwrap()));
+        }
+        let (owner, sibling) = (&mounted[0].0, &mounted[1].0);
+        let generation = {
+            let data = lock(&host.client_ui.data);
+            assert_eq!(data.instances[owner].worker_environment_id, data.instances[sibling].worker_environment_id);
+            data.instances[owner].worker_generation.unwrap()
+        };
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"draw_commit", "surface":"desktop", "component":"Pane", "instance_id":"missing-fault",
+            "render_revision":revision, "clients":[{"plugin":"review","key":"owner","module":"card.tsx"},
+                {"plugin":"review","key":"sibling","module":"card.tsx"}],
+        })), session.as_ref()).await.unwrap();
+        let failure = host.run_client_worker_operation(host_generated_json(json!({
+            "type":"setProps", "runtimeId":owner, "generation":generation,
+            "hostRenderRevision":revision, "props":{"fail":true},
+        }))).await;
+        assert!(matches!(failure, Err(ClientWorkerOperationError::Fault { .. })));
+        {
+            let data = lock(&host.client_ui.data);
+            assert!(data.instances[owner].worker_fault.is_none());
+            assert!(data.instances[sibling].worker_fault.is_none(), "no Worker fault event was delivered to Host");
+        }
+        let result = host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"runHeld", "runtimeId":sibling, "render_revision":revision, "handle":mounted[1].1,
+        })), session.as_ref()).await.unwrap();
+        let response = test_value(&result);
+        assert_eq!(response["runtimeId"], *sibling);
+        assert_eq!(response["outcome"], json!({"status":"not_started","runtime":"unavailable"}));
+        assert_eq!(response["fault"]["phase"], "render");
+        assert_eq!(session.models.load(std::sync::atomic::Ordering::SeqCst), 0,
+            "the refused callback produced no model side effect");
+        let data = lock(&host.client_ui.data);
+        assert!(data.instances[owner].worker_fault.is_some());
+        assert!(data.instances[sibling].worker_fault.is_some());
     }
 
     #[tokio::test]
