@@ -1,0 +1,26 @@
+name: Isolated Windows job-time probe
+on:
+  push:
+    branches: [codex/windows-job-time-probe-20261028]
+permissions:
+  contents: read
+jobs:
+  native-probe:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile and run standalone native probe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host "commit=$env:GITHUB_SHA runner=$env:RUNNER_OS image=$env:ImageOS imageVersion=$env:ImageVersion"
+          Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,BuildNumber | Format-List
+          rustc -Vv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustc --edition 2021 -O probe.rs -o probe.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\probe.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
