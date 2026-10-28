@@ -67,7 +67,7 @@ pub async fn kill_tree_with_grace(pid: u32, grace: Duration) -> Result<(), Proce
 
     tokio::time::sleep(grace).await;
 
-    // SIGKILL escalation. Tolerate ESRCH / EPERM — the group is gone.
+    // SIGKILL escalation. Only ESRCH means the group is no longer present.
     match killpg(pgid, Signal::SIGKILL) {
         Ok(()) => Ok(()),
         Err(e) if group_already_gone(e) => Ok(()),
@@ -75,13 +75,12 @@ pub async fn kill_tree_with_grace(pid: u32, grace: Duration) -> Result<(), Proce
     }
 }
 
-/// `killpg` returns either `ESRCH` (no such group) or, on some kernels
-/// (notably macOS / BSD) `EPERM` once every member of the group has been
-/// reaped and the pgid is no longer owned by any process. Both mean "the
-/// group is already gone" — which is exactly the post-condition the
-/// caller wants from a tree-kill — and we treat them identically.
+/// `ESRCH` indicates that this process group is absent at signal time.
+/// `EPERM` may instead mean that the group still exists but cannot be signaled,
+/// so it is never evidence that the group has exited.
+/// An absent process group is not proof that all descendants have exited.
 fn group_already_gone(e: nix::errno::Errno) -> bool {
-    matches!(e, nix::errno::Errno::ESRCH | nix::errno::Errno::EPERM)
+    matches!(e, nix::errno::Errno::ESRCH)
 }
 
 fn pgid_from(pid: u32) -> Result<Pid, ProcessError> {
