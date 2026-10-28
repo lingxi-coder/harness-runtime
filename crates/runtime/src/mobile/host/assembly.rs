@@ -49,7 +49,8 @@ use super::{
     resolve_default_model_ref, settings_commands, settle_mobile_loop_turn, ActiveTurn,
     MobileBuildError, MobileConfig, MobileEngineError, MobileEngineHandle, MobileMcpReloadJob,
     MobileMediaAgentHandoffQueue, MobileMsgQueueInput, MobileOAuthManager, MobileRuntime,
-    MobileSessionAgentObserver, MobileWakeupDelivery, TurnLifecycleListener, MOBILE_CRON_HANDLES,
+    MobileSessionAgentObserver, MobileWakeupDelivery, ModeEventListener, TurnLifecycleListener,
+    MOBILE_CRON_HANDLES,
 };
 
 // Recompute from admitted mobile settings for each plugin-owner connect. This
@@ -2430,7 +2431,6 @@ pub(super) async fn build_mobile_inner_with_ask(
             .with_host(app_host),
         ));
     }
-    crate::mobile::apply_mobile_session_tool_policy(&mut tools, cfg.session_mode);
     let device_skill_tools = tools
         .available_tools(&tool_api::tool_trait::ToolStaticContext::default())
         .into_iter()
@@ -2438,12 +2438,10 @@ pub(super) async fn build_mobile_inner_with_ask(
         .collect::<Vec<_>>();
     let live_mcp_tool_ctx = tool_ctx.clone();
     let initial_mcp_tool_ctx = live_mcp_tool_ctx.clone();
-    if cfg.session_mode == session::jsonl::SessionMode::Code {
-        for (connection_id, mcp_tools) in
-            tool_mcp::build_registered_mcp_tools(&mcp_registry, tool_ctx).await
-        {
-            tools.register_mcp_tools(connection_id, mcp_tools);
-        }
+    for (connection_id, mcp_tools) in
+        tool_mcp::build_registered_mcp_tools(&mcp_registry, tool_ctx).await
+    {
+        tools.register_mcp_tools(connection_id, mcp_tools);
     }
     let tools = Arc::new(tools);
     let child_skill_listing_provider = wired_skill_listing_provider.clone();
@@ -2470,7 +2468,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     // mobile ToolRegistry in sync with the same generation-checked refresh path
     // used by desktop; otherwise settings changes and list_changed events only
     // update the MCP registry while the model continues seeing stale tools.
-    if cfg.session_mode == session::jsonl::SessionMode::Code {
+    {
         let mcp_registry_weak = Arc::downgrade(&mcp_registry);
         let live_tools = tools.clone();
         tokio::spawn(async move {
@@ -2705,6 +2703,7 @@ pub(super) async fn build_mobile_inner_with_ask(
     .with_instruction_user_email_provider(instruction_identity.clone())
     .with_workflow_size_guideline(workflow_size_guideline_state)
     .with_session_id(main_session_id)
+    .with_conversation_mode(cfg.session_mode)
     // P0.2: attach the SAME `HookRegistry` the executor reads so `list_hooks`
     // reports the loaded settings hooks (the executor fires against it; this
     // exposes it for inspection — mobile sibling of desktop's
@@ -3152,7 +3151,7 @@ pub(super) async fn build_mobile_inner_with_ask(
             })
         }))
         .with_skill_usage_session(skill_usage_session);
-    let dispatcher = if cfg.session_mode == session::jsonl::SessionMode::Code {
+    let dispatcher = {
         let background_command_handle = handle.clone();
         dispatcher
             .with_background_prompt_launcher(Arc::new(move |prompt| {
@@ -3178,12 +3177,8 @@ pub(super) async fn build_mobile_inner_with_ask(
                         .map_err(|error| error.to_string())
                 })
             }))
-            // (#3) Real embedded-shell expansion for markdown/plugin + builtin
-            // `InjectMessage` prompts. Non-MCP only. Chat deliberately leaves
-            // both execution providers unwired as a second enforcement layer.
+            // The provider checks the actual host shell and permission policy.
             .with_shell_expansion(shell_expansion_provider)
-    } else {
-        dispatcher
     };
     // MP-1 (mobile sibling of `harness_runtime::desktop::build`): hand the dispatcher the
     // enforcing gate so each input's frontmatter `disallowed-tools` reaches
@@ -3358,7 +3353,6 @@ pub(super) async fn build_mobile_inner_with_ask(
         permission_gate: adapter_gate,
         permission_policy_gate,
         requested_permission_mode: Arc::new(StdMutex::new(requested_permission_mode)),
-        session_mode: cfg.session_mode,
         session_default_permission_mode: initial_permission_mode,
         listener,
         event_sink,
@@ -3496,6 +3490,7 @@ fn build_mobile_engine_on_worker(
     let durable_turns = Arc::new(DurableTurnStore::new(lingxi_home.join("mobile-turns")));
     // Taken before the wrap: the gate below is what a connection-scoped notice
     // has to get past, so it cannot be reached through the wrapped listener.
+    let listener = ModeEventListener::new(listener, &runtime);
     let connection_sink = ListenerSink::arc(listener.clone());
     let media_agent_handoffs = Arc::new(MobileMediaAgentHandoffQueue::default());
     let lifecycle_listener: Arc<dyn ClientEventListener> =

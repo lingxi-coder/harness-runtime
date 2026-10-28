@@ -100,6 +100,21 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
     let original = runtime.active_session_uuid.lock().unwrap().clone();
     let target = lingxi_core::types::SessionId::new();
     let target_uuid = target.as_uuid().to_string();
+    let target_path = session::jsonl::session_path(&home, &cwd, &target_uuid);
+    let target_writer = session::jsonl::JsonlWriter::new(
+        target_path,
+        Arc::new(platform_posix_minimal::PosixFileSystem::new(
+            temp.path().to_path_buf(),
+        )),
+    );
+    target_writer
+        .append_mobile_empty_session(&target_uuid, "Scheduled", &cwd)
+        .await
+        .unwrap();
+    target_writer
+        .append_session_mode_selection(&target_uuid, "chat", 4, 3)
+        .await
+        .unwrap();
     for (task_id, session_uuid, run_id) in [
         ("wold00001", original, "wf_old"),
         ("wnew00001", target_uuid.clone(), "wf_new"),
@@ -132,6 +147,13 @@ async fn retargeted_cron_runtime_rebinds_workflows_permissions_and_transcript_id
         .await
         .unwrap();
     runtime.retarget_session_context(&home, target, &cwd).await;
+    let restored = runtime
+        .orchestrator
+        .restore_conversation_mode(session::jsonl::SessionMode::Chat)
+        .await
+        .unwrap();
+    assert_eq!(restored.selected, session::jsonl::SessionMode::Chat);
+    assert_eq!(restored.revision, 4);
     assert_eq!(*runtime.active_session_uuid.lock().unwrap(), target_uuid);
     assert_eq!(
         runtime.session_writer.active_path(),

@@ -42,6 +42,9 @@ pub struct BranchResult {
     pub title: String,
     /// Count of conversation messages copied into the branch.
     pub message_count: usize,
+    /// Greatest profile revision or copied skill-instruction epoch observed in
+    /// the same captured source transcript used to construct this branch.
+    pub source_context_revision_max: u64,
 }
 
 /// Why a branch could not be created.
@@ -51,6 +54,8 @@ pub enum BranchError {
     NoConversation,
     /// The source has no main-conversation messages (`"No messages to branch"`).
     NoMessages,
+    /// The source exhausted the exact integer range for a fresh profile epoch.
+    ContextEpochExhausted,
     /// A filesystem read/write failed.
     Io(std::io::Error),
 }
@@ -60,6 +65,7 @@ impl std::fmt::Display for BranchError {
         match self {
             Self::NoConversation => write!(f, "No conversation to branch"),
             Self::NoMessages => write!(f, "No messages to branch"),
+            Self::ContextEpochExhausted => write!(f, "conversation context revision exhausted"),
             Self::Io(e) => write!(f, "{e}"),
         }
     }
@@ -70,11 +76,14 @@ impl std::error::Error for BranchError {}
 ///
 /// `custom_title` is the trimmed `/branch [name]` argument (empty / `None` ⇒
 /// derive the base name from the first user message). Returns the new session
-/// id + saved title so the caller can switch into the branch.
+/// id + saved title so the caller can switch into the branch. A branch is a
+/// new task: it retains the source's selected mode but starts a fresh skill
+/// epoch, so skills can be explicitly invoked again for the new task.
 ///
 /// # Errors
 /// [`BranchError::NoConversation`] when the source file is missing/empty,
-/// [`BranchError::NoMessages`] when it holds no chain messages, and
+/// [`BranchError::NoMessages`] when it holds no chain messages,
+/// [`BranchError::ContextEpochExhausted`] when no fresh epoch exists, or
 /// [`BranchError::Io`] on any read/write failure.
 pub async fn create_branch(
     lingxi_home: &Path,
@@ -83,7 +92,44 @@ pub async fn create_branch(
     custom_title: Option<&str>,
     fs: Arc<dyn FileSystem>,
 ) -> Result<BranchResult, BranchError> {
-    create_branch_in(lingxi_home, cwd, cwd, source_session_id, custom_title, fs).await
+    create_branch_in(
+        lingxi_home,
+        cwd,
+        cwd,
+        source_session_id,
+        custom_title,
+        None,
+        fs,
+    )
+    .await
+}
+
+/// Create a branch with a new, independent conversation profile. Its copied
+/// skill instructions retain their transcript provenance but are retired by
+/// a fresh epoch newer than every captured source revision and skill epoch.
+/// The profile and copied history are published atomically as one file.
+///
+/// # Errors
+/// Returns the same errors as [`create_branch`], or
+/// [`BranchError::ContextEpochExhausted`] if no fresh exact epoch is available.
+pub async fn create_branch_with_mode(
+    lingxi_home: &Path,
+    cwd: &str,
+    source_session_id: Uuid,
+    custom_title: Option<&str>,
+    mode: crate::jsonl::SessionMode,
+    fs: Arc<dyn FileSystem>,
+) -> Result<BranchResult, BranchError> {
+    create_branch_in(
+        lingxi_home,
+        cwd,
+        cwd,
+        source_session_id,
+        custom_title,
+        Some(mode),
+        fs,
+    )
+    .await
 }
 
 /// Fork `source_session_id` (living under `source_cwd`'s project dir) into a
@@ -120,6 +166,7 @@ pub async fn create_branch_to_cwd(
         target_cwd,
         source_session_id,
         custom_title,
+        None,
         fs,
     )
     .await
@@ -131,6 +178,7 @@ async fn create_branch_in(
     target_cwd: &str,
     source_session_id: Uuid,
     custom_title: Option<&str>,
+    mode: Option<crate::jsonl::SessionMode>,
     fs: Arc<dyn FileSystem>,
 ) -> Result<BranchResult, BranchError> {
     let cwd = source_cwd;
@@ -152,6 +200,22 @@ async fn create_branch_in(
     if routed.messages_in_order.is_empty() {
         return Err(BranchError::NoMessages);
     }
+    let src_sid = source_session_id.to_string();
+    let source_context_revision_max =
+        source_context_revision_max(&content, &src_sid, &routed.messages_in_order);
+    let mode = mode
+        .or_else(|| {
+            routed
+                .session_modes
+                .get(&src_sid)
+                .and_then(|value| crate::jsonl::SessionMode::from_str(value))
+        })
+        .unwrap_or_default();
+    // Profile revisions are represented as exactly round-trippable JSON
+    // numbers, and an explicit fork needs a strictly newer instruction epoch.
+    if source_context_revision_max >= (1_u64 << 53) - 1 {
+        return Err(BranchError::ContextEpochExhausted);
+    }
 
     // 3. Base name = provided title, else the first-prompt derivation
     //    (`deriveFirstPrompt`). Then append the collision-numbered "(Branch)".
@@ -166,7 +230,6 @@ async fn create_branch_in(
     //    sidechain flag, plus a `forkedFrom` back-reference to the origin.
     let new_session_id = Uuid::new_v4();
     let new_sid = new_session_id.to_string();
-    let src_sid = source_session_id.to_string();
     let carried_replacements = carried_content_replacements(&content, src_sid.as_str());
     let mut parent: Option<String> = None;
     let message_count = routed.messages_in_order.len();
@@ -278,6 +341,20 @@ async fn create_branch_in(
         }))
         .expect("custom-title serializes"),
     );
+    let epoch = source_context_revision_max + 1;
+    lines.push(
+        serde_json::to_string(&json!({
+            "type": "session-mode",
+            "sessionId": new_sid,
+            "sessionMode": mode.as_str(),
+            "contextRevision": epoch,
+            "profileEpoch": epoch,
+            "admittedMode": mode.as_str(),
+            "admittedEpoch": epoch,
+            "pending": false,
+        }))
+        .expect("fork profile serializes"),
+    );
     // 6. Write the branch file (0o600 like claude). Same-cwd: the project
     //    dir already exists (it holds the source we just read). Cross-cwd:
     //    a fresh app workspace has no catalog dir yet — create it.
@@ -290,9 +367,39 @@ async fn create_branch_in(
         }
     }
     let body = format!("{}\n", lines.join("\n"));
-    tokio::fs::write(&dst_path, body.as_bytes())
-        .await
-        .map_err(BranchError::Io)?;
+    // Publish the copied messages and fresh profile together. A crash or a
+    // failed append must never expose a fork with the source's old epoch.
+    let root = dst_path
+        .parent()
+        .ok_or_else(|| BranchError::Io(std::io::Error::other("branch has no parent")))?
+        .to_owned();
+    let file = dst_path
+        .file_name()
+        .ok_or_else(|| BranchError::Io(std::io::Error::other("branch has no filename")))?
+        .to_owned();
+    tokio::task::spawn_blocking(move || {
+        use lingxi_core::host::rooted_fs::{
+            atomic_write_pinned, root_identity, AtomicWriteOptions,
+        };
+        let identity =
+            root_identity(&root).map_err(|error| std::io::Error::other(error.to_string()))?;
+        atomic_write_pinned(
+            &root,
+            Path::new(&file),
+            body.as_bytes(),
+            AtomicWriteOptions {
+                overwrite: false,
+                create_parents: false,
+                dir_mode: 0o700,
+                file_mode: 0o600,
+            },
+            &identity,
+        )
+        .map_err(|error| std::io::Error::other(error.to_string()))
+    })
+    .await
+    .map_err(|error| BranchError::Io(std::io::Error::other(error.to_string())))?
+    .map_err(BranchError::Io)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -316,7 +423,44 @@ async fn create_branch_in(
         source_session_id,
         title,
         message_count,
+        source_context_revision_max,
     })
+}
+
+fn source_context_revision_max(
+    content: &str,
+    session_id: &str,
+    messages: &[crate::jsonl::JsonlMessage],
+) -> u64 {
+    let metadata_max = content
+        .lines()
+        .filter_map(|line| parse_exact_json(line).ok())
+        .filter_map(|entry| {
+            let value = entry.value;
+            if value.get("type").and_then(serde_json::Value::as_str) != Some("session-mode")
+                || value.get("sessionId").and_then(serde_json::Value::as_str) != Some(session_id)
+            {
+                return None;
+            }
+            ["contextRevision", "profileEpoch", "admittedEpoch"]
+                .into_iter()
+                .filter_map(|key| value.get(key).and_then(serde_json::Value::as_u64))
+                .max()
+        })
+        .max()
+        .unwrap_or(0);
+    let skill_max = messages
+        .iter()
+        .filter_map(|message| message.origin_projection.as_ref())
+        .filter(|origin| origin.string_at("/type") == Some("skill_activation"))
+        .filter_map(|origin| origin.number_at("/context_epoch"))
+        .filter(|epoch| epoch.is_finite() && *epoch >= 0.0 && epoch.fract() == 0.0)
+        // Rust's float-to-integer cast saturates, so an out-of-range origin
+        // becomes an exhaustion error before a branch file is created.
+        .map(|epoch| epoch as u64)
+        .max()
+        .unwrap_or(0);
+    metadata_max.max(skill_max)
 }
 
 #[derive(Default)]
@@ -461,6 +605,119 @@ mod tests {
         });
         value[field] = json!(payload);
         value.to_string()
+    }
+
+    #[tokio::test]
+    async fn profiled_branch_uses_newer_captured_epoch_and_rejects_exhaustion() {
+        let home = tempfile::tempdir().unwrap();
+        let cwd = "/profiled-branch";
+        let src = Uuid::new_v4();
+        let src_sid = src.to_string();
+        let source = session_path(home.path(), cwd, &src_sid);
+        tokio::fs::create_dir_all(source.parent().unwrap())
+            .await
+            .unwrap();
+        let mut message: serde_json::Value = serde_json::from_str(&user_line(
+            "11111111-1111-1111-1111-111111111111",
+            &src_sid,
+            None,
+            "copied instruction",
+        ))
+        .unwrap();
+        message["origin"] = json!({"type":"skill_activation", "context_epoch":7});
+        let metadata = |revision| {
+            json!({"type":"session-mode", "sessionId":&src_sid,
+                "sessionMode":"code", "contextRevision":revision})
+        };
+        let write_source = |revision| format!("{message}\n{}\n", metadata(revision));
+        let fs: Arc<dyn FileSystem> = Arc::new(PosixFileSystem::new(home.path().to_path_buf()));
+
+        tokio::fs::write(&source, write_source(4)).await.unwrap();
+        let branch = create_branch_with_mode(
+            home.path(),
+            cwd,
+            src,
+            None,
+            crate::jsonl::SessionMode::Chat,
+            fs.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(branch.source_context_revision_max, 7);
+        let branch_raw = tokio::fs::read_to_string(session_path(
+            home.path(),
+            cwd,
+            &branch.new_session_id.to_string(),
+        ))
+        .await
+        .unwrap();
+        let mode = branch_raw
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+            .find(|row| row["type"] == "session-mode")
+            .unwrap();
+        assert_eq!(mode["sessionMode"], "chat");
+        assert_eq!(mode["contextRevision"], 8);
+        assert_eq!(mode["profileEpoch"], 8);
+        assert_eq!(mode["admittedEpoch"], 8);
+        assert_eq!(mode["pending"], false);
+        assert!(branch_raw.contains("copied instruction"));
+
+        tokio::fs::write(&source, write_source(11)).await.unwrap();
+        let branch = create_branch_with_mode(
+            home.path(),
+            cwd,
+            src,
+            None,
+            crate::jsonl::SessionMode::Chat,
+            fs.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(branch.source_context_revision_max, 11);
+        let mut old_message = message.clone();
+        old_message["origin"]["context_epoch"] = json!(0);
+        tokio::fs::write(&source, format!("{old_message}\n{}\n", metadata(3)))
+            .await
+            .unwrap();
+        let generic = create_branch(home.path(), cwd, src, None, fs.clone())
+            .await
+            .unwrap();
+        assert_eq!(generic.source_context_revision_max, 3);
+        let generic_raw = tokio::fs::read_to_string(session_path(
+            home.path(),
+            cwd,
+            &generic.new_session_id.to_string(),
+        ))
+        .await
+        .unwrap();
+        let generic_mode = generic_raw
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|row| row["type"] == "session-mode")
+            .unwrap();
+        assert_eq!(generic_mode["sessionMode"], "code");
+        assert_eq!(generic_mode["profileEpoch"], 4);
+        assert!(generic_raw.contains("copied instruction"));
+        tokio::fs::write(&source, write_source((1_u64 << 53) - 1))
+            .await
+            .unwrap();
+        let files_before = std::fs::read_dir(source.parent().unwrap()).unwrap().count();
+        let error = create_branch_with_mode(
+            home.path(),
+            cwd,
+            src,
+            None,
+            crate::jsonl::SessionMode::Chat,
+            fs,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, BranchError::ContextEpochExhausted));
+        assert_eq!(
+            std::fs::read_dir(source.parent().unwrap()).unwrap().count(),
+            files_before
+        );
     }
 
     #[tokio::test]
@@ -624,8 +881,8 @@ mod tests {
             .await
             .unwrap();
         let lines: Vec<&str> = written.lines().collect();
-        // 2 conversation lines + 1 custom-title line.
-        assert_eq!(lines.len(), 3);
+        // 2 conversation lines + custom-title + fresh profile.
+        assert_eq!(lines.len(), 4);
         let first = read_row(lines[0]);
         assert_eq!(first.session_id, new_sid);
         assert_eq!(first.parent_uuid, None, "first entry re-roots the chain");
@@ -719,7 +976,7 @@ mod tests {
             .await
             .unwrap();
         let lines: Vec<&str> = written.lines().collect();
-        assert_eq!(lines.len(), 7);
+        assert_eq!(lines.len(), 8);
 
         let suppression: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(suppression["type"], "history-suppression");
@@ -825,7 +1082,7 @@ mod tests {
         let dst = session_path(&home, target_cwd, &new_sid);
         let written = tokio::fs::read_to_string(&dst).await.expect("fork exists");
         let lines: Vec<&str> = written.lines().collect();
-        assert_eq!(lines.len(), 3);
+        assert_eq!(lines.len(), 4);
         for line in &lines[..2] {
             let entry = read_row(line);
             assert_eq!(entry.session_id, new_sid);

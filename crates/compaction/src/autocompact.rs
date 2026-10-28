@@ -453,10 +453,16 @@ impl Autocompactor {
                         false,
                     );
                 }
+                // Host-injected skill bodies are not human requests. Exclude
+                // them only from the summarizer's view, preserving the source
+                // history and the original split/tail for restoration. Current
+                // effective skill instructions are reattached independently.
+                let summary_context =
+                    crate::prompt::without_skill_activation_instructions(&summarize);
                 cache_params.fork_context_messages = if stripped_media {
-                    crate::strip_media::strip_images_from_messages(summarize.clone())
+                    crate::strip_media::strip_images_from_messages(summary_context)
                 } else {
-                    summarize.clone()
+                    summary_context
                 };
                 let req = ForkedAgentRequest {
                     api_attempts_left: api_attempts_left.clone(),
@@ -1294,6 +1300,33 @@ mod tests {
             Some("PARENT SYSTEM PROMPT")
         );
         // Usage from the forked call is carried through.
+    }
+
+    #[tokio::test]
+    async fn compactor_excludes_only_host_marked_skill_instructions_from_summary() {
+        let (compactor, client) = wired("<summary>ok</summary>", vec![]).await;
+        let human = user_msg("Keep the database untouched");
+        let body = "Do a one-time setup";
+        let skill = user_msg(body).with_origin(crate::invoked_skills::skill_activation_origin(4));
+        let quote = user_msg(body);
+        let history = vec![human.clone(), skill, quote.clone()];
+        compactor
+            .compact(history.clone(), None)
+            .await
+            .expect("wired compact succeeds");
+
+        let sent = client.seen.lock().unwrap().clone().expect("client called");
+        assert_eq!(
+            sent.messages.len(),
+            3,
+            "human, quoted evidence, and compact prompt"
+        );
+        assert_eq!(sent.messages[0], human);
+        assert_eq!(sent.messages[1], quote);
+        assert!(sent.messages[2]
+            .text_content()
+            .contains("Provenance for this summary:"));
+        assert_eq!(history.len(), 3, "the source history remains unchanged");
     }
 
     #[tokio::test]

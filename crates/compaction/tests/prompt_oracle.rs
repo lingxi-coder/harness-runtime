@@ -1,6 +1,9 @@
 //! Regression tests for prompt oracle.
 
-use compaction::{format_compact_summary, get_compact_prompt, get_compact_user_summary_message};
+use compaction::prompt::COMPACT_SUMMARY_PROVENANCE_GUIDANCE;
+use compaction::{
+    format_compact_summary, get_compact_prompt, get_compact_user_summary_message, NO_TOOLS_TRAILER,
+};
 use serde_json::Value;
 
 #[test]
@@ -9,9 +12,14 @@ fn oracle_261_prompt_and_continuation_bytes() {
         serde_json::from_str(include_str!("fixtures/claude_2_1_261_prompt.json")).unwrap();
     assert_eq!(compaction::BASE_COMPACT_PROMPT, oracle["basePrompt"]);
     for case in oracle["prompts"].as_array().unwrap() {
+        let oracle_prompt = case["expected"].as_str().unwrap();
+        let oracle_before_trailer = oracle_prompt.strip_suffix(NO_TOOLS_TRAILER).unwrap();
+        let expected = format!(
+            "{oracle_before_trailer}{COMPACT_SUMMARY_PROVENANCE_GUIDANCE}{NO_TOOLS_TRAILER}"
+        );
         assert_eq!(
             get_compact_prompt(case["custom"].as_str()),
-            case["expected"].as_str().unwrap(),
+            expected,
             "custom instructions: {:?}",
             case["custom"]
         );

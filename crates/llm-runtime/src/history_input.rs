@@ -85,11 +85,26 @@ fn object_payload(fields: Vec<(&str, wire::JsonPayload)>) -> Result<wire::JsonPa
 
 fn computer_tool_ids(messages: &[Message]) -> Result<BTreeSet<String>, LlmError> {
     let mut ids = BTreeSet::new();
-    if crate::computer::uses_auxiliary_history_projection() {
+    let ordinary = crate::computer::uses_ordinary_computer_history();
+    if crate::computer::uses_auxiliary_history_projection() && !ordinary {
         return Ok(ids);
     }
+    let abandoned = if ordinary {
+        abandoned_computer_calls(messages)?
+    } else {
+        BTreeSet::new()
+    };
     for item in messages.iter().flat_map(|message| &message.content) {
         if let Some(("lingxi_computer_binding", value, _)) = computer_marker(item) {
+            if ordinary {
+                let response = value.string_at("/provider_response_id");
+                let call = value.string_at("/call/context/call_id");
+                if !response.zip(call).is_some_and(|(response, call)| {
+                    abandoned.contains(&(response.to_owned(), call.to_owned()))
+                }) {
+                    continue;
+                }
+            }
             let mapped: Vec<String> = payload_field(
                 value,
                 "/tool_use_ids",
@@ -156,7 +171,9 @@ fn acknowledged_computer_receipts(
 
 fn abandoned_computer_calls(messages: &[Message]) -> Result<BTreeSet<(String, String)>, LlmError> {
     let mut ids = BTreeSet::new();
-    if crate::computer::uses_auxiliary_history_projection() {
+    if crate::computer::uses_auxiliary_history_projection()
+        && !crate::computer::uses_ordinary_computer_history()
+    {
         return Ok(ids);
     }
     for block in messages.iter().flat_map(|message| &message.content) {
@@ -1276,6 +1293,7 @@ mod tests {
                         continuation: continuation.clone(),
                         binding: None,
                         submission: None,
+                        ordinary_history: false,
                     }),
                     async {
                         let (request, _) = crate::computer::without_computer_request(|| {
@@ -1312,6 +1330,89 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn profile_boundary_replays_ordinary_computer_history_without_continuation() {
+        for protocol in [
+            wire::ProtocolFamily::OpenAiResponses,
+            wire::ProtocolFamily::GeminiInteractions,
+        ] {
+            let model = match protocol {
+                wire::ProtocolFamily::OpenAiResponses => "gpt-5.5",
+                _ => "gemini-3.8-flash",
+            };
+            let (call, receipt, _) = native_round(protocol, "old-response", "desktop result");
+            let body = crate::computer::scope_computer_request(
+                Some(crate::computer::ComputerRequestProjection {
+                    native: None,
+                    continuation: None,
+                    binding: None,
+                    submission: None,
+                    ordinary_history: true,
+                }),
+                async {
+                    let (request, _) = history_input(model, &[call, receipt], &[], &[], protocol)
+                        .expect("ordinary replay must retain the completed desktop exchange");
+                    encoded_body(&request, protocol).to_string()
+                },
+            )
+            .await;
+            assert!(body.contains("synthetic-old-response"), "{body}");
+            assert!(body.contains("desktop result"), "{body}");
+            for forbidden in [
+                "previous_response_id",
+                "previous_interaction_id",
+                "lingxi_computer",
+                "reused-call",
+            ] {
+                assert!(!body.contains(forbidden), "{body}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_boundary_omits_abandoned_unpaired_computer_call() {
+        let protocol = wire::ProtocolFamily::OpenAiResponses;
+        let (call, _, _) = native_round(protocol, "old-response", "unused");
+        let abandoned = Message {
+            api_output_config: None,
+            role: "user".into(),
+            content: vec![
+                ContentBlock::ProviderContent {
+                    protocol: "open_ai_responses".into(),
+                    value: host_payload(json!({
+                        "type":"lingxi_computer_abandoned",
+                        "call_ids":["reused-call"],
+                        "call_identities":[["old-response","reused-call"]],
+                        "reason":"Outcome unknown; observe again"
+                    })),
+                },
+                ContentBlock::Text {
+                    text: "Outcome unknown; observe again".into(),
+                    cache_control: None,
+                    citations: None,
+                },
+            ],
+        };
+        let body = crate::computer::scope_computer_request(
+            Some(crate::computer::ComputerRequestProjection {
+                native: None,
+                continuation: None,
+                binding: None,
+                submission: None,
+                ordinary_history: true,
+            }),
+            async {
+                let (request, _) =
+                    history_input("gpt-5.5", &[call, abandoned], &[], &[], protocol).unwrap();
+                encoded_body(&request, protocol).to_string()
+            },
+        )
+        .await;
+        assert!(body.contains("Outcome unknown; observe again"));
+        assert!(!body.contains("synthetic-old-response"), "{body}");
+        assert!(!body.contains("previous_response_id"), "{body}");
     }
 
     fn assert_current_receipt(body: &Value, protocol: wire::ProtocolFamily) {
@@ -1408,6 +1509,7 @@ mod tests {
                     continuation: continuation.clone(),
                     binding: None,
                     submission: None,
+                    ordinary_history: false,
                 }),
                 async { history_input(&model, &messages, &[], &[], protocol).unwrap() },
             )
@@ -1470,6 +1572,7 @@ mod tests {
                     continuation: continuation.clone(),
                     binding: None,
                     submission: None,
+                    ordinary_history: false,
                 }),
                 async { history_input(model, &messages, &[], &[], protocol).unwrap() },
             )
@@ -1946,6 +2049,7 @@ mod tests {
                 continuation: Some(continuation),
                 binding: None,
                 submission: None,
+                ordinary_history: false,
             }),
             async {
                 history_input(
@@ -2029,6 +2133,7 @@ mod tests {
                 continuation: Some(continuation.clone()),
                 binding: None,
                 submission: None,
+                ordinary_history: false,
             }),
             async {
                 history_input(

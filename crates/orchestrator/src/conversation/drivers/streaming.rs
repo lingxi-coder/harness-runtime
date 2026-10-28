@@ -4220,6 +4220,8 @@ impl StreamingTurnDriver<'_> {
                         },
                     )
                     .await;
+                    orch.stamp_skill_prompt_activation(&input, &mut message)
+                        .await;
                     submissions.push((input, message));
                 }
                 submissions

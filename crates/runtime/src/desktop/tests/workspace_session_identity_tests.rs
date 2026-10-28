@@ -92,6 +92,30 @@ impl lingxi_core::host::PermissionGate for ColdResumePermissionGate {
     }
 }
 
+#[cfg(unix)]
+struct ResolvedModeGate(std::sync::RwLock<String>);
+
+#[cfg(unix)]
+#[async_trait::async_trait]
+impl lingxi_core::host::PermissionGate for ResolvedModeGate {
+    async fn check(
+        &self,
+        _: &str,
+        _: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    ) -> lingxi_core::host::PermissionDecision {
+        lingxi_core::host::PermissionDecision::Allow
+    }
+
+    async fn set_permission_mode(&self, mode: &str) -> Result<(), String> {
+        *self.0.write().unwrap() = mode.to_owned();
+        Ok(())
+    }
+
+    fn permission_mode(&self) -> Option<String> {
+        Some(self.0.read().unwrap().clone())
+    }
+}
+
 #[tokio::test]
 async fn captured_cold_history_waits_for_transport_before_dispatching_deferred_tools() {
     use super::{
@@ -194,9 +218,7 @@ async fn selected_cold_snapshot_is_hydrated_before_session_start_appends() {
         configure_session_hook_root, hydrate_captured_session_before_start, DesktopConfig,
         DesktopSessionResumeSnapshot,
     };
-    use orchestrator::test_support::{
-        MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
-    };
+    use orchestrator::test_support::{MockApiClient, MockOutputStream, StaticMemoryProvider};
 
     let root = tempfile::tempdir().unwrap();
     let launch = root.path().join("launch");
@@ -219,11 +241,16 @@ async fn selected_cold_snapshot_is_hydrated_before_session_start_appends() {
     );
     std::fs::create_dir_all(unselected.parent().unwrap()).unwrap();
     let content = format!(
-        "{}\n",
+        "{}\n{}\n",
         serde_json::json!({
             "type":"user", "uuid":uuid, "sessionId":session_id.as_uuid(),
             "parentUuid":null, "cwd":target,
             "message":{"role":"user","content":"selected-history"}
+        }),
+        serde_json::json!({
+            "type":"session-mode", "sessionId":session_id.as_uuid(),
+            "sessionMode":"chat", "contextRevision":1, "profileEpoch":1,
+            "admittedMode":"chat", "admittedEpoch":1, "pending":false
         }),
     );
     std::fs::write(&selected, &content).unwrap();
@@ -244,6 +271,8 @@ async fn selected_cold_snapshot_is_hydrated_before_session_start_appends() {
             source_session_id: session_id.as_uuid().to_string(),
             content: content.clone().into(),
         }),
+        permission_mode: permission::PermissionMode::Auto,
+        permission_mode_cli_explicit: true,
         ..Default::default()
     };
     let input_path = root.path().join("hook-input.json");
@@ -292,7 +321,7 @@ async fn selected_cold_snapshot_is_hydrated_before_session_start_appends() {
         Arc::new(MockApiClient::new(Vec::new())),
         Arc::new(tool_api::ToolRegistry::new()),
         hooks,
-        Arc::new(NoOpPermissionGate),
+        Arc::new(ResolvedModeGate(std::sync::RwLock::new("plan".into()))),
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         target.clone(),
@@ -322,8 +351,19 @@ async fn selected_cold_snapshot_is_hydrated_before_session_start_appends() {
     .unwrap();
     assert_eq!(source, "resume");
     assert_eq!(
+        orchestrator.permission_mode().as_deref(),
+        Some("plan"),
+        "resume retains the resolved gate mode rather than raw configuration"
+    );
+    assert_eq!(
         orchestrator.session().lock().await.history[0].text_content(),
         "selected-history"
+    );
+    let mode = lingxi_core::host::OrchestratorHandle::conversation_mode(&orchestrator).await;
+    assert_eq!(
+        mode.active,
+        lingxi_core::host::session_context::ConversationMode::Chat,
+        "the captured profile is active before SessionStart hooks"
     );
     let effects = orchestrator.fire_session_start(source).await;
     assert!(effects.initial_user_message.is_some());

@@ -129,6 +129,27 @@ pub struct SkillRestoreCandidate {
     pub content: Utf16JsonProjection,
     /// When the skill was last invoked; restoration sorts descending on this.
     pub invoked_at_ms: i64,
+    /// Registry activation that produced this snapshot. `None` is for callers
+    /// providing standalone candidates without a live registry entry.
+    pub activation_id: Option<u64>,
+}
+
+fn skill_activation_is_current(skill: &SkillRestoreCandidate) -> bool {
+    skill
+        .activation_id
+        .is_none_or(|id| crate::invoked_skills::is_effective_activation(&skill.key, id))
+}
+
+fn write_back_skill_candidate(
+    skill: &SkillRestoreCandidate,
+    content: &Utf16JsonProjection,
+) -> bool {
+    if let Some(id) = skill.activation_id {
+        crate::invoked_skills::write_back_if_current(&skill.key, id, content)
+    } else {
+        crate::invoked_skills::write_back(&skill.key, content);
+        true
+    }
 }
 
 /// An already-attached item consulted by `LQn` when deduping a skill's content
@@ -362,10 +383,9 @@ pub fn restore_post_compact_files(
 /// 6. On a kept-and-truncated candidate (`u !== content`, not a body match),
 ///    persist the truncated content back to the registry (`n_n(key,u)`).
 ///
-/// The write-backs mutate the process-global registry via
-/// [`crate::invoked_skills::write_back`] — a no-op for candidates whose key is
-/// not in the registry (e.g. the pure unit tests), so the selection/budget logic
-/// stays testable without a live registry.
+/// Registry-backed snapshots are discarded if their activation has expired or
+/// been replaced; write-backs also check the activation identity before mutating
+/// a row. Standalone candidates can be tested without a live registry.
 #[must_use]
 pub fn restore_post_compact_skills(
     candidates: Vec<SkillRestoreCandidate>,
@@ -377,6 +397,9 @@ pub fn restore_post_compact_skills(
     let mut running = 0u64;
     let mut out = Vec::new();
     for skill in sorted {
+        if !skill_activation_is_current(&skill) {
+            continue;
+        }
         // `if(!a.content)continue;` — skip cleared/empty registry rows.
         if skill
             .content
@@ -401,15 +424,20 @@ pub fn restore_post_compact_skills(
         // registry content (unless a body match) and DROP (do not truncate-to-fit).
         if running.saturating_add(cost) > POST_COMPACT_SKILLS_TOKEN_BUDGET {
             if !is_body {
-                crate::invoked_skills::write_back(&skill.key, &root_string_from_units(Vec::new()));
+                write_back_skill_candidate(&skill, &root_string_from_units(Vec::new()));
             }
             continue;
         }
         // `n+=d;` then `if(!c&&u!==a.content)n_n(s,u)` — persist truncation.
-        running = running.saturating_add(cost);
         if !is_body && !truncated.semantically_eq(&skill.content) {
-            crate::invoked_skills::write_back(&skill.key, &truncated);
+            if !write_back_skill_candidate(&skill, &truncated) {
+                continue;
+            }
         }
+        if !skill_activation_is_current(&skill) {
+            continue;
+        }
+        running = running.saturating_add(cost);
         out.push(RestoredSkill {
             name: skill.name,
             path: skill.path,
@@ -666,6 +694,7 @@ mod tests {
             path: PathBuf::from(path),
             content: source(content),
             invoked_at_ms: invoked,
+            activation_id: None,
         }
     }
 

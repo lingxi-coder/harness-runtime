@@ -128,6 +128,8 @@ impl ConversationOrchestrator {
             side_chat,
             side_chat_model_refs: None,
             config,
+            conversation_context: Mutex::new(Default::default()),
+            conversation_transition: Mutex::new(()),
             native_sandbox_host_facts_provider: None,
             native_policy_host_facts_provider: None,
             native_proactivity_state: NativeProactivityState::default(),

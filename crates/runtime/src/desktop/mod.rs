@@ -1401,18 +1401,30 @@ async fn hydrate_captured_session_before_start(
         ));
     }
     let plan_mode = orchestrator::state_from_messages(session_id, &messages).plan_mode;
+    // Assembly may already have resolved an agent, preference or auto-mode
+    // policy into a different live mode than the raw configuration value.
+    let resolved_permission_mode = orchestrator
+        .permission_mode()
+        .as_deref()
+        .map(permission::permission_mode_from_cli_string)
+        .unwrap_or(cfg.permission_mode);
     let permission_mode = if !cfg.permission_mode_cli_explicit && plan_mode {
         permission::PermissionMode::Plan
     } else {
-        cfg.permission_mode
+        resolved_permission_mode
     };
     orchestrator
         .restore_captured_session_history(
             session_id,
             &messages,
             &loaded.messages_in_order,
-            model_provenance != lingxi_core::host::ModelProvenance::ProviderCatalogTier,
+            cfg.cli_agent.is_some()
+                || model_provenance != lingxi_core::host::ModelProvenance::ProviderCatalogTier,
             permission_mode,
+            session::JsonlWriter::session_mode_transition_from_source(
+                &snapshot.content,
+                &session_id.to_string(),
+            ),
         )
         .await
         .map_err(BuildError::Orchestrator)?;

@@ -271,6 +271,22 @@ fn current_contract_index() -> ContractIndex {
         ix.insert(path.to_string(), ty.to_string());
     };
 
+    put("ClientCommand::SetSessionMode", "set_session_mode");
+    put("ClientCommand::SetSessionMode.mode", "SessionModeDto");
+    put("ClientCommand::GetContextManifest", "get_context_manifest");
+    put("ClientEvent::SessionModeChanged", "session_mode_changed");
+    put("ClientEvent::SessionModeChanged.session_id", "String");
+    put("ClientEvent::SessionModeChanged.mode", "SessionModeDto");
+    put(
+        "ClientEvent::SessionModeChanged.pending_mode",
+        "Option<SessionModeDto>",
+    );
+    put("ClientEvent::SessionModeChanged.revision", "u64");
+    put("ClientEvent::ContextManifest", "context_manifest");
+    put("ClientEvent::ContextManifest.manifest_json", "String");
+    put("SessionModeDto::Chat", "chat");
+    put("SessionModeDto::Code", "code");
+
     put("ClientCommand::SkillAdmin", "skill_admin");
     put("ClientCommand::SkillAdmin.command", "SkillAdminCommandDto");
     put("ClientCommand::FusionAdmin", "fusion_admin");
@@ -3091,7 +3107,8 @@ fn contract_index_covers_every_dto() {
         AgentDto, AuthStateDto, CheckStatusDto, CoordinatorWorkerDto, DoctorCheckDto,
         DoctorReportDto, DoctorSummaryDto, HookDto, McpServerDto, McpStatusDto, MemoryEntryDto,
         MemoryTierDto, ModelContextBudgetDto, SessionAgentMessageRowDto, SessionAgentSummaryDto,
-        SessionRowDto, SkillDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto, TaskStatusDto,
+        SessionModeDto, SessionRowDto, SkillDto, SlashCommandDto, StatusSnapshotDto, TaskRowDto,
+        TaskStatusDto,
     };
     use client::protocol::media::*;
     use client::protocol::message::{MessageBlockDto, MessageDto};
@@ -3109,6 +3126,7 @@ fn contract_index_covers_every_dto() {
     // Touch every type so removing a type breaks this compile. The values are
     // intentionally minimal; this is a coverage anchor, not a round-trip test.
     let _text = ClientTextDto::default();
+    let _session_modes = [SessionModeDto::Chat, SessionModeDto::Code];
     let _context_budget = ModelContextBudgetDto {
         policy: String::new(),
         effective_input_budget: None,
@@ -3118,6 +3136,15 @@ fn contract_index_covers_every_dto() {
         recommendation_source: None,
     };
     let _ev: Vec<ClientEvent> = vec![
+        ClientEvent::SessionModeChanged {
+            session_id: String::new(),
+            mode: SessionModeDto::Chat,
+            pending_mode: Some(SessionModeDto::Code),
+            revision: 0,
+        },
+        ClientEvent::ContextManifest {
+            manifest_json: String::new(),
+        },
         ClientEvent::WorkspaceChanged {
             state: client::protocol::listings::WorkspaceStateDto {
                 session_id: String::new(),
@@ -3527,6 +3554,10 @@ fn contract_index_covers_every_dto() {
     };
     let _skill_admin = skill_admin_command.clone();
     let _cmd: Vec<ClientCommand> = vec![
+        ClientCommand::SetSessionMode {
+            mode: SessionModeDto::Chat,
+        },
+        ClientCommand::GetContextManifest,
         ClientCommand::ListProviderCredentials {
             operation_id: 0,
             provider_ids: Vec::new(),

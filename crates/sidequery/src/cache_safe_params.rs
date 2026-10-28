@@ -74,8 +74,8 @@ pub struct CacheSafeParams {
 ///
 /// Concurrency model: writers and readers contend on a single `RwLock`,
 /// but readers clone-out so they don't hold the lock during the (potentially
-/// long-running) fork call. The atomic generation counter is incremented
-/// exactly once per successful save.
+/// long-running) fork call. The generation changes under the write lock on
+/// each save or invalidation, fencing conditional writes from older snapshots.
 pub struct CacheSafeParamsSlot {
     last: RwLock<Option<CacheSafeParams>>,
     next_generation: AtomicU64,
@@ -93,8 +93,18 @@ impl CacheSafeParamsSlot {
 
     /// Unconditional write. Assigns a fresh generation tag and stores.
     pub async fn save(&self, mut params: CacheSafeParams) {
+        let mut slot = self.last.write().await;
         params.generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
-        *self.last.write().await = Some(params);
+        *slot = Some(params);
+    }
+
+    /// Discard a captured prefix at a conversation context boundary.
+    /// In-flight forks keep their own snapshot, but conditional writes based
+    /// on it cannot republish that snapshot after the boundary.
+    pub async fn invalidate(&self) {
+        let mut slot = self.last.write().await;
+        *slot = None;
+        self.next_generation.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Returns a clone of the latest snapshot, or `None` if nothing has

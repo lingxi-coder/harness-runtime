@@ -325,7 +325,8 @@ pub fn error_kind_for(err: &OrchestratorError) -> ErrorKindDto {
         // ($X)" Display is preserved in the event's message. (client::adapter is not the
         // headless `--max-budget` path; this just keeps the match exhaustive.)
         | OrchestratorError::MaxBudgetReached { .. }
-        | OrchestratorError::MaxStructuredOutputRetries { .. } => ErrorKindDto::Internal,
+        | OrchestratorError::MaxStructuredOutputRetries { .. }
+        | OrchestratorError::ContextState(_) => ErrorKindDto::Internal,
     }
 }
 

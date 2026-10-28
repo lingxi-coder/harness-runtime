@@ -164,6 +164,60 @@ mod mod_session_turn_resume_tests {
     }
 
     #[test]
+    fn cold_resume_keeps_excluded_attachment_in_history_but_not_model_context() {
+        let session_id = Uuid::new_v4();
+        let excluded_id = Uuid::new_v4();
+        let visible_id = Uuid::new_v4();
+        let payload = serde_json::json!({"type":"environment","snapshot":{}});
+        let mut excluded = prompt_ingress_row(
+            session_id,
+            excluded_id,
+            payload.clone(),
+            "system",
+            "same evidence",
+        );
+        excluded
+            .extra
+            .set_field(
+                "isModelContextExcluded",
+                Utf16JsonProjection::from_serde_value(&serde_json::json!(true)).unwrap(),
+            )
+            .unwrap();
+        let visible =
+            prompt_ingress_row(session_id, visible_id, payload, "system", "same evidence");
+        let queued_id = MessageId::new();
+        let mut queued = prompt_ingress_row(
+            session_id,
+            Uuid::new_v4(),
+            serde_json::json!({
+                "type":"queued_command",
+                "commandMode":"prompt",
+                "prompt":"queued request",
+                "source_uuid":queued_id.to_string()
+            }),
+            "system",
+            "queued request",
+        );
+        queued
+            .extra
+            .set_field(
+                "isModelContextExcluded",
+                Utf16JsonProjection::from_serde_value(&serde_json::json!(true)).unwrap(),
+            )
+            .unwrap();
+
+        let state = state_from_messages(session_id, &[excluded, visible, queued]);
+        assert_eq!(state.history.len(), 3);
+        let model = state.model_context_history();
+        assert_eq!(model.len(), 1);
+        assert_eq!(model[0].id().as_uuid(), visible_id);
+        assert!(state
+            .model_context_excluded_messages
+            .contains(&MessageId::from_uuid(excluded_id)));
+        assert!(state.model_context_excluded_messages.contains(&queued_id));
+    }
+
+    #[test]
     fn prompt_ingress_resume_uses_rendered_roles_and_restores_listing_deltas() {
         let session_id = Uuid::new_v4();
         let environment_id = Uuid::new_v4();
@@ -1190,6 +1244,15 @@ fn build_state_from_jsonl(
                 if let Some(message) = queued_human_attachment_message_for_api(m, msg_uuid)
                     .or_else(|| hook_attachment_message_for_api(m, msg_uuid))
                 {
+                    if m.extra
+                        .at_pointer("/isModelContextExcluded")
+                        .and_then(JsonValueView::as_bool)
+                        == Some(true)
+                    {
+                        // Queued attachments may project to their source UUID,
+                        // which can differ from the attachment envelope UUID.
+                        state.model_context_excluded_messages.insert(message.id());
+                    }
                     state.history.push(message);
                 }
                 if is_compact_boundary(m) {
@@ -3237,6 +3300,7 @@ impl ConversationOrchestrator {
         entries: &[JsonlMessage],
         preserve_boot_model: bool,
         permission_mode: permission::PermissionMode,
+        profile: Option<lingxi_core::host::session_context::SessionModeTransition>,
     ) -> Result<(), String> {
         let (replayed, last_uuid, metadata) = build_state_from_jsonl(session_id, messages);
         let model_recovered = messages.iter().any(|message| {
@@ -3270,6 +3334,15 @@ impl ConversationOrchestrator {
         self.sync_active_goal_stop_hook_for_current_state().await;
         self.restore_resume_runtime_metadata(messages).await;
         self.restore_resume_prompt_metadata(entries).await;
+        // A captured resume is mounted before SessionStart and instruction
+        // hooks run. Restore the admitted profile and epoch at that boundary,
+        // including its model-only exclusions, before any hook observes it.
+        self.restore_captured_conversation_profile(
+            lingxi_core::host::session_context::ConversationMode::Code,
+            profile,
+        )
+        .await
+        .map_err(|error| error.to_string())?;
         let (model, profile) = {
             let state = self.session.lock().await;
             (state.model.clone(), state.model_profile.clone())

@@ -61,13 +61,11 @@ pub(super) fn queued_human_rendered(
     let rendered_content = if content.string_units("").is_some() {
         text
     } else {
-        let mut blocks = vec![
-            Utf16JsonProjection::object(vec![
-                ("type".into(), "text".into()),
-                ("text".into(), text),
-            ])
-            .map_err(invalid_content)?,
-        ];
+        let mut blocks = vec![Utf16JsonProjection::object(vec![
+            ("type".into(), "text".into()),
+            ("text".into(), text),
+        ])
+        .map_err(invalid_content)?];
         let count = content
             .array_len("")
             .ok_or_else(|| invalid_content("projected content must be a string or array"))?;
@@ -258,9 +256,9 @@ fn invalid_content(error: impl std::fmt::Display) -> OrchestratorError {
 mod tests {
     use super::*;
     use crate::test_support::{
-        MockApiClient, MockOutputStream, MockStreamingApiClient, NoOpPermissionGate,
-        StaticMemoryProvider, content_block_start_text, content_block_stop, message_delta_stop,
-        message_start, message_stop, noop_hook_executor, text_delta,
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, noop_hook_executor, text_delta, MockApiClient, MockOutputStream,
+        MockStreamingApiClient, NoOpPermissionGate, StaticMemoryProvider,
     };
     use lingxi_core::types::{ConversationMessage, MessageId, SessionId};
     use serde_json::Value;
@@ -298,11 +296,9 @@ mod tests {
         else {
             panic!("lost exact queued text")
         };
-        assert!(
-            utf16_code_units
-                .windows(3)
-                .any(|units| units == [0xd800, 10, b'l' as u16])
-        );
+        assert!(utf16_code_units
+            .windows(3)
+            .any(|units| units == [0xd800, 10, b'l' as u16]));
         assert!(utf16_code_units.contains(&0xdfff));
         let rendered = queued_human_rendered(&content).unwrap();
         let exact = rendered

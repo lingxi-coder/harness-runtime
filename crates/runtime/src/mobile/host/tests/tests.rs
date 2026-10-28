@@ -3163,9 +3163,10 @@ fn mobile_engine_exports_copyable_mcp_oauth_url_getters() {
 }
 
 #[test]
-fn mobile_mcp_reload_identical_config_is_read_only() {
+fn chat_mcp_listing_and_reload_keep_the_connected_server() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let cfg = test_config(tmp.path());
+    let mut cfg = test_config(tmp.path());
+    cfg.session_mode = session::jsonl::SessionMode::Chat;
     let settings_path = cfg.lingxi_home.join("settings.json");
     std::fs::create_dir_all(&cfg.lingxi_home).expect("create mobile home");
     std::fs::write(
@@ -3174,7 +3175,7 @@ fn mobile_mcp_reload_identical_config_is_read_only() {
     )
     .expect("write MCP settings");
     let cwd = cfg.cwd.clone();
-    let (handle, _listener) = build_submit_handle_with_config(cfg, tmp.path());
+    let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
     let desired = mobile_mcp_preflight(
         mcp::load_mcp_servers(&cwd.join(".mcp.json"), &settings_path, &cwd),
         handle.inner.oauth_supported,
@@ -3225,6 +3226,94 @@ fn mobile_mcp_reload_identical_config_is_read_only() {
             }
             other => panic!("unchanged MCP entry was reconciled: {other:?}"),
         }
+        handle
+            .submit(ClientCommand::RefreshListings {
+                which: vec![client::protocol::commands::ListingKindDto::Mcp],
+            })
+            .await
+            .unwrap();
+        assert!(
+            drained(&listener).await.iter().any(|event| matches!(event,
+                Ev::McpServers { servers } if servers.iter().any(|server| server.name == "remote")
+            )),
+            "Chat must expose the connected server"
+        );
+    });
+}
+
+#[test]
+fn chat_live_mcp_catalog_retires_removed_tools() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut cfg = test_config(tmp.path());
+    cfg.session_mode = session::jsonl::SessionMode::Chat;
+    let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
+    handle.runtime().block_on(async {
+        let connection_id = lingxi_core::types::McpConnectionId::new();
+        let tool = lingxi_core::host::McpToolDto {
+            full_name: "mcp__remote__lookup".into(),
+            server_name: "remote".into(),
+            tool_name: "lookup".into(),
+            description: "Look up a value".into(),
+            input_schema: Utf16JsonProjection::from_serde_value(
+                &serde_json::json!({"type": "object"}),
+            )
+            .unwrap(),
+            output_schema: None,
+            annotations: None,
+            icons: Vec::new(),
+            meta: None,
+            search_hint: None,
+            always_load: None,
+            requires_user_interaction: false,
+        };
+        handle.inner.mcp_registry.connections.write().await.insert(
+            "remote".into(),
+            mcp::connection::McpConnectionState::Cached {
+                config: mobile_reload_test_config("http://127.0.0.1:1/mcp"),
+                connection_id,
+                capabilities: lingxi_core::host::ServerCapabilitiesDto::default(),
+                negotiated: lingxi_core::host::McpNegotiatedProtocol {
+                    era: lingxi_core::host::McpProtocolEra::Legacy,
+                    version: "2025-11-25".into(),
+                },
+                server_info: None,
+                tools: vec![tool],
+                resources: Vec::new(),
+                resource_templates: Vec::new(),
+                prompts: Vec::new(),
+                cache_saved_at_ms: 0,
+                age_ms: 0,
+            },
+        );
+        let registered = tool_mcp::build_registered_mcp_tools(
+            &handle.inner.mcp_registry,
+            handle.inner.mcp_tool_context.clone(),
+        )
+        .await;
+        handle.inner.mcp_tool_registry.replace_mcp_tools(registered);
+        assert!(handle
+            .inner
+            .mcp_tool_registry
+            .find_by_name("mcp__remote__lookup")
+            .is_some());
+        handle
+            .inner
+            .mcp_registry
+            .remove_without_revoking_auth("remote")
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while handle
+                .inner
+                .mcp_tool_registry
+                .find_by_name("mcp__remote__lookup")
+                .is_some()
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the Chat MCP watcher removes retired tools");
     });
 }
 
@@ -6189,7 +6278,15 @@ fn mobile_bash_with_responses_disabled_cold_resume_never_executes_or_queries_aga
         first
             .inner()
             .session_writer
-            .append_session_mode(first.inner().session_mode.as_str())
+            .append_session_mode(
+                first
+                    .inner()
+                    .orchestrator
+                    .conversation_mode()
+                    .await
+                    .selected
+                    .as_str(),
+            )
             .await
             .expect("persist session mode");
         first
@@ -6359,7 +6456,15 @@ fn mobile_send_prompt_cold_resume_replays_the_durable_prompt() {
         first
             .inner
             .session_writer
-            .append_session_mode(first.inner.session_mode.as_str())
+            .append_session_mode(
+                first
+                    .inner
+                    .orchestrator
+                    .conversation_mode()
+                    .await
+                    .selected
+                    .as_str(),
+            )
             .await
             .expect("persist the session mode");
 
@@ -6654,7 +6759,15 @@ fn mobile_send_prompt_without_turn_id_is_durable_across_cold_resume() {
         engine_for_work
             .inner
             .session_writer
-            .append_session_mode(engine_for_work.inner.session_mode.as_str())
+            .append_session_mode(
+                engine_for_work
+                    .inner
+                    .orchestrator
+                    .conversation_mode()
+                    .await
+                    .selected
+                    .as_str(),
+            )
             .await
             .expect("persist the session mode");
 
@@ -7672,7 +7785,7 @@ fn mobile_skill_slash_runs_and_cold_resumes_the_source_preserving_batch() {
             first
                 .inner()
                 .session_writer
-                .append_session_mode(first.inner().session_mode.as_str())
+                .append_session_mode(first.inner().orchestrator.conversation_mode().await.selected.as_str())
                 .await
                 .expect("persist session mode");
 
@@ -10124,6 +10237,8 @@ async fn media_conversation_attachment_receives_the_existing_service_channel() {
         session_id: "session-1".into(),
         profile_name: Some("profile".into()),
         account_scope: Some("profile:profile".into()),
+        conversation_mode: Default::default(),
+        conversation_profile_epoch: 0,
         instructions: String::new(),
         history: Vec::new(),
         tools: Vec::new(),
@@ -11640,88 +11755,1129 @@ fn submit_resume_session_restores_its_persisted_permission_mode() {
 }
 
 #[test]
-fn submit_resume_session_rejects_a_session_from_another_mode() {
+fn resume_restores_persisted_mode_from_a_different_initial_mode() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let (session_id, _) = seed_replay_valid_session(tmp.path());
     let cfg = test_config(tmp.path());
     let path =
         session::jsonl::session_path(&cfg.lingxi_home, &cfg.cwd.to_string_lossy(), &session_id);
-    let mut transcript = std::fs::read_to_string(&path).expect("read seeded transcript");
+    let mut transcript = std::fs::read_to_string(&path).unwrap();
     transcript.push_str(&format!(
         "{}\n",
         serde_json::json!({
-            "type": "session-mode",
-            "sessionMode": "chat",
-            "sessionId": session_id,
+            "type": "session-mode", "sessionMode": "chat", "sessionId": session_id,
         })
     ));
-    std::fs::write(&path, transcript).expect("append session mode");
-
-    let code_cfg = test_config(tmp.path());
-    let (handle, listener) = build_submit_handle_with_config(code_cfg, tmp.path());
+    std::fs::write(&path, transcript).unwrap();
+    let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
     handle.runtime().block_on(async {
-        let active_before = handle.inner().orchestrator.current_session_id().await;
-        let result = handle
+        handle.submit(ClientCommand::ResumeSession { session_id: session_id.clone(), cwd: None })
+            .await.expect("resume a chat session from a code engine");
+        assert!(drained(&listener).await.iter().any(|event| matches!(event,
+            Ev::SessionResumed { session_id: id, mode: SessionModeDto::Chat, .. } if id == &session_id
+        )));
+        let state = handle.inner().orchestrator.conversation_mode().await;
+        assert_eq!(state.session_id, session_id);
+        assert_eq!(state.selected, session::jsonl::SessionMode::Chat);
+        assert!(!state.pending);
+    });
+}
+
+#[test]
+fn resume_mode_less_session_from_chat_restores_code_default() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (session_id, _) = seed_replay_valid_session(tmp.path());
+    let mut cfg = test_config(tmp.path());
+    cfg.session_mode = session::jsonl::SessionMode::Chat;
+    let (handle, listener) = build_submit_handle_with_config(cfg, tmp.path());
+    handle.runtime().block_on(async {
+        handle.submit(ClientCommand::ResumeSession { session_id: session_id.clone(), cwd: None })
+            .await.expect("resume mode-less session");
+        assert!(drained(&listener).await.iter().any(|event| matches!(event,
+            Ev::SessionResumed { session_id: id, mode: SessionModeDto::Code, .. } if id == &session_id
+        )));
+        assert_eq!(handle.inner().orchestrator.conversation_mode().await.selected,
+            session::jsonl::SessionMode::Code);
+    });
+}
+
+#[test]
+fn same_session_mode_commands_preserve_controls_and_report_manifest() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (handle, listener) = build_submit_handle(tmp.path());
+    handle.runtime().block_on(async {
+        let orchestrator = &handle.inner().orchestrator;
+        let id = orchestrator.current_session_id().await;
+        let permission_before = orchestrator.permission_mode();
+        let cwd_before = handle.session_cwd();
+        for mode in [SessionModeDto::Chat, SessionModeDto::Code, SessionModeDto::Chat, SessionModeDto::Chat] {
+            handle.submit(ClientCommand::SetSessionMode { mode }).await.unwrap();
+        }
+        handle.submit(ClientCommand::GetContextManifest).await.unwrap();
+        assert_eq!(orchestrator.current_session_id().await, id);
+        assert_eq!(orchestrator.permission_mode(), permission_before);
+        assert_eq!(handle.session_cwd(), cwd_before);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let count = listener.received.lock().await.iter().filter(|event| matches!(event,
+                    Ev::SessionModeChanged { session_id, mode: SessionModeDto::Chat, pending_mode: None, .. }
+                        if session_id == &id.as_uuid().to_string())).count();
+                if count >= 3 { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        let events = drained(&listener).await;
+        let delivered_modes = events.iter().filter_map(|event| match event {
+            Ev::SessionModeChanged { session_id, mode, pending_mode: None, .. }
+                if session_id == &id.as_uuid().to_string() => Some(*mode),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(delivered_modes, vec![SessionModeDto::Chat, SessionModeDto::Code,
+            SessionModeDto::Chat, SessionModeDto::Chat]);
+        let manifest = events.iter().find_map(|event| match event {
+            Ev::ContextManifest { manifest_json } => Some(serde_json::from_str::<serde_json::Value>(manifest_json).unwrap()),
+            _ => None,
+        }).expect("context manifest reply");
+        assert_eq!(manifest["session"]["selected"], "chat");
+        handle.submit(ClientCommand::NewSession { cwd: None, model: None }).await.unwrap();
+        handle.submit(ClientCommand::ResumeSession { session_id: id.as_uuid().to_string(), cwd: None }).await.unwrap();
+        assert_eq!(orchestrator.conversation_mode().await.selected, session::jsonl::SessionMode::Chat);
+    });
+}
+
+#[test]
+fn mode_selection_anchors_a_zero_length_draft() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle(tmp.path());
+    handle.runtime().block_on(async {
+        let id = handle
+            .inner()
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string();
+        let path = handle.inner().session_writer.active_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "").unwrap();
+        handle
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Chat,
+            })
+            .await
+            .unwrap();
+        handle
+            .submit(ClientCommand::NewSession {
+                cwd: None,
+                model: None,
+            })
+            .await
+            .unwrap();
+        handle
             .submit(ClientCommand::ResumeSession {
-                session_id: session_id.clone(),
+                session_id: id,
                 cwd: None,
             })
-            .await;
-        assert!(
-            matches!(result, Err(ClientError::Rejected { ref message })
-                    if message.contains("belongs to chat mode")
-                        && message.contains("runs code mode")),
-            "{result:?}"
-        );
-        let events = drained(&listener).await;
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, Ev::SessionResumed { .. })),
-            "a rejected cross-mode resume must not emit SessionResumed"
-        );
+            .await
+            .unwrap();
         assert_eq!(
-            handle.inner().orchestrator.current_session_id().await,
-            active_before,
-            "mode validation must happen before mutating the active session"
+            handle
+                .inner()
+                .orchestrator
+                .conversation_mode()
+                .await
+                .selected,
+            session::jsonl::SessionMode::Chat
         );
     });
 }
 
 #[test]
-fn submit_resume_session_rejects_legacy_mode_less_session_from_chat_source() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (session_id, _) = seed_replay_valid_session(tmp.path());
-    let mut chat_cfg = test_config(tmp.path());
-    chat_cfg.session_mode = session::jsonl::SessionMode::Chat;
-    let (handle, listener) = build_submit_handle_with_config(chat_cfg, tmp.path());
-
+fn mobile_initial_and_new_session_modes_use_versioned_records() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut config = test_config(tmp.path());
+    config.session_mode = session::jsonl::SessionMode::Chat;
+    let (handle, _) = build_submit_handle_with_config(config, tmp.path());
     handle.runtime().block_on(async {
-        let active_before = handle.inner().orchestrator.current_session_id().await;
-        let result = handle
+        handle
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Chat,
+            })
+            .await
+            .unwrap();
+        for create_new in [false, true] {
+            if create_new {
+                handle
+                    .submit(ClientCommand::NewSession {
+                        cwd: None,
+                        model: None,
+                    })
+                    .await
+                    .unwrap();
+            }
+            let raw = std::fs::read_to_string(handle.inner().session_writer.active_path()).unwrap();
+            let mode = raw
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .find(|row| row["type"] == "session-mode")
+                .unwrap();
+            assert_eq!(mode["sessionMode"], "chat");
+            assert_eq!(mode["contextRevision"], 0);
+            assert_eq!(mode["profileEpoch"], 0);
+        }
+    });
+}
+
+#[test]
+fn bootstrapped_empty_session_restores_its_created_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, listener) = build_submit_handle(tmp.path());
+    let session_id = "a0111111-2222-3333-4444-555555555555".to_string();
+    handle.runtime().block_on(async {
+        handle
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Chat,
+            })
+            .await
+            .unwrap();
+        handle
+            .resume_empty_session(session_id.clone(), "Empty session".into())
+            .await
+            .unwrap();
+        let snapshot = handle.inner().orchestrator.conversation_mode().await;
+        assert_eq!(snapshot.active, session::jsonl::SessionMode::Chat);
+        assert_eq!(snapshot.selected, session::jsonl::SessionMode::Chat);
+        let raw = std::fs::read_to_string(handle.inner().session_writer.active_path()).unwrap();
+        let mode = raw
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|row| row["type"] == "session-mode")
+            .unwrap();
+        assert_eq!(mode["contextRevision"], 0);
+        assert!(drained(&listener).await.iter().any(|event| matches!(event,
+            Ev::SessionResumed { session_id: id, mode: SessionModeDto::Chat, .. } if id == &session_id
+        )));
+    });
+}
+
+#[test]
+fn empty_bootstrap_retries_an_anchor_without_a_committed_profile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle(tmp.path());
+    let session_id = "a0222222-2222-3333-4444-555555555555".to_string();
+    handle.runtime().block_on(async {
+        handle
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Chat,
+            })
+            .await
+            .unwrap();
+        let cwd = handle.session_cwd();
+        let path = session::jsonl::session_path(&handle.lingxi_home, &cwd, &session_id);
+        let writer = session::jsonl::JsonlWriter::new(path.clone(), handle.fs.clone());
+        writer
+            .append_mobile_empty_session(&session_id, "Empty session", &cwd)
+            .await
+            .unwrap();
+        handle
+            .resume_empty_session(session_id, "Empty session".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            handle.inner().orchestrator.conversation_mode().await.active,
+            session::jsonl::SessionMode::Chat
+        );
+        let raw = std::fs::read_to_string(path).unwrap();
+        let mode = raw
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|row| row["type"] == "session-mode")
+            .unwrap();
+        assert_eq!(mode["sessionMode"], "chat");
+        assert_eq!(mode["contextRevision"], 0);
+    });
+}
+
+#[test]
+fn mobile_cold_resume_reports_active_then_pending_mode_in_order() {
+    use lingxi_core::host::session_context::{ConversationMode, SessionModeTransition};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (first, _) = build_submit_handle(tmp.path());
+    let session_id = first.runtime().block_on(async {
+        first
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Code,
+            })
+            .await
+            .unwrap();
+        let id = first
+            .inner()
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string();
+        first
+            .inner()
+            .session_writer
+            .append_session_mode_transition(
+                &id,
+                &SessionModeTransition {
+                    selected: ConversationMode::Chat,
+                    active: ConversationMode::Code,
+                    revision: 1,
+                    selected_epoch: 1,
+                    active_epoch: 0,
+                    pending: true,
+                },
+            )
+            .await
+            .unwrap();
+        id
+    });
+    drop(first);
+    let (resumed, listener) = build_submit_handle(tmp.path());
+    resumed.runtime().block_on(async {
+        resumed
             .submit(ClientCommand::ResumeSession {
                 session_id: session_id.clone(),
                 cwd: None,
             })
-            .await;
-        assert!(
-            matches!(result, Err(ClientError::Rejected { ref message })
-                    if message.contains("belongs to code mode")
-                        && message.contains("runs chat mode")),
-            "{result:?}"
-        );
+            .await
+            .unwrap();
+        let snapshot = resumed.inner().orchestrator.conversation_mode().await;
+        assert_eq!(snapshot.active, ConversationMode::Code);
+        assert_eq!(snapshot.selected, ConversationMode::Chat);
+        assert!(snapshot.pending);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if listener.received.lock().await.iter().any(|event| {
+                    matches!(event, Ev::SessionModeChanged {
+                        session_id: id,
+                        mode: SessionModeDto::Code,
+                        pending_mode: Some(SessionModeDto::Chat),
+                        revision: 1,
+                    } if id == &session_id)
+                }) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
         let events = drained(&listener).await;
-        assert!(
-            !events
+        let resumed_index = events
+            .iter()
+            .position(|event| {
+                matches!(event, Ev::SessionResumed {
+                    session_id: id, mode: SessionModeDto::Code, ..
+                } if id == &session_id)
+            })
+            .expect("resume event reports the active mode");
+        let pending_index = events
+            .iter()
+            .position(|event| {
+                matches!(event, Ev::SessionModeChanged {
+                    session_id: id,
+                    mode: SessionModeDto::Code,
+                    pending_mode: Some(SessionModeDto::Chat),
+                    revision: 1,
+                } if id == &session_id)
+            })
+            .expect("mode event reports the pending selection");
+        assert!(resumed_index < pending_index);
+    });
+}
+
+#[test]
+fn resume_empty_session_uses_latest_captured_mode_not_stale_writer_cache() {
+    use std::io::Write;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, listener) = build_submit_handle(tmp.path());
+    handle.runtime().block_on(async {
+        handle
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Chat,
+            })
+            .await
+            .unwrap();
+        let id = handle
+            .inner()
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string();
+        let path = handle.inner().session_writer.active_path();
+        handle
+            .submit(ClientCommand::NewSession {
+                cwd: None,
+                model: None,
+            })
+            .await
+            .unwrap();
+        // Simulate another owner committing a new selection while this engine
+        // is on a different conversation; its old metadata mirror is now stale.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({"type":"session-mode", "sessionId":id,
+            "sessionMode":"code", "contextRevision":10})
+        )
+        .unwrap();
+        file.sync_all().unwrap();
+        handle
+            .submit(ClientCommand::ResumeSession {
+                session_id: id.clone(),
+                cwd: None,
+            })
+            .await
+            .unwrap();
+        let state = handle.inner().orchestrator.conversation_mode().await;
+        assert_eq!(state.selected, session::jsonl::SessionMode::Code);
+        assert_eq!(state.revision, 10);
+        assert!(drained(&listener).await.iter().any(|event| matches!(event,
+            Ev::SessionResumed { session_id, mode: SessionModeDto::Code, .. } if session_id == &id
+        )));
+    });
+}
+
+struct ReentrantModeListener {
+    handle: StdMutex<Option<std::sync::Weak<MobileEngineHandle>>>,
+    completed: Notify,
+}
+
+#[async_trait]
+impl ClientEventListener for ReentrantModeListener {
+    async fn on_event(&self, event: ClientEvent) {
+        if matches!(event, ClientEvent::SessionModeChanged { .. }) {
+            let handle = self
+                .handle
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade);
+            if let Some(handle) = handle {
+                handle
+                    .submit(ClientCommand::GetContextManifest)
+                    .await
+                    .unwrap();
+                self.completed.notify_one();
+            }
+        }
+    }
+    async fn on_workflow_progress(
+        &self,
+        _: String,
+        _: String,
+        _: String,
+        _: client::protocol::listings::WorkflowProgressDto,
+    ) {
+    }
+}
+
+#[test]
+fn mobile_mode_event_listener_can_reenter_the_engine() {
+    let tmp = tempfile::tempdir().unwrap();
+    let listener = Arc::new(ReentrantModeListener {
+        handle: StdMutex::new(None),
+        completed: Notify::new(),
+    });
+    let handle = build_mobile_engine(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+    )
+    .unwrap();
+    *listener.handle.lock().unwrap() = Some(Arc::downgrade(&handle));
+    handle.runtime().block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            handle
+                .submit(ClientCommand::SetSessionMode {
+                    mode: SessionModeDto::Chat,
+                })
+                .await
+                .unwrap();
+            listener.completed.notified().await;
+        })
+        .await
+        .expect("mode event callback must not deadlock on the session transition");
+    });
+}
+
+#[test]
+fn mobile_mode_switch_during_turn_is_admitted_by_next_query() {
+    use crate::mobile::test_support::new_engine_with_streaming;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let listener = Arc::new(FakeListener::default());
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let streaming = Arc::new(PendingPromptStreamClient::new(entered_tx));
+    let handle = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(streaming.clone()),
+    )
+    .unwrap();
+    handle.runtime().block_on(async {
+        handle.submit(ClientCommand::SendPrompt {
+            text: "first".into(), prompt_mode: None, images: Vec::new(),
+            turn_id: Some(9911), visualization_context: None,
+        }).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx).await.unwrap().unwrap();
+        let id = handle.inner().orchestrator.current_session_id().await;
+        let permissions = handle.inner().orchestrator.permission_mode();
+        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Chat }).await.unwrap();
+        let state = handle.inner().orchestrator.conversation_mode().await;
+        assert_eq!(state.active, session::jsonl::SessionMode::Code);
+        assert_eq!(state.selected, session::jsonl::SessionMode::Chat);
+        assert!(state.pending);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if listener.received.lock().await.iter().any(|event| matches!(event,
+                    Ev::SessionModeChanged { session_id, mode: SessionModeDto::Code,
+                        pending_mode: Some(SessionModeDto::Chat), .. } if session_id == &id.as_uuid().to_string()
+                )) { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        let _ = drained(&listener).await;
+        assert_eq!(handle.inner().orchestrator.permission_mode(), permissions);
+        handle.submit(ClientCommand::GetContextManifest).await.unwrap();
+        let events = drained(&listener).await;
+        let manifest = events.iter().find_map(|event| match event {
+            Ev::ContextManifest { manifest_json } => Some(serde_json::from_str::<serde_json::Value>(manifest_json).unwrap()),
+            _ => None,
+        }).expect("pending context manifest");
+        assert_eq!(manifest["session"]["active"], "code");
+        assert_eq!(manifest["session"]["selected"], "chat");
+        assert_eq!(manifest["projected"], false);
+        handle.submit(ClientCommand::Cancel { turn_id: Some(9911) }).await.unwrap();
+        let cancelled = handle.inner().orchestrator.conversation_mode().await;
+        assert_eq!(cancelled.active, session::jsonl::SessionMode::Code);
+        assert!(cancelled.pending, "cancellation must not admit a pending profile");
+        handle.submit(ClientCommand::SendPrompt {
+            text: "second".into(), prompt_mode: None, images: Vec::new(),
+            turn_id: Some(9912), visualization_context: None,
+        }).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while streaming.captured_calls().len() < 2 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        let state = handle.inner().orchestrator.conversation_mode().await;
+        assert_eq!(state.active, session::jsonl::SessionMode::Chat);
+        assert_eq!(state.selected, session::jsonl::SessionMode::Chat);
+        assert!(!state.pending);
+        assert_eq!(handle.inner().orchestrator.current_session_id().await, id);
+        handle.submit(ClientCommand::Cancel { turn_id: Some(9912) }).await.unwrap();
+    });
+}
+
+fn mobile_fixture_response_model(config: &MobileConfig) -> String {
+    let listings = super::model_listings(&llm_runtime::builtin_presets().providers);
+    super::resolve_default_model_ref(&config.default_model, &listings).0
+}
+
+fn assert_persisted_assistant_models(path: &Path, expected: &str, minimum: usize) {
+    let raw = std::fs::read_to_string(path).unwrap();
+    let models = raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|row| row["type"] == "assistant")
+        .filter_map(|row| row["message"]["model"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    assert!(
+        models.len() >= minimum,
+        "expected completed assistant rows: {models:?}"
+    );
+    assert!(
+        models.iter().all(|model| model == expected),
+        "wrong persisted model: {models:?}"
+    );
+}
+
+#[test]
+fn mobile_mode_switch_retires_slash_skill_body_and_keeps_conversation_on_resume() {
+    use crate::mobile::test_support::new_engine_with_streaming;
+    use orchestrator::test_support_stream::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta, MockStreamingApiClient,
+    };
+
+    fn reply(id: &str, model: &str) -> Vec<llm_runtime::HistoryEvent> {
+        vec![
+            message_start(id, model),
+            content_block_start_text(0),
+            text_delta(0, "Earlier answer"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]
+    }
+    fn contains(
+        calls: &[orchestrator::test_support_stream::CapturedStreamCall],
+        index: usize,
+        text: &str,
+    ) -> bool {
+        calls[index].messages.iter().any(|message| match message {
+            lingxi_core::types::ConversationMessage::User { content, .. }
+            | lingxi_core::types::ConversationMessage::Assistant { content, .. } => content
                 .iter()
-                .any(|event| matches!(event, Ev::SessionResumed { .. })),
-            "a rejected legacy code resume must not emit SessionResumed"
+                .any(|block| native_text_block_contains(block, text)),
+            _ => false,
+        })
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let commands = tmp.path().join(".lingxi/commands");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(
+        commands.join("research.md"),
+        "---\ndescription: Test research\n---\nOBSOLETE-SKILL-BODY-2381\n",
+    )
+    .unwrap();
+    let config = test_config(tmp.path());
+    let response_model = mobile_fixture_response_model(&config);
+    let streaming = Arc::new(MockStreamingApiClient::with_turns(vec![
+        reply("skill", &response_model),
+        reply("next", &response_model),
+    ]));
+    let engine = new_engine_with_streaming(
+        config.clone(),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(streaming.clone()),
+    )
+    .unwrap();
+    let session_id = engine.runtime().block_on(async {
+        engine
+            .submit(ClientCommand::RunSlashCommand {
+                raw: "/research".into(),
+                images: Vec::new(),
+                turn_id: Some(9921),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !streaming.captured_calls().await.is_empty()
+                    && engine.active_cancel.lock().await.is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(contains(
+            &streaming.captured_calls().await,
+            0,
+            "OBSOLETE-SKILL-BODY-2381"
+        ));
+        let id = engine
+            .inner()
+            .orchestrator
+            .current_session_id()
+            .await
+            .as_uuid()
+            .to_string();
+        engine
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Chat,
+            })
+            .await
+            .unwrap();
+        engine
+            .submit(ClientCommand::SendPrompt {
+                text: "Keep the earlier conversation".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(9922),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if streaming.captured_calls().await.len() >= 2
+                    && engine.active_cancel.lock().await.is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let calls = streaming.captured_calls().await;
+        assert!(!contains(&calls, 1, "OBSOLETE-SKILL-BODY-2381"));
+        assert!(contains(&calls, 1, "Earlier answer"));
+        assert_persisted_assistant_models(
+            &engine.inner().session_writer.active_path(),
+            &response_model,
+            2,
+        );
+        id
+    });
+    drop(engine);
+    let resumed_stream = Arc::new(MockStreamingApiClient::with_turns(vec![reply(
+        "resumed",
+        &response_model,
+    )]));
+    let resumed_listener = Arc::new(FakeListener::default());
+    let resumed = new_engine_with_streaming(
+        config,
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        resumed_listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(resumed_stream.clone()),
+    )
+    .unwrap();
+    resumed.runtime().block_on(async {
+        resumed
+            .submit(ClientCommand::ResumeSession {
+                session_id,
+                cwd: None,
+            })
+            .await
+            .unwrap();
+        resumed
+            .submit(ClientCommand::SendPrompt {
+                text: "Continue".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(9923),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        let wait = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !resumed_stream.captured_calls().await.is_empty()
+                    && resumed.active_cancel.lock().await.is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        if wait.is_err() {
+            panic!(
+                "cold resume made no request; events: {:?}",
+                drained(&resumed_listener).await
+            );
+        }
+        let calls = resumed_stream.captured_calls().await;
+        assert!(!contains(&calls, 0, "OBSOLETE-SKILL-BODY-2381"));
+        assert!(contains(&calls, 0, "Keep the earlier conversation"));
+        assert_persisted_assistant_models(
+            &resumed.inner().session_writer.active_path(),
+            &response_model,
+            3,
+        );
+    });
+}
+
+#[test]
+fn mobile_fork_retires_copied_skill_but_preserves_source_and_conversation() {
+    use crate::mobile::test_support::new_engine_with_streaming;
+    use orchestrator::test_support_stream::{
+        content_block_start_text, content_block_stop, message_delta_stop, message_start,
+        message_stop, text_delta, CapturedStreamCall, MockStreamingApiClient,
+    };
+
+    fn reply(id: &str, model: &str) -> Vec<llm_runtime::HistoryEvent> {
+        vec![
+            message_start(id, model),
+            content_block_start_text(0),
+            text_delta(0, "Original answer"),
+            content_block_stop(0),
+            message_delta_stop("end_turn"),
+            message_stop(),
+        ]
+    }
+    fn contains(call: &CapturedStreamCall, text: &str) -> bool {
+        call.messages.iter().any(|message| match message {
+            lingxi_core::types::ConversationMessage::User { content, .. }
+            | lingxi_core::types::ConversationMessage::Assistant { content, .. } => content
+                .iter()
+                .any(|block| native_text_block_contains(block, text)),
+            _ => false,
+        })
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let commands = tmp.path().join(".lingxi/commands");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(
+        commands.join("forkskill.md"),
+        "---\ndescription: Fork test\n---\nSOURCE-SKILL-INSTRUCTIONS-514\n",
+    )
+    .unwrap();
+    let config = test_config(tmp.path());
+    let response_model = mobile_fixture_response_model(&config);
+    let listener = Arc::new(FakeListener::default());
+    let stream = Arc::new(MockStreamingApiClient::with_turns(vec![
+        reply("source-skill", &response_model),
+        reply("source-followup", &response_model),
+    ]));
+    let engine = new_engine_with_streaming(
+        config.clone(),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(stream.clone()),
+    )
+    .unwrap();
+    let (fork_id, generic_id) = engine.runtime().block_on(async {
+        engine
+            .submit(ClientCommand::RunSlashCommand {
+                raw: "/forkskill".into(),
+                images: Vec::new(),
+                turn_id: Some(9931),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !stream.captured_calls().await.is_empty()
+                    && engine.active_cancel.lock().await.is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(contains(
+            &stream.captured_calls().await[0],
+            "SOURCE-SKILL-INSTRUCTIONS-514"
+        ));
+        let source_id = engine.inner().orchestrator.current_session_id().await;
+        let source_path = engine.inner().session_writer.active_path();
+        let before = std::fs::read(&source_path).unwrap();
+        engine
+            .submit(ClientCommand::ForkSession {
+                session_id: source_id.as_uuid().to_string(),
+                target_mode: SessionModeDto::Chat,
+            })
+            .await
+            .unwrap();
+        let fork_id = drained(&listener)
+            .await
+            .iter()
+            .find_map(|event| match event {
+                Ev::SessionForked { session_id, .. } => Some(session_id.clone()),
+                _ => None,
+            })
+            .expect("fork event");
+        assert_eq!(std::fs::read(&source_path).unwrap(), before);
+        let fork_path =
+            session::jsonl::session_path(&config.lingxi_home, &engine.session_cwd(), &fork_id);
+        let fork_raw = std::fs::read_to_string(fork_path).unwrap();
+        assert!(fork_raw.contains("SOURCE-SKILL-INSTRUCTIONS-514"));
+        let profile = fork_raw
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|row| row["type"] == "session-mode")
+            .unwrap();
+        assert_eq!(profile["sessionMode"], "chat");
+        assert_eq!(profile["profileEpoch"], 1);
+
+        engine
+            .submit(ClientCommand::SendPrompt {
+                text: "Source follow-up".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(9932),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if stream.captured_calls().await.len() >= 2
+                    && engine.active_cancel.lock().await.is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(contains(
+            &stream.captured_calls().await[1],
+            "SOURCE-SKILL-INSTRUCTIONS-514"
+        ));
+        assert_persisted_assistant_models(&source_path, &response_model, 2);
+        assert_eq!(
+            engine.inner().orchestrator.conversation_mode().await.active,
+            session::jsonl::SessionMode::Code
+        );
+        // The generic branch API has no target-mode parameter. After two
+        // switches, its new task must still retire the old epoch-0 skill.
+        for mode in [SessionModeDto::Chat, SessionModeDto::Code] {
+            engine
+                .submit(ClientCommand::SetSessionMode { mode })
+                .await
+                .unwrap();
+        }
+        let generic = session::branch::create_branch(
+            &config.lingxi_home,
+            &engine.session_cwd(),
+            source_id.as_uuid(),
+            None,
+            engine.fs.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(generic.source_context_revision_max, 2);
+        (fork_id, generic.new_session_id.to_string())
+    });
+    drop(engine);
+
+    let resumed_stream = Arc::new(MockStreamingApiClient::with_turns(vec![
+        reply("fork", &response_model),
+        reply("generic", &response_model),
+    ]));
+    let resumed_listener = Arc::new(FakeListener::default());
+    let resumed = new_engine_with_streaming(
+        config,
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        resumed_listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(resumed_stream.clone()),
+    )
+    .unwrap();
+    resumed.runtime().block_on(async {
+        resumed
+            .submit(ClientCommand::ResumeSession {
+                session_id: fork_id,
+                cwd: None,
+            })
+            .await
+            .unwrap();
+        resumed
+            .submit(ClientCommand::SendPrompt {
+                text: "Continue the fork".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(9933),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        let wait = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if !resumed_stream.captured_calls().await.is_empty()
+                    && resumed.active_cancel.lock().await.is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        if wait.is_err() {
+            panic!(
+                "fork resume made no request; events: {:?}",
+                drained(&resumed_listener).await
+            );
+        }
+        let calls = resumed_stream.captured_calls().await;
+        assert!(!contains(&calls[0], "SOURCE-SKILL-INSTRUCTIONS-514"));
+        assert!(contains(&calls[0], "Original answer"));
+        assert!(!contains(&calls[0], "Source follow-up"));
+        assert_persisted_assistant_models(
+            &resumed.inner().session_writer.active_path(),
+            &response_model,
+            2,
         );
         assert_eq!(
-            handle.inner().orchestrator.current_session_id().await,
-            active_before,
-            "legacy fallback validation must not disturb the active Chat session"
+            resumed
+                .inner()
+                .orchestrator
+                .conversation_mode()
+                .await
+                .active,
+            session::jsonl::SessionMode::Chat
         );
+        resumed
+            .submit(ClientCommand::ResumeSession {
+                session_id: generic_id,
+                cwd: None,
+            })
+            .await
+            .unwrap();
+        resumed
+            .submit(ClientCommand::SendPrompt {
+                text: "Continue the generic fork".into(),
+                prompt_mode: None,
+                images: Vec::new(),
+                turn_id: Some(9934),
+                visualization_context: None,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if resumed_stream.captured_calls().await.len() >= 2
+                    && resumed.active_cancel.lock().await.is_none()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let calls = resumed_stream.captured_calls().await;
+        assert!(!contains(&calls[1], "SOURCE-SKILL-INSTRUCTIONS-514"));
+        assert!(contains(&calls[1], "Source follow-up"));
+        assert_persisted_assistant_models(
+            &resumed.inner().session_writer.active_path(),
+            &response_model,
+            3,
+        );
+        assert_eq!(
+            resumed
+                .inner()
+                .orchestrator
+                .conversation_mode()
+                .await
+                .active,
+            session::jsonl::SessionMode::Code
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_mode_persistence_keeps_the_committed_mobile_state() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, listener) = build_submit_handle(tmp.path());
+    handle.runtime().block_on(async {
+        // The idempotent command first creates and persists the empty draft.
+        handle
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Code,
+            })
+            .await
+            .unwrap();
+        let before = handle.inner().orchestrator.conversation_mode().await;
+        let _ = drained(&listener).await;
+        let path = handle.inner().session_writer.active_path();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        // Root can bypass the fixture's read-only file; skip only in that environment.
+        if std::fs::OpenOptions::new().append(true).open(&path).is_ok() {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            return;
+        }
+        let result = handle
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Chat,
+            })
+            .await;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            result.is_err(),
+            "a failed durable append cannot report success"
+        );
+        assert_eq!(
+            handle.inner().orchestrator.conversation_mode().await,
+            before
+        );
+        assert!(!drained(&listener).await.iter().any(|event| matches!(
+            event,
+            Ev::SessionModeChanged {
+                mode: SessionModeDto::Chat,
+                ..
+            }
+        )));
+        handle
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Chat,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            handle
+                .inner()
+                .orchestrator
+                .conversation_mode()
+                .await
+                .selected,
+            session::jsonl::SessionMode::Chat
+        );
+    });
+}
+
+#[test]
+fn mobile_mode_switch_retires_only_the_current_main_skill_scope() {
+    use compaction::invoked_skills::{self, InvokedSkillScopeRef};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle(tmp.path());
+    handle.runtime().block_on(async {
+        let session_id = handle
+            .inner()
+            .orchestrator
+            .current_session_id()
+            .await
+            .to_string();
+        let other_session = lingxi_core::types::SessionId::new().to_string();
+        let main = InvokedSkillScopeRef::new(Some(&session_id), None);
+        let child = InvokedSkillScopeRef::new(Some(&session_id), Some("agent:child"));
+        let other = InvokedSkillScopeRef::new(Some(&other_session), None);
+        let retired_message = lingxi_core::types::MessageId::new();
+        invoked_skills::register_scoped_for_message(
+            &"main".into(),
+            Path::new("/skill/main"),
+            &"main instructions".into(),
+            main,
+            retired_message,
+        );
+        invoked_skills::register_scoped(
+            &"child".into(),
+            Path::new("/skill/child"),
+            &"child instructions".into(),
+            child,
+        );
+        invoked_skills::register_scoped(
+            &"other".into(),
+            Path::new("/skill/other"),
+            &"other instructions".into(),
+            other,
+        );
+        handle
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Chat,
+            })
+            .await
+            .unwrap();
+        assert!(invoked_skills::filter_for_scope(main).is_empty());
+        assert!(invoked_skills::expired_message_ids_for_scope(main).contains(&retired_message));
+        assert_eq!(invoked_skills::filter_for_scope(child).len(), 1);
+        assert_eq!(invoked_skills::filter_for_scope(other).len(), 1);
+        invoked_skills::clear_session(&other_session);
     });
 }
 
@@ -11790,36 +12946,33 @@ fn submit_fork_session_copies_context_into_target_mode_without_mutating_source()
 }
 
 #[test]
-fn chat_source_rejects_a_code_only_slash_command_before_dispatch() {
+fn chat_and_code_expose_the_same_standard_slash_catalog() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let mut chat_cfg = test_config(tmp.path());
-    chat_cfg.session_mode = session::jsonl::SessionMode::Chat;
-    let (handle, listener) = build_submit_handle_with_config(chat_cfg, tmp.path());
-
+    let commands = tmp.path().join(".lingxi").join("commands");
+    std::fs::create_dir_all(&commands).unwrap();
+    std::fs::write(
+        commands.join("research.md"),
+        "---\ndescription: Research\n---\nResearch $ARGUMENTS\n",
+    )
+    .unwrap();
+    let mut cfg = test_config(tmp.path());
+    cfg.session_mode = session::jsonl::SessionMode::Chat;
+    let (handle, _) = build_submit_handle_with_config(cfg, tmp.path());
     handle.runtime().block_on(async {
+        let before = handle.slash_command_catalog_snapshot().await;
+        assert!(before
+            .iter()
+            .any(|command| command.name.display() == "research"));
         handle
-            .submit(ClientCommand::RunSlashCommand {
-                raw: "/loop every 5 minutes inspect the workspace".into(),
-                images: Vec::new(),
-                turn_id: Some(42),
+            .submit(ClientCommand::SetSessionMode {
+                mode: SessionModeDto::Code,
             })
             .await
-            .expect("Chat rejection is a handled command result");
-
-        let events = drained(&listener).await;
-        assert!(events.iter().any(|event| matches!(
-            event,
-            Ev::SlashCommandResult {
-                turn_id: Some(42),
-                display,
-                is_error: true,
-            } if display.display().contains("unavailable in Chat mode")
-        )));
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, Ev::TurnStarted { .. })),
-            "a hidden Code-only command must never reach turn dispatch"
+            .unwrap();
+        let after = handle.slash_command_catalog_snapshot().await;
+        assert_eq!(
+            before.iter().map(|c| c.name.display()).collect::<Vec<_>>(),
+            after.iter().map(|c| c.name.display()).collect::<Vec<_>>()
         );
     });
 }
@@ -12579,7 +13732,15 @@ fn mobile_transcript_authority_follows_real_new_and_resume_session_activation() 
         handle
             .inner
             .session_writer
-            .append_session_mode(handle.inner.session_mode.as_str())
+            .append_session_mode(
+                handle
+                    .inner
+                    .orchestrator
+                    .conversation_mode()
+                    .await
+                    .selected
+                    .as_str(),
+            )
             .await
             .unwrap();
         let original_scope = handle.inner.task_registry.handback_scope().await.unwrap();

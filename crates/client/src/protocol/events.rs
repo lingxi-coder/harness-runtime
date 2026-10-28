@@ -880,11 +880,37 @@ define_client_event! {
     MediaControlRequest {
         request: MediaControlRequestDto,
     },
+    // The selected profile is pending only while another query owns the turn.
+    SessionModeChanged {
+        session_id: String,
+        mode: SessionModeDto,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pending_mode: Option<SessionModeDto>,
+        revision: u64,
+    },
+    ContextManifest {
+        manifest_json: String,
+    },
+
 }
 
 impl From<ClientEventWire> for ClientEvent {
     fn from(value: ClientEventWire) -> Self {
         match value {
+            ClientEventWire::SessionModeChanged {
+                session_id,
+                mode,
+                pending_mode,
+                revision,
+            } => Self::SessionModeChanged {
+                session_id,
+                mode,
+                pending_mode,
+                revision,
+            },
+            ClientEventWire::ContextManifest { manifest_json } => {
+                Self::ContextManifest { manifest_json }
+            }
             ClientEventWire::FusionCatalog { catalog_json } => Self::FusionCatalog { catalog_json },
             ClientEventWire::FusionStrategyResolved {
                 operation_id,

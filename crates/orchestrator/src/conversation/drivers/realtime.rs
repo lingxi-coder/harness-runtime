@@ -22,6 +22,10 @@ pub struct RealtimeAgentContext {
     pub profile_name: Option<String>,
     /// Trusted profile/account namespace pinned for this realtime session.
     pub account_scope: Option<String>,
+    /// Conversation behavior admitted when the instructions were assembled.
+    pub conversation_mode: lingxi_core::host::session_context::SessionModeSnapshot,
+    /// Effective skill-instruction epoch used to project this history.
+    pub conversation_profile_epoch: u64,
     /// Current Agent system instructions.
     pub instructions: String,
     /// Normalized text and tool history; connector imports it without a response.
@@ -482,6 +486,35 @@ pub fn realtime_history(
     }
     Ok(output)
 }
+// Model-facing realtime history skips transcript-only rows and nonportable
+// reasoning. Use the same projection when recording context metadata.
+fn realtime_manifest_message(message: &ConversationMessage) -> Option<ConversationMessage> {
+    let mut message = message.clone();
+    match &mut message {
+        ConversationMessage::System { api_system, .. } => {
+            api_system.as_ref()?;
+        }
+        ConversationMessage::User {
+            is_visible_in_transcript_only: true,
+            ..
+        } => return None,
+        ConversationMessage::User { content, .. }
+        | ConversationMessage::Assistant { content, .. } => {
+            content.retain(|block| match block {
+                ContentBlock::Text { text, .. } | ContentBlock::TextJsUtf16 { text, .. } => {
+                    !text.is_empty()
+                }
+                ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => true,
+                _ => false,
+            });
+            if content.is_empty() {
+                return None;
+            }
+        }
+    }
+    Some(message)
+}
+
 struct RealtimeGuard {
     control: RealtimeControl,
     cancel: CancellationToken,
@@ -666,6 +699,12 @@ impl ConversationOrchestrator {
     pub async fn prepare_realtime_agent(&self) -> Result<RealtimeAgentContext, OrchestratorError> {
         self.cancel_idle_compaction();
         let _gate = self.turn_gate.lock().await;
+        // Realtime preparation is a query boundary: a profile chosen during a
+        // previous turn must be admitted before capturing history or prompts.
+        self.admit_conversation_profile().await?;
+        self.refresh_effective_skill_projection().await?;
+        let conversation_mode = self.conversation_profile().await;
+        let conversation_profile_epoch = self.profile_epoch().await;
         let (session_id, history) = {
             let session = self.session.lock().await;
             (
@@ -675,7 +714,7 @@ impl ConversationOrchestrator {
         };
         let profile_name = self.current_audio_profile().await?;
         let account_scope = format!("profile:{profile_name}");
-        let tools = self
+        let mut wire_tools = self
             .build_wire_tools()
             .await?
             .0
@@ -688,20 +727,41 @@ impl ConversationOrchestrator {
                             .conflicts_with(&REALTIME_HELD_MEDIA_RESOURCES)
                     })
             })
+            .collect::<Vec<_>>();
+        let tools = wire_tools
+            .iter_mut()
             .map(|tool| {
+                // Realtime sends full function schemas without these ordinary
+                // provider-specific flags; its manifest should reflect that.
+                tool.strict = false;
+                tool.defer_loading = false;
                 Ok(serde_json::json!({
-                    "name": tool.name,
+                    "name": tool.name.as_str(),
                     "description": source_value(&tool.description)?,
                     "parameters": source_value(&tool.input_schema)?,
                 }))
             })
             .collect::<Result<Vec<_>, OrchestratorError>>()?;
+        let realtime_history = realtime_history(&history)?;
+        let manifest_history = history
+            .iter()
+            .filter_map(realtime_manifest_message)
+            .collect::<Vec<_>>();
+        let system = self.provider_system_prompt().await?;
+        let instructions = Self::system_prompt_source_text(&system)
+            .string_at("")
+            .map(str::to_owned)
+            .ok_or_else(|| failure("realtime system instructions are not a string"))?;
+        self.record_context_projection(Some(&system), &manifest_history, &wire_tools)
+            .await;
         Ok(RealtimeAgentContext {
             session_id,
             profile_name: Some(profile_name),
             account_scope: Some(account_scope),
-            instructions: self.effective_system_prompt().await?,
-            history: realtime_history(&history)?,
+            conversation_mode,
+            conversation_profile_epoch,
+            instructions,
+            history: realtime_history,
             tools,
         })
     }
@@ -891,6 +951,18 @@ impl ConversationOrchestrator {
         }
         self.cancel_idle_compaction();
         let _gate = tokio::select! {biased;_ = session_cancel.cancelled()=>return Ok(RealtimeAgentEnd::Cancelled),gate=self.turn_gate.lock()=>gate};
+        // Connector creation happens outside the gate. Admit any queued mode
+        // selection first, then reject a context captured for another profile.
+        // The guard closes already-opened realtime IO on this error path.
+        self.admit_conversation_profile().await?;
+        self.refresh_effective_skill_projection().await?;
+        if self.conversation_profile().await != prepared.conversation_mode
+            || self.profile_epoch().await != prepared.conversation_profile_epoch
+        {
+            return Err(failure(
+                "Agent conversation mode changed before realtime admission",
+            ));
+        }
         {
             let session = self.session.lock().await;
             if session.session_id.as_uuid().to_string() != prepared.session_id

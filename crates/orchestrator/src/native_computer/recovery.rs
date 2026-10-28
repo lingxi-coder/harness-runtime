@@ -1077,6 +1077,7 @@ pub(super) async fn rehydrate(
     }
     let mut restored = HashMap::new();
     let mut continuation = None;
+    let mut continuation_epoch = 0;
     let mut continuation_binding = None;
     for value in &markers {
         match value.string_at("/type") {
@@ -1092,6 +1093,7 @@ pub(super) async fn rehydrate(
             }
             Some("lingxi_computer_continuation") => {
                 let saved: wire::ContinuationRef = decode_payload_field(value, "/continuation")?;
+                continuation_epoch = continuation_context_epoch(value)?;
                 continuation_binding = Some(NativeContinuationBinding {
                     account: saved.account_scope.clone(),
                     profile: saved.profile_name.clone(),
@@ -1158,6 +1160,7 @@ pub(super) async fn rehydrate(
     let mut state = RoundState {
         session_id: Some(session_id),
         continuation,
+        continuation_epoch,
         continuation_binding,
         ..Default::default()
     };

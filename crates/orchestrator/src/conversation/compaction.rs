@@ -1632,6 +1632,10 @@ impl ConversationOrchestrator {
             guard = self.turn_gate.lock() => guard,
         };
 
+        self.admit_conversation_profile().await?;
+        self.refresh_effective_skill_projection()
+            .await
+            .map_err(|error| lingxi_core::host::HandleError::ActionFailed(error.to_string()))?;
         let (history_before, model) = {
             let session = self.session.lock().await;
             (session.model_context_history(), session.model.clone())
@@ -1903,6 +1907,10 @@ impl ConversationOrchestrator {
 
         // Snapshot history (clone — we don't hold the lock across the
         // network call inside `process_iteration`).
+        self.admit_conversation_profile().await?;
+        self.refresh_effective_skill_projection()
+            .await
+            .map_err(|error| lingxi_core::host::HandleError::ActionFailed(error.to_string()))?;
         let (history_before, model) = {
             let s = self.session.lock().await;
             (s.model_context_history(), s.model.clone())
@@ -2250,7 +2258,7 @@ impl ConversationOrchestrator {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(message_id, contents);
-            out.push(lingxi_core::types::ConversationMessage::user_meta_js_utf16(
+            let mut message = lingxi_core::types::ConversationMessage::user_meta_js_utf16(
                 message_id,
                 rendered
                     .string_at("")
@@ -2259,7 +2267,36 @@ impl ConversationOrchestrator {
                 rendered
                     .string_units("")
                     .expect("skill attachment renderer returns a root string"),
-            ));
+            );
+            if let lingxi_core::types::ConversationMessage::User { origin, .. } = &mut message {
+                let scope =
+                    compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
+                let mut activation = compaction::invoked_skills::skill_activation_origin(
+                    compaction::invoked_skills::context_epoch(scope),
+                );
+                let sources = restored_skills
+                    .iter()
+                    .map(|skill| {
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::object(vec![
+                            ("name".into(), skill.name.clone()),
+                            (
+                                "path".into(),
+                                skill.path.to_string_lossy().to_string().into(),
+                            ),
+                        ])
+                        .expect("skill source metadata has unique keys")
+                    })
+                    .collect();
+                activation
+                    .set_field(
+                        "skills",
+                        lingxi_core::types::utf16_json::Utf16JsonProjection::array(sources)
+                            .expect("skill source metadata is an array"),
+                    )
+                    .expect("skill activation metadata is an object");
+                *origin = Some(activation);
+            }
+            out.push(message);
         }
 
         // 2.1.266 `_ts` (@4123349), assembled by `KOe` as

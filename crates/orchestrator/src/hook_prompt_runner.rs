@@ -976,6 +976,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn profile_switch_excludes_retired_skill_from_prompt_hook_provider_request() {
+        use crate::test_support::{
+            noop_hook_executor, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
+        };
+        use lingxi_core::host::session_context::ConversationMode;
+
+        let api = MockApi::text("x", r#"{"ok":true}"#);
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            api.clone(),
+            Arc::new(tool_api::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::path::PathBuf::from("/work/repo"),
+        )
+        .with_conversation_mode(ConversationMode::Code);
+        let user = ConversationMessage::user(MessageId::new(), "earlier user text".into());
+        let retired = ConversationMessage::user_meta(MessageId::new(), "old skill body".into())
+            .with_origin(compaction::invoked_skills::skill_activation_origin(0));
+        let assistant_id = MessageId::new();
+        let assistant = ConversationMessage::Assistant {
+            per_turn_effort: None,
+            id: assistant_id,
+            content: vec![lingxi_core::types::ContentBlock::Text {
+                text: "answer".into(),
+                citations: None,
+            }],
+            stop_reason: None,
+            resumable: None,
+        };
+        let audit_history = vec![user.clone(), retired.clone(), assistant.clone()];
+        {
+            let mut session = orch.session.lock().await;
+            session.history = audit_history.clone();
+            session
+                .hook_message_grouping
+                .insert(assistant_id, (true, false));
+        }
+        assert_eq!(orch.prompt_hook_transcript().await.messages, audit_history);
+        orch.select_conversation_mode(ConversationMode::Chat)
+            .await
+            .unwrap();
+        let snapshot = orch.prompt_hook_transcript().await;
+        assert_eq!(snapshot.messages, vec![user.clone(), assistant.clone()]);
+        assert_eq!(
+            snapshot.message_grouping.get(&assistant_id),
+            Some(&(true, false))
+        );
+        assert_eq!(orch.session.lock().await.history, audit_history);
+
+        let mut request = req("judge", None);
+        request.transcript = Some(snapshot);
+        test_runner(api.clone()).run(request).await.unwrap();
+        let recorded = api.recorded.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        let sent = &recorded[0].3;
+        assert_eq!(&sent[..2], &[user, assistant]);
+        assert!(sent.iter().all(|message| message.id() != retired.id()));
+    }
+
+    #[tokio::test]
     async fn run_calls_messages_create_with_prompt_and_system_and_extracts_text() {
         let api = MockApi::text("claude-haiku-4-5", r#"{"ok": true}"#);
         let runner = test_runner(api.clone());

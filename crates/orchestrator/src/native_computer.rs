@@ -77,6 +77,7 @@ struct NativeContinuationPayload<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
     continuation: &'a wire::ContinuationRef,
+    context_epoch: u64,
 }
 
 #[derive(Serialize)]
@@ -152,6 +153,8 @@ struct RoundState {
     next_native: bool,
     active: Option<Binding>,
     continuation: Option<wire::ContinuationRef>,
+    continuation_epoch: u64,
+    ordinary_history_fallback: bool,
     continuation_binding: Option<NativeContinuationBinding>,
     pending_receipts: Vec<NativeReceiptRecord>,
     fallback_reason: Option<String>,
@@ -285,6 +288,15 @@ fn decode_payload_field<T: serde::de::DeserializeOwned>(
     decode_payload(&field)
 }
 
+fn continuation_context_epoch(value: &Utf16JsonProjection) -> Result<u64, OrchestratorError> {
+    if value.get_property("context_epoch").is_none() {
+        // The initial, unversioned conversation has epoch zero.
+        Ok(0)
+    } else {
+        decode_payload_field(value, "/context_epoch")
+    }
+}
+
 fn sdk_payload_from_core(
     value: &Utf16JsonProjection,
 ) -> Result<wire::JsonPayload, OrchestratorError> {
@@ -412,6 +424,7 @@ pub(crate) async fn prepare_projection(
     profile: Option<&str>,
     tools: &[lingxi_core::host::SourceToolWireDefinition],
 ) -> Result<Option<llm_runtime::computer::ComputerRequestProjection>, OrchestratorError> {
+    let active_epoch = orch.profile_epoch().await;
     let available = tools
         .iter()
         .any(|tool| tool.name == "computer" && !tool.defer_loading);
@@ -423,7 +436,7 @@ pub(crate) async fn prepare_projection(
         None
     };
     let provider = orch.api.native_computer_provider(model, profile);
-    let retained_continuations = orch
+    let retained_markers = orch
         .session
         .lock()
         .await
@@ -438,12 +451,30 @@ pub(crate) async fn prepare_projection(
             ContentBlock::ProviderContent { value, .. }
                 if value.string_at("/type") == Some("lingxi_computer_continuation") =>
             {
-                value.subprojection("/continuation").ok()
+                Some(value.clone())
             }
             _ => None,
         })
         .collect::<Vec<_>>();
+    let mut retained_continuations = Vec::new();
+    let mut has_older_continuation = false;
+    for marker in &retained_markers {
+        let reference = marker.subprojection("/continuation").map_err(internal)?;
+        has_older_continuation |= continuation_context_epoch(marker)? != active_epoch;
+        retained_continuations.push(reference);
+    }
     let mut state = orch.computer_runtime.state.lock().await;
+    if state.continuation.is_some() && state.continuation_epoch != active_epoch {
+        if !state.pending_receipts.is_empty() {
+            return Err(internal(
+                "pending computer receipt belongs to an earlier conversation profile; its original continuation is retained for recovery",
+            ));
+        }
+        state.continuation = None;
+        state.continuation_binding = None;
+        state.next_native = false;
+        state.ordinary_history_fallback = true;
+    }
     let retained_continuation = state
         .continuation
         .as_ref()
@@ -457,6 +488,9 @@ pub(crate) async fn prepare_projection(
         state.continuation = None;
         state.continuation_binding = None;
         state.next_native = false;
+    }
+    if state.continuation.is_none() && has_older_continuation {
+        state.ordinary_history_fallback = true;
     }
     // A submitted receipt is never recreated after an uncertain provider response.
     if let Some(journal) = &orch.tool_execution_journal {
@@ -485,6 +519,15 @@ pub(crate) async fn prepare_projection(
         state.fallback_reason = Some("selected protocol has no native desktop projection".into());
         if !state.pending_receipts.is_empty() || state.continuation.is_some() {
             return Err(internal("computer continuation cannot change provider"));
+        }
+        if state.ordinary_history_fallback {
+            return Ok(Some(llm_runtime::computer::ComputerRequestProjection {
+                native: None,
+                continuation: None,
+                binding: None,
+                submission: None,
+                ordinary_history: true,
+            }));
         }
         return Ok(None);
     };
@@ -576,7 +619,11 @@ pub(crate) async fn prepare_projection(
             .into(),
         );
     }
-    if !available && state.pending_receipts.is_empty() && state.continuation.is_none() {
+    if !available
+        && state.pending_receipts.is_empty()
+        && state.continuation.is_none()
+        && !state.ordinary_history_fallback
+    {
         return Ok(None);
     }
     let submission = orch
@@ -598,6 +645,7 @@ pub(crate) async fn prepare_projection(
             .map(|r| r.binding.clone())
             .or_else(|| state.continuation_binding.clone()),
         submission,
+        ordinary_history: state.ordinary_history_fallback,
     }))
 }
 
@@ -775,6 +823,7 @@ pub(crate) async fn bind_response(
         }
     }
     if let Some(continuation) = continuation {
+        let context_epoch = orch.profile_epoch().await;
         blocks.push(ContentBlock::ProviderContent {
             protocol: serde_json::to_value(continuation.protocol)
                 .map_err(internal)?
@@ -784,6 +833,7 @@ pub(crate) async fn bind_response(
             value: source_payload(&NativeContinuationPayload {
                 kind: "lingxi_computer_continuation",
                 continuation: &continuation,
+                context_epoch,
             })?,
         });
         let mut state = orch.computer_runtime.state.lock().await;
@@ -802,6 +852,8 @@ pub(crate) async fn bind_response(
                 })
             });
         state.continuation = Some(continuation);
+        state.continuation_epoch = context_epoch;
+        state.ordinary_history_fallback = false;
     }
     if !acknowledged.is_empty() {
         let (model, profile) = {
@@ -1487,10 +1539,13 @@ pub(crate) async fn persist_native_assistant(
     if let Some(reference) =
         llm_runtime::computer::response_continuation(response).map_err(internal)?
     {
+        let context_epoch = orch.profile_epoch().await;
         if !content.iter().any(|block| {
             matches!(block, ContentBlock::ProviderContent { value, .. }
             if value.string_at("/type") == Some("lingxi_computer_continuation")
-                && decode_payload_field::<wire::ContinuationRef>(value, "/continuation").ok().as_ref() == Some(&reference))
+                && decode_payload_field::<wire::ContinuationRef>(value, "/continuation").ok().as_ref() == Some(&reference)
+                && value.get_property("context_epoch").is_some()
+                && continuation_context_epoch(value).ok() == Some(context_epoch))
         }) {
             return Err(internal(
                 "append hook removed or changed the response continuation",
@@ -1959,6 +2014,66 @@ pub(crate) async fn has_pending_receipts(orch: &ConversationOrchestrator) -> boo
         .await
         .pending_receipts
         .is_empty()
+}
+
+/// Check durable ownership before a profile boundary; this does not replay or
+/// change a receipt. A cold owner may not have reconstructed its in-memory
+/// native state yet.
+pub(crate) async fn has_unsettled_profile_receipts(
+    orch: &ConversationOrchestrator,
+) -> Result<bool, OrchestratorError> {
+    let session_id = orch.session.lock().await.session_id;
+    {
+        let state = orch.computer_runtime.state.lock().await;
+        if state.session_id == Some(session_id) && !state.pending_receipts.is_empty() {
+            return Ok(true);
+        }
+    }
+    let Some(journal) = &orch.tool_execution_journal else {
+        return Ok(false);
+    };
+    let recovered = journal
+        .recover_session(session_id)
+        .await
+        .map_err(internal)?;
+    if recovered
+        .receipts
+        .iter()
+        .any(|receipt| receipt.stage != NativeReceiptStage::ResponseReceived)
+    {
+        return Ok(true);
+    }
+    let completed: std::collections::HashSet<_> = recovered
+        .receipts
+        .iter()
+        .filter(|receipt| receipt.stage == NativeReceiptStage::ResponseReceived)
+        .flat_map(|receipt| receipt.execution_ids.iter().cloned())
+        .collect();
+    let history = orch.session.lock().await.history.clone();
+    let mut abandoned = std::collections::HashSet::new();
+    for value in history
+        .iter()
+        .flat_map(|message| match message {
+            ConversationMessage::User { content, .. }
+            | ConversationMessage::Assistant { content, .. } => content.as_slice(),
+            ConversationMessage::System { .. } => &[],
+        })
+        .filter_map(|block| match block {
+            ContentBlock::ProviderContent { value, .. }
+                if value.string_at("/type") == Some("lingxi_computer_abandoned") =>
+            {
+                Some(value)
+            }
+            _ => None,
+        })
+    {
+        let calls: Vec<(String, String)> = decode_payload_field(value, "/call_identities")?;
+        abandoned.extend(calls);
+    }
+    Ok(recovered.executions.iter().any(|execution| {
+        !completed.contains(&execution.execution_id())
+            && !abandoned.contains(&execution.identity.call_identity())
+    }))
 }
 
 async fn receipt_acknowledgements(

@@ -463,6 +463,8 @@ pub struct LoadedTranscript {
     /// last-write-wins. LingXi-only metadata used to separate chat/code
     /// capability profiles without colliding with Claude's generic `mode`.
     pub session_modes: HashMap<String, String>,
+    /// Last committed context revision, independent of transcript message count.
+    pub session_context_revisions: HashMap<String, u64>,
     /// `worktree-state` entries: keyed by `sessionId` → the inner
     /// `worktreeSession` JSON value (an object for an active worktree, or `null`
     /// after `ExitWorktree` clears it). Binary (2.1.212 `Yle`):
@@ -940,6 +942,10 @@ pub(crate) fn route_line_seq<'a>(lines: impl IntoIterator<Item = &'a str>) -> Lo
                 value.get("sessionMode").and_then(Value::as_str),
             ) {
                 out.session_modes.insert(sid.to_string(), mode.to_string());
+                if let Some(revision) = value.get("contextRevision").and_then(Value::as_u64) {
+                    out.session_context_revisions
+                        .insert(sid.to_string(), revision);
+                }
             }
         } else if ty == "worktree-state" {
             // Binary (2.1.212 `Yle`): `x.set(J.sessionId, J.worktreeSession)` —

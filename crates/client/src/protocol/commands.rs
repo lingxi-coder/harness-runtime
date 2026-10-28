@@ -929,11 +929,20 @@ define_client_command! {
     UpdateMediaSessionModes {
         modes: Vec<MediaSessionModeDto>,
     },
+    // Behavior selection is independent of tool permission and model settings.
+    SetSessionMode {
+        mode: crate::protocol::listings::SessionModeDto,
+    },
+    // Inspect host-side context metadata without a model call or prompt bodies.
+    GetContextManifest,
+
 }
 
 impl From<ClientCommandWire> for ClientCommand {
     fn from(value: ClientCommandWire) -> Self {
         match value {
+            ClientCommandWire::SetSessionMode { mode } => Self::SetSessionMode { mode },
+            ClientCommandWire::GetContextManifest => Self::GetContextManifest,
             ClientCommandWire::FusionAdmin { command } => Self::FusionAdmin { command },
             ClientCommandWire::SideChatCreate {
                 request_id,
@@ -1410,6 +1419,7 @@ impl<'de> Deserialize<'de> for ClientCommand {
             "clear_session" => Ok(Self::ClearSession),
             "request_exit" => Ok(Self::RequestExit),
             "get_conversation_controls" => Ok(Self::GetConversationControls),
+            "get_context_manifest" => Ok(Self::GetContextManifest),
             // These prompt fields are Source text. Decode their raw member
             // tokens directly so serde's internally-tagged Content buffer
             // cannot normalize isolated UTF-16 surrogates first.

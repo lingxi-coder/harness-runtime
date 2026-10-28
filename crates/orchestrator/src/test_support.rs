@@ -1168,6 +1168,7 @@ type EffortCommandSource = std::sync::Arc<
 /// return `Ok(())` (or appropriate success defaults); flags are recorded
 /// for later assertion via `was_*_called()` accessors.
 pub struct MockOrchestratorHandle {
+    conversation_profile: StdMutex<(lingxi_core::host::session_context::ConversationMode, u64)>,
     /// Stable session id returned by `current_session_id`.
     session_id: SessionId,
     /// Number of `clear_session` calls.
@@ -1295,6 +1296,7 @@ impl MockOrchestratorHandle {
     pub fn new() -> Self {
         Self {
             session_id: SessionId::new(),
+            conversation_profile: StdMutex::new((Default::default(), 0)),
             clear_calls: AtomicUsize::new(0),
             clear_error: StdMutex::new(None),
             compact_summary: StdMutex::new(None),
@@ -1557,6 +1559,39 @@ impl Default for MockOrchestratorHandle {
 
 #[async_trait]
 impl OrchestratorHandle for MockOrchestratorHandle {
+    async fn conversation_mode(&self) -> lingxi_core::host::session_context::SessionModeSnapshot {
+        let (mode, revision) = *self.conversation_profile.lock().unwrap();
+        lingxi_core::host::session_context::SessionModeSnapshot {
+            session_id: self.session_id.as_uuid().to_string(),
+            active: mode,
+            selected: mode,
+            revision,
+            pending: false,
+        }
+    }
+
+    async fn set_conversation_mode(
+        &self,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
+        {
+            let mut profile = self.conversation_profile.lock().unwrap();
+            if profile.0 != mode {
+                profile.0 = mode;
+                profile.1 += 1;
+            }
+        }
+        Ok(self.conversation_mode().await)
+    }
+
+    async fn restore_conversation_mode(
+        &self,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
+        *self.conversation_profile.lock().unwrap() = (mode, 0);
+        Ok(self.conversation_mode().await)
+    }
+
     async fn current_session_id(&self) -> SessionId {
         self.session_id
     }

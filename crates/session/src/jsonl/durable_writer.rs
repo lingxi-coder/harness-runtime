@@ -309,6 +309,28 @@ impl<R: Read> Read for MetadataReader<'_, R> {
 }
 
 impl DurableTranscriptWriter {
+    /// Revert an unacknowledged profile selection while the transaction owns
+    /// the transcript lock. Failure stays explicit if rollback cannot sync.
+    fn rollback_mode_selection(
+        &self,
+        file: &mut std::fs::File,
+        previous_len: u64,
+        error: String,
+    ) -> TranscriptWriterError {
+        let rollback = file.set_len(previous_len).and_then(|()| {
+            #[cfg(test)]
+            self.syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            file.sync_all()
+        });
+        let message = match rollback {
+            Ok(()) => error,
+            Err(rollback) => {
+                format!("{error}; restoring the previous mode record failed: {rollback}")
+            }
+        };
+        TranscriptWriterError::WrittenButNotDurable(FsError::Io(message))
+    }
+
     /// A failed write_all may leave half a JSON row. Roll back only bytes from
     /// this locked append so retrying cannot turn a full disk into lost history.
     fn append_complete_line(
@@ -980,17 +1002,69 @@ impl DurableTranscriptTransaction<'_> {
             transcript_relative,
             Some(transcript_identity),
         )?;
+        // A versioned session-mode record acknowledges a committed behavior
+        // selection. Ordinary metadata remains ordered but intentionally does
+        // not pay an fsync; this record must survive before it is published.
+        let mode_selection = payload.string_at("/type") == Some("session-mode")
+            && payload.number_at("/contextRevision").is_some();
+        let previous_len = if mode_selection {
+            Some(
+                file.metadata()
+                    .map_err(|error| FsError::Io(error.to_string()))?
+                    .len(),
+            )
+        } else {
+            None
+        };
         self.writer.append_complete_line(&mut file, &line)?;
+        if let Some(previous_len) = previous_len {
+            #[cfg(test)]
+            let injected_error = self
+                .writer
+                .fail_next_append_sync
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+                .then(|| std::io::Error::other("synthetic mode selection sync failure"));
+            #[cfg(not(test))]
+            let injected_error: Option<std::io::Error> = None;
+            let sync = if let Some(error) = injected_error {
+                Err(error)
+            } else {
+                #[cfg(test)]
+                self.writer
+                    .syncs
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                file.sync_all()
+            };
+            if let Err(error) = sync {
+                // The selection was not acknowledged. While still holding the
+                // transcript transaction, remove its complete line so a failed
+                // selection does not become visible on the next resume.
+                return Err(self.writer.rollback_mode_selection(
+                    &mut file,
+                    previous_len,
+                    error.to_string(),
+                ));
+            }
+        }
         if !file_present {
             #[cfg(test)]
             self.writer
                 .syncs
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            sync_parent_pinned(
+            if let Err(error) = sync_parent_pinned(
                 transcript_root,
                 transcript_relative,
                 Some(transcript_identity),
-            )?;
+            ) {
+                if let Some(previous_len) = previous_len {
+                    return Err(self.writer.rollback_mode_selection(
+                        &mut file,
+                        previous_len,
+                        error.to_string(),
+                    ));
+                }
+                return Err(error.into());
+            }
         }
         Ok(())
     }
@@ -1438,6 +1512,66 @@ mod tests {
             Err(TranscriptWriterError::DeliveryConflict { .. })
         ));
         assert_eq!(std::fs::read_to_string(dir.path().join(path)).unwrap(), raw);
+    }
+
+    #[test]
+    fn versioned_mode_selection_is_synced_and_sync_failure_is_not_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
+        let path = Path::new("mode.jsonl");
+        let identity = root_identity(dir.path()).unwrap();
+        let append = |payload: Value| {
+            writer.with_transaction(|transaction| {
+                transaction.append_raw_json_at(dir.path(), &identity, path, source_payload(payload))
+            })
+        };
+
+        append(json!({"type":"session-mode", "sessionMode":"code"})).unwrap();
+        assert_eq!(
+            writer.sync_count_for_test(),
+            1,
+            "unversioned metadata only syncs the new directory entry"
+        );
+        append(json!({"type":"session-mode", "sessionMode":"chat", "contextRevision":1})).unwrap();
+        assert_eq!(
+            writer.sync_count_for_test(),
+            2,
+            "a versioned selection fsyncs its file"
+        );
+        let before = std::fs::read(dir.path().join(path)).unwrap();
+        writer
+            .fail_next_append_sync
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            append(json!({"type":"session-mode", "sessionMode":"code", "contextRevision":2})),
+            Err(TranscriptWriterError::WrittenButNotDurable(_))
+        ));
+        assert_eq!(
+            std::fs::read(dir.path().join(path)).unwrap(),
+            before,
+            "a rejected selection cannot be replayed on resume"
+        );
+        append(json!({"type":"session-mode", "sessionMode":"code", "contextRevision":2})).unwrap();
+        assert_eq!(writer.sync_count_for_test(), 4);
+
+        let fresh = Path::new("fresh-mode.jsonl");
+        writer
+            .with_transaction(|transaction| {
+                transaction.append_raw_json_at(
+                    dir.path(),
+                    &identity,
+                    fresh,
+                    source_payload(
+                        json!({"type":"session-mode", "sessionMode":"chat", "contextRevision":1}),
+                    ),
+                )
+            })
+            .unwrap();
+        assert_eq!(
+            writer.sync_count_for_test(),
+            6,
+            "a fresh selection syncs both file and directory"
+        );
     }
 
     /// Ordinary rows travel through the durable transaction for ORDERING, not

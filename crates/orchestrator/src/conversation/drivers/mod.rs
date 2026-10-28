@@ -141,6 +141,19 @@ pub fn skill_prompt_inputs(
     body: Utf16JsonProjection,
     hook_messages: Vec<Utf16JsonProjection>,
 ) -> Vec<QueuedPromptInput> {
+    let command_units = command.string_units("").expect("skill command is text");
+    let name_units = command_units
+        .iter()
+        .copied()
+        .skip_while(|unit| *unit == b'/' as u16 || *unit == b' ' as u16)
+        .take_while(|unit| !matches!(*unit, 9 | 10 | 13 | 32))
+        .collect::<Vec<_>>();
+    let name = Utf16JsonProjection::root_string(String::from_utf16_lossy(&name_units), name_units)
+        .expect("skill name is source text");
+    let mut activation = compaction::invoked_skills::skill_activation_origin(0);
+    activation
+        .set_field("skill_name", name)
+        .expect("host skill metadata is an object");
     vec![
         QueuedPromptInput {
             text: command,
@@ -150,6 +163,7 @@ pub fn skill_prompt_inputs(
             text: body,
             is_meta: true,
             turn_companion: true,
+            message_origin: Some(activation),
             trailing_history_rows: hook_messages,
             ..Default::default()
         },
@@ -992,6 +1006,7 @@ impl ConversationOrchestrator {
         prompt: &Utf16JsonProjection,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         self.recover_session_storage().await?;
+        self.admit_conversation_profile().await?;
         self.prompt_runtime.begin_native_query();
         // 0. Build the system prompt for THIS turn.
         // claude-code `nre` precedence: `--system-prompt` (override) wins; else
@@ -3094,6 +3109,7 @@ impl ConversationOrchestrator {
         // Each call admits one fresh query, including a metadata re-wake. The
         // StreamingTurnDriver retains these IDs through internal retries and
         // tool continuations without re-entering this wrapper.
+        self.admit_conversation_profile().await?;
         self.prompt_runtime.begin_native_query();
         let suggestion_origin = queued_inputs
             .as_ref()
@@ -3375,6 +3391,7 @@ impl ConversationOrchestrator {
         cancel: CancellationToken,
         queued_inputs: Option<Vec<QueuedPromptInput>>,
     ) -> Result<TurnOutcome, OrchestratorError> {
+        self.admit_conversation_profile().await?;
         self.prompt_runtime.begin_native_query();
         // 0. Build the system prompt (same as non-cancelable path).
         // claude-code `nre` precedence: `--system-prompt` (override) wins; else the
@@ -3458,6 +3475,8 @@ impl ConversationOrchestrator {
                     },
                 )
                 .await;
+                self.stamp_skill_prompt_activation(&input, &mut message)
+                    .await;
                 submissions.push((input, message, context));
             }
             if submissions.iter().any(|(input, _, _)| !input.is_meta) {

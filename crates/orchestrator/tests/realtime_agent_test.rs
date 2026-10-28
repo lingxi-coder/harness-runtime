@@ -2,7 +2,8 @@
 use async_trait::async_trait;
 use base64::Engine as _;
 use futures::StreamExt;
-use lingxi_core::host::{PermissionDecision, PermissionGate};
+use lingxi_core::host::session_context::ConversationMode;
+use lingxi_core::host::{OrchestratorHandle as _, PermissionDecision, PermissionGate};
 use lingxi_core::types::utf16_json::Utf16JsonProjection;
 use lingxi_core::types::{ContentBlock, ConversationMessage, MessageId, ToolUseId};
 use lingxi_llm_client::realtime::*;
@@ -509,6 +510,141 @@ async fn connection_with_codec(
     (control, events, tokio::spawn(driver.run()), tx, sent)
 }
 #[tokio::test]
+async fn realtime_rejects_prepared_context_when_behavior_changes_before_admission() {
+    for switch_back in [false, true] {
+        let gate = Arc::new(Gate {
+            calls: AtomicUsize::new(0),
+            deny: false,
+            release: None,
+            approved: AtomicBool::new(false),
+        });
+        let (orch, calls) = fixture(gate).await;
+        let prepared = orch.prepare_realtime_agent().await.unwrap();
+        assert_eq!(prepared.conversation_mode.active, ConversationMode::Code);
+        orch.set_conversation_mode(ConversationMode::Chat)
+            .await
+            .unwrap();
+        if switch_back {
+            orch.set_conversation_mode(ConversationMode::Code)
+                .await
+                .unwrap();
+        }
+        let current = orch.prepare_realtime_agent().await.unwrap();
+        assert_eq!(prepared.session_id, current.session_id);
+        assert_eq!(prepared.profile_name, current.profile_name);
+        assert_eq!(prepared.history, current.history);
+        assert_eq!(prepared.tools, current.tools);
+        assert_ne!(
+            prepared.conversation_mode.revision,
+            current.conversation_mode.revision
+        );
+        if !switch_back {
+            assert!(current.instructions.contains("research, writing, learning"));
+            assert_ne!(prepared.instructions, current.instructions);
+        }
+        let (control, events, driver, _provider, _) = connection().await;
+        let (_inputs_tx, inputs) = mpsc::channel(4);
+        let (output, _output_rx) = mpsc::channel(4);
+        let error = orch
+            .run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                RealtimeAgentLimits::default(),
+                false,
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("conversation mode changed before realtime admission"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let _ = tokio::time::timeout(Duration::from_secs(2), driver).await;
+    }
+}
+
+#[tokio::test]
+async fn realtime_admission_rejects_a_profile_selected_during_the_previous_turn() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = Arc::new(Gate {
+        calls: AtomicUsize::new(0),
+        deny: false,
+        release: Some(release.clone()),
+        approved: AtomicBool::new(false),
+    });
+    let (orch, _) = fixture(gate.clone()).await;
+    let prepared = orch.prepare_realtime_agent().await.unwrap();
+    let (control, events, driver, provider, _) = connection().await;
+    let (_inputs_tx, inputs) = mpsc::channel(4);
+    let (output, _output_rx) = mpsc::channel(16);
+    let cancel = CancellationToken::new();
+    let first = tokio::spawn({
+        let orch = orch.clone();
+        let prepared = prepared.clone();
+        let cancel = cancel.clone();
+        async move {
+            orch.run_realtime_agent(
+                prepared,
+                control,
+                events,
+                inputs,
+                output,
+                RealtimeAgentLimits::default(),
+                false,
+                cancel,
+            )
+            .await
+        }
+    });
+    provider
+        .unbounded_send(Ok(RealtimeFrame::text("tool")))
+        .unwrap();
+    wait_until(
+        || gate.calls.load(Ordering::SeqCst) > 0,
+        "previous realtime turn owns gate",
+    )
+    .await;
+    let pending = orch
+        .set_conversation_mode(ConversationMode::Chat)
+        .await
+        .unwrap();
+    assert!(pending.pending);
+    cancel.cancel();
+    release.notify_one();
+    let _ = tokio::time::timeout(Duration::from_secs(2), first)
+        .await
+        .unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(2), driver).await;
+
+    let (control, events, driver, _provider, _) = connection().await;
+    let (_inputs_tx, inputs) = mpsc::channel(4);
+    let (output, _output_rx) = mpsc::channel(4);
+    let error = orch
+        .run_realtime_agent(
+            prepared,
+            control,
+            events,
+            inputs,
+            output,
+            RealtimeAgentLimits::default(),
+            false,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("conversation mode changed before realtime admission"));
+    let selected = orch.conversation_mode().await;
+    assert_eq!(selected.active, ConversationMode::Chat);
+    assert!(!selected.pending);
+    let _ = tokio::time::timeout(Duration::from_secs(2), driver).await;
+}
+
+#[tokio::test]
 async fn realtime_tool_loop_keeps_idle_paused_during_permission_and_uses_common_result() {
     let release = Arc::new(tokio::sync::Notify::new());
     let gate = Arc::new(Gate {
@@ -651,6 +787,20 @@ async fn current_catalog_filters_media_resources_and_permission_denial_never_exe
         .map(|tool| tool["name"].as_str().unwrap())
         .collect::<Vec<_>>();
     assert_eq!(names, ["fixture", "media_capture", "media_observe"]);
+    let manifest = orch.context_manifest().await;
+    assert!(manifest.projected);
+    let manifest_tools = manifest
+        .blocks
+        .iter()
+        .filter_map(|block| block.id.strip_prefix("tool:"))
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        manifest_tools,
+        names
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+    );
     let (control, events, driver, events_tx, sent) = connection().await;
     let (_inputs_tx, inputs) = mpsc::channel(4);
     let (output, _rx) = mpsc::channel(16);

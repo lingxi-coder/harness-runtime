@@ -1341,6 +1341,8 @@ fn event_goldens() -> Vec<(&'static str, ClientEvent)> {
                 },
             },
         ),
+        ("event/session_mode_changed.json", ClientEvent::SessionModeChanged { session_id: "session-1".into(), mode: SessionModeDto::Code, pending_mode: Some(SessionModeDto::Chat), revision: 2 }),
+        ("event/context_manifest.json", ClientEvent::ContextManifest { manifest_json: "{\"projected\":false}".into() }),
         (
             "event/media_control_request.json",
             ClientEvent::MediaControlRequest {
@@ -2028,6 +2030,8 @@ fn command_goldens() -> Vec<(&'static str, ClientCommand)> {
                 },
             },
         ),
+        ("command/set_session_mode.json", ClientCommand::SetSessionMode { mode: SessionModeDto::Chat }),
+        ("command/get_context_manifest.json", ClientCommand::GetContextManifest),
         (
             "command/update_media_session_modes.json",
             ClientCommand::UpdateMediaSessionModes {

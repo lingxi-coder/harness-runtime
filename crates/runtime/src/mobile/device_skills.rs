@@ -236,7 +236,7 @@ mod tests {
             let descriptor = loader.load(&"visualize".into()).await.unwrap().unwrap();
             assert!(descriptor.allowed_tools.is_empty());
             assert!(descriptor.shell.is_none() && descriptor.context.is_none());
-            assert_eq!(descriptor.skip_shell_expansion, mode == SessionMode::Chat);
+            assert!(!descriptor.skip_shell_expansion);
             assert!(descriptor
                 .dynamic_body
                 .unwrap()

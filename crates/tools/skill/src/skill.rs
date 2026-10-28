@@ -1031,6 +1031,9 @@ fn truncate_source_string(source: &Utf16JsonProjection, limit: usize) -> Utf16Js
 
 fn user_message_from_source(
     source: &Utf16JsonProjection,
+    context_epoch: u64,
+    skill_name: &Utf16JsonProjection,
+    skill_path: &std::path::Path,
 ) -> lingxi_core::types::ConversationMessage {
     let units = source
         .string_units("")
@@ -1050,7 +1053,13 @@ fn user_message_from_source(
         is_visible_in_transcript_only: false,
         turn_companion: None,
         usage_limit_note: None,
-        origin: None,
+        origin: Some(
+            compaction::invoked_skills::skill_activation_origin_with_skill(
+                context_epoch,
+                skill_name,
+                skill_path,
+            ),
+        ),
         turn_origin: None,
     }
 }
@@ -1733,17 +1742,26 @@ present this turn, the skill is loaded — follow it directly rather than callin
             self.ctx.session_id.map(|id| id.to_string())
         };
         let agent_id = ctx.agent_id.as_ref().map(ToString::to_string);
-        compaction::invoked_skills::register_scoped(
+        let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(
+            session_id.as_deref(),
+            agent_id.as_deref(),
+        );
+        let skill_message = user_message_from_source(
+            &expanded_prompt,
+            compaction::invoked_skills::context_epoch(scope),
+            &command_name,
+            &skill_path,
+        );
+        compaction::invoked_skills::register_activation_with_message(
             &command_name,
             &skill_path,
             &expanded_prompt,
-            compaction::invoked_skills::InvokedSkillScopeRef::new(
-                session_id.as_deref(),
-                agent_id.as_deref(),
-            ),
+            Some(&desc.body),
+            scope,
+            skill_message.id(),
         );
 
-        let new_messages = vec![user_message_from_source(&expanded_prompt)];
+        let new_messages = vec![skill_message];
 
         let mut md: LogEventMetadata = HashMap::new();
         md.insert(

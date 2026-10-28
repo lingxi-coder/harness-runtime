@@ -1611,6 +1611,86 @@ this turn, the skill is loaded — follow it directly rather than calling again.
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
+    async fn compaction_preserves_effective_guidelines_without_replaying_skill_actions() {
+        let _g = compaction::invoked_skills::TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        compaction::invoked_skills::reset_for_test();
+
+        let capture = Arc::new(CapturingProcess {
+            seen: std::sync::Mutex::new(Vec::new()),
+            stdout: "setup result\n".into(),
+        });
+        let session_id = SessionId::new();
+        let session_text = session_id.to_string();
+        let scope =
+            compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_text), None);
+        compaction::invoked_skills::set_context_epoch(scope, 23);
+        let mut context = shell_test_ctx(dummy_out());
+        context.process = capture.clone();
+        context.session_id = Some(session_id);
+        let desc = SkillDescriptor {
+            body: "## User Request\nCreate the requested file.\n!`echo setup`\nOngoing guideline"
+                .into(),
+            skill_root: Some(std::path::PathBuf::from("/skills/once")),
+            ..prompt_desc("once")
+        };
+        let tool = SkillTool::with_loader(context, Arc::new(FixedLoader(Some(desc))));
+        let result = tool
+            .call(source_json!({"skill": "once"}), fresh_ctx(), fresh_tx())
+            .await
+            .expect("skill invocation");
+        let injected_id = result.new_messages[0].id();
+        let serialized =
+            serde_json::to_string(&result.new_messages[0]).expect("serialize skill message");
+        let decoded: lingxi_core::types::ConversationMessage =
+            serde_json::from_str(&serialized).expect("restore skill message");
+        let lingxi_core::types::ConversationMessage::User {
+            origin: Some(origin),
+            ..
+        } = decoded
+        else {
+            panic!("host-injected skill provenance must survive serialization");
+        };
+        assert_eq!(origin.string_at("/type"), Some("skill_activation"));
+        assert_eq!(origin.number_at("/context_epoch"), Some(23.0));
+        assert_eq!(origin.string_at("/skill_name"), Some("once"));
+        assert_eq!(origin.string_at("/skill_path"), Some("/skills/once"));
+        let calls_after_invocation = capture.seen.lock().unwrap().len();
+        assert_eq!(
+            calls_after_invocation, 2,
+            "snapshot plus the one-time action"
+        );
+        let metadata = compaction::invoked_skills::activation_metadata_for_scope(scope);
+        assert_eq!(metadata.len(), 1);
+        assert_ne!(
+            metadata[0].definition_sha256, metadata[0].content_sha256,
+            "the definition retains the unexpanded command while the activation carries its output"
+        );
+
+        let restored = compaction::restore_post_compact_skills(
+            compaction::invoked_skills::filter_for_scope(scope),
+            &[],
+        );
+        let rendered = compaction::render_invoked_skills_attachment(&restored)
+            .expect("effective skill restored");
+        let rendered = rendered.string_at("").unwrap();
+        assert!(rendered
+            .contains("Do NOT re-execute these skills or perform their one-time setup actions"));
+        assert!(rendered.contains("Ongoing guideline"));
+        assert!(rendered.contains("Create the requested file."));
+        assert_eq!(capture.seen.lock().unwrap().len(), calls_after_invocation);
+
+        compaction::invoked_skills::expire_for_mode_change(&session_text);
+        assert!(compaction::invoked_skills::filter_for_scope(scope).is_empty());
+        assert!(
+            compaction::invoked_skills::expired_message_ids_for_scope(scope).contains(&injected_id)
+        );
+        compaction::invoked_skills::reset_for_test();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn invocation_registry_preserves_raw_skill_name_and_expanded_prompt_units() {
         let _g = compaction::invoked_skills::TEST_LOCK
             .lock()
@@ -1646,6 +1726,14 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             .call(input, fresh_ctx(), fresh_tx())
             .await
             .expect("raw skill invocation");
+        let lingxi_core::types::ConversationMessage::User {
+            origin: Some(origin),
+            ..
+        } = &result.new_messages[0]
+        else {
+            panic!("skill message carries origin metadata");
+        };
+        assert_eq!(origin.string_units("/skill_name"), Some(name_units.clone()));
 
         let key = compaction::invoked_skills::registry_key(
             compaction::invoked_skills::InvokedSkillScopeRef::new(None, None),

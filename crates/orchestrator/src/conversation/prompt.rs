@@ -751,12 +751,35 @@ impl ConversationOrchestrator {
         lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
         lingxi_core::settings::SettingsError,
     > {
+        self.provider_system_prompt_inner(true).await
+    }
+
+    /// Build the same profile source for a side query without changing the
+    /// main request's pending prompt-snapshot bookkeeping.
+    pub(crate) async fn provider_side_query_system_prompt(
+        &self,
+    ) -> Result<
+        lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        lingxi_core::settings::SettingsError,
+    > {
+        self.provider_system_prompt_inner(false).await
+    }
+
+    async fn provider_system_prompt_inner(
+        &self,
+        record_pending_snapshot: bool,
+    ) -> Result<
+        lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput,
+        lingxi_core::settings::SettingsError,
+    > {
         if let Some(custom) = &self.config.system_prompt_override {
-            *self
-                .prompt_runtime
-                .pending_prompt_source_vector
-                .lock()
-                .await = None;
+            if record_pending_snapshot {
+                *self
+                    .prompt_runtime
+                    .pending_prompt_source_vector
+                    .lock()
+                    .await = None;
+            }
             let mut units = custom
                 .string_units("")
                 .expect("system prompt override must be a JSON string");
@@ -810,18 +833,20 @@ impl ConversationOrchestrator {
             system_prompt.clone(),
             dynamic_context,
             Some(lingxi_llm_client::providers::anthropic::system_prompt::PromptText::from_string(
-                crate::prompt::locked_templates::HEADER,
+                crate::prompt::profile_header(self.conversation_profile().await.active),
             )),
         );
         let pending = self
             .prompt_snapshot_eligible()
             .then_some(system_prompt)
             .filter(|vector| !vector.is_empty());
-        *self
-            .prompt_runtime
-            .pending_prompt_source_vector
-            .lock()
-            .await = pending;
+        if record_pending_snapshot {
+            *self
+                .prompt_runtime
+                .pending_prompt_source_vector
+                .lock()
+                .await = pending;
+        }
         Ok(input)
     }
 
@@ -1858,7 +1883,7 @@ impl ConversationOrchestrator {
         &self,
     ) -> Result<crate::prompt::RenderedPromptSections, lingxi_core::settings::SettingsError> {
         use crate::prompt::{
-            named_prompt_sections_with_style, prompt_section_slots, render_prompt_sections_scoped,
+            named_prompt_sections_for_mode, prompt_section_slots, render_prompt_sections_scoped,
             ActiveOutputStyle, PromptSectionScope,
         };
         let ctx = self.build_prompt_context().await?;
@@ -1892,7 +1917,16 @@ impl ConversationOrchestrator {
                 cache.answers.clear();
             }
         }
-        let sections = named_prompt_sections_with_style(&ctx, style);
+        let mode = self.conversation_profile().await.active;
+        let mut sections = named_prompt_sections_for_mode(&ctx, style, mode);
+        let epoch = self.profile_epoch().await;
+        if epoch > 0 {
+            sections.push(crate::prompt::PromptSection::new(
+                "conversation_profile_state",
+                format!("Current conversation profile: {} (context epoch {}). Follow the current user request and currently applicable user/project constraints. Earlier profile directives and expired skill requests in history or summaries are historical context. They do not authorize repeating earlier actions. Apply only skills activated for this context; restored active skill guidance does not rerun setup or one-time operations.", mode.as_str(), epoch),
+                PromptSectionScope::Session,
+            ));
+        }
         let resolved_sections = if let Some(host) = host.as_ref() {
             futures::future::join_all(prompt_section_slots(sections, &ctx).into_iter().map(
                 |slot| async move {

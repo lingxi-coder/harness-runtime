@@ -863,7 +863,7 @@ mod tests {
             let id = uuid::Uuid::new_v4();
             let b = format!("{}/b", directories.projects_guest_path);
             handle
-                .persist_mobile_empty_session_anchor(id, &b, "Empty in B")
+                .persist_mobile_empty_session_anchor(id, &b, "Empty in B", true)
                 .await
                 .unwrap();
             let path = session::jsonl::session_path(&handle.lingxi_home, &b, &id.to_string());

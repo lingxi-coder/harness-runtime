@@ -177,4 +177,6 @@
 /// media-device and media-connection request/response variants and introduce
 /// new DTO families. They do not retype or remove an existing field/variant;
 /// host routing keeps these control messages outside model history and AG-UI.
+// Session-mode selection and context-manifest commands/events append to their
+// respective variant lists without changing existing ordinals or fields.
 pub const CLIENT_PROTOCOL_VERSION: &str = "29.0.0";

@@ -1,0 +1,7 @@
+{
+  "type": "session_mode_changed",
+  "session_id": "session-1",
+  "mode": "code",
+  "pending_mode": "chat",
+  "revision": 2
+}

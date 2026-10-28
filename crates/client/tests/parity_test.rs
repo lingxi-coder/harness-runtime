@@ -69,6 +69,7 @@ fn session_metadata_parity() {
         created: UNIX_EPOCH + Duration::from_secs(1_748_113_392),
         message_count: 1,
         path: PathBuf::from("/tmp/x.jsonl"),
+        workspace_path: None,
         pr_number: None,
         // Search-only field; `lower_session_metadata` does not map it, so the
         // DTO assertions below are unaffected by its value.

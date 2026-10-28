@@ -26,6 +26,8 @@ tracing.workspace = true
 regex = "1"
 # P2-12: the process-global invoked-skill registry (`Pt.invokedSkills` mirror).
 once_cell = "1"
+# Stable identity for the exact UTF-16 content of invoked skill activations.
+sha2 = "0.10"
 
 [dev-dependencies]
 # Only used by the autocompact unit test to construct a `CacheSafeParams`

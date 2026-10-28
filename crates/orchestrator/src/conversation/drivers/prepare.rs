@@ -271,6 +271,7 @@ impl ConversationOrchestrator {
         // authority. Keep their queue claims retryable until durable history
         // admission has succeeded, before any request snapshot is captured.
         self.consume_main_reports().await?;
+        self.refresh_effective_skill_projection().await?;
         // Arm both prefetches CONCURRENTLY with this turn (claude-code `wAo` /
         // `startSkillDiscoveryPrefetch`), so their handles are ready when
         // `relevant_memory_reminder_messages` and
@@ -1031,6 +1032,9 @@ impl ConversationOrchestrator {
             &mut turn_reminders,
             &mut guarded_async_hook_reminders,
         );
+
+        self.record_context_projection(system, &snapshot, &wire_tools)
+            .await;
 
         Ok(PreparedTurnStep {
             snapshot,

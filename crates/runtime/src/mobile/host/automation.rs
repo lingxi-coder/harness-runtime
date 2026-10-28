@@ -415,6 +415,7 @@ impl MobileTurnFirer {
         if let Some(automation) = automation {
             config.default_model = automation.model.clone();
         }
+        let target_conversation_mode = config.session_mode;
         let rt = build_mobile_inner(config, self.platform.clone(), listener, sink, None)
             .await
             .map_err(|e| {
@@ -462,6 +463,10 @@ impl MobileTurnFirer {
                 &cwd,
             )
             .await;
+            handle
+                .restore_conversation_mode(target_conversation_mode)
+                .await
+                .map_err(|error| format!("paused: Cannot restore conversation mode: {error}"))?;
         }
         let session_id = handle.current_session_id().await.as_uuid().to_string();
         if target_uuid.is_none() && automation.is_some() {
@@ -479,7 +484,7 @@ impl MobileTurnFirer {
                 .await
                 .map_err(|error| format!("persist scheduled session anchor: {error}"))?;
             rt.session_writer
-                .append_session_mode(self.cfg.session_mode.as_str())
+                .append_session_mode_selection(&session_id, self.cfg.session_mode.as_str(), 0, 0)
                 .await
                 .map_err(|error| format!("persist scheduled session mode: {error}"))?;
         }

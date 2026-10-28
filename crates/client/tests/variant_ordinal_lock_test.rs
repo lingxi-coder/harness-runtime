@@ -351,6 +351,8 @@ fn side_chat_variants_are_appended_after_the_protocol_25_prefix() {
         "MediaServiceRequest".into(),
         "MediaControlResponse".into(),
         "UpdateMediaSessionModes".into(),
+        "SetSessionMode".into(),
+        "GetContextManifest".into(),
     ]));
     assert!(events.ends_with(&[
         "SideChatCreated".into(),
@@ -367,6 +369,8 @@ fn side_chat_variants_are_appended_after_the_protocol_25_prefix() {
         "MediaDeviceRequest".into(),
         "MediaServiceResponse".into(),
         "MediaControlRequest".into(),
+        "SessionModeChanged".into(),
+        "ContextManifest".into(),
     ]));
 }
 

@@ -251,12 +251,9 @@ async fn end_mobile_audio_owner(
     }
 }
 
-use crate::mobile::{
-    skill_loader::command_visible_in_session_mode,
-    turn_durability::{
-        DurableBashResult, DurableSkillPrompt, DurableTurnStore, DurableTurnStoreError,
-        QueueDeliveryState, QueueOperationKind, ResumeDisposition,
-    },
+use crate::mobile::turn_durability::{
+    DurableBashResult, DurableSkillPrompt, DurableTurnStore, DurableTurnStoreError,
+    QueueDeliveryState, QueueOperationKind, ResumeDisposition,
 };
 
 /// Everything a mobile host needs to drive a conversation, built deterministically
@@ -382,8 +379,6 @@ pub struct MobileRuntime {
     pub permission_policy_gate: Arc<permission::PolicyPermissionGate>,
     /// User-requested permission mode before model/provider auto resolution.
     pub requested_permission_mode: Arc<StdMutex<String>>,
-    /// Capability profile attached to this source/session lane.
-    pub session_mode: session::jsonl::SessionMode,
     /// Mode assigned to a newly-created session when it has no transcript
     /// metadata of its own. Existing sessions always restore their own value.
     pub session_default_permission_mode: String,
@@ -568,7 +563,7 @@ fn mobile_skill_listing_provider(
 
 fn mobile_skill_listing_provider_with_settings(
     registry: Arc<RwLock<command_api::CommandRegistry>>,
-    session_mode: session::jsonl::SessionMode,
+    _session_mode: session::jsonl::SessionMode,
     read_file_state: Option<tool_api::read_file_state::ReadFileStateMap>,
     include_code_review_suggestion: Arc<
         dyn Fn() -> Result<bool, lingxi_core::settings::SettingsError> + Send + Sync,
@@ -641,7 +636,6 @@ fn mobile_skill_listing_provider_with_settings(
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .is_available_named(&c.name, patterns, &touched, &root),
                     })
-                    .filter(|c| command_visible_in_session_mode(c, session_mode))
                     // Native Gee eligibility after mobile mode/workspace filtering.
                     .filter(|c| {
                         c.source == CommandSource::Builtin
@@ -3501,6 +3495,52 @@ async fn continue_media_agent_handoff(
 /// single-owner invariant at the delivery boundary: one terminal event closes
 /// the turn, cancellation rewrites that terminal outcome, and live-turn events
 /// emitted after terminal/slot release are discarded.
+/// Deliver mode snapshots on one ordered queue so a foreign listener may
+/// submit another command without waiting on the command's transition lock.
+struct ModeEventListener {
+    inner: Arc<dyn ClientEventListener>,
+    mode_events: tokio::sync::mpsc::UnboundedSender<ClientEvent>,
+}
+
+impl ModeEventListener {
+    fn new(
+        inner: Arc<dyn ClientEventListener>,
+        runtime: &tokio::runtime::Runtime,
+    ) -> Arc<dyn ClientEventListener> {
+        let (mode_events, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let consumer = inner.clone();
+        runtime.spawn(async move {
+            while let Some(event) = receiver.recv().await {
+                consumer.on_event(event).await;
+            }
+        });
+        Arc::new(Self { inner, mode_events })
+    }
+}
+
+#[async_trait]
+impl ClientEventListener for ModeEventListener {
+    async fn on_event(&self, event: ClientEvent) {
+        if matches!(event, ClientEvent::SessionModeChanged { .. }) {
+            let _ = self.mode_events.send(event);
+        } else {
+            self.inner.on_event(event).await;
+        }
+    }
+
+    async fn on_workflow_progress(
+        &self,
+        origin_session_id: String,
+        task_id: String,
+        run_id: String,
+        progress: client::protocol::listings::WorkflowProgressDto,
+    ) {
+        self.inner
+            .on_workflow_progress(origin_session_id, task_id, run_id, progress)
+            .await;
+    }
+}
+
 struct TurnLifecycleListener {
     inner: Arc<dyn ClientEventListener>,
     active_turn: Arc<Mutex<Option<Arc<ActiveTurn>>>>,
@@ -3840,6 +3880,22 @@ impl MobileEngineHandle {
     /// The same live logical cwd used by file tools, Bash and the orchestrator.
     fn session_cwd(&self) -> String {
         self.inner.session_cwd.cwd().to_string_lossy().into_owned()
+    }
+
+    async fn emit_conversation_mode_snapshot(
+        &self,
+        snapshot: &lingxi_core::host::session_context::SessionModeSnapshot,
+    ) {
+        self.connection_sink
+            .emit(ClientEvent::SessionModeChanged {
+                session_id: snapshot.session_id.clone(),
+                mode: lower_session_mode(snapshot.active),
+                pending_mode: snapshot
+                    .pending
+                    .then(|| lower_session_mode(snapshot.selected)),
+                revision: snapshot.revision,
+            })
+            .await;
     }
 
     async fn emit_controls_snapshot(&self) {
@@ -4236,36 +4292,63 @@ impl MobileEngineHandle {
         Ok(active)
     }
 
-    async fn persist_session_permission_mode(&self, mode: &str) -> Result<(), ClientError> {
+    /// An engine can begin in an empty draft without `NewSession`. Anchor it
+    /// before a mode selection or first turn so its initial profile survives
+    /// closing and reopening the conversation.
+    async fn ensure_mobile_session_anchor(&self) -> Result<(), ClientError> {
         let path = self.inner.session_writer.active_path();
         session_identity_snapshot_for_path(&self.inner.session_writer, &path)
             .await
             .map_err(|error| ClientError::Internal {
                 message: format!("session transcript identity import failed: {error}"),
             })?;
-        if !path.exists() {
-            let session_id = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .ok_or_else(|| ClientError::Internal {
-                    message: "persist session permission mode failed: invalid transcript path"
-                        .into(),
-                })?;
+        if std::fs::metadata(&path).map_or(true, |metadata| metadata.len() == 0) {
+            let session_id = self.inner.orchestrator.current_session_id().await;
             self.inner
                 .session_writer
-                .append_mobile_empty_session(session_id, "新对话", &self.session_cwd())
+                .append_mobile_empty_session(
+                    &session_id.as_uuid().to_string(),
+                    "新对话",
+                    &self.session_cwd(),
+                )
                 .await
                 .map_err(|error| ClientError::Internal {
-                    message: format!("persist session permission anchor failed: {error}"),
-                })?;
-            self.inner
-                .session_writer
-                .append_session_mode(self.inner.session_mode.as_str())
-                .await
-                .map_err(|error| ClientError::Internal {
-                    message: format!("persist session mode failed: {error}"),
+                    message: format!("persist session anchor failed: {error}"),
                 })?;
         }
+        if self
+            .inner
+            .session_writer
+            .persisted_session_mode()
+            .await
+            .is_none()
+        {
+            let snapshot = self.inner.orchestrator.conversation_mode().await;
+            if snapshot.revision != 0 || snapshot.pending || snapshot.active != snapshot.selected {
+                return Err(ClientError::Internal {
+                    message: "cannot recreate missing conversation profile after a mode change"
+                        .into(),
+                });
+            }
+            self.inner
+                .session_writer
+                .append_session_mode_selection(
+                    &snapshot.session_id,
+                    snapshot.selected.as_str(),
+                    0,
+                    0,
+                )
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: format!("persist initial conversation mode failed: {error}"),
+                })?;
+        }
+        Ok(())
+    }
+
+    async fn persist_session_permission_mode(&self, mode: &str) -> Result<(), ClientError> {
+        let path = self.inner.session_writer.active_path();
+        self.ensure_mobile_session_anchor().await?;
         session_identity_snapshot_for_path(&self.inner.session_writer, &path)
             .await
             .map_err(|error| ClientError::Internal {
@@ -4291,21 +4374,49 @@ impl MobileEngineHandle {
         session_id: uuid::Uuid,
         cwd: &str,
         title: &str,
+        create_anchor: bool,
     ) -> Result<(), ClientError> {
         let path = session::jsonl::session_path(&self.lingxi_home, cwd, &session_id.to_string());
-        let writer = session::jsonl::JsonlWriter::new(path, self.fs.clone());
+        let target_id = lingxi_core::types::SessionId::from_uuid(session_id);
+        let authority = crate::mobile::transcript::MobileTranscriptSessionSwitcher::new(
+            self.lingxi_home.clone(),
+        )
+        .writer(target_id)
+        .await
+        .map_err(|error| ClientError::Internal {
+            message: format!("empty session transcript authority failed: {error}"),
+        })?;
+        let writer = session::jsonl::JsonlWriter::new(path.clone(), self.fs.clone())
+            .with_durable_lock(authority);
         writer
-            .append_mobile_empty_session(
-                &session_id.to_string(),
-                if title.is_empty() { "新对话" } else { title },
-                cwd,
-            )
-            .await
+            .activate_session_target(target_id, path, std::path::PathBuf::from(cwd))
             .map_err(|error| ClientError::Internal {
-                message: format!("persist empty session failed: {error}"),
+                message: format!("empty session transcript activation failed: {error}"),
             })?;
+        if create_anchor {
+            writer
+                .append_mobile_empty_session(
+                    &session_id.to_string(),
+                    if title.is_empty() { "新对话" } else { title },
+                    cwd,
+                )
+                .await
+                .map_err(|error| ClientError::Internal {
+                    message: format!("persist empty session failed: {error}"),
+                })?;
+        }
         writer
-            .append_session_mode(self.inner.session_mode.as_str())
+            .append_session_mode_selection(
+                &session_id.to_string(),
+                self.inner
+                    .orchestrator
+                    .conversation_mode()
+                    .await
+                    .selected
+                    .as_str(),
+                0,
+                0,
+            )
             .await
             .map_err(|error| ClientError::Internal {
                 message: format!("persist empty session mode failed: {error}"),
@@ -4384,7 +4495,7 @@ impl MobileEngineHandle {
             })
             .map(|hint| self.workspace_target(&hint).map(|(logical, _)| logical))
             .transpose()?;
-        let captured_empty_source = captured
+        let mut captured_empty_source = captured
             .as_ref()
             .ok()
             .filter(|(_, _, loaded)| {
@@ -4392,20 +4503,30 @@ impl MobileEngineHandle {
                     && loaded.mobile_empty_sessions.contains(&uuid.to_string())
             })
             .map(|(path, _, _)| path.clone());
+        // Empty anchored sessions have no replay object, so preserve their
+        // metadata from the same captured transcript instead of trusting the
+        // writer's possibly stale in-memory mirror after a background owner.
+        let mut captured_empty_metadata = captured
+            .as_ref()
+            .ok()
+            .filter(|(_, _, loaded)| {
+                loaded.messages_in_order.is_empty()
+                    && loaded.mobile_empty_sessions.contains(&uuid.to_string())
+            })
+            .map(|(_, source, _)| {
+                session::jsonl::JsonlWriter::capture_session_metadata_source(
+                    source,
+                    &uuid.to_string(),
+                )
+            });
         let recorded_permission_mode = captured
             .as_ref()
             .ok()
             .and_then(|(_, _, loaded)| loaded.permission_modes.get(&uuid.to_string()).cloned());
-        let effective_session_mode = captured
+        let captured_empty_profile = captured
             .as_ref()
             .ok()
-            .and_then(|(_, _, loaded)| {
-                loaded
-                    .session_modes
-                    .get(&uuid.to_string())
-                    .and_then(|value| session::jsonl::SessionMode::from_str(value))
-            })
-            .unwrap_or(session::jsonl::SessionMode::Code);
+            .is_some_and(|(_, _, loaded)| loaded.session_modes.contains_key(&uuid.to_string()));
         let mut restored_project_root = None;
         let replay_result = captured
             .map_err(orchestrator::resume::ResumeError::from)
@@ -4426,16 +4547,6 @@ impl MobileEngineHandle {
                 replayed.working_directory = restored_directory.clone();
                 Ok(replayed)
             });
-        if effective_session_mode != self.inner.session_mode {
-            return Err(ClientError::Rejected {
-                message: format!(
-                    "resume: session {session_id} belongs to {} mode, but this source runs {} mode",
-                    effective_session_mode.as_str(),
-                    self.inner.session_mode.as_str()
-                ),
-            });
-        }
-
         match replay_result {
             Ok(replayed) => {
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
@@ -4505,6 +4616,7 @@ impl MobileEngineHandle {
                 }
                 self.retarget_session_writer(lingxi_core::types::SessionId::from_uuid(uuid), &cwd)
                     .await?;
+                let restored_mode = handle.conversation_mode().await;
                 self.inner
                     .workflow_checkpoints
                     .adopt_session(&uuid.to_string(), self.inner.task_registry.as_ref())
@@ -4513,10 +4625,11 @@ impl MobileEngineHandle {
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {
                         session_id: uuid.to_string(),
-                        mode: lower_session_mode(self.inner.session_mode),
+                        mode: lower_session_mode(restored_mode.active),
                         messages,
                     })
                     .await;
+                self.emit_conversation_mode_snapshot(&restored_mode).await;
                 if let Some(usage) = replayed.runtime_metadata.current_usage {
                     self.event_sink
                         .emit(client::adapter::lowering::lower_current_usage(usage))
@@ -4556,13 +4669,33 @@ impl MobileEngineHandle {
                     });
                 }
 
-                if !has_anchor {
+                if !has_anchor || (may_bootstrap && !captured_empty_profile) {
                     self.persist_mobile_empty_session_anchor(
                         uuid,
                         &cwd,
                         empty_bootstrap_title.as_deref().unwrap_or("新对话"),
+                        !has_anchor,
                     )
                     .await?;
+                    // The anchor was created after the initial capture. Bind
+                    // its metadata to the same transcript for atomic profile
+                    // restoration, even if this writer has an older cache.
+                    let path =
+                        session::jsonl::session_path(&self.lingxi_home, &cwd, &uuid.to_string());
+                    let source = self
+                        .fs
+                        .read_file(&path.to_string_lossy(), None, None)
+                        .await
+                        .map_err(|error| ClientError::Internal {
+                            message: format!("read empty session anchor failed: {error}"),
+                        })?;
+                    captured_empty_metadata = Some(
+                        session::jsonl::JsonlWriter::capture_session_metadata_source(
+                            &source.content,
+                            &uuid.to_string(),
+                        ),
+                    );
+                    captured_empty_source = Some(path);
                 }
 
                 let handle: Arc<dyn OrchestratorHandle> = self.inner.orchestrator.clone();
@@ -4585,6 +4718,7 @@ impl MobileEngineHandle {
                         self.resume_runtime_with_model_preference(
                             lingxi_core::host::ResumeRuntimeSnapshot {
                                 transcript_path: captured_empty_source,
+                                transcript_metadata: captured_empty_metadata,
                                 working_directory: restored_directory,
                                 ..Default::default()
                             },
@@ -4617,6 +4751,7 @@ impl MobileEngineHandle {
                     })?;
                 self.retarget_session_writer(lingxi_core::types::SessionId::from_uuid(uuid), &cwd)
                     .await?;
+                let restored_mode = handle.conversation_mode().await;
                 self.inner
                     .workflow_checkpoints
                     .adopt_session(&uuid.to_string(), self.inner.task_registry.as_ref())
@@ -4624,10 +4759,11 @@ impl MobileEngineHandle {
                 self.event_sink
                     .emit(ClientEvent::SessionResumed {
                         session_id: uuid.to_string(),
-                        mode: lower_session_mode(self.inner.session_mode),
+                        mode: lower_session_mode(restored_mode.active),
                         messages: Vec::new(),
                     })
                     .await;
+                self.emit_conversation_mode_snapshot(&restored_mode).await;
                 self.emit_controls_snapshot().await;
                 let _ = self.session_lifecycle_tx.send(uuid.to_string());
                 Ok(())
@@ -5066,27 +5202,6 @@ impl MobileEngineHandle {
             }
         }
         self.inner.dispatcher.refresh_command_snapshot().await;
-        if self.inner.session_mode == session::jsonl::SessionMode::Chat {
-            let allowed = if let Some(parsed) = command_api::parse_slash_command(&raw_source) {
-                let registry = self.inner.slash_registry.read().await;
-                registry.resolve(&parsed.name).is_some_and(|command| {
-                    command_visible_in_session_mode(command, self.inner.session_mode)
-                })
-            } else {
-                true
-            };
-            if !allowed {
-                self.event_sink
-                    .emit(ClientEvent::SlashCommandResult {
-                        turn_id: client_turn_id,
-                        display: "command is unavailable in Chat mode".into(),
-                        is_error: true,
-                    })
-                    .await;
-                return Ok(());
-            }
-        }
-
         // A queued item always remains attached to the active owner's session.
         // The loop transition guard prevents a concurrent New/Resume retarget
         // between choosing that session and durably admitting the operation.
@@ -6678,6 +6793,14 @@ impl MobileEngineHandle {
             &command,
             ClientCommand::SendPrompt { .. }
                 | ClientCommand::RunSlashCommand { .. }
+                | ClientCommand::SetSessionMode { .. }
+        ) {
+            self.ensure_mobile_session_anchor().await?;
+        }
+        if matches!(
+            &command,
+            ClientCommand::SendPrompt { .. }
+                | ClientCommand::RunSlashCommand { .. }
                 | ClientCommand::TaskMessage { .. }
         ) {
             let busy = self.active_cancel.lock().await.is_some();
@@ -6915,6 +7038,37 @@ impl MobileEngineHandle {
             }
             ClientCommand::CancelAskUserQuestion { request_id } => {
                 self.resolve_ask_user_question(request_id, None).await
+            }
+
+            ClientCommand::SetSessionMode { mode } => {
+                let mode = match mode {
+                    SessionModeDto::Chat => session::jsonl::SessionMode::Chat,
+                    SessionModeDto::Code => session::jsonl::SessionMode::Code,
+                };
+                let previous = handle.conversation_mode().await;
+                let snapshot = handle.set_conversation_mode(mode).await.map_err(|error| {
+                    ClientError::Rejected {
+                        message: format!("set conversation mode failed: {error}"),
+                    }
+                })?;
+                // The stream publishes transitions; an idempotent selection
+                // still receives an explicit snapshot through the same queue.
+                if snapshot.revision == previous.revision {
+                    self.emit_conversation_mode_snapshot(&snapshot).await;
+                }
+                Ok(())
+            }
+
+            ClientCommand::GetContextManifest => {
+                let manifest = handle.context_manifest().await;
+                let manifest_json =
+                    serde_json::to_string(&manifest).map_err(|error| ClientError::Internal {
+                        message: format!("serialize context manifest failed: {error}"),
+                    })?;
+                self.connection_sink
+                    .emit(ClientEvent::ContextManifest { manifest_json })
+                    .await;
+                Ok(())
             }
 
             ClientCommand::SetPermissionMode { mode } => {
@@ -7545,33 +7699,22 @@ impl MobileEngineHandle {
                     uuid::Uuid::parse_str(canonical).map_err(|error| ClientError::Rejected {
                         message: format!("fork: malformed session id {session_id:?}: {error}"),
                     })?;
-                let result = session::branch::create_branch(
+                let target_mode = match target_mode {
+                    SessionModeDto::Chat => session::jsonl::SessionMode::Chat,
+                    SessionModeDto::Code => session::jsonl::SessionMode::Code,
+                };
+                let result = session::branch::create_branch_with_mode(
                     &self.lingxi_home,
                     &self.session_cwd(),
                     source_uuid,
                     None,
+                    target_mode,
                     self.fs.clone(),
                 )
                 .await
                 .map_err(|error| ClientError::Rejected {
                     message: format!("fork: could not duplicate session {session_id}: {error}"),
                 })?;
-                let fork_path = session::jsonl::session_path(
-                    &self.lingxi_home,
-                    &self.session_cwd(),
-                    &result.new_session_id.to_string(),
-                );
-                let writer = session::jsonl::JsonlWriter::new(fork_path, self.fs.clone());
-                let target_mode = match target_mode {
-                    SessionModeDto::Chat => session::jsonl::SessionMode::Chat,
-                    SessionModeDto::Code => session::jsonl::SessionMode::Code,
-                };
-                writer
-                    .append_session_mode(target_mode.as_str())
-                    .await
-                    .map_err(|error| ClientError::Internal {
-                        message: format!("fork: persist session mode failed: {error}"),
-                    })?;
                 self.event_sink
                     .emit(ClientEvent::SessionForked {
                         source_session_id: source_uuid.to_string(),
@@ -7675,13 +7818,7 @@ impl MobileEngineHandle {
                     .map_err(|error| ClientError::Internal {
                         message: format!("new session anchor failed: {error}"),
                     })?;
-                self.inner
-                    .session_writer
-                    .append_session_mode(self.inner.session_mode.as_str())
-                    .await
-                    .map_err(|error| ClientError::Internal {
-                        message: format!("new session mode persist failed: {error}"),
-                    })?;
+                self.ensure_mobile_session_anchor().await?;
                 self.persist_session_permission_mode(&new_session_permission_mode)
                     .await?;
                 if let Some(request) = requested_model {
@@ -7694,12 +7831,14 @@ impl MobileEngineHandle {
                 // while the JSONL filename and ResumeSession contract use the
                 // bare UUID. Never leak the display prefix into persisted state.
                 let session_id = new_session_id.as_uuid().to_string();
+                let started_mode = handle.conversation_mode().await;
                 self.event_sink
                     .emit(ClientEvent::SessionStarted {
                         session_id: session_id.clone(),
-                        mode: lower_session_mode(self.inner.session_mode),
+                        mode: lower_session_mode(started_mode.active),
                     })
                     .await;
+                self.emit_conversation_mode_snapshot(&started_mode).await;
                 self.emit_controls_snapshot().await;
                 let _ = self.session_lifecycle_tx.send(session_id);
                 Ok(())
@@ -8910,12 +9049,10 @@ impl MobileEngineHandle {
 
     fn slash_command_catalog_from_registry(
         reg: &command_api::CommandRegistry,
-        session_mode: session::jsonl::SessionMode,
     ) -> Vec<SlashCommandDto> {
         let mut commands: Vec<_> = reg
             .palette_commands()
             .into_iter()
-            .filter(|command| command_visible_in_session_mode(command, session_mode))
             .map(|command| SlashCommandDto {
                 hidden: command_api::builtin_support::names::is_palette_hidden(
                     command.name.string_at("").expect("command name is text"),
@@ -8964,7 +9101,7 @@ impl MobileEngineHandle {
     async fn slash_command_catalog_snapshot(&self) -> Vec<SlashCommandDto> {
         self.inner.dispatcher.refresh_command_snapshot().await;
         let reg = self.inner.slash_registry.read().await;
-        Self::slash_command_catalog_from_registry(&reg, self.inner.session_mode)
+        Self::slash_command_catalog_from_registry(&reg)
     }
 
     async fn capture_slash_authority(&self) -> SlashAuthoritySnapshot {
@@ -9099,14 +9236,6 @@ impl MobileEngineHandle {
                     .await;
             }
             ProtocolListingKind::Mcp => {
-                if self.inner.session_mode == session::jsonl::SessionMode::Chat {
-                    self.event_sink
-                        .emit(ClientEvent::McpServers {
-                            servers: Vec::new(),
-                        })
-                        .await;
-                    return;
-                }
                 self.reload_configured_mcp().await;
                 let servers = handle
                     .list_mcp_servers()
@@ -9186,9 +9315,6 @@ impl MobileEngineHandle {
     /// the registry changes and updates the model-facing tools asynchronously.
     /// The listing and the next turn therefore use the same live registry.
     async fn reload_configured_mcp(&self) {
-        if self.inner.session_mode == session::jsonl::SessionMode::Chat {
-            return;
-        }
         let Ok(cfg) = self.current_mobile_config() else {
             return;
         };

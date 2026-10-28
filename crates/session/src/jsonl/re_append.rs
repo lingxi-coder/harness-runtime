@@ -123,6 +123,16 @@ pub struct SessionMetadataState {
     pub permission_mode: Option<String>,
     /// LingXi mobile capability profile → `{type:"session-mode",sessionMode,sessionId}`.
     pub session_mode: Option<String>,
+    /// Revision committed with the profile; retained across metadata re-append.
+    pub session_context_revision: Option<u64>,
+    /// Selected profile epoch used by trusted skill-activation provenance.
+    pub session_profile_epoch: Option<u64>,
+    /// Profile retained by the interrupted query until the next admission.
+    pub session_admitted_mode: Option<String>,
+    /// Epoch retained by the interrupted query.
+    pub session_admitted_epoch: Option<u64>,
+    /// Whether the selection is awaiting a query boundary.
+    pub session_mode_pending: Option<bool>,
     /// `currentSessionIsolationLatch` → `{type:"isolation-latch",side,sessionId}`.
     /// Note the wire key is `side`, NOT `isolationLatch`.
     pub isolation_latch: Option<String>,
@@ -602,11 +612,27 @@ pub fn plan_re_append(
         ]));
     }
     if let Some(session_mode) = truthy(&state.session_mode) {
-        entries.push(obj(vec![
+        let mut fields = vec![
             ("type", Value::String("session-mode".into())),
             ("sessionMode", Value::String(session_mode.to_string())),
             ("sessionId", sid()),
-        ]));
+        ];
+        if let Some(revision) = state.session_context_revision {
+            fields.push(("contextRevision", Value::from(revision)));
+        }
+        if let Some(epoch) = state.session_profile_epoch {
+            fields.push(("profileEpoch", Value::from(epoch)));
+        }
+        if let Some(mode) = &state.session_admitted_mode {
+            fields.push(("admittedMode", Value::String(mode.clone())));
+        }
+        if let Some(epoch) = state.session_admitted_epoch {
+            fields.push(("admittedEpoch", Value::from(epoch)));
+        }
+        if let Some(pending) = state.session_mode_pending {
+            fields.push(("pending", Value::Bool(pending)));
+        }
+        entries.push(obj(fields));
     }
     if let Some(latch) = truthy(&state.isolation_latch) {
         entries.push(obj(vec![
@@ -887,6 +913,11 @@ mod tests {
             mode: Some("default".into()),
             permission_mode: Some("acceptEdits".into()),
             session_mode: Some("code".into()),
+            session_context_revision: None,
+            session_profile_epoch: None,
+            session_admitted_mode: None,
+            session_admitted_epoch: None,
+            session_mode_pending: None,
             isolation_latch: Some("left".into()),
             atis: Some("atis-token".into()),
             worktree: Some(serde_json::json!({"worktreePath": "/wt"})),

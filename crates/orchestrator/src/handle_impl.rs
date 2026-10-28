@@ -241,7 +241,14 @@ impl ConversationOrchestrator {
     ) -> (
         lingxi_core::host::bg_session_forker::BgSessionSnapshot,
         String,
+        Option<Arc<lingxi_core::types::utf16_json::Utf16JsonProjection>>,
     ) {
+        // Keep the history, admitted profile and frozen prompt on the same
+        // side of a concurrent profile or session transition.
+        let _transition = self.conversation_transition.lock().await;
+        let profile = self.conversation_profile().await;
+        let active_epoch = self.profile_epoch().await;
+        let system_prompt = self.current_turn_system_prompt().await.map(Arc::new);
         let session = self.session.lock().await;
         let attachments = self
             .transcript
@@ -261,10 +268,22 @@ impl ConversationOrchestrator {
         (
             lingxi_core::host::bg_session_forker::BgSessionSnapshot {
                 history: session.history.clone(),
+                model_context_excluded_messages: session.model_context_excluded_messages.clone(),
+                // The copy is an independent task. A selection pending in
+                // the foreground belongs to the foreground's next query.
+                profile: lingxi_core::host::session_context::SessionModeTransition {
+                    selected: profile.active,
+                    active: profile.active,
+                    revision: profile.revision,
+                    selected_epoch: active_epoch,
+                    active_epoch,
+                    pending: false,
+                },
                 model_reminder_attachments,
                 native_request_history: session.native_request_history.clone(),
             },
             session.model.clone(),
+            system_prompt,
         )
     }
 
@@ -1219,14 +1238,22 @@ impl ConversationOrchestrator {
         turn_guard: tokio::sync::OwnedMutexGuard<()>,
         request: OwnedSessionSwitch,
     ) -> Result<(), HandleError> {
+        // Selections may be queued behind a running query, but must not race
+        // an administrative switch of the transcript/writer identity.
+        let _profile_transition = self.conversation_transition.lock().await;
+
         // A model hook sequence must belong entirely to one session even
         // though live selections no longer acquire the turn gate.
         let _switch_guard = self.model_switch_gate.lock().await;
         // Keep each operation's large child future out of this enum's poll
         // frame; cold replay must leave stack room for permission classifiers.
-        match request {
+        let turn_guard = Arc::new(turn_guard);
+        let result = match request {
             OwnedSessionSwitch::Clear => {
-                crate::turn_loop::boxed_turn_future(|| self.execute_clear_session(turn_guard)).await
+                crate::turn_loop::boxed_turn_future(|| {
+                    self.execute_clear_session(turn_guard.clone())
+                })
+                .await
             }
             OwnedSessionSwitch::CompleteColdResume {
                 session_id,
@@ -1245,6 +1272,10 @@ impl ConversationOrchestrator {
                         "cold resume target changed before deferred replay".into(),
                     ));
                 }
+                self.restore_conversation_profile_locked(
+                    lingxi_core::host::session_context::ConversationMode::Code,
+                )
+                .await?;
                 crate::turn_loop::boxed_turn_future(|| {
                     crate::resume::replay_deferred_tools_after_resume(self, deferred_tools)
                 })
@@ -1292,7 +1323,7 @@ impl ConversationOrchestrator {
             } => {
                 crate::turn_loop::boxed_turn_future(|| {
                     self.execute_resume_session(
-                        turn_guard,
+                        turn_guard.clone(),
                         session_id,
                         history,
                         last_jsonl_uuid,
@@ -1302,12 +1333,13 @@ impl ConversationOrchestrator {
                 })
                 .await
             }
-        }
+        };
+        result
     }
 
     async fn execute_clear_session(
         &self,
-        _turn_guard: tokio::sync::OwnedMutexGuard<()>,
+        _turn_guard: Arc<tokio::sync::OwnedMutexGuard<()>>,
     ) -> Result<(), HandleError> {
         self.abort_startup_responses_websocket_prewarm();
         if let Err(err) = self.api.close_responses_websocket_session().await {
@@ -1408,7 +1440,7 @@ impl ConversationOrchestrator {
     #[allow(clippy::too_many_arguments)]
     async fn execute_resume_session(
         &self,
-        _turn_guard: tokio::sync::OwnedMutexGuard<()>,
+        _turn_guard: Arc<tokio::sync::OwnedMutexGuard<()>>,
         session_id: lingxi_core::types::SessionId,
         history: Vec<lingxi_core::types::ConversationMessage>,
         last_jsonl_uuid: Option<String>,
@@ -1785,6 +1817,12 @@ impl ConversationOrchestrator {
             .replace_loaded(runtime.loaded_tool_names);
         self.restore_hot_resume_prompt_state().await;
         *self.transcript.last_jsonl_uuid.lock().await = last_jsonl_uuid;
+        // The selected profile/epoch must precede resumed hooks and deferred
+        // Skill dispatch, which stamp their new instruction rows with it.
+        self.restore_conversation_profile_locked(
+            lingxi_core::host::session_context::ConversationMode::Code,
+        )
+        .await?;
         // The latch resets with the session, and so does the cascade's
         // tried-models list (see `clear_session`).
         self.model_runtime
@@ -1874,6 +1912,28 @@ impl ConversationOrchestrator {
 
 #[async_trait]
 impl OrchestratorHandle for ConversationOrchestrator {
+    async fn set_conversation_mode(
+        &self,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
+        self.select_conversation_mode(mode).await
+    }
+
+    async fn restore_conversation_mode(
+        &self,
+        mode: lingxi_core::host::session_context::ConversationMode,
+    ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
+        self.restore_conversation_profile(mode).await
+    }
+
+    async fn conversation_mode(&self) -> lingxi_core::host::session_context::SessionModeSnapshot {
+        self.conversation_profile().await
+    }
+
+    async fn context_manifest(&self) -> lingxi_core::host::session_context::ContextManifest {
+        self.current_context_manifest().await
+    }
+
     async fn record_prompt_suggestion_submission(&self, text: &str) -> Result<(), HandleError> {
         self.record_prompt_suggestion_submission_inner(text).await;
         Ok(())
@@ -2141,10 +2201,38 @@ impl OrchestratorHandle for ConversationOrchestrator {
             .clone()
             .ok_or_else(|| HandleError::ActionFailed("fork: no budget wired".into()))?;
 
-        // Keep the complete parent history, including lazy instruction bodies.
-        let (history, origin_session_id) = {
-            let s = self.session.lock().await;
-            (s.history.clone(), s.session_id)
+        // A fork started between turns is itself the next query boundary. If
+        // the main turn owns the gate, its detached child instead inherits
+        // that already-admitted turn's profile.
+        if let Ok(turn) = self.turn_gate.try_lock() {
+            self.admit_conversation_profile().await?;
+            drop(turn);
+        }
+
+        // Freeze a model-facing history and system prompt under the same
+        // profile revision. Building a fresh prompt can call Mods, so do that
+        // outside the transition gate and retry if a selection changed while
+        // it was assembled.
+        let (history, origin_session_id, parent_sys, instruction_context) = loop {
+            let profile = self.conversation_profile().await;
+            let parent_sys = match self.current_turn_system_prompt().await {
+                Some(prompt) => prompt,
+                None => Self::system_prompt_source_text(
+                    &self.provider_side_query_system_prompt().await?,
+                ),
+            };
+            let instruction_context = self.instruction_context_snapshot().await;
+            let transition = self.conversation_transition.lock().await;
+            if self.conversation_profile().await != profile {
+                drop(transition);
+                continue;
+            }
+            let (history, session_id) = {
+                let s = self.session.lock().await;
+                (s.model_context_history(), s.session_id)
+            };
+            drop(transition);
+            break (history, session_id, parent_sys, instruction_context);
         };
         if !history.iter().any(|message| {
             matches!(
@@ -2158,10 +2246,6 @@ impl OrchestratorHandle for ConversationOrchestrator {
         }
 
         let fork_msgs = lingxi_core::host::fork_subagent::build_forked_context(directive, &history);
-        // The parent's rendered system-prompt bytes for a cache-identical child
-        // prefix (`None` until the first successful turn).
-        let parent_sys = self.current_turn_system_prompt().await;
-
         // Synthesize a short, stable display codename. Reused for BOTH the spawn
         // request's `name` (so the background spawner registers it for
         // `SendMessage` routing) and the returned `ForkOutcome.name` (rendered
@@ -2197,8 +2281,8 @@ impl OrchestratorHandle for ConversationOrchestrator {
             cwd: None,
             worktree: None,
             fork_context_messages: Some(fork_msgs),
-            instruction_context: Some(self.instruction_context_snapshot().await),
-            fork_parent_system_prompt: parent_sys,
+            instruction_context: Some(instruction_context),
+            fork_parent_system_prompt: Some(parent_sys),
             schema: None,
             structured_output_mode: Default::default(),
             structured_output_parse_retries: 0,
@@ -2274,7 +2358,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // sonnet`, or a cross-provider model) instead of the `DEFAULT_MODEL`
         // seed — the copied assistant lines otherwise carry no `model` for
         // `state_from_messages` to restore.
-        let (mut conversation, mut model) = self.background_session_snapshot().await;
+        let (mut conversation, mut model, system_prompt) = self.background_session_snapshot().await;
         lingxi_core::host::refusal_state::neutralize_fork(&mut conversation.history);
         if let Some(latch) = self
             .model_runtime
@@ -2289,9 +2373,6 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 .flatten()
                 .unwrap_or_else(|| self.config.model.clone());
         }
-        // The parent's rendered system-prompt bytes (`None` until the first
-        // successful turn) so the copy carries a cache-identical prefix.
-        let system_prompt = self.current_turn_system_prompt().await.map(Arc::new);
         forker
             .fork_to_background(&conversation, system_prompt, prompt, &model)
             .await
@@ -2325,7 +2406,7 @@ impl OrchestratorHandle for ConversationOrchestrator {
             )
         })?;
 
-        let (mut conversation, model) = self.background_session_snapshot().await;
+        let (mut conversation, model, system_prompt) = self.background_session_snapshot().await;
         let partial = snapshot.partial_text();
         if !partial.is_empty() {
             conversation
@@ -2342,7 +2423,6 @@ impl OrchestratorHandle for ConversationOrchestrator {
                 });
         }
 
-        let system_prompt = self.current_turn_system_prompt().await.map(Arc::new);
         let continuation = if matches!(
             snapshot,
             lingxi_core::host::BackgroundingSnapshot::Idle { .. }
@@ -7750,5 +7830,80 @@ mod tests {
     #[test]
     fn default_editor_windows_is_notepad() {
         assert_eq!(default_editor(), "notepad.exe");
+    }
+}
+
+#[cfg(test)]
+mod background_context_tests {
+    use super::*;
+    use crate::test_support::{
+        noop_hook_executor, MockApiClient, MockOutputStream, NoOpPermissionGate,
+        StaticMemoryProvider,
+    };
+    use lingxi_core::host::session_context::ConversationMode;
+    use lingxi_core::types::{ConversationMessage, MessageId};
+    use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
+
+    #[tokio::test]
+    async fn pending_foreground_mode_does_not_retarget_background_snapshot() {
+        let orch = ConversationOrchestrator::new(
+            crate::OrchestratorConfig::default(),
+            Arc::new(MockApiClient::new(Vec::new())),
+            Arc::new(tool_api::ToolRegistry::new()),
+            noop_hook_executor(),
+            Arc::new(NoOpPermissionGate),
+            Arc::new(MockOutputStream::new()),
+            Arc::new(StaticMemoryProvider::empty()),
+            std::env::temp_dir(),
+        );
+        let old_id = MessageId::new();
+        let user_id = MessageId::new();
+        let old = ConversationMessage::user_meta(old_id, "retired skill".into())
+            .with_origin(compaction::invoked_skills::skill_activation_origin(0));
+        let user = ConversationMessage::user(user_id, "retired skill".into());
+        orch.session.lock().await.history.extend([old, user]);
+        let chat = orch
+            .select_conversation_mode(ConversationMode::Chat)
+            .await
+            .unwrap();
+        assert_eq!((chat.active, chat.revision), (ConversationMode::Chat, 1));
+        orch.save_current_turn_system_prompt(Some(&SystemPromptInput::custom_prompt(
+            "captured chat instructions".into(),
+        )))
+        .await;
+
+        let turn = orch.turn_gate.lock().await;
+        let foreground = orch
+            .select_conversation_mode(ConversationMode::Code)
+            .await
+            .unwrap();
+        assert!(foreground.pending);
+        assert_eq!(foreground.active, ConversationMode::Chat);
+        let (snapshot, _, prompt) = orch.background_session_snapshot().await;
+        assert_eq!(snapshot.history.len(), 2);
+        assert!(snapshot.model_context_excluded_messages.contains(&old_id));
+        assert!(!snapshot.model_context_excluded_messages.contains(&user_id));
+        assert_eq!(snapshot.profile.active, ConversationMode::Chat);
+        assert_eq!(snapshot.profile.selected, ConversationMode::Chat);
+        assert_eq!(
+            (snapshot.profile.revision, snapshot.profile.active_epoch),
+            (2, 1)
+        );
+        assert_eq!(snapshot.profile.selected_epoch, 1);
+        assert!(!snapshot.profile.pending);
+        assert_eq!(
+            prompt.as_ref().and_then(|source| source.string_at("")),
+            Some("captured chat instructions")
+        );
+
+        orch.admit_conversation_profile().await.unwrap();
+        assert_eq!(
+            orch.conversation_profile().await.active,
+            ConversationMode::Code
+        );
+        assert_eq!(orch.profile_epoch().await, 2);
+        assert_eq!(snapshot.profile.active, ConversationMode::Chat);
+        assert_eq!(snapshot.profile.active_epoch, 1);
+        drop(turn);
     }
 }

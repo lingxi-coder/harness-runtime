@@ -205,3 +205,80 @@ async fn media_handoff_commit_matches_successful_json_tool_result_text() {
         "an error tool result cannot authorize this handoff"
     );
 }
+
+#[tokio::test]
+async fn realtime_preparation_admits_pending_behavior_before_capturing_context() {
+    use lingxi_core::host::session_context::ConversationMode;
+
+    let orchestrator = ConversationOrchestrator::new(
+        OrchestratorConfig::default(),
+        Arc::new(MockApiClient::new(Vec::new())),
+        Arc::new(ToolRegistry::new()),
+        noop_hook_executor(),
+        Arc::new(NoOpPermissionGate),
+        Arc::new(MockOutputStream::new()),
+        Arc::new(StaticMemoryProvider::empty()),
+        std::env::temp_dir(),
+    );
+    let old_id = MessageId::new();
+    let user_id = MessageId::new();
+    let empty_id = MessageId::new();
+    let mut old_skill =
+        ConversationMessage::user_meta(old_id, "obsolete skill instructions".into());
+    if let ConversationMessage::User { origin, .. } = &mut old_skill {
+        *origin = Some(compaction::invoked_skills::skill_activation_origin(0));
+    }
+    {
+        let mut session = orchestrator.session.lock().await;
+        session.model_profile = Some("realtime-test-profile".into());
+        session.history.push(old_skill);
+        session
+            .history
+            .push(ConversationMessage::user(user_id, "user evidence".into()));
+        session
+            .history
+            .push(ConversationMessage::user(empty_id, "".into()));
+    }
+    let prior_turn = orchestrator.turn_gate.lock().await;
+    let pending = orchestrator
+        .select_conversation_mode(ConversationMode::Chat)
+        .await
+        .unwrap();
+    assert!(pending.pending);
+    assert_eq!(pending.active, ConversationMode::Code);
+    drop(prior_turn);
+
+    let prepared = orchestrator.prepare_realtime_agent().await.unwrap();
+    assert_eq!(prepared.conversation_mode.active, ConversationMode::Chat);
+    assert_eq!(prepared.conversation_mode.selected, ConversationMode::Chat);
+    assert!(!prepared.conversation_mode.pending);
+    assert_eq!(prepared.conversation_profile_epoch, 1);
+    assert!(prepared
+        .instructions
+        .contains("research, writing, learning"));
+    assert!(!prepared
+        .instructions
+        .contains("command-line coding assistant"));
+    assert!(prepared.history.iter().any(|item| matches!(item,
+        RealtimeHistoryItem::Message { text, .. } if text == "user evidence")));
+    assert!(
+        !prepared.history.iter().any(|item| matches!(item,
+        RealtimeHistoryItem::Message { text, .. } if text.contains("obsolete skill instructions")))
+    );
+    let manifest = orchestrator.current_context_manifest().await;
+    assert!(manifest.projected);
+    assert_eq!(manifest.session.active, ConversationMode::Chat);
+    assert!(manifest.blocks.iter().any(|block| block.id == "system"));
+    assert!(manifest
+        .blocks
+        .iter()
+        .any(|block| block.id == format!("message:{user_id}")));
+    assert!(!manifest
+        .blocks
+        .iter()
+        .any(|block| block.id == format!("message:{old_id}")));
+    assert!(!manifest
+        .blocks
+        .iter()
+        .any(|block| block.id == format!("message:{empty_id}")));
+}

@@ -145,6 +145,7 @@ async fn auxiliary_builders_and_dispatch_never_submit_parent_receipts() {
         continuation: None,
         binding: None,
         submission: Some(submission.clone()),
+        ordinary_history: false,
     };
     scope_computer_request(Some(projection), async {
         for tools in [vec![], vec![computer_tool().into()]] {
@@ -223,6 +224,7 @@ async fn scheduled_main_request_keeps_its_native_projection_and_receipt_authorit
             continuation: None,
             binding: None,
             submission: Some(submission.clone()),
+            ordinary_history: false,
         }),
         async {
             let mut request = MessagesCreateRequest::new(
@@ -281,6 +283,7 @@ async fn auxiliary_history_conversion_does_not_use_the_parent_continuation_bound
                 continuation: Some(continuation.clone()),
                 binding: None,
                 submission: None,
+                ordinary_history: false,
             }),
             async {
                 let messages = vec![user("early context"), user("summarize all context")];
@@ -456,6 +459,7 @@ async fn auxiliary_dispatch_projects_actual_native_history_as_ordinary_tools() {
             .unwrap();
         scope_computer_request(Some(ComputerRequestProjection {
             native: None, continuation: Some(continuation), binding: None, submission: Some(submission.clone()),
+                ordinary_history: false,
         }), async {
             let plain = auxiliary(&service, messages.clone(), vec![]);
             assert_independent(&plain);

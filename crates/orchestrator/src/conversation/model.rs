@@ -2018,6 +2018,41 @@ impl ConversationOrchestrator {
     /// the byte-audit copy in `command-core`'s `recap.rs` test.
     pub(crate) const RECAP_PROMPT: &str = "The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, then the one next action. Skip root-cause narrative, fix internals, secondary to-dos, and em-dash tangents.";
 
+    /// Rebuild a side-query prefix when a profile boundary invalidated the
+    /// last main request. Do not publish this provisional prefix to the slot.
+    async fn side_query_params_after_profile_boundary(
+        &self,
+    ) -> Result<Option<sidequery::CacheSafeParams>, lingxi_core::settings::SettingsError> {
+        let Some(slot) = self.model_runtime.cache_safe_slot.as_ref() else {
+            return Ok(None);
+        };
+        loop {
+            let profile = self.conversation_profile().await;
+            let params = match slot.get_last().await {
+                Some(params) => Some(params),
+                None => {
+                    if self.session.lock().await.model_context_history().is_empty() {
+                        None
+                    } else {
+                        let system = self.provider_side_query_system_prompt().await?;
+                        let model = self.session.lock().await.model.clone();
+                        let tools = self.build_wire_tools().await?.0;
+                        Some(
+                            self.build_cache_safe_params(Some(&system), &model, &tools)
+                                .await?,
+                        )
+                    }
+                }
+            };
+            let transition = self.conversation_transition.lock().await;
+            if self.conversation_profile().await == profile {
+                drop(transition);
+                return Ok(params);
+            }
+            drop(transition);
+        }
+    }
+
     /// Real `/recap` body — a read-only, tool-denied, single-turn side query,
     /// cancelable via a [`CancellationToken`]. HISTORY-INERT by construction:
     /// unlike [`Self::force_compact_with_cancel`], it reuses the
@@ -2028,9 +2063,8 @@ impl ConversationOrchestrator {
     /// the recap prompt, exposes no tools, and issues exactly one query.
     ///
     /// On cancel returns `Ok(RecapOutcome::Cancelled)` (a fixed-string outcome),
-    /// not `Err`. An empty cache-safe slot (no successful turn recorded yet — a
-    /// resumed session whose transcript loaded but which has run no live turn)
-    /// maps to `Err(ActionFailed)` rather than a panic.
+    /// not `Err`. If a profile change invalidated the last request, rebuild a
+    /// filtered prefix from the current conversation before making the fork.
     pub(crate) async fn generate_recap_query(
         &self,
         cancel: tokio_util::sync::CancellationToken,
@@ -2039,15 +2073,14 @@ impl ConversationOrchestrator {
         let runner = self.recap_runner.clone().ok_or_else(|| {
             lingxi_core::host::HandleError::ActionFailed("recap unavailable".into())
         })?;
+        if self.model_runtime.cache_safe_slot.is_none() {
+            return Err(lingxi_core::host::HandleError::ActionFailed(
+                "recap: no cache-safe slot".into(),
+            ));
+        }
         let params = self
-            .model_runtime
-            .cache_safe_slot
-            .as_ref()
-            .ok_or_else(|| {
-                lingxi_core::host::HandleError::ActionFailed("recap: no cache-safe slot".into())
-            })?
-            .get_last()
-            .await
+            .side_query_params_after_profile_boundary()
+            .await?
             .ok_or_else(|| {
                 lingxi_core::host::HandleError::ActionFailed("recap: no cache-safe params".into())
             })?;
@@ -2095,18 +2128,12 @@ impl ConversationOrchestrator {
                 "session name generation unavailable".into(),
             )
         })?;
-        let Some(params) = self
-            .model_runtime
-            .cache_safe_slot
-            .as_ref()
-            .ok_or_else(|| {
-                lingxi_core::host::HandleError::ActionFailed(
-                    "session name generation unavailable".into(),
-                )
-            })?
-            .get_last()
-            .await
-        else {
+        if self.model_runtime.cache_safe_slot.is_none() {
+            return Err(lingxi_core::host::HandleError::ActionFailed(
+                "session name generation unavailable".into(),
+            ));
+        }
+        let Some(params) = self.side_query_params_after_profile_boundary().await? else {
             return Ok(None);
         };
 
@@ -2173,7 +2200,7 @@ impl ConversationOrchestrator {
         // but current tools, model options, and post-compaction messages.
         let system = match saved.as_ref() {
             Some(params) => params.system_prompt_input.clone(),
-            None => Some(self.provider_system_prompt().await?),
+            None => Some(self.provider_side_query_system_prompt().await?),
         };
         let model = self.session.lock().await.model.clone();
         let tools = self.build_wire_tools().await?.0;

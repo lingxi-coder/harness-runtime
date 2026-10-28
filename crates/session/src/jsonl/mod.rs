@@ -13,37 +13,8 @@
 //! - `title` — M5-08 first-user-message title extraction.
 //! - `transcript_compact` — SC-08 transcript-file rewrite (`performCompactTranscript`).
 
-/// Persisted capability profile for one immutable session transcript.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SessionMode {
-    /// Conversational profile: device, read, web and inline-visualization
-    /// tools plus `Write` and `Shell`, each call confirmed through the
-    /// permission prompt. Skills never get shell expansion here.
-    Chat,
-    /// Full development profile and legacy fallback.
-    Code,
-}
-
-impl SessionMode {
-    /// Stable JSONL wire value.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Chat => "chat",
-            Self::Code => "code",
-        }
-    }
-
-    /// Parse a stable JSONL wire value.
-    #[must_use]
-    pub fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "chat" => Some(Self::Chat),
-            "code" => Some(Self::Code),
-            _ => None,
-        }
-    }
-}
+/// Persisted behavior profile shared with the host and orchestrator.
+pub use lingxi_core::host::session_context::ConversationMode as SessionMode;
 
 pub mod aliases;
 pub mod djb2;

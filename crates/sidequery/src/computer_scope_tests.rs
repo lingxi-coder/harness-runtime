@@ -89,6 +89,7 @@ async fn direct_plain_and_strict_queries_ignore_the_parent_computer_continuation
             continuation: Some(continuation),
             binding: None,
             submission: None,
+                ordinary_history: false,
         }),
         async {
             let messages = vec![user("early context"), user("summarize all context")];
@@ -216,6 +217,7 @@ async fn session_compaction_fork_preserves_typed_attachment_bytes_and_function_c
             continuation: None,
             binding: None,
             submission: None,
+                ordinary_history: false,
         }),
         async {
             let estimate = client

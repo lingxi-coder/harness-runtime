@@ -2675,6 +2675,40 @@ pub struct PromptSuggestionResult {
 /// `ConversationOrchestrator` does NOT yet implement it.
 #[async_trait]
 pub trait OrchestratorHandle: Send + Sync {
+    /// Persist a profile selection; a running query retains its admitted profile.
+    async fn set_conversation_mode(
+        &self,
+        _mode: super::session_context::ConversationMode,
+    ) -> Result<super::session_context::SessionModeSnapshot, HandleError> {
+        Err(HandleError::Unimplemented("set_conversation_mode".into()))
+    }
+
+    /// Restore a transcript's profile after the host has mounted its history.
+    /// This does not append another selection record.
+    async fn restore_conversation_mode(
+        &self,
+        _mode: super::session_context::ConversationMode,
+    ) -> Result<super::session_context::SessionModeSnapshot, HandleError> {
+        Err(HandleError::Unimplemented(
+            "restore_conversation_mode".into(),
+        ))
+    }
+
+    /// Read the selected and currently admitted profiles without a model call.
+    async fn conversation_mode(&self) -> super::session_context::SessionModeSnapshot {
+        super::session_context::SessionModeSnapshot {
+            session_id: self.current_session_id().await.as_uuid().to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Inspect the last model projection without exposing prompt bodies.
+    async fn context_manifest(&self) -> super::session_context::ContextManifest {
+        super::session_context::ContextManifest {
+            session: self.conversation_mode().await,
+            ..Default::default()
+        }
+    }
     /// Account for a real composer submission before slash-command dispatch.
     async fn record_prompt_suggestion_submission(&self, _text: &str) -> Result<(), HandleError> {
         Ok(())
@@ -4165,6 +4199,8 @@ pub enum ResponseTimingEvent {
 
 #[async_trait]
 pub trait OutputStream: Send + Sync {
+    /// Publish a committed profile selection or its admission at a query boundary.
+    async fn emit_conversation_mode(&self, _state: &super::session_context::SessionModeSnapshot) {}
     /// Observe receipt before any asynchronous presentation or output delivery.
     /// RequestStarted marks the admitted SDK transport dispatch; sinks may
     /// retain the first fact across every request in one external query.
