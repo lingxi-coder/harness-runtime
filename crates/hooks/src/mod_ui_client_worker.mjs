@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import path from 'node:path';
 import { createContext, Script, SourceTextModule } from 'node:vm';
 
@@ -14,6 +15,8 @@ const MAX_DATA_VALUES = 20_000;
 const MAX_DATA_DEPTH = 32;
 const LOAD_BUDGET_MS = 10_000;
 const RUN_BUDGET_MS = 1_000;
+// Must remain below the Host worker-response watchdog.
+const ASYNC_HELD_BUDGET_MS = 10_000;
 
 const CREATE_SURFACE = new Script(`
   (bridge, dimensions) => {
@@ -53,7 +56,7 @@ const CREATE_SURFACE = new Script(`
     const surface = {
       elements,
       setState(next) {
-        if (!mounted) return;
+        if (!mounted || !bridge.allowed()) return;
         const value = typeof next === 'function' ? next(state) : next;
         if (value == null || typeof value !== 'object' || Array.isArray(value)) {
           throw new TypeError('surface.setState expects an object or updater');
@@ -65,20 +68,20 @@ const CREATE_SURFACE = new Script(`
         if (!Number.isFinite(milliseconds) || milliseconds < 0 || typeof callback !== 'function') {
           throw new TypeError('surface.every expects a non-negative interval and callback');
         }
-        if (!mounted) return () => {};
+        if (!mounted || !bridge.allowed()) return () => {};
         return bridge.every(milliseconds, callback);
       },
       onPointer(callback) {
         if (typeof callback !== 'function') throw new TypeError('surface.onPointer expects a callback');
-        if (!mounted) return;
+        if (!mounted || !bridge.allowed()) return;
         pointerListener = callback;
       },
       onKey(callback) {
         if (typeof callback !== 'function') throw new TypeError('surface.onKey expects a callback');
-        if (!mounted) return;
+        if (!mounted || !bridge.allowed()) return;
         keyListener = callback;
       },
-      post(data) { if (mounted) bridge.post(data); },
+      post(data) { if (mounted && bridge.allowed()) bridge.post(data); },
     };
     Object.defineProperties(surface, {
       state: { enumerable: true, get: () => state },
@@ -319,12 +322,34 @@ const MAKE_BRIDGE = new Script(`
   (host, serializeData) => ({
     schedule: host.schedule,
     every: host.every,
+    allowed: host.allowed,
     post(data) { host.post(serializeData(data)); },
   })
 `);
 
 function fail(message) {
   throw new TypeError(message);
+}
+
+// The Host still owns a longer process watchdog for CPU-bound continuations.
+// This timer bounds promises that are pending while the event loop is healthy.
+async function awaitHeldCallback(result, signal, budgetMs) {
+  let timer;
+  let onAbort;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Client callback timed out')), budgetMs);
+  });
+  const cancelled = new Promise((_, reject) => {
+    onAbort = () => reject(new Error('Client callback cancelled'));
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    await Promise.race([Promise.resolve(result), timeout, cancelled]);
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', onAbort);
+  }
 }
 
 class ClientSurfaceError extends Error {
@@ -636,9 +661,14 @@ function hasListener(instance, kind) {
 }
 
 export class ClientSurfaceManager {
-  constructor({ send } = {}) {
+  constructor({ send, asyncHeldBudgetMs = ASYNC_HELD_BUDGET_MS } = {}) {
     if (typeof send !== 'function') fail('ClientSurfaceManager requires a host send callback');
+    if (!Number.isFinite(asyncHeldBudgetMs) || asyncHeldBudgetMs <= 0) fail('invalid Client callback budget');
     this.send = send;
+    this.asyncHeldBudgetMs = asyncHeldBudgetMs;
+    // A per-async-chain context prevents unrelated timers and callbacks from
+    // being attributed to a held action that happens to be awaiting.
+    this.heldContext = new AsyncLocalStorage();
     this.environments = new Map();
     this.runtimeInstances = new Map();
     this.nextGeneration = 1;
@@ -669,7 +699,10 @@ export class ClientSurfaceManager {
 
   emit(instance, action, fields = {}) {
     if (instance.destroyed || this.disposed || (instance.failure && action !== 'fault')) return;
-    const postAction = action === 'post' ? instance.activePostAction : undefined;
+    const held = this.heldContext.getStore();
+    if (held?.instance === instance && held.cancelled) return;
+    const postAction = action === 'post' && held?.instance === instance && held.active
+      && typeof held.id === 'string' ? held : undefined;
     const postCorrelation = postAction
       ? { postActionId: postAction.id, postId: postAction.postIds.length }
       : undefined;
@@ -695,6 +728,7 @@ export class ClientSurfaceManager {
     if (instance.destroyed || instance.failure) return false;
     const reason = errorReason(error);
     instance.failure = Object.freeze({ status: 'failed', phase, reason });
+    instance.activePostAction?.controller.abort();
     instance.scheduled = false;
     for (const timer of instance.timers.values()) clearInterval(timer);
     instance.timers.clear();
@@ -744,6 +778,10 @@ export class ClientSurfaceManager {
       instance.moduleEntry = moduleEntry;
       instance.component = await environment.loadEntry(moduleEntry, componentName);
       const hostBridge = {
+        allowed: safeBridgeFunction(() => {
+          const held = this.heldContext.getStore();
+          return !(held?.instance === instance && held.cancelled);
+        }),
         schedule: safeBridgeFunction(() => {
           if (instance.destroyed || instance.scheduled) return;
           instance.scheduled = true;
@@ -851,34 +889,51 @@ export class ClientSurfaceManager {
     }
   }
 
-  runHeld(runtimeId, handle, payload) {
-    return this.runHeldCore(runtimeId, handle, payload).accepted;
+  async runHeld(runtimeId, handle, payload) {
+    return (await this.runHeldCore(runtimeId, handle, payload)).accepted;
   }
 
-  runHeldWithPostIds(runtimeId, handle, payload, postActionId) {
-    return this.runHeldCore(runtimeId, handle, payload, postActionId);
+  async runHeldWithPostIds(runtimeId, handle, payload, postActionId, signal) {
+    return this.runHeldCore(runtimeId, handle, payload, postActionId, signal);
   }
 
-  runHeldCore(runtimeId, handle, payload, postActionId) {
+  async runHeldCore(runtimeId, handle, payload, postActionId, signal) {
     const instance = this.runtimeInstances.get(runtimeId);
-    if (!instance || instance.destroyed || instance.failure) {
+    if (!instance || instance.destroyed || instance.failure || signal?.aborted) {
       return { accepted: false, postIds: [] };
     }
     const callback = instance.held.get(handle);
     if (typeof callback !== 'function') return { accepted: false, postIds: [] };
-    const postAction = postActionId === undefined ? undefined : { id: postActionId, postIds: [] };
-    if (postAction && instance.activePostAction) fail('Client post action is already active');
-    if (postAction) instance.activePostAction = postAction;
+    if (instance.activePostAction) fail('Client post action is already active');
+    const action = { id: postActionId, postIds: [], instance, active: true,
+      cancelled: false, controller: new AbortController() };
+    const abort = () => action.controller.abort();
+    action.controller.signal.addEventListener('abort', () => { action.cancelled = true; }, { once: true });
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+    instance.activePostAction = action;
     try {
-      this.invokeCallback(instance, callback, instance.environment.cloneData(payload));
-      return { accepted: true, postIds: postAction?.postIds ?? [] };
+      const input = instance.environment.cloneData(payload);
+      const result = this.heldContext.run(action, () =>
+        instance.environment.invoke(callback, [input], RUN_BUDGET_MS));
+      await awaitHeldCallback(result, action.controller.signal, this.asyncHeldBudgetMs);
+      if (instance.destroyed || instance.failure || action.controller.signal.aborted) {
+        throw new Error('Client callback owner ended before completion');
+      }
+      action.active = false;
+      return { accepted: true, postIds: action.postIds };
     } catch (error) {
-      this.emitFault(instance, 'run', error);
-      throw clientError('run', error);
+      const cancelled = action.controller.signal.aborted;
+      action.cancelled = true;
+      action.controller.abort();
+      if (!cancelled) this.emitFault(instance, 'run', error);
+      const failure = clientError('run', error);
+      failure.outcomeUnknown = true;
+      throw failure;
     } finally {
-      // invokeCallback intentionally does not await callback Promises. Only
-      // posts emitted before its synchronous return belong to this action.
-      if (postAction && instance.activePostAction === postAction) instance.activePostAction = undefined;
+      action.active = false;
+      signal?.removeEventListener('abort', abort);
+      if (instance.activePostAction === action) instance.activePostAction = undefined;
     }
   }
 
@@ -929,6 +984,7 @@ export class ClientSurfaceManager {
     const instance = this.runtimeInstances.get(runtimeId);
     if (!instance) return false;
     instance.destroyed = true;
+    instance.activePostAction?.controller.abort();
     for (const timer of instance.timers.values()) clearInterval(timer);
     instance.timers.clear();
     instance.held.clear();
@@ -976,7 +1032,7 @@ export class ClientSurfaceManager {
     return instance.frameSequence;
   }
 
-  async operation(operation) {
+  async operation(operation, { signal } = {}) {
     if (!operation || typeof operation !== 'object' || Array.isArray(operation)) {
       fail('ui.client.operation requires an operation object');
     }
@@ -999,7 +1055,7 @@ export class ClientSurfaceManager {
           fail('Client runHeld operation requires a host post action ID');
         }
         return this.runHeldWithPostIds(
-          operation.runtimeId, operation.handle, operation.payload, operation.postActionId,
+          operation.runtimeId, operation.handle, operation.payload, operation.postActionId, signal,
         );
       case 'dropHeld': this.dropHeld(operation.runtimeId, operation.handles); return { ok: true };
       case 'unmount': return { unmounted: this.unmount(operation.runtimeId) };

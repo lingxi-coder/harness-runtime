@@ -670,6 +670,12 @@ enum ClientWorkerOperationError {
         phase: String,
         reason: ExactHookText,
     },
+    // The held callback was invoked (or the worker died before it could
+    // answer); a side effect may already have occurred and the VM is failed.
+    UnknownFault {
+        phase: String,
+        reason: ExactHookText,
+    },
     Host(ModError),
 }
 
@@ -682,7 +688,8 @@ impl From<ModError> for ClientWorkerOperationError {
 impl From<ClientWorkerOperationError> for ModError {
     fn from(error: ClientWorkerOperationError) -> Self {
         match error {
-            ClientWorkerOperationError::Fault { phase, reason } => {
+            ClientWorkerOperationError::Fault { phase, reason }
+            | ClientWorkerOperationError::UnknownFault { phase, reason } => {
                 ModError::Hook(format!("Client surface {phase} failed: {}", reason.display))
             }
             ClientWorkerOperationError::Host(error) => error,
@@ -743,8 +750,45 @@ struct ClientUiInstance {
     props: Utf16JsonProjection,
     mounted: bool,
     worker_fault: Option<ClientUiWorkerFault>,
-    worker_fault_snapshot_sent: bool,
+    worker_fault_snapshot: ClientFaultSnapshotState,
     worker_fault_event_dispatched: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ClientFaultSnapshotState {
+    Pending,
+    Publishing,
+    Sent,
+}
+
+/// Reserve the one-shot fault publication without acknowledging it early.
+/// A dropped/cancelled future releases the reservation for later replay.
+struct ClientFaultSnapshotClaim<'a> {
+    state: &'a ClientUiHostState,
+    runtime_id: String,
+    committed: bool,
+}
+
+impl ClientFaultSnapshotClaim<'_> {
+    fn commit(mut self) {
+        if let Some(instance) = lock(&self.state.data).instances.get_mut(&self.runtime_id) {
+            if instance.worker_fault_snapshot == ClientFaultSnapshotState::Publishing {
+                instance.worker_fault_snapshot = ClientFaultSnapshotState::Sent;
+            }
+        }
+        self.committed = true;
+    }
+}
+
+impl Drop for ClientFaultSnapshotClaim<'_> {
+    fn drop(&mut self) {
+        if self.committed { return; }
+        if let Some(instance) = lock(&self.state.data).instances.get_mut(&self.runtime_id) {
+            if instance.worker_fault_snapshot == ClientFaultSnapshotState::Publishing {
+                instance.worker_fault_snapshot = ClientFaultSnapshotState::Pending;
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -3440,16 +3484,18 @@ impl ModHost {
         true
     }
 
-    fn claim_client_worker_fault_snapshot(&self, runtime_id: &str) -> bool {
+    fn claim_client_worker_fault_snapshot(&self, runtime_id: &str) -> Option<ClientFaultSnapshotClaim<'_>> {
         let mut data = lock(&self.client_ui.data);
-        let Some(instance) = data.instances.get_mut(runtime_id) else {
-            return false;
-        };
-        if instance.worker_fault_snapshot_sent {
-            return false;
+        let instance = data.instances.get_mut(runtime_id)?;
+        if instance.worker_fault_snapshot != ClientFaultSnapshotState::Pending {
+            return None;
         }
-        instance.worker_fault_snapshot_sent = true;
-        true
+        instance.worker_fault_snapshot = ClientFaultSnapshotState::Publishing;
+        Some(ClientFaultSnapshotClaim {
+            state: &self.client_ui,
+            runtime_id: runtime_id.to_owned(),
+            committed: false,
+        })
     }
 
     fn client_worker_fault(&self, runtime_id: &str) -> Option<ClientUiWorkerFault> {
@@ -3562,6 +3608,7 @@ impl ModHost {
             .map_err(|error| {
                 ClientWorkerOperationError::Host(ModError::Protocol(error.to_string()))
             })?;
+        let cancellation = post_action.as_ref().map(|action| action.cancellation.clone());
         let mut request = if let Some(post_action) = post_action {
             self.request_projection_for_client_post_action(envelope, post_action)
                 .await?
@@ -3577,7 +3624,34 @@ impl ModHost {
                     "Client operation has no worker epoch".into(),
                 ))
             })?;
-        let reply = self.receive(&mut request).await?;
+        let reply = if let Some(cancellation) = cancellation.as_ref() {
+            // Dropping the request sends cancel to the Worker, preventing a
+            // suspended action from continuing to publish after owner loss.
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err(ClientWorkerOperationError::Host(
+                    ModError::Unavailable("Client runHeld was cancelled with outcome unknown".into()),
+                )),
+                reply = self.receive(&mut request) => reply,
+            }
+        } else {
+            self.receive(&mut request).await
+        };
+        let reply = match reply {
+            Ok(reply) => reply,
+            Err(error @ ModError::Timeout) if cancellation.is_some() => {
+                return Err(ClientWorkerOperationError::UnknownFault {
+                    phase: "run".into(),
+                    reason: ExactHookText::from_text(&error.to_string()),
+                });
+            }
+            Err(ModError::Unavailable(message)) if cancellation.is_some() && message == "worker exited" => {
+                return Err(ClientWorkerOperationError::UnknownFault {
+                    phase: "run".into(), reason: ExactHookText::from_text(&message),
+                });
+            }
+            Err(error) => return Err(error.into()),
+        };
         match reply.string_at("/kind") {
             Some("ui.client.result") => {
                 if reply.get_property("error").is_some() {
@@ -3595,6 +3669,11 @@ impl ModHost {
                                 "Client worker fault has no reason".into(),
                             ))
                         })?;
+                    if reply.at_pointer("/error/outcomeUnknown").and_then(|value| value.as_bool()) == Some(true) {
+                        return Err(ClientWorkerOperationError::UnknownFault {
+                            phase: phase.to_owned(), reason,
+                        });
+                    }
                     return Err(ClientWorkerOperationError::Fault {
                         phase: phase.to_owned(),
                         reason,
@@ -3818,7 +3897,7 @@ impl ModHost {
             props: trusted_props.clone(),
             mounted: false,
             worker_fault: None,
-            worker_fault_snapshot_sent: false,
+            worker_fault_snapshot: ClientFaultSnapshotState::Pending,
             worker_fault_event_dispatched: false,
         };
         {
@@ -3916,7 +3995,7 @@ impl ModHost {
                             &reason,
                         ));
                     }
-                    error @ ClientWorkerOperationError::Host(_) => return Err(error.into()),
+                    error => return Err(error.into()),
                 }
             }
         };
@@ -4128,6 +4207,19 @@ impl ModHost {
             self.run_client_worker_operation(worker_operation).await
         } {
             Ok(result) => result,
+            Err(ClientWorkerOperationError::UnknownFault { phase, reason }) if kind == "runHeld" => {
+                // Record the Host fence before the response can reach a client;
+                // it blocks operations and background events for this VM.
+                self.record_client_worker_fault(runtime_id, &phase, &reason);
+                let mut response = worker_fault_response(
+                    Some(runtime_id), revision, instance.key.identity.plugin(),
+                    instance.key.identity.module(), &phase, &reason,
+                );
+                response.set_field("outcome", host_generated_json(json!({
+                    "status":"unknown", "runtime":"unavailable",
+                }))).map_err(|error| ModError::Protocol(error.to_string()))?;
+                return Ok(response);
+            }
             Err(ClientWorkerOperationError::Fault { phase, reason }) if kind != "unmount" => {
                 self.record_client_worker_fault(runtime_id, &phase, &reason);
                 return Ok(worker_fault_response(
@@ -4683,7 +4775,7 @@ impl ModHost {
                 };
                 let phase = fault.phase.as_str();
                 let reason = &fault.reason;
-                if self.claim_client_worker_fault_snapshot(&runtime_id) {
+                if let Some(claim) = self.claim_client_worker_fault_snapshot(&runtime_id) {
                     let normalized_reason = crate::mod_ui_fault::normalize_client_fault_reason(
                         instance.key.identity.plugin(),
                         instance.key.identity.module(),
@@ -4706,11 +4798,9 @@ impl ModHost {
                     .map_err(|error| ModError::Protocol(error.to_string()))?;
                     // This is a Host-local leaf failure snapshot for async
                     // worker faults, not a successful tree frame or a control response.
-                    if let Err(error) = session
-                        .emit_mod_ui_client_frame(&runtime_id, &failure)
-                        .await
-                    {
-                        tracing::warn!(%error, "client fault frame could not be admitted");
+                    match session.emit_mod_ui_client_frame(&runtime_id, &failure).await {
+                        Ok(()) => claim.commit(),
+                        Err(error) => tracing::warn!(%error, "client fault frame could not be admitted; snapshot remains pending"),
                     }
                 }
                 if !self.claim_client_worker_fault_dispatch(&runtime_id) {
@@ -6252,6 +6342,7 @@ mod tests {
     struct ReceiptAcceptedSession {
         inner: Arc<ReceiptTestSession>,
         frames: std::sync::Mutex<Vec<(String, Utf16JsonProjection)>>,
+        refuse_fault: std::sync::atomic::AtomicBool,
     }
     #[async_trait::async_trait]
     impl ModSessionContext for ReceiptAcceptedSession {
@@ -6261,6 +6352,9 @@ mod tests {
         async fn id(&self) -> String { self.inner.id().await }
         async fn turns(&self) -> u64 { self.inner.turns().await }
         async fn emit_mod_ui_client_frame(&self, runtime: &str, frame: &Utf16JsonProjection) -> Result<(), ModError> {
+            if frame.at_pointer("/fault").is_some() && self.refuse_fault.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(ModError::Unavailable("injected fault admission refusal".into()));
+            }
             self.frames.lock().unwrap().push((runtime.into(), frame.clone()));
             Ok(())
         }
@@ -6298,6 +6392,7 @@ mod tests {
         });
         let accepting = Arc::new(ReceiptAcceptedSession {
             inner: observation.clone(), frames: std::sync::Mutex::new(Vec::new()),
+            refuse_fault: std::sync::atomic::AtomicBool::new(false),
         });
         let session: Arc<dyn ModSessionContext> = if accept { accepting.clone() } else { observation.clone() };
         host.attach_background_context(Arc::downgrade(&session));
@@ -6333,9 +6428,37 @@ mod tests {
         if accept {
             let response = test_value(&result.unwrap());
             assert!(tree_contains_text(&response["tree"], "callback result"));
-            let frames = accepting.frames.lock().unwrap();
-            assert!(frames.iter().any(|(runtime, frame)| runtime == &runtime_id &&
-                projection_tree_contains_text(frame, "callback result")));
+            {
+                let frames = accepting.frames.lock().unwrap();
+                assert!(frames.iter().any(|(runtime, frame)| runtime == &runtime_id &&
+                    projection_tree_contains_text(frame, "callback result")));
+            }
+            // A refused fault snapshot must remain retryable even though the
+            // distinct ui.fault hook may already have been dispatched.
+            accepting.refuse_fault.store(true, std::sync::atomic::Ordering::SeqCst);
+            let generation = lock(&host.client_ui.data).instances[&runtime_id].worker_generation.unwrap();
+            let fault = host_generated_json(json!({
+                "kind":"ui.client.event", "runtimeId":runtime_id, "generation":generation,
+                "plugin":"review", "element":"card", "module":"card.tsx",
+                "action":"fault", "phase":"run", "reason":"injected fault",
+            }));
+            host.handle_client_ui_background_event(&fault, session.as_ref()).await.unwrap();
+            assert_eq!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault_snapshot,
+                ClientFaultSnapshotState::Pending);
+            assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault_event_dispatched);
+            let claim = host.claim_client_worker_fault_snapshot(&runtime_id).unwrap();
+            assert!(host.claim_client_worker_fault_snapshot(&runtime_id).is_none(),
+                "an in-flight publication excludes a duplicate");
+            drop(claim); // Simulates cancellation while awaiting queue admission.
+            assert_eq!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault_snapshot,
+                ClientFaultSnapshotState::Pending);
+            accepting.refuse_fault.store(false, std::sync::atomic::Ordering::SeqCst);
+            host.handle_client_ui_background_event(&fault, session.as_ref()).await.unwrap();
+            host.handle_client_ui_background_event(&fault, session.as_ref()).await.unwrap();
+            assert_eq!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault_snapshot,
+                ClientFaultSnapshotState::Sent);
+            assert_eq!(accepting.frames.lock().unwrap().iter().filter(|(runtime, frame)|
+                runtime == &runtime_id && frame.at_pointer("/fault").is_some()).count(), 1);
         } else {
             let error = result.unwrap_err().to_string();
             assert!(error.contains("outcome is unknown"), "{error}");
@@ -6350,6 +6473,128 @@ mod tests {
     #[tokio::test]
     async fn real_worker_callback_with_accepting_sink_returns_updated_frame() {
         real_worker_frame_receipt(true).await;
+    }
+
+
+    async fn real_worker_async_input_waits_for_post_and_fences_rejection(reject: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("card.tsx");
+        let entry = directory.path().join("register.tsx");
+        let fail = if reject { "throw new Error('failed after update');" } else { "" };
+        std::fs::write(&child, r#"
+          import { Input, h } from 'claude:surface-runtime';
+          let latest = '';
+          export function Card(props, surface) {
+            latest = props.value;
+            return h(Input, {key:'query', value:latest, onSubmit() {},
+              onInput: async value => {
+                await new Promise(resolve => {
+                  const stop = surface.every(35, () => { stop(); resolve(); });
+                });
+                surface.post({value});
+                // Completion depends on the Host dispatching this post and
+                // updating props while the held operation is still active.
+                await new Promise(resolve => {
+                  const stop = surface.every(2, () => { if (latest === value) { stop(); resolve(); } });
+                });
+                // REJECT_IF_REQUESTED
+              }});
+          }
+        "#.replace("// REJECT_IF_REQUESTED", fail)).unwrap();
+        std::fs::write(&entry, r#"
+          export function register(on) {
+            on('ui.render', {surface:'desktop', component:'Pane'}, ($, event) => {
+              const {Client, h} = $.ui.resolve(event);
+              return h(Client, {key:'card', module:'./card.tsx', props:{value:''}});
+            });
+            on('ui.message', async ($, event) => {
+              await $.session.model();
+              return {handled:true, props:{value:event.data.value}};
+            });
+          }
+        "#).unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let completed = Arc::new(tokio::sync::Notify::new());
+        let session_impl = Arc::new(UiLifecycleSession {
+            root: directory.path().to_path_buf(),
+            model_gate: StdMutex::new(Some(UiLifecycleModelGate {
+                entered: entered.clone(), release: release.clone(), completed: completed.clone(),
+            })),
+            ..Default::default()
+        });
+        let session: Arc<dyn ModSessionContext> = session_impl.clone();
+        host.attach_background_context(Arc::downgrade(&session));
+        let prepared = host.prepare_module(directory.path(), &entry).await.unwrap();
+        host.load_with_tier_order_storage_prepared(
+            "review", "review@user", directory.path(), &entry,
+            Utf16JsonProjection::parse("{}").unwrap(), "user", None, Some(&prepared),
+        ).await.unwrap();
+        let render = host.dispatch_client_ui_control(host_generated_json(json!({
+            "subtype":"ui_render", "surface":"desktop", "component":"Pane",
+            "instance_id":"pane-async", "props":{}, "viewport":{"columns":80,"rows":24},
+        })), session.as_ref()).await.unwrap();
+        let revision = render.render_revision.unwrap();
+        let mount = host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"mount", "surface":"desktop", "component":"Pane", "instance_id":"pane-async",
+            "plugin":"review", "client":"card", "module":"card.tsx", "render_revision":revision,
+            "columns":80, "rows":24,
+        })), session.as_ref()).await.unwrap();
+        let mounted = test_value(&mount);
+        let runtime_id = mounted["runtimeId"].as_str().unwrap().to_owned();
+        let input = tree_node_with_key(&mounted["tree"], "query").unwrap();
+        assert_eq!(input["props"]["value"], "");
+        let handle = tree_press_handle_for_key(&mounted["tree"], "query").unwrap();
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"draw_commit", "surface":"desktop", "component":"Pane", "instance_id":"pane-async",
+            "render_revision":revision, "clients":[{"plugin":"review","key":"card","module":"card.tsx"}],
+        })), session.as_ref()).await.unwrap();
+        let operation = host_generated_json(json!({"type":"runHeld", "runtimeId":runtime_id,
+            "render_revision":revision, "handle":handle, "event":{"kind":"change","value":"typed"}}));
+        let host_task = host.clone();
+        let session_task = session.clone();
+        let mut task = tokio::spawn(async move {
+            host_task.dispatch_client_ui_operation(operation, session_task.as_ref()).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified()).await
+            .expect("the post reaches the real Host callback after the first await");
+        assert!(tokio::time::timeout(Duration::from_millis(60), &mut task).await.is_err(),
+            "runHeld must not confirm the stale Input while its post is held");
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), completed.notified()).await.unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), &mut task).await
+            .expect("held callback and its post must finish without queue deadlock")
+            .unwrap().unwrap();
+        let response = test_value(&response);
+        if reject {
+            assert_eq!(response["outcome"], json!({"status":"unknown","runtime":"unavailable"}));
+            assert_eq!(response["fault"]["phase"], "run");
+            assert!(response["fault"]["reason"].as_str().unwrap().contains("failed after update"));
+            assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_some(),
+                "the runtime is fenced before the structured unknown result returns");
+            let next = host.dispatch_client_ui_operation(host_generated_json(json!({
+                "type":"runHeld", "runtimeId":runtime_id, "render_revision":revision, "handle":handle,
+            })), session.as_ref()).await.unwrap();
+            assert_eq!(test_value(&next)["handled"], false);
+        } else {
+            let input = tree_node_with_key(&response["tree"], "query").unwrap();
+            assert_eq!(input["props"]["value"], "typed");
+            assert!(lock(&session_impl.frames).iter().any(|(runtime, frame)| {
+                runtime == &runtime_id && tree_node_with_key(&frame["tree"], "query")
+                    .is_some_and(|node| node["props"]["value"] == "typed")
+            }), "the post's updated frame was admitted before runHeld returned");
+        }
+    }
+
+    #[tokio::test]
+    async fn real_worker_async_input_waits_for_post_before_confirming() {
+        real_worker_async_input_waits_for_post_and_fences_rejection(false).await;
+    }
+
+    #[tokio::test]
+    async fn real_worker_async_input_rejection_returns_unknown_and_fences_runtime() {
+        real_worker_async_input_waits_for_post_and_fences_rejection(true).await;
     }
 
     #[tokio::test]
@@ -7221,6 +7466,7 @@ mod tests {
             .unwrap();
         assert_eq!(test_value(&run_fault)["fault"]["phase"], "run");
         assert_eq!(test_value(&run_fault)["fault"]["source"], "worker");
+        assert_eq!(test_value(&run_fault)["outcome"], json!({"status":"unknown","runtime":"unavailable"}));
         let async_run_fault = wait_for_client_frame(
             &session_impl,
             &failed_run_runtime,

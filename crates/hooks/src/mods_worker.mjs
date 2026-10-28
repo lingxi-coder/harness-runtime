@@ -25,6 +25,11 @@ let secDefaultPolicyAt = -Infinity;
 let secDefaultPolicyPromise;
 const activeDispatch = new Map();
 const pendingDispatch = new Set();
+// A held Client callback may await Host processing of its own post. Track its
+// cancellation separately from the serial queue so the matching ui.message and
+// setProps work can run while the callback is suspended.
+const activeClientOperations = new Map();
+const runningHeldByRuntime = new Map();
 const cancelledRequests = new Set();
 const moduleCache = new Map();
 const preparedModules = new Map();
@@ -4534,14 +4539,31 @@ async function processMessage(message) {
         admitted: parentPressHrefPreflight(message) });
     }
     else if (message.kind === 'ui.client.operation') {
+      const request = activeClientOperations.get(message.id);
+      if (!request) return;
+      if (request.controller.signal.aborted) {
+        activeClientOperations.delete(message.id);
+        return;
+      }
+      const operation = message.operation;
+      const held = operation?.type === 'runHeld' ? {
+        id: message.id, generation: operation.generation,
+      } : undefined;
+      if (held) runningHeldByRuntime.set(operation.runtimeId, held);
       try {
-        const result = await clientSurfaceManager.operation(message.operation);
-        send({ id: message.id, kind: 'ui.client.result', result });
+        const result = await clientSurfaceManager.operation(operation, { signal: request.controller.signal });
+        if (!request.controller.signal.aborted) send({ id: message.id, kind: 'ui.client.result', result });
       } catch (error) {
-        send({ id: message.id, kind: 'ui.client.result', error: {
+        if (!request.controller.signal.aborted) send({ id: message.id, kind: 'ui.client.result', error: {
           phase: ['load', 'render', 'run'].includes(error?.phase) ? error.phase : 'load',
           reason: String(error?.message || error),
+          ...(error?.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
         } });
+      } finally {
+        if (held && runningHeldByRuntime.get(operation.runtimeId) === held) {
+          runningHeldByRuntime.delete(operation.runtimeId);
+        }
+        if (activeClientOperations.get(message.id) === request) activeClientOperations.delete(message.id);
       }
     }
     else if (message.kind === 'unload') {
@@ -4626,6 +4648,7 @@ input.on('line', line => {
     if (message.kind === 'api.callers.result') reply.resolve();
     else reply.reject(new Error(message.message));
   } else if (message.kind === 'cancel') {
+    activeClientOperations.get(message.id)?.controller.abort();
     for (const [callId, pending] of pendingApiCallerRegistrations) {
       if (pending.requestId === message.id) {
         pendingApiCallerRegistrations.delete(callId);
@@ -4664,9 +4687,33 @@ input.on('line', line => {
   } else if (message.kind === 'stream.advance') {
     void advanceStream(message);
   } else if (message.kind === 'dispatch' || message.kind === 'stream.dispatch') {
-    // Dispatches may nest while an outer handler waits for its host-side next.
+    // A Client handler can await the props update caused by its own post.
+    // ui.message dispatch must not wait behind that same held operation.
     pendingDispatch.add(message.id);
-    void queue.then(() => processMessage(message));
+    const belongsToHeldSurface = message.kind === 'dispatch' && message.event === 'ui.message'
+      && [...runningHeldByRuntime.keys()].some(runtimeId => {
+        const identity = clientSurfaceManager.runtimeInstances.get(runtimeId)?.identity;
+        const input = message.input;
+        return identity && input && message.pluginScope === identity.plugin
+          && input.surface === identity.parent.surface && input.component === identity.parent.component
+          && input.requestId === identity.parent.requestId && input.element === identity.key
+          && input.module === identity.module;
+      });
+    if (belongsToHeldSurface) {
+      void processMessage(message);
+    } else {
+      void queue.then(() => processMessage(message));
+    }
+  } else if (message.kind === 'ui.client.operation') {
+    const request = { controller: new AbortController() };
+    activeClientOperations.set(message.id, request);
+    const operation = message.operation;
+    const active = operation?.type === 'setProps' ? runningHeldByRuntime.get(operation.runtimeId) : undefined;
+    if (active && active.generation === operation.generation) {
+      void processMessage(message);
+    } else {
+      queue = queue.then(() => processMessage(message));
+    }
   } else {
     queue = queue.then(() => processMessage(message));
   }

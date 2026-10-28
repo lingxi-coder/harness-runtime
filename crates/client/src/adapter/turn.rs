@@ -911,6 +911,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mod_ui_unknown_outcome_survives_correlated_event_serialization() {
+        let outcome = serde_json::json!({
+            "handled": false, "runtimeId": "runtime-7", "renderRevision": 3,
+            "outcome": { "status": "unknown", "runtime": "unavailable" },
+            "fault": { "phase": "run", "reason": "failed after update", "source": "worker" },
+        });
+        let projection = lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(&outcome).unwrap();
+        let event = mod_ui_client_operation_result_event("operation-7", Ok(projection));
+        let wire = serde_json::to_string(&event).unwrap();
+        let decoded: ClientEvent = serde_json::from_str(&wire).unwrap();
+        let ClientEvent::UiControlResult { request_id, response_json, metadata_json, error } = decoded else {
+            panic!("expected correlated operation result");
+        };
+        assert_eq!(request_id, "operation-7");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&response_json.unwrap()).unwrap(), outcome);
+        assert_eq!(metadata_json, None);
+        assert_eq!(error, None);
+    }
+
     #[tokio::test]
     async fn mod_ui_control_error_preserves_correlator() {
         let sink = MockSink::arc();

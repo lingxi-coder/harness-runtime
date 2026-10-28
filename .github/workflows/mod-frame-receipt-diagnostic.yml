@@ -1,7 +1,7 @@
 name: Mod frame receipt diagnostic
 on:
   push:
-    branches: [codex/media-mod-frame-receipt-20261028-a]
+    branches: [codex/media-mod-frame-receipt-20261028-a, codex/media-mod-frame-async-20261028-a]
 env:
   CARGO_BUILD_JOBS: "2"
   CARGO_INCREMENTAL: "0"
@@ -20,6 +20,20 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.4.3'
+      - name: Run Node and Bun async Worker contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --experimental-vm-modules --test crates/hooks/src/mod_ui_client_worker.test.mjs
+          bun test crates/hooks/src/mod_ui_client_worker.test.mjs
+      - name: Run async Input through the real Worker and Host
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LINGXI_MOD_BUN_EXECUTABLE="$(command -v bun)"
+          cargo test --locked -p hooks --lib real_worker_async_input_ -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/async-input.log"
+          grep -F 'real_worker_async_input_waits_for_post_before_confirming ... ok' "$RUNNER_TEMP/async-input.log"
+          grep -F 'real_worker_async_input_rejection_returns_unknown_and_fences_runtime ... ok' "$RUNNER_TEMP/async-input.log"
       - name: Run held Worker and sink admission tests
         shell: bash
         run: |
@@ -58,6 +72,12 @@ jobs:
           grep -F 'listener_sink_propagates_native_frame_admission ... ok' "$RUNNER_TEMP/listener.log"
           cargo test --locked -p client --features adapter,uniffi --lib emit_mod_ui_client_frame_forwards_runtime_and_frame_json -- --nocapture | tee "$RUNNER_TEMP/forward.log"
           grep -F 'emit_mod_ui_client_frame_forwards_runtime_and_frame_json ... ok' "$RUNNER_TEMP/forward.log"
+      - name: Test unknown outcome across ClientEvent serialization
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p client --features adapter,uniffi --lib mod_ui_unknown_outcome_survives_correlated_event_serialization -- --nocapture | tee "$RUNNER_TEMP/unknown-outcome.log"
+          grep -F 'mod_ui_unknown_outcome_survives_correlated_event_serialization ... ok' "$RUNNER_TEMP/unknown-outcome.log"
       - name: Test generation guard admission and cancellation
         shell: bash
         run: |

@@ -108,7 +108,7 @@ test('mounts a module graph into a bounded VM tree and routes held, pointer, key
   const key = { key: 'Enter', repeat: false };
   assert.equal(manager.pointer('drawing-1', pointer), true);
   assert.equal(manager.key('drawing-1', key), true);
-  assert.equal(manager.runHeld('drawing-1', 1, { pointerId: 4 }), true);
+  assert.equal(await manager.runHeld('drawing-1', 1, { pointerId: 4 }), true);
   assert(events.some(event => event.action === 'post' && event.json === JSON.stringify({ kind: 'pointer', event: pointer })));
   assert(events.some(event => event.action === 'post' && event.json === JSON.stringify({ kind: 'key', event: key })));
   assert(events.some(event => event.action === 'post' && event.json === '{"kind":"press","event":{"pointerId":4}}'));
@@ -124,7 +124,7 @@ test('mounts a module graph into a bounded VM tree and routes held, pointer, key
   assert(events.filter(event => event.action === 'schedule').length >= 2,
     'surface state changes schedule a later render, including a timer callback');
   assert.equal(manager.unmount('drawing-1'), true);
-  assert.equal(manager.runHeld('drawing-1', 1, {}), false);
+  assert.equal(await manager.runHeld('drawing-1', 1, {}), false);
   manager.dispose();
 });
 
@@ -176,11 +176,11 @@ test('Client worker mirrors Native Button, Input and Select adapters and keeps M
   }, 'native Client exportTree keeps pressableLinks as data without a callback');
   assert.equal(Object.hasOwn(markdown, 'held'), false,
     'Native Client does not expose a Markdown held callback');
-  assert.equal(manager.runHeld(mounted.runtimeId, button.held, { kind: 'press' }), true);
-  assert.equal(manager.runHeld(mounted.runtimeId, input.held, { kind: 'change', value: ' typed ' }), true);
-  assert.equal(manager.runHeld(mounted.runtimeId, input.held, { kind: 'submit', value: ' answer ' }), true);
-  assert.equal(manager.runHeld(mounted.runtimeId, select.held, { value: 'fast' }), true);
-  assert.equal(manager.runHeld(mounted.runtimeId, optionalInput.held, {
+  assert.equal(await manager.runHeld(mounted.runtimeId, button.held, { kind: 'press' }), true);
+  assert.equal(await manager.runHeld(mounted.runtimeId, input.held, { kind: 'change', value: ' typed ' }), true);
+  assert.equal(await manager.runHeld(mounted.runtimeId, input.held, { kind: 'submit', value: ' answer ' }), true);
+  assert.equal(await manager.runHeld(mounted.runtimeId, select.held, { value: 'fast' }), true);
+  assert.equal(await manager.runHeld(mounted.runtimeId, optionalInput.held, {
     kind: 'change', value: 'ignored without optional onInput',
   }), true, 'an explicitly undefined optional onInput is treated as absent');
   assert.deepEqual(events.filter(event => event.action === 'post').map(event => JSON.parse(event.json)), [
@@ -204,7 +204,7 @@ test('Client worker mirrors Native Button, Input and Select adapters and keeps M
   manager.dispose();
 });
 
-test('runHeld correlates synchronous posts only and still rejects a replaced handle', async () => {
+test('runHeld correlates posts through async completion and still rejects a replaced handle', async () => {
   const events = [];
   const manager = new ClientSurfaceManager({ send: message => events.push(message) });
   const mounted = await manager.mount(mountOptions({
@@ -231,14 +231,14 @@ test('runHeld correlates synchronous posts only and still rejects a replaced han
     payload: { kind: 'press' },
     postActionId: 'host-action-7',
   });
-  assert.deepEqual(action, { accepted: true, postIds: [0] });
+  assert.deepEqual(action, { accepted: true, postIds: [0, 1] });
   const posts = events.filter(event => event.action === 'post');
   assert.equal(posts.length, 2);
   assert.equal(posts[0].postActionId, 'host-action-7');
   assert.equal(posts[0].postId, 0);
   assert.deepEqual(JSON.parse(posts[0].json), { stage: 'synchronous' });
-  assert.equal(Object.hasOwn(posts[1], 'postActionId'), false,
-    'a post after the callback promise yields is a later external update');
+  assert.equal(posts[1].postActionId, 'host-action-7');
+  assert.equal(posts[1].postId, 1, 'a post after await belongs to the same live action');
 
   manager.render(mounted.runtimeId);
   const stale = await manager.operation({
@@ -252,6 +252,115 @@ test('runHeld correlates synchronous posts only and still rejects a replaced han
   assert.equal(events.filter(event => event.action === 'post').length, 2,
     'a replaced handle does not invoke its callback or emit a post');
   manager.dispose();
+});
+
+
+test('async Input waits for its own posts while unrelated timer posts stay uncorrelated', async () => {
+  const events = [];
+  const manager = new ClientSurfaceManager({ send: message => events.push(message) });
+  const mounted = await manager.mount(mountOptions({
+    runtimeId: 'async-input',
+    source: `
+      let scheduled = false;
+      export function Board(_props, surface) {
+        if (!scheduled) {
+          scheduled = true;
+          const stop = surface.every(5, () => { stop(); surface.post({ stage:'unrelated' }); });
+        }
+        return surface.elements.Input({
+          value: surface.state.value || '', onSubmit() {},
+          onInput: async value => {
+            surface.post({ stage:'before' });
+            await new Promise(resolve => {
+              const stop = surface.every(40, () => { stop(); resolve(); });
+            });
+            surface.post({ stage:'after', value });
+            surface.setState({ value });
+          },
+        });
+      }
+    `,
+  }));
+  let completed = false;
+  const operation = manager.operation({ type:'runHeld', runtimeId:mounted.runtimeId,
+    handle:mounted.tree.held, payload:{kind:'change', value:'typed'}, postActionId:'input-1' });
+  operation.then(() => { completed = true; });
+  await delay(15);
+  assert.equal(completed, false, 'the old tree cannot be acknowledged while callback is suspended');
+  assert.equal(manager.render(mounted.runtimeId).tree.props.value, '');
+  const result = await operation;
+  assert.deepEqual(result, { accepted:true, postIds:[0, 1] });
+  const posts = events.filter(event => event.action === 'post');
+  const byStage = Object.fromEntries(posts.map(event => [JSON.parse(event.json).stage, event]));
+  assert.equal(byStage.before.postActionId, 'input-1');
+  assert.equal(byStage.after.postActionId, 'input-1');
+  assert.equal(byStage.after.postId, 1);
+  assert.equal(Object.hasOwn(byStage.unrelated, 'postActionId'), false);
+  assert.equal(manager.render(mounted.runtimeId).tree.props.value, 'typed');
+  manager.dispose();
+});
+
+test('cancelled async Input cannot publish a late post, and a live runtime can accept a fresh action', async () => {
+  const events = [];
+  const manager = new ClientSurfaceManager({ send: message => events.push(message) });
+  const mounted = await manager.mount(mountOptions({
+    runtimeId:'cancelled-input',
+    source:`export function Board(_props, surface) {
+      return surface.elements.Input({ value:surface.state.value || '', onSubmit(){},
+        onInput: async value => {
+          surface.post({stage:'before', value});
+          await new Promise(resolve => {
+            const stop = surface.every(40, () => { stop(); resolve(); });
+          });
+          surface.post({stage:'after', value});
+          surface.setState({value});
+        }
+      });
+    }`,
+  }));
+  const controller = new AbortController();
+  const cancelled = manager.operation({type:'runHeld', runtimeId:mounted.runtimeId,
+    handle:mounted.tree.held, payload:{kind:'change', value:'first'}, postActionId:'cancel-me'},
+    {signal:controller.signal});
+  await delay(5);
+  controller.abort();
+  await assert.rejects(cancelled, error => error.phase === 'run' && error.outcomeUnknown === true);
+  await delay(60);
+  const posts = events.filter(event => event.action === 'post').map(event => JSON.parse(event.json));
+  assert.deepEqual(posts, [{stage:'before', value:'first'}], 'prior effect survives; delayed effects are fenced');
+  assert.equal(events.filter(event => event.action === 'fault').length, 0, 'cancel is not a worker fault');
+  assert.equal(manager.render(mounted.runtimeId).tree.props.value, '');
+  const fresh = manager.render(mounted.runtimeId);
+  const result = await manager.operation({type:'runHeld', runtimeId:mounted.runtimeId,
+    handle:fresh.tree.held, payload:{kind:'change', value:'second'}, postActionId:'fresh'});
+  assert.deepEqual(result, {accepted:true, postIds:[0, 1]});
+  assert.equal(manager.render(mounted.runtimeId).tree.props.value, 'second');
+  manager.dispose();
+});
+
+test('an async handler rejection or timeout is unknown, faults the runtime and never confirms a no-op', async () => {
+  for (const mode of ['reject', 'timeout']) {
+    const events = [];
+    const manager = new ClientSurfaceManager({send: event => events.push(event), asyncHeldBudgetMs:25});
+    const body = mode === 'reject'
+      ? "await Promise.resolve(); throw new Error('failure after post');"
+      : 'await new Promise(() => {});';
+    const mounted = await manager.mount(mountOptions({runtimeId:`async-${mode}`, source:`
+      export function Board(_props, surface) {
+        return surface.elements.Button({onPress: async () => {
+          surface.post({stage:'before'}); ${body}
+        }});
+      }
+    `}));
+    await assert.rejects(manager.operation({type:'runHeld', runtimeId:mounted.runtimeId,
+      handle:mounted.tree.held, payload:{kind:'press'}, postActionId:`action-${mode}`}),
+      error => error.phase === 'run' && error.outcomeUnknown === true);
+    assert.equal(events.filter(event => event.action === 'post').length, 1);
+    assert.equal(events.filter(event => event.action === 'fault').length, 1);
+    assert.equal(manager.runtimeInstances.get(mounted.runtimeId).failure.status, 'failed');
+    assert.deepEqual(await manager.operation({type:'render', runtimeId:mounted.runtimeId}), {stale:true});
+    manager.dispose();
+  }
 });
 
 test('Client tree JSON matches Native exportTree field order and Input/Select omissions', async () => {
@@ -581,7 +690,7 @@ test('a VM fault tears down timers and held callbacks until an explicit remount'
     status: 'failed', phase: 'run', reason: 'stop this surface',
   });
   assert.equal(events.filter(event => event.action === 'fault').length, 1);
-  assert.equal(manager.runHeld('faulted-vm', heldHandle, { type: 'press' }), false,
+  assert.equal(await manager.runHeld('faulted-vm', heldHandle, { type: 'press' }), false,
     'fault cleanup releases the serialized held callback');
   assert.equal(manager.pointer('faulted-vm', { type: 'move' }), false,
     'the failed surface no longer has input listeners');
@@ -669,6 +778,60 @@ test('serializes one-way worker event frames and operation results', async () =>
   const unmounted = await manager.operation({ type: 'unmount', runtimeId: 'op-1' });
   assert.deepEqual(unmounted, { unmounted: true });
   manager.dispose();
+});
+
+
+test('mods worker admits matching setProps while an async held action waits for that update', async t => {
+  const workerPath = fileURLToPath(new URL('./mods_worker.mjs', import.meta.url));
+  const worker = spawn(process.execPath, ['--experimental-vm-modules', workerPath],
+    { stdio:['pipe', 'pipe', 'pipe'] });
+  t.after(() => { if (!worker.killed) worker.kill(); });
+  const pending = new Map();
+  const events = [];
+  let wakePost;
+  const posted = new Promise(resolve => { wakePost = resolve; });
+  createInterface({ input:worker.stdout, crlfDelay:Infinity }).on('line', line => {
+    const frame = decodeModsIpcFrame(line);
+    if (frame.id === 0) {
+      events.push(frame);
+      if (frame.action === 'post') wakePost();
+    } else {
+      pending.get(frame.id)?.(frame);
+      pending.delete(frame.id);
+    }
+  });
+  const request = (id, message) => new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => { pending.delete(id); reject(new Error(`worker request ${id} timed out`)); }, 2_000);
+    pending.set(id, frame => { clearTimeout(timeout); resolve(frame); });
+    worker.stdin.write(`${encodeModsIpcFrame({id, ...message})}\n`);
+  });
+  const mounted = await request(1, {kind:'ui.client.operation', operation:{type:'mount',
+    ...mountOptions({runtimeId:'held-waits-for-props', source:`
+      let latest = '';
+      export function Board(props, surface) {
+        latest = props.value || '';
+        return surface.elements.Input({value:latest, onSubmit(){}, onInput:async value => {
+          surface.post({value});
+          await new Promise(resolve => {
+            const stop = surface.every(5, () => { if (latest === value) { stop(); resolve(); } });
+          });
+          surface.post({completed:value});
+        }});
+      }
+    `})}});
+  let done = false;
+  const held = request(2, {kind:'ui.client.operation', operation:{type:'runHeld',
+    runtimeId:'held-waits-for-props', generation:mounted.result.generation, handle:mounted.result.tree.held,
+    payload:{kind:'change',value:'typed'}, postActionId:'held-action'}});
+  held.then(() => { done = true; });
+  await posted;
+  assert.equal(done, false);
+  const updated = await request(3, {kind:'ui.client.operation', operation:{type:'setProps',
+    runtimeId:'held-waits-for-props', generation:mounted.result.generation, props:{value:'typed'}}});
+  assert.equal(updated.result.tree.props.value, 'typed');
+  assert.deepEqual((await held).result, {accepted:true, postIds:[0,1]});
+  assert.deepEqual(events.filter(event => event.action === 'post').map(event => event.postActionId),
+    ['held-action', 'held-action']);
 });
 
 test('mods worker accepts ui.client.operation and returns tree plus asynchronous event frames', async t => {
