@@ -535,6 +535,14 @@ mod tests {
         assert!(!error.spawn_group_empty_verified);
         let mut active = spawn_owned(payload("slow", dir.path()), &StartupGate::default()).unwrap();
         wait_for_file(&dir.path().join("ready")).await;
+        let cancelled = StartupGate::default();
+        cancelled.cancel();
+        let no_child = spawn_owned(payload("marker", dir.path()), &cancelled).unwrap_err();
+        assert!(!no_child.may_have_spawned_child && no_child.owner.is_none());
+        assert!(
+            !no_child.spawn_group_empty_verified,
+            "a different live payload remains in the outer Job"
+        );
         let missing = Command::new(dir.path().join("nonexistent-payload.exe"));
         let busy = spawn_owned(missing, &StartupGate::default()).unwrap_err();
         assert!(

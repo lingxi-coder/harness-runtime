@@ -661,7 +661,7 @@ mod integration_tests {
         })
         .await
         .expect("output EOF did not report unverified group ownership");
-        assert_eq!(unknown["cleanup_verified"], false, "{unknown}");
+        assert_eq!(unknown["group_cleanup_verified"], false, "{unknown}");
         assert_eq!(native::process_handle_is_alive_for_test(&held), Some(true));
         let captured = std::fs::read_to_string(cleanup.directories[1].join("output")).unwrap();
         assert!(
@@ -696,7 +696,7 @@ mod integration_tests {
             serde_json::json!({"request":"Inspect", "nonce":nonce}),
         )
         .await;
-        assert_eq!(after["cleanup_verified"], false, "{after}");
+        assert_eq!(after["group_cleanup_verified"], false, "{after}");
         // The test owns this supervisor and ends it after checking the held
         // descendant. Production keeps it parked while cleanup is unknown.
         supervisor.start_kill().unwrap();
@@ -799,7 +799,7 @@ mod integration_tests {
             })
             .await
             .expect("handoff stop did not report unknown cleanup");
-            assert_eq!(unknown["cleanup_verified"], false, "{unknown}");
+            assert_eq!(unknown["group_cleanup_verified"], false, "{unknown}");
             supervisor.start_kill().unwrap();
             tokio::time::timeout(Duration::from_secs(10), supervisor.wait())
                 .await
