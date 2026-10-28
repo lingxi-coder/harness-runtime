@@ -399,7 +399,17 @@ fn retain_until_reaped(
         if deadline.job.is_some() {
             // There is currently no way to upgrade an arbitrary resumed Job
             // to a complete held-descendant proof. Keep the exact owner and
-            // lease instead of repeatedly treating zero accounting as proof.
+            // lease, and keep later explicit stop requests actionable. The
+            // original Job remains held even after a termination attempt.
+            if let Some(stop) = verified_sink
+                .as_ref()
+                .and_then(|(sink, _)| sink.stop_notify())
+            {
+                loop {
+                    stop.notified().await;
+                    let _ = terminate_and_reap(&deadline, &mut child, &mut guard).await;
+                }
+            }
             // Runtime/process loss remains a separate durability boundary.
             std::future::pending::<()>().await;
         }
@@ -1013,6 +1023,7 @@ pub(super) async fn run(
     let mut capture = Capture::new(cmd, limit);
     let mut eof = [false; 2];
     let mut timed_out = false;
+    let mut retain_after_output_eof = false;
     if !explicit {
         let foreground_deadline =
             tokio::time::Instant::now() + cmd.inner().timeout.unwrap_or(DEFAULT_TIMEOUT);
@@ -1136,62 +1147,76 @@ pub(super) async fn run(
                 }),
             });
         }
-        // A starved deadline/request must not background an already exited PID.
+        // A supervisor may have a reaped leader whose descendants still own
+        // stdout or stderr. Keep the real output owner visible as a background
+        // task instead of returning Completed after a timed-out drain.
         let exited_status = match child.try_wait() {
             Ok(status) => status,
             Err(error) => fail_foreground!(io_error(error)),
         };
         if let Some(status) = exited_status {
             guard.0 = None;
-            if let Ok(Err(error)) = tokio::time::timeout(
-                std::time::Duration::from_millis(50),
-                drain(
-                    &mut child,
-                    &mut stdout,
-                    &mut stderr,
-                    &mut capture,
-                    eof,
-                    &mut deadline,
-                    false,
-                ),
-            )
-            .await
-            {
-                fail_foreground!(error);
-            }
-            if deadline.strict_host && deadline.terminated {
-                if let Err(error) = terminate_and_reap(&deadline, &mut child, &mut guard).await {
+            #[cfg(test)]
+            let preserve_legacy = std::env::var_os("LINGXI_DETACHED_JOB_LEGACY_BLOCKING").is_some();
+            #[cfg(not(test))]
+            let preserve_legacy = false;
+            retain_after_output_eof = cmd.is_supervisor_request()
+                && !deadline.strict_host
+                && !eof.iter().all(|closed| *closed)
+                && !preserve_legacy;
+            if !retain_after_output_eof {
+                if let Ok(Err(error)) = tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    drain(
+                        &mut child,
+                        &mut stdout,
+                        &mut stderr,
+                        &mut capture,
+                        eof,
+                        &mut deadline,
+                        false,
+                    ),
+                )
+                .await
+                {
                     fail_foreground!(error);
                 }
-                if !deadline.expired {
-                    return Err(ProcessError::Io("supervisor command cancelled".into()));
+                if deadline.strict_host && deadline.terminated {
+                    if let Err(error) = terminate_and_reap(&deadline, &mut child, &mut guard).await
+                    {
+                        fail_foreground!(error);
+                    }
+                    if !deadline.expired {
+                        return Err(ProcessError::Io("supervisor command cancelled".into()));
+                    }
+                    return Ok(ForegroundRunResult {
+                        output_file: capture.metadata(),
+                        outcome: ForegroundOutcome::Completed(ProcessOutput {
+                            stdout: capture.stdout,
+                            stderr: capture.stderr,
+                            exit_code: 143,
+                            timed_out: true,
+                        }),
+                    });
+                }
+                if let Err(error) =
+                    finish_foreground(&mut capture, &mut child, &mut guard, &mut deadline, &stop)
+                        .await
+                {
+                    fail_foreground!(error);
                 }
                 return Ok(ForegroundRunResult {
                     output_file: capture.metadata(),
                     outcome: ForegroundOutcome::Completed(ProcessOutput {
                         stdout: capture.stdout,
                         stderr: capture.stderr,
-                        exit_code: 143,
-                        timed_out: true,
+                        exit_code: status.code().unwrap_or(-1),
+                        timed_out: false,
                     }),
                 });
             }
-            if let Err(error) =
-                finish_foreground(&mut capture, &mut child, &mut guard, &mut deadline, &stop).await
-            {
-                fail_foreground!(error);
-            }
-            return Ok(ForegroundRunResult {
-                output_file: capture.metadata(),
-                outcome: ForegroundOutcome::Completed(ProcessOutput {
-                    stdout: capture.stdout,
-                    stderr: capture.stderr,
-                    exit_code: status.code().unwrap_or(-1),
-                    timed_out: false,
-                }),
-            });
         }
-        if timed_out && !cmd.auto_background_on_timeout() {
+        if timed_out && !cmd.auto_background_on_timeout() && !retain_after_output_eof {
             let _ = super::kill_tree::kill_tree_windows(pid).await;
             let _ = child.kill().await;
             let _ = child.wait().await;
@@ -1274,7 +1299,12 @@ pub(super) async fn run(
         let mut cleanup_verified = false;
         let status = match result {
             Ok(status) => {
-                if deadline.strict_host || deadline.verify_lease || lifetime_guard.is_some() {
+                if retain_after_output_eof {
+                    // EOF proves only that output writers closed. Do not
+                    // release the Job or manufacture descendant proof.
+                    Err(format!("foreground output closed after leader exit {:?}; process group cleanup remains unverified", status.code()))
+                } else if deadline.strict_host || deadline.verify_lease || lifetime_guard.is_some()
+                {
                     match terminate_and_reap(&deadline, &mut child, &mut guard).await {
                         Ok(_) => {
                             cleanup_verified = true;

@@ -58,7 +58,7 @@ jobs:
             'process::supervisor::integration_tests::real_supervisor_preserves_detached_child_after_normal_foreground',
             'process::supervisor::integration_tests::real_supervisor_drains_a_deliberately_inherited_descendant_pipe',
             'process::supervisor_gate::tests::normal_foreground_completion_preserves_detached_descendants',
-            'process::supervisor::integration_tests::real_supervisor_diagnostic_inherited_writer_blocks_shutdown',
+            'process::supervisor::integration_tests::real_supervisor_retains_output_and_job_until_explicit_stop',
             'process::owned_job::tests::job_unknown_and_suspended_start_are_proven_in_dedicated_helpers',
             'process::background::native_background_stop_tests::stopped_resumed_job_reports_unknown_without_cleanup_receipt',
             'process::background::native_background_stop_tests::strict_foreground_eof_does_not_manufacture_group_cleanup_proof'
@@ -70,6 +70,19 @@ jobs:
             if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw "target test did not pass: $test" }
           }
           exit 0
+      - name: Verify old supervisor shutdown defect is detected
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $env:LINGXI_DETACHED_JOB_LEGACY_BLOCKING = '1'
+          $log = Join-Path $env:RUNNER_TEMP 'legacy-blocking.log'
+          cargo test --locked -p platform-windows --lib process::supervisor::integration_tests::real_supervisor_diagnostic_inherited_writer_blocks_shutdown -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+          $testExit = $LASTEXITCODE
+          Remove-Item Env:LINGXI_DETACHED_JOB_LEGACY_BLOCKING
+          if ($testExit -ne 0) { exit $testExit }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'detached-probe: result returned; live writer blocks supervisor shutdown')) { throw 'old behavior was not reproduced' }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'legacy control did not execute' }
+          exit 0
       - name: Preserve diagnostic logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -77,5 +90,6 @@ jobs:
           name: windows-detached-diagnostic
           path: |
             ${{ runner.temp }}/unsafe-inheritance.log
+            ${{ runner.temp }}/legacy-blocking.log
             ${{ runner.temp }}/process-supervisor*-*.log
           if-no-files-found: ignore

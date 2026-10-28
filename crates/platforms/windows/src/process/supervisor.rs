@@ -179,13 +179,22 @@ mod integration_tests {
         format!("{}{suffix}", branding::ENV_PREFIX)
     }
 
-    struct Sink;
+    struct Sink(PathBuf);
     #[async_trait::async_trait]
     impl BackgroundExitSink for Sink {
+        async fn append_output(&self, _: &str, text: &str) -> Result<(), ProcessError> {
+            let mut output = tokio::fs::OpenOptions::new()
+                .append(true)
+                .open(&self.0)
+                .await
+                .map_err(error)?;
+            output.write_all(text.as_bytes()).await.map_err(error)?;
+            output.flush().await.map_err(error)
+        }
         async fn on_exit(&self, _: &str, _: Option<i32>) {}
     }
-    fn sink(_: &Path) -> Arc<dyn BackgroundExitSink> {
-        Arc::new(Sink)
+    fn sink(output: &Path) -> Arc<dyn BackgroundExitSink> {
+        Arc::new(Sink(output.to_owned()))
     }
 
     #[tokio::test]
@@ -205,6 +214,7 @@ mod integration_tests {
     impl Drop for Cleanup {
         fn drop(&mut self) {
             let _ = std::fs::write(&self.release, "release");
+            let _ = std::fs::write(self.release.with_file_name("exit"), "exit");
             for directory in &self.directories {
                 let _ = std::fs::remove_dir_all(directory);
             }
@@ -567,6 +577,133 @@ mod integration_tests {
         })
         .await
         .expect("detached process did not exit after release");
+    }
+
+    #[tokio::test]
+    async fn real_supervisor_retains_output_and_job_until_explicit_stop() {
+        let fixture = tempfile::tempdir().unwrap();
+        let command = ProcessCommand {
+            command: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                DETACHED_HELPER.into(),
+                "--exact".into(),
+                "--nocapture".into(),
+            ],
+            cwd: Some(fixture.path().to_path_buf()),
+            env: std::collections::HashMap::from([
+                (
+                    test_env("DETACHED_JOB_TEST_DIR"),
+                    fixture.path().to_string_lossy().into_owned(),
+                ),
+                (test_env("DETACHED_JOB_HOLD_PIPE"), "1".into()),
+                (test_env("DETACHED_JOB_WRITE_AFTER_RELEASE"), "1".into()),
+                (test_env("DETACHED_JOB_LINGER_AFTER_STDOUT"), "1".into()),
+            ]),
+            timeout: Some(Duration::from_secs(5)),
+            stdin: None,
+        };
+        let (mut supervisor, mut stream, endpoint, nonce, payload, cleanup) =
+            start(command, None, false, fixture.path().join("release")).await;
+        let supervisor_pid = supervisor.id().unwrap();
+        wait_file(&fixture.path().join("started")).await;
+        let descendant: u32 = std::fs::read_to_string(fixture.path().join("descendant.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let held = native::hold_process_handle_for_test(descendant).unwrap();
+        assert_eq!(native::process_handle_is_alive_for_test(&held), Some(true));
+        let response = tokio::time::timeout(Duration::from_secs(12), receive(&mut stream))
+            .await
+            .expect("output ownership was not handed off");
+        assert_eq!(response["response"], "Started", "{response}");
+        let result: ForegroundRunResult =
+            serde_json::from_value(response["result"].clone()).unwrap();
+        assert!(
+            matches!(result.outcome, ForegroundOutcome::MovedToBackground(ref handle) if handle.pid == payload)
+        );
+        assert_eq!(response["handoff"]["pid"], payload);
+        send(
+            &mut stream,
+            serde_json::json!({"request":"Accepted", "nonce":nonce}),
+        )
+        .await;
+        assert_eq!(receive(&mut stream).await["response"], "Ack");
+        let before = rpc(
+            &endpoint,
+            supervisor_pid,
+            serde_json::json!({"request":"Inspect", "nonce":nonce}),
+        )
+        .await;
+        assert_eq!(before["terminal"], false, "{before}");
+        assert_eq!(native::process_handle_is_alive_for_test(&held), Some(true));
+
+        std::fs::write(fixture.path().join("release"), "release").unwrap();
+        wait_file(&fixture.path().join("pipe.closed")).await;
+        let unknown = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let state = rpc(
+                    &endpoint,
+                    supervisor_pid,
+                    serde_json::json!({"request":"Inspect", "nonce":nonce}),
+                )
+                .await;
+                if state["stop_cause"]
+                    .as_str()
+                    .is_some_and(|cause| cause.contains("group cleanup remains unverified"))
+                {
+                    break state;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("output EOF did not report unverified group ownership");
+        assert_eq!(unknown["cleanup_verified"], false, "{unknown}");
+        assert_eq!(native::process_handle_is_alive_for_test(&held), Some(true));
+        let captured = std::fs::read_to_string(cleanup.directories[1].join("output")).unwrap();
+        assert!(
+            captured.contains("detached-child-output-after-release"),
+            "{captured:?}"
+        );
+
+        // Even after EOF and an unverified terminal observation, a Stop must
+        // still reach the original retained Job. The same held descendant
+        // handle, not a PID lookup or delay, establishes actual exit.
+        let stopped = rpc(
+            &endpoint,
+            supervisor_pid,
+            serde_json::json!({"request":"Kill", "nonce":nonce}),
+        )
+        .await;
+        assert_eq!(stopped["response"], "Ack", "{stopped}");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match native::process_handle_is_alive_for_test(&held) {
+                    Some(false) => break,
+                    Some(true) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    None => panic!("could not inspect original descendant handle"),
+                }
+            }
+        })
+        .await
+        .expect("retained Job did not stop the descendant");
+        let after = rpc(
+            &endpoint,
+            supervisor_pid,
+            serde_json::json!({"request":"Inspect", "nonce":nonce}),
+        )
+        .await;
+        assert_eq!(after["cleanup_verified"], false, "{after}");
+        // The test owns this supervisor and ends it after checking the held
+        // descendant. Production keeps it parked while cleanup is unknown.
+        supervisor.start_kill().unwrap();
+        tokio::time::timeout(Duration::from_secs(10), supervisor.wait())
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

@@ -595,6 +595,19 @@ mod tests {
                         stdout.flush().unwrap();
                     }
                     std::fs::write(directory.join("finished"), "survived").unwrap();
+                    if std::env::var_os("LINGXI_DETACHED_JOB_LINGER_AFTER_STDOUT").is_some() {
+                        // Close only this fixture's stdout, then remain alive
+                        // so EOF cannot be mistaken for a group exit receipt.
+                        let stdout = unsafe { GetStdHandle(-11i32 as u32) };
+                        assert!(!stdout.is_null() && stdout != -1isize as Handle);
+                        assert_ne!(unsafe { CloseHandle(stdout) }, 0);
+                        std::fs::write(directory.join("pipe.closed"), "closed").unwrap();
+                        let until = std::time::Instant::now() + Duration::from_secs(30);
+                        while !directory.join("exit").exists() {
+                            assert!(std::time::Instant::now() < until, "fixture did not stop");
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                    }
                     return;
                 }
                 std::thread::sleep(Duration::from_millis(10));
