@@ -352,6 +352,11 @@ path = "tests/desktop/background_output_writer.rs"
 required-features = ["desktop"]
 
 [[test]]
+name = "typed_bash_windows"
+path = "tests/desktop/typed_bash_windows.rs"
+required-features = ["desktop", "test-support"]
+
+[[test]]
 name = "coordinator_activation"
 path = "tests/desktop/coordinator_activation.rs"
 required-features = ["desktop"]

@@ -1,4 +1,6 @@
-use super::*;
+#![cfg(windows)]
+
+use harness_runtime::desktop::{run_typed_bash_for_test, TestingTypedBashProcess};
 use lingxi_core::host::{
     BackgroundExitSink, BackgroundTaskBinding, ProcessCommand, ProcessRunner, SandboxedCommand,
     SandboxedTag,
@@ -8,7 +10,6 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use tool_api::bash_runner::BashRunner;
 
 struct SourceSink;
 #[async_trait::async_trait]
@@ -115,13 +116,12 @@ async fn desktop_typed_bash_entry_rejects_windows_before_spawn() {
         fixture.0.path().to_path_buf(),
     );
     ctx.process = Arc::new(platform_windows::process::WindowsProcess::new());
-    let runner = DesktopBashRunner { ctx };
-    let result = runner
-        .run_with_cancel(
-            "echo spawned > should-not-exist",
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
+    let result = run_typed_bash_for_test(
+        ctx,
+        "echo spawned > should-not-exist",
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
     assert_ne!(result.exit_code, 0);
     assert!(
         result.stderr.contains("Bash is not supported on Windows"),
@@ -135,11 +135,11 @@ async fn real_typed_bash_stop_preserves_foreground_contract_and_signals_job() {
     let fixture = Fixture(tempfile::tempdir().unwrap());
     platform_windows::process::supervisor::enable_supervisor(driver());
     let token = tokio_util::sync::CancellationToken::new();
-    let process = TypedBashProcess {
-        inner: Arc::new(platform_windows::process::WindowsProcess::new()),
-        owner: format!("typed-stop-{}", lingxi_core::types::ToolUseId::new()),
-        cancel: token.clone(),
-    };
+    let process = TestingTypedBashProcess::for_test(
+        Arc::new(platform_windows::process::WindowsProcess::new()),
+        format!("typed-stop-{}", lingxi_core::types::ToolUseId::new()),
+        token.clone(),
+    );
     let cmd = command(fixture.0.path(), Duration::from_secs(30));
     let running = tokio::spawn(async move {
         process
@@ -171,11 +171,11 @@ async fn real_typed_bash_stop_preserves_foreground_contract_and_signals_job() {
 async fn real_typed_bash_timeout_cannot_report_success_with_live_writer() {
     let fixture = Fixture(tempfile::tempdir().unwrap());
     platform_windows::process::supervisor::enable_supervisor(driver());
-    let process = TypedBashProcess {
-        inner: Arc::new(platform_windows::process::WindowsProcess::new()),
-        owner: format!("typed-timeout-{}", lingxi_core::types::ToolUseId::new()),
-        cancel: tokio_util::sync::CancellationToken::new(),
-    };
+    let process = TestingTypedBashProcess::for_test(
+        Arc::new(platform_windows::process::WindowsProcess::new()),
+        format!("typed-timeout-{}", lingxi_core::types::ToolUseId::new()),
+        tokio_util::sync::CancellationToken::new(),
+    );
     let cmd = command(fixture.0.path(), Duration::from_secs(5));
     let running = tokio::spawn(async move {
         process
