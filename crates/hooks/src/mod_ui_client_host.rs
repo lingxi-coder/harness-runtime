@@ -6536,10 +6536,10 @@ mod tests {
           export function register(on) {
             on('ui.render', {surface:'desktop', component:'Pane'}, ($, event) => {
               const {Box, Client, h} = $.ui.resolve(event);
-              return h(Box, {children:[
+              return h(Box, {},
                 h(Client, {key:'card', module:'./card.tsx', props:{value:''}}),
                 h(Client, {key:'sibling', module:'./card.tsx', props:{value:''}}),
-              ]});
+              );
             });
             on('ui.message', async ($, event) => {
               await $.session.model();
