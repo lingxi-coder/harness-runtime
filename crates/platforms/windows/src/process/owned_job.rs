@@ -176,7 +176,9 @@ pub struct OwnedSpawnError {
     /// Whether an OS child may have been created. In particular, Tokio's
     /// spawn API does not promise that every error precedes child creation.
     pub may_have_spawned_child: bool,
-    /// True only when startup has proven that no payload was created.
+    /// Whether all payloads in the helper's outer Job are verified gone.
+    /// This is false without a complete held-process proof; use
+    /// `may_have_spawned_child` for the narrower no-child-for-this-attempt fact.
     pub spawn_group_empty_verified: bool,
 }
 
@@ -203,7 +205,9 @@ fn startup_error(
         cancelled,
         owner,
         may_have_spawned_child,
-        spawn_group_empty_verified: !may_have_spawned_child,
+        // A no-child result for this attempt does not prove that no other
+        // attempt in the outer Job is still present.
+        spawn_group_empty_verified: false,
     }
 }
 
@@ -372,6 +376,39 @@ mod tests {
         .expect("fixture did not start");
     }
 
+    fn held_leader(owner: &OwnedProcess) -> std::os::windows::io::OwnedHandle {
+        use std::os::windows::io::BorrowedHandle;
+        let raw = owner.child.raw_handle().expect("leader is still held");
+        // SAFETY: the Child retains this handle through the duplication.
+        unsafe { BorrowedHandle::borrow_raw(raw) }
+            .try_clone_to_owned()
+            .expect("duplicate original leader process handle")
+    }
+
+    async fn assert_held_process_exited(process: &std::os::windows::io::OwnedHandle) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match super::super::supervisor_native::process_handle_is_alive_for_test(process) {
+                    Some(false) => break,
+                    Some(true) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    None => panic!("failed to inspect original process handle"),
+                }
+            }
+        })
+        .await
+        .expect("held process did not exit");
+    }
+
+    fn assert_group_unknown(result: Result<ExitStatus, ProcessError>) {
+        let error = result.expect_err("resumed group must not produce cleanup proof");
+        assert!(
+            error
+                .to_string()
+                .contains("no complete descendant handle proof"),
+            "{error}"
+        );
+    }
+
     async fn before_resume_cancel_is_linearized() {
         let dir = tempfile::tempdir().unwrap();
         let already_cancelled = StartupGate::default();
@@ -381,7 +418,7 @@ mod tests {
             early.cancelled
                 && early.owner.is_none()
                 && !early.may_have_spawned_child
-                && early.spawn_group_empty_verified
+                && !early.spawn_group_empty_verified
         );
         let gate = StartupGate::default();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
@@ -482,10 +519,12 @@ mod tests {
         cancel.await.unwrap();
         assert!(gate.is_cancelled());
         assert!(gate.may_have_resumed());
-        tokio::time::timeout(Duration::from_secs(15), owner.terminate_and_reap())
+        let leader = held_leader(&owner);
+        let cleanup = tokio::time::timeout(Duration::from_secs(15), owner.terminate_and_reap())
             .await
-            .unwrap()
             .unwrap();
+        assert_group_unknown(cleanup);
+        assert_held_process_exited(&leader).await;
     }
 
     async fn failed_spawn_stages_keep_the_exact_owner() {
@@ -493,10 +532,7 @@ mod tests {
         let missing = Command::new(dir.path().join("nonexistent-payload.exe"));
         let error = spawn_owned(missing, &StartupGate::default()).unwrap_err();
         assert!(!error.cancelled && error.owner.is_none() && error.may_have_spawned_child);
-        assert!(
-            error.spawn_group_empty_verified,
-            "outer Job contains only the helper"
-        );
+        assert!(!error.spawn_group_empty_verified);
         let mut active = spawn_owned(payload("slow", dir.path()), &StartupGate::default()).unwrap();
         wait_for_file(&dir.path().join("ready")).await;
         let missing = Command::new(dir.path().join("nonexistent-payload.exe"));
@@ -506,9 +542,11 @@ mod tests {
             "an active payload prevents the group-empty proof"
         );
         assert!(!startup_group_empty_verified().unwrap());
-        active.terminate_and_reap().await.unwrap();
+        let leader = held_leader(&active);
+        assert_group_unknown(active.terminate_and_reap().await);
+        assert_held_process_exited(&leader).await;
         drop(active);
-        assert!(startup_group_empty_verified().unwrap());
+        assert!(!startup_group_empty_verified().unwrap());
         for stage_to_fail in [
             StartupStage::AssignJob,
             StartupStage::OpenThread,
@@ -580,13 +618,9 @@ mod tests {
             });
             assert!(worker.await.is_err());
             assert_eq!(gate.may_have_resumed(), after_resume);
-            tokio::time::timeout(Duration::from_secs(15), async {
-                while !startup_group_empty_verified().unwrap() {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("outer Job did not become empty after the worker failed");
+            // The unwound worker no longer supplies a held process object.
+            // Outer Job accounting cannot repair that missing proof.
+            assert!(!startup_group_empty_verified().unwrap());
             if !after_resume {
                 assert!(!dir.path().join("ran").exists());
             }
@@ -603,6 +637,7 @@ mod tests {
             .env("OWNED_JOB_TEST_DIR", dir.path())
             .env("OWNED_JOB_KEEP", "kept");
         let mut owner = spawn_owned(command, &StartupGate::default()).unwrap();
+        let leader = held_leader(&owner);
         let mut stdout = owner.take_stdout().expect("separate stdout");
         let mut stderr = owner.take_stderr().expect("separate stderr");
         let mut out = Vec::new();
@@ -625,7 +660,8 @@ mod tests {
         assert!(!out.contains("owned-stderr-kept"));
         assert!(err.contains("owned-stderr-kept"));
         assert!(!err.contains("owned-stdout-kept"));
-        owner.terminate_and_reap().await.unwrap();
+        assert_group_unknown(owner.terminate_and_reap().await);
+        assert_held_process_exited(&leader).await;
     }
 
     async fn leader_exit_does_not_release_descendants() {
@@ -650,39 +686,14 @@ mod tests {
             Some(true)
         );
         let job = owner.job.as_ref().expect("payload job assigned");
-        let active_before = job.active_processes().unwrap();
+        assert!(job.active_processes().unwrap() > 0);
         assert!(
             job.contains_process(&descendant).unwrap(),
             "the held descendant must belong to this payload job before termination"
         );
-        owner.terminate_and_reap().await.unwrap();
-        if super::super::supervisor_native::process_handle_is_alive_for_test(&descendant)
-            == Some(true)
-        {
-            let job = owner.job.as_ref().unwrap();
-            let member_after = job.contains_process(&descendant);
-            let active_after = job.active_processes();
-            let start = std::time::Instant::now();
-            let settled = tokio::time::timeout(Duration::from_secs(5), async {
-                while super::super::supervisor_native::process_handle_is_alive_for_test(&descendant)
-                    == Some(true)
-                {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                super::super::supervisor_native::process_handle_is_alive_for_test(&descendant)
-            })
-            .await;
-            panic!(
-                "cleanup returned before descendant termination: active_before={active_before}, \
-                 member_after={member_after:?}, active_after={active_after:?}, \
-                 elapsed={:?}, eventual_state={settled:?}",
-                start.elapsed()
-            );
-        }
-        assert_eq!(
-            super::super::supervisor_native::process_handle_is_alive_for_test(&descendant),
-            Some(false)
-        );
+        assert_group_unknown(owner.terminate_and_reap().await);
+        assert_held_process_exited(&descendant).await;
+        assert_group_unknown(owner.terminate_and_reap().await);
     }
 
     async fn resumed_job_remains_unverified_even_after_accounting_zero() {
@@ -732,6 +743,7 @@ mod tests {
         let gate = StartupGate::default();
         let mut owner = spawn_owned(payload("slow", dir.path()), &gate).unwrap();
         wait_for_file(&dir.path().join("ready")).await;
+        let leader = held_leader(&owner);
         gate.cancel();
         assert!(gate.is_cancelled());
         // Pause precisely after the termination request, rather than relying
@@ -748,10 +760,12 @@ mod tests {
             }
         }
         drop(cleanup);
-        tokio::time::timeout(Duration::from_secs(15), owner.terminate_and_reap())
+        let cleanup = tokio::time::timeout(Duration::from_secs(15), owner.terminate_and_reap())
             .await
-            .unwrap()
             .unwrap();
+        assert_group_unknown(cleanup);
+        assert_held_process_exited(&leader).await;
+        assert_group_unknown(owner.terminate_and_reap().await);
     }
 
     async fn helper_crash_fixture() {
@@ -795,7 +809,7 @@ mod tests {
             let error =
                 spawn_owned(payload("marker", dir.path()), &StartupGate::default()).unwrap_err();
             assert!(!error.cancelled && error.owner.is_none() && !error.may_have_spawned_child);
-            assert!(error.spawn_group_empty_verified);
+            assert!(!error.spawn_group_empty_verified);
             return;
         }
         if case == "stdio" || case == "stdio_leak_control" {

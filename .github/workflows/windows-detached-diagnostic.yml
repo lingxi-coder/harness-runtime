@@ -61,6 +61,7 @@ jobs:
             'process::supervisor::integration_tests::real_supervisor_retains_output_and_job_until_explicit_stop',
             'process::supervisor::integration_tests::unaccepted_or_stopped_output_handoff_retains_job_and_reports_unknown',
             'process::owned_job::tests::job_unknown_and_suspended_start_are_proven_in_dedicated_helpers',
+            'process::owned_job::tests::owned_job_native_regressions_in_dedicated_helpers',
             'process::background::native_background_stop_tests::stopped_resumed_job_reports_unknown_without_cleanup_receipt',
             'process::background::native_background_stop_tests::strict_foreground_eof_does_not_manufacture_group_cleanup_proof'
           )
