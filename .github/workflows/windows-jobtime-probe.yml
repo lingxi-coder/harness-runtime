@@ -1,0 +1,32 @@
+name: Windows end-of-job-time diagnostic
+on:
+  push:
+    branches: [codex/media-windows-jobtime-probe-20261028]
+permissions:
+  contents: read
+jobs:
+  job-time-proof:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Compile isolated Win32 probe
+        shell: pwsh
+        run: rustc --edition=2021 -Dwarnings validation/windows-jobtime-probe/main.rs -o "$env:RUNNER_TEMP/jobtime-probe.exe"
+      - name: Compare Job signal with retained process handles
+        timeout-minutes: 4
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = Join-Path $env:RUNNER_TEMP 'jobtime-probe.log'
+          & "$env:RUNNER_TEMP/jobtime-probe.exe" 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'jobtime-probe all-rounds-passed=24')) { throw 'probe did not complete all rounds' }
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: jobtime-probe
+          path: ${{ runner.temp }}/jobtime-probe.log
+          if-no-files-found: ignore
