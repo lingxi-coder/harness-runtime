@@ -218,6 +218,11 @@ pub struct FakeListener {
 
 #[async_trait]
 impl ClientEventListener for FakeListener {
+    async fn on_mod_ui_client_frame(&self, event: ClientEvent) -> bool {
+        self.received.lock().await.push(event);
+        true
+    }
+
     async fn on_event(&self, event: ClientEvent) {
         let projection = match &event {
             ClientEvent::TurnEventReplay { event_json, .. }

@@ -109,6 +109,28 @@ pub(super) async fn execute_tool_hook(
     }
 }
 
+/// A cancelled guard can race queue admission. An error means the caller must
+/// treat the post as outcome-unknown, not retry it as if no callback ran.
+async fn publish_frame_if_current(
+    guard: &dyn HookPublicationGuard,
+    publication: impl std::future::Future<Output = Result<(), String>> + Send,
+) -> Result<(), hooks::mods::ModError> {
+    let mut admission = None;
+    let published = guard
+        .publish_if_current(Box::pin(async { admission = Some(publication.await) }))
+        .await;
+    if !published {
+        return Err(hooks::mods::ModError::Unavailable(
+            "Client frame publication cancelled before confirmation".into(),
+        ));
+    }
+    admission
+        .ok_or_else(|| hooks::mods::ModError::Unavailable(
+            "Client frame publication completed without an admission receipt".into(),
+        ))?
+        .map_err(hooks::mods::ModError::Unavailable)
+}
+
 async fn tool_dispatch_mod_host(
     orch: &ConversationOrchestrator,
 ) -> Option<std::sync::Arc<hooks::mods::ModHost>> {
@@ -2414,13 +2436,17 @@ impl hooks::mods::ModSessionContext for ConversationOrchestrator {
         self.output.emit_mod_status(plugin, text.as_ref()).await;
     }
 
-    async fn emit_mod_ui_client_frame(&self, runtime_id: &str, frame: &Utf16JsonProjection) {
-        let Ok(frame_json) = frame.to_json_string() else {
-            return;
-        };
+    async fn emit_mod_ui_client_frame(
+        &self,
+        runtime_id: &str,
+        frame: &Utf16JsonProjection,
+    ) -> Result<(), hooks::mods::ModError> {
+        let frame_json = frame.to_json_string()
+            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
         self.output
             .emit_mod_ui_client_frame(runtime_id, &frame_json)
-            .await;
+            .await
+            .map_err(hooks::mods::ModError::Unavailable)
     }
 
     async fn emit_mod_ui_invalidate(
@@ -3399,17 +3425,18 @@ impl hooks::mods::ModSessionContext for GenerationBoundModSessionContext {
         self.publication_guard.generation_cancellation_token()
     }
 
-    async fn emit_mod_ui_client_frame(&self, runtime_id: &str, frame: &Utf16JsonProjection) {
-        let Ok(frame_json) = frame.to_json_string() else {
-            return;
-        };
-        self.publication_guard
-            .publish_if_current(
-                self.inner
-                    .output
-                    .emit_mod_ui_client_frame(runtime_id, &frame_json),
-            )
-            .await;
+    async fn emit_mod_ui_client_frame(
+        &self,
+        runtime_id: &str,
+        frame: &Utf16JsonProjection,
+    ) -> Result<(), hooks::mods::ModError> {
+        let frame_json = frame.to_json_string()
+            .map_err(|error| hooks::mods::ModError::Protocol(error.to_string()))?;
+        publish_frame_if_current(
+            self.publication_guard.as_ref(),
+            self.inner.output.emit_mod_ui_client_frame(runtime_id, &frame_json),
+        )
+        .await
     }
 
     async fn emit_mod_ui_invalidate(
@@ -9546,5 +9573,82 @@ mod native_tool_check_metadata_tests {
             matches!(checked, PermissionResolution::Allow { .. }),
             "Mod must receive the captured rule from the preflight snapshot, not the replacement overlay"
         );
+    }
+}
+
+#[cfg(test)]
+mod client_frame_receipt_tests {
+    use super::*;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct TestGuard(lingxi_core::host::CancellationToken);
+
+    impl HookPublicationGuard for TestGuard {
+        fn is_current(&self) -> bool { !self.0.is_cancelled() }
+        fn generation_cancellation_token(&self) -> Option<lingxi_core::host::CancellationToken> {
+            Some(self.0.clone())
+        }
+        fn publish_if_current<'a>(
+            &'a self,
+            publication: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+        ) -> Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            Box::pin(async move {
+                tokio::select! {
+                    biased;
+                    _ = self.0.cancelled() => false,
+                    () = publication => true,
+                }
+            })
+        }
+        fn commit_if_current<'a>(
+            &'a self,
+            mutation: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>,
+        ) -> Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
+            self.publish_if_current(mutation)
+        }
+    }
+
+    #[tokio::test]
+    async fn guard_and_sink_outcomes_are_preserved() {
+        let token = lingxi_core::host::CancellationToken::new();
+        let guard = TestGuard(token.clone());
+        let attempts = AtomicUsize::new(0);
+        assert!(publish_frame_if_current(&guard, async {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }).await.is_ok());
+        assert!(publish_frame_if_current(&guard, async {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Err("closed".into())
+        }).await.unwrap_err().to_string().contains("closed"));
+        token.cancel();
+        assert!(publish_frame_if_current(&guard, async {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }).await.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2, "stale guard never polls the sink");
+    }
+
+    #[tokio::test]
+    async fn cancellation_during_publication_does_not_claim_unexecuted_side_effects() {
+        let token = lingxi_core::host::CancellationToken::new();
+        let guard = TestGuard(token.clone());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let queued = Arc::new(AtomicUsize::new(0));
+        let entered_by_sink = entered.clone();
+        let queued_by_sink = queued.clone();
+        let task = tokio::spawn(async move {
+            publish_frame_if_current(&guard, async move {
+                queued_by_sink.fetch_add(1, Ordering::SeqCst);
+                entered_by_sink.notify_one();
+                std::future::pending::<Result<(), String>>().await
+            }).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), entered.notified()).await.unwrap();
+        token.cancel();
+        assert!(task.await.unwrap().is_err());
+        assert_eq!(queued.load(Ordering::SeqCst), 1, "failure does not undo a previously performed side effect");
     }
 }

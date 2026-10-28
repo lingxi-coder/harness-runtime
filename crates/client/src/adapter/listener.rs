@@ -56,6 +56,10 @@ pub trait ClientEventListener: Send + Sync {
     /// commands may be issued independently.
     async fn on_event(&self, event: ClientEvent);
 
+    /// True only after the frame enters the native listener's local queue.
+    /// It says nothing about later projection or display.
+    async fn on_mod_ui_client_frame(&self, event: ClientEvent) -> bool;
+
     /// Deliver one structured workflow progress update directly to the host.
     ///
     /// This deliberately stays outside [`ClientEvent`]: that enum is already
@@ -106,6 +110,14 @@ impl ClientEventSink for ListenerSink {
     async fn emit(&self, event: ClientEvent) {
         self.listener.on_event(event).await;
     }
+
+    async fn admit_mod_ui_client_frame(&self, event: ClientEvent) -> Result<(), String> {
+        if self.listener.on_mod_ui_client_frame(event).await {
+            Ok(())
+        } else {
+            Err("mobile listener did not admit Client frame".into())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -141,6 +153,28 @@ mod tests {
         async fn on_event(&self, event: ClientEvent) {
             self.received.lock().await.push(event);
         }
+        async fn on_mod_ui_client_frame(&self, event: ClientEvent) -> bool {
+            self.received.lock().await.push(event);
+            true
+        }
+    }
+
+    #[tokio::test]
+    async fn listener_sink_propagates_native_frame_admission() {
+        struct RefusingListener;
+        #[async_trait]
+        impl ClientEventListener for RefusingListener {
+            async fn on_event(&self, _: ClientEvent) { panic!("ordinary callback is not an admission receipt"); }
+            async fn on_mod_ui_client_frame(&self, _: ClientEvent) -> bool { false }
+            async fn on_workflow_progress(&self, _: String, _: String, _: String, _: WorkflowProgressDto) {}
+        }
+        let event = ClientEvent::UiClientFrame { runtime_id: "r".into(), frame_json: "{}".into() };
+        let listener = Arc::new(FakeListener::default());
+        let accepting = ListenerSink::new(listener.clone());
+        accepting.admit_mod_ui_client_frame(event.clone()).await.unwrap();
+        assert_eq!(*listener.received.lock().await, vec![event.clone()]);
+        let refusing = ListenerSink::new(Arc::new(RefusingListener));
+        assert!(refusing.admit_mod_ui_client_frame(event).await.is_err());
     }
 
     /// F3-02 walking proof: a translated [`ClientEvent`] pushed onto the

@@ -102,6 +102,10 @@ pub(super) struct CapturingListener {
 
 #[async_trait]
 impl ClientEventListener for CapturingListener {
+    async fn on_mod_ui_client_frame(&self, _event: ClientEvent) -> bool {
+        false
+    }
+
     async fn on_workflow_progress(
         &self,
         _: String,

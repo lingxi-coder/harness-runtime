@@ -823,13 +823,17 @@ impl OutputStream for AdapterOutputStream {
             .await;
     }
 
-    async fn emit_mod_ui_client_frame(&self, runtime_id: &str, frame_json: &str) {
+    async fn emit_mod_ui_client_frame(
+        &self,
+        runtime_id: &str,
+        frame_json: &str,
+    ) -> Result<(), String> {
         self.sink
-            .emit(ClientEvent::UiClientFrame {
+            .admit_mod_ui_client_frame(ClientEvent::UiClientFrame {
                 runtime_id: runtime_id.to_string(),
                 frame_json: frame_json.to_string(),
             })
-            .await;
+            .await
     }
 
     async fn emit_mod_ui_invalidate(
@@ -1879,6 +1883,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_sink_cannot_claim_client_frame_admission() {
+        struct DiscardingSink;
+        #[async_trait::async_trait]
+        impl crate::adapter::sink::ClientEventSink for DiscardingSink {
+            async fn emit(&self, _event: ClientEvent) {}
+        }
+        let stream = AdapterOutputStream::new(std::sync::Arc::new(DiscardingSink));
+        let error = stream.emit_mod_ui_client_frame("runtime", "{}").await.unwrap_err();
+        assert!(error.contains("cannot confirm queue admission"));
+    }
+
+    #[tokio::test]
     async fn emit_mod_ui_client_frame_forwards_runtime_and_frame_json() {
         let sink = MockSink::arc();
         let stream = AdapterOutputStream::new(sink.clone());
@@ -1888,7 +1904,8 @@ mod tests {
                 "runtime-1",
                 r#"{"type":"ui.render","tree":{"type":"text"}}"#,
             )
-            .await;
+            .await
+            .expect("the mock sink admitted the frame");
 
         assert_eq!(
             sink.events().await,

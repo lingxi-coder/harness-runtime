@@ -4301,8 +4301,15 @@ pub trait OutputStream: Send + Sync {
     /// Set or clear this plugin's pinned status below the prompt.
     async fn emit_mod_status(&self, _plugin: &str, _text: Option<&Utf16JsonProjection>) {}
 
-    /// Deliver a current Client VM frame to the attached session renderer.
-    async fn emit_mod_ui_client_frame(&self, _runtime_id: &str, _frame_json: &str) {}
+    /// Admit a Client VM frame to a local transport queue. This is not a
+    /// receipt from the remote client or evidence that the frame was displayed.
+    async fn emit_mod_ui_client_frame(
+        &self,
+        _runtime_id: &str,
+        _frame_json: &str,
+    ) -> Result<(), String> {
+        Err("Client frame sink cannot confirm queue admission".into())
+    }
 
     /// Native `ui.render` invalidation, scoped to supplied parent instances.
     async fn emit_mod_ui_invalidate(

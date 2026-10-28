@@ -1,0 +1,81 @@
+name: Mod frame receipt diagnostic
+on:
+  push:
+    branches: [codex/media-mod-frame-receipt-20261028-a]
+env:
+  CARGO_BUILD_JOBS: "2"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  RUST_MIN_STACK: "16777216"
+jobs:
+  worker:
+    name: Real Worker and weak session
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.3'
+      - name: Run held Worker and sink admission tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          export LINGXI_MOD_BUN_EXECUTABLE="$(command -v bun)"
+          cargo test --locked -p hooks --lib real_worker_callback_with_ -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/worker-receipt.log"
+          grep -F 'real_worker_callback_with_default_sink_has_unknown_outcome ... ok' "$RUNNER_TEMP/worker-receipt.log"
+          grep -F 'real_worker_callback_with_accepting_sink_returns_updated_frame ... ok' "$RUNNER_TEMP/worker-receipt.log"
+          cargo test --locked -p hooks --lib weak_session_frame_admission_reports_dead_owner_and_sink_result -- --nocapture | tee "$RUNNER_TEMP/weak-receipt.log"
+          grep -F 'weak_session_frame_admission_reports_dead_owner_and_sink_result ... ok' "$RUNNER_TEMP/weak-receipt.log"
+      - name: Run runHeld v3 host lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LINGXI_MOD_BUN_EXECUTABLE="$(command -v bun)"
+          cargo test --locked -p hooks --lib prepared_tsx_client_runs_the_host_render_mount_draw_post_and_unload_lifecycle -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/lifecycle.log"
+          grep -F 'prepared_tsx_client_runs_the_host_render_mount_draw_post_and_unload_lifecycle ... ok' "$RUNNER_TEMP/lifecycle.log"
+  adapter:
+    name: Client sink and generation guard
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Check client adapter and UniFFI together
+        run: cargo check --locked -p client --features adapter,uniffi
+      - name: Test admission on default and mobile listener sinks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p client --features adapter,uniffi --lib default_sink_cannot_claim_client_frame_admission -- --nocapture | tee "$RUNNER_TEMP/default-sink.log"
+          grep -F 'default_sink_cannot_claim_client_frame_admission ... ok' "$RUNNER_TEMP/default-sink.log"
+          cargo test --locked -p client --features adapter,uniffi --lib listener_sink_propagates_native_frame_admission -- --nocapture | tee "$RUNNER_TEMP/listener.log"
+          grep -F 'listener_sink_propagates_native_frame_admission ... ok' "$RUNNER_TEMP/listener.log"
+          cargo test --locked -p client --features adapter,uniffi --lib emit_mod_ui_client_frame_forwards_runtime_and_frame_json -- --nocapture | tee "$RUNNER_TEMP/forward.log"
+          grep -F 'emit_mod_ui_client_frame_forwards_runtime_and_frame_json ... ok' "$RUNNER_TEMP/forward.log"
+      - name: Test generation guard admission and cancellation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p orchestrator --lib client_frame_receipt_tests -- --nocapture | tee "$RUNNER_TEMP/guard.log"
+          grep -F 'guard_and_sink_outcomes_are_preserved ... ok' "$RUNNER_TEMP/guard.log"
+          grep -F 'cancellation_during_publication_does_not_claim_unexecuted_side_effects ... ok' "$RUNNER_TEMP/guard.log"
+  mobile:
+    name: Mobile runtime and listener compilation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Compile mobile runtime, UniFFI, and test listeners
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked -p harness-runtime --no-default-features --features mobile,uniffi --lib
+          cargo check --locked -p harness-runtime --no-default-features --features mobile,uniffi --tests

@@ -38,4 +38,11 @@ pub trait ClientEventSink: Send + Sync {
     /// e.g. enqueue onto an mpsc channel or invoke a foreign callback — so the
     /// streaming loop is never stalled on transport back-pressure.
     async fn emit(&self, event: ClientEvent);
+
+    /// Admit a Mod Client frame to the local transport queue. Success does not
+    /// establish delivery to, or display by, the remote client. Implementations
+    /// without an admission receipt must fail instead of calling `emit`.
+    async fn admit_mod_ui_client_frame(&self, _event: ClientEvent) -> Result<(), String> {
+        Err("Client frame sink cannot confirm queue admission".into())
+    }
 }

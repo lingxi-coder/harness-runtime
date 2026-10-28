@@ -9984,6 +9984,10 @@ struct ReentrantQuestionListener {
 
 #[async_trait]
 impl ClientEventListener for ReentrantQuestionListener {
+    async fn on_mod_ui_client_frame(&self, _event: ClientEvent) -> bool {
+        false
+    }
+
     async fn on_event(&self, event: ClientEvent) {
         let run = matches!(projected_turn_event(&event), ClientEvent::TextDelta { .. })
             && !self.invoked.swap(true, Ordering::AcqRel);
@@ -10113,6 +10117,10 @@ fn background_question_does_not_change_main_turn_and_can_be_answered_reentrantly
 
 #[async_trait]
 impl ClientEventListener for ReentrantPermissionListener {
+    async fn on_mod_ui_client_frame(&self, _event: ClientEvent) -> bool {
+        false
+    }
+
     async fn on_event(&self, event: ClientEvent) {
         let run = matches!(projected_turn_event(&event), ClientEvent::TextDelta { .. })
             && !self.invoked.swap(true, Ordering::AcqRel);
@@ -10281,6 +10289,10 @@ fn listener_can_resolve_permission_reentrantly_and_reconnect_without_replaying_r
 
 #[async_trait]
 impl ClientEventListener for BlockingSequenceListener {
+    async fn on_mod_ui_client_frame(&self, _event: ClientEvent) -> bool {
+        false
+    }
+
     async fn on_event(&self, event: ClientEvent) {
         let first = matches!(&projected_turn_event(&event), ClientEvent::TextDelta { text } if text.display() == "first");
         self.events.lock().await.push(event);
@@ -10847,6 +10859,10 @@ impl BlockingLifecycleListener {
 
 #[async_trait]
 impl ClientEventListener for BlockingLifecycleListener {
+    async fn on_mod_ui_client_frame(&self, _event: ClientEvent) -> bool {
+        false
+    }
+
     async fn on_event(&self, event: ClientEvent) {
         let target = if self.terminal {
             matches!(projected_turn_event(&event), ClientEvent::TurnEnded { .. })

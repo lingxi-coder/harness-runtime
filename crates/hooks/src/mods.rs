@@ -1474,8 +1474,15 @@ pub trait ModSessionContext: Send + Sync {
             ))),
         }
     }
-    /// Forward a host-local Client VM frame to the owner of this session.
-    async fn emit_mod_ui_client_frame(&self, _runtime_id: &str, _frame: &Utf16JsonProjection) {}
+    /// Admit a Client VM frame to the session transport's local queue.
+    /// Success does not mean that a remote client received or displayed it.
+    async fn emit_mod_ui_client_frame(
+        &self,
+        _runtime_id: &str,
+        _frame: &Utf16JsonProjection,
+    ) -> Result<(), ModError> {
+        Err(ModError::Unavailable("Client frame sink cannot confirm queue admission".into()))
+    }
     /// Invalidate only the supplied UI render sites in this session.
     async fn emit_mod_ui_invalidate(
         &self,
@@ -2018,10 +2025,12 @@ impl ModSessionContext for WeakModSessionContext {
         session.remote_ui_operation(event, input, plugin).await
     }
 
-    async fn emit_mod_ui_client_frame(&self, runtime_id: &str, frame: &Utf16JsonProjection) {
-        if let Ok(session) = self.upgrade() {
-            session.emit_mod_ui_client_frame(runtime_id, frame).await;
-        }
+    async fn emit_mod_ui_client_frame(
+        &self,
+        runtime_id: &str,
+        frame: &Utf16JsonProjection,
+    ) -> Result<(), ModError> {
+        self.upgrade()?.emit_mod_ui_client_frame(runtime_id, frame).await
     }
 
     async fn emit_mod_ui_invalidate(
@@ -10936,6 +10945,44 @@ impl ModHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn weak_session_frame_admission_reports_dead_owner_and_sink_result() {
+        struct FrameSession {
+            accepted: std::sync::atomic::AtomicBool,
+            events: std::sync::Mutex<Vec<String>>,
+        }
+        #[async_trait::async_trait]
+        impl ModSessionContext for FrameSession {
+            fn cwd(&self) -> PathBuf { PathBuf::new() }
+            fn root(&self) -> PathBuf { PathBuf::new() }
+            async fn model(&self) -> String { String::new() }
+            async fn id(&self) -> String { String::new() }
+            async fn turns(&self) -> u64 { 0 }
+            async fn emit_mod_ui_client_frame(&self, runtime: &str, _: &Utf16JsonProjection) -> Result<(), ModError> {
+                if !self.accepted.load(Ordering::SeqCst) {
+                    return Err(ModError::Unavailable("sink closed".into()));
+                }
+                self.events.lock().unwrap().push(runtime.into());
+                Ok(())
+            }
+        }
+        let owner = Arc::new(FrameSession {
+            accepted: std::sync::atomic::AtomicBool::new(true),
+            events: std::sync::Mutex::new(Vec::new()),
+        });
+        let erased: Arc<dyn ModSessionContext> = owner.clone();
+        let detached = WeakModSessionContext(WeakModSessionSource::Weak(Arc::downgrade(&erased)));
+        let frame = Utf16JsonProjection::parse("{}").unwrap();
+        detached.emit_mod_ui_client_frame("live", &frame).await.unwrap();
+        assert_eq!(*owner.events.lock().unwrap(), vec!["live"]);
+        owner.accepted.store(false, Ordering::SeqCst);
+        assert!(detached.emit_mod_ui_client_frame("closed", &frame).await.unwrap_err().to_string().contains("sink closed"));
+        assert_eq!(*owner.events.lock().unwrap(), vec!["live"]);
+        drop(erased);
+        drop(owner);
+        assert!(detached.emit_mod_ui_client_frame("dead", &frame).await.unwrap_err().to_string().contains("session ended"));
+    }
 
     #[tokio::test]
     async fn weak_session_factory_retains_owner_only_for_active_work() {

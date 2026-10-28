@@ -17,6 +17,10 @@ struct CancelBarrierListener {
 
 #[async_trait]
 impl ClientEventListener for CancelBarrierListener {
+    async fn on_mod_ui_client_frame(&self, _event: ClientEvent) -> bool {
+        false
+    }
+
     async fn on_event(&self, event: ClientEvent) {
         if matches!(event, ClientEvent::TurnRecoveryState { snapshot } if snapshot.state == TurnRecoveryStateDto::Cancelled)
         {
@@ -113,6 +117,10 @@ impl orchestrator::StreamingApiClient for GatedTwoTurnStream {
 
 #[async_trait]
 impl ClientEventListener for PanicStartedListener {
+    async fn on_mod_ui_client_frame(&self, _event: ClientEvent) -> bool {
+        false
+    }
+
     async fn on_event(&self, event: ClientEvent) {
         if matches!(
             projected_turn_event(&event),
@@ -156,6 +164,10 @@ async fn arm_background_probe(handle: &MobileEngineHandle) -> Arc<CountBackgroun
 
 #[async_trait]
 impl ClientEventListener for AttachBarrierListener {
+    async fn on_mod_ui_client_frame(&self, _event: ClientEvent) -> bool {
+        false
+    }
+
     async fn on_event(&self, event: ClientEvent) {
         let hold = matches!(&event, ClientEvent::TurnAttachStarted { request_id, .. } if request_id == "request-one");
         self.events.lock().await.push(event);

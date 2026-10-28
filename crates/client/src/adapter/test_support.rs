@@ -62,4 +62,9 @@ impl ClientEventSink for MockSink {
     async fn emit(&self, event: ClientEvent) {
         self.events.lock().await.push(event);
     }
+
+    async fn admit_mod_ui_client_frame(&self, event: ClientEvent) -> Result<(), String> {
+        self.events.lock().await.push(event);
+        Ok(())
+    }
 }

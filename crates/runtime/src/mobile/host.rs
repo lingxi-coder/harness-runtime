@@ -4038,6 +4038,12 @@ impl TurnLifecycleListener {
 
 #[async_trait]
 impl ClientEventListener for TurnLifecycleListener {
+    async fn on_mod_ui_client_frame(&self, event: ClientEvent) -> bool {
+        // UiClientFrame is connection-scoped: on_event neither journals nor
+        // filters this variant. Forward the actual native queue admission.
+        self.inner.on_mod_ui_client_frame(event).await
+    }
+
     async fn on_event(&self, mut event: ClientEvent) {
         // Acquire the shared turn gate before reserving a journal sequence.
         // Waiting never holds the owner lock or an external callback.
