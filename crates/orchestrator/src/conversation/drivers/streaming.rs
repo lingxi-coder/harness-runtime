@@ -3594,6 +3594,7 @@ impl StreamingTurnDriver<'_> {
                 loop_state,
                 in_human_turn,
                 &mut step_cache,
+                ack_failure,
             );
             let outcome = crate::query_model::ROUTE
                 .scope(
@@ -3701,6 +3702,7 @@ impl StreamingTurnDriver<'_> {
         loop_state: &'a mut TurnLoopState,
         in_human_turn: bool,
         step_cache: &'a mut Option<prepare::PreparedTurnStep>,
+        ack_failure: &'a mut bool,
     ) -> BoxFuture<'a, Result<Option<StepExit>, OrchestratorError>> {
         Box::pin(async move {
             if crate::native_computer::uses_buffered_protocol(orch).await {
@@ -3714,6 +3716,7 @@ impl StreamingTurnDriver<'_> {
                     loop_state,
                     in_human_turn,
                     step_cache,
+                    ack_failure,
                 )
                 .await
             }
@@ -3781,6 +3784,7 @@ impl StreamingTurnDriver<'_> {
         loop_state: &'a mut TurnLoopState,
         in_human_turn: bool,
         step_cache: &'a mut Option<prepare::PreparedTurnStep>,
+        ack_failure: &'a mut bool,
     ) -> BoxFuture<'a, Result<Option<StepExit>, OrchestratorError>> {
         Box::pin(async move {
             let mut continuation: Option<OpenedStreamingIteration<'_>> = None;
