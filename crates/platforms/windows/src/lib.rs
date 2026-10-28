@@ -27,6 +27,8 @@ pub mod secure_storage;
 #[cfg(windows)]
 pub mod stdio_cancel;
 pub mod swarm;
+#[cfg(windows)]
+pub mod system_paths;
 pub(crate) mod watch_helper;
 pub mod worktree;
 
