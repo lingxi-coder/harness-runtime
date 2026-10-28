@@ -7732,7 +7732,10 @@ mod tests {
                 .await
                 .expect("runtime cancellation releases runHeld promptly")
                 .unwrap();
-        assert!(cancellation_result.is_err());
+        let cancellation_result = test_value(&cancellation_result.unwrap());
+        assert_eq!(cancellation_result["outcome"], json!({"status":"unknown","runtime":"unavailable"}));
+        assert_eq!(cancellation_result["runtimeId"], runtime_id);
+        assert_eq!(cancellation_result["renderRevision"], revision);
 
         let after_cancel_render = host
             .dispatch_client_ui_operation(
