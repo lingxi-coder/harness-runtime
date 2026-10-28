@@ -2681,6 +2681,7 @@ impl orchestrator::prompt::mid_turn_input::MidTurnInputSource for WriteGatedReal
 #[test]
 fn real_write_and_mobile_ack_failure_reopen_rewind_with_and_without_stop() {
     use client::protocol::events::QueuedTurnStatusDto;
+    use orchestrator::ConversationOrchestrator;
     use orchestrator::test_support::{
         MockApiClient, MockOutputStream, NoOpPermissionGate, StaticMemoryProvider,
     };
