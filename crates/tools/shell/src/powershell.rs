@@ -619,6 +619,7 @@ mod tests {
 
     use mobile_linux_api::ProcessOutput;
     use std::ffi::OsString;
+    #[cfg(unix)]
     use std::sync::Mutex;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx};
 
@@ -674,10 +675,12 @@ mod tests {
     }
 
     /// The OTEL runtime and its counter registry are process-global.
+    #[cfg(unix)]
     static OTEL_LOCK: Mutex<()> = Mutex::new(());
 
     /// Drive one PowerShell completion through the real `call()` and return the
     /// rendered Prometheus registry.
+    #[cfg(unix)]
     async fn powershell_completion_metrics(command: &str, out: ProcessOutput) -> String {
         use std::os::unix::fs::PermissionsExt;
         let tool = PowerShellTool::new(shell_test_ctx(out));
@@ -703,6 +706,7 @@ mod tests {
     /// PowerShell arm is the one that carries a skip guard:
     ///   g = m.code===0 && !m.stdout && m.stderr && !m.backgroundTaskId
     ///   if (!g && mEo(e.command, m.code, _).prResolved && …)
+    #[cfg(unix)]
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn powershell_completion_records_git_counters_with_the_oracle_skip_guard() {
