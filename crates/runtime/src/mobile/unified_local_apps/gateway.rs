@@ -435,6 +435,7 @@ fn is_page_method_allowed(method: &str) -> bool {
             | "agent.tasks.cancel"
             | "agent.tasks.events"
             | "agent.chats.create"
+            | "agent.chats.creationStatus"
             | "agent.chats.get"
             | "agent.chats.list"
             | "agent.chats.archive"
@@ -452,6 +453,7 @@ fn is_small_control_method(method: &str) -> bool {
             | "agent.tasks.list"
             | "agent.tasks.cancel"
             | "agent.tasks.events"
+            | "agent.chats.creationStatus"
             | "agent.chats.get"
             | "agent.chats.list"
             | "agent.chats.cancel"
@@ -1720,7 +1722,9 @@ mod tests {
                 format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n").into_bytes(),
             )
             .await;
-            assert!(String::from_utf8_lossy(&response).starts_with(&format!("HTTP/1.1 {expected}")));
+            assert!(
+                String::from_utf8_lossy(&response).starts_with(&format!("HTTP/1.1 {expected}"))
+            );
         }
         cancel.cancel();
         task.await.unwrap().unwrap();
@@ -2477,6 +2481,14 @@ mod agent_json_tests {
     use super::*;
     use base64::Engine as _;
 
+    #[test]
+    fn chat_creation_status_is_a_small_control_method() {
+        assert!(is_page_method_allowed("agent.chats.creationStatus"));
+        assert!(is_small_control_method("agent.chats.creationStatus"));
+        assert!(!is_small_control_method("agent.chats.create"));
+        assert!(!is_page_method_allowed("agent.chats.creationStatusOther"));
+    }
+
     #[tokio::test]
     async fn request_body_spools_in_chunks_and_drops_tempfiles_on_timeout_or_eof() {
         let scratch = tempfile::tempdir().unwrap();
@@ -2508,12 +2520,14 @@ mod agent_json_tests {
         assert_eq!(std::fs::read_dir(spool_dir).unwrap().count(), 0);
 
         let (mut hanging, _sink) = tokio::io::duplex(1);
-        assert!(tokio::time::timeout(
-            Duration::from_millis(5),
-            spool_fixed_body(&mut hanging, b"prefix:", 1024, spool_dir)
-        )
-        .await
-        .is_err());
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(5),
+                spool_fixed_body(&mut hanging, b"prefix:", 1024, spool_dir)
+            )
+            .await
+            .is_err()
+        );
         assert_eq!(std::fs::read_dir(spool_dir).unwrap().count(), 0);
 
         let (mut truncated, mut sink) = tokio::io::duplex(1);
@@ -2631,8 +2645,7 @@ mod agent_json_tests {
         let args = serde_json::from_str::<serde_json::Value>(request.args.get()).unwrap();
         assert_eq!(args["input"], expected_input);
         assert_eq!(
-            args["input"]["messages"][0]["content"][1]["metadata"]["com.lingxi.localApp"]
-                ["filename"],
+            args["input"]["messages"][0]["content"][1]["metadata"]["com.lingxi.localApp"]["filename"],
             "sample.bin"
         );
     }

@@ -45,6 +45,41 @@ export interface LocalAppTaskPage {
   nextCursor?: string;
 }
 
+export interface LocalAppChatCreationOptions {
+  /** A caller-generated, lowercase canonical UUIDv4, persisted before submission. */
+  requestId: string;
+  title?: string;
+}
+
+export interface LocalAppPendingChatCreation extends LocalAppChatCreationOptions {
+  state: 'pending' | 'accepted' | 'deleted' | 'rejected';
+}
+
+interface LocalAppCommonChats {
+  open(chatId: string): Promise<LocalAppChatHandle>;
+  list(options?: {cursor?: string; limit?: number; includeArchived?: boolean}): Promise<{
+    chats: LocalAppChatSummary[];
+    /** Continues the combined ordering of available and unavailable Chats. */
+    nextCursor?: string;
+    /** Unavailable Chat IDs in this page, when the host reports them. */
+    unavailableChats?: Array<{chatId: string; code: 'chat_storage_uncertain'}>;
+    /** True if any Chat is unavailable across the App; absent means not reported. */
+    hasUncertainChats?: boolean;
+  }>;
+  archive(chatId: string): Promise<void>;
+  delete(chatId: string): Promise<void>;
+}
+
+/** LingXi host extension, separate from the AG-UI run protocol. */
+export interface LocalAppChats extends LocalAppCommonChats {
+  create(options: LocalAppChatCreationOptions): Promise<LocalAppChatHandle>;
+  /** Null means not currently observed; an earlier request may still arrive. */
+  creationStatus(options: LocalAppChatCreationOptions): Promise<LocalAppChatHandle | null>;
+  pendingCreations(): Promise<LocalAppPendingChatCreation[]>;
+  /** Removes a resolved browser receipt, not the host Chat. */
+  forgetCreation(requestId: string): Promise<void>;
+}
+
 export interface LocalAppBrowserAgentResource {
   run(input: RunAgentInput): Promise<RunAgentResult>;
   createClient(options?: AgentConfig): LocalAppAgent;
@@ -57,13 +92,7 @@ export interface LocalAppBrowserAgentResource {
     list(options?: {cursor?: string; limit?: number}): Promise<LocalAppTaskPage>;
     cancel(runId: string): Promise<void>;
   };
-  readonly chats: {
-    create(options?: {title?: string}): Promise<LocalAppChatHandle>;
-    open(chatId: string): Promise<LocalAppChatHandle>;
-    list(options?: {cursor?: string; limit?: number; includeArchived?: boolean}): Promise<{chats: LocalAppChatSummary[]; nextCursor?: string}>;
-    archive(chatId: string): Promise<void>;
-    delete(chatId: string): Promise<void>;
-  };
+  readonly chats: LocalAppChats;
 }
 
 export interface BrowserAgentHostTransport {
@@ -75,12 +104,12 @@ export interface BrowserAgentHostTransport {
 
 export interface BrowserAgentResources {
   tasks: LocalAppBrowserAgentResource['tasks'];
-  chats: LocalAppBrowserAgentResource['chats'];
+  chats: LocalAppChats;
 }
 
 export declare function installBrowserAgent(options: {
   transport: BrowserAgentHostTransport;
   tasks: BrowserAgentResources['tasks'];
-  chats: BrowserAgentResources['chats'];
+  chats: LocalAppChats;
   isPersistentThread?: (threadId: string) => boolean;
 }): LocalAppBrowserAgentResource;

@@ -66,10 +66,10 @@
     "dist/licenses/third-party/uuid-11.1.1-LICENSE.md": "beaa6b04fb82e41dd2ad679e19e27953afb5999b1abbb455b6564e78ebfeb332",
     "dist/licenses/third-party/zod-3.25.76-LICENSE": "3f1189b28e3866e0d979968d466b78f813f76827cfdca1fbb124cc0a5c8841f8",
     "dist/types/browser-source.d.ts": "2b22b78027c8a53718dabd9a16c5e5b979752158532bb69a977d5379a91dc9b1",
-    "dist/types/browser.d.ts": "d68f8ddd482b84c53ba6e576f4ebdd30d6276df808cbc38ab6e76b2e16d0cc7c",
+    "dist/types/browser.d.ts": "f7c43a94c7e247aa06f4ec2fa466b91f8cd421009f0444fd2f43562d150f7bd2",
     "dist/types/client.d.ts": "4da4a88eb66b18bc64e39e4f6afc11829ce0834bcd5aadfc0d77b079ee013a9f",
     "dist/types/file.d.ts": "305f43d728d03f5e2c03d5715fbbec02c9c004e9a638aa8d4f7df7a55e824407",
-    "dist/types/index.d.ts": "157230411f80a2b68ce9937de0d8861db867989e3cf436773580837d3a65041b",
+    "dist/types/index.d.ts": "7bcd4ad1407086bb9be47cacd2ac909466cf78395c7db2745747b0451c52f4b9",
     "dist/types/validators.d.ts": "1374b828746dc6edbbf571c86b21760f2c124cda55237f0d9e188d9f6e901763"
   }
 }

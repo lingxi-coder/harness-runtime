@@ -21,10 +21,24 @@ pub enum AppError {
     ConsentRequired(String),
     #[error("data schema {current} is not compatible with release schema {target}")]
     DataIncompatible { current: u32, target: u32 },
-    #[error("data schema change {current} → {target} requires a verified backup and migration transaction; existing data and current release are retained")]
+    #[error(
+        "data schema change {current} → {target} requires a verified backup and migration transaction; existing data and current release are retained"
+    )]
     DataMigrationRequired { current: u32, target: u32 },
     #[error("app is busy: {0}")]
     Busy(String),
+    /// The Chat creation ID was already used for different input.
+    #[error("Chat creation request is already bound to different input")]
+    ChatCreateConflict,
+    /// The Chat creation ID was previously deleted and cannot be reused.
+    #[error("Chat creation request refers to a deleted Chat")]
+    ChatCreateDeleted,
+    /// A stored index predates, or is missing, the creation identity map.
+    #[error("Chat creation index is missing; the data may use an older format or be incomplete")]
+    ChatLegacyIndexUnsupported,
+    /// A Chat index write may have committed and requires reopening to verify.
+    #[error("Chat storage outcome is uncertain; reopen the store before continuing")]
+    ChatStorageUncertain,
     #[error("local app storage: {0}")]
     Io(#[from] std::io::Error),
     #[error("local app JSON: {0}")]
@@ -40,6 +54,10 @@ impl AppError {
             Self::DataIncompatible { .. } => "dataIncompatible",
             Self::DataMigrationRequired { .. } => "dataMigrationRequired",
             Self::Busy(_) => "busy",
+            Self::ChatCreateConflict => "chatCreateConflict",
+            Self::ChatCreateDeleted => "chatCreateDeleted",
+            Self::ChatLegacyIndexUnsupported => "chatLegacyIndexUnsupported",
+            Self::ChatStorageUncertain => "chatStorageUncertain",
             Self::Io(_) => "storageFailure",
         }
     }

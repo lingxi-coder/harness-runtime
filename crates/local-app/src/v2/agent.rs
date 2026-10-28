@@ -13,7 +13,10 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex, MutexGuard,
+    },
 };
 
 const MAX_ATTACHMENTS: usize = 8;
@@ -25,6 +28,7 @@ const MAX_NATIVE_OUTPUT_BYTES: u64 = 9_007_199_254_740_991;
 const MAX_PROTOCOL_EVENT_PAGE: usize = 128;
 const PROTOCOL_EVENT_STORAGE_FAILED: &str = "protocol_event_storage_failed";
 const PROTOCOL_TERMINAL_CONFLICT: &str = "protocol_terminal_conflict";
+const IOS_BACKGROUND_EXPIRED: &str = "ios_background_expired";
 
 #[derive(Debug)]
 enum EventLogReadError {
@@ -346,6 +350,14 @@ struct Grant {
     settings: Settings,
     epoch: u64,
 }
+
+/// Trusted native stop intent; never accepted from the browser protocol.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum StopIntent {
+    IosBackgroundExpired,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Record {
@@ -353,6 +365,8 @@ struct Record {
     input_digest: String,
     epoch: u64,
     cancel_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stop_intent: Option<StopIntent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -441,6 +455,13 @@ pub struct AgentStore {
     // grant/admission changes. Never hold this lock across an async await.
     protocol_commit: Mutex<()>,
     ledger: Mutex<Ledger>,
+    // An expiration-intent write can fail after rename. Until reopening the
+    // store, its old in-memory ledger must not overwrite that uncertain disk.
+    storage_uncertain: AtomicBool,
+    #[cfg(test)]
+    fail_next_persist_after_rename: AtomicBool,
+    #[cfg(test)]
+    persist_failure_barrier: Mutex<Option<std::sync::Arc<std::sync::Barrier>>>,
 }
 /// Result of an atomic native grant update. An explicit revoke is always a
 /// change, including when no grant is currently stored for the release.
@@ -761,11 +782,20 @@ pub fn error_message(code: &str) -> &'static str {
         "cancelled" | "authorization_revoked" => {
             "The Agent task was cancelled or its authorization was revoked."
         }
+        IOS_BACKGROUND_EXPIRED => {
+            "iOS ended the background execution time for this Agent task. Check the task and any external effects before retrying."
+        }
         "mcp_definition_changed" => {
             "The MCP configuration or tool definition changed. Review and authorize the current tool again."
         }
         "tool_cleanup_incomplete" => {
             "A tool has not finished stopping. The host is retaining the task's resources until cleanup completes."
+        }
+        "chat_deferred_tools_pending" => {
+            "This Chat contains an unfinished tool operation. Review its effects before continuing; it will not be replayed automatically. Earlier Chat history remains available."
+        }
+        "chat_transcript_unavailable" => {
+            "The Chat history could not be verified. Check the host status and saved data before continuing. The task will not be replayed automatically."
         }
         "agent_storage_unavailable" | "task_storage_failed" => {
             "Agent task storage is unavailable. Existing task data has been preserved."
@@ -849,12 +879,18 @@ impl AgentStore {
             if !record.task.state.terminal() {
                 record.task.state = State::Interrupted;
                 record.task.phase = None;
-                record.task.error = Some(TaskError {
-                    code: "host_restarted".into(),
-                    message:
-                        "The host restarted. This task was interrupted and will not be replayed."
-                            .into(),
-                });
+                record.task.error = if record.stop_intent == Some(StopIntent::IosBackgroundExpired)
+                {
+                    Some(TaskError {
+                        code: IOS_BACKGROUND_EXPIRED.into(),
+                        message: error_message(IOS_BACKGROUND_EXPIRED).into(),
+                    })
+                } else {
+                    Some(TaskError {
+                        code: "host_restarted".into(),
+                        message: "The host restarted. This task was interrupted and will not be replayed.".into(),
+                    })
+                };
                 record.task.sequence += 1;
                 record.task.updated_at = now();
             } else if events.as_ref().is_some_and(|events| {
@@ -901,6 +937,11 @@ impl AgentStore {
             events_root,
             protocol_commit: Mutex::new(()),
             ledger: Mutex::new(ledger),
+            storage_uncertain: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_next_persist_after_rename: AtomicBool::new(false),
+            #[cfg(test)]
+            persist_failure_barrier: Mutex::new(None),
         };
         for (owner, task_id, run_id, thread_id, state, task_error) in pending_terminal_events {
             let terminal = match state {
@@ -918,7 +959,7 @@ impl AgentStore {
                 State::Succeeded | State::Interrupted | State::Queued | State::Running => {
                     json!({
                         "type":"RUN_ERROR",
-                        "message":"The host restarted before the Agent run completed.",
+                        "message":task_error.as_ref().map_or("The host restarted before the Agent run completed.", |error| error.message.as_str()),
                         "code":task_error.as_ref().map_or("host_restarted", |error| error.code.as_str())
                     })
                 }
@@ -955,6 +996,21 @@ impl AgentStore {
             file.write_all(&serde_json::to_vec(ledger)?)?;
             file.sync_all()?;
             fs::rename(&temp, &self.path)?;
+            #[cfg(test)]
+            if self
+                .fail_next_persist_after_rename
+                .swap(false, Ordering::AcqRel)
+            {
+                if let Some(barrier) = self.persist_failure_barrier.lock().unwrap().clone() {
+                    barrier.wait();
+                    barrier.wait();
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "injected failure after ledger rename",
+                )
+                .into());
+            }
             fs::File::open(
                 self.path
                     .parent()
@@ -968,14 +1024,29 @@ impl AgentStore {
         }
         write
     }
+    fn storage_unavailable() -> AppError {
+        AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "Agent storage state is uncertain; reopen the store",
+        ))
+    }
+
+    fn lock_ledger(&self) -> Result<MutexGuard<'_, Ledger>, AppError> {
+        let ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
+        if self.storage_uncertain.load(Ordering::Acquire) {
+            return Err(Self::storage_unavailable());
+        }
+        Ok(ledger)
+    }
+
     fn change<T>(
         &self,
         edit: impl FnOnce(&mut Ledger) -> Result<T, AppError>,
     ) -> Result<T, AppError> {
-        let mut ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let mut ledger = self.lock_ledger()?;
         let mut next = ledger.clone();
         let result = edit(&mut next)?;
         self.persist(&next)?;
@@ -990,6 +1061,9 @@ impl AgentStore {
             .protocol_commit
             .lock()
             .map_err(|_| invalid("Agent storage unavailable"))?;
+        if self.storage_uncertain.load(Ordering::Acquire) {
+            return Err(Self::storage_unavailable());
+        }
         Ok(commit())
     }
 
@@ -1020,10 +1094,7 @@ impl AgentStore {
         if let Some(s) = &settings {
             s.validate()?;
         }
-        let mut ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let mut ledger = self.lock_ledger()?;
         if let Some(requested) = &settings {
             if ledger.grants.get(&owner.app_id).is_some_and(|grant| {
                 grant.owner.release_digest == owner.release_digest && grant.settings == *requested
@@ -1071,10 +1142,7 @@ impl AgentStore {
     }
     pub fn settings(&self, owner: &Owner) -> Result<Option<Settings>, AppError> {
         owner.validate()?;
-        let ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let ledger = self.lock_ledger()?;
         Ok(ledger
             .grants
             .get(&owner.app_id)
@@ -1203,6 +1271,7 @@ impl AgentStore {
                     input_digest: hash,
                     epoch: grant.epoch,
                     cancel_requested: false,
+                    stop_intent: None,
                     chat_id: chat_id.map(str::to_owned),
                     protocol_thread_id: input.protocol_thread_id.clone(),
                     protocol_input_digest: input.protocol_input_digest.clone(),
@@ -1225,10 +1294,7 @@ impl AgentStore {
             .lock()
             .map_err(|_| invalid("Agent storage unavailable"))?;
         owner.validate()?;
-        let ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let ledger = self.lock_ledger()?;
         let record = ledger
             .runs
             .get(id)
@@ -1241,10 +1307,7 @@ impl AgentStore {
     /// Resolve the public AG-UI runId to the private, path-safe task UUID.
     pub fn task_id_for_request(&self, owner: &Owner, run_id: &str) -> Result<String, AppError> {
         owner.validate()?;
-        let ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let ledger = self.lock_ledger()?;
         ledger
             .runs
             .values()
@@ -1266,10 +1329,7 @@ impl AgentStore {
         run_id: &str,
     ) -> Result<String, AppError> {
         owner.validate()?;
-        let ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let ledger = self.lock_ledger()?;
         ledger
             .runs
             .values()
@@ -1283,10 +1343,7 @@ impl AgentStore {
     }
     pub fn thread_id_for_request(&self, owner: &Owner, run_id: &str) -> Result<String, AppError> {
         owner.validate()?;
-        let ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let ledger = self.lock_ledger()?;
         ledger
             .runs
             .values()
@@ -1308,10 +1365,7 @@ impl AgentStore {
             .map_err(|_| invalid("Agent storage unavailable"))?;
         owner.validate()?;
         let path = self.event_path(id)?;
-        let mut ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let mut ledger = self.lock_ledger()?;
         let record = ledger
             .runs
             .get(id)
@@ -1345,10 +1399,7 @@ impl AgentStore {
             .lock()
             .map_err(|_| invalid("Agent storage unavailable"))?;
         owner.validate()?;
-        let mut ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let mut ledger = self.lock_ledger()?;
         let mut next = ledger.clone();
         let record = next
             .runs
@@ -1380,10 +1431,7 @@ impl AgentStore {
             }
         })?;
         let path = self.event_path(task_id)?;
-        let ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let ledger = self.lock_ledger()?;
         let record = ledger
             .runs
             .get(task_id)
@@ -1458,10 +1506,7 @@ impl AgentStore {
             .lock()
             .map_err(|_| invalid("Agent storage unavailable"))?;
         owner.validate()?;
-        let ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let ledger = self.lock_ledger()?;
         let record = ledger
             .runs
             .values()
@@ -1517,10 +1562,7 @@ impl AgentStore {
             invocation_id: "startup-recovery".into(),
         };
         owner.validate()?;
-        let ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let ledger = self.lock_ledger()?;
         Ok(ledger
             .runs
             .values()
@@ -1577,10 +1619,7 @@ impl AgentStore {
             .protocol_commit
             .lock()
             .map_err(|_| invalid("Agent storage unavailable"))?;
-        let ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let ledger = self.lock_ledger()?;
         let mut tasks = ledger
             .runs
             .values()
@@ -1608,7 +1647,7 @@ impl AgentStore {
     /// Recheck before execution, after approval, reconnect and authentication
     /// retry. Native hosts additionally recheck the actual active app run.
     pub fn lease_valid(&self, owner: &Owner, id: &str) -> bool {
-        self.ledger.lock().ok().is_some_and(|ledger| {
+        self.lock_ledger().ok().is_some_and(|ledger| {
             ledger.runs.get(id).is_some_and(|r| {
                 r.owner == *owner
                     && !r.cancel_requested
@@ -1638,6 +1677,44 @@ impl AgentStore {
             }
             Ok(())
         })
+    }
+
+    /// Persist the trusted iOS system-expiration intent before revoking the
+    /// executor. The caller must only use this for an actual native callback.
+    /// A prior cancellation, authorization change or terminal result wins.
+    pub fn request_background_expiration(&self, owner: &Owner, id: &str) -> Result<(), AppError> {
+        let _commit = self
+            .protocol_commit
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
+        owner.validate()?;
+        let mut ledger = self.lock_ledger()?;
+        let record = ledger
+            .runs
+            .get(id)
+            .filter(|record| {
+                record.owner.app_id == owner.app_id
+                    && record.owner.release_digest == owner.release_digest
+            })
+            .ok_or_else(|| AppError::NotFound("Agent task".into()))?;
+        let current_grant = ledger.grants.get(&owner.app_id).is_some_and(|grant| {
+            grant.epoch == record.epoch && grant.owner.release_digest == owner.release_digest
+        });
+        if record.task.state.terminal() || record.cancel_requested || !current_grant {
+            return Ok(());
+        }
+        let mut next = ledger.clone();
+        let record = next.runs.get_mut(id).expect("checked Agent task");
+        record.cancel_requested = true;
+        record.stop_intent = Some(StopIntent::IosBackgroundExpired);
+        if let Err(error) = self.persist(&next) {
+            // Rename may already have succeeded. Do not let the old in-memory
+            // ledger be read or written until a new store recovers the disk.
+            self.storage_uncertain.store(true, Ordering::Release);
+            return Err(error);
+        }
+        *ledger = next;
+        Ok(())
     }
     /// Publish a trusted execution phase without revealing approval inputs.
     /// Its sequence is durable, so a reconnected browser can observe a pending
@@ -1694,10 +1771,7 @@ impl AgentStore {
         revision: u64,
     ) -> Result<Option<u64>, AppError> {
         owner.validate()?;
-        let ledger = self
-            .ledger
-            .lock()
-            .map_err(|_| invalid("Agent storage unavailable"))?;
+        let ledger = self.lock_ledger()?;
         let record = ledger
             .runs
             .values()
@@ -1791,6 +1865,17 @@ impl AgentStore {
                         }
                         .into(),
                     ),
+                )
+            } else {
+                (state, result, error)
+            };
+            let (state, result, error) = if state == State::Cancelled
+                && record.stop_intent == Some(StopIntent::IosBackgroundExpired)
+            {
+                (
+                    State::Interrupted,
+                    None,
+                    Some(IOS_BACKGROUND_EXPIRED.into()),
                 )
             } else {
                 (state, result, error)
@@ -2211,7 +2296,7 @@ mod protocol_failure_tests {
         }
     }
 
-    fn input(request_id: &str) -> Input {
+    pub(super) fn input(request_id: &str) -> Input {
         serde_json::from_value(json!({
             "requestId": request_id,
             "protocolThreadId": "thread-1",
@@ -2220,7 +2305,7 @@ mod protocol_failure_tests {
         .unwrap()
     }
 
-    fn setup() -> (tempfile::TempDir, AgentStore, Owner) {
+    pub(super) fn setup() -> (tempfile::TempDir, AgentStore, Owner) {
         let root = tempfile::tempdir().unwrap();
         let store = AgentStore::open(root.path()).unwrap();
         let owner = owner();
@@ -2934,5 +3019,526 @@ mod protocol_failure_tests {
             store.admit(&owner, &input("new-run"), &[]),
             Err(AppError::Busy(_))
         ));
+    }
+}
+
+#[cfg(test)]
+mod background_expiration_tests {
+    use super::protocol_failure_tests::{input, setup};
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    fn start(store: &AgentStore, owner: &Owner, request_id: &str) -> Task {
+        let task = store.admit(owner, &input(request_id), &[]).unwrap().task;
+        store
+            .append_event(
+                owner,
+                &task.run_id,
+                json!({
+                    "type":"RUN_STARTED", "threadId":"thread-1", "runId":request_id
+                }),
+            )
+            .unwrap();
+        store
+            .update(owner, &task.run_id, State::Running, None, None, None)
+            .unwrap()
+    }
+
+    fn result() -> TaskResult {
+        TaskResult {
+            text: "completed".into(),
+            output: None,
+            attachments: vec![],
+            chat_id: None,
+            message_id: None,
+        }
+    }
+
+    fn commit_cancel(store: &AgentStore, owner: &Owner, id: &str) -> Task {
+        store
+            .with_protocol_commit(|| {
+                let task = store
+                    .update(
+                        owner,
+                        id,
+                        State::Cancelled,
+                        None,
+                        None,
+                        Some("cancelled".into()),
+                    )
+                    .unwrap();
+                let terminal = if task.state == State::Interrupted {
+                    let error = task.error.as_ref().unwrap();
+                    json!({"type":"RUN_ERROR", "code":error.code, "message":error.message})
+                } else {
+                    json!({"type":"RUN_FINISHED", "threadId":"thread-1", "runId":task.request_id,
+                       "outcome":{"type":"cancelled"}})
+                };
+                store.append_event(owner, id, terminal).unwrap();
+                task
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn expiration_waits_for_reap_and_commits_an_interrupted_terminal() {
+        let (root, store, owner) = setup();
+        let run = start(&store, &owner, "expiry-run");
+        store
+            .request_background_expiration(&owner, &run.run_id)
+            .unwrap();
+        assert!(!store.lease_valid(&owner, &run.run_id));
+        assert_eq!(
+            store.get(&owner, &run.run_id).unwrap().state,
+            State::Running
+        );
+        assert!(matches!(
+            store.admit(&owner, &input("other-run"), &[]),
+            Err(AppError::Busy(_))
+        ));
+
+        let waiting = store
+            .update(
+                &owner,
+                &run.run_id,
+                State::Running,
+                None,
+                None,
+                Some("tool_cleanup_incomplete".into()),
+            )
+            .unwrap();
+        assert_eq!(waiting.state, State::Running);
+        assert!(matches!(
+            store.admit(&owner, &input("other-run"), &[]),
+            Err(AppError::Busy(_))
+        ));
+
+        let task = commit_cancel(&store, &owner, &run.run_id);
+        assert_eq!(task.state, State::Interrupted);
+        assert_eq!(task.error.as_ref().unwrap().code, IOS_BACKGROUND_EXPIRED);
+        drop(store);
+        let reopened = AgentStore::open(root.path()).unwrap();
+        let task = reopened.get_by_request(&owner, "expiry-run").unwrap();
+        assert_eq!(task.state, State::Interrupted);
+        assert_eq!(task.error.as_ref().unwrap().code, IOS_BACKGROUND_EXPIRED);
+        let page = reopened.protocol_events(&owner, "expiry-run", 0).unwrap();
+        let terminal = page.events.last().unwrap();
+        assert_eq!(terminal["type"], "RUN_ERROR");
+        assert_eq!(terminal["code"], IOS_BACKGROUND_EXPIRED);
+        assert_eq!(terminal["message"], error_message(IOS_BACKGROUND_EXPIRED));
+        assert!(
+            !reopened
+                .admit(&owner, &input("expiry-run"), &[])
+                .unwrap()
+                .start
+        );
+        assert!(
+            reopened
+                .admit(&owner, &input("other-run"), &[])
+                .unwrap()
+                .start
+        );
+    }
+
+    #[test]
+    fn restart_uses_only_a_persisted_expiration_reason() {
+        for expired in [false, true] {
+            let (root, store, owner) = setup();
+            let run = start(&store, &owner, "restart-run");
+            if expired {
+                store
+                    .request_background_expiration(&owner, &run.run_id)
+                    .unwrap();
+            }
+            drop(store);
+            let reopened = AgentStore::open(root.path()).unwrap();
+            let task = reopened.get_by_request(&owner, "restart-run").unwrap();
+            let expected = if expired {
+                IOS_BACKGROUND_EXPIRED
+            } else {
+                "host_restarted"
+            };
+            assert_eq!(task.state, State::Interrupted);
+            assert_eq!(task.error.as_ref().unwrap().code, expected);
+            let page = reopened.protocol_events(&owner, "restart-run", 0).unwrap();
+            let terminal = page.events.last().unwrap();
+            assert_eq!(terminal["type"], "RUN_ERROR");
+            assert_eq!(terminal["code"], expected);
+            assert_eq!(terminal["message"], task.error.unwrap().message);
+            assert!(
+                !reopened
+                    .admit(&owner, &input("restart-run"), &[])
+                    .unwrap()
+                    .start
+            );
+        }
+    }
+
+    #[test]
+    fn prior_cancel_revoke_or_terminal_state_is_not_relabelled() {
+        for prior in ["cancel", "revoke", "finished"] {
+            let (_root, store, owner) = setup();
+            let run = start(&store, &owner, "prior-run");
+            match prior {
+                "cancel" => store.request_cancel(&owner, &run.run_id).unwrap(),
+                "revoke" => {
+                    store.configure(owner.clone(), None).unwrap();
+                }
+                _ => {
+                    store
+                        .with_protocol_commit(|| {
+                            store
+                                .update(
+                                    &owner,
+                                    &run.run_id,
+                                    State::Succeeded,
+                                    Some(result()),
+                                    None,
+                                    None,
+                                )
+                                .unwrap();
+                            store.append_event(&owner, &run.run_id, json!({
+                            "type":"RUN_FINISHED", "threadId":"thread-1", "runId":"prior-run",
+                            "outcome":{"type":"success"}
+                        })).unwrap();
+                        })
+                        .unwrap();
+                }
+            }
+            let before = fs::read(&store.path).unwrap();
+            store
+                .request_background_expiration(&owner, &run.run_id)
+                .unwrap();
+            assert_eq!(fs::read(&store.path).unwrap(), before);
+            let ledger = store.lock_ledger().unwrap();
+            assert_eq!(ledger.runs[&run.run_id].stop_intent, None);
+            drop(ledger);
+            if prior == "finished" {
+                assert_eq!(
+                    store.get(&owner, &run.run_id).unwrap().state,
+                    State::Succeeded
+                );
+            } else {
+                let task = store
+                    .update(
+                        &owner,
+                        &run.run_id,
+                        State::Cancelled,
+                        None,
+                        None,
+                        Some("cancelled".into()),
+                    )
+                    .unwrap();
+                assert_eq!(task.state, State::Cancelled);
+                assert_ne!(task.error.unwrap().code, IOS_BACKGROUND_EXPIRED);
+            }
+        }
+    }
+
+    #[test]
+    fn expiry_and_success_are_linearized_before_any_terminal_event() {
+        for _ in 0..12 {
+            let (_root, store, owner) = setup();
+            let store = Arc::new(store);
+            let run = start(&store, &owner, "race-run");
+            let barrier = Arc::new(Barrier::new(3));
+            let expiry_store = store.clone();
+            let expiry_owner = owner.clone();
+            let expiry_id = run.run_id.clone();
+            let expiry_barrier = barrier.clone();
+            let expiry = std::thread::spawn(move || {
+                expiry_barrier.wait();
+                expiry_store.request_background_expiration(&expiry_owner, &expiry_id)
+            });
+            let finish_store = store.clone();
+            let finish_owner = owner.clone();
+            let finish_id = run.run_id.clone();
+            let finish_barrier = barrier.clone();
+            let finish =
+                std::thread::spawn(move || {
+                    finish_barrier.wait();
+                    finish_store.with_protocol_commit(|| {
+                    let task = finish_store.update(&finish_owner, &finish_id, State::Succeeded,
+                        Some(result()), None, None).unwrap();
+                    let event = if task.state == State::Succeeded {
+                        json!({"type":"RUN_FINISHED", "threadId":"thread-1", "runId":"race-run",
+                               "outcome":{"type":"success"}})
+                    } else {
+                        let error = task.error.as_ref().unwrap();
+                        json!({"type":"RUN_ERROR", "code":error.code, "message":error.message})
+                    };
+                    finish_store.append_event(&finish_owner, &finish_id, event).unwrap();
+                    task
+                }).unwrap()
+                });
+            barrier.wait();
+            expiry.join().unwrap().unwrap();
+            let task = finish.join().unwrap();
+            let ledger = store.lock_ledger().unwrap();
+            let intent = ledger.runs[&run.run_id].stop_intent.clone();
+            drop(ledger);
+            if task.state == State::Succeeded {
+                assert_eq!(intent, None);
+                assert!(task.error.is_none());
+            } else {
+                assert_eq!(task.state, State::Interrupted);
+                assert_eq!(intent, Some(StopIntent::IosBackgroundExpired));
+                assert_eq!(task.error.unwrap().code, IOS_BACKGROUND_EXPIRED);
+            }
+            assert!(store.protocol_events(&owner, "race-run", 0).is_ok());
+        }
+    }
+
+    #[test]
+    fn expiry_races_with_cancel_and_revoke_without_relabelling_an_earlier_intent() {
+        for operation in ["cancel", "revoke"] {
+            for _ in 0..12 {
+                let (_root, store, owner) = setup();
+                let store = Arc::new(store);
+                let run = start(&store, &owner, "race-run");
+                let barrier = Arc::new(Barrier::new(3));
+                let expiry_store = store.clone();
+                let expiry_owner = owner.clone();
+                let expiry_id = run.run_id.clone();
+                let expiry_barrier = barrier.clone();
+                let expiry = std::thread::spawn(move || {
+                    expiry_barrier.wait();
+                    expiry_store.request_background_expiration(&expiry_owner, &expiry_id)
+                });
+                let stop_store = store.clone();
+                let stop_owner = owner.clone();
+                let stop_id = run.run_id.clone();
+                let stop_barrier = barrier.clone();
+                let stop = std::thread::spawn(move || {
+                    stop_barrier.wait();
+                    if operation == "cancel" {
+                        stop_store.request_cancel(&stop_owner, &stop_id)
+                    } else {
+                        stop_store.configure(stop_owner, None).map(|_| ())
+                    }
+                });
+                barrier.wait();
+                expiry.join().unwrap().unwrap();
+                stop.join().unwrap().unwrap();
+                let intent = store.lock_ledger().unwrap().runs[&run.run_id]
+                    .stop_intent
+                    .clone();
+                let task = store
+                    .update(
+                        &owner,
+                        &run.run_id,
+                        State::Cancelled,
+                        None,
+                        None,
+                        Some("cancelled".into()),
+                    )
+                    .unwrap();
+                if intent == Some(StopIntent::IosBackgroundExpired) {
+                    assert_eq!(task.state, State::Interrupted);
+                    assert_eq!(task.error.unwrap().code, IOS_BACKGROUND_EXPIRED);
+                } else {
+                    assert_eq!(task.state, State::Cancelled);
+                    assert_eq!(task.error.unwrap().code, "cancelled");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn failed_expiry_after_rename_fences_all_store_access_until_reopen() {
+        let (root, store, owner) = setup();
+        let store = Arc::new(store);
+        let run = start(&store, &owner, "uncertain-expiry");
+        let persist_barrier = Arc::new(Barrier::new(2));
+        *store.persist_failure_barrier.lock().unwrap() = Some(persist_barrier.clone());
+        store
+            .fail_next_persist_after_rename
+            .store(true, Ordering::Release);
+        let expiry_store = store.clone();
+        let expiry_owner = owner.clone();
+        let expiry_id = run.run_id.clone();
+        let expiry = std::thread::spawn(move || {
+            expiry_store.request_background_expiration(&expiry_owner, &expiry_id)
+        });
+        // The expiration write has renamed its ledger while retaining both
+        // locks. Queue a reader, writer and admission before it reports Err.
+        persist_barrier.wait();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let reader_store = store.clone();
+        let reader_owner = owner.clone();
+        let reader_ready = ready_tx.clone();
+        let reader = std::thread::spawn(move || {
+            reader_ready.send(()).unwrap();
+            reader_store.get_by_request(&reader_owner, "uncertain-expiry")
+        });
+        let writer_store = store.clone();
+        let writer_owner = owner.clone();
+        let writer_id = run.run_id.clone();
+        let writer_ready = ready_tx.clone();
+        let writer = std::thread::spawn(move || {
+            writer_ready.send(()).unwrap();
+            writer_store.set_phase(&writer_owner, &writer_id, Some("waiting_for_answer"))
+        });
+        let admission_store = store.clone();
+        let admission_owner = owner.clone();
+        let admission = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            admission_store.admit(&admission_owner, &input("concurrent-run"), &[])
+        });
+        for _ in 0..3 {
+            ready_rx.recv().unwrap();
+        }
+        persist_barrier.wait();
+        assert!(matches!(expiry.join().unwrap(), Err(AppError::Io(_))));
+        assert!(matches!(reader.join().unwrap(), Err(AppError::Io(_))));
+        assert!(matches!(writer.join().unwrap(), Err(AppError::Io(_))));
+        assert!(matches!(admission.join().unwrap(), Err(AppError::Io(_))));
+        let disk = fs::read(&store.path).unwrap();
+        let disk_ledger: Ledger = serde_json::from_slice(&disk).unwrap();
+        assert_eq!(
+            disk_ledger.runs[&run.run_id].stop_intent,
+            Some(StopIntent::IosBackgroundExpired)
+        );
+        assert!(disk_ledger.runs[&run.run_id].cancel_requested);
+
+        assert!(matches!(store.settings(&owner), Err(AppError::Io(_))));
+        assert!(matches!(
+            store.get(&owner, &run.run_id),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.get_by_request(&owner, "uncertain-expiry"),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.task_id_for_request(&owner, "uncertain-expiry"),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.thread_id_for_request(&owner, "uncertain-expiry"),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.protocol_input_fingerprint(&owner, "uncertain-expiry"),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.protocol_events(&owner, "uncertain-expiry", 0),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.recovery_states(&owner.app_id),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(store.list(&owner, None, 10), Err(AppError::Io(_))));
+        assert!(matches!(
+            store.native_output_bytes_for_request(&owner, "uncertain-expiry", 1),
+            Err(AppError::Io(_))
+        ));
+        assert!(!store.lease_valid(&owner, &run.run_id));
+        assert!(matches!(
+            store.set_phase(&owner, &run.run_id, Some("waiting_for_answer")),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.record_native_output_bytes(&owner, &run.run_id, 1, 1),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.set_completed_model_turns(&owner, &run.run_id, 1),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.request_cancel(&owner, &run.run_id),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.request_background_expiration(&owner, &run.run_id),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.configure(owner.clone(), None),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.update(&owner, &run.run_id, State::Cancelled, None, None, None),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.admit(&owner, &input("other-run"), &[]),
+            Err(AppError::Io(_))
+        ));
+        assert!(matches!(
+            store.append_event(
+                &owner,
+                &run.run_id,
+                json!({
+                    "type":"RUN_ERROR", "message":"must not append"
+                })
+            ),
+            Err(AppError::Io(_))
+        ));
+        let called = std::cell::Cell::new(false);
+        assert!(matches!(
+            store.with_protocol_commit(|| called.set(true)),
+            Err(AppError::Io(_))
+        ));
+        assert!(!called.get());
+
+        assert_eq!(fs::read(&store.path).unwrap(), disk);
+        drop(store);
+
+        let reopened = AgentStore::open(root.path()).unwrap();
+        let task = reopened.get_by_request(&owner, "uncertain-expiry").unwrap();
+        assert_eq!(task.state, State::Interrupted);
+        assert_eq!(task.error.unwrap().code, IOS_BACKGROUND_EXPIRED);
+        let page = reopened
+            .protocol_events(&owner, "uncertain-expiry", 0)
+            .unwrap();
+        assert_eq!(page.events.last().unwrap()["code"], IOS_BACKGROUND_EXPIRED);
+        assert!(
+            !reopened
+                .admit(&owner, &input("uncertain-expiry"), &[])
+                .unwrap()
+                .start
+        );
+        assert!(
+            reopened
+                .admit(&owner, &input("other-run"), &[])
+                .unwrap()
+                .start
+        );
+    }
+
+    #[test]
+    fn failed_expiry_before_rename_reopens_with_unknown_reason() {
+        let (root, mut store, owner) = setup();
+        let run = start(&store, &owner, "unpersisted-expiry");
+        let ledger_path = store.path.clone();
+        let original = fs::read(&ledger_path).unwrap();
+        let blocked = ledger_path.with_extension("unwritable-directory");
+        fs::create_dir(&blocked).unwrap();
+        store.path = blocked;
+        assert!(store
+            .request_background_expiration(&owner, &run.run_id)
+            .is_err());
+        assert!(matches!(
+            store.get(&owner, &run.run_id),
+            Err(AppError::Io(_))
+        ));
+        assert!(!store.lease_valid(&owner, &run.run_id));
+        assert_eq!(fs::read(&ledger_path).unwrap(), original);
+        store.path = ledger_path;
+        drop(store);
+        let reopened = AgentStore::open(root.path()).unwrap();
+        let task = reopened
+            .get_by_request(&owner, "unpersisted-expiry")
+            .unwrap();
+        assert_eq!(task.state, State::Interrupted);
+        assert_eq!(task.error.unwrap().code, "host_restarted");
+        let page = reopened
+            .protocol_events(&owner, "unpersisted-expiry", 0)
+            .unwrap();
+        assert_eq!(page.events.last().unwrap()["code"], "host_restarted");
     }
 }

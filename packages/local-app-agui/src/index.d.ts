@@ -15,6 +15,6 @@ export {ContentPartSchema, EventSchema, MessageSchema, RunAgentInputSchema} from
 export {createLocalAppAgent, LocalAppAgent, validateLocalAppRunInput} from './client.js';
 export type {AgentEventPage, LocalAppAgentConfig, LocalAppAgentTransport} from './client.js';
 export {installBrowserAgent} from './browser.js';
-export type {BrowserAgentHostTransport, BrowserAgentResources, ChatHistoryPage, LocalAppBrowserAgentResource, LocalAppChatHandle, LocalAppChatSummary, LocalAppTask, LocalAppTaskPage, LocalAppTaskState} from './browser.js';
+export type {BrowserAgentHostTransport, BrowserAgentResources, ChatHistoryPage, LocalAppBrowserAgentResource, LocalAppChatCreationOptions, LocalAppPendingChatCreation, LocalAppChats, LocalAppChatHandle, LocalAppChatSummary, LocalAppTask, LocalAppTaskPage, LocalAppTaskState} from './browser.js';
 export {fileToContentPart} from './file.js';
 export {validateContentPart, validateEvent, validateMessage, validateRunAgentInput} from './validators.js';

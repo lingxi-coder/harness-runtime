@@ -16,13 +16,17 @@
   const maxReportedMissingWakeRuns = 32;
   const pendingStore = 'pending';
   const pendingDbName = 'lingxi-local-app-agui-' + config.appId;
+  const chatCreationDbName = 'lingxi-local-app-chat-creates-' + config.appId + '-revision-' + config.revision;
+  const chatCreationStore = 'creations';
+  const maxChatCreations = 64;
   const obsoletePendingDbName = 'lingxi-local-app-agent-' + config.appId;
   const pendingPrefix = config.appId + ':' + config.revision + ':';
   const readOnlyMethods = new Set([
     'agent.tasks.get', 'agent.tasks.list', 'agent.tasks.events',
-    'agent.chats.get', 'agent.chats.list', 'agent.chats.history'
+    'agent.chats.get', 'agent.chats.list', 'agent.chats.history', 'agent.chats.creationStatus'
   ]);
   const inFlight = new Map();
+  const chatCreateFlights = new Map();
   const handoffWaiters = new Map();
   const restoringWakeRuns = new Set();
   const reportedMissingWakeRuns = new Set();
@@ -185,6 +189,160 @@
       opening.onsuccess = () => resolve(opening.result);
       opening.onerror = () => reject(makeError('Could not open persistent browser storage.', 'storage_unavailable', opening.error));
       opening.onblocked = () => reject(makeError('Persistent browser storage is busy in another tab.', 'storage_unavailable'));
+    });
+  }
+
+  // Chat creation is a LingXi host operation, separate from AG-UI run
+  // submission. Each App revision retains its unresolved identity without TTL eviction.
+  function chatCreationDatabase() {
+    if (!('indexedDB' in window)) return Promise.reject(makeError('Persistent browser storage is unavailable.', 'storage_unavailable'));
+    return new Promise((resolve, reject) => {
+      const opening = indexedDB.open(chatCreationDbName, 1);
+      opening.onupgradeneeded = () => {
+        if (!opening.result.objectStoreNames.contains(chatCreationStore)) {
+          opening.result.createObjectStore(chatCreationStore, {keyPath: 'key'});
+        }
+      };
+      opening.onsuccess = () => resolve(opening.result);
+      opening.onerror = () => reject(makeError('Could not open Chat recovery storage.', 'storage_unavailable', opening.error));
+      opening.onblocked = () => reject(makeError('Chat recovery storage is busy in another tab.', 'storage_unavailable'));
+    });
+  }
+
+  function chatCreationOptions(options) {
+    if (!isRecord(options) || Object.keys(options).some(key => !['requestId', 'title'].includes(key))
+        || typeof options.requestId !== 'string'
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(options.requestId)
+        || (Object.hasOwn(options, 'title') && (typeof options.title !== 'string'
+            || options.title.length > 512
+            || textEncoder.encode(options.title).byteLength > 512
+            || /[\u0000-\u001f\u007f-\u009f]/u.test(options.title)
+            || [...options.title].some(char => {
+              const code = char.codePointAt(0);
+              return code >= 0xd800 && code <= 0xdfff;
+            })
+            || !options.title.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '')
+            || [...options.title.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '')].length > 80))) {
+      throw makeError('Chat creation requires a UUIDv4 requestId and an optional bounded title.', 'invalid_chat');
+    }
+    return {requestId: options.requestId, ...(Object.hasOwn(options, 'title') ? {title: options.title} : {})};
+  }
+
+  function sameChatCreation(record, options) {
+    return record?.appId === config.appId && record.revision === config.revision && record.key === options.requestId
+      && record.requestId === options.requestId && record.options?.requestId === options.requestId
+      && Object.hasOwn(record.options || {}, 'title') === Object.hasOwn(options, 'title')
+      && record.options?.title === options.title;
+  }
+
+  async function reserveChatCreation(options) {
+    const db = await chatCreationDatabase();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(chatCreationStore, 'readwrite');
+      const store = tx.objectStore(chatCreationStore);
+      let failure = null;
+      let count = 0;
+      const cursorRequest = store.openCursor();
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (cursor) { count++; cursor.continue(); return; }
+        const request = store.get(options.requestId);
+        request.onsuccess = () => {
+          const existing = request.result;
+          if (existing) {
+            if (!['pending', 'accepted', 'deleted', 'rejected'].includes(existing.state)) {
+              failure = makeError('Chat recovery data is invalid.', 'storage_unavailable');
+            } else if (!sameChatCreation(existing, options)) {
+              failure = makeError('This Chat creation requestId is already bound to different input.', 'chat_create_conflict');
+            } else if (existing.state !== 'pending') {
+              // A new explicit submission is unresolved until this attempt returns.
+              store.put({...existing, state: 'pending'});
+            }
+            return;
+          }
+          if (count >= maxChatCreations) {
+            failure = makeError('Chat recovery storage is full. Forget a resolved creation before continuing.', 'storage_full');
+            return;
+          }
+          store.add({key: options.requestId, appId: config.appId, revision: config.revision, requestId: options.requestId,
+            options, state: 'pending', createdAt: Date.now()});
+        };
+      };
+      tx.oncomplete = () => { db.close(); failure ? reject(failure) : resolve(); };
+      tx.onerror = () => { db.close(); reject(makeError('Could not save Chat creation for recovery.', 'storage_unavailable', tx.error)); };
+      tx.onabort = () => { db.close(); reject(makeError('Could not save Chat creation for recovery.', 'storage_unavailable', tx.error)); };
+    });
+  }
+
+  async function markChatCreationState(options, state) {
+    const db = await chatCreationDatabase();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(chatCreationStore, 'readwrite');
+      const store = tx.objectStore(chatCreationStore);
+      const request = store.get(options.requestId);
+      request.onsuccess = () => {
+        if (sameChatCreation(request.result, options)) store.put({...request.result, state});
+      };
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(makeError('Could not update Chat recovery storage.', 'storage_unavailable', tx.error)); };
+      tx.onabort = () => { db.close(); reject(makeError('Could not update Chat recovery storage.', 'storage_unavailable', tx.error)); };
+    });
+  }
+
+  async function pendingChatCreations() {
+    const db = await chatCreationDatabase();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(chatCreationStore, 'readonly');
+      const records = [];
+      let failure = null;
+      const request = tx.objectStore(chatCreationStore).openCursor();
+      request.onsuccess = () => {
+        const cursor = request.result;
+        if (!cursor) return;
+        const record = cursor.value;
+        let valid = false;
+        try {
+          const stored = record?.options;
+          if (!stored || typeof stored !== 'object' || Array.isArray(stored)
+              || Object.keys(stored).some(key => !['requestId', 'title'].includes(key))) throw new Error('invalid receipt');
+          const options = chatCreationOptions({requestId: stored.requestId,
+            ...(Object.hasOwn(stored, 'title') ? {title: stored.title} : {})});
+          valid = sameChatCreation(record, options)
+            && ['pending', 'accepted', 'deleted', 'rejected'].includes(record.state);
+        } catch { /* report invalid recovery data below */ }
+        if (!valid) {
+          failure = makeError('Chat recovery data is invalid.', 'storage_unavailable');
+        } else {
+          records.push({...record.options, state: record.state});
+        }
+        cursor.continue();
+      };
+      tx.oncomplete = () => { db.close(); failure ? reject(failure) : resolve(records); };
+      tx.onerror = () => { db.close(); reject(makeError('Could not read Chat recovery storage.', 'storage_unavailable', tx.error)); };
+      tx.onabort = () => { db.close(); reject(makeError('Could not read Chat recovery storage.', 'storage_unavailable', tx.error)); };
+    });
+  }
+
+  async function forgetChatCreation(requestId) {
+    const options = chatCreationOptions({requestId});
+    const db = await chatCreationDatabase();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(chatCreationStore, 'readwrite');
+      const store = tx.objectStore(chatCreationStore);
+      let failure = null;
+      const request = store.get(options.requestId);
+      request.onsuccess = () => {
+        const record = request.result;
+        if (record && record.appId === config.appId && record.revision === config.revision && record.requestId === requestId
+            && ['accepted', 'deleted', 'rejected'].includes(record.state)) {
+          store.delete(requestId);
+        } else if (record) {
+          failure = makeError('Only resolved Chat creations can be forgotten.', 'chat_creation_unresolved');
+        }
+      };
+      tx.oncomplete = () => { db.close(); failure ? reject(failure) : resolve(); };
+      tx.onerror = () => { db.close(); reject(makeError('Could not remove Chat recovery data.', 'storage_unavailable', tx.error)); };
+      tx.onabort = () => { db.close(); reject(makeError('Could not remove Chat recovery data.', 'storage_unavailable', tx.error)); };
     });
   }
 
@@ -640,9 +798,11 @@
     return () => { active = false; clearTimeout(timer); };
   }
 
-  function requestChatHandle(summary) {
+  function requestChatHandle(summary, expectedId) {
     const id = summary?.chatId;
-    if (typeof id !== 'string' || !id) throw makeError('The host returned an invalid Chat ID.', 'invalid_host_response');
+    if (typeof id !== 'string' || !id || (expectedId !== undefined && id !== expectedId)) {
+      throw makeError('The host returned an invalid Chat ID.', 'invalid_host_response');
+    }
     chatIds.add(id);
     if (!chatMessageIds.has(id)) chatMessageIds.set(id, new Set());
     const knownMessages = chatMessageIds.get(id);
@@ -716,8 +876,61 @@
   });
 
   let agent;
+  async function createChat(rawOptions) {
+    const options = chatCreationOptions(rawOptions);
+    await reserveChatCreation(options);
+    const existing = chatCreateFlights.get(options.requestId);
+    if (existing) return existing;
+    const flight = (async () => {
+      const timer = setTimeout(() => window.dispatchEvent(new CustomEvent('localApp:chat-creation-pending', {
+        detail: {requestId: options.requestId}
+      })), 5000);
+      try {
+        const summary = await invoke('agent.chats.create', options);
+        const handle = requestChatHandle(summary, options.requestId);
+        // If the acknowledgement cannot be saved, the original pending record
+        // remains recoverable. The caller still receives the confirmed Chat ID.
+        try { await markChatCreationState(options, 'accepted'); } catch { /* retain pending */ }
+        return handle;
+      } catch (error) {
+        if (error?.definitive && ['chat_create_deleted', 'chat_create_conflict', 'invalid_chat'].includes(error.code)) {
+          try { await markChatCreationState(options, error.code === 'chat_create_deleted' ? 'deleted' : 'rejected'); }
+          catch { /* retain pending */ }
+        }
+        if (['host_unavailable', 'chat_storage_uncertain', 'invalid_host_response'].includes(error?.code)) {
+          error.definitive = false;
+        }
+        if (error && typeof error === 'object') error.requestId = options.requestId;
+        throw error;
+      } finally { clearTimeout(timer); }
+    })();
+    chatCreateFlights.set(options.requestId, flight);
+    try { return await flight; }
+    finally { if (chatCreateFlights.get(options.requestId) === flight) chatCreateFlights.delete(options.requestId); }
+  }
+
+  async function chatCreationStatus(rawOptions) {
+    const options = chatCreationOptions(rawOptions);
+    let summary;
+    try { summary = await invoke('agent.chats.creationStatus', options); }
+    catch (error) {
+      if (error?.definitive && ['chat_create_deleted', 'chat_create_conflict', 'invalid_chat'].includes(error.code)) {
+        try { await markChatCreationState(options, error.code === 'chat_create_deleted' ? 'deleted' : 'rejected'); }
+        catch { /* retain pending */ }
+      }
+      throw error;
+    }
+    if (summary === null) return null;
+    const handle = requestChatHandle(summary, options.requestId);
+    try { await markChatCreationState(options, 'accepted'); } catch { /* status remains read-only on the host */ }
+    return handle;
+  }
+
   const chats = Object.freeze({
-    async create(options = {}) { return requestChatHandle(await invoke('agent.chats.create', options)); },
+    create: createChat,
+    creationStatus: chatCreationStatus,
+    pendingCreations: pendingChatCreations,
+    forgetCreation: forgetChatCreation,
     async open(chatId) { return requestChatHandle(await invoke('agent.chats.get', {chatId})); },
     list(options) { return invoke('agent.chats.list', options || {}); },
     async archive(chatId) { await invoke('agent.chats.archive', {chatId}); },

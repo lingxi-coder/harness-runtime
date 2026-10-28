@@ -1426,6 +1426,21 @@ fn agent_envelope(result: Result<Value, String>) -> String {
                 "agent_storage_unavailable" => {
                     "Agent task storage is unavailable. Existing task data has been preserved."
                 }
+                "agent_legacy_store_unsupported" => {
+                    "This App has older or unrecognized Agent storage that cannot be opened by this version. The existing data was preserved. Create a new App or seek help with the existing data."
+                }
+                "agent_protocol_store_marker_missing" => {
+                    "This App has existing Agent data with a missing protocol marker. The existing data was preserved. Seek help before modifying it."
+                }
+                "agent_protocol_store_version_mismatch" => {
+                    "This App's Agent data has an unsupported or invalid protocol marker. The existing data was preserved. Seek help before modifying it."
+                }
+                "chat_legacy_index_unsupported" => {
+                    "This App's Chat creation index is missing; its data may use an older format or be incomplete. The existing data was preserved. Create a new App or seek help with the existing data."
+                }
+                "chat_storage_uncertain" => {
+                    "This App's Chat storage could not be verified. Keep the existing data and seek help before trying to modify it."
+                }
                 "app_invocation_closed" | "stale_app_invocation" => {
                     "This application run has closed. Reopen the application and retry."
                 }
@@ -1457,6 +1472,58 @@ pub(super) fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod agent_envelope_tests {
+    use super::agent_envelope;
+    use serde_json::Value;
+
+    #[test]
+    fn unresolved_chat_tool_has_actionable_safe_error_message() {
+        let response: Value =
+            serde_json::from_str(&agent_envelope(Err("chat_deferred_tools_pending".into())))
+                .unwrap();
+        assert_eq!(response["ok"], false);
+        assert_eq!(response["error"]["code"], "chat_deferred_tools_pending");
+        let message = response["error"]["message"].as_str().unwrap();
+        assert_eq!(
+            message,
+            local_app::v2::agent::error_message("chat_deferred_tools_pending")
+        );
+        assert!(message.contains("unfinished tool operation"));
+        assert!(message.contains("Review its effects"));
+        assert!(message.contains("not be replayed automatically"));
+    }
+
+    #[test]
+    fn app_storage_errors_distinguish_missing_index_from_corruption() {
+        for (code, phrase) in [
+            (
+                "chat_legacy_index_unsupported",
+                "older format or be incomplete",
+            ),
+            ("chat_storage_uncertain", "could not be verified"),
+            (
+                "agent_legacy_store_unsupported",
+                "older or unrecognized Agent storage",
+            ),
+            (
+                "agent_protocol_store_marker_missing",
+                "missing protocol marker",
+            ),
+            (
+                "agent_protocol_store_version_mismatch",
+                "unsupported or invalid protocol marker",
+            ),
+        ] {
+            let response: Value = serde_json::from_str(&agent_envelope(Err(code.into()))).unwrap();
+            assert_eq!(response["error"]["code"], code);
+            let message = response["error"]["message"].as_str().unwrap();
+            assert!(message.contains(phrase));
+            assert!(!message.contains("delete"));
+        }
+    }
+}
 
 #[cfg(test)]
 mod process_tests;

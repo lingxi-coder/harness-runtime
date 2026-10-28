@@ -63,6 +63,18 @@ fn clear_app_media_capabilities(context: &mut BuiltinToolContext) {
     context.media_agent_handoff = None;
 }
 
+/// Generic Harness resume replays unresolved hook-deferred tools. Local App
+/// recovery must leave those operations for an explicit user decision instead.
+pub(super) fn validate_local_app_chat_resume(
+    replayed: &orchestrator::resume::ReplayedSession,
+) -> Result<(), String> {
+    if replayed.runtime_metadata.deferred_tools.is_empty() {
+        Ok(())
+    } else {
+        Err("chat_deferred_tools_pending".into())
+    }
+}
+
 impl AppAgentFactory {
     pub(crate) async fn catalog(&self) -> Result<Value, String> {
         use sha2::Digest;
@@ -192,6 +204,11 @@ impl AppAgentFactory {
         owner.validate().map_err(|_| "invalid_owner")?;
         if !admission.start || !cwd.is_absolute() {
             return Err("invalid_admission".into());
+        }
+        // Check before constructing/switching an orchestrator: resume_session
+        // may otherwise dispatch stored deferred tools as a side effect.
+        if let Some(replayed) = chat.as_ref().and_then(|chat| chat.replayed.as_ref()) {
+            validate_local_app_chat_resume(replayed)?;
         }
         let model = &admission.task.model;
         let route =
@@ -668,5 +685,135 @@ mod discovery_tests {
             assert!(!app_supports_deferred_tool_search(Some(protocol)));
         }
         assert!(!app_supports_deferred_tool_search(None));
+    }
+}
+
+#[cfg(test)]
+mod resume_guard_tests {
+    use super::validate_local_app_chat_resume;
+    use lingxi_core::host::FileSystem;
+    use orchestrator::resume::{replay_session_state_from_path, ReplayedSession};
+    use serde_json::{json, Value};
+    use std::{path::PathBuf, sync::Arc};
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    struct TranscriptFixture {
+        _root: TempDir,
+        path: PathBuf,
+        original: Vec<u8>,
+        replayed: ReplayedSession,
+    }
+
+    async fn transcript_fixture(deferred: bool, result_id: Option<&str>) -> TranscriptFixture {
+        let root = tempfile::tempdir().unwrap();
+        let session_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let assistant_id = Uuid::new_v4();
+        let attachment_id = Uuid::new_v4();
+        let result_uuid = Uuid::new_v4();
+        let cwd = root.path().to_string_lossy().to_string();
+        let mut rows: Vec<Value> = vec![json!({
+            "type": "user", "uuid": user_id, "parentUuid": null,
+            "sessionId": session_id, "timestamp": "2026-10-27T01:00:00.000Z", "cwd": cwd,
+            "message": {"role": "user", "content": "inspect the saved session"}
+        })];
+        if deferred {
+            rows.push(json!({
+                "type": "assistant", "uuid": assistant_id, "parentUuid": user_id,
+                "sessionId": session_id, "timestamp": "2026-10-27T01:00:01.000Z", "cwd": cwd,
+                "message": {"role": "assistant", "content": [{
+                    "type": "tool_use", "id": "toolu_pending", "name": "Shell", "input": {"command": "touch forbidden"}
+                }]}
+            }));
+            rows.push(json!({
+                "type": "attachment", "uuid": attachment_id, "parentUuid": assistant_id,
+                "sessionId": session_id, "timestamp": "2026-10-27T01:00:02.000Z", "cwd": cwd,
+                "attachment": {"type": "hook_deferred_tool", "toolUseID": "toolu_pending",
+                    "toolName": "Shell", "toolInput": {"command": "touch forbidden"},
+                    "hookName": "PreToolUse:Shell", "hookEvent": "PreToolUse", "permissionMode": "default"}
+            }));
+            if let Some(result_id) = result_id {
+                rows.push(json!({
+                    "type": "user", "uuid": result_uuid, "parentUuid": attachment_id,
+                    "sessionId": session_id, "timestamp": "2026-10-27T01:00:03.000Z", "cwd": cwd,
+                    "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": result_id, "content": "already handled"}]}
+                }));
+            }
+        }
+        let original = rows
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let path = root.path().join(format!("{session_id}.jsonl"));
+        std::fs::write(&path, original.as_bytes()).unwrap();
+        let fs: Arc<dyn FileSystem> = Arc::new(platform_posix_minimal::PosixFileSystem::new(
+            root.path().to_path_buf(),
+        ));
+        let replayed = replay_session_state_from_path(&path, session_id, fs)
+            .await
+            .unwrap();
+        TranscriptFixture {
+            _root: root,
+            path,
+            original: original.into_bytes(),
+            replayed,
+        }
+    }
+
+    #[tokio::test]
+    async fn unresolved_deferred_tool_is_rejected_without_changing_the_jsonl() {
+        let fixture = transcript_fixture(true, None).await;
+        assert_eq!(fixture.replayed.runtime_metadata.deferred_tools.len(), 1);
+        assert_eq!(
+            fixture.replayed.runtime_metadata.deferred_tools[0].tool_name,
+            "Shell"
+        );
+        assert_eq!(
+            fixture
+                .replayed
+                .handle_runtime_snapshot()
+                .deferred_tools
+                .len(),
+            1
+        );
+        assert_eq!(
+            validate_local_app_chat_resume(&fixture.replayed).unwrap_err(),
+            "chat_deferred_tools_pending"
+        );
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), fixture.original);
+        assert!(!fixture._root.path().join("forbidden").exists());
+    }
+
+    #[tokio::test]
+    async fn only_a_matching_later_tool_result_resolves_the_deferred_operation() {
+        let wrong_result = transcript_fixture(true, Some("another_tool")).await;
+        assert_eq!(
+            validate_local_app_chat_resume(&wrong_result.replayed).unwrap_err(),
+            "chat_deferred_tools_pending"
+        );
+        assert_eq!(
+            std::fs::read(&wrong_result.path).unwrap(),
+            wrong_result.original
+        );
+        let resolved = transcript_fixture(true, Some("toolu_pending")).await;
+        assert!(resolved.replayed.runtime_metadata.deferred_tools.is_empty());
+        assert!(validate_local_app_chat_resume(&resolved.replayed).is_ok());
+        assert_eq!(std::fs::read(&resolved.path).unwrap(), resolved.original);
+    }
+
+    #[tokio::test]
+    async fn ordinary_chat_without_deferred_tools_remains_resumable() {
+        let fixture = transcript_fixture(false, None).await;
+        assert!(fixture.replayed.runtime_metadata.deferred_tools.is_empty());
+        assert!(validate_local_app_chat_resume(&fixture.replayed).is_ok());
+        assert!(fixture
+            .replayed
+            .display_history
+            .iter()
+            .any(|row| row.text_content().contains("inspect the saved session")));
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), fixture.original);
     }
 }

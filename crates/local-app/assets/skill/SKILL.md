@@ -149,6 +149,30 @@ as `threadId`, and send a fresh `runId` for each turn. Chat history is paged as
 `{messages: Message[], nextCursor?}`. The host owns the real Harness transcript;
 client-provided history must match canonical messages.
 
+Chat creation is a LingXi host operation, separate from the AG-UI
+run protocol. Generate a lowercase UUIDv4 `requestId` and persist it with the
+exact creation options before calling `chats.create({requestId, title?})`.
+Omitted title and an explicitly supplied title are distinct inputs; the returned
+handle ID equals `requestId`. A lost response or timeout does not prove that
+creation failed. On reopening the same App revision in the same browser origin,
+recover saved options with `chats.pendingCreations()` and use only
+`chats.creationStatus({requestId, title?})` to check; `null` means not currently
+observed and the original request may still arrive. Never automatically replay
+create. Only an explicit user retry may call `create` with the same saved ID and
+unchanged options. A different input conflicts, and a deleted Chat cannot be
+recreated with the same ID. `chats.forgetCreation(requestId)` removes a resolved
+browser receipt, not the Chat. Receipts are partitioned by App and revision.
+If the App revision changes, browser storage is cleared, or the original ID is
+lost, show the Chat list for the user to inspect rather than guessing a match.
+If `chats.list` reports `unavailableChats`, show those IDs as unavailable
+without deleting or replacing them automatically. Its `nextCursor` covers both
+available and unavailable Chats; `hasUncertainChats: true` reports an issue
+anywhere in the App, not just the current page. An absent flag means the host
+did not report that detail, not that every Chat was verified.
+If existing Agent or Chat storage has an unsupported or unverifiable format,
+or a required marker is missing, show it as unavailable, preserve the existing
+data, and never automatically delete or recreate it.
+
 For a Mobile independent Agent task or any independent request that needs
 recovery, use `tasks.start` with the same official input, then
 `tasks.get/list/events/subscribe/cancel`. Task metadata includes `threadId` and
@@ -159,8 +183,9 @@ the fresh `runId` before sending, and use `chats.open(threadId)` on return.
 Then reconnect read-only with
 `createClient({threadId}).connectAgent({runId})`; a reload never submits another
 model request. Identical input with the same `runId` is idempotent; changed input
-under that ID is rejected. Do not use the retired prompt/attachments/requestId
-or custom state-event protocol. Old Agent records are discarded, not converted.
+under that ID is rejected. Do not use the retired Agent-run
+prompt/attachments/requestId or custom state-event protocol. Old Agent records
+are discarded, not converted.
 
 Treat an immediate `tasks.get` `task_not_found` as a lookup miss, not a model
 outcome. Keep the exact saved input and `runId`; retry only read-only lookup or

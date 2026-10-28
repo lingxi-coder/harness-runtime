@@ -282,11 +282,16 @@ impl AppAgentState {
         };
         owner.validate().map_err(|_| "invalid_app")?;
         let legacy_root = app_root.join(app_id).join("agent");
+        // Inspect an existing Chat index before AgentStore recovery can modify
+        // task records or protocol events. Never initialize over an index we
+        // cannot interpret.
+        ChatStore::preflight_existing_index(&legacy_root.join("agui-v1"))
+            .map_err(chat_store_open_error)?;
         let root = initialize_agui_agent_store(&legacy_root)?;
         let store = Arc::new(
             AgentStore::open(&root.join("tasks")).map_err(|_| "agent_storage_unavailable")?,
         );
-        let chats = Arc::new(ChatStore::open(&root).map_err(|_| "agent_storage_unavailable")?);
+        let chats = Arc::new(ChatStore::open(&root).map_err(chat_store_open_error)?);
         let task_states = store
             .recovery_states(app_id)
             .map_err(|_| "agent_storage_unavailable")?;
@@ -297,10 +302,16 @@ impl AppAgentState {
     }
 }
 
-/// Create a fresh AG-UI 1.0 store once per App. The caller (`attach_agent_factory`)
-/// stops the previous executor before constructing a replacement, so known
-/// prototype task/chat journals can be removed without touching release files,
-/// app data, upload spools, or directories supplied by page input.
+fn chat_store_open_error(error: local_app::v2::AppError) -> &'static str {
+    match error {
+        local_app::v2::AppError::ChatLegacyIndexUnsupported => "chat_legacy_index_unsupported",
+        local_app::v2::AppError::ChatStorageUncertain => "chat_storage_uncertain",
+        _ => "agent_storage_unavailable",
+    }
+}
+
+/// Create a fresh AG-UI 1.0 store once per App, while retaining any older
+/// Agent data that cannot be identified as safe to discard.
 fn initialize_agui_agent_store(agent_root: &Path) -> Result<PathBuf, String> {
     ensure_agent_directory(agent_root)?;
     let store_root = agent_root.join("agui-v1");
@@ -326,6 +337,10 @@ fn initialize_agui_agent_store(agent_root: &Path) -> Result<PathBuf, String> {
                     {
                         return Err("agent_protocol_store_version_mismatch".into());
                     }
+                    // The marker only identifies the new subdirectory. An
+                    // older sibling store can still hold user data and must
+                    // be surfaced before any task recovery or cleanup runs.
+                    reject_existing_legacy_agent_data(agent_root)?;
                     return Ok(store_root);
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -336,13 +351,13 @@ fn initialize_agui_agent_store(agent_root: &Path) -> Result<PathBuf, String> {
                     {
                         return Err("agent_protocol_store_marker_missing".into());
                     }
-                    purge_prototype_agent_store(agent_root)?;
+                    reject_existing_legacy_agent_data(agent_root)?;
                 }
                 Err(_) => return Err("agent_storage_unavailable".into()),
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            purge_prototype_agent_store(agent_root)?;
+            reject_existing_legacy_agent_data(agent_root)?;
             create_agent_directory(&store_root)?;
         }
         Err(_) => return Err("agent_storage_unavailable".into()),
@@ -403,88 +418,17 @@ fn create_agent_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn purge_prototype_agent_store(agent_root: &Path) -> Result<(), String> {
-    let task_root = agent_root.join("tasks");
-    match std::fs::symlink_metadata(&task_root) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return Err("agent_storage_unavailable".into());
+fn reject_existing_legacy_agent_data(agent_root: &Path) -> Result<(), String> {
+    // These paths may contain real user data. A filename or UUID alone cannot
+    // prove that deleting it is safe, so leave the whole old store untouched.
+    for name in ["tasks", "chats", "chats-index.json", "protocol-events"] {
+        match std::fs::symlink_metadata(agent_root.join(name)) {
+            Ok(_) => return Err("agent_legacy_store_unsupported".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("agent_storage_unavailable".into()),
         }
-        Ok(_) => {
-            for entry in std::fs::read_dir(&task_root).map_err(|_| "agent_storage_unavailable")? {
-                let entry = entry.map_err(|_| "agent_storage_unavailable")?;
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                let metadata = std::fs::symlink_metadata(entry.path())
-                    .map_err(|_| "agent_storage_unavailable")?;
-                if metadata.file_type().is_symlink() {
-                    return Err("agent_storage_unavailable".into());
-                }
-                if name == "agent-tasks.json" && metadata.is_file() {
-                    std::fs::remove_file(entry.path()).map_err(|_| "agent_storage_unavailable")?;
-                } else if metadata.is_dir()
-                    && uuid::Uuid::parse_str(name.as_ref())
-                        .is_ok_and(|uuid| uuid.to_string() == name)
-                {
-                    std::fs::remove_dir_all(entry.path())
-                        .map_err(|_| "agent_storage_unavailable")?;
-                }
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err("agent_storage_unavailable".into()),
     }
-    let chats_root = agent_root.join("chats");
-    match std::fs::symlink_metadata(&chats_root) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return Err("agent_storage_unavailable".into());
-        }
-        Ok(_) => {
-            for entry in std::fs::read_dir(&chats_root).map_err(|_| "agent_storage_unavailable")? {
-                let entry = entry.map_err(|_| "agent_storage_unavailable")?;
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                let metadata = std::fs::symlink_metadata(entry.path())
-                    .map_err(|_| "agent_storage_unavailable")?;
-                if metadata.file_type().is_symlink() {
-                    return Err("agent_storage_unavailable".into());
-                }
-                if metadata.is_dir()
-                    && uuid::Uuid::parse_str(name.as_ref())
-                        .is_ok_and(|uuid| uuid.to_string() == name)
-                {
-                    std::fs::remove_dir_all(entry.path())
-                        .map_err(|_| "agent_storage_unavailable")?;
-                }
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err("agent_storage_unavailable".into()),
-    }
-    remove_known_agent_file(&agent_root.join("chats-index.json"))?;
-    remove_known_agent_directory(&agent_root.join("protocol-events"))?;
     Ok(())
-}
-
-fn remove_known_agent_file(path: &Path) -> Result<(), String> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            Err("agent_storage_unavailable".into())
-        }
-        Ok(_) => std::fs::remove_file(path).map_err(|_| "agent_storage_unavailable".into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err("agent_storage_unavailable".into()),
-    }
-}
-
-fn remove_known_agent_directory(path: &Path) -> Result<(), String> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            Err("agent_storage_unavailable".into())
-        }
-        Ok(_) => std::fs::remove_dir_all(path).map_err(|_| "agent_storage_unavailable".into()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err("agent_storage_unavailable".into()),
-    }
 }
 
 impl Control {
@@ -853,10 +797,17 @@ impl AppAgentHost {
             .list()
             .map_err(|_| "agent_storage_unavailable")?
         {
-            apps.insert(
-                record.app_id.clone(),
-                Arc::new(AppAgentState::open(&apps_root, &record.app_id)?),
-            );
+            match AppAgentState::open(&apps_root, &record.app_id) {
+                Ok(state) => {
+                    apps.insert(record.app_id.clone(), Arc::new(state));
+                }
+                Err(code) => {
+                    // Keep other Apps available. A later request for this App
+                    // retries opening it and returns the same scoped error.
+                    tracing::warn!(app_id = %record.app_id, error_code = %code,
+                        "Local App Agent storage is unavailable");
+                }
+            }
         }
         Ok(Arc::new(Self {
             service: Arc::downgrade(service),
@@ -1073,11 +1024,11 @@ impl AppAgentHost {
                 let task = state
                     .store
                     .get_by_request(&owner, id)
-                    .map_err(|_| "task_not_found")?;
+                    .map_err(task_access_error)?;
                 let thread_id = state
                     .store
                     .thread_id_for_request(&owner, id)
-                    .map_err(|_| "task_not_found")?;
+                    .map_err(task_access_error)?;
                 public_task_value(&task, thread_id)
             }
             "agent.tasks.list" => {
@@ -1093,11 +1044,11 @@ impl AppAgentHost {
                 let task = state
                     .store
                     .get_by_request(&owner, id)
-                    .map_err(|_| "task_not_found")?;
+                    .map_err(task_access_error)?;
                 state
                     .store
                     .request_cancel(&owner, &task.run_id)
-                    .map_err(|_| "task_not_found")?;
+                    .map_err(task_access_error)?;
                 self.cancel_ids(&[task.run_id]).await;
                 Ok(Value::Null)
             }
@@ -1116,17 +1067,9 @@ impl AppAgentHost {
                     .map_err(|_| "agent_events_unavailable")?;
                 serde_json::to_value(page).map_err(|_| "agent_events_unavailable".into())
             }
-            "agent.chats.create" => {
-                reject_unknown(&args, &["title"])?;
-                let title = args.get("title").and_then(Value::as_str);
+            "agent.chats.create" | "agent.chats.creationStatus" => {
                 let state = self.app_state(app)?;
-                serde_json::to_value(
-                    state
-                        .chats
-                        .create(title, &uuid::Uuid::new_v4().to_string())
-                        .map_err(|_| "chat_storage_unavailable")?,
-                )
-                .map_err(|_| "invalid_chat".into())
+                chat_creation_value(&state.chats, &args, method == "agent.chats.creationStatus")
             }
             "agent.chats.get" => {
                 let chat_id = required_string(&args, "chatId")?;
@@ -1221,7 +1164,7 @@ impl AppAgentHost {
                     state
                         .store
                         .request_cancel(&owner, &run_id)
-                        .map_err(|_| "task_not_found")?;
+                        .map_err(task_access_error)?;
                     self.cancel_ids(&[run_id]).await;
                 }
                 Ok(Value::Null)
@@ -1819,7 +1762,7 @@ impl AppAgentHost {
                 .chats
                 .transcript_path(chat_id)
                 .map_err(|_| "chat_storage_unavailable")?;
-            let replayed = if transcript_path.is_file() {
+            let replayed = if checked_chat_transcript_exists(&transcript_path)? {
                 let replayed = orchestrator::resume::replay_session_state_from_path(
                     &transcript_path,
                     session_uuid,
@@ -1827,6 +1770,10 @@ impl AppAgentHost {
                 )
                 .await
                 .map_err(|_| "chat_transcript_unavailable")?;
+                // A generic orchestrator resume can replay unresolved deferred
+                // hook tools. Refuse before even reconciling transcript rows
+                // into Chat metadata; a user must review the saved history.
+                super::validate_local_app_chat_resume(&replayed)?;
                 recover_chat_message_metadata(&control.chats, chat_id, &replayed)?;
                 Some(replayed)
             } else {
@@ -2062,6 +2009,21 @@ impl AppAgentHost {
             super::lifecycle::wait_for_completion(&control.done, &control.finished).await;
         }
     }
+
+    async fn expire_background_control(&self, control: &Arc<Control>) -> Result<(), String> {
+        // The store serializes this intent with terminal publication and
+        // refuses further access if its persistence outcome is uncertain.
+        // Revoke even when persistence fails; a storage failure cannot grant
+        // an expired background execution more time or tool authority.
+        let persisted = control
+            .store
+            .request_background_expiration(&control.owner, &control.id);
+        control.revoke();
+        control.interaction.lock().await.take();
+        super::lifecycle::wait_for_completion(&control.done, &control.finished).await;
+        persisted.map_err(|_| "agent_storage_unavailable".into())
+    }
+
     pub async fn stop_all(&self) -> Result<(), String> {
         let _serial = self.admission.lock().await;
         self.shutdown.store(true, Ordering::Release);
@@ -2180,12 +2142,24 @@ impl AppAgentHost {
             "wake.clear" => {
                 reject_unknown(
                     &request,
-                    &["op", "appId", "revision", "runId", "reservationId"],
+                    &[
+                        "op",
+                        "appId",
+                        "revision",
+                        "runId",
+                        "reservationId",
+                        "reason",
+                    ],
                 )?;
                 let app = required_string(&request, "appId")?;
                 let revision = request["revision"].as_u64().ok_or("invalid_revision")?;
                 let run_id_request = required_string(&request, "runId")?;
                 let reservation_id = required_string(&request, "reservationId")?;
+                let system_expiration = match request.get("reason") {
+                    None => false,
+                    Some(Value::String(reason)) if reason == "system_expiration" => true,
+                    Some(_) => return Err("invalid_wake_clear_reason".into()),
+                };
                 uuid::Uuid::parse_str(reservation_id).map_err(|_| "invalid_reservation_id")?;
                 validate_request_id(run_id_request)?;
                 let _serial = self.admission.lock().await;
@@ -2207,7 +2181,11 @@ impl AppAgentHost {
                             && control.revision == revision
                             && control.request_id == run_id_request
                         {
-                            self.cancel_ids(&[run_id]).await;
+                            if system_expiration {
+                                self.expire_background_control(&control).await?;
+                            } else {
+                                self.cancel_ids(&[run_id]).await;
+                            }
                         }
                     }
                 }
@@ -2341,7 +2319,7 @@ impl AppAgentHost {
                     state
                         .store
                         .request_cancel(&owner, id)
-                        .map_err(|_| "task_not_found")?;
+                        .map_err(task_access_error)?;
                 }
                 self.cancel_ids(&ids).await;
                 Ok(Value::Null)
@@ -2595,7 +2573,7 @@ async fn persist_chat_user_row(
     let transcript_path = chats
         .transcript_path(chat_id)
         .map_err(|_| "chat_storage_unavailable")?;
-    if !transcript_path.is_file() {
+    if !checked_chat_transcript_exists(&transcript_path)? {
         return Err("chat_transcript_unavailable".into());
     }
     let session_id = chats.session_id(chat_id).map_err(|_| "chat_not_found")?;
@@ -2604,6 +2582,7 @@ async fn persist_chat_user_row(
         orchestrator::resume::replay_session_state_from_path(&transcript_path, session_uuid, fs)
             .await
             .map_err(|_| "chat_transcript_unavailable")?;
+    super::validate_local_app_chat_resume(&replayed)?;
     let persisted_user_rows = replayed
         .display_history
         .iter()
@@ -3056,6 +3035,97 @@ mod inventory_page_tests {
     }
 
     #[test]
+    fn chat_create_and_status_use_an_app_scoped_exact_request_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let app = format!("a{}", "5".repeat(32));
+        let other = format!("a{}", "6".repeat(32));
+        std::fs::create_dir_all(root.path().join(&app)).unwrap();
+        std::fs::create_dir_all(root.path().join(&other)).unwrap();
+        let state = AppAgentState::open(root.path(), &app).unwrap();
+        let other_state = AppAgentState::open(root.path(), &other).unwrap();
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let args = json!({"requestId":id, "title":"  Budget  "});
+        assert_eq!(
+            chat_creation_value(&state.chats, &args, true).unwrap(),
+            Value::Null
+        );
+        let created = chat_creation_value(&state.chats, &args, false).unwrap();
+        assert_eq!(created["chatId"], id);
+        assert_eq!(
+            chat_creation_value(&state.chats, &args, false).unwrap(),
+            created
+        );
+        assert_eq!(
+            chat_creation_value(&state.chats, &args, true).unwrap(),
+            created
+        );
+        assert_eq!(
+            chat_creation_value(&other_state.chats, &args, true).unwrap(),
+            Value::Null
+        );
+        let other_created = chat_creation_value(&other_state.chats, &args, false).unwrap();
+        assert_eq!(other_created["chatId"], id);
+
+        let changed_title = json!({"requestId":id, "title":"Budget"});
+        assert_eq!(
+            chat_creation_value(&state.chats, &changed_title, false).unwrap_err(),
+            "chat_create_conflict"
+        );
+        assert_eq!(
+            chat_creation_value(&state.chats, &changed_title, true).unwrap_err(),
+            "chat_create_conflict"
+        );
+        state.chats.delete(id).unwrap();
+        assert_eq!(
+            chat_creation_value(&state.chats, &args, false).unwrap_err(),
+            "chat_create_deleted"
+        );
+        assert_eq!(
+            chat_creation_value(&state.chats, &args, true).unwrap_err(),
+            "chat_create_deleted"
+        );
+        assert_eq!(
+            chat_creation_value(&other_state.chats, &args, true).unwrap(),
+            other_created
+        );
+    }
+
+    #[test]
+    fn chat_create_and_status_reject_malformed_or_ambiguous_arguments() {
+        let root = tempfile::tempdir().unwrap();
+        let app = format!("a{}", "5".repeat(32));
+        std::fs::create_dir_all(root.path().join(&app)).unwrap();
+        let state = AppAgentState::open(root.path(), &app).unwrap();
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let invalid = [
+            json!({}),
+            json!({"requestId":null}),
+            json!({"requestId":"AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"}),
+            json!({"requestId":"aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"}),
+            json!({"requestId":"aaaaaaaa-aaaa-1aaa-8aaa-aaaaaaaaaaaa"}),
+            json!({"requestId":"aaaaaaaa-aaaa-4aaa-0aaa-aaaaaaaaaaaa"}),
+            json!({"requestId":id, "title":null}),
+            json!({"requestId":id, "title":true}),
+            json!({"requestId":id, "title":""}),
+            json!({"requestId":id, "title":"unsafe\nname"}),
+            json!({"requestId":id, "title":"x".repeat(513)}),
+            json!({"requestId":id, "unknown":true}),
+        ];
+        for value in invalid {
+            for status_only in [false, true] {
+                assert_eq!(
+                    chat_creation_value(&state.chats, &value, status_only).unwrap_err(),
+                    "invalid_chat"
+                );
+            }
+        }
+        assert_eq!(
+            chat_creation_value(&state.chats, &json!({"requestId":id}), true).unwrap(),
+            Value::Null
+        );
+    }
+
+    #[test]
     fn host_chat_inventory_returns_named_filtered_pages_without_duplicates() {
         let root = tempfile::tempdir().unwrap();
         let app_id = format!("a{}", "5".repeat(32));
@@ -3066,6 +3136,7 @@ mod inventory_page_tests {
                 state
                     .chats
                     .create(
+                        &uuid::Uuid::new_v4().to_string(),
                         Some(&format!("chat-{index}")),
                         &uuid::Uuid::new_v4().to_string(),
                     )
@@ -3117,6 +3188,64 @@ fn required_string<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| format!("invalid_{key}"))
+}
+
+fn checked_chat_transcript_exists(path: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(_) => Err("chat_transcript_unavailable".into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err("chat_transcript_unavailable".into()),
+    }
+}
+
+fn task_access_error(error: local_app::v2::AppError) -> &'static str {
+    match error {
+        local_app::v2::AppError::NotFound(_) => "task_not_found",
+        _ => "agent_storage_unavailable",
+    }
+}
+
+fn chat_creation_value(
+    chats: &ChatStore,
+    args: &Value,
+    status_only: bool,
+) -> Result<Value, String> {
+    reject_unknown(args, &["requestId", "title"]).map_err(|_| "invalid_chat")?;
+    let request_id = args
+        .get("requestId")
+        .and_then(Value::as_str)
+        .ok_or("invalid_chat")?;
+    let uuid = uuid::Uuid::parse_str(request_id).map_err(|_| "invalid_chat")?;
+    if uuid.to_string() != request_id
+        || uuid.get_version_num() != 4
+        || uuid.get_variant() != uuid::Variant::RFC4122
+    {
+        return Err("invalid_chat".into());
+    }
+    let title = match args.get("title") {
+        None => None,
+        Some(Value::String(title)) => Some(title.as_str()),
+        Some(_) => return Err("invalid_chat".into()),
+    };
+    let map_error = |error| match error {
+        local_app::v2::AppError::ChatCreateConflict => "chat_create_conflict",
+        local_app::v2::AppError::ChatCreateDeleted => "chat_create_deleted",
+        local_app::v2::AppError::ChatStorageUncertain => "chat_storage_uncertain",
+        local_app::v2::AppError::Invalid(_) => "invalid_chat",
+        _ => "chat_storage_unavailable",
+    };
+    if status_only {
+        let status = chats
+            .creation_status(request_id, title)
+            .map_err(map_error)?;
+        serde_json::to_value(status).map_err(|_| "invalid_chat".into())
+    } else {
+        let chat = chats
+            .create(request_id, title, &uuid::Uuid::new_v4().to_string())
+            .map_err(map_error)?;
+        serde_json::to_value(chat).map_err(|_| "invalid_chat".into())
+    }
 }
 
 fn reject_unknown(value: &Value, allowed: &[&str]) -> Result<(), String> {
@@ -3265,6 +3394,217 @@ mod progress_tests {
         (host, service)
     }
 
+    #[tokio::test]
+    async fn unavailable_app_storage_does_not_block_other_apps_or_modify_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let (initial_host, service) = test_wake_host(root.path()).await;
+        let mut published_apps = Vec::new();
+        for name in [
+            "old-index",
+            "corrupt-index",
+            "old-agent",
+            "bad-chat-root",
+            "healthy",
+        ] {
+            let source = root.path().join(name);
+            std::fs::create_dir(&source).unwrap();
+            std::fs::write(source.join("index.html"), "fixture").unwrap();
+            std::fs::write(
+                source.join("lingxi-app.json"),
+                json!({
+                    "schema":2,"name":name,"entry":{"type":"static","path":"index.html"},
+                    "targets":[{"platform":"ios","environment":"web"}],
+                    "capabilities":["agent"],"agent":{"tools":[]}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let published = service
+                .request_value(json!({"op":"publish", "expectedRevision":0, "sourcePath":source}))
+                .await
+                .unwrap();
+            published_apps.push((
+                published["record"]["appId"].as_str().unwrap().to_owned(),
+                published["record"]["currentRevision"].as_u64().unwrap(),
+            ));
+        }
+
+        let apps_root = service.library.root().join("apps");
+        let mut evidence = Vec::new();
+        for (index, (app_id, _)) in published_apps.iter().take(4).enumerate() {
+            let state = AppAgentState::open(&apps_root, app_id).unwrap();
+            let owner = Owner {
+                app_id: app_id.clone(),
+                release_digest: "2".repeat(64),
+                invocation_id: "before-restart".into(),
+            };
+            let settings: Settings = serde_json::from_value(json!({
+                "model":{"providerId":"provider","modelId":"model"},"tools":{},"skills":[],
+                "background":false,"maxTurns":4,"timeoutMs":30000
+            }))
+            .unwrap();
+            state
+                .store
+                .configure(owner.clone(), Some(settings))
+                .unwrap();
+            let mut input: Input = serde_json::from_value(json!({
+                "requestId":"existing-run", "prompt":"preserve this run"
+            }))
+            .unwrap();
+            input.protocol_thread_id = Some("existing-thread".into());
+            let task = state.store.admit(&owner, &input, &[]).unwrap().task;
+            state
+                .store
+                .update(&owner, &task.run_id, State::Running, None, None, None)
+                .unwrap();
+            state
+                .store
+                .append_event(
+                    &owner,
+                    &task.run_id,
+                    json!({
+                        "type":"RUN_STARTED", "threadId":"existing-thread", "runId":"existing-run"
+                    }),
+                )
+                .unwrap();
+            let chat_id = uuid::Uuid::new_v4().to_string();
+            let session_id = uuid::Uuid::new_v4().to_string();
+            state.chats.create(&chat_id, None, &session_id).unwrap();
+            let transcript = state.chats.transcript_path(&chat_id).unwrap();
+            std::fs::write(&transcript, b"preserve prior transcript\n").unwrap();
+            let index_path = state.root.join("chats-index.json");
+            let mut chat_index: Value =
+                serde_json::from_slice(&std::fs::read(&index_path).unwrap()).unwrap();
+            if index == 0 {
+                chat_index.as_object_mut().unwrap().remove("creations");
+            } else if index == 1 {
+                chat_index["creations"] = json!({});
+            }
+            std::fs::write(&index_path, serde_json::to_vec(&chat_index).unwrap()).unwrap();
+            let ledger_path = state.root.join("tasks/agent-tasks.json");
+            let events_path = state
+                .root
+                .join("tasks/protocol-events")
+                .join(format!("{}.jsonl", task.run_id));
+            let transcript = if index == 3 {
+                let chat_root = state.root.join("chats");
+                let displaced = state.root.join("preserved-chat-data");
+                std::fs::rename(&chat_root, &displaced).unwrap();
+                std::fs::write(&chat_root, b"not a directory").unwrap();
+                evidence.push((chat_root.clone(), std::fs::read(&chat_root).unwrap()));
+                displaced.join(chat_id).join(format!("{session_id}.jsonl"))
+            } else {
+                transcript
+            };
+            for path in [
+                index_path,
+                ledger_path,
+                events_path,
+                transcript,
+                state.root.join("protocol-store.json"),
+            ] {
+                evidence.push((path.clone(), std::fs::read(&path).unwrap()));
+            }
+        }
+        let old_agent = apps_root.join(&published_apps[2].0).join("agent");
+        std::fs::create_dir_all(old_agent.join("chats")).unwrap();
+        let old_index = old_agent.join("chats-index.json");
+        let old_transcript = old_agent.join("chats/previous-transcript.jsonl");
+        std::fs::write(&old_index, b"legacy index bytes").unwrap();
+        std::fs::write(&old_transcript, b"legacy transcript bytes").unwrap();
+        for path in [old_index, old_transcript] {
+            evidence.push((path.clone(), std::fs::read(&path).unwrap()));
+        }
+
+        let factory = initial_host.factory.clone();
+        drop(initial_host);
+        let host = AppAgentHost::new(&service, factory, root.path()).unwrap();
+        assert_eq!(host.apps.lock().unwrap().len(), 1);
+        for (index, expected) in [
+            "chat_legacy_index_unsupported",
+            "chat_storage_uncertain",
+            "agent_legacy_store_unsupported",
+            "chat_storage_uncertain",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (app_id, revision) = &published_apps[index];
+            assert_eq!(host.app_state(app_id).err().as_deref(), Some(expected));
+            assert_eq!(
+                host.host(
+                    json!({"op":"wake.reserve", "appId":app_id, "revision":revision,
+                    "runId":"new-run", "receiveTimeoutMs":120000})
+                )
+                .await
+                .err()
+                .as_deref(),
+                Some(expected)
+            );
+        }
+        for (path, before) in evidence {
+            assert_eq!(std::fs::read(path).unwrap(), before);
+        }
+        assert!(old_agent.join("agui-v1/protocol-store.json").is_file());
+
+        let (app_id, revision) = &published_apps[4];
+        let (owner, _, _) = host
+            .current_release(app_id, *revision, "healthy")
+            .await
+            .unwrap();
+        let settings: Settings = serde_json::from_value(json!({
+            "model":{"providerId":"provider","modelId":"model"},"tools":{},"skills":[],
+            "background":false,"maxTurns":4,"timeoutMs":30000
+        }))
+        .unwrap();
+        let state = host.app_state(app_id).unwrap();
+        state
+            .store
+            .configure(owner.clone(), Some(settings))
+            .unwrap();
+        let receipt = host
+            .host(
+                json!({"op":"wake.reserve", "appId":app_id, "revision":revision,
+            "runId":"healthy-run", "receiveTimeoutMs":120000}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(receipt["created"], true);
+        host.force_wake_policy.store(true, Ordering::Release);
+        let mut input: Input = serde_json::from_value(json!({
+            "requestId":"healthy-run", "prompt":"healthy app remains usable"
+        }))
+        .unwrap();
+        input.protocol_thread_id = Some("healthy-thread".into());
+        let id = host
+            .start_task(
+                owner.clone(),
+                *revision,
+                &[],
+                &[],
+                input,
+                None,
+                None,
+                CancellationToken::new(),
+                true,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            state
+                .store
+                .get_by_request(&owner, "healthy-run")
+                .unwrap()
+                .run_id,
+            id
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(10), host.stop_all())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     fn configured_wake_fixture(host: &AppAgentHost) -> (Owner, Input, WakeKey, Arc<AppAgentState>) {
         let app_id = format!("a{}", "8".repeat(32));
         std::fs::create_dir_all(host.apps_root.join(&app_id)).unwrap();
@@ -3298,6 +3638,53 @@ mod progress_tests {
             .unwrap();
         host.force_wake_policy.store(true, Ordering::Release);
         (owner, input, key, state)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn chat_transcript_only_treats_a_missing_file_as_new() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing.jsonl");
+        assert!(!checked_chat_transcript_exists(&missing).unwrap());
+        let regular = root.path().join("regular.jsonl");
+        std::fs::write(&regular, b"existing transcript").unwrap();
+        assert!(checked_chat_transcript_exists(&regular).unwrap());
+        let directory = root.path().join("directory.jsonl");
+        std::fs::create_dir(&directory).unwrap();
+        assert_eq!(
+            checked_chat_transcript_exists(&directory).unwrap_err(),
+            "chat_transcript_unavailable"
+        );
+        let link = root.path().join("link.jsonl");
+        symlink(&regular, &link).unwrap();
+        assert_eq!(
+            checked_chat_transcript_exists(&link).unwrap_err(),
+            "chat_transcript_unavailable"
+        );
+        let dangling = root.path().join("dangling.jsonl");
+        symlink(&missing, &dangling).unwrap();
+        assert_eq!(
+            checked_chat_transcript_exists(&dangling).unwrap_err(),
+            "chat_transcript_unavailable"
+        );
+
+        let inaccessible = root.path().join("inaccessible");
+        std::fs::create_dir(&inaccessible).unwrap();
+        let hidden = inaccessible.join("hidden.jsonl");
+        std::fs::write(&hidden, b"preserved").unwrap();
+        std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let metadata_denied = std::fs::symlink_metadata(&hidden).is_err();
+        let result = checked_chat_transcript_exists(&hidden);
+        std::fs::set_permissions(&inaccessible, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if metadata_denied {
+            assert_eq!(result.unwrap_err(), "chat_transcript_unavailable");
+        } else {
+            // Some privileged test environments bypass directory mode bits.
+            assert!(result.unwrap());
+        }
+        assert_eq!(std::fs::read(&hidden).unwrap(), b"preserved");
     }
 
     #[tokio::test]
@@ -3746,6 +4133,498 @@ mod progress_tests {
         // Replacement construction still succeeds after the real clear/reap path.
         let replacement = AppAgentHost::new(&service, host.factory.clone(), root.path()).unwrap();
         assert!(!replacement.shutdown.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn system_expiration_cancels_only_the_owned_wake_and_emits_run_error() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, _) = test_wake_host(root.path()).await;
+        let control = Arc::new(running_control_with_protocol(root.path(), true));
+        let key = WakeKey {
+            app_id: control.owner.app_id.clone(),
+            revision: control.revision,
+            request_id: control.request_id.clone(),
+        };
+        let (old, current) = {
+            let mut registry = host.wake_reservations.lock().unwrap();
+            let old = registry.reserve(key.clone(), 100, 10).unwrap();
+            let current = registry.reserve(key.clone(), 110, 100).unwrap();
+            assert!(registry.claim(&key, 111));
+            assert!(registry.consume(&key, 111, &control.id));
+            (old, current)
+        };
+        host.active
+            .lock()
+            .await
+            .insert(control.id.clone(), control.clone());
+        let clear = |reservation_id: &str, reason: Value| {
+            json!({"op":"wake.clear", "appId":key.app_id, "revision":key.revision,
+                "runId":key.request_id, "reservationId":reservation_id, "reason":reason})
+        };
+        assert_eq!(
+            host.host(clear(&current.reservation_id, json!("user_cancelled")))
+                .await
+                .unwrap_err(),
+            "invalid_wake_clear_reason"
+        );
+        host.host(clear(&old.reservation_id, json!("system_expiration")))
+            .await
+            .unwrap();
+        assert!(
+            !control.cancel.is_cancelled(),
+            "An old token cannot affect the new run"
+        );
+        assert_eq!(
+            control
+                .store
+                .get(&control.owner, &control.id)
+                .unwrap()
+                .state,
+            State::Running
+        );
+
+        let worker_host = host.clone();
+        let worker_control = control.clone();
+        let worker = tokio::spawn(async move {
+            worker_control.cancel.cancelled().await;
+            let completed = TaskResult {
+                text: "A result that raced with expiration".into(),
+                output: None,
+                attachments: Vec::new(),
+                chat_id: None,
+                message_id: Some("assistant-raced".into()),
+            };
+            let (task, event_failed) = worker_control
+                .commit_terminal(State::Succeeded, Some(completed), None, None)
+                .unwrap();
+            assert!(!event_failed);
+            worker_host.active.lock().await.remove(&worker_control.id);
+            worker_control.finished.store(true, Ordering::Release);
+            worker_control.done.notify_waiters();
+            task
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            host.host(clear(&current.reservation_id, json!("system_expiration"))),
+        )
+        .await
+        .expect("expiration must release the active-map guard before waiting")
+        .unwrap();
+        let task = worker.await.unwrap();
+        assert_eq!(task.state, State::Interrupted);
+        assert!(
+            task.result.is_none(),
+            "Expiration must not publish the raced result"
+        );
+        assert_eq!(task.error.unwrap().code, "ios_background_expired");
+        let events = control
+            .store
+            .protocol_events(&control.owner, &control.request_id, 0)
+            .unwrap();
+        assert_eq!(events.events.last().unwrap()["type"], "RUN_ERROR");
+        assert_eq!(
+            events.events.last().unwrap()["code"],
+            "ios_background_expired"
+        );
+        host.host(clear(&current.reservation_id, json!("system_expiration")))
+            .await
+            .unwrap();
+        assert!(host.active.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn expiration_does_not_overwrite_an_already_committed_success() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, _) = test_wake_host(root.path()).await;
+        let control = Arc::new(running_control_with_protocol(root.path(), true));
+        let key = WakeKey {
+            app_id: control.owner.app_id.clone(),
+            revision: control.revision,
+            request_id: control.request_id.clone(),
+        };
+        let receipt = {
+            let mut registry = host.wake_reservations.lock().unwrap();
+            let now = now_millis();
+            let receipt = registry.reserve(key.clone(), now, 120_000).unwrap();
+            assert!(registry.claim(&key, now));
+            assert!(registry.consume(&key, now, &control.id));
+            receipt
+        };
+        host.active
+            .lock()
+            .await
+            .insert(control.id.clone(), control.clone());
+        let result = TaskResult {
+            text: "Already completed".into(),
+            output: None,
+            attachments: Vec::new(),
+            chat_id: None,
+            message_id: Some("assistant-complete".into()),
+        };
+        let (committed, event_failed) = control
+            .commit_terminal(State::Succeeded, Some(result.clone()), None, None)
+            .unwrap();
+        assert!(!event_failed);
+        assert_eq!(committed.state, State::Succeeded);
+        // The executor has committed but has not yet removed this Control.
+        control.finished.store(true, Ordering::Release);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            host.host(
+                json!({"op":"wake.clear", "appId":key.app_id, "revision":key.revision,
+                "runId":key.request_id, "reservationId":receipt.reservation_id,
+                "reason":"system_expiration"}),
+            ),
+        )
+        .await
+        .expect("expiration must finish after the committed success")
+        .unwrap();
+        let after = control.store.get(&control.owner, &control.id).unwrap();
+        assert_eq!(after.state, State::Succeeded);
+        assert_eq!(after.result, Some(result));
+        let events = control
+            .store
+            .protocol_events(&control.owner, &control.request_id, 0)
+            .unwrap();
+        assert_eq!(events.events.last().unwrap()["type"], "RUN_FINISHED");
+        assert_eq!(events.events.last().unwrap()["outcome"]["type"], "success");
+    }
+
+    #[tokio::test]
+    async fn expiration_does_not_replace_a_previously_requested_cancel() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, _) = test_wake_host(root.path()).await;
+        let control = Arc::new(running_control_with_protocol(root.path(), true));
+        let key = WakeKey {
+            app_id: control.owner.app_id.clone(),
+            revision: control.revision,
+            request_id: control.request_id.clone(),
+        };
+        let receipt = {
+            let mut registry = host.wake_reservations.lock().unwrap();
+            let now = now_millis();
+            let receipt = registry.reserve(key.clone(), now, 120_000).unwrap();
+            assert!(registry.claim(&key, now));
+            assert!(registry.consume(&key, now, &control.id));
+            receipt
+        };
+        host.active
+            .lock()
+            .await
+            .insert(control.id.clone(), control.clone());
+        control
+            .store
+            .request_cancel(&control.owner, &control.id)
+            .unwrap();
+        let worker_host = host.clone();
+        let worker_control = control.clone();
+        let worker = tokio::spawn(async move {
+            worker_control.cancel.cancelled().await;
+            let (task, _) = worker_control
+                .commit_terminal(State::Cancelled, None, None, Some("cancelled".into()))
+                .unwrap();
+            worker_host.active.lock().await.remove(&worker_control.id);
+            worker_control.finished.store(true, Ordering::Release);
+            worker_control.done.notify_waiters();
+            task
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            host.host(
+                json!({"op":"wake.clear", "appId":key.app_id, "revision":key.revision,
+                "runId":key.request_id, "reservationId":receipt.reservation_id,
+                "reason":"system_expiration"}),
+            ),
+        )
+        .await
+        .expect("expiration must finish after prior cancellation")
+        .unwrap();
+        let task = worker.await.unwrap();
+        assert_eq!(task.state, State::Cancelled);
+        assert_eq!(task.error.unwrap().code, "cancelled");
+        let events = control
+            .store
+            .protocol_events(&control.owner, &control.request_id, 0)
+            .unwrap();
+        assert_eq!(events.events.last().unwrap()["type"], "RUN_FINISHED");
+        assert_eq!(
+            events.events.last().unwrap()["outcome"]["type"],
+            "cancelled"
+        );
+    }
+
+    #[tokio::test]
+    async fn system_expiration_keeps_unfinished_cleanup_busy() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, _) = test_wake_host(root.path()).await;
+        let control = Arc::new(running_control_with_protocol(root.path(), true));
+        let key = WakeKey {
+            app_id: control.owner.app_id.clone(),
+            revision: control.revision,
+            request_id: control.request_id.clone(),
+        };
+        let receipt = {
+            let mut registry = host.wake_reservations.lock().unwrap();
+            let now = now_millis();
+            let receipt = registry.reserve(key.clone(), now, 120_000).unwrap();
+            assert!(registry.claim(&key, now));
+            assert!(registry.consume(&key, now, &control.id));
+            receipt
+        };
+        host.active
+            .lock()
+            .await
+            .insert(control.id.clone(), control.clone());
+        let worker_control = control.clone();
+        let worker = tokio::spawn(async move {
+            worker_control.cancel.cancelled().await;
+            worker_control
+                .store
+                .update(
+                    &worker_control.owner,
+                    &worker_control.id,
+                    State::Running,
+                    None,
+                    None,
+                    Some("tool_cleanup_incomplete".into()),
+                )
+                .unwrap();
+            worker_control.finished.store(true, Ordering::Release);
+            worker_control.done.notify_waiters();
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            host.host(
+                json!({"op":"wake.clear", "appId":key.app_id, "revision":key.revision,
+                "runId":key.request_id, "reservationId":receipt.reservation_id,
+                "reason":"system_expiration"}),
+            ),
+        )
+        .await
+        .expect("expiration must finish without claiming cleanup succeeded")
+        .unwrap();
+        worker.await.unwrap();
+        let task = control.store.get(&control.owner, &control.id).unwrap();
+        assert_eq!(task.state, State::Running);
+        assert_eq!(task.error.unwrap().code, "tool_cleanup_incomplete");
+        assert!(!control.store.lease_valid(&control.owner, &control.id));
+        assert!(host.active.lock().await.contains_key(&control.id));
+        assert_eq!(
+            host.stop_all().await.unwrap_err(),
+            "agent_cleanup_incomplete"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn expiration_storage_failure_revokes_without_publishing_a_terminal_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let (host, _) = test_wake_host(root.path()).await;
+        let control = Arc::new(running_control_with_protocol(root.path(), true));
+        let key = WakeKey {
+            app_id: control.owner.app_id.clone(),
+            revision: control.revision,
+            request_id: control.request_id.clone(),
+        };
+        let receipt = {
+            let mut registry = host.wake_reservations.lock().unwrap();
+            let now = now_millis();
+            let receipt = registry.reserve(key.clone(), now, 120_000).unwrap();
+            assert!(registry.claim(&key, now));
+            assert!(registry.consume(&key, now, &control.id));
+            receipt
+        };
+        host.active
+            .lock()
+            .await
+            .insert(control.id.clone(), control.clone());
+        let tasks = root
+            .path()
+            .join(&control.owner.app_id)
+            .join("agent/agui-v1/tasks");
+        std::fs::set_permissions(&tasks, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let worker_control = control.clone();
+        let worker = tokio::spawn(async move {
+            worker_control.cancel.cancelled().await;
+            let result = worker_control.commit_terminal(
+                State::Cancelled,
+                None,
+                None,
+                Some("cancelled".into()),
+            );
+            worker_control.finished.store(true, Ordering::Release);
+            worker_control.done.notify_waiters();
+            result
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            host.host(
+                json!({"op":"wake.clear", "appId":key.app_id, "revision":key.revision,
+                "runId":key.request_id, "reservationId":receipt.reservation_id,
+                "reason":"system_expiration"}),
+            ),
+        )
+        .await
+        .expect("expiration must revoke even when persistence fails");
+        std::fs::set_permissions(&tasks, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(result.unwrap_err(), "agent_storage_unavailable");
+        assert_eq!(
+            worker.await.unwrap().unwrap_err(),
+            "agent_storage_unavailable"
+        );
+        assert!(control.cancel.is_cancelled());
+        assert!(!control.store.lease_valid(&control.owner, &control.id));
+        let error = control
+            .store
+            .get_by_request(&control.owner, &control.request_id)
+            .unwrap_err();
+        assert_eq!(task_access_error(error), "agent_storage_unavailable");
+        assert_eq!(
+            task_access_error(local_app::v2::AppError::NotFound("task".into())),
+            "task_not_found"
+        );
+        assert!(control
+            .store
+            .protocol_events(&control.owner, &control.request_id, 0)
+            .is_err());
+        assert!(host.active.lock().await.contains_key(&control.id));
+        assert_eq!(
+            host.stop_all().await.unwrap_err(),
+            "agent_cleanup_incomplete"
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_chat_tool_fails_after_admission_without_replaying_it() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, service) = test_wake_host(root.path()).await;
+        let source = root.path().join("agent-app");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("index.html"), "fixture").unwrap();
+        std::fs::write(
+            source.join("lingxi-app.json"),
+            json!({
+                "schema":2,"name":"Agent fixture","entry":{"type":"static","path":"index.html"},
+                "targets":[{"platform":"ios","environment":"web"}],
+                "capabilities":["agent"],"agent":{"tools":[]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let published = service
+            .request_value(json!({"op":"publish", "expectedRevision":0,
+            "sourcePath":source}))
+            .await
+            .unwrap();
+        let app = published["record"]["appId"].as_str().unwrap();
+        let revision = published["record"]["currentRevision"].as_u64().unwrap();
+        let (owner, _, _) = host
+            .current_release(app, revision, "deferred-test")
+            .await
+            .unwrap();
+        let state = host.app_state(app).unwrap();
+        let settings: Settings = serde_json::from_value(json!({
+            "model":{"providerId":"provider","modelId":"model"},"tools":{},"skills":[],
+            "background":false,"maxTurns":4,"timeoutMs":30000
+        }))
+        .unwrap();
+        state
+            .store
+            .configure(owner.clone(), Some(settings))
+            .unwrap();
+        let chat_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4();
+        state
+            .chats
+            .create(&chat_id, None, &session_id.to_string())
+            .unwrap();
+        let path = state.chats.transcript_path(&chat_id).unwrap();
+        let user_id = uuid::Uuid::new_v4();
+        let assistant_id = uuid::Uuid::new_v4();
+        let attachment_id = uuid::Uuid::new_v4();
+        let cwd = root.path().to_string_lossy().to_string();
+        let rows = [
+            json!({"type":"user", "uuid":user_id, "parentUuid":null, "sessionId":session_id,
+                "timestamp":"2026-10-27T01:00:00.000Z", "cwd":cwd,
+                "message":{"role":"user","content":"previous request"}}),
+            json!({"type":"assistant", "uuid":assistant_id, "parentUuid":user_id, "sessionId":session_id,
+                "timestamp":"2026-10-27T01:00:01.000Z", "cwd":cwd,
+                "message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_pending",
+                    "name":"Shell","input":{"command":"touch forbidden"}}]}}),
+            json!({"type":"attachment", "uuid":attachment_id, "parentUuid":assistant_id,
+                "sessionId":session_id, "timestamp":"2026-10-27T01:00:02.000Z", "cwd":cwd,
+                "attachment":{"type":"hook_deferred_tool","toolUseID":"toolu_pending",
+                    "toolName":"Shell","toolInput":{"command":"touch forbidden"},
+                    "hookName":"PreToolUse:Shell","hookEvent":"PreToolUse","permissionMode":"default"}}),
+        ];
+        let transcript = rows
+            .iter()
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        std::fs::write(&path, &transcript).unwrap();
+        let mut input: Input =
+            serde_json::from_value(json!({"requestId":"deferred-run", "prompt":"new request"}))
+                .unwrap();
+        input.protocol_thread_id = Some(chat_id.clone());
+        let new_user = json!({"id":"new-user", "role":"user", "content":"new request"});
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            host.start_task(
+                owner.clone(),
+                revision,
+                &[],
+                &[],
+                input.clone(),
+                Some(new_user.clone()),
+                Some(chat_id.clone()),
+                CancellationToken::new(),
+                true,
+                true,
+            ),
+        )
+        .await
+        .expect("deferred guard must complete without starting the model");
+        assert_eq!(result.unwrap_err(), "chat_deferred_tools_pending");
+        let task = state
+            .store
+            .get_by_request(&owner, &input.request_id)
+            .unwrap();
+        assert_eq!(task.state, State::Failed);
+        let error = task.error.unwrap();
+        assert_eq!(error.code, "chat_deferred_tools_pending");
+        assert!(error.message.contains("Review its effects"));
+        assert!(error.message.contains("not be replayed automatically"));
+        let events = state
+            .store
+            .protocol_events(&owner, &input.request_id, 0)
+            .unwrap();
+        assert_eq!(events.events.first().unwrap()["type"], "RUN_STARTED");
+        assert_eq!(events.events.last().unwrap()["type"], "RUN_ERROR");
+        assert_eq!(
+            events.events.last().unwrap()["code"],
+            "chat_deferred_tools_pending"
+        );
+        let history = state
+            .chats
+            .protocol_history_page(&chat_id, None, 10)
+            .unwrap();
+        assert_eq!(
+            history.messages,
+            vec![new_user],
+            "Current user input may already be saved on rejection"
+        );
+        assert_eq!(
+            state.chats.message_metadata(&chat_id).unwrap().len(),
+            1,
+            "Existing transcript rows must not be imported before the guard"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), transcript);
+        assert!(!root.path().join("forbidden").exists());
+        assert!(host.active.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -4218,7 +5097,11 @@ mod accepted_projection_tests {
             .unwrap();
         let chat = state
             .chats
-            .create(None, &uuid::Uuid::new_v4().to_string())
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
             .unwrap();
         let user = json!({"id":"user-1","role":"user","content":"hello"});
         let input = json!({"threadId":chat.chat_id,"runId":"public-run-1","protocolVersion":"1.0","messages":[user.clone()]});
@@ -4798,7 +5681,7 @@ mod wake_tests {
     }
 
     #[test]
-    fn first_agui_store_purges_only_known_prototype_agent_paths() {
+    fn first_agui_store_preserves_legacy_agent_data() {
         let root = tempfile::tempdir().unwrap();
         let agent = root.path().join("agent");
         let tasks = agent.join("tasks");
@@ -4820,12 +5703,27 @@ mod wake_tests {
         std::fs::write(spool.join("preserved"), b"unrelated upload spool").unwrap();
         std::fs::write(agent.join("app-data.json"), b"preserved app data").unwrap();
 
-        let store = initialize_agui_agent_store(&agent).unwrap();
-        assert!(store.join("protocol-store.json").is_file());
-        assert!(!tasks.join("agent-tasks.json").exists());
-        assert!(!tasks.join(old_task).exists());
-        assert!(!agent.join("chats-index.json").exists());
-        assert!(!chats.join(old_chat).exists());
+        assert_eq!(
+            initialize_agui_agent_store(&agent).unwrap_err(),
+            "agent_legacy_store_unsupported"
+        );
+        assert_eq!(
+            std::fs::read(tasks.join("agent-tasks.json")).unwrap(),
+            b"old task ledger"
+        );
+        assert_eq!(
+            std::fs::read(tasks.join(old_task).join("output.txt")).unwrap(),
+            b"old task data"
+        );
+        assert_eq!(
+            std::fs::read(agent.join("chats-index.json")).unwrap(),
+            b"old chat index"
+        );
+        assert_eq!(
+            std::fs::read(chats.join(old_chat).join("old-transcript.jsonl")).unwrap(),
+            b"old chat"
+        );
+        assert!(!agent.join("agui-v1").exists());
         assert_eq!(
             std::fs::read(spool.join("preserved")).unwrap(),
             b"unrelated upload spool"
@@ -4834,17 +5732,40 @@ mod wake_tests {
             std::fs::read(agent.join("app-data.json")).unwrap(),
             b"preserved app data"
         );
+    }
 
-        std::fs::create_dir_all(store.join("tasks")).unwrap();
-        let current = store.join("tasks/current.json");
-        std::fs::write(&current, b"new AG-UI data").unwrap();
-        assert_eq!(initialize_agui_agent_store(&agent).unwrap(), store);
-        assert_eq!(std::fs::read(current).unwrap(), b"new AG-UI data");
+    #[test]
+    fn missing_or_incompatible_protocol_marker_preserves_existing_data() {
+        let root = tempfile::tempdir().unwrap();
+        for (name, marker, expected) in [
+            ("missing", None, "agent_protocol_store_marker_missing"),
+            (
+                "mismatch",
+                Some(br#"{"protocol":"AG-UI","version":"unsupported"}"#.as_slice()),
+                "agent_protocol_store_version_mismatch",
+            ),
+        ] {
+            let agent = root.path().join(name);
+            let store = agent.join("agui-v1");
+            std::fs::create_dir_all(&store).unwrap();
+            let data = store.join("existing-data");
+            std::fs::write(&data, b"preserve this data").unwrap();
+            let marker_path = store.join("protocol-store.json");
+            if let Some(bytes) = marker {
+                std::fs::write(&marker_path, bytes).unwrap();
+            }
+            assert_eq!(initialize_agui_agent_store(&agent).unwrap_err(), expected);
+            assert_eq!(std::fs::read(&data).unwrap(), b"preserve this data");
+            match marker {
+                Some(bytes) => assert_eq!(std::fs::read(marker_path).unwrap(), bytes),
+                None => assert!(!marker_path.exists()),
+            }
+        }
     }
 
     #[cfg(unix)]
     #[test]
-    fn prototype_cleanup_rejects_symlinked_task_roots_without_following_them() {
+    fn legacy_store_rejects_symlinked_task_roots_without_following_them() {
         use std::os::unix::fs::symlink;
         let root = tempfile::tempdir().unwrap();
         let agent = root.path().join("agent");
@@ -4899,7 +5820,11 @@ mod protocol_retry_tests {
             .unwrap();
         let chat = state
             .chats
-            .create(None, &uuid::Uuid::new_v4().to_string())
+            .create(
+                &uuid::Uuid::new_v4().to_string(),
+                None,
+                &uuid::Uuid::new_v4().to_string(),
+            )
             .unwrap();
         let input = json!({
             "threadId":chat.chat_id,

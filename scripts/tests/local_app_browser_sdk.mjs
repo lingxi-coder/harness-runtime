@@ -245,16 +245,16 @@ function runEvents(runInput, result = 'answer') {
   ];
 }
 
-function browser({child = false, existing = false, hostPlatform = 'android', pendingRecords = [], initialWakeRunId, clock} = {}) {
+function browser({child = false, existing = false, hostPlatform = 'android', appId = 'app-one', revision = 3, pendingRecords = [], initialWakeRunId, clock, indexedDb: sharedIndexedDb} = {}) {
   const requests = [];
   const inputs = [];
   const listeners = [];
-  const config = {appId: 'app-one', name: 'Meal', revision: 3, runId: 'epoch-one',
+  const config = {appId, name: 'Meal', revision, runId: 'epoch-one',
     hostPlatform, services: ['api']};
   const window = eventTarget();
   window.top = child ? {} : window;
   window.isSecureContext = true;
-  const indexedDb = fakeIndexedDb({pendingRecords});
+  const indexedDb = sharedIndexedDb || fakeIndexedDb({databaseName: 'lingxi-local-app-agui-' + appId, pendingRecords});
   window.indexedDB = indexedDb;
   if (existing) window.localApp = {desktop: true};
 
@@ -314,7 +314,9 @@ function browser({child = false, existing = false, hostPlatform = 'android', pen
         const runInput = submitted?.envelope.args.input || {threadId: 'thread-one', runId: args.runId};
         value = {events: runEvents(runInput, 'answer'), sequence: 5};
       } else if (method === 'agent.chats.create') {
-        value = {chatId: 'chat-one', title: 'Chat', createdAt: 1, updatedAt: 1, archived: false, state: 'idle'};
+        value = {chatId: args.requestId, title: 'Chat', createdAt: 1, updatedAt: 1, archived: false, state: 'idle'};
+      } else if (method === 'agent.chats.creationStatus') {
+        value = null;
       } else if (method === 'agent.chats.get') {
         value = {chatId: args.chatId, title: 'Chat', createdAt: 1, updatedAt: 1, archived: false, state: 'idle'};
       } else if (method === 'agent.chats.history') {
@@ -530,13 +532,14 @@ test('unsubscribe while checking task status prevents later polling and events',
   assert.deepEqual(events, []);
 });
 
-test('all six read-only facade calls time out waiting for headers after five seconds', async () => {
+test('read-only facade calls time out waiting for headers after five seconds', async () => {
   const cases = [
     ['agent.tasks.get', b => b.api.agent.tasks.get('run-one')],
     ['agent.tasks.list', b => b.api.agent.tasks.list()],
     ['agent.tasks.events', b => b.api.agent.tasks.events(b.input({runId: 'run-one'}))],
     ['agent.chats.get', b => b.api.agent.chats.open('chat-one')],
     ['agent.chats.list', b => b.api.agent.chats.list()],
+    ['agent.chats.creationStatus', b => b.api.agent.chats.creationStatus(b.input({requestId: '11111111-1111-4111-8111-111111111111'}))],
     ['agent.chats.history', (_b, handle) => handle.history()]
   ];
   for (const [method, call] of cases) {
@@ -674,7 +677,7 @@ test('completed bodies and every response error release the request timer', asyn
 test('mutating control calls keep their 120-second budget', async () => {
   const cases = [
     ['agent.tasks.cancel', b => b.api.agent.tasks.cancel('run-one')],
-    ['agent.chats.create', b => b.api.agent.chats.create()],
+    ['agent.chats.create', b => b.api.agent.chats.create(b.input({requestId: '11111111-1111-4111-8111-111111111111'}))],
     ['agent.chats.archive', b => b.api.agent.chats.archive('chat-one')],
     ['agent.chats.delete', b => b.api.agent.chats.delete('chat-one')],
     ['agent.chats.cancel', (_b, handle) => handle.cancel()]
@@ -682,23 +685,131 @@ test('mutating control calls keep their 120-second budget', async () => {
   for (const [method, call] of cases) {
     const clock = fakeClock();
     const b = browser({clock});
+    const pendingSignals = [];
+    b.window.addEventListener('localApp:chat-creation-pending', event => pendingSignals.push(event.detail.requestId));
     await b.flush();
     const handle = method === 'agent.chats.cancel' ? await b.api.agent.chats.open('chat-one') : null;
     b.setFetchHandler(() => new Promise(() => {}));
     const promise = call(b, handle);
     let settled = false;
     void promise.then(() => { settled = true; }, () => { settled = true; });
-    assert.equal(b.requests.at(-1).envelope.method, method);
-    assert.deepEqual(clock.pending(), [120000]);
+    await waitFor(() => b.requests.at(-1)?.envelope.method === method, `missing ${method} request`);
+    assert.deepEqual(clock.pending(), method === 'agent.chats.create' ? [5000, 120000] : [120000]);
     clock.advance(5000);
     await b.flush();
     assert.equal(settled, false, method);
+    assert.deepEqual(pendingSignals, method === 'agent.chats.create' ? ['11111111-1111-4111-8111-111111111111'] : []);
     assert.deepEqual(clock.pending(), [115000]);
     clock.advance(115000);
-    await assert.rejects(promise, error => error.code === 'host_unavailable' && error.definitive === undefined);
+    await assert.rejects(promise, error => error.code === 'host_unavailable'
+      && error.definitive === (method === 'agent.chats.create' ? false : undefined));
     assert.equal(b.requests.at(-1).options.signal.aborted, true);
     assert.deepEqual(clock.pending(), []);
   }
+});
+
+test('Chat creation saves identity before POST and shares concurrent same-ID calls', async () => {
+  const b = browser();
+  const requestId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const options = b.input({requestId, title: '  Exact title  '});
+  const reply = deferred();
+  b.setFetchHandler(request => {
+    assert.equal(request.envelope.method, 'agent.chats.create');
+    const saved = b.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3', 'creations', requestId);
+    assert.equal(saved.state, 'pending');
+    assert.equal(saved.options.title, '  Exact title  ');
+    return reply.promise;
+  });
+  const first = b.api.agent.chats.create(options);
+  await waitFor(() => b.requests.length === 1, 'Chat creation never reached the host');
+  const second = b.api.agent.chats.create(options);
+  await assert.rejects(b.api.agent.chats.create(b.input({requestId, title: 'Exact title'})),
+    error => error.code === 'chat_create_conflict');
+  assert.equal(b.requests.length, 1);
+  reply.resolve({ok: true, json: async () => b.input({ok: true, value: {chatId: requestId}})});
+  assert.equal((await first).id, requestId);
+  assert.equal((await second).id, requestId);
+  assert.equal(b.requests.length, 1);
+  assert.equal(b.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3', 'creations', requestId).state, 'accepted');
+  assert.deepEqual(JSON.parse(JSON.stringify(await b.api.agent.chats.pendingCreations())),
+    [{requestId, title: '  Exact title  ', state: 'accepted'}]);
+  await b.api.agent.chats.forgetCreation(requestId);
+  assert.deepEqual(JSON.parse(JSON.stringify(await b.api.agent.chats.pendingCreations())), []);
+});
+
+test('Chat creation recovery is read-only after response loss and page reopen', async () => {
+  const b = browser();
+  const requestId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+  const options = b.input({requestId});
+  b.setFetchHandler(() => { throw new Error('response lost'); });
+  await assert.rejects(b.api.agent.chats.create(options), error =>
+    error.code === 'host_unavailable' && error.definitive === false && error.requestId === requestId);
+  await assert.rejects(b.api.agent.chats.forgetCreation(requestId), error => error.code === 'chat_creation_unresolved');
+  const reopened = browser({indexedDb: b.indexedDb});
+  const saved = JSON.parse(JSON.stringify(await reopened.api.agent.chats.pendingCreations()));
+  assert.deepEqual(saved, [{requestId, state: 'pending'}]);
+  assert.equal(reopened.requests.length, 0, 'opening the page must not replay create');
+  const recoveredOptions = reopened.input({requestId});
+  assert.equal(await reopened.api.agent.chats.creationStatus(recoveredOptions), null);
+  assert.deepEqual(reopened.requests.map(request => request.envelope.method), ['agent.chats.creationStatus']);
+  // The caller explicitly decides to retry using the exact stored identity.
+  const handle = await reopened.api.agent.chats.create(recoveredOptions);
+  assert.equal(handle.id, requestId);
+  assert.deepEqual(reopened.requests.map(request => request.envelope.method),
+    ['agent.chats.creationStatus', 'agent.chats.create']);
+});
+
+test('Chat creation never sends when identity cannot be saved or is invalid', async () => {
+  const b = browser();
+  const requestId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  b.indexedDb.failNextGet();
+  await assert.rejects(b.api.agent.chats.create(b.input({requestId})), error => error.code === 'storage_unavailable');
+  assert.equal(b.requests.length, 0);
+  for (const options of [{}, {requestId: requestId.toUpperCase()}, {requestId, title: null}, {requestId, extra: 1}]) {
+    await assert.rejects(b.api.agent.chats.create(b.input(options)), error => error.code === 'invalid_chat');
+  }
+  assert.equal(b.requests.length, 0);
+});
+
+test('Chat creation receipts are isolated by App and revision at one browser origin', async () => {
+  const first = browser();
+  const second = browser({appId: 'app-two', indexedDb: first.indexedDb});
+  const newer = browser({appId: 'app-one', revision: 4, indexedDb: first.indexedDb});
+  const requestId = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
+  assert.equal(first.location.origin, second.location.origin);
+  await first.api.agent.chats.create(first.input({requestId, title: 'First'}));
+  await second.api.agent.chats.create(second.input({requestId, title: 'Second'}));
+  await newer.api.agent.chats.create(newer.input({requestId, title: 'First'}));
+  assert.deepEqual(JSON.parse(JSON.stringify(await first.api.agent.chats.pendingCreations())),
+    [{requestId, title: 'First', state: 'accepted'}]);
+  assert.deepEqual(JSON.parse(JSON.stringify(await second.api.agent.chats.pendingCreations())),
+    [{requestId, title: 'Second', state: 'accepted'}]);
+  assert.deepEqual(JSON.parse(JSON.stringify(await newer.api.agent.chats.pendingCreations())),
+    [{requestId, title: 'First', state: 'accepted'}]);
+  await newer.api.agent.chats.forgetCreation(requestId);
+  assert.equal((await first.api.agent.chats.pendingCreations()).length, 1);
+  assert.equal((await second.api.agent.chats.pendingCreations()).length, 1);
+});
+
+test('only definitive Chat rejection permits forgetting a receipt', async () => {
+  for (const [code, state] of [['chat_create_deleted', 'deleted'], ['chat_create_conflict', 'rejected'], ['invalid_chat', 'rejected']]) {
+    const b = browser();
+    const requestId = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    b.setFetchHandler(() => ({ok: true, json: async () => b.input({ok: false, error: {code, message: code}})}));
+    await assert.rejects(b.api.agent.chats.create(b.input({requestId})), error => error.code === code);
+    const receipts = JSON.parse(JSON.stringify(await b.api.agent.chats.pendingCreations()));
+    assert.deepEqual(receipts, [{requestId, state}]);
+    await b.api.agent.chats.forgetCreation(requestId);
+    assert.equal((await b.api.agent.chats.pendingCreations()).length, 0);
+  }
+  const b = browser();
+  const requestId = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+  b.setFetchHandler(() => ({ok: true, json: async () => b.input({ok: false,
+    error: {code: 'chat_storage_uncertain', message: 'unknown'}})}));
+  await assert.rejects(b.api.agent.chats.create(b.input({requestId})), error =>
+    error.code === 'chat_storage_uncertain' && error.definitive === false);
+  assert.deepEqual(JSON.parse(JSON.stringify(await b.api.agent.chats.pendingCreations())), [{requestId, state: 'pending'}]);
+  await assert.rejects(b.api.agent.chats.forgetCreation(requestId), error => error.code === 'chat_creation_unresolved');
 });
 
 test('large task and chat submissions preserve pending input for an explicit same-ID retry', async () => {
@@ -1180,6 +1291,7 @@ test('offline recovery uses only the new AG-UI runId store and callback', () => 
   assert.match(source, /url\.searchParams\.getAll\('__lingxi_ready'\)/);
   assert.match(recoverySource, /lingxi-local-app-agui-/);
   assert.match(recoverySource, /runId:record\.runId/);
-  assert.doesNotMatch(source, /requestId|FormData|multipart/);
+  // Chat creation has its own requestId; Agent run recovery still uses runId.
+  assert.doesNotMatch(source, /FormData|multipart/);
   assert.doesNotMatch(recoverySource, /requestId|lingxi-local-app-agent-/);
 });
