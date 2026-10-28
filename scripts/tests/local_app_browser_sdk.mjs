@@ -264,6 +264,7 @@ function fakeClock() {
       }
       now = target;
     },
+    nowMs() { return now; },
     pending() { return [...timers.values()].map(timer => timer.at - now).sort((a, b) => a - b); }
   };
 }
@@ -332,6 +333,7 @@ function browser({child = false, existing = false, hostPlatform = 'android', app
   let fetchHandler;
   const context = vm.createContext({
     window, location, document, navigator, history, console, URL, URLSearchParams,
+    performance: {now: () => clock?.nowMs() ?? Date.now()},
     CustomEvent: BrowserCustomEvent,
     indexedDB: window.indexedDB,
     File,
@@ -377,6 +379,8 @@ function browser({child = false, existing = false, hostPlatform = 'android', app
     api: window.localApp, requests, inputs, listeners, location, window, document, navigator, history, indexedDb,
     input: value => parseInPage(JSON.stringify(value)),
     setFetchHandler(handler) { fetchHandler = handler; },
+    removeDocument() { delete context.document; },
+    setDiagnosticGlobal(name, descriptor) { Object.defineProperty(context, name, {configurable: true, ...descriptor}); },
     async flush() { await new Promise(setImmediate); await new Promise(setImmediate); },
     simulateWakeReturn(runId) {
       location.href = `${location.origin}/__run/epoch-one/index.html?__lingxi_ready=${encodeURIComponent(runId)}`;
@@ -1954,4 +1958,274 @@ test('offline recovery uses only the new AG-UI runId store and callback', () => 
   // Chat creation has its own requestId; Agent run recovery still uses runId.
   assert.doesNotMatch(source, /FormData|multipart/);
   assert.doesNotMatch(recoverySource, /requestId|lingxi-local-app-agent-/);
+});
+
+test('transport diagnostics identify header and body timeouts without changing read behavior', async () => {
+  for (const phase of ['request', 'response_body']) {
+    const clock = fakeClock();
+    const b = browser({clock, hostPlatform: 'ios'});
+    await b.flush();
+    b.document.visibilityState = 'hidden';
+    const initialUrl = b.location.href;
+    const stalled = deferred();
+    let bodyStarted = false;
+    b.setFetchHandler(() => phase === 'request' ? stalled.promise : {
+      ok: true, status: 200,
+      json: () => { bodyStarted = true; return stalled.promise; }
+    });
+    const pending = b.api.agent.tasks.get('sensitive-run-id');
+    if (phase === 'response_body') await waitFor(() => bodyStarted, 'body not started');
+    clock.advance(5000);
+    await assert.rejects(pending, error => {
+      assert.equal(error.code, 'host_unavailable');
+      assert.equal(error.definitive, undefined);
+      assert.deepEqual(JSON.parse(JSON.stringify(error.transport)), {
+        phase, reason: 'timeout', ...(phase === 'response_body' ? {httpStatus: 200} : {}),
+        elapsedMs: 5000, visibility: 'hidden'
+      });
+      return true;
+    });
+    assert.equal(b.requests.length, 1);
+    assert.equal(b.location.href, initialUrl);
+    assert.deepEqual(clock.pending(), []);
+    stalled.reject(new TypeError('sensitive late network failure'));
+    await b.flush();
+  }
+});
+
+test('transport diagnostics distinguish HTTP failures from network, JSON and host failures', async () => {
+  const scenarios = [
+    ...[403, 410, 429, 503].map(status => ({
+      response: () => ({ok: false, status, url: 'sensitive-url'}),
+      phase: 'http_response', reason: 'http_error', status, code: 'host_unavailable', definitive: true
+    })),
+    {response: () => { throw new TypeError('sensitive fetch cause'); },
+      phase: 'request', reason: 'fetch_failed', code: 'host_unavailable'},
+    {response: () => ({ok: true, status: 200, json: async () => { throw new TypeError('sensitive body cause'); }}),
+      phase: 'response_body', reason: 'body_failed', status: 200, code: 'host_unavailable'},
+    {response: () => ({ok: true, status: 200, json: async () => { throw new SyntaxError('sensitive JSON content'); }}),
+      phase: 'response_body', reason: 'invalid_json', status: 200, code: 'invalid_host_response'},
+    {response: b => ({ok: true, status: 200,
+      json: async () => b.input({ok: false, error: {code: 'denied', message: 'sensitive host message'}})}),
+      phase: 'host_response', reason: 'host_error', status: 200, code: 'denied', definitive: true}
+  ];
+  for (const scenario of scenarios) {
+    const b = browser();
+    await b.flush();
+    b.setFetchHandler(() => scenario.response(b));
+    const initialUrl = b.location.href;
+    await assert.rejects(b.api.agent.tasks.get('sensitive-run-id'), error => {
+      assert.equal(error.code, scenario.code);
+      assert.equal(error.definitive, scenario.definitive);
+      assert.deepEqual(Object.keys(error.transport).sort(),
+        ['phase', 'reason', 'elapsedMs', 'visibility', ...(scenario.status ? ['httpStatus'] : [])].sort());
+      assert.equal(error.transport.phase, scenario.phase);
+      assert.equal(error.transport.reason, scenario.reason);
+      assert.equal(error.transport.httpStatus, scenario.status);
+      assert.equal(error.transport.visibility, 'visible');
+      assert.ok(Number.isInteger(error.transport.elapsedMs) && error.transport.elapsedMs >= 0 && error.transport.elapsedMs <= 120000);
+      assert.equal(JSON.stringify(error.transport).includes('sensitive'), false);
+      return true;
+    });
+    assert.equal(b.requests.length, 1, 'diagnostics must not retry');
+    assert.equal(b.location.href, initialUrl, 'diagnostics must not navigate');
+  }
+});
+
+test('Chat creation failure retains its pending receipt with sanitized transport diagnostics', async () => {
+  const b = browser({hostPlatform: 'ios'});
+  await b.flush();
+  const requestId = '11111111-1111-4111-8111-111111111111';
+  b.setFetchHandler(() => ({ok: false, status: 503}));
+  await assert.rejects(b.api.agent.chats.create(b.input({requestId, title: 'sensitive title'})), error => {
+    assert.equal(error.code, 'host_unavailable');
+    assert.equal(error.definitive, false);
+    assert.equal(error.requestId, requestId);
+    assert.equal(error.transport.phase, 'http_response');
+    assert.equal(error.transport.httpStatus, 503);
+    assert.equal(JSON.stringify(error.transport).includes(requestId), false);
+    assert.equal(JSON.stringify(error.transport).includes('sensitive'), false);
+    return true;
+  });
+  assert.equal(b.indexedDb.getRecord('lingxi-local-app-chat-creates-app-one-revision-3', 'creations', requestId).state, 'pending');
+  b.window.dispatchEvent({type: 'pageshow'});
+  b.document.dispatchEvent({type: 'visibilitychange'});
+  await b.flush();
+  assert.equal(b.requests.length, 1, 'a failed create must not be replayed');
+});
+
+
+test('transport diagnostics preserve failures when document is unavailable', async () => {
+  for (const reason of ['fetch_failed', 'http_error', 'timeout']) {
+    const clock = fakeClock();
+    const b = browser({clock});
+    await b.flush();
+    b.removeDocument();
+    b.setFetchHandler(() => {
+      if (reason === 'fetch_failed') throw new TypeError('network failed');
+      if (reason === 'http_error') return {ok: false, status: 503};
+      return new Promise(() => {});
+    });
+    const pending = b.api.agent.tasks.get('run-one');
+    if (reason === 'timeout') clock.advance(5000);
+    await assert.rejects(pending, error => {
+      assert.equal(error.code, 'host_unavailable');
+      assert.equal(error.definitive, reason === 'http_error' ? true : undefined);
+      assert.equal(error.transport.reason, reason);
+      assert.equal(error.transport.visibility, 'unknown');
+      assert.equal(error.transport.phase, reason === 'http_error' ? 'http_response' : 'request');
+      return true;
+    });
+    assert.equal(b.requests.length, 1, 'missing DOM must not retry');
+    assert.deepEqual(clock.pending(), []);
+  }
+});
+
+
+const throwingDiagnostics = [
+  ['visibility getter', b => Object.defineProperty(b.document, 'visibilityState', {
+    get() { throw new Error('sensitive visibility failure'); }
+  })],
+  ['performance getter', b => b.setDiagnosticGlobal('performance', {
+    get() { throw new Error('sensitive performance failure'); }
+  })],
+  ['performance.now getter', b => b.setDiagnosticGlobal('performance', {value: {
+    get now() { throw new Error('sensitive clock getter failure'); }
+  }})],
+  ['performance.now call', b => b.setDiagnosticGlobal('performance', {value: {
+    now() { throw new Error('sensitive clock failure'); }
+  }})],
+  ['all clocks unavailable', b => {
+    b.setDiagnosticGlobal('performance', {value: {now() { throw new Error('sensitive clock failure'); }}});
+    b.setDiagnosticGlobal('Date', {value: {now() { throw new Error('sensitive fallback failure'); }}});
+  }]
+];
+
+test('diagnostic getter failures cannot prevent header or body deadlines from settling', async () => {
+  for (const [name, install] of throwingDiagnostics) {
+    for (const phase of ['request', 'response_body']) {
+      const clock = fakeClock();
+      const b = browser({clock});
+      await b.flush();
+      install(b);
+      const stalled = deferred();
+      let bodyStarted = false;
+      b.setFetchHandler(() => phase === 'request' ? stalled.promise : {
+        ok: true, status: 200,
+        json: () => { bodyStarted = true; return stalled.promise; }
+      });
+      const failure = b.api.agent.tasks.get('sensitive-run-id').catch(error => error);
+      assert.equal(b.requests.length, 1, name + ': diagnostics must not prevent dispatch');
+      if (phase === 'response_body') await waitFor(() => bodyStarted, 'body not started');
+      assert.doesNotThrow(() => clock.advance(5000), name + ': deadline callback must not throw');
+      const error = await failure;
+      assert.equal(error.code, 'host_unavailable', name);
+      assert.equal(error.definitive, undefined, name);
+      assert.equal(error.transport.reason, 'timeout', name);
+      assert.equal(error.transport.phase, phase, name);
+      assert.equal(error.transport.visibility, name === 'visibility getter' ? 'unknown' : 'visible', name);
+      if (name === 'all clocks unavailable') assert.equal(Object.hasOwn(error.transport, 'elapsedMs'), false);
+      else assert.ok(Number.isInteger(error.transport.elapsedMs) && error.transport.elapsedMs >= 0);
+      assert.equal(JSON.stringify(error.transport).includes('sensitive'), false, name);
+      assert.equal(b.requests[0].options.signal.aborted, true, name);
+      assert.equal(b.requests.length, 1, name + ': diagnostics must not retry');
+      assert.deepEqual(clock.pending(), []);
+      stalled.reject(new TypeError('sensitive late failure'));
+      await b.flush();
+    }
+  }
+});
+
+test('diagnostic getter failures cannot prevent explicit Chat wait cancellation', async () => {
+  for (const name of ['visibility getter', 'performance.now call']) {
+    const clock = fakeClock();
+    const b = browser({clock});
+    await b.flush();
+    const requestId = '11111111-1111-4111-8111-111111111111';
+    b.setFetchHandler(request => b.requests.length === 1 ? new Promise(() => {}) : {
+      ok: true, status: 200, json: async () => b.input({ok: true, value: {chatId: requestId}})
+    });
+    const result = b.api.agent.chats.create(b.input({requestId})).catch(error => error);
+    await waitFor(() => b.requests.length === 1, 'initial Chat request not dispatched');
+    clock.advance(5000);
+    await b.flush();
+    assert.equal(b.requests.length, 1, 'no retry before a trusted action');
+    throwingDiagnostics.find(([candidate]) => candidate === name)[1](b);
+    retryButton(b, requestId).dispatchEvent({type: 'click', isTrusted: true});
+    await waitFor(() => b.requests.length === 2, name + ': trusted retry must cancel the old wait');
+    const handle = await result;
+    assert.equal(handle.id, requestId, name);
+    assert.equal(b.requests[0].options.signal.aborted, true, name);
+    assert.equal(b.requests.length, 2, name + ': only the explicit retry may post');
+    assert.deepEqual(clock.pending(), []);
+  }
+});
+
+test('throwing HTTP diagnostic status getter cannot replace the original host error', async () => {
+  const b = browser();
+  await b.flush();
+  b.setFetchHandler(() => ({ok: false, get status() { throw new Error('sensitive status failure'); }}));
+  await assert.rejects(b.api.agent.tasks.get('run-one'), error => {
+    assert.equal(error.code, 'host_unavailable');
+    assert.equal(error.definitive, true);
+    assert.equal(error.transport.reason, 'http_error');
+    assert.equal(error.transport.httpStatus, undefined);
+    assert.equal(JSON.stringify(error.transport).includes('sensitive'), false);
+    return true;
+  });
+  assert.equal(b.requests[0].options.signal.aborted, true);
+  assert.equal(b.requests.length, 1);
+});
+
+
+test('unknown elapsed time is omitted when clock sources change or timestamps are unavailable', async () => {
+  const cases = [
+    ['performance', 'date', 15000],
+    ['date', 'performance', 15000],
+    [null, null, 15000],
+    [null, 'performance', 15000],
+    ['performance', null, 15000],
+    ['performance', 'performance', 9999]
+  ];
+  for (const [startSource, finishSource, finishValue] of cases) {
+    const clock = fakeClock();
+    const b = browser({clock});
+    await b.flush();
+    const setClock = (source, value) => {
+      b.setDiagnosticGlobal('performance', {value: source === 'performance' ? {now: () => value} : undefined});
+      b.setDiagnosticGlobal('Date', {value: {now: () => source === 'date' ? value : undefined}});
+    };
+    setClock(startSource, 10000);
+    b.setFetchHandler(() => new Promise(() => {}));
+    const failure = b.api.agent.tasks.get('run-one').catch(error => error);
+    assert.equal(b.requests.length, 1);
+    setClock(finishSource, finishValue);
+    assert.doesNotThrow(() => clock.advance(5000));
+    const error = await failure;
+    assert.equal(error.code, 'host_unavailable');
+    assert.equal(error.definitive, undefined);
+    assert.equal(error.transport.reason, 'timeout');
+    assert.equal(error.transport.phase, 'request');
+    assert.equal(Object.hasOwn(error.transport, 'elapsedMs'), false);
+    assert.deepEqual(Object.keys(error.transport).sort(), ['phase', 'reason', 'visibility']);
+    assert.equal(b.requests[0].options.signal.aborted, true);
+    assert.equal(b.requests.length, 1, 'unknown timing must not retry');
+    assert.deepEqual(clock.pending(), []);
+  }
+});
+
+test('a valid zero elapsed measurement remains distinct from unknown timing', async () => {
+  const clock = fakeClock();
+  const b = browser({clock});
+  await b.flush();
+  b.setFetchHandler(() => { throw new TypeError('network failed'); });
+  await assert.rejects(b.api.agent.tasks.get('run-one'), error => {
+    assert.equal(error.code, 'host_unavailable');
+    assert.equal(error.transport.reason, 'fetch_failed');
+    assert.equal(Object.hasOwn(error.transport, 'elapsedMs'), true);
+    assert.equal(error.transport.elapsedMs, 0);
+    return true;
+  });
+  assert.equal(b.requests.length, 1);
+  assert.deepEqual(clock.pending(), []);
 });

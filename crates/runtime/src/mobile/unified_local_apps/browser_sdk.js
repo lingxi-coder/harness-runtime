@@ -820,6 +820,46 @@
       throw makeError('The AG-UI request exceeds the 116 MiB transport limit.', 'invalid_input');
     }
     const controller = new AbortController();
+    const transportNow = () => {
+      try {
+        const clock = globalThis.performance;
+        const value = typeof clock?.now === 'function' ? clock.now() : undefined;
+        if (Number.isFinite(value)) return {source: 'performance', value};
+      } catch { /* Diagnostic clocks must not prevent an Agent request. */ }
+      try {
+        const value = Date.now();
+        if (Number.isFinite(value)) return {source: 'date', value};
+      } catch { /* A missing diagnostic timestamp is safe. */ }
+      return null;
+    };
+    const transportStartedAt = transportNow();
+    let transportPhase = 'request';
+    let transportStatus;
+    // Local Error metadata only. Never add these fields to AG-UI messages,
+    // events or results, and never include caller identities or request content.
+    const annotateTransport = (error, reason) => {
+      try {
+        let visibility = 'unknown';
+        try {
+          const current = typeof document === 'undefined' ? undefined : document?.visibilityState;
+          if (current === 'visible' || current === 'hidden') visibility = current;
+        } catch { /* Page visibility is optional diagnostic context. */ }
+        const finishedAt = transportNow();
+        const elapsed = transportStartedAt && finishedAt && transportStartedAt.source === finishedAt.source
+          ? finishedAt.value - transportStartedAt.value : undefined;
+        const elapsedMs = Number.isFinite(elapsed) && elapsed >= 0
+          ? Math.min(120000, Math.round(elapsed)) : undefined;
+        error.transport = Object.freeze({
+          phase: transportPhase,
+          reason,
+          ...(transportStatus === undefined ? {} : {httpStatus: transportStatus}),
+          ...(elapsedMs === undefined ? {} : {elapsedMs}),
+          visibility
+        });
+      } catch { /* Diagnostics must never replace the operation's error. */ }
+      return error;
+    };
+    const transportError = (message, code, reason, cause) => annotateTransport(makeError(message, code, cause), reason);
     const isSubmission = method === 'agent.tasks.start' || method === 'agent.chats.send';
     const unavailableMessage = isSubmission
       ? 'LingXi is unavailable or paused. The run is saved for an explicit retry.'
@@ -829,8 +869,10 @@
       timer = setTimeout(() => {
         // Settle the deadline before aborting: an abort may synchronously
         // reject fetch or body reading, but the timeout remains a soft error.
-        reject(makeError(unavailableMessage, 'host_unavailable'));
+        const error = makeError(unavailableMessage, 'host_unavailable');
+        reject(error);
         controller.abort();
+        annotateTransport(error, 'timeout');
       }, readOnlyMethods.has(method) ? 5000 : 120000);
     });
     try {
@@ -850,25 +892,32 @@
             signal: controller.signal
           });
         } catch (cause) {
-          throw makeError(unavailableMessage, 'host_unavailable', cause);
+          throw transportError(unavailableMessage, 'host_unavailable', 'fetch_failed', cause);
         }
+        transportPhase = 'http_response';
+        try {
+          const status = response.status;
+          if (Number.isInteger(status) && status >= 100 && status <= 599) transportStatus = status;
+        } catch { /* HTTP status is diagnostic only. */ }
         if (!response.ok) {
           controller.abort();
-          const error = makeError('The application run is unavailable. Return to LingXi to resume.', 'host_unavailable');
+          const error = transportError('The application run is unavailable. Return to LingXi to resume.', 'host_unavailable', 'http_error');
           error.definitive = true;
           throw error;
         }
         let result;
+        transportPhase = 'response_body';
         try { result = await response.json(); }
         catch (cause) {
           if (cause?.name === 'SyntaxError') {
-            throw makeError('The host returned an invalid Agent response.', 'invalid_host_response', cause);
+            throw transportError('The host returned an invalid Agent response.', 'invalid_host_response', 'invalid_json', cause);
           }
-          throw makeError(unavailableMessage, 'host_unavailable', cause);
+          throw transportError(unavailableMessage, 'host_unavailable', 'body_failed', cause);
         }
+        transportPhase = 'host_response';
         if (!result?.ok) {
           const detail = result?.error || {};
-          const error = makeError(detail.message || 'Agent request failed.', detail.code || 'agent_error');
+          const error = transportError(detail.message || 'Agent request failed.', detail.code || 'agent_error', 'host_error');
           error.definitive = true;
           error[hostResponded] = true;
           throw error;
@@ -880,7 +929,7 @@
         const error = makeError('The earlier request may still complete in LingXi.', 'host_unavailable');
         error.definitive = false;
         controller.abort();
-        throw error;
+        throw annotateTransport(error, 'wait_cancelled');
       }));
       const result = await Promise.race(requests);
       if (!silentRecovery && (readOnlyMethods.has(method) || method === 'agent.chats.create')) noteHostReachable();
