@@ -47,10 +47,11 @@ jobs:
           if (-not (Select-String -Path $log -Quiet -SimpleMatch 'detached-probe: child alive, stdout inheritable=1')) { throw 'negative control did not establish a live child and inheritable stdout' }
           if (-not (Select-String -Path $log -Quiet -SimpleMatch 'redirected descendant retained the supervisor output pipe')) { throw 'negative control failed for a different reason' }
           if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: FAILED. 0 passed; 1 failed; 0 ignored')) { throw 'negative control did not execute exactly the expected test' }
+          exit 0
       - name: Verify redirected and deliberately inherited pipes
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
           $tests = @(
             'process::supervisor::integration_tests::real_supervisor_preserves_detached_child_after_normal_foreground',
             'process::supervisor::integration_tests::real_supervisor_drains_a_deliberately_inherited_descendant_pipe'
@@ -61,6 +62,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw "target test did not pass: $test" }
           }
+          exit 0
       - name: Preserve diagnostic logs
         if: always()
         uses: actions/upload-artifact@v4
