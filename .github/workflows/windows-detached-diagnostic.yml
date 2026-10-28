@@ -152,7 +152,7 @@ jobs:
       - name: Build the real supervisor fixture
         shell: pwsh
         run: |
-          cargo build --locked -p platform-windows --example typed_bash_fixture
+          cargo build --locked -p platform-windows --features test-support --example typed_bash_fixture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "HARNESS_WINDOWS_TYPED_FIXTURE=$env:GITHUB_WORKSPACE\target\debug\examples\typed_bash_fixture.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build the desktop typed Bash tests
@@ -166,16 +166,27 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'typed Bash Stop did not execute exactly once' }
           exit 0
-      - name: Reproduce the remaining typed Bash timeout defect
+      - name: Real typed Bash timeout retains output and stops the held descendant
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Continue'
           $log = Join-Path $env:RUNNER_TEMP 'typed-timeout.log'
           cargo test --locked -p harness-runtime --no-default-features --features desktop --lib desktop::typed_bash_windows_tests::real_typed_bash_timeout_cannot_report_success_with_live_writer -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'typed Bash timeout did not execute exactly once' }
+          exit 0
+      - name: Reproduce the old typed Bash timeout defect
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $log = Join-Path $env:RUNNER_TEMP 'typed-timeout-legacy.log'
+          $env:LINGXI_TYPED_LEGACY_FOREGROUND = '1'
+          cargo test --locked -p harness-runtime --no-default-features --features desktop --lib desktop::typed_bash_windows_tests::real_typed_bash_timeout_cannot_report_success_with_live_writer -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
           $testExit = $LASTEXITCODE
+          Remove-Item Env:LINGXI_TYPED_LEGACY_FOREGROUND
           if ($testExit -eq 0) { throw 'known typed Bash timeout defect did not reproduce; reassess this negative control' }
           if (-not (Select-String -Path $log -Quiet -SimpleMatch 'typed-timeout-probe: result=Ok(Ok(Ok(')) { throw 'typed Bash did not report foreground success in the expected fixture' }
-          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'held_before_release=Some(true); held_after_release=true')) { throw 'negative control did not retain and later signal the real descendant handle' }
+          if (-not (Select-String -Path $log -Quiet -SimpleMatch 'held_before_release=Some(true); signaled_before_release=false; held_after_release=true')) { throw 'negative control did not retain and later signal the real descendant handle' }
           if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: FAILED. 0 passed; 1 failed; 0 ignored')) { throw 'negative control did not execute exactly once' }
           exit 0
       - name: Preserve typed Bash diagnostics

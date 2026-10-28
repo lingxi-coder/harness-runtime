@@ -79,6 +79,21 @@ async fn wait_held_exit(held: &platform_windows::process::test_support::HeldProc
     .unwrap_or(false)
 }
 
+async fn wait_for_captured_prefix(directory: &Path) -> bool {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let output = std::fs::read_to_string(directory.join("private-output").join("output"))
+                .unwrap_or_default();
+            if output.contains("typed-fixture-before-stop") {
+                break true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or(false)
+}
+
 struct Fixture(tempfile::TempDir);
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -117,6 +132,10 @@ async fn real_typed_bash_stop_preserves_foreground_contract_and_signals_job() {
         signaled,
         "Stop must reach the actual retained descendant handle"
     );
+    assert!(
+        wait_for_captured_prefix(fixture.0.path()).await,
+        "output read before Stop must be retained"
+    );
 }
 
 #[tokio::test]
@@ -138,15 +157,20 @@ async fn real_typed_bash_timeout_cannot_report_success_with_live_writer() {
     assert_eq!(held.is_alive(), Some(true));
     let result = tokio::time::timeout(Duration::from_secs(20), running).await;
     let was_alive = held.is_alive();
+    let signaled_before_release = wait_held_exit(&held).await;
     std::fs::write(fixture.0.path().join("release"), "release").unwrap();
     let eventually_signaled = wait_held_exit(&held).await;
-    eprintln!("typed-timeout-probe: result={result:?}; held_before_release={was_alive:?}; held_after_release={eventually_signaled}");
+    eprintln!("typed-timeout-probe: result={result:?}; held_before_release={was_alive:?}; signaled_before_release={signaled_before_release}; held_after_release={eventually_signaled}");
     assert!(
         matches!(result, Ok(Ok(Err(_)))),
         "an open inherited writer is not a successful foreground completion"
     );
     assert!(
-        eventually_signaled,
-        "the original child handle must eventually signal"
+        signaled_before_release && eventually_signaled,
+        "deadline Stop must signal the original child handle without fixture release"
+    );
+    assert!(
+        wait_for_captured_prefix(fixture.0.path()).await,
+        "output read before deadline must be retained"
     );
 }

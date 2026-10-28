@@ -437,6 +437,95 @@ fn retain_until_reaped(
     });
 }
 
+// A foreground-only supervised shell cannot be handed to the caller as a
+// background task. After Stop or deadline, keep its exact Job and both pipe
+// readers in the supervisor, report uncertainty, and drain through actual EOF.
+// An append/read failure keeps the original bytes and readers quarantined; an
+// ambiguous partial append is never retried as if it had definitely failed.
+#[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
+async fn retain_unverified_foreground(
+    cmd: &SandboxedCommand,
+    reason: &str,
+    mut child: tokio::process::Child,
+    guard: StreamingProcessTreeGuard,
+    mut deadline: DrainDeadline,
+    mut stdout: tokio::process::ChildStdout,
+    mut stderr: tokio::process::ChildStderr,
+    mut capture: Capture,
+    mut eof: [bool; 2],
+    registration: Option<lingxi_core::host::agent_processes::Registration>,
+) -> ProcessError {
+    deadline.verify_lease = true;
+    let termination = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        deadline.terminate(&mut child),
+    )
+    .await;
+    let cause = ProcessError::Io(format!(
+        "supervised foreground {reason}; Windows process group cleanup unverified; initial stop: {termination:?}"
+    ));
+    if let Some(sink) = capture.binding.on_exit.as_ref() {
+        sink.on_wait_failure(&capture.binding.task_id, &cause.to_string())
+            .await;
+    }
+    let lifetime = cmd.lifetime_guard().cloned();
+    tokio::spawn(async move {
+        let _guard = guard;
+        let _registration = registration;
+        let _lifetime = lifetime;
+        // The source received an error, so persist the complete in-memory
+        // prefix before accepting more output. On failure, the capture itself
+        // remains held; no retry can safely infer whether a partial write won.
+        let mut incomplete = capture
+            .spill()
+            .await
+            .err()
+            .map(|error| (Vec::<u8>::new(), false, false, error.to_string()));
+        let mut out = [0u8; 8192];
+        let mut err = [0u8; 8192];
+        let mut output_flushed = false;
+        let mut retry = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            if eof.iter().all(|closed| *closed) && incomplete.is_none() && !output_flushed {
+                match capture.flush().await {
+                    Ok(()) => output_flushed = true,
+                    Err(error) => {
+                        incomplete = Some((Vec::new(), false, true, error.to_string()));
+                    }
+                }
+            }
+            tokio::select! {
+                _ = retry.tick() => {
+                    // The retry initiates termination; elapsed time and Job
+                    // accounting never upgrade this to an exit proof.
+                    let _ = deadline.terminate(&mut child).await;
+                    let _ = child.try_wait();
+                }
+                read = stdout.read(&mut out), if !eof[0] && incomplete.is_none() => {
+                    match read {
+                        Ok(n) => match capture.chunk(&out[..n], false, n == 0).await {
+                            Ok(()) => eof[0] = n == 0,
+                            Err(error) => incomplete = Some((out[..n].to_vec(), false, n == 0, error.to_string())),
+                        },
+                        Err(error) => incomplete = Some((Vec::new(), false, false, error.to_string())),
+                    }
+                }
+                read = stderr.read(&mut err), if !eof[1] && incomplete.is_none() => {
+                    match read {
+                        Ok(n) => match capture.chunk(&err[..n], true, n == 0).await {
+                            Ok(()) => eof[1] = n == 0,
+                            Err(error) => incomplete = Some((err[..n].to_vec(), true, n == 0, error.to_string())),
+                        },
+                        Err(error) => incomplete = Some((Vec::new(), true, false, error.to_string())),
+                    }
+                }
+            }
+        }
+    });
+    cause
+}
+
 async fn foreground_failure(
     cmd: &SandboxedCommand,
     cause: ProcessError,
@@ -1028,6 +1117,10 @@ pub(super) async fn run(
     let mut eof = [false; 2];
     let mut timed_out = false;
     let mut retain_after_output_eof = false;
+    #[cfg(all(windows, feature = "test-support"))]
+    let preserve_typed_legacy = std::env::var_os("LINGXI_TYPED_LEGACY_FOREGROUND").is_some();
+    #[cfg(all(windows, not(feature = "test-support")))]
+    let preserve_typed_legacy = false;
     if !explicit {
         let foreground_deadline =
             tokio::time::Instant::now() + cmd.inner().timeout.unwrap_or(DEFAULT_TIMEOUT);
@@ -1100,6 +1193,26 @@ pub(super) async fn run(
             }
         }
         if stopped {
+            #[cfg(windows)]
+            if cmd.is_supervisor_request()
+                && !cmd.auto_background_on_timeout()
+                && !deadline.strict_host
+                && !preserve_typed_legacy
+            {
+                return Err(retain_unverified_foreground(
+                    cmd,
+                    "stop",
+                    child,
+                    guard,
+                    deadline,
+                    stdout,
+                    stderr,
+                    capture,
+                    eof,
+                    agent_registration,
+                )
+                .await);
+            }
             deadline.verify_lease |= deadline.verify_supervised_stop;
             if deadline.strict_host || deadline.verify_lease {
                 if let Err(error) = terminate_and_reap(&deadline, &mut child, &mut guard).await {
@@ -1130,6 +1243,27 @@ pub(super) async fn run(
             flush_capture(&mut capture, deadline.strict_host).await?;
             finalize_capture(&mut capture, deadline.strict_host).await?;
             return Err(ProcessError::Io("supervisor command cancelled".into()));
+        }
+        #[cfg(windows)]
+        if timed_out
+            && cmd.is_supervisor_request()
+            && !cmd.auto_background_on_timeout()
+            && !deadline.strict_host
+            && !preserve_typed_legacy
+        {
+            return Err(retain_unverified_foreground(
+                cmd,
+                "deadline",
+                child,
+                guard,
+                deadline,
+                stdout,
+                stderr,
+                capture,
+                eof,
+                agent_registration,
+            )
+            .await);
         }
         // A host deadline owns the whole payload job, even if the direct
         // shell has already exited while a descendant still holds its pipes.
