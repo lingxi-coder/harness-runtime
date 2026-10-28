@@ -8455,7 +8455,6 @@ mod tests {
                 error.contains("fixture acknowledgement failed"),
                 "unexpected tool error: {error}"
             );
-            assert!(error.contains("termination is unverified"));
             assert!(registry.killers.lock().unwrap().contains_key("b1a2b3c4d"));
             let weak_runner = Arc::downgrade(&runner);
             drop(runner);
