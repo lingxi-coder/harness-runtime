@@ -312,6 +312,9 @@ test-harness = { path = "../test-harness" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "test-util", "time"] }
 tool-api = { path = "../tool-api", features = ["test-support"] }
 
+[target."cfg(windows)".dev-dependencies]
+platform-windows = { path = "../platforms/windows", features = ["test-support"] }
+
 [[test]]
 name = "visualization_host"
 path = "tests/mobile/visualization_host.rs"

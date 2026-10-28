@@ -723,7 +723,7 @@ pub(super) fn process_is_alive(pid: u32) -> Option<bool> {
 }
 
 /// Retain a process object until the background cleanup test drops the handle.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn hold_process_handle_for_test(
     pid: u32,
 ) -> std::io::Result<std::os::windows::io::OwnedHandle> {
@@ -741,7 +741,7 @@ pub(super) fn hold_process_handle_for_test(
 }
 
 /// Query the same process object retained by the test, even if its PID is reused.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn process_handle_is_alive_for_test(
     handle: &std::os::windows::io::OwnedHandle,
 ) -> Option<bool> {

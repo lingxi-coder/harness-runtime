@@ -22,3 +22,19 @@ mod supervisor_gate;
 
 #[cfg(windows)]
 pub mod owned_job;
+
+/// Test-only access to one retained Windows process identity.
+#[cfg(all(windows, feature = "test-support"))]
+pub mod test_support {
+    pub struct HeldProcess(std::os::windows::io::OwnedHandle);
+
+    impl HeldProcess {
+        pub fn open(pid: u32) -> std::io::Result<Self> {
+            super::supervisor_native::hold_process_handle_for_test(pid).map(Self)
+        }
+
+        pub fn is_alive(&self) -> Option<bool> {
+            super::supervisor_native::process_handle_is_alive_for_test(&self.0)
+        }
+    }
+}

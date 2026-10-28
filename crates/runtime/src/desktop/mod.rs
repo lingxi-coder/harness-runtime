@@ -2278,6 +2278,10 @@ impl DesktopBashRunner {
 #[path = "typed_bash_test.rs"]
 mod typed_bash_cancellation_tests;
 
+#[cfg(all(test, windows))]
+#[path = "typed_bash_windows_test.rs"]
+mod typed_bash_windows_tests;
+
 /// Project-specific `/worktree` slash-command grammar. Claude Code exposes the
 /// same lifecycle through `--worktree` plus `EnterWorktree`/`ExitWorktree`, but
 /// has no slash row; `LingXi` keeps the upstream command table locked and adds
