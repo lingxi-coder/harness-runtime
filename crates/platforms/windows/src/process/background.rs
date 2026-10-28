@@ -1123,9 +1123,12 @@ pub(super) async fn run(
     let mut eof = [false; 2];
     let mut timed_out = false;
     let mut retain_after_output_eof = false;
-    #[cfg(all(windows, feature = "test-support"))]
+    #[cfg(all(windows, test))]
+    let preserve_typed_legacy = std::env::var_os("LINGXI_DETACHED_JOB_LEGACY_BLOCKING").is_some()
+        || std::env::var_os("LINGXI_TYPED_LEGACY_FOREGROUND").is_some();
+    #[cfg(all(windows, not(test), feature = "test-support"))]
     let preserve_typed_legacy = std::env::var_os("LINGXI_TYPED_LEGACY_FOREGROUND").is_some();
-    #[cfg(all(windows, not(feature = "test-support")))]
+    #[cfg(all(windows, not(test), not(feature = "test-support")))]
     let preserve_typed_legacy = false;
     if !explicit {
         let foreground_deadline =
