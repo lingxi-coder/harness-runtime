@@ -2169,6 +2169,19 @@ impl lingxi_core::host::BackgroundExitSink for BackgroundBashExitSink {
     }
 }
 
+// Preserve the original source-text units when annotating an unverified stop.
+// ToolError's Display is only a logging label for source-carrying errors.
+fn background_cleanup_unverified(error: ToolError, stop_observation: &str) -> ToolError {
+    let mut units = error
+        .model_facing_message()
+        .string_units("")
+        .expect("tool error messages are root strings");
+    units.extend(
+        format!("; background termination is unverified ({stop_observation})").encode_utf16(),
+    );
+    ToolError::Io(tool_api::tool_trait::source_text_projection_units(&units))
+}
+
 /// Terminates a backgrounded shell's OS process on `TaskStop` or teardown.
 struct BackgroundBashKiller {
     process: std::sync::Arc<dyn lingxi_core::host::ProcessRunner>,
@@ -2670,10 +2683,7 @@ impl BashTool {
                     Ok(()) => "stop request accepted".to_string(),
                     Err(stop_error) => format!("stop request failed: {stop_error}"),
                 };
-                return Err(ToolError::Io(
-                    format!("{error}; background termination is unverified ({stop_observation})")
-                        .into(),
-                ));
+                return Err(background_cleanup_unverified(error, &stop_observation));
             }
             // An owned launch is already tracked by the host request. The
             // registration error is not an exit receipt: its background sink
@@ -8343,6 +8353,25 @@ mod tests {
         assert!(registry.unarmed.lock().unwrap().is_empty());
     }
 
+    #[test]
+    fn background_cleanup_unverified_keeps_original_utf16_units() {
+        let original = vec![u16::from(b'a'), 0xd800, u16::from(b'b')];
+        let result = background_cleanup_unverified(
+            ToolError::Io(tool_api::tool_trait::source_text_projection_units(
+                &original,
+            )),
+            "stop request failed",
+        );
+        let units = result.model_facing_message().string_units("").unwrap();
+        assert!(units.starts_with(&original));
+        assert_eq!(
+            &units[original.len()..],
+            "; background termination is unverified (stop request failed)"
+                .encode_utf16()
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn failed_background_ack_keeps_live_child_and_output_unverified() {
@@ -8415,10 +8444,13 @@ mod tests {
                     fresh_tx(),
                 )
                 .await;
-            let error = format!(
-                "{:?}",
-                result.err().expect("ack failure must remain an error")
-            );
+            let error = result
+                .err()
+                .expect("ack failure must remain an error")
+                .model_facing_message()
+                .string_at("")
+                .expect("fixture error is valid UTF-16")
+                .to_owned();
             assert!(
                 error.contains("fixture acknowledgement failed"),
                 "unexpected tool error: {error}"

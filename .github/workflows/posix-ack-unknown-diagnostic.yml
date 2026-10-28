@@ -23,7 +23,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for test_name in failed_background_ack_keeps_live_child_and_output_unverified background_registration_and_pid_binding_precede_detachment_ack; do
+          for test_name in background_cleanup_unverified_keeps_original_utf16_units failed_background_ack_keeps_live_child_and_output_unverified background_registration_and_pid_binding_precede_detachment_ack; do
             timeout 45s cargo test --locked -p tool-shell --lib "bash::tests::$test_name" -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/$test_name.log"
             grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored' "$RUNNER_TEMP/$test_name.log"
           done
