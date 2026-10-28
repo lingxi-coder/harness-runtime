@@ -2,8 +2,9 @@
 //!
 //! Children spawned with `setsid()` (see [`super::spawn_unsafe::attach_setsid`])
 //! are process-group leaders — their PID equals their PGID. We pass the
-//! POSITIVE PGID to `killpg(2)`, which delivers the signal to every member
-//! of the group, including any descendants the child has forked.
+//! POSITIVE PGID to `killpg(2)` to request a signal for group members,
+//! including descendants that remain in the group. Delivery is subject to
+//! OS permissions; descendants can also leave the original group.
 //!
 //! Two exported variants:
 //! - [`kill_tree_force`]: immediate SIGKILL, no grace period. Used by
@@ -20,24 +21,27 @@ use std::time::Duration;
 /// Default grace period between SIGTERM and the SIGKILL escalation.
 pub const DEFAULT_GRACE: Duration = Duration::from_secs(5);
 
-/// Kill every member of the process group `pid`. Sends `SIGTERM`, waits
-/// [`DEFAULT_GRACE`] for graceful exit, then sends `SIGKILL`.
+/// Request `SIGTERM` for the process group `pid`, wait [`DEFAULT_GRACE`],
+/// and request `SIGKILL`. A successful return is not proof that all members
+/// or all descendants exited: signal delivery can be partial, and descendants
+/// may have moved to another group.
 ///
 /// `pid` MUST be the PGID — typically the PID of a child spawned with
 /// `setsid()`, in which case PID == PGID. Passing a non-leader PID will
 /// only signal that one process, which is rarely what callers want.
 ///
 /// # Errors
-/// Returns [`ProcessError::Io`] when the `SIGTERM` call fails with anything
-/// other than `ESRCH` (already dead). `ESRCH` from the `SIGKILL`
-/// escalation is treated as success — by then the group is gone.
+/// Returns [`ProcessError::Io`] for signal errors other than `ESRCH`, which
+/// indicates that no matching process group was present at that moment.
 pub async fn kill_tree_unix(pid: u32) -> Result<(), ProcessError> {
     kill_tree_with_grace(pid, DEFAULT_GRACE).await
 }
 
 /// Like [`kill_tree_unix`] but skips the graceful `SIGTERM` and sends
 /// `SIGKILL` directly. Used in shutdown paths where the parent cannot
-/// afford the 5 s grace period.
+/// afford the 5 s grace period. A successful return confirms only that the
+/// signal request was accepted or the group was absent; it does not verify
+/// that every group member or descendant has exited.
 ///
 /// # Errors
 /// Returns [`ProcessError::Io`] when `killpg(SIGKILL)` fails with
