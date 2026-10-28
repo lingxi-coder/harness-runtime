@@ -1938,6 +1938,7 @@ async fn wait_for_background_outcome(
 enum ForegroundArmingDecision {
     Withdraw,
     KeepBackground,
+    PreserveUnverified,
     CallerDropped,
 }
 
@@ -1971,6 +1972,10 @@ impl ForegroundArming {
     async fn keep_for_background(mut self) {
         self.decide(ForegroundArmingDecision::KeepBackground);
     }
+
+    async fn preserve_unverified(mut self) {
+        self.decide(ForegroundArmingDecision::PreserveUnverified);
+    }
 }
 
 impl Drop for ForegroundArming {
@@ -2001,6 +2006,19 @@ async fn finish_foreground_arming(
     use lingxi_core::host::task_registry::TaskBackgroundOutcome;
     if matches!(decision, ForegroundArmingDecision::KeepBackground) {
         return TaskBackgroundOutcome::Backgrounded;
+    }
+    if matches!(decision, ForegroundArmingDecision::PreserveUnverified) {
+        if let Some(lease) = lease {
+            if let Err(error) = registry
+                .mark_foreground_bash_unverified_owned(lease, "foreground cleanup unverified")
+                .await
+            {
+                tracing::warn!(target: "tool_shell::bash", %error, "could not record unverified foreground observation for the original row");
+            }
+        }
+        // In particular, no lease is not proof that no row or process exists.
+        // Keep the allocation and report Unknown; do not address a reused ID.
+        return TaskBackgroundOutcome::Unknown;
     }
     if matches!(decision, ForegroundArmingDecision::CallerDropped) {
         if let Some(request) = host_request {
@@ -4350,7 +4368,7 @@ impl Tool for BashTool {
             sender: settled.clone(),
             outcome: lingxi_core::host::task_registry::TaskBackgroundOutcome::Unknown,
         };
-        let arming = match (fg_bound.as_ref(), on_demand.as_ref()) {
+        let mut arming = match (fg_bound.as_ref(), on_demand.as_ref()) {
             (Some((task_id, _)), Some(notify)) => self.arm_foreground_record(
                 &ctx,
                 task_id,
@@ -4462,6 +4480,18 @@ impl Tool for BashTool {
         if let Err(error) = &run_result {
             self.ctx.note_side_chat_cleanup_failure(&error.to_string());
         }
+        // A plain runner error does not prove either no child was started or
+        // that its cleanup completed. Until that proof is represented by the
+        // runner contract, preserve its output and original row for all errors.
+        let cleanup_unverified = run_result.is_err();
+        let output_cleanup_supervised = arming.is_some();
+        if cleanup_unverified {
+            // Decide before another await can cancel this caller. The arming
+            // task owns any in-flight registration and exact row lease.
+            if let Some(arming) = arming.take() {
+                arming.preserve_unverified().await;
+            }
+        }
         // The wrapped command has finished: tear down any per-command sandbox
         // state (e.g. bwrap mount points). No-op for the default
         // `LegacyWrapRunner`; only the live runner has anything to clean up.
@@ -4502,7 +4532,6 @@ impl Tool for BashTool {
         // armed row back. A command that moved to the background keeps it — it
         // owns a live child now, and the background arm below flips
         // `isBackgrounded` and takes over the record.
-        let output_cleanup_supervised = arming.is_some();
         if let Some(arming) = arming {
             if moved_to_background && !host_detach_forbidden {
                 arming.keep_for_background().await;
@@ -4515,7 +4544,7 @@ impl Tool for BashTool {
                 "A supervised process unexpectedly moved to the background without transferable sandbox resources".into(),
             ));
         }
-        if !moved_to_background && !output_cleanup_supervised {
+        if !moved_to_background && !output_cleanup_supervised && !cleanup_unverified {
             if let (Some(registry), Some((task_id, _))) =
                 (self.ctx.task_registry.as_ref(), fg_bound.as_ref())
             {
@@ -7522,6 +7551,8 @@ mod tests {
         output_chunks: std::sync::Mutex<Vec<(String, String)>>,
         output_flushes: std::sync::Mutex<Vec<String>>,
         unverified: std::sync::Mutex<Vec<(String, String)>>,
+        owned_observation_attempted: tokio::sync::Notify,
+        output_root: Option<std::path::PathBuf>,
 
         allocated: std::sync::Mutex<Vec<String>>,
         registered: std::sync::Mutex<
@@ -7541,6 +7572,7 @@ mod tests {
         requester:
             std::sync::Mutex<Option<Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>>>,
         withdrawal_attempted: tokio::sync::Notify,
+        discarded_notify: tokio::sync::Notify,
     }
 
     #[derive(Default)]
@@ -7618,6 +7650,34 @@ mod tests {
 
     #[async_trait::async_trait]
     impl lingxi_core::host::task_registry::TaskRegistryHandle for RecordingRegistry {
+        async fn mark_foreground_bash_unverified_owned(
+            &self,
+            lease: &lingxi_core::host::task_registry::ForegroundTaskLease,
+            reason: &str,
+        ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
+            let is_original = self
+                .foreground_instances
+                .lock()
+                .unwrap()
+                .get(lease.task_id())
+                .is_some_and(|identity| Arc::ptr_eq(identity, lease.identity()));
+            if is_original {
+                self.unverified
+                    .lock()
+                    .unwrap()
+                    .push((lease.task_id().into(), reason.into()));
+            }
+            self.owned_observation_attempted.notify_one();
+            if is_original {
+                Ok(())
+            } else {
+                Err(
+                    lingxi_core::host::task_registry::TaskRegistryError::NotFound(
+                        lease.task_id().into(),
+                    ),
+                )
+            }
+        }
         async fn settle_background_bash_unverified(
             &self,
             task_id: &str,
@@ -7821,7 +7881,10 @@ mod tests {
             self.allocated.lock().unwrap().push(id.clone());
             Ok(lingxi_core::host::task_registry::BackgroundBashHandle {
                 task_id: id,
-                output_path: "/session/tasks/b1a2b3c4d.output".to_string(),
+                output_path: self.output_root.as_ref().map_or_else(
+                    || "/session/tasks/b1a2b3c4d.output".to_string(),
+                    |root| root.join("b1a2b3c4d.output").to_string_lossy().into_owned(),
+                ),
             })
         }
         async fn allocate_owned_bash_output(
@@ -7858,6 +7921,10 @@ mod tests {
                 .contains_key(task_id)
             {
                 self.discarded.lock().unwrap().push(task_id.to_string());
+                if let Some(root) = &self.output_root {
+                    let _ = std::fs::remove_file(root.join(format!("{task_id}.output")));
+                }
+                self.discarded_notify.notify_one();
             }
         }
         async fn bind_background_process(
@@ -7943,6 +8010,231 @@ mod tests {
                 fresh_tx(),
             )
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn foreground_unverified_arming_preserves_exact_row() {
+        use lingxi_core::host::task_registry::TaskBackgroundOutcome;
+
+        for replace_row in [false, true] {
+            let gate = Arc::new(ForegroundRegistrationGate::default());
+            let registry = Arc::new(RecordingRegistry {
+                registration_gate: Some(gate.clone()),
+                ..Default::default()
+            });
+            let arming = test_foreground_arming(registry.clone(), "unverified-row", None);
+            tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+                .await
+                .expect("the original row must exist before the hook returns");
+            arming.preserve_unverified().await;
+            if replace_row {
+                registry
+                    .foreground_instances
+                    .lock()
+                    .unwrap()
+                    .insert("unverified-row".into(), Arc::new(()));
+            }
+            let observed = registry.owned_observation_attempted.notified();
+            gate.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), observed)
+                .await
+                .expect("the original lease must be checked after the hook returns");
+            assert!(registry.unarmed.lock().unwrap().is_empty());
+            assert!(registry.discarded.lock().unwrap().is_empty());
+            let recorded = registry.unverified.lock().unwrap().clone();
+            if replace_row {
+                assert!(recorded.is_empty(), "a replacement row must not be marked");
+            } else {
+                assert_eq!(
+                    recorded,
+                    [(
+                        "unverified-row".into(),
+                        "foreground cleanup unverified".into()
+                    )]
+                );
+            }
+        }
+        let registry = RecordingRegistry::default();
+        assert_eq!(
+            finish_foreground_arming(
+                &registry,
+                "no-lease",
+                None,
+                None,
+                ForegroundArmingDecision::PreserveUnverified,
+            )
+            .await,
+            TaskBackgroundOutcome::Unknown
+        );
+        assert!(registry.unverified.lock().unwrap().is_empty());
+        assert!(registry.discarded.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    struct UnverifiedForegroundOutput {
+        can_arm: bool,
+        ordinary_error: bool,
+        release: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl ProcessRunner for UnverifiedForegroundOutput {
+        fn supports_foreground_backgrounding(&self) -> bool {
+            self.can_arm
+        }
+        async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            unreachable!("the Bash tool must use its foreground runner")
+        }
+        async fn run_foreground_with_output_limit(
+            &self,
+            command: &SandboxedCommand,
+            _: Option<usize>,
+        ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+            let binding = command.background_task().expect("source identity is bound");
+            std::fs::write(&binding.output_path, b"original output bytes\n").unwrap();
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
+            Err(ProcessError::Io(if self.ordinary_error {
+                "ordinary I/O failure with no no-spawn receipt".into()
+            } else {
+                format!(
+                    "{} injected supervisor loss",
+                    lingxi_core::host::process::OWNED_SHELL_CLEANUP_UNVERIFIED
+                )
+            }))
+        }
+        async fn spawn_background(
+            &self,
+            _: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_unverified_error_preserves_output_without_arming() {
+        for ordinary_error in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let registry = Arc::new(RecordingRegistry {
+                output_root: Some(directory.path().to_owned()),
+                ..Default::default()
+            });
+            let mut context = shell_test_ctx(ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            });
+            context.task_registry = Some(registry.clone());
+            context.process = Arc::new(UnverifiedForegroundOutput {
+                can_arm: false,
+                ordinary_error,
+                release: None,
+            });
+            let result = BashTool::new(context)
+                .call(
+                    source_json!({"command": "echo fixture"}),
+                    use_ctx(),
+                    fresh_tx(),
+                )
+                .await;
+            assert!(result.is_err(), "unverified cleanup must remain an error");
+            let expected = if ordinary_error {
+                "ordinary I/O failure"
+            } else {
+                "owned shell cleanup unverified"
+            };
+            assert!(format!("{:?}", result.err().unwrap()).contains(expected));
+            assert_eq!(
+                std::fs::read(directory.path().join("b1a2b3c4d.output"))
+                    .expect("unverified output was discarded"),
+                b"original output bytes\n"
+            );
+            assert!(registry.discarded.lock().unwrap().is_empty());
+            assert!(
+                registry.unverified.lock().unwrap().is_empty(),
+                "no lease means no ID-only observation"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_unverified_error_preserves_output_after_row_published() {
+        let directory = tempfile::tempdir().unwrap();
+        let gate = Arc::new(ForegroundRegistrationGate::default());
+        let registry = Arc::new(RecordingRegistry {
+            output_root: Some(directory.path().to_owned()),
+            registration_gate: Some(gate.clone()),
+            ..Default::default()
+        });
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut context = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        context.task_registry = Some(registry.clone());
+        context.process = Arc::new(UnverifiedForegroundOutput {
+            can_arm: true,
+            ordinary_error: false,
+            release: Some(release.clone()),
+        });
+        let call = tokio::spawn(async move {
+            BashTool::new(context)
+                .call(
+                    source_json!({"command": "echo fixture"}),
+                    use_ctx(),
+                    fresh_tx(),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+            .await
+            .expect("the foreground row must publish before the result");
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(2), call)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err());
+        assert!(format!("{:?}", result.err().unwrap()).contains("owned shell cleanup unverified"));
+        let observed = registry.owned_observation_attempted.notified();
+        let withdrawn = registry.withdrawal_attempted.notified();
+        gate.release.notify_one();
+        let marked = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! { _ = observed => true, _ = withdrawn => false }
+        })
+        .await
+        .expect("the original registration must settle");
+        if !marked {
+            tokio::time::timeout(Duration::from_secs(2), registry.discarded_notify.notified())
+                .await
+                .unwrap();
+        }
+        assert!(
+            marked,
+            "unverified output was withdrawn instead of retaining the original row"
+        );
+        assert_eq!(
+            registry.unverified.lock().unwrap().as_slice(),
+            [("b1a2b3c4d".into(), "foreground cleanup unverified".into())]
+        );
+        assert!(registry.discarded.lock().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read(directory.path().join("b1a2b3c4d.output")).unwrap(),
+            b"original output bytes\n"
+        );
     }
 
     #[tokio::test]

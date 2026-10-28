@@ -1,0 +1,84 @@
+name: Foreground unverified output diagnostic
+on:
+  push:
+    branches: [codex/media-windows-source-owner-20261028]
+permissions:
+  contents: read
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_INCREMENTAL: "0"
+  RUST_MIN_STACK: "16777216"
+jobs:
+  source-regressions:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Build targeted test executables
+        run: |
+          cargo test --locked -p core --lib --no-run
+          cargo test --locked -p tasks --lib --no-run
+          cargo test --locked -p tool-shell --lib --no-run
+      - name: Verify exact row and source output ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_one() {
+            local package_name="$1" test_name="$2" log_name="$3"
+            cargo test --locked -p "$package_name" --lib "$test_name" -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/$log_name.log"
+            grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored' "$RUNNER_TEMP/$log_name.log"
+          }
+          test_one core host::task_registry::tests::unverified_shell_default_never_settles_a_task default-fail-closed
+          test_one tasks registry::registry_test::foreground_unverified_observation_uses_exact_row_lease exact-lease
+          test_one tool-shell bash::tests::foreground_unverified_arming_preserves_exact_row arming
+          test_one tool-shell bash::tests::foreground_unverified_error_preserves_output_without_arming fast-output
+          test_one tool-shell bash::tests::foreground_unverified_error_preserves_output_after_row_published row-output
+      - name: Reproduce unconditional error-output discard
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('crates/tools/shell/src/bash.rs')
+          text = source.read_text()
+          old = 'let cleanup_unverified = run_result.is_err();'
+          assert text.count(old) == 1
+          source.write_text(text.replace(old, 'let cleanup_unverified = false;', 1))
+          PY
+          set +e
+          cargo test --locked -p tool-shell --lib bash::tests::foreground_unverified_error_preserves_output_without_arming -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/legacy-discard.log"
+          test_exit=${PIPESTATUS[0]}
+          set -e
+          if [ "$test_exit" -eq 0 ]; then echo 'legacy discard unexpectedly passed'; exit 1; fi
+          grep -F 'unverified output was discarded' "$RUNNER_TEMP/legacy-discard.log"
+          grep -F 'test result: FAILED. 0 passed; 1 failed; 0 ignored' "$RUNNER_TEMP/legacy-discard.log"
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-owner-diagnostic
+          path: ${{ runner.temp }}/*.log
+          if-no-files-found: ignore
+  windows-production-check:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - name: Enable long paths
+        shell: pwsh
+        run: git config --global core.longpaths true
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Ensure native crypto assembler
+        shell: pwsh
+        run: |
+          if (-not (Get-Command nasm -ErrorAction SilentlyContinue)) {
+            choco install nasm --no-progress -y
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "C:\Program Files\NASM" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+      - name: Check Windows production crates
+        run: cargo check --locked -p platform-windows -p tasks -p tool-shell

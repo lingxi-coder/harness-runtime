@@ -2669,6 +2669,76 @@ async fn stale_foreground_lease_cannot_bind_or_withdraw_replacement() {
 }
 
 #[tokio::test]
+async fn foreground_unverified_observation_uses_exact_row_lease() {
+    use lingxi_core::host::task_registry::{BackgroundBashRegistration, TaskRegistryHandle};
+
+    let (_dir, registry) = make_registry();
+    let (id, output) = registry.allocate_bash_output().await.unwrap();
+    registry
+        .output_manager
+        .append(&output, "raw evidence\n")
+        .await
+        .unwrap();
+    let registration = BackgroundBashRegistration {
+        command: "fixture".into(),
+        description: "probe".into(),
+        ..Default::default()
+    };
+    let original = registry
+        .register_foreground_bash_owned(&id, registration.clone(), true)
+        .await
+        .unwrap();
+    TaskRegistryHandle::mark_foreground_bash_unverified_owned(
+        &registry,
+        &original,
+        "original wait unavailable",
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(registry.get(&id).await, Some(TaskState::LocalBash(shell))
+        if !shell.base.status.is_terminal()
+            && shell.stop_cause.as_deref() == Some("wait_unverified:original wait unavailable"))
+    );
+    assert_eq!(
+        registry
+            .output_manager
+            .read(&output, Default::default())
+            .await
+            .unwrap()
+            .content,
+        "raw evidence\n"
+    );
+
+    let mut replacement = registry.get(&id).await.unwrap();
+    let TaskState::LocalBash(shell) = &mut replacement else {
+        unreachable!()
+    };
+    shell.stop_cause = None;
+    registry.insert_state_for_test(replacement).await;
+    assert!(TaskRegistryHandle::mark_foreground_bash_unverified_owned(
+        &registry,
+        &original,
+        "late stale observation",
+    )
+    .await
+    .is_err());
+    assert!(
+        matches!(registry.get(&id).await, Some(TaskState::LocalBash(shell))
+        if !shell.base.status.is_terminal() && shell.stop_cause.is_none())
+    );
+    assert_eq!(
+        registry
+            .output_manager
+            .read(&output, Default::default())
+            .await
+            .unwrap()
+            .content,
+        "raw evidence\n"
+    );
+}
+
+#[tokio::test]
 async fn panicking_task_created_cleans_only_its_foreground_instance() {
     struct GatePanic {
         entered: tokio::sync::Notify,
