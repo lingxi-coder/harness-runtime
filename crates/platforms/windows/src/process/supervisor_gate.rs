@@ -56,6 +56,13 @@ struct ThreadEntry {
     delta_priority: i32,
     flags: u32,
 }
+#[cfg(test)]
+#[repr(C)]
+#[derive(Default)]
+struct TestFileTime {
+    low: u32,
+    high: u32,
+}
 #[link(name = "kernel32")]
 extern "system" {
     fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> Handle;
@@ -85,6 +92,16 @@ extern "system" {
     #[cfg(test)]
     fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
     #[cfg(test)]
+    fn GetProcessTimes(
+        process: Handle,
+        creation: *mut TestFileTime,
+        exit: *mut TestFileTime,
+        kernel: *mut TestFileTime,
+        user: *mut TestFileTime,
+    ) -> i32;
+    #[cfg(test)]
+    fn TerminateProcess(process: Handle, code: u32) -> i32;
+    #[cfg(test)]
     fn CloseHandle(handle: Handle) -> i32;
 }
 
@@ -107,6 +124,124 @@ pub(super) fn hold_process_for_membership_test(pid: u32) -> Result<OwnedHandle, 
     }
     // SAFETY: successful OpenProcess returns a uniquely owned handle.
     Ok(unsafe { OwnedHandle::from_raw_handle(raw) })
+}
+
+#[cfg(test)]
+fn fixture_process_birth(process: Handle) -> Result<u64, ProcessError> {
+    let (mut creation, mut exit, mut kernel, mut user) = (
+        TestFileTime::default(),
+        TestFileTime::default(),
+        TestFileTime::default(),
+        TestFileTime::default(),
+    );
+    // SAFETY: the caller holds the process handle and all output pointers are valid.
+    if unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } == 0 {
+        return Err(error("query fixture process creation time"));
+    }
+    Ok((u64::from(creation.high) << 32) | u64::from(creation.low))
+}
+
+// Own an exact fixture process object across the release and exit checks. The
+// creation-time comparison rejects a recycled PID before the handle is held.
+#[cfg(test)]
+pub(super) struct DetachedFixtureProcess {
+    handle: OwnedHandle,
+    release: std::path::PathBuf,
+}
+
+#[cfg(test)]
+impl DetachedFixtureProcess {
+    pub(super) fn open(directory: &std::path::Path) -> Result<Self, ProcessError> {
+        let identity = std::fs::read_to_string(directory.join("identity"))
+            .map_err(|cause| ProcessError::Io(format!("read fixture identity: {cause}")))?;
+        let mut fields = identity.split_whitespace();
+        let pid: u32 = fields
+            .next()
+            .ok_or_else(|| ProcessError::Io("missing fixture pid".into()))?
+            .parse()
+            .map_err(|cause| ProcessError::Io(format!("invalid fixture pid: {cause}")))?;
+        let birth: u64 = fields
+            .next()
+            .ok_or_else(|| ProcessError::Io("missing fixture birth identity".into()))?
+            .parse()
+            .map_err(|cause| {
+                ProcessError::Io(format!("invalid fixture birth identity: {cause}"))
+            })?;
+        if fields.next().is_some() {
+            return Err(ProcessError::Io("invalid fixture identity".into()));
+        }
+        // SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE.
+        // Termination is reserved for bounded cleanup on a failing test.
+        let raw = unsafe { OpenProcess(0x0010_0000 | 0x1000 | 0x1, 0, pid) };
+        if raw.is_null() {
+            return Err(error("open detached fixture process"));
+        }
+        // SAFETY: successful OpenProcess transfers a new owned handle.
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+        if fixture_process_birth(handle.as_raw_handle())? != birth {
+            return Err(ProcessError::Io(
+                "detached fixture process identity changed".into(),
+            ));
+        }
+        Ok(Self {
+            handle,
+            release: directory.join("release"),
+        })
+    }
+
+    pub(super) fn exited(&self) -> Result<bool, ProcessError> {
+        // SAFETY: self retains the process handle during the zero-time wait.
+        match unsafe { WaitForSingleObject(self.handle.as_raw_handle(), 0) } {
+            0 => Ok(true),
+            258 => Ok(false),
+            state => Err(ProcessError::Io(format!(
+                "fixture wait failed with state {state}"
+            ))),
+        }
+    }
+
+    pub(super) async fn wait_exit(&self) -> Result<(), ProcessError> {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if self.exited()? {
+                    return Ok(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            ProcessError::Io("detached fixture exit was not observed before the deadline".into())
+        })?
+    }
+}
+
+#[cfg(test)]
+impl Drop for DetachedFixtureProcess {
+    fn drop(&mut self) {
+        match self.exited() {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(cause) => {
+                eprintln!("detached fixture cleanup exit is unconfirmed: {cause}");
+                return;
+            }
+        }
+        let _ = std::fs::write(&self.release, "release");
+        // SAFETY: the handle still names the birth-checked fixture process.
+        match unsafe { WaitForSingleObject(self.handle.as_raw_handle(), 5000) } {
+            0 => {}
+            258 => {
+                // Termination requests are not treated as exit receipts.
+                let terminated = unsafe { TerminateProcess(self.handle.as_raw_handle(), 143) };
+                let waited = unsafe { WaitForSingleObject(self.handle.as_raw_handle(), 5000) };
+                if waited != 0 {
+                    eprintln!("detached fixture cleanup exit is unconfirmed (terminate={terminated}, wait={waited})");
+                }
+            }
+            state => eprintln!("detached fixture cleanup exit is unconfirmed (wait={state})"),
+        }
+    }
 }
 
 /// Stop Rust's Windows CreateProcess call (which allows handle inheritance)
@@ -588,7 +723,7 @@ mod tests {
             return;
         };
         let directory = PathBuf::from(directory);
-        if std::env::var_os("LINGXI_DETACHED_JOB_CHILD").is_some() {
+        if std::env::var_os("LINGXI_DETACHED_JOB_CHILD").is_some_and(|value| value == "1") {
             std::fs::write(directory.join("started"), "ready").unwrap();
             let until = std::time::Instant::now() + Duration::from_secs(30);
             while std::time::Instant::now() < until {
@@ -598,7 +733,15 @@ mod tests {
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
+            std::fs::write(directory.join("expired"), "deadline").unwrap();
             return;
+        }
+        let hold_pipe =
+            std::env::var_os("LINGXI_DETACHED_JOB_HOLD_PIPE").is_some_and(|value| value == "1");
+        if !hold_pipe {
+            // Redirecting the descendant's stdio does not by itself prevent
+            // inherited non-standard copies of the leader's pipe handles.
+            super::protect_standard_handles().unwrap();
         }
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
@@ -606,10 +749,17 @@ mod tests {
             .env("LINGXI_DETACHED_JOB_CHILD", "1")
             .stdin(Stdio::null())
             .stderr(Stdio::null());
-        if std::env::var_os("LINGXI_DETACHED_JOB_HOLD_PIPE").is_none() {
+        if !hold_pipe {
             command.stdout(Stdio::null());
         }
-        let _detached = command.spawn().unwrap();
+        let detached = command.spawn().unwrap();
+        // Publish the birth identity while this exact child handle is held.
+        let birth = super::fixture_process_birth(detached.as_raw_handle()).unwrap();
+        std::fs::write(
+            directory.join("identity"),
+            format!("{} {birth}", detached.id()),
+        )
+        .unwrap();
         let until = std::time::Instant::now() + Duration::from_secs(10);
         while !directory.join("started").exists() {
             assert!(
@@ -624,12 +774,23 @@ mod tests {
     async fn normal_foreground_completion_preserves_detached_descendants() {
         use lingxi_core::host::sandbox::SandboxedTag;
         use lingxi_core::host::{ForegroundOutcome, SandboxedCommand};
+        struct ReleaseOnDrop(PathBuf);
+        impl Drop for ReleaseOnDrop {
+            fn drop(&mut self) {
+                let _ = std::fs::write(&self.0, "release");
+            }
+        }
         for hold_pipe in [false, true] {
             let directory = tempfile::tempdir().unwrap();
-            let mut env = std::collections::HashMap::from([(
-                "LINGXI_DETACHED_JOB_TEST_DIR".into(),
-                directory.path().to_string_lossy().into_owned(),
-            )]);
+            let _release = ReleaseOnDrop(directory.path().join("release"));
+            let mut env = std::collections::HashMap::from([
+                (
+                    "LINGXI_DETACHED_JOB_TEST_DIR".into(),
+                    directory.path().to_string_lossy().into_owned(),
+                ),
+                ("LINGXI_DETACHED_JOB_CHILD".into(), "0".into()),
+                ("LINGXI_DETACHED_JOB_HOLD_PIPE".into(), "0".into()),
+            ]);
             if hold_pipe {
                 env.insert("LINGXI_DETACHED_JOB_HOLD_PIPE".into(), "1".into());
             }
@@ -658,14 +819,37 @@ mod tests {
                 super::super::background::run(&command, None, false),
             )
             .await;
-            // Always release the bounded descendant before asserting, including
-            // a failure in the foreground path under test.
-            std::fs::write(directory.path().join("release"), "release").unwrap();
             let result = result.unwrap().unwrap();
             assert!(
                 matches!(result.outcome, ForegroundOutcome::Completed(output) if output.exit_code == 0 && !output.timed_out)
             );
+            let identity_path = directory.path().join("identity");
+            let identity = std::fs::read_to_string(&identity_path).unwrap();
+            let mut fields = identity.split_whitespace();
+            let pid = fields.next().unwrap();
+            let birth: u64 = fields.next().unwrap().parse().unwrap();
+            std::fs::write(&identity_path, format!("{pid} {}", birth ^ 1)).unwrap();
+            let wrong_birth = super::DetachedFixtureProcess::open(directory.path());
+            std::fs::write(&identity_path, identity).unwrap();
+            assert!(matches!(
+                wrong_birth,
+                Err(ProcessError::Io(message)) if message == "detached fixture process identity changed"
+            ));
+            let detached = super::DetachedFixtureProcess::open(directory.path()).unwrap();
+            assert!(
+                !detached.exited().unwrap(),
+                "detached child exited before release"
+            );
+            assert!(!directory.path().join("finished").exists());
+            std::fs::write(directory.path().join("release"), "release").unwrap();
             await_file(&directory.path().join("finished")).await;
+            assert_eq!(
+                std::fs::read_to_string(directory.path().join("finished")).unwrap(),
+                "survived"
+            );
+            detached.wait_exit().await.unwrap();
+            drop(detached); // Close the test's handle after observing this exact process exit.
+            eprintln!("detached fixture mode hold_pipe={hold_pipe}: exit observed");
         }
     }
 

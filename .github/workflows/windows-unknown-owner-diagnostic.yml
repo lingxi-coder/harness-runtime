@@ -50,9 +50,9 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $logs = Join-Path $env:RUNNER_TEMP 'windows-unknown-owner'
           $cases = @(
-            @{ Package = 'tool-shell'; Test = 'bash::tests::bash_user_error_exposes_spool_with_real_child_still_running' },
+            @{ Package = 'tool-shell'; Test = 'bash::tests::windows_bash_refuses_before_process_start' },
             @{ Package = 'tool-shell'; Test = 'bash::tests::powershell_user_error_exposes_spool_with_real_child_still_running' },
-            @{ Package = 'tool-shell'; Test = 'bash::tests::foreground_process_timeout_err_remains_unverified' },
+            @{ Package = 'tool-shell'; Test = 'bash::tests::powershell_owned_timeout_error_remains_unverified' },
             @{ Package = 'tool-shell'; Test = 'bash::tests::foreground_unverified_arming_preserves_exact_row' },
             @{ Package = 'tool-shell'; Test = 'bash::tests::cancelled_foreground_arming_retains_unknown_row_and_output' },
             @{ Package = 'core'; Test = 'host::shell_supervisor::registration_tests::startup_failure_and_cancellation_keep_real_supervisor_owner' },
@@ -60,6 +60,8 @@ jobs:
             @{ Package = 'core'; Test = 'host::shell_supervisor::registration_tests::start_evidence_is_per_command_and_conflicting_attempts_fail_closed' },
             @{ Package = 'tasks'; Test = 'registry::registry_test::foreground_unverified_observation_uses_exact_row_lease' },
             @{ Package = 'platform-windows'; Test = 'process::supervisor::integration_tests::real_supervisor_strict_cancel_reaps_the_payload_tree' },
+            @{ Package = 'platform-windows'; Test = 'process::supervisor_gate::tests::normal_foreground_completion_preserves_detached_descendants' },
+            @{ Package = 'platform-windows'; Test = 'process::supervisor::integration_tests::real_supervisor_early_detached_release_waits_for_exit' },
             @{ Package = 'platform-windows'; Test = 'process::supervisor::integration_tests::real_supervisor_preserves_detached_child_after_normal_foreground' }
           )
           $failed = 0
@@ -82,11 +84,59 @@ jobs:
             }
           }
           Write-Host "Exact diagnostics passed: $passed / $($cases.Count); failed: $failed"
-          if ($cases.Count -ne 11 -or $passed -ne 11 -or $failed -ne 0) { exit 1 }
+          if ($cases.Count -ne 13 -or $passed -ne 13 -or $failed -ne 0) { exit 1 }
       - name: Preserve diagnostic logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: windows-unknown-owner-diagnostic
           path: ${{ runner.temp }}/windows-unknown-owner
+          if-no-files-found: ignore
+
+  unix-bash-controls:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/media-windows-unknown-owner-20261028'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/llm-client
+      - uses: dtolnay/rust-toolchain@1.94.0
+      - name: Run the original Bash controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          logs="$RUNNER_TEMP/unix-bash-controls"
+          mkdir -p "$logs"
+          tests=(
+            bash::tests::bash_user_error_exposes_spool_with_real_child_still_running
+            bash::tests::foreground_process_timeout_err_remains_unverified
+          )
+          passed=0
+          failed=0
+          for test in "${tests[@]}"; do
+            log="$logs/${test##*::}.log"
+            if cargo test --locked -p tool-shell --lib "$test" -- --exact --nocapture --test-threads=1 2>&1 | tee "$log" &&
+              grep -Fx 'running 1 test' "$log" &&
+              grep -Fx "test $test ... ok" "$log" &&
+              grep -E '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$log"; then
+              passed=$((passed + 1))
+            else
+              echo "FAILED: $test"
+              failed=$((failed + 1))
+            fi
+          done
+          echo "Bash controls passed: $passed / ${#tests[@]}; failed: $failed"
+          test "${#tests[@]}" -eq 2 && test "$passed" -eq 2 && test "$failed" -eq 0
+      - name: Preserve Bash control logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unix-bash-controls-${{ matrix.os }}
+          path: ${{ runner.temp }}/unix-bash-controls
           if-no-files-found: ignore

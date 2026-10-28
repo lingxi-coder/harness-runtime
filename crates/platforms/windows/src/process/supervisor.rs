@@ -200,13 +200,44 @@ mod integration_tests {
 
     struct Cleanup {
         release: PathBuf,
+        release_on_drop: bool,
         directories: Vec<PathBuf>,
     }
     impl Drop for Cleanup {
         fn drop(&mut self) {
-            let _ = std::fs::write(&self.release, "release");
+            if self.release_on_drop {
+                let _ = std::fs::write(&self.release, "release");
+            }
             for directory in &self.directories {
                 let _ = std::fs::remove_dir_all(directory);
+            }
+        }
+    }
+
+    struct ReleaseBeforeHandle {
+        directory: PathBuf,
+        armed: bool,
+    }
+    impl Drop for ReleaseBeforeHandle {
+        fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
+            let identity = self.directory.join("identity");
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !identity.exists() && std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // Acquire before release so the wait refers to the same process
+            // object whose birth identity the fixture originally published.
+            let detached =
+                super::super::supervisor_gate::DetachedFixtureProcess::open(&self.directory);
+            let _ = std::fs::write(self.directory.join("release"), "release");
+            match detached {
+                Ok(detached) => drop(detached),
+                Err(cause) => {
+                    eprintln!("early detached fixture cleanup exit is unconfirmed: {cause}");
+                }
             }
         }
     }
@@ -265,6 +296,7 @@ mod integration_tests {
             .unwrap();
         let cleanup = Cleanup {
             release,
+            release_on_drop: true,
             directories: vec![directory.clone(), output_directory.clone()],
         };
         let directory_identity = lingxi_core::host::rooted_fs::root_identity(&directory).unwrap();
@@ -337,7 +369,117 @@ mod integration_tests {
 
     #[tokio::test]
     async fn real_supervisor_preserves_detached_child_after_normal_foreground() {
+        for hold_pipe in [false, true] {
+            let started = std::time::Instant::now();
+            let fixture = tempfile::tempdir().unwrap();
+            let mut early_release = ReleaseBeforeHandle {
+                directory: fixture.path().to_path_buf(),
+                armed: true,
+            };
+            let command = ProcessCommand {
+                command: std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                args: vec![
+                    DETACHED_HELPER.into(),
+                    "--exact".into(),
+                    "--nocapture".into(),
+                ],
+                cwd: Some(fixture.path().to_path_buf()),
+                env: std::collections::HashMap::from([
+                    (
+                        test_env("DETACHED_JOB_TEST_DIR"),
+                        fixture.path().to_string_lossy().into_owned(),
+                    ),
+                    (test_env("DETACHED_JOB_CHILD"), "0".into()),
+                    (
+                        test_env("DETACHED_JOB_HOLD_PIPE"),
+                        if hold_pipe { "1" } else { "0" }.into(),
+                    ),
+                ]),
+                timeout: Some(Duration::from_secs(if hold_pipe { 5 } else { 20 })),
+                stdin: None,
+            };
+            let (mut supervisor, mut stream, _, _, _, mut cleanup) =
+                start(command, None, false, fixture.path().join("release")).await;
+            // From here until the fixture handle is obtained, early_release
+            // owns release and the opportunity to wait on that exact child.
+            cleanup.release_on_drop = false;
+            eprintln!(
+                "detached fixture hold_pipe={hold_pipe}: spawn accepted at {:?}",
+                started.elapsed()
+            );
+            let response = receive(&mut stream).await;
+            eprintln!(
+                "detached fixture hold_pipe={hold_pipe}: foreground response at {:?}",
+                started.elapsed()
+            );
+            assert_eq!(response["response"], "Started", "{response}");
+            let result: ForegroundRunResult =
+                serde_json::from_value(response["result"].clone()).unwrap();
+            assert!(
+                matches!(result.outcome, ForegroundOutcome::Completed(output) if !output.timed_out && output.exit_code == 0)
+            );
+            assert!(
+                fixture.path().join("started").exists(),
+                "detached fixture did not start"
+            );
+            let detached =
+                super::super::supervisor_gate::DetachedFixtureProcess::open(fixture.path())
+                    .unwrap();
+            early_release.armed = false;
+            assert!(
+                !detached.exited().unwrap(),
+                "detached child exited before release"
+            );
+            if !hold_pipe {
+                let status = tokio::time::timeout(Duration::from_secs(30), supervisor.wait())
+                    .await
+                    .expect("supervisor did not exit")
+                    .unwrap();
+                assert!(status.success());
+                assert!(
+                    !detached.exited().unwrap(),
+                    "detached child did not survive supervisor exit"
+                );
+                eprintln!(
+                    "detached fixture hold_pipe={hold_pipe}: supervisor exited at {:?}",
+                    started.elapsed()
+                );
+            }
+            // A descendant retaining the output pipe is released before waiting
+            // for supervisor shutdown; the other mode proves survival past it.
+            assert!(!fixture.path().join("finished").exists());
+            std::fs::write(fixture.path().join("release"), "release").unwrap();
+            wait_file(&fixture.path().join("finished")).await;
+            assert_eq!(
+                std::fs::read_to_string(fixture.path().join("finished")).unwrap(),
+                "survived"
+            );
+            detached.wait_exit().await.unwrap();
+            drop(detached);
+            eprintln!(
+                "detached fixture hold_pipe={hold_pipe}: child exit observed at {:?}",
+                started.elapsed()
+            );
+            if hold_pipe {
+                let status = tokio::time::timeout(Duration::from_secs(30), supervisor.wait())
+                    .await
+                    .expect("supervisor did not exit after descendant release")
+                    .unwrap();
+                assert!(status.success());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn real_supervisor_early_detached_release_waits_for_exit() {
         let fixture = tempfile::tempdir().unwrap();
+        let early_release = ReleaseBeforeHandle {
+            directory: fixture.path().to_path_buf(),
+            armed: true,
+        };
         let command = ProcessCommand {
             command: std::env::current_exe()
                 .unwrap()
@@ -349,15 +491,20 @@ mod integration_tests {
                 "--nocapture".into(),
             ],
             cwd: Some(fixture.path().to_path_buf()),
-            env: std::collections::HashMap::from([(
-                test_env("DETACHED_JOB_TEST_DIR"),
-                fixture.path().to_string_lossy().into_owned(),
-            )]),
+            env: std::collections::HashMap::from([
+                (
+                    test_env("DETACHED_JOB_TEST_DIR"),
+                    fixture.path().to_string_lossy().into_owned(),
+                ),
+                (test_env("DETACHED_JOB_CHILD"), "0".into()),
+                (test_env("DETACHED_JOB_HOLD_PIPE"), "0".into()),
+            ]),
             timeout: Some(Duration::from_secs(20)),
             stdin: None,
         };
-        let (mut supervisor, mut stream, _, _, _, _cleanup) =
+        let (mut supervisor, mut stream, _, _, _, mut cleanup) =
             start(command, None, false, fixture.path().join("release")).await;
+        cleanup.release_on_drop = false;
         let response = receive(&mut stream).await;
         assert_eq!(response["response"], "Started", "{response}");
         let result: ForegroundRunResult =
@@ -365,15 +512,27 @@ mod integration_tests {
         assert!(
             matches!(result.outcome, ForegroundOutcome::Completed(output) if !output.timed_out && output.exit_code == 0)
         );
+        let witness =
+            super::super::supervisor_gate::DetachedFixtureProcess::open(fixture.path()).unwrap();
+        assert!(!witness.exited().unwrap());
+        // Simulate failing before the main test acquires its own handle. This
+        // independent handle verifies that the release guard waited for exit.
+        drop(early_release);
+        assert!(
+            witness.exited().unwrap(),
+            "early cleanup returned before exit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.path().join("finished")).unwrap(),
+            "survived"
+        );
+        witness.wait_exit().await.unwrap();
+        drop(witness);
         let status = tokio::time::timeout(Duration::from_secs(30), supervisor.wait())
             .await
-            .expect("supervisor did not exit")
+            .expect("supervisor did not exit after early cleanup")
             .unwrap();
         assert!(status.success());
-        // The detached process must do useful work after the real supervisor has
-        // exited; mere PID existence before that point would not test its Job.
-        std::fs::write(fixture.path().join("release"), "release").unwrap();
-        wait_file(&fixture.path().join("finished")).await;
     }
 
     #[tokio::test]

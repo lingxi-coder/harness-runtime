@@ -6111,6 +6111,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn foreground_process_timeout_err_remains_unverified() {
         // A runner error does not prove that every child was stopped.
@@ -6174,6 +6175,7 @@ mod tests {
         std::thread::sleep(Duration::from_secs(30));
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn bash_user_error_exposes_spool_with_real_child_still_running() {
         struct TestChild(std::process::Child);
@@ -6277,6 +6279,112 @@ mod tests {
                 .is_none());
             // Runner drop kills and waits for the test child even on panic.
         }
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_bash_refuses_before_process_start() {
+        struct NeverRunner;
+        #[async_trait]
+        impl ProcessRunner for NeverRunner {
+            async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                panic!("unsupported Bash must not start a process")
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                panic!("unsupported Bash must not spawn a background process")
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                panic!("unsupported Bash must not signal a process")
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let mut context = shell_test_ctx(ok_output());
+        context.process = Arc::new(NeverRunner);
+        let error = BashTool::new(context)
+            .call(source_json!({"command": "fixture"}), use_ctx(), fresh_tx())
+            .await
+            .expect_err("Bash is unavailable on Windows");
+        assert!(matches!(&error, ToolError::InvalidInput(_)));
+        assert_eq!(
+            error.model_facing_message().string_at(""),
+            Some("Bash is not supported on Windows; use PowerShellTool")
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn powershell_owned_timeout_error_remains_unverified() {
+        #[derive(Default)]
+        struct TimeoutRunner(std::sync::atomic::AtomicBool);
+        #[async_trait]
+        impl ProcessRunner for TimeoutRunner {
+            fn supports_verified_background_stop(&self, _: &SandboxedCommand) -> bool {
+                true
+            }
+            async fn run(&self, command: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                assert!(command.requires_group_cleanup_on_exit());
+                assert!(command.process_owner().is_some());
+                assert_eq!(command.inner().timeout, Some(Duration::from_millis(200)));
+                let binding = command.background_task().expect("task allocation");
+                std::fs::write(&binding.output_path, "partial before timeout").unwrap();
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                Err(ProcessError::Timeout)
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!()
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                unreachable!()
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(RecordingRegistry {
+            output_root: Some(directory.path().to_owned()),
+            ..Default::default()
+        });
+        let runner = Arc::new(TimeoutRunner::default());
+        let mut context = shell_test_ctx(ok_output());
+        context.task_registry = Some(registry.clone());
+        context.process = runner.clone();
+        let request = Arc::new(tool_api::context::HostToolRequest::default());
+        let mut tool_context = use_ctx();
+        tool_context.host_tool_cancellation =
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(request.clone());
+        let error = crate::powershell::PowerShellTool::new(context)
+            .call(
+                source_json!({"command": "Write-Output fixture", "timeout": 200}),
+                tool_context,
+                fresh_tx(),
+            )
+            .await
+            .expect_err("a runner timeout does not verify termination");
+        assert!(runner.0.load(std::sync::atomic::Ordering::SeqCst));
+        let path = directory.path().join("b1a2b3c4d.output");
+        let message = error.model_facing_message();
+        let message = message.string_at("").unwrap();
+        assert!(message.contains("termination is unverified"));
+        assert!(message.contains(&format!("{:?}", path.to_str().unwrap())));
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "partial before timeout"
+        );
+        assert!(registry.discarded.lock().unwrap().is_empty());
+        assert!(request
+            .cancel_and_reap()
+            .await
+            .expect_err("a runner timeout cannot prove cleanup")
+            .contains("termination is unverified"));
     }
 
     // This runs the PowerShell tool entry point with a deliberately failing
