@@ -9462,6 +9462,19 @@ impl ApiService {
         self.refresh_effort_settings(&mut req)?;
         req.execution.resolve_native_effort = true;
         let mut prepared = self.client.prepare_on(&req, self.transport.clone()).await?;
+        // Preparation has already resolved the live profile, route, proxy and
+        // credentials. On any other transport reuse the existing prewarm gate
+        // before constructing stream headers for a request that cannot run.
+        if !matches!(
+            prepared.provider_request.stream_transport,
+            crate::ProviderStreamTransport::ResponsesWebSocket
+        ) {
+            let mut session = self.responses_ws_session.lock().await;
+            return self
+                .client
+                .prewarm_prepared_websocket(prepared, self.transport.clone(), &mut session)
+                .await;
+        }
         // Responses-WebSocket prewarm only — never a first-party Anthropic
         // route, so the dispatch gate is inert here.
         self.inject_stream_headers(&mut prepared, DispatchHeaderState::default())?;

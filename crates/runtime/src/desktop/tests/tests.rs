@@ -2772,6 +2772,7 @@ fn desktop_config_default_is_constructible() {
     assert!(cfg.mcp_paths.is_empty());
     // CLI default — opt into `NoOpPermissionGate`.
     assert!(cfg.use_noop_permission_gate);
+    assert!(cfg.startup_responses_websocket_prewarm);
     // SDK/tests/default hosts have no stdout TTY; the CLI fills this from
     // `process.stdout.isTTY??!1`.
     assert!(!cfg.is_tty);

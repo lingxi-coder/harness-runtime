@@ -6419,7 +6419,9 @@ pub async fn build_with_credential_stack(
             })
         }));
     }
-    orch.spawn_startup_responses_websocket_prewarm();
+    if cfg.startup_responses_websocket_prewarm {
+        orch.spawn_startup_responses_websocket_prewarm();
+    }
     // Plan 3c: `/connect` seams — Copilot device-flow over `PosixHttp`, and the
     // API-key writer over the host secure prompt (tui-supplied; headless no-op).
     // M8: also wire the ChatGPT OAuth seam (`/connect chatgpt`).

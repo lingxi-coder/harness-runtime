@@ -272,6 +272,7 @@ struct ResponsesWsTransport {
     responses: std::sync::Arc<Mutex<VecDeque<Vec<Result<RawStreamFrame, LlmError>>>>>,
     close_count: std::sync::Arc<Mutex<u32>>,
     open_count: Mutex<u32>,
+    open_requests: Mutex<Vec<ProviderRequest>>,
     open_error: Mutex<Option<LlmError>>,
     http_streams: Mutex<VecDeque<Vec<Result<RawStreamFrame, LlmError>>>>,
     http_count: Mutex<u32>,
@@ -284,6 +285,7 @@ impl ResponsesWsTransport {
             responses: std::sync::Arc::new(Mutex::new(responses.into())),
             close_count: std::sync::Arc::new(Mutex::new(0)),
             open_count: Mutex::new(0),
+            open_requests: Mutex::new(Vec::new()),
             open_error: Mutex::new(None),
             http_streams: Mutex::new(VecDeque::new()),
             http_count: Mutex::new(0),
@@ -296,6 +298,7 @@ impl ResponsesWsTransport {
             responses: std::sync::Arc::new(Mutex::new(VecDeque::new())),
             close_count: std::sync::Arc::new(Mutex::new(0)),
             open_count: Mutex::new(0),
+            open_requests: Mutex::new(Vec::new()),
             open_error: Mutex::new(Some(LlmError::Transport {
                 message: "non-success HTTP status 426: upgrade required".to_string(),
             })),
@@ -357,9 +360,13 @@ impl llm_runtime::test_support::FixtureTransport for ResponsesWsTransport {
 
     fn open_responses_websocket_session<'a>(
         &'a self,
-        _request: &'a ProviderRequest,
+        request: &'a ProviderRequest,
     ) -> BoxFuture<'a, Result<Box<dyn ResponsesWebSocketTransportSession>, LlmError>> {
         *self.open_count.lock().expect("open_count") += 1;
+        self.open_requests
+            .lock()
+            .expect("open_requests")
+            .push(request.clone());
         if let Some(error) = self.open_error.lock().expect("open_error").clone() {
             return Box::pin(async move { Err(error) });
         }
@@ -472,6 +479,157 @@ async fn execute_stream_threads_provider_metadata_headers_to_responses_decoder()
             .iter()
             .any(|(key, value)| key == name && value == expected));
     }
+}
+
+#[derive(Debug, Default)]
+struct PrewarmCredentials(Mutex<Vec<llm_runtime::CredentialScope>>);
+
+impl llm_runtime::CredentialProvider for PrewarmCredentials {
+    fn load<'a>(
+        &'a self,
+        scope: &'a llm_runtime::CredentialScope,
+    ) -> BoxFuture<'a, Result<llm_runtime::Credential, LlmError>> {
+        self.0.lock().unwrap().push(scope.clone());
+        Box::pin(async { Ok(llm_runtime::Credential::ApiKey("fixture-key".into())) })
+    }
+
+    fn anthropic_auth_snapshot<'a>(
+        &'a self,
+        scope: &'a llm_runtime::CredentialScope,
+    ) -> BoxFuture<'a, Result<llm_runtime::AnthropicAuthSnapshot, LlmError>> {
+        Box::pin(async move {
+            Ok(llm_runtime::AnthropicAuthSnapshot::from_credential(
+                scope.clone(),
+                llm_runtime::CredentialProvider::load(self, scope).await?,
+            ))
+        })
+    }
+}
+
+/// All candidates share one model ID so an explicit profile must select the
+/// actual transport and credential scope on each call. No real network is used.
+#[tokio::test]
+async fn service_prewarm_uses_resolved_profile_and_skips_non_websocket_routes() {
+    let profile = |name: &str, protocol, provider_id, base: &str, websocket| ProviderProfile {
+        wire_profile: None,
+        regions: llm_runtime::Region::all(),
+        provider_id,
+        profile_name: name.into(),
+        base_url: base.into(),
+        protocol,
+        auth: AuthStrategy::ApiKey,
+        credential: CredentialConfig::HostManaged {
+            id: format!("{name}-key"),
+        },
+        models: vec![ModelProfile {
+            display_model: "p-model".into(),
+            request_model: if websocket {
+                "p-model"
+            } else {
+                "claude-sonnet-4-5"
+            }
+            .into(),
+            billing_model: "p-model".into(),
+            aliases: vec![],
+            description: None,
+            metadata: Default::default(),
+            capabilities: Capabilities {
+                streaming: true,
+                tools: true,
+                ..Default::default()
+            },
+        }],
+        pricing: PricingConfig::default(),
+        signing: None,
+        azure: None,
+        supports_websockets: websocket,
+        supports_websocket_compression: false,
+        websocket_connect_timeout_ms: Some(250),
+        vision_delegate: None,
+        connection: Default::default(),
+    };
+    let credentials = Arc::new(PrewarmCredentials::default());
+    let client = ModelRuntime::from_config(ClientConfig {
+        providers: vec![
+            profile(
+                "direct",
+                ProtocolFamily::AnthropicMessages,
+                ProviderId::AnthropicFirstParty,
+                "https://api.anthropic.com",
+                false,
+            ),
+            profile(
+                "proxy",
+                ProtocolFamily::AnthropicMessages,
+                ProviderId::AnthropicFirstParty,
+                "https://proxy.example",
+                false,
+            ),
+            profile(
+                "responses",
+                ProtocolFamily::OpenAiResponses,
+                ProviderId::OpenAI,
+                "https://responses.example/v1",
+                true,
+            ),
+        ],
+    })
+    .unwrap()
+    .with_credential_provider(credentials.clone());
+    let transport = Arc::new(ResponsesWsTransport::new(vec![responses_completed(
+        "resp_warm",
+    )]));
+    let service = llm_runtime::ApiService::new(
+        Arc::new(client),
+        transport.clone(),
+        llm_runtime::SubscriberState::default(),
+        llm_runtime::model::user_agent::UserAgentEnv::default(),
+        "test",
+        None,
+        None,
+    );
+    for name in ["direct", "proxy"] {
+        let error = service
+            .prewarm_responses_websocket("p-model", Some(name), None, vec![], vec![], false)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, LlmError::InvalidRequest { ref message } if message.contains("requires an OpenAI Responses WebSocket")),
+            "{error:?}"
+        );
+    }
+    assert_eq!(transport.open_count(), 0);
+    assert_eq!(transport.http_count(), 0);
+    service
+        .prewarm_responses_websocket("p-model", Some("responses"), None, vec![], vec![], false)
+        .await
+        .expect("Responses prewarm");
+    assert_eq!(transport.open_count(), 1);
+    let requests = transport.open_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].url.contains("responses.example"));
+    let header_names: Vec<_> = requests[0].headers.keys().cloned().collect();
+    let authorization = requests[0]
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .map(|(_, value)| value.as_str());
+    assert_eq!(
+        authorization,
+        Some("Bearer fixture-key"),
+        "header names: {header_names:?}"
+    );
+    drop(requests);
+    assert_eq!(transport.sent_bodies()[0]["generate"], false);
+    let scopes = credentials.0.lock().unwrap();
+    for name in ["direct", "proxy", "responses"] {
+        assert!(
+            scopes.iter().any(|scope| scope.profile_name == name),
+            "missing selected credential scope {name}: {scopes:?}"
+        );
+    }
+    assert!(scopes.iter().any(|scope| scope.profile_name == "proxy"
+        && scope.base_url.as_deref() == Some("https://proxy.example")));
 }
 
 #[tokio::test]

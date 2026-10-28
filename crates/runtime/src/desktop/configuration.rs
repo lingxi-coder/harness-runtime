@@ -690,6 +690,9 @@ pub struct DesktopConfig {
     /// (claude-code "Disable session persistence - sessions will not be saved
     /// to disk and cannot be resumed"). `true` (the default) ⟶ unchanged.
     pub session_persistence: bool,
+    /// Whether to start the optional Responses WebSocket prewarm at boot.
+    /// Disabling prewarm does not disable subsequent model requests.
+    pub startup_responses_websocket_prewarm: bool,
     /// (M4 cc2.1.198) CLI `--agents <json>` raw payload ("JSON object defining
     /// custom agents"). `build()` parses it with the strict flag-record schema
     /// (`agent::parse_agents_from_flag_json`, the `QXt` port) and merges the
@@ -1327,6 +1330,7 @@ impl Default for DesktopConfig {
             customization_gates: CustomizationGates::default(),
             // Default: persist the session JSONL (absent --no-session-persistence).
             session_persistence: true,
+            startup_responses_websocket_prewarm: true,
             // (M4 cc2.1.198) Defaults: no --agents payload, no --agent
             // selection, no --plugin-dir entries, no --effort level.
             cli_agents_json: None,
