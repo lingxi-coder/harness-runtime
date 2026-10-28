@@ -458,7 +458,13 @@ impl Tool for PowerShellTool {
                         lingxi_core::host::ForegroundOutcome::Completed(output)
                             if output.timed_out =>
                         {
-                            Err(mobile_linux_api::ProcessError::Timeout)
+                            return Err(ToolError::Io(
+                                crate::bash::unverified_output_message(
+                                    "PowerShell timed out",
+                                    bound.as_ref(),
+                                )
+                                .into(),
+                            ));
                         }
                         lingxi_core::host::ForegroundOutcome::Completed(output) => Ok(output),
                         lingxi_core::host::ForegroundOutcome::MovedToBackground(_) => {
@@ -467,10 +473,25 @@ impl Tool for PowerShellTool {
                             ));
                         }
                     },
-                    Ok(Err(error)) => Err(error),
+                    Ok(Err(error)) => {
+                        return Err(ToolError::Io(
+                            crate::bash::unverified_output_message(
+                                &format!("{error}"),
+                                bound.as_ref(),
+                            )
+                            .into(),
+                        ));
+                    }
                     Err(ToolError::Aborted) => return Err(ToolError::Aborted),
                     Err(error) => {
-                        return Err(error);
+                        let detail = error.model_facing_message();
+                        return match detail.string_at("") {
+                            Some(message) => Err(ToolError::Io(
+                                crate::bash::unverified_output_message(message, bound.as_ref())
+                                    .into(),
+                            )),
+                            None => Err(error),
+                        };
                     }
                 };
                 if let (Some(registry), Some((id, _))) = (&self.ctx.task_registry, &bound) {

@@ -1715,6 +1715,16 @@ impl TaskRegistryHandle for TaskRegistry {
         TaskRegistry::unregister_foreground_bash_owned(self, lease).await;
     }
 
+    async fn mark_foreground_bash_unverified_owned(
+        &self,
+        lease: &lingxi_core::host::task_registry::ForegroundTaskLease,
+        reason: &str,
+    ) -> Result<(), TaskRegistryError> {
+        TaskRegistry::mark_foreground_bash_unverified_owned(self, lease, reason)
+            .await
+            .map_err(task_err_to_registry_err)
+    }
+
     async fn bind_background_requester(
         &self,
         task_id: &str,

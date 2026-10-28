@@ -2036,6 +2036,23 @@ pub trait TaskRegistryHandle: Send + Sync {
     /// Remove only the shell row identified by this capability.
     async fn unregister_foreground_bash_owned(&self, _lease: &ForegroundTaskLease) {}
 
+    /// Record an unverified foreground shell observation on this exact row.
+    /// This is neither a background handoff nor a cleanup receipt.
+    ///
+    /// # Errors
+    /// Returns an error when the registry cannot verify the row identity or
+    /// record the observation. This is not a durable receipt. Never fall back
+    /// to updating by task ID alone.
+    async fn mark_foreground_bash_unverified_owned(
+        &self,
+        _lease: &ForegroundTaskLease,
+        _reason: &str,
+    ) -> Result<(), TaskRegistryError> {
+        Err(TaskRegistryError::Internal(
+            "owned foreground shell observation unwired".into(),
+        ))
+    }
+
     /// Attach the handle that moves an armed foreground shell to the background
     /// on demand.
     ///
@@ -2870,6 +2887,12 @@ mod tests {
         };
         assert!(registry
             .settle_background_bash_unverified("b1", "wait failed")
+            .await
+            .is_err());
+        assert!(registry.killed.lock().unwrap().is_empty());
+        let lease = ForegroundTaskLease::new("b1".into(), std::sync::Arc::new(()));
+        assert!(registry
+            .mark_foreground_bash_unverified_owned(&lease, "wait failed")
             .await
             .is_err());
         assert!(registry.killed.lock().unwrap().is_empty());

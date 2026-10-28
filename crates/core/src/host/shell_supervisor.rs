@@ -67,6 +67,119 @@ fn platform() -> &'static dyn Platform {
 const FLAG: &str = "--lingxi-shell-supervisor";
 static EXECUTABLE: OnceLock<PathBuf> = OnceLock::new();
 static IN_SUPERVISOR: AtomicBool = AtomicBool::new(false);
+
+// A start can be delivered before the caller receives any child capability.
+// Bound these in-process reservations before creating a supervisor, and keep
+// the pinned output and sandbox lease on every uncertain start. They are not
+// a durable recovery mechanism and are never promoted to cleanup proof.
+const MAX_STARTUP_OWNERS: usize = 64;
+type SupervisorWait = Result<std::process::ExitStatus, String>;
+struct StartupOwner {
+    task_id: String,
+    _output: std::fs::File,
+    _lifetime_guard: Option<crate::host::sandbox::BackendPlanHandle>,
+    supervisor_pid: Option<u32>,
+    supervisor_wait: Option<tokio::sync::watch::Receiver<Option<SupervisorWait>>>,
+    unverified: bool,
+}
+fn startup_owners() -> &'static Mutex<HashMap<String, StartupOwner>> {
+    static OWNERS: OnceLock<Mutex<HashMap<String, StartupOwner>>> = OnceLock::new();
+    OWNERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+struct StartupReservation {
+    nonce: String,
+    active: bool,
+}
+impl StartupReservation {
+    fn reserve(
+        nonce: String,
+        task_id: String,
+        output: std::fs::File,
+        lifetime_guard: Option<crate::host::sandbox::BackendPlanHandle>,
+    ) -> Result<Self, ProcessError> {
+        let mut owners = startup_owners()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if owners.len() >= MAX_STARTUP_OWNERS || owners.contains_key(&nonce) {
+            return Err(error(
+                "supervisor startup owner capacity unavailable; no process started",
+            ));
+        }
+        owners.insert(
+            nonce.clone(),
+            StartupOwner {
+                task_id,
+                _output: output,
+                _lifetime_guard: lifetime_guard,
+                supervisor_pid: None,
+                supervisor_wait: None,
+                unverified: false,
+            },
+        );
+        Ok(Self {
+            nonce,
+            active: true,
+        })
+    }
+
+    fn attach(&self, pid: Option<u32>, wait: tokio::sync::watch::Receiver<Option<SupervisorWait>>) {
+        if let Some(owner) = startup_owners()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&self.nonce)
+        {
+            owner.supervisor_pid = pid;
+            owner.supervisor_wait = Some(wait);
+        }
+    }
+
+    fn transferred(&mut self) {
+        let removed = startup_owners()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.nonce);
+        self.active = false;
+        // Drop leases outside the lock: backend destructors can reenter.
+        drop(removed);
+    }
+}
+impl Drop for StartupReservation {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut owners = startup_owners()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let observation = owners.get_mut(&self.nonce).map(|owner| {
+            owner.unverified = true;
+            (owner.task_id.clone(), owner.supervisor_pid)
+        });
+        drop(owners);
+        if let Some((task_id, supervisor_pid)) = observation {
+            tracing::warn!(%task_id, ?supervisor_pid,
+                "supervisor startup ownership retained; cleanup remains unverified");
+        }
+    }
+}
+
+// Transfer the actual Child into a detached waiter before the caller's first
+// suspension point. A dropped caller cannot drop this handle while the Tokio
+// runtime is alive. The process exit result alone is not payload/Job proof.
+fn retain_supervisor(
+    mut supervisor: tokio::process::Child,
+) -> (
+    Option<u32>,
+    tokio::sync::watch::Receiver<Option<SupervisorWait>>,
+) {
+    let pid = supervisor.id();
+    let (sender, receiver) = tokio::sync::watch::channel(None);
+    tokio::spawn(async move {
+        let waited = supervisor.wait().await.map_err(|error| error.to_string());
+        sender.send_replace(Some(waited));
+    });
+    (pid, receiver)
+}
 struct Job {
     handoff: ShellProcessHandoff,
     registration: Option<crate::host::agent_processes::RegistrationEntry>,
@@ -160,6 +273,43 @@ pub fn enabled(command: &SandboxedCommand) -> bool {
 }
 fn error(error: impl std::fmt::Display) -> ProcessError {
     ProcessError::Io(error.to_string())
+}
+
+fn no_supervisor_started(cause: impl std::fmt::Display) -> ProcessError {
+    error(format!("shell supervisor not started: {cause}"))
+}
+
+struct SupervisorStartAttempt {
+    evidence: Option<crate::host::sandbox::SupervisorStartEvidence>,
+    attempted: bool,
+}
+impl SupervisorStartAttempt {
+    fn new(command: &SandboxedCommand) -> Self {
+        Self {
+            evidence: command.supervisor_start_evidence().cloned(),
+            attempted: false,
+        }
+    }
+    fn begin(&mut self) -> Result<(), ProcessError> {
+        self.attempted = true;
+        if self
+            .evidence
+            .as_ref()
+            .is_some_and(|evidence| !evidence.claim_spawn())
+        {
+            return Err(error("supervisor start evidence was already consumed"));
+        }
+        Ok(())
+    }
+}
+impl Drop for SupervisorStartAttempt {
+    fn drop(&mut self) {
+        if !self.attempted {
+            if let Some(evidence) = &self.evidence {
+                evidence.record_no_start();
+            }
+        }
+    }
 }
 
 fn unverified_shell_error(cause: impl std::fmt::Display) -> ProcessError {
@@ -1177,40 +1327,61 @@ pub async fn execute(
     limit: Option<usize>,
     explicit: bool,
 ) -> Result<ForegroundRunResult, ProcessError> {
-    let binding = command.background_task().ok_or(ProcessError::Unsupported)?;
-    let nonce = platform().nonce()?;
-    let directory = platform().create_directory(&nonce)?;
+    let mut start_attempt = SupervisorStartAttempt::new(command);
+    let binding = command
+        .background_task()
+        .ok_or_else(|| no_supervisor_started("background binding is unavailable"))?;
+    let executable = EXECUTABLE
+        .get()
+        .ok_or_else(|| no_supervisor_started("supervisor executable is unavailable"))?;
+    let nonce = platform().nonce().map_err(no_supervisor_started)?;
+    let directory = platform()
+        .create_directory(&nonce)
+        .map_err(no_supervisor_started)?;
     let supervisor_directory_identity =
-        crate::host::rooted_fs::root_identity(&directory).map_err(error)?;
+        crate::host::rooted_fs::root_identity(&directory).map_err(no_supervisor_started)?;
     let output_root = binding
         .output_path
         .parent()
-        .ok_or(ProcessError::Unsupported)?;
-    let root_parent = output_root.parent().ok_or(ProcessError::Unsupported)?;
-    let root_leaf = Path::new(output_root.file_name().ok_or(ProcessError::Unsupported)?);
+        .ok_or_else(|| no_supervisor_started("output root is unavailable"))?;
+    let root_parent = output_root
+        .parent()
+        .ok_or_else(|| no_supervisor_started("output parent is unavailable"))?;
+    let root_leaf = Path::new(
+        output_root
+            .file_name()
+            .ok_or_else(|| no_supervisor_started("output root name is unavailable"))?,
+    );
     let output_root_identity =
         crate::host::rooted_fs::ensure_private_directory(root_parent, root_leaf, 0o700)
-            .map_err(error)?;
-    platform().validate_directory(output_root)?;
+            .map_err(no_supervisor_started)?;
+    platform()
+        .validate_directory(output_root)
+        .map_err(no_supervisor_started)?;
     let output_leaf = Path::new(
         binding
             .output_path
             .file_name()
-            .ok_or(ProcessError::Unsupported)?,
+            .ok_or_else(|| no_supervisor_started("output file name is unavailable"))?,
     );
     let output_file = crate::host::rooted_fs::open_append_file_pinned(
         output_root,
         output_leaf,
         Some(&output_root_identity),
     )
-    .map_err(error)?;
-    let output_file_identity =
-        crate::host::rooted_fs::opened_file_identity(&output_file).map_err(error)?;
-    drop(output_file);
+    .map_err(no_supervisor_started)?;
+    let output_file_identity = crate::host::rooted_fs::opened_file_identity(&output_file)
+        .map_err(no_supervisor_started)?;
+    let mut startup = StartupReservation::reserve(
+        nonce.clone(),
+        binding.task_id.clone(),
+        output_file,
+        command.lifetime_guard().cloned(),
+    )
+    .map_err(no_supervisor_started)?;
 
     let socket = platform().endpoint(&directory);
-    let mut process =
-        tokio::process::Command::new(EXECUTABLE.get().ok_or(ProcessError::Unsupported)?);
+    let mut process = tokio::process::Command::new(executable);
     process
         .arg(FLAG)
         .arg(&directory)
@@ -1218,17 +1389,29 @@ pub async fn execute(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     platform().detach(&mut process);
-    let mut supervisor = process.spawn().map_err(error)?;
+    // No error after this point proves the OS did not create a process.
+    start_attempt.begin()?;
+    let supervisor = process.spawn().map_err(|cause| {
+        unverified_shell_error(format!(
+            "supervisor creation did not supply an owner: {cause}"
+        ))
+    })?;
+    let (supervisor_pid, supervisor_wait) = retain_supervisor(supervisor);
+    startup.attach(supervisor_pid, supervisor_wait.clone());
+    let supervisor_pid = supervisor_pid
+        .ok_or_else(|| unverified_shell_error("created supervisor has no held process identity"))?;
     let mut stream = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            match platform()
-                .connect(&socket, supervisor.id().unwrap_or(0))
-                .await
-            {
+            match platform().connect(&socket, supervisor_pid).await {
                 Ok(stream) => return Ok(stream),
                 Err(_) => {
-                    if supervisor.try_wait().map_err(error)?.is_some() {
-                        return Err(error("shell supervisor exited during bootstrap"));
+                    if let Some(wait) = supervisor_wait.borrow().as_ref() {
+                        return Err(unverified_shell_error(format!(
+                            "shell supervisor ended during bootstrap: {wait:?}"
+                        )));
+                    }
+                    if supervisor_wait.has_changed().is_err() {
+                        return Err(unverified_shell_error("supervisor wait owner disappeared"));
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
@@ -1236,7 +1419,9 @@ pub async fn execute(
         }
     })
     .await
-    .map_err(error)??;
+    .map_err(|cause| {
+        unverified_shell_error(format!("supervisor bootstrap timed out: {cause}"))
+    })??;
     let request = Start {
         supervisor_directory_identity,
         output_root_identity,
@@ -1264,7 +1449,7 @@ pub async fn execute(
         output_file_identity: Some(output_file_identity),
         task_id: binding.task_id.clone(),
         pid: 0,
-        supervisor_pid: supervisor.id().unwrap_or(0),
+        supervisor_pid,
         supervisor_start_identity: None,
         process_start_identity: None,
         owner: command.process_owner().map(str::to_owned),
@@ -1328,11 +1513,6 @@ pub async fn execute(
             )));
         }
     };
-    // A detached child is reaped in this host while it lives. Source exit does
-    // not kill it; the supervisor was created as an independent session leader.
-    tokio::spawn(async move {
-        let _ = supervisor.wait().await;
-    });
     match response {
         Response::Started { result, handoff } => {
             if let ForegroundOutcome::MovedToBackground(handle) = &result.outcome {
@@ -1372,25 +1552,14 @@ pub async fn execute(
                 }
             }
             recovery_guard.handoff = None;
+            startup.transferred();
             Ok(result)
         }
-        Response::Error {
-            message,
-            no_child_started,
-        } => {
-            if message == "supervisor command cancelled" {
-                if let Some(handoff) = &recovery_guard.handoff {
-                    retire_foreground_job(handoff, &mut live);
-                }
-                recovery_guard.handoff = None;
-                Err(error(message))
-            } else if no_child_started && recovery_guard.handoff.is_none() {
-                recovery_guard.handoff = None;
-                Err(error(message))
-            } else {
-                recovery_guard.recover_error().await;
-                Err(unverified_shell_error(message))
-            }
+        Response::Error { message, .. } => {
+            // A response or cancellation marker is not a held Job/stream
+            // cleanup receipt. Preserve the reservation and output as unknown.
+            recovery_guard.recover_error().await;
+            Err(unverified_shell_error(message))
         }
         _ => {
             recovery_guard.recover_error().await;
@@ -2087,6 +2256,506 @@ pub async fn run_at(
 #[cfg(test)]
 mod registration_tests {
     use super::*;
+
+    #[test]
+    fn startup_owner_child_fixture() {
+        let Some(root) = std::env::var_os("LXS_STARTUP_OWNER_CHILD") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        std::fs::write(root.join("ready"), "ready").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !root.join("release").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if root.join("release").exists() {
+            std::fs::write(root.join("child-finished"), "finished").unwrap();
+        }
+    }
+
+    #[test]
+    fn start_evidence_never_promotes_an_attempt_or_reused_receipt_to_no_start() {
+        let command = SandboxedCommand::__new_sandboxed(
+            ProcessCommand {
+                command: "unused".into(),
+                args: vec![],
+                cwd: None,
+                env: HashMap::new(),
+                timeout: None,
+                stdin: None,
+            },
+            SandboxedTag::BypassAuditedWithReason {
+                reason: "start evidence test".into(),
+            },
+        );
+        let (command1, unattempted) = command.clone().with_fresh_supervisor_start_evidence();
+        drop(SupervisorStartAttempt::new(&command1));
+        assert!(unattempted.no_process_started());
+        assert!(SupervisorStartAttempt::new(&command1).begin().is_err());
+        let (command2, attempted) = command.with_fresh_supervisor_start_evidence();
+        let mut guard = SupervisorStartAttempt::new(&command2);
+        guard.begin().unwrap();
+        drop(guard);
+        assert!(!attempted.no_process_started());
+        assert!(SupervisorStartAttempt::new(&command2).begin().is_err());
+        assert!(!attempted.no_process_started());
+    }
+
+    #[test]
+    fn start_evidence_is_per_command_and_conflicting_attempts_fail_closed() {
+        fn command() -> SandboxedCommand {
+            SandboxedCommand::__new_sandboxed(
+                ProcessCommand {
+                    command: "unused".into(),
+                    args: vec![],
+                    cwd: None,
+                    env: HashMap::new(),
+                    timeout: None,
+                    stdin: None,
+                },
+                SandboxedTag::BypassAuditedWithReason {
+                    reason: "start evidence concurrency".into(),
+                },
+            )
+        }
+        let (first, first_evidence) = command().with_fresh_supervisor_start_evidence();
+        let (second, second_evidence) = command().with_fresh_supervisor_start_evidence();
+        assert!(first
+            .clone()
+            .with_process_owner(Some("other-owner".into()))
+            .supervisor_start_evidence()
+            .is_none());
+        assert!(first
+            .clone()
+            .with_lifetime_guard(42_u8)
+            .supervisor_start_evidence()
+            .is_none());
+        drop(SupervisorStartAttempt::new(&first));
+        assert!(first_evidence.no_process_started());
+        assert!(!second_evidence.no_process_started());
+        drop(second);
+        for _ in 0..64 {
+            let (command, evidence) = command().with_fresh_supervisor_start_evidence();
+            let first = command.clone();
+            let second = command;
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let peer = barrier.clone();
+            let attempt = std::thread::spawn(move || {
+                let mut guard = SupervisorStartAttempt::new(&first);
+                peer.wait();
+                guard.begin().is_ok()
+            });
+            let peer = barrier.clone();
+            let rejected = std::thread::spawn(move || {
+                let guard = SupervisorStartAttempt::new(&second);
+                peer.wait();
+                drop(guard);
+            });
+            let attempted = attempt.join().unwrap();
+            rejected.join().unwrap();
+            assert!(
+                !(attempted && evidence.no_process_started()),
+                "an attempted creation must never produce no-start proof"
+            );
+            if !attempted {
+                assert!(
+                    evidence.no_process_started(),
+                    "rejected attempt should see the other no-start observation"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_owner_retains_real_child_output_and_lease_after_caller_drop() {
+        struct DropProbe(Arc<AtomicBool>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let output_path = root.path().join("output");
+        std::fs::write(&output_path, b"accepted prefix").unwrap();
+        let output = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&output_path)
+            .unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = crate::host::sandbox::BackendPlanHandle::new(DropProbe(dropped.clone()));
+        let nonce = format!("startup-test-{}", std::process::id());
+        let reservation =
+            StartupReservation::reserve(nonce.clone(), "startup-test".into(), output, Some(guard))
+                .unwrap();
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "host::shell_supervisor::registration_tests::startup_owner_child_fixture",
+                "--nocapture",
+            ])
+            .env("LXS_STARTUP_OWNER_CHILD", root.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let (pid, mut waiter) = retain_supervisor(command.spawn().unwrap());
+        reservation.attach(pid, waiter.clone());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !root.path().join("ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("real supervisor did not start");
+        drop(reservation); // Model cancellation of the caller's Start future.
+        {
+            let owners = startup_owners().lock().unwrap();
+            let held = owners.get(&nonce).expect("uncertain owner removed");
+            assert!(held.unverified);
+            assert_eq!(held.supervisor_pid, pid);
+            assert!(held.supervisor_wait.as_ref().unwrap().borrow().is_none());
+        }
+        assert!(!dropped.load(Ordering::SeqCst));
+        assert_eq!(std::fs::read(&output_path).unwrap(), b"accepted prefix");
+        std::fs::write(root.path().join("release"), "release").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(waited) = waiter.borrow().clone() {
+                    assert!(waited.unwrap().success());
+                    break;
+                }
+                waiter.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("the detached waiter lost the real child");
+        assert_eq!(
+            std::fs::read(root.path().join("child-finished")).unwrap(),
+            b"finished"
+        );
+        assert!(
+            startup_owners()
+                .lock()
+                .unwrap()
+                .get(&nonce)
+                .unwrap()
+                .unverified,
+            "leader exit alone must not settle cleanup"
+        );
+        assert!(!dropped.load(Ordering::SeqCst));
+        // Isolated test cleanup, not a production verification or release.
+        let held = startup_owners().lock().unwrap().remove(&nonce).unwrap();
+        drop(held);
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+    #[test]
+    fn startup_execute_process() {
+        use std::io::Write as _;
+        let Some(root) = std::env::var_os("LXS_STARTUP_EXECUTE_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let output = root.join("output/fixture.output");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(output)
+            .unwrap();
+        file.write_all(b"prefix").unwrap();
+        file.flush().unwrap();
+        std::fs::write(root.join("ready"), "ready").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !root.join("release").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if root.join("release").exists() {
+            file.write_all(b"tail").unwrap();
+            file.flush().unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_execute_real_process_fixture() {
+        let Some(root) = std::env::var_os("LXS_STARTUP_EXECUTE_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let mode = std::env::var("LXS_STARTUP_EXECUTE_MODE").unwrap();
+        struct FixturePlatform {
+            root: PathBuf,
+            mode: String,
+        }
+        #[async_trait::async_trait]
+        impl Platform for FixturePlatform {
+            fn nonce(&self) -> Result<String, ProcessError> {
+                Ok("b".repeat(48))
+            }
+            fn create_directory(&self, _: &str) -> Result<PathBuf, ProcessError> {
+                let dir = self.root.join("supervisor");
+                std::fs::create_dir(&dir).map_err(error)?;
+                Ok(dir)
+            }
+            fn validate_directory(&self, path: &Path) -> Result<(), ProcessError> {
+                if path.is_dir() {
+                    Ok(())
+                } else {
+                    Err(error("missing fixture directory"))
+                }
+            }
+            fn endpoint(&self, dir: &Path) -> String {
+                dir.join("socket").display().to_string()
+            }
+            fn detach(&self, _: &mut tokio::process::Command) {}
+            fn cancel_active_processes(&self) {}
+            async fn connect(&self, _: &str, _: u32) -> Result<BoxStream, ProcessError> {
+                if self.mode == "cancel" {
+                    return std::future::pending().await;
+                }
+                let (client, server) = tokio::io::duplex(1024);
+                drop(server); // Actual Start write fails after supervisor creation.
+                Ok(Box::new(client))
+            }
+            async fn listen(&self, _: &Path) -> Result<Box<dyn Listener>, ProcessError> {
+                Err(ProcessError::Unsupported)
+            }
+            fn runner(&self, _: &Path) -> Arc<dyn ProcessRunner> {
+                panic!("no payload runner")
+            }
+            async fn cleanup_orphan(&self, _: &ShellProcessHandoff) -> Result<(), ProcessError> {
+                Err(ProcessError::Unsupported)
+            }
+            async fn memory_pressure(&self) -> bool {
+                false
+            }
+        }
+        struct Sink;
+        #[async_trait::async_trait]
+        impl BackgroundExitSink for Sink {
+            async fn on_exit(&self, _: &str, _: Option<i32>) {}
+            fn manages_output(&self) -> bool {
+                true
+            }
+        }
+        #[cfg(unix)]
+        let wrapper = root.join("fixture-supervisor.sh");
+        #[cfg(windows)]
+        let wrapper = root.join("fixture-supervisor.cmd");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&wrapper, r#"#!/bin/sh
+exec "$LXS_STARTUP_EXECUTE_EXE" --exact host::shell_supervisor::registration_tests::startup_execute_process --nocapture
+"#).unwrap();
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        #[cfg(windows)]
+        std::fs::write(&wrapper, r#"@echo off
+"%LXS_STARTUP_EXECUTE_EXE%" --exact host::shell_supervisor::registration_tests::startup_execute_process --nocapture
+exit /b %ERRORLEVEL%
+"#).unwrap();
+        std::env::set_var("LXS_STARTUP_EXECUTE_EXE", std::env::current_exe().unwrap());
+        configure(Arc::new(FixturePlatform {
+            root: root.clone(),
+            mode: mode.clone(),
+        }));
+        enable_supervisor(wrapper);
+        let output_path = root.join("output/fixture.output");
+        let command = SandboxedCommand::__new_sandboxed(
+            ProcessCommand {
+                command: "unused".into(),
+                args: vec![],
+                cwd: Some(root.clone()),
+                env: HashMap::new(),
+                timeout: None,
+                stdin: None,
+            },
+            SandboxedTag::BypassAuditedWithReason {
+                reason: "startup ownership fixture".into(),
+            },
+        )
+        .with_background_task(BackgroundTaskBinding {
+            task_id: "fixture".into(),
+            output_path: output_path.clone(),
+            on_exit: Some(Arc::new(Sink)),
+            on_demand: None,
+        });
+        let (command, evidence) = command.with_fresh_supervisor_start_evidence();
+        if mode == "capacity" {
+            let capacity_file = std::fs::File::create(root.join("capacity-output")).unwrap();
+            let mut reservations = Vec::new();
+            for index in 0..MAX_STARTUP_OWNERS {
+                reservations.push(
+                    StartupReservation::reserve(
+                        format!("capacity-{index}"),
+                        "existing".into(),
+                        capacity_file.try_clone().unwrap(),
+                        None,
+                    )
+                    .unwrap(),
+                );
+            }
+            let result = execute(&command, None, false).await;
+            assert!(matches!(result, Err(ProcessError::Io(message))
+                if message.contains("capacity unavailable; no process started")));
+            assert!(
+                !root.join("ready").exists(),
+                "capacity rejection must precede spawn"
+            );
+            assert!(
+                evidence.no_process_started(),
+                "typed proof missing for capacity rejection"
+            );
+            for reservation in &mut reservations {
+                reservation.transferred();
+            }
+            return;
+        }
+        let running = tokio::spawn(async move { execute(&command, None, false).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !root.join("ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("real supervisor did not reach its output marker");
+        if mode == "cancel" {
+            running.abort();
+            assert!(running.await.unwrap_err().is_cancelled());
+        } else {
+            let result = tokio::time::timeout(Duration::from_secs(5), running)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(result, Err(ProcessError::Io(message))
+                if message.starts_with(crate::host::process::OWNED_SHELL_CLEANUP_UNVERIFIED)),
+                "Start write failure must be unverified"
+            );
+        }
+        assert!(
+            !evidence.no_process_started(),
+            "an attempted spawn must not be classified as pre-spawn refusal"
+        );
+        let mut waiter = {
+            let owners = startup_owners().lock().unwrap();
+            let owner = owners.get(&"b".repeat(48)).expect("startup owner was lost");
+            assert!(owner.unverified);
+            assert_eq!(owner.task_id, "fixture");
+            owner
+                .supervisor_wait
+                .clone()
+                .expect("missing real supervisor wait")
+        };
+        assert_eq!(std::fs::read(&output_path).unwrap(), b"prefix");
+        std::fs::write(root.join("release"), "release").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(result) = waiter.borrow().clone() {
+                    assert!(result.unwrap().success());
+                    break;
+                }
+                waiter
+                    .changed()
+                    .await
+                    .expect("supervisor owner stopped waiting");
+            }
+        })
+        .await
+        .expect("supervisor wait timed out");
+        assert_eq!(std::fs::read(&output_path).unwrap(), b"prefixtail");
+        assert!(
+            startup_owners()
+                .lock()
+                .unwrap()
+                .get(&"b".repeat(48))
+                .unwrap()
+                .unverified,
+            "supervisor exit is not payload cleanup proof"
+        );
+        // This subprocess exits immediately afterwards; no product release is implied.
+    }
+
+    #[tokio::test]
+    async fn startup_failure_and_cancellation_keep_real_supervisor_owner() {
+        for mode in ["start-failure", "cancel", "capacity"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut fixture = tokio::process::Command::new(std::env::current_exe().unwrap());
+            fixture.args(["--exact", "host::shell_supervisor::registration_tests::startup_execute_real_process_fixture", "--nocapture"])
+                .env("LXS_STARTUP_EXECUTE_ROOT", root.path())
+                .env("LXS_STARTUP_EXECUTE_MODE", mode)
+                .kill_on_drop(true);
+            let output = tokio::time::timeout(Duration::from_secs(20), fixture.output())
+                .await
+                .expect("startup fixture timed out")
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{mode}: stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn transferred_startup_reservation_releases_resources_but_waiter_keeps_child() {
+        struct DropProbe(Arc<AtomicBool>);
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let output = std::fs::File::create(root.path().join("output")).unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = crate::host::sandbox::BackendPlanHandle::new(DropProbe(dropped.clone()));
+        let nonce = format!("transferred-{}", std::process::id());
+        let mut reservation =
+            StartupReservation::reserve(nonce.clone(), "fixture".into(), output, Some(guard))
+                .unwrap();
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "host::shell_supervisor::registration_tests::startup_owner_child_fixture",
+                "--nocapture",
+            ])
+            .env("LXS_STARTUP_OWNER_CHILD", root.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let (pid, mut wait) = retain_supervisor(command.spawn().unwrap());
+        reservation.attach(pid, wait.clone());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !root.path().join("ready").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        reservation.transferred();
+        assert!(!startup_owners().lock().unwrap().contains_key(&nonce));
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(
+            wait.borrow().is_none(),
+            "real supervisor must still be live"
+        );
+        std::fs::write(root.path().join("release"), "release").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(result) = wait.borrow().clone() {
+                    assert!(result.unwrap().success());
+                    break;
+                }
+                wait.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(root.path().join("child-finished").exists());
+    }
+
     fn handoff(id: &str, owner: &str) -> ShellProcessHandoff {
         ShellProcessHandoff {
             supervisor_directory_identity: None,

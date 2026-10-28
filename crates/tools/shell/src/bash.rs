@@ -14,11 +14,9 @@
 //! before the data URI reaches the model.
 //!
 //! Timeout/interrupt handling (claude-code `BashTool.tsx` ~602-605 / 720):
-//! a timed-out (or interrupted) command is surfaced as a SUCCESSFUL
-//! `tool_result` carrying `interrupted: true`, `timed_out: true`, and
-//! whatever partial stdout/stderr was captured — NOT a hard error. The
-//! `<error>Command was aborted before completion</error>` marker is appended
-//! to stderr and `is_error` follows `interrupted`. See `interrupted_result`.
+//! a returned completed/interrupted result carries `interrupted: true` and
+//! any captured output. A runner error, including `Err(Timeout)`, is not a
+//! termination receipt and remains an error with an unverified observation.
 
 //! ## CLI-5 `bashEditDiffEnabled` — the contract, and what is built
 //!
@@ -105,6 +103,10 @@
 //! session, so the only divergence is a mid-session mode switch INTO `auto` /
 //! `bypassPermissions` — and that arm needs `tengu_thrifty_sonic`, which
 //! defaults false upstream too, so it is unreachable in a stock install.
+
+#[path = "unverified_output.rs"]
+mod unverified_output;
+pub(crate) use unverified_output::unverified_output_message;
 
 use crate::shared::strip_ansi_count;
 use async_trait::async_trait;
@@ -1938,6 +1940,7 @@ async fn wait_for_background_outcome(
 enum ForegroundArmingDecision {
     Withdraw,
     KeepBackground,
+    PreserveUnverified,
     CallerDropped,
 }
 
@@ -1971,6 +1974,10 @@ impl ForegroundArming {
     async fn keep_for_background(mut self) {
         self.decide(ForegroundArmingDecision::KeepBackground);
     }
+
+    async fn preserve_unverified(mut self) {
+        self.decide(ForegroundArmingDecision::PreserveUnverified);
+    }
 }
 
 impl Drop for ForegroundArming {
@@ -2002,17 +2009,21 @@ async fn finish_foreground_arming(
     if matches!(decision, ForegroundArmingDecision::KeepBackground) {
         return TaskBackgroundOutcome::Backgrounded;
     }
-    if matches!(decision, ForegroundArmingDecision::CallerDropped) {
-        if let Some(request) = host_request {
-            // A dropped strict call may still own its process. Preserve the row
-            // and output until the existing cancellation receipt is verified.
-            if !request.is_cancelled() {
-                request.lifecycle_token().cancelled().await;
-            }
-            if !request.is_cancelled() || request.cancel_and_reap().await.is_err() {
-                return TaskBackgroundOutcome::Unknown;
+    if matches!(
+        decision,
+        ForegroundArmingDecision::PreserveUnverified | ForegroundArmingDecision::CallerDropped
+    ) {
+        if let Some(lease) = lease {
+            if let Err(error) = registry
+                .mark_foreground_bash_unverified_owned(lease, "foreground cleanup unverified")
+                .await
+            {
+                tracing::warn!(target: "tool_shell::bash", %error, "could not record unverified foreground observation for the original row");
             }
         }
+        // In particular, no lease is not proof that no row or process exists.
+        // Keep the allocation and report Unknown; do not address a reused ID.
+        return TaskBackgroundOutcome::Unknown;
     }
     if let Some(lease) = lease {
         // Only withdraw this exact unpromoted row, never a replacement or an
@@ -2912,6 +2923,12 @@ async fn spawn_host_background_with_timeout(
     sandbox_lease: Option<tool_api::sandbox_runner::SandboxLease>,
     timeout: Duration,
 ) -> Result<Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError>, ToolError> {
+    let allocation = command.background_task().map(|binding| {
+        (
+            binding.task_id.clone(),
+            binding.output_path.to_string_lossy().into_owned(),
+        )
+    });
     let runner = process.clone();
     let mut spawning = tokio::spawn(async move { runner.spawn_background(&command).await });
     match tokio::time::timeout(timeout, &mut spawning).await {
@@ -2920,16 +2937,18 @@ async fn spawn_host_background_with_timeout(
             if let Some(lease) = sandbox_lease {
                 request.retain_sandbox_lease(lease);
             }
-            let message =
-                format!("background spawn task failed; process cleanup is unverified: {error}");
+            let message = unverified_output_message(
+                &format!("background spawn task failed: {error}"),
+                allocation.as_ref(),
+            );
             request.record_cleanup_error(message.clone());
             Err(ToolError::Io(message.into()))
         }
         Err(_) => {
             let retained = sandbox_lease.map(|lease| request.retain_sandbox_lease(lease));
-            request.record_cleanup_error(
-                "background spawn timed out; process cleanup is unverified".into(),
-            );
+            let message =
+                unverified_output_message("background spawn timed out", allocation.as_ref());
+            request.record_cleanup_error(message.clone());
             // The timed-out task may still publish a handle. Keep its owner
             // alive, then stop and verify that exact process before releasing.
             tokio::spawn(async move {
@@ -2944,15 +2963,8 @@ async fn spawn_host_background_with_timeout(
                         }
                         tokio::time::sleep(Duration::from_millis(250)).await;
                     },
-                    Ok(Err(mobile_linux_api::ProcessError::Io(message)))
-                        if message.starts_with(
-                            lingxi_core::host::process::OWNED_SHELL_CLEANUP_UNVERIFIED,
-                        ) =>
-                    {
-                        false
-                    }
-                    Ok(Err(_)) => true, // the runner proved it never started a child
-                    Err(_) => false,
+                    // A generic runner error or panic is not a no-child receipt.
+                    Ok(Err(_)) | Err(_) => false,
                 };
                 if verified {
                     if let Some((registry, id)) = output_cleanup {
@@ -2963,9 +2975,7 @@ async fn spawn_host_background_with_timeout(
                     }
                 }
             });
-            Err(ToolError::Io(
-                "background spawn timed out; process cleanup is unverified".into(),
-            ))
+            Err(ToolError::Io(message.into()))
         }
     }
 }
@@ -3015,6 +3025,12 @@ async fn run_host_foreground_with_timeout(
     cleanup_timeout: Duration,
 ) -> Result<Result<lingxi_core::host::ForegroundRunResult, mobile_linux_api::ProcessError>, ToolError>
 {
+    let allocation = command.background_task().map(|binding| {
+        (
+            binding.task_id.clone(),
+            binding.output_path.to_string_lossy().into_owned(),
+        )
+    });
     let worker_request = request.clone();
     let rejected_cleanup = output_cleanup.clone();
     // A runner can panic after creating a child. Quarantine before its first
@@ -3074,12 +3090,11 @@ async fn run_host_foreground_with_timeout(
                         }
                         worker_quarantine.release_verified();
                     }
-                    Ok(Err(mobile_linux_api::ProcessError::Io(message))) if message == "supervisor command cancelled" => {
-                        if let Some((registry, id)) = &output_cleanup { registry.discard_bash_output(id).await; }
-                        worker_quarantine.release_verified();
-                    }
                     Ok(Err(error)) => {
-                        worker_request.record_cleanup_error(format!("foreground cancellation cleanup is unverified: {error}"));
+                        worker_request.record_cleanup_error(unverified_output_message(
+                            &format!("foreground cancellation cleanup failed: {error}"),
+                            allocation.as_ref(),
+                        ));
                     }
                     Err(_) => {
                         let retained = worker_quarantine.clone();
@@ -3105,7 +3120,6 @@ async fn run_host_foreground_with_timeout(
                                                     }
                                                 }
                                             },
-                                            Err(mobile_linux_api::ProcessError::Io(message)) if message == "supervisor command cancelled" => true,
                                             Err(_) => false,
                                         };
                                         if verified {
@@ -3118,18 +3132,26 @@ async fn run_host_foreground_with_timeout(
                                 }
                             }
                         });
-                        worker_request.record_cleanup_error("foreground cancellation timed out; process cleanup is unverified".into());
+                        worker_request.record_cleanup_error(unverified_output_message(
+                            "foreground cancellation timed out",
+                            allocation.as_ref(),
+                        ));
                     },
                 }
                 return Err(ToolError::Aborted);
             }
             result = &mut running => result,
         };
-        if let Err(mobile_linux_api::ProcessError::Io(message)) = &result {
-            if message.starts_with(lingxi_core::host::process::OWNED_SHELL_CLEANUP_UNVERIFIED) {
-                worker_request.record_cleanup_error(message.clone());
+        let cleanup_unverified = match &result {
+            Err(error) => {
+                worker_request.record_cleanup_error(unverified_output_message(
+                    &format!("foreground runner failed: {error}"),
+                    allocation.as_ref(),
+                ));
+                true
             }
-        }
+            Ok(_) => false,
+        };
         if let Ok(lingxi_core::host::ForegroundRunResult {
             outcome: lingxi_core::host::ForegroundOutcome::MovedToBackground(handle), ..
         }) = &result {
@@ -3137,7 +3159,7 @@ async fn run_host_foreground_with_timeout(
             let cleanup = output_cleanup.clone();
             worker_request.track_background_with_cleanup(process, handle.clone(), owner, cleanup, sandbox_lease.clone());
         }
-        if !matches!(&result, Err(mobile_linux_api::ProcessError::Io(message)) if message.starts_with(lingxi_core::host::process::OWNED_SHELL_CLEANUP_UNVERIFIED)) {
+        if !cleanup_unverified {
             worker_quarantine.release_verified();
         }
         Ok(result)
@@ -4010,6 +4032,7 @@ impl Tool for BashTool {
                             .flatten()
                     })
                 }));
+                let (sandboxed, _start_evidence) = sandboxed.with_fresh_supervisor_start_evidence();
                 if request.is_some()
                     && (owner.is_none()
                         || bound.is_none()
@@ -4163,29 +4186,20 @@ impl Tool for BashTool {
                         })
                     }
                     Err(e) => {
-                        if let (Some(request), mobile_linux_api::ProcessError::Io(message)) =
-                            (&request, &e)
-                        {
-                            if message.starts_with(
-                                lingxi_core::host::process::OWNED_SHELL_CLEANUP_UNVERIFIED,
-                            ) {
-                                if let Some(lease) = sandbox_lease.clone() {
-                                    request.retain_sandbox_lease(lease);
-                                }
-                                request.record_cleanup_error(message.clone());
-                                return Err(ToolError::Io(message.clone().into()));
+                        // The runner is an open host trait: its error, including
+                        // any nested supervisor observation, is not proof that
+                        // it did not also create another process.
+                        let message = unverified_output_message(
+                            &format!("background startup failed: {e}"),
+                            bound.as_ref(),
+                        );
+                        if let Some(request) = &request {
+                            if let Some(lease) = sandbox_lease.clone() {
+                                request.retain_sandbox_lease(lease);
                             }
+                            request.record_cleanup_error(message.clone());
                         }
-                        // The identity was allocated before spawning. Retire its
-                        // pending receipt and spool if no task row was published.
-                        if let (Some((task_id, _)), Some(registry)) =
-                            (bound.as_ref(), tool.ctx.task_registry.as_ref())
-                        {
-                            let _ = registry.settle_background_bash(task_id, None, false).await;
-                            registry.discard_bash_output(task_id).await;
-                        }
-                        emit_failed(&tool.ctx.bus, &request_id, "spawn_failed", started_at).await;
-                        Err(ToolError::Io(format!("{e}").into()))
+                        return Err(ToolError::Io(message.into()));
                     }
                 }
             };
@@ -4291,6 +4305,7 @@ impl Tool for BashTool {
         } else {
             sandboxed
         };
+        let (sandboxed, _start_evidence) = sandboxed.with_fresh_supervisor_start_evidence();
         if sandbox_lease.as_ref().is_some_and(|lease| !lease.is_noop())
             && ((can_auto_background && !host_detach_forbidden) || on_demand.is_some())
             && !self.ctx.process.supports_background_lifetime_guard()
@@ -4329,7 +4344,7 @@ impl Tool for BashTool {
             sender: settled.clone(),
             outcome: lingxi_core::host::task_registry::TaskBackgroundOutcome::Unknown,
         };
-        let arming = match (fg_bound.as_ref(), on_demand.as_ref()) {
+        let mut arming = match (fg_bound.as_ref(), on_demand.as_ref()) {
             (Some((task_id, _)), Some(notify)) => self.arm_foreground_record(
                 &ctx,
                 task_id,
@@ -4360,7 +4375,7 @@ impl Tool for BashTool {
         // PARITY 2.1.210: `run_foreground` moves a timed-out command to the
         // background (returning `MovedToBackground`) rather than killing it; the
         // default trait impl still maps a normal finish to `Completed` and a
-        // timeout to `Err(Timeout)`, preserving the interrupted-result fallback.
+        // timeout to `Err(Timeout)`. The latter is not a termination receipt.
         let run_result = if let (Some(request), Some(owner)) =
             (host_request.clone(), host_cancel_owner.clone())
         {
@@ -4386,7 +4401,13 @@ impl Tool for BashTool {
                 Ok(result) => result,
                 Err(ToolError::Aborted) => return Err(ToolError::Aborted),
                 Err(error) => {
-                    return Err(error);
+                    let detail = error.model_facing_message();
+                    return match detail.string_at("") {
+                        Some(message) => Err(ToolError::Io(
+                            unverified_output_message(message, fg_bound.as_ref()).into(),
+                        )),
+                        None => Err(error),
+                    };
                 }
             }
         } else {
@@ -4441,6 +4462,17 @@ impl Tool for BashTool {
         if let Err(error) = &run_result {
             self.ctx.note_side_chat_cleanup_failure(&error.to_string());
         }
+        // A runner may do other work outside the supervisor. Its error is not
+        // a receipt proving that every process was never created or reaped.
+        let cleanup_unverified = run_result.is_err();
+        let output_cleanup_supervised = arming.is_some();
+        if cleanup_unverified {
+            // Decide before another await can cancel this caller. The arming
+            // task owns any in-flight registration and exact row lease.
+            if let Some(arming) = arming.take() {
+                arming.preserve_unverified().await;
+            }
+        }
         // The wrapped command has finished: tear down any per-command sandbox
         // state (e.g. bwrap mount points). No-op for the default
         // `LegacyWrapRunner`; only the live runner has anything to clean up.
@@ -4481,7 +4513,6 @@ impl Tool for BashTool {
         // armed row back. A command that moved to the background keeps it — it
         // owns a live child now, and the background arm below flips
         // `isBackgrounded` and takes over the record.
-        let output_cleanup_supervised = arming.is_some();
         if let Some(arming) = arming {
             if moved_to_background && !host_detach_forbidden {
                 arming.keep_for_background().await;
@@ -4494,7 +4525,7 @@ impl Tool for BashTool {
                 "A supervised process unexpectedly moved to the background without transferable sandbox resources".into(),
             ));
         }
-        if !moved_to_background && !output_cleanup_supervised {
+        if !moved_to_background && !output_cleanup_supervised && !cleanup_unverified {
             if let (Some(registry), Some((task_id, _))) =
                 (self.ctx.task_registry.as_ref(), fg_bound.as_ref())
             {
@@ -5098,30 +5129,11 @@ impl Tool for BashTool {
                     subagent_hooks_fired: false,
                 })
             }
-            Err(mobile_linux_api::ProcessError::Timeout) => {
-                let mut meta: LogEventMetadata = HashMap::new();
-                meta.insert(
-                    "request_id".into(),
-                    AnalyticsValue::String(request_id.clone()),
-                );
-                meta.insert("timeout_ms".into(), AnalyticsValue::Int(timeout_ms as i64));
-                self.ctx.bus.log_event(BASH_TIMEOUT, meta).await;
-                // RESIDUAL: the non-streaming posix runner uses
-                // `timeout(..).wait_with_output()` and drops captured bytes on
-                // kill, so no partial output is available on this arm — emit the
-                // correct interrupted shape with empty partial. (The
-                // `Ok(timed_out)` arm above DOES carry partial bytes.)
-                Ok(build_interrupted_result(
-                    "",
-                    "",
-                    &cmd_str,
-                    Some(timeout_ms),
-                    &sandbox_violation_lines,
-                ))
-            }
             Err(e) => {
                 emit_failed(&self.ctx.bus, &request_id, "spawn_failed", started_at).await;
-                Err(ToolError::Io(format!("{e}").into()))
+                Err(ToolError::Io(
+                    unverified_output_message(&format!("{e}"), fg_bound.as_ref()).into(),
+                ))
             }
         }
     }
@@ -6100,9 +6112,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn foreground_process_timeout_err_returns_ok_interrupted_empty_partial() {
-        // The non-streaming runner reports a kill as `Err(ProcessError::Timeout)`
-        // and drops captured bytes — still an Ok(interrupted) shape, empty stdout.
+    async fn foreground_process_timeout_err_remains_unverified() {
+        // A runner error does not prove that every child was stopped.
         struct TimeoutStub;
         #[async_trait]
         impl lingxi_core::host::process::ProcessRunner for TimeoutStub {
@@ -6137,18 +6148,248 @@ mod tests {
         });
         ctx.process = std::sync::Arc::new(TimeoutStub);
         let tool = BashTool::new(ctx);
-        let res = tool
+        let error = tool
             .call(
                 source_json!({"command": "do-work", "timeout": 200}),
                 use_ctx(),
                 fresh_tx(),
             )
             .await
-            .expect("process-timeout should be Ok(interrupted)");
-        assert_eq!(data_value(&res.data)["interrupted"], true);
-        assert_eq!(data_value(&res.data)["stdout"], "");
-        assert!(data_value(&res.data).get("timed_out").is_none());
-        assert!(data_value(&res.data).get("is_error").is_none());
+            .expect_err("unverified process timeout must remain an error");
+        let message = error.model_facing_message();
+        assert!(message
+            .string_at("")
+            .unwrap()
+            .contains("termination is unverified"));
+    }
+
+    // This fixture is spawned by the next test as an actual child of the test
+    // executable. It is ignored when the test suite runs normally.
+    #[test]
+    #[ignore]
+    fn unverified_output_child_fixture() {
+        use std::io::Write as _;
+        print!("UNVERIFIED_CHILD_OUTPUT\n");
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn bash_user_error_exposes_spool_with_real_child_still_running() {
+        struct TestChild(std::process::Child);
+        impl Drop for TestChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        #[derive(Default)]
+        struct Runner {
+            children: std::sync::Mutex<Vec<TestChild>>,
+        }
+        impl Runner {
+            fn start_then_fail(&self, command: &SandboxedCommand) -> ProcessError {
+                let binding = command.background_task().expect("task allocation");
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&binding.output_path)
+                    .unwrap();
+                let child = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "bash::tests::unverified_output_child_fixture",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .stdout(file)
+                    .spawn()
+                    .unwrap();
+                self.children.lock().unwrap().push(TestChild(child));
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    let output = std::fs::read(&binding.output_path).unwrap();
+                    if output
+                        .windows(b"UNVERIFIED_CHILD_OUTPUT".len())
+                        .any(|window| window == b"UNVERIFIED_CHILD_OUTPUT")
+                    {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "child did not write output"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                ProcessError::Io("injected loss after real child start".into())
+            }
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for Runner {
+            async fn run(&self, command: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                Err(self.start_then_fail(command))
+            }
+            async fn spawn_background(
+                &self,
+                command: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                Err(self.start_then_fail(command))
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Err(ProcessError::Unsupported)
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        for background in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let registry = Arc::new(RecordingRegistry {
+                output_root: Some(directory.path().to_owned()),
+                ..Default::default()
+            });
+            let runner = Arc::new(Runner::default());
+            let mut context = shell_test_ctx(ok_output());
+            context.task_registry = Some(registry.clone());
+            context.process = runner.clone();
+            let input = if background {
+                source_json!({"command": "fixture", "run_in_background": true})
+            } else {
+                source_json!({"command": "fixture"})
+            };
+            let error = BashTool::new(context)
+                .call(input, use_ctx(), fresh_tx())
+                .await
+                .expect_err("lost observation cannot report success");
+            let path = directory.path().join("b1a2b3c4d.output");
+            let message = error.model_facing_message();
+            let message = message.string_at("").unwrap();
+            assert!(message.contains("termination is unverified"));
+            assert!(message.contains(&format!("{:?}", path.to_str().unwrap())));
+            assert!(std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("UNVERIFIED_CHILD_OUTPUT"));
+            assert!(registry.discarded.lock().unwrap().is_empty());
+            assert!(runner.children.lock().unwrap()[0]
+                .0
+                .try_wait()
+                .unwrap()
+                .is_none());
+            // Runner drop kills and waits for the test child even on panic.
+        }
+    }
+
+    // This runs the PowerShell tool entry point with a deliberately failing
+    // runner that has already started a real child. It is not a native
+    // PowerShell or Windows Job integration test.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn powershell_user_error_exposes_spool_with_real_child_still_running() {
+        struct TestChild(std::process::Child);
+        impl Drop for TestChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        #[derive(Default)]
+        struct Runner {
+            children: std::sync::Mutex<Vec<TestChild>>,
+        }
+        #[async_trait::async_trait]
+        impl ProcessRunner for Runner {
+            fn supports_verified_background_stop(&self, _: &SandboxedCommand) -> bool {
+                // The test deliberately makes the runner break this claimed
+                // capability by returning an error after starting a child.
+                true
+            }
+            async fn run(&self, command: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+                let binding = command.background_task().expect("task allocation");
+                let file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&binding.output_path)
+                    .unwrap();
+                let child = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "bash::tests::unverified_output_child_fixture",
+                        "--ignored",
+                        "--nocapture",
+                    ])
+                    .stdout(file)
+                    .spawn()
+                    .unwrap();
+                self.children.lock().unwrap().push(TestChild(child));
+                let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                while !std::fs::read_to_string(&binding.output_path)
+                    .unwrap()
+                    .contains("UNVERIFIED_CHILD_OUTPUT")
+                {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "child did not write output"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(ProcessError::Io(
+                    "injected loss after real child start".into(),
+                ))
+            }
+            async fn spawn_background(
+                &self,
+                _: &SandboxedCommand,
+            ) -> Result<ProcessHandle, ProcessError> {
+                unreachable!("PowerShell is a foreground call")
+            }
+            async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+                Err(ProcessError::Unsupported)
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let registry = Arc::new(RecordingRegistry {
+            output_root: Some(directory.path().to_owned()),
+            ..Default::default()
+        });
+        let runner = Arc::new(Runner::default());
+        let mut context = shell_test_ctx(ok_output());
+        context.task_registry = Some(registry.clone());
+        context.process = runner.clone();
+        let request = Arc::new(tool_api::context::HostToolRequest::default());
+        let mut tool_context = use_ctx();
+        tool_context.host_tool_cancellation =
+            tool_api::context::HostToolCancellation::TerminateOwnedProcess(request.clone());
+        let error = crate::powershell::PowerShellTool::new(context)
+            .call(
+                source_json!({"command": "Write-Output fixture"}),
+                tool_context,
+                fresh_tx(),
+            )
+            .await
+            .expect_err("lost observation cannot report success");
+        let path = directory.path().join("b1a2b3c4d.output");
+        let message = error.model_facing_message();
+        let message = message.string_at("").unwrap();
+        assert!(message.contains("termination is unverified"));
+        assert!(message.contains(&format!("{:?}", path.to_str().unwrap())));
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("UNVERIFIED_CHILD_OUTPUT"));
+        assert!(registry.discarded.lock().unwrap().is_empty());
+        assert!(runner.children.lock().unwrap()[0]
+            .0
+            .try_wait()
+            .unwrap()
+            .is_none());
+        let cleanup_error = request
+            .cancel_and_reap()
+            .await
+            .expect_err("cleanup is unverified");
+        assert!(cleanup_error.contains("termination is unverified"));
+        // Runner drop kills and waits for the test child even on panic.
     }
 
     #[tokio::test]
@@ -7501,6 +7742,8 @@ mod tests {
         output_chunks: std::sync::Mutex<Vec<(String, String)>>,
         output_flushes: std::sync::Mutex<Vec<String>>,
         unverified: std::sync::Mutex<Vec<(String, String)>>,
+        owned_observation_attempted: tokio::sync::Notify,
+        output_root: Option<std::path::PathBuf>,
 
         allocated: std::sync::Mutex<Vec<String>>,
         registered: std::sync::Mutex<
@@ -7520,6 +7763,7 @@ mod tests {
         requester:
             std::sync::Mutex<Option<Arc<dyn lingxi_core::host::task_registry::TaskBackgrounder>>>,
         withdrawal_attempted: tokio::sync::Notify,
+        discarded_notify: tokio::sync::Notify,
     }
 
     #[derive(Default)]
@@ -7597,6 +7841,34 @@ mod tests {
 
     #[async_trait::async_trait]
     impl lingxi_core::host::task_registry::TaskRegistryHandle for RecordingRegistry {
+        async fn mark_foreground_bash_unverified_owned(
+            &self,
+            lease: &lingxi_core::host::task_registry::ForegroundTaskLease,
+            reason: &str,
+        ) -> Result<(), lingxi_core::host::task_registry::TaskRegistryError> {
+            let is_original = self
+                .foreground_instances
+                .lock()
+                .unwrap()
+                .get(lease.task_id())
+                .is_some_and(|identity| Arc::ptr_eq(identity, lease.identity()));
+            if is_original {
+                self.unverified
+                    .lock()
+                    .unwrap()
+                    .push((lease.task_id().into(), reason.into()));
+            }
+            self.owned_observation_attempted.notify_one();
+            if is_original {
+                Ok(())
+            } else {
+                Err(
+                    lingxi_core::host::task_registry::TaskRegistryError::NotFound(
+                        lease.task_id().into(),
+                    ),
+                )
+            }
+        }
         async fn settle_background_bash_unverified(
             &self,
             task_id: &str,
@@ -7800,7 +8072,10 @@ mod tests {
             self.allocated.lock().unwrap().push(id.clone());
             Ok(lingxi_core::host::task_registry::BackgroundBashHandle {
                 task_id: id,
-                output_path: "/session/tasks/b1a2b3c4d.output".to_string(),
+                output_path: self.output_root.as_ref().map_or_else(
+                    || "/session/tasks/b1a2b3c4d.output".to_string(),
+                    |root| root.join("b1a2b3c4d.output").to_string_lossy().into_owned(),
+                ),
             })
         }
         async fn allocate_owned_bash_output(
@@ -7837,6 +8112,10 @@ mod tests {
                 .contains_key(task_id)
             {
                 self.discarded.lock().unwrap().push(task_id.to_string());
+                if let Some(root) = &self.output_root {
+                    let _ = std::fs::remove_file(root.join(format!("{task_id}.output")));
+                }
+                self.discarded_notify.notify_one();
             }
         }
         async fn bind_background_process(
@@ -7922,6 +8201,294 @@ mod tests {
                 fresh_tx(),
             )
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn foreground_unverified_arming_preserves_exact_row() {
+        use lingxi_core::host::task_registry::TaskBackgroundOutcome;
+
+        for replace_row in [false, true] {
+            let gate = Arc::new(ForegroundRegistrationGate::default());
+            let registry = Arc::new(RecordingRegistry {
+                registration_gate: Some(gate.clone()),
+                ..Default::default()
+            });
+            let arming = test_foreground_arming(registry.clone(), "unverified-row", None);
+            tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+                .await
+                .expect("the original row must exist before the hook returns");
+            arming.preserve_unverified().await;
+            if replace_row {
+                registry
+                    .foreground_instances
+                    .lock()
+                    .unwrap()
+                    .insert("unverified-row".into(), Arc::new(()));
+            }
+            let observed = registry.owned_observation_attempted.notified();
+            gate.release.notify_one();
+            tokio::time::timeout(Duration::from_secs(2), observed)
+                .await
+                .expect("the original lease must be checked after the hook returns");
+            assert!(registry.unarmed.lock().unwrap().is_empty());
+            assert!(registry.discarded.lock().unwrap().is_empty());
+            let recorded = registry.unverified.lock().unwrap().clone();
+            if replace_row {
+                assert!(recorded.is_empty(), "a replacement row must not be marked");
+            } else {
+                assert_eq!(
+                    recorded,
+                    [(
+                        "unverified-row".into(),
+                        "foreground cleanup unverified".into()
+                    )]
+                );
+            }
+        }
+        let registry = RecordingRegistry::default();
+        assert_eq!(
+            finish_foreground_arming(
+                &registry,
+                "no-lease",
+                None,
+                None,
+                ForegroundArmingDecision::PreserveUnverified,
+            )
+            .await,
+            TaskBackgroundOutcome::Unknown
+        );
+        assert!(registry.unverified.lock().unwrap().is_empty());
+        assert!(registry.discarded.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    struct UnverifiedForegroundOutput {
+        can_arm: bool,
+        ordinary_error: bool,
+        no_start: bool,
+        release: Option<Arc<tokio::sync::Notify>>,
+    }
+
+    #[cfg(unix)]
+    #[async_trait::async_trait]
+    impl ProcessRunner for UnverifiedForegroundOutput {
+        fn supports_foreground_backgrounding(&self) -> bool {
+            self.can_arm
+        }
+        async fn run(&self, _: &SandboxedCommand) -> Result<ProcessOutput, ProcessError> {
+            unreachable!("the Bash tool must use its foreground runner")
+        }
+        async fn run_foreground_with_output_limit(
+            &self,
+            command: &SandboxedCommand,
+            _: Option<usize>,
+        ) -> Result<lingxi_core::host::ForegroundRunResult, ProcessError> {
+            let binding = command.background_task().expect("source identity is bound");
+            std::fs::write(&binding.output_path, b"original output bytes\n").unwrap();
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
+            if self.no_start {
+                return lingxi_core::host::shell_supervisor::execute(command, None, false).await;
+            }
+            Err(ProcessError::Io(if self.ordinary_error {
+                "shell supervisor not started: spoofed string without evidence".into()
+            } else {
+                format!(
+                    "{} injected supervisor loss",
+                    lingxi_core::host::process::OWNED_SHELL_CLEANUP_UNVERIFIED
+                )
+            }))
+        }
+        async fn spawn_background(
+            &self,
+            command: &SandboxedCommand,
+        ) -> Result<ProcessHandle, ProcessError> {
+            if self.no_start {
+                return match lingxi_core::host::shell_supervisor::execute(command, None, true).await
+                {
+                    Err(error) => Err(error),
+                    Ok(_) => panic!("unconfigured supervisor unexpectedly started"),
+                };
+            }
+            Err(ProcessError::Unsupported)
+        }
+        async fn kill(&self, _: &ProcessHandle) -> Result<(), ProcessError> {
+            Err(ProcessError::Unsupported)
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_unverified_error_preserves_output_without_arming() {
+        for ordinary_error in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let registry = Arc::new(RecordingRegistry {
+                output_root: Some(directory.path().to_owned()),
+                ..Default::default()
+            });
+            let mut context = shell_test_ctx(ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            });
+            context.task_registry = Some(registry.clone());
+            context.process = Arc::new(UnverifiedForegroundOutput {
+                can_arm: false,
+                ordinary_error,
+                no_start: false,
+                release: None,
+            });
+            let result = BashTool::new(context)
+                .call(
+                    source_json!({"command": "echo fixture"}),
+                    use_ctx(),
+                    fresh_tx(),
+                )
+                .await;
+            assert!(result.is_err(), "unverified cleanup must remain an error");
+            let expected = if ordinary_error {
+                "shell supervisor not started: spoofed"
+            } else {
+                "owned shell cleanup unverified"
+            };
+            let error = result.err().unwrap();
+            assert!(format!("{error:?}").contains(expected));
+            let message = error.model_facing_message();
+            let message = message.string_at("").expect("model-facing string");
+            assert!(message.contains("termination is unverified"));
+            assert!(message.contains("b1a2b3c4d"));
+            assert!(message.contains("b1a2b3c4d.output"));
+            assert_eq!(
+                std::fs::read(directory.path().join("b1a2b3c4d.output"))
+                    .expect("unverified output was discarded"),
+                b"original output bytes\n"
+            );
+            assert!(registry.discarded.lock().unwrap().is_empty());
+            assert!(
+                registry.unverified.lock().unwrap().is_empty(),
+                "no lease means no ID-only observation"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn no_start_error_preserves_output_without_trusted_runner_receipt() {
+        for background in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let output = directory.path().join("b1a2b3c4d.output");
+            std::fs::write(&output, b"unused allocation").unwrap();
+            let registry = Arc::new(RecordingRegistry {
+                output_root: Some(directory.path().to_owned()),
+                ..Default::default()
+            });
+            let mut context = shell_test_ctx(ProcessOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: 0,
+                timed_out: false,
+            });
+            context.task_registry = Some(registry.clone());
+            context.process = Arc::new(UnverifiedForegroundOutput {
+                can_arm: false,
+                ordinary_error: false,
+                no_start: true,
+                release: None,
+            });
+            let input = if background {
+                source_json!({"command": "echo fixture", "run_in_background": true})
+            } else {
+                source_json!({"command": "echo fixture"})
+            };
+            let result = BashTool::new(context)
+                .call(input, use_ctx(), fresh_tx())
+                .await;
+            assert!(result.is_err(), "capacity refusal must not report success");
+            let error = result.err().unwrap();
+            assert!(format!("{error:?}").contains("shell supervisor not started"));
+            let message = error.model_facing_message();
+            let message = message.string_at("").expect("model-facing string");
+            assert!(message.contains("termination is unverified"));
+            assert!(message.contains("b1a2b3c4d.output"));
+            assert!(output.exists(), "unverified output was discarded");
+            assert!(registry.discarded.lock().unwrap().is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn foreground_unverified_error_preserves_output_after_row_published() {
+        let directory = tempfile::tempdir().unwrap();
+        let gate = Arc::new(ForegroundRegistrationGate::default());
+        let registry = Arc::new(RecordingRegistry {
+            output_root: Some(directory.path().to_owned()),
+            registration_gate: Some(gate.clone()),
+            ..Default::default()
+        });
+        let release = Arc::new(tokio::sync::Notify::new());
+        let mut context = shell_test_ctx(ProcessOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            timed_out: false,
+        });
+        context.task_registry = Some(registry.clone());
+        context.process = Arc::new(UnverifiedForegroundOutput {
+            can_arm: true,
+            ordinary_error: false,
+            no_start: false,
+            release: Some(release.clone()),
+        });
+        let call = tokio::spawn(async move {
+            BashTool::new(context)
+                .call(
+                    source_json!({"command": "echo fixture"}),
+                    use_ctx(),
+                    fresh_tx(),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+            .await
+            .expect("the foreground row must publish before the result");
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(2), call)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result.is_err());
+        assert!(format!("{:?}", result.err().unwrap()).contains("owned shell cleanup unverified"));
+        let observed = registry.owned_observation_attempted.notified();
+        let withdrawn = registry.withdrawal_attempted.notified();
+        gate.release.notify_one();
+        let marked = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! { _ = observed => true, _ = withdrawn => false }
+        })
+        .await
+        .expect("the original registration must settle");
+        if !marked {
+            tokio::time::timeout(Duration::from_secs(2), registry.discarded_notify.notified())
+                .await
+                .unwrap();
+        }
+        assert!(
+            marked,
+            "unverified output was withdrawn instead of retaining the original row"
+        );
+        assert_eq!(
+            registry.unverified.lock().unwrap().as_slice(),
+            [("b1a2b3c4d".into(), "foreground cleanup unverified".into())]
+        );
+        assert!(registry.discarded.lock().unwrap().is_empty());
+        assert_eq!(
+            std::fs::read(directory.path().join("b1a2b3c4d.output")).unwrap(),
+            b"original output bytes\n"
+        );
     }
 
     #[tokio::test]
@@ -8178,16 +8745,15 @@ mod tests {
                 gate.release.notify_one();
             }
             if arm_first {
-                tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                    loop {
-                        if !registry.unarmed.lock().unwrap().is_empty() {
-                            break;
-                        }
-                        tokio::task::yield_now().await;
-                    }
-                })
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    registry.owned_observation_attempted.notified(),
+                )
                 .await
-                .expect("dropping the call must withdraw its foreground row");
+                .expect("dropping the call must preserve the exact unknown row");
+                assert!(registry.unarmed.lock().unwrap().is_empty());
+                assert!(registry.discarded.lock().unwrap().is_empty());
+                assert_eq!(registry.unverified.lock().unwrap().len(), 1);
             } else {
                 tokio::time::sleep(FOREGROUND_ARMING_DELAY + std::time::Duration::from_millis(100))
                     .await;
@@ -8209,7 +8775,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_foreground_arming_discards_output_after_withdrawal() {
+    async fn cancelled_foreground_arming_retains_unknown_row_and_output() {
         let gate = Arc::new(ForegroundRegistrationGate::default());
         let registry = Arc::new(RecordingRegistry {
             registration_gate: Some(gate.clone()),
@@ -8222,28 +8788,21 @@ mod tests {
             .await
             .expect("the row must be visible while TaskCreated is pending");
         drop(arming);
+        gate.release.notify_one();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            registry.owned_observation_attempted.notified(),
+        )
+        .await
+        .expect("the original row must retain its unverified observation");
         assert!(registry.unarmed.lock().unwrap().is_empty());
         assert!(registry.discarded.lock().unwrap().is_empty());
-        gate.release.notify_one();
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if registry
-                    .discarded
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|id| id == "cancelled-arming")
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
         assert_eq!(
-            registry.unarmed.lock().unwrap().as_slice(),
-            ["cancelled-arming"]
+            registry.unverified.lock().unwrap().as_slice(),
+            [(
+                "cancelled-arming".into(),
+                "foreground cleanup unverified".into()
+            )]
         );
     }
 

@@ -2167,6 +2167,45 @@ impl TaskRegistry {
             .await;
     }
 
+    /// Record an unverified observation only on the exact foreground row.
+    /// A replacement row with the same task ID must not inherit this result.
+    ///
+    /// # Errors
+    /// Returns an error when the row has been replaced, removed, or settled.
+    pub async fn mark_foreground_bash_unverified_owned(
+        &self,
+        lease: &lingxi_core::host::task_registry::ForegroundTaskLease,
+        reason: &str,
+    ) -> Result<(), TaskError> {
+        let task_id = lease.task_id();
+        let gate = self.shell_row_gate(task_id);
+        let _guard = gate.lock().await;
+        let mut rows = self.tasks.write().await;
+        if !self
+            .tasks
+            .identity(task_id)
+            .is_some_and(|identity| Arc::ptr_eq(&identity, lease.identity()))
+        {
+            return Err(TaskError::NotFound(task_id.to_owned()));
+        }
+        let Some(TaskState::LocalBash(shell)) = rows.get_mut(task_id) else {
+            return Err(TaskError::NotFound(task_id.to_owned()));
+        };
+        if shell.base.status.is_terminal()
+            || shell.stop_cause.as_deref().is_some_and(|cause| {
+                cause.starts_with("verified_after_unverified:")
+                    || cause.starts_with(BASH_OUTCOME_UNKNOWN)
+            })
+        {
+            return Err(TaskError::TerminatedTask);
+        }
+        shell.stop_cause = Some(format!("wait_unverified:{reason}"));
+        rows.checkpoint();
+        drop(rows);
+        self.bump_notification_revision();
+        Ok(())
+    }
+
     async fn unregister_foreground_bash_inner(&self, task_id: &str, expected: Option<&Arc<()>>) {
         let task_id = self.canonical_or_raw(task_id).await;
         let gate = self.shell_row_gate(&task_id);
@@ -6084,6 +6123,19 @@ impl TaskRegistry {
                 TaskError::Internal("owned shell terminal outcome was not published".into())
             })?;
             return published;
+        }
+        // A row may survive an uncertain startup without an attached stop
+        // capability (including after a registry reload). A legacy fire-and-
+        // forget cleanup cannot turn that observation into a Killed receipt.
+        let unverified_shell = self.tasks.read().await.get(task_id_ref).is_some_and(|state| {
+            matches!(state, TaskState::LocalBash(shell)
+                if !shell.base.status.is_terminal()
+                    && shell.stop_cause.as_deref().is_some_and(|cause| cause.starts_with("wait_unverified:")))
+        });
+        if unverified_shell {
+            return Err(TaskError::Internal(
+                "shell cleanup is unverified and no verified stop capability is bound".into(),
+            ));
         }
         // Read liveness BEFORE any kill dispatch. A handler's status sink flips
         // the row to `Killed` INSIDE `handler.kill(..)`, so by the time

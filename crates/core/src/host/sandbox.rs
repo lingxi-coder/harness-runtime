@@ -176,6 +176,40 @@ impl std::fmt::Debug for BackendPlanHandle {
     }
 }
 
+/// Per-invocation evidence for the supervisor's process-creation boundary.
+/// Only the supervisor can publish a pre-spawn observation; an unobserved or
+/// attempted creation never proves that no process exists.
+#[derive(Debug, Clone, Default)]
+pub struct SupervisorStartEvidence(Arc<std::sync::atomic::AtomicU8>);
+
+impl SupervisorStartEvidence {
+    /// Whether the supervisor rejected this exact invocation before creating a process.
+    #[must_use]
+    pub fn no_process_started(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst) == 1
+    }
+
+    pub(crate) fn claim_spawn(&self) -> bool {
+        self.0
+            .compare_exchange(
+                0,
+                2,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    pub(crate) fn record_no_start(&self) {
+        let _ = self.0.compare_exchange(
+            0,
+            1,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+}
+
 /// Opaque newtype — only constructible via [`Sandbox::prepare`],
 /// [`Sandbox::bypass_with_audit`], [`SandboxedCommand::__new_sandboxed`], or
 /// [`SandboxedCommand::__new_sandboxed_with_plan`] (the seams external
@@ -189,6 +223,7 @@ pub struct SandboxedCommand {
     tag: SandboxedTag,
     plan: Option<BackendPlanHandle>,
     lifetime_guard: Option<BackendPlanHandle>,
+    supervisor_start_evidence: Option<SupervisorStartEvidence>,
     background: Option<crate::host::process::BackgroundTaskBinding>,
     auto_background_on_timeout: bool,
     background_timeout: Option<std::time::Duration>,
@@ -217,6 +252,7 @@ impl SandboxedCommand {
     /// Attribute this OS process group to the subagent that launched it.
     #[must_use]
     pub fn with_process_owner(mut self, owner: Option<String>) -> Self {
+        self.supervisor_start_evidence = None;
         self.process_owner = owner;
         self
     }
@@ -230,6 +266,7 @@ impl SandboxedCommand {
     /// naturally. Ordinary commands may deliberately leave descendants alive.
     #[must_use]
     pub fn with_require_group_cleanup_on_exit(mut self, required: bool) -> Self {
+        self.supervisor_start_evidence = None;
         self.require_group_cleanup_on_exit = required;
         self
     }
@@ -249,6 +286,7 @@ impl SandboxedCommand {
 
     #[must_use]
     pub(crate) fn mark_supervisor_request(mut self) -> Self {
+        self.supervisor_start_evidence = None;
         self.supervisor_request = true;
         self
     }
@@ -267,6 +305,7 @@ impl SandboxedCommand {
             tag,
             plan: None,
             lifetime_guard: None,
+            supervisor_start_evidence: None,
             background: None,
             auto_background_on_timeout: true,
             background_timeout: None,
@@ -291,6 +330,7 @@ impl SandboxedCommand {
             tag,
             plan: Some(plan),
             lifetime_guard: None,
+            supervisor_start_evidence: None,
             background: None,
             auto_background_on_timeout: true,
             background_timeout: None,
@@ -300,10 +340,26 @@ impl SandboxedCommand {
         }
     }
 
+    /// Mint fresh in-process evidence for this exact command configuration.
+    /// Clones share one single-use state; a later mutation removes the evidence.
+    #[must_use]
+    pub fn with_fresh_supervisor_start_evidence(mut self) -> (Self, SupervisorStartEvidence) {
+        let evidence = SupervisorStartEvidence::default();
+        self.supervisor_start_evidence = Some(evidence.clone());
+        (self, evidence)
+    }
+
+    /// Observe this invocation's pre-spawn evidence, if its caller requested it.
+    #[must_use]
+    pub fn supervisor_start_evidence(&self) -> Option<&SupervisorStartEvidence> {
+        self.supervisor_start_evidence.as_ref()
+    }
+
     /// Keep a per-command resource alive while the runner owns the process.
     /// Background-capable runners must clone this guard into their reaper.
     #[must_use]
     pub fn with_lifetime_guard<T: Any + Send + Sync>(mut self, guard: T) -> Self {
+        self.supervisor_start_evidence = None;
         self.lifetime_guard = Some(BackendPlanHandle::new(guard));
         self
     }
@@ -326,6 +382,7 @@ impl SandboxedCommand {
         mut self,
         binding: crate::host::process::BackgroundTaskBinding,
     ) -> Self {
+        self.supervisor_start_evidence = None;
         self.background = Some(binding);
         self
     }
@@ -347,6 +404,7 @@ impl SandboxedCommand {
     /// existed.
     #[must_use]
     pub fn with_auto_background_on_timeout(mut self, allowed: bool) -> Self {
+        self.supervisor_start_evidence = None;
         self.auto_background_on_timeout = allowed;
         self
     }
@@ -362,6 +420,7 @@ impl SandboxedCommand {
     /// to the caller (for example Monitor, which owns its own deadline).
     #[must_use]
     pub fn with_background_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.supervisor_start_evidence = None;
         self.background_timeout = timeout;
         self
     }
