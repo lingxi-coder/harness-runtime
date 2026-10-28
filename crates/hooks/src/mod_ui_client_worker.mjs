@@ -715,6 +715,7 @@ export class ClientSurfaceManager {
       kind: 'ui.client.event',
       runtimeId: instance.runtimeId,
       generation: instance.generation,
+      hostRenderRevision: instance.hostRenderRevision,
       parent: instance.identity.parent,
       plugin: instance.identity.plugin,
       element: instance.identity.key,
@@ -764,6 +765,10 @@ export class ClientSurfaceManager {
 
   async mount(input) {
     if (this.disposed) fail('ClientSurfaceManager is disposed');
+    if (input.hostRenderRevision !== undefined
+        && (!Number.isSafeInteger(input.hostRenderRevision) || input.hostRenderRevision <= 0)) {
+      fail('Client mount has an invalid Host render revision');
+    }
     const identity = makeIdentity(input);
     if (this.runtimeInstances.has(identity.runtimeId)) this.unmount(identity.runtimeId);
     const environment = this.environmentFor({ ...input, ...identity });
@@ -772,6 +777,7 @@ export class ClientSurfaceManager {
       runtimeId: identity.runtimeId,
       vmInstanceId: environment.nextInstance++,
       generation: this.nextGeneration++,
+      hostRenderRevision: input.hostRenderRevision,
       frameSequence: 0,
       environment,
       props: undefined,
@@ -905,8 +911,10 @@ export class ClientSurfaceManager {
       this.invokeCallback(instance, callback, instance.environment.cloneData(payload));
       return true;
     } catch (error) {
-      this.emitFault(instance, 'run', error);
-      throw clientError('run', error);
+      this.invalidateHeldEnvironment(instance, error);
+      const failure = clientError('run', error);
+      failure.outcomeUnknown = true;
+      throw failure;
     }
   }
 
@@ -975,7 +983,7 @@ export class ClientSurfaceManager {
     if (instance.destroyed || instance.failure) return;
     const result = instance.environment.invoke(callback, [payload], RUN_BUDGET_MS);
     if (result && typeof result.then === 'function') {
-      result.catch(error => this.emitFault(instance, 'run', error));
+      result.catch(error => this.invalidateHeldEnvironment(instance, error));
     }
   }
 
@@ -985,7 +993,7 @@ export class ClientSurfaceManager {
     const timer = setInterval(() => {
       if (instance.destroyed || !instance.timers.has(timerId)) return;
       try { this.invokeCallback(instance, callback, undefined); }
-      catch (error) { this.emitFault(instance, 'run', error); }
+      catch (error) { this.invalidateHeldEnvironment(instance, error); }
     }, Math.max(1, milliseconds));
     timer.unref?.();
     instance.timers.set(timerId, timer);
@@ -1075,6 +1083,15 @@ export class ClientSurfaceManager {
       if (!current || (operation.generation !== undefined && operation.generation !== current.generation)) {
         if (operation.type === 'unmount') return { unmounted: false, stale: true };
         return { stale: true };
+      }
+      if (operation.hostRenderRevision !== undefined && operation.type !== 'unmount') {
+        if (!Number.isSafeInteger(operation.hostRenderRevision) || operation.hostRenderRevision <= 0) {
+          fail('Client operation has an invalid Host render revision');
+        }
+        if (current.hostRenderRevision !== undefined && operation.hostRenderRevision < current.hostRenderRevision) {
+          return { stale: true };
+        }
+        current.hostRenderRevision = operation.hostRenderRevision;
       }
     }
     switch (operation.type) {

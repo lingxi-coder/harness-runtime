@@ -43,6 +43,8 @@ jobs:
           grep -F 'real_worker_background_fence_cancels_frame_admission_after_side_effect ... ok' "$RUNNER_TEMP/background-admission-fence.log"
           cargo test --locked -p hooks --lib real_worker_old_background_post_is_not_relabelled_to_new_revision -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/background-revision.log"
           grep -F 'real_worker_old_background_post_is_not_relabelled_to_new_revision ... ok' "$RUNNER_TEMP/background-revision.log"
+          cargo test --locked -p hooks --lib real_host_rejects_old_revision_event_before_dispatch -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/event-revision.log"
+          grep -F 'real_host_rejects_old_revision_event_before_dispatch ... ok' "$RUNNER_TEMP/event-revision.log"
           cargo test --locked -p hooks --lib real_worker_pointer_and_key_wait_for_async_post_delivery -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/listener-events.log"
           grep -F 'real_worker_pointer_and_key_wait_for_async_post_delivery ... ok' "$RUNNER_TEMP/listener-events.log"
           cargo test --locked -p hooks --lib real_worker_held_drop_after_callback_result_fences_before_next_action -- --nocapture --test-threads=1 | tee "$RUNNER_TEMP/held-drop.log"

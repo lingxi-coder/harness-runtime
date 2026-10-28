@@ -307,6 +307,26 @@ test('async Input waits for its own posts while unrelated timer posts stay uncor
   manager.dispose();
 });
 
+test('Client events retain the Host revision that produced them', async () => {
+  const events=[];
+  const manager=new ClientSurfaceManager({send:event=>events.push(event)});
+  const source=`let sent=false;export function Board(props,surface){
+    if(props.trigger&&!sent){sent=true;surface.post({stage:'revision-two'});}
+    return surface.elements.Text({children:'ready'});
+  }`;
+  const options=mountOptions({runtimeId:'revision-owner',source});
+  options.hostRenderRevision=1;
+  const mounted=await manager.operation({type:'mount',...options});
+  const updated=await manager.operation({type:'setProps',runtimeId:'revision-owner',generation:mounted.generation,
+    hostRenderRevision:2,props:{trigger:true}});
+  assert.equal(updated.tree.type,'Text');
+  const post=events.find(event=>event.action==='post');
+  assert.equal(post.hostRenderRevision,2);
+  assert.deepEqual(await manager.operation({type:'render',runtimeId:'revision-owner',generation:mounted.generation,
+    hostRenderRevision:1}),{stale:true},'an older Host operation cannot roll back the event revision');
+  manager.dispose();
+});
+
 test('cancel invalidates every surface sharing the VM and remount isolates a late continuation', async () => {
   const events = [];
   const manager = new ClientSurfaceManager({ send: message => events.push(message) });
@@ -694,15 +714,17 @@ test('a VM fault tears down timers and held callbacks until an explicit remount'
         surface.setState(state => ({ ticks: (state.ticks ?? 0) + 1 }));
       });
       surface.onPointer(() => {
-        if (failPointerOnce) {
+        if (failPointerOnce && !_props.allowPointer) {
           failPointerOnce = false;
           throw new Error('stop this surface');
         }
       });
-      return surface.elements.Button({ onPress: event => surface.post({ kind: 'held', event }) });
+      return surface.elements.Button({ label:failPointerOnce ? 'fresh' : 'changed',
+        onPress: event => surface.post({ kind: 'held', event }) });
     }
   `;
   const mounted = await manager.mount(mountOptions({ runtimeId: 'faulted-vm', source }));
+  const oldEnvironment = manager.runtimeInstances.get('faulted-vm').environment;
   const heldHandle = mounted.tree.held;
   assert.equal(typeof heldHandle, 'number');
   await delay(20);
@@ -730,11 +752,15 @@ test('a VM fault tears down timers and held callbacks until an explicit remount'
   assert.equal(events.filter(event => event.action === 'fault').length, 1,
     'later operations do not emit duplicate fault events');
 
-  const remounted = await manager.mount(mountOptions({ runtimeId: 'faulted-vm', source }));
+  const options = mountOptions({ runtimeId: 'faulted-vm', source });
+  options.props = {allowPointer:true};
+  const remounted = await manager.mount(options);
+  assert.notEqual(manager.runtimeInstances.get('faulted-vm').environment, oldEnvironment);
   assert(remounted.generation > mounted.generation);
   assert.equal(remounted.frameSequence, 1);
+  assert.equal(remounted.tree.props.label, 'fresh', 'module state resets in the replacement VM');
   assert.equal(manager.pointer('faulted-vm', { type: 'move' }), true,
-    'a fresh generation restores the surface after the one-shot failure');
+    'a fresh environment restores the surface with corrected props');
   manager.dispose();
 });
 
@@ -1238,6 +1264,43 @@ test('rejected background admission fences its shared VM', async t => background
 test('unmount during a background event fences its shared VM', async t => backgroundOwnerEnds(t,'unmount'));
 test('unacknowledged background event expires and fences its shared VM',
   {timeout:36_000}, async t => backgroundOwnerEnds(t,'timeout'));
+
+async function timerFaultFencesSharedEnvironment(t, asynchronous) {
+  const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));
+  const worker=spawn(process.execPath,['--experimental-vm-modules',workerPath],{stdio:['pipe','pipe','pipe']});
+  t.after(()=>{if(!worker.killed)worker.kill();});
+  const pending=new Map(),events=[];
+  createInterface({input:worker.stdout,crlfDelay:Infinity}).on('line',line=>{
+    const frame=decodeModsIpcFrame(line);
+    if(frame.id===0)events.push(frame);else{pending.get(frame.id)?.(frame);pending.delete(frame.id);}
+  });
+  const request=(id,message)=>new Promise((resolve,reject)=>{
+    const timer=setTimeout(()=>{pending.delete(id);reject(new Error('request timeout'));},2_000);
+    pending.set(id,frame=>{clearTimeout(timer);resolve(frame);});
+    worker.stdin.write(`${encodeModsIpcFrame({id,...message})}\n`);
+  });
+  const callback=asynchronous
+    ? "async()=>{stop();shared='poison';await Promise.resolve();throw new Error('timer fault');}"
+    : "()=>{stop();shared='poison';throw new Error('timer fault');}";
+  const source=`let shared='clean',started=false;export function Board(props,surface){
+    if(props.start&&!started){started=true;const stop=surface.every(5,${callback});}
+    return surface.elements.Text({children:shared});}`;
+  const mount=(id,runtimeId)=>request(id,{kind:'ui.client.operation',operation:{type:'mount',...mountOptions({runtimeId,source})}});
+  const owner=await mount(1,'timer-fault-owner'),sibling=await mount(2,'timer-fault-sibling');
+  assert.equal(owner.result.environmentInstanceId,sibling.result.environmentInstanceId);
+  await request(3,{kind:'ui.client.operation',operation:{type:'setProps',runtimeId:'timer-fault-owner',
+    generation:owner.result.generation,props:{start:true}}});
+  for(let i=0;i<100 && events.filter(event=>event.action==='fault').length<2;i++)await delay(5);
+  assert.equal(events.filter(event=>event.action==='fault').length,2);
+  const old=await request(4,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'timer-fault-sibling',generation:sibling.result.generation}});
+  assert.deepEqual(old.result,{stale:true},'the sibling cannot observe a partially-mutated shared module');
+  const fresh=await mount(5,'timer-fault-fresh');
+  assert.notEqual(fresh.result.environmentInstanceId,owner.result.environmentInstanceId);
+  assert.deepEqual(fresh.result.tree.children,['clean']);
+}
+
+test('synchronous timer failure fences every surface in its VM', async t => timerFaultFencesSharedEnvironment(t,false));
+test('async timer rejection fences every surface in its VM', async t => timerFaultFencesSharedEnvironment(t,true));
 
 test('unmount interrupts a suspended held callback with an unknown result', async t => {
   const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));

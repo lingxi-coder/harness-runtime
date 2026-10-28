@@ -3346,6 +3346,18 @@ impl ModHost {
                 |_| async { Ok(Some(host_generated_json(json!({"handled":true})))) },
             )
             .await?;
+        {
+            let data = lock(&self.client_ui.data);
+            if !self.client_instance_is_current(&data, &instance) {
+                let removed = !data.instances.contains_key(&instance.runtime_id);
+                let has_props = result.at_pointer("/props").and_then(|value| value.object_entries()).is_some();
+                return Err(ModError::Unavailable(if removed && has_props {
+                    "Client runtime was removed before its frame was delivered".into()
+                } else {
+                    "Client runtime changed before the post completed".into()
+                }));
+            }
+        }
         let handled = result
             .at_pointer("/handled")
             .and_then(|value| value.as_bool())
@@ -3363,6 +3375,7 @@ impl ModHost {
                 "type":"setProps",
                 "runtimeId":instance.runtime_id.clone(),
                 "generation":instance.worker_generation,
+                "hostRenderRevision":instance.revision,
             }));
             operation
                 .set_field("props", props.clone())
@@ -3928,6 +3941,11 @@ impl ModHost {
             if instance.worker_fault.is_some() || instance.background_cancellation.is_cancelled() {
                 return Err(ModError::Unavailable("Client runtime was fenced before frame admission".into()));
             }
+            if instance.revision != revision
+                || !data.parents.get(&instance.key.site).is_some_and(|parent| parent.revision == revision)
+            {
+                return Err(ModError::Unavailable("Client render revision changed before frame admission".into()));
+            }
             instance.key.clone()
         };
         let (Ok(frame_sequence), Ok(has_pointer_listener), Ok(has_key_listener)) = (
@@ -4128,6 +4146,7 @@ impl ModHost {
             ),
             ("manifestHash".into(), plain_text_projection(&manifest_hash)),
             ("runtimeId".into(), plain_text_projection(&runtime_id)),
+            ("hostRenderRevision".into(), host_generated_json(json!(revision))),
             ("parent".into(), parent),
             ("client".into(), client),
             ("moduleGraph".into(), module_graph),
@@ -4273,10 +4292,15 @@ impl ModHost {
                         json!({"handled":false,"renderRevision":revision}),
                     ));
                 }
+                if instance.revision != revision {
+                    instance.background_cancellation.cancel();
+                    instance.background_cancellation = CancellationToken::new();
+                }
                 instance.revision = revision;
                 instance.props = parent_props;
                 if let Some(stored) = data.instances.get_mut(runtime_id) {
                     stored.revision = revision;
+                    stored.background_cancellation = instance.background_cancellation.clone();
                     stored.props = instance.props.clone();
                 }
             } else {
@@ -4311,7 +4335,9 @@ impl ModHost {
                 ));
             }
         }
-        let mut worker_operation = host_generated_json(json!({"type":kind,"runtimeId":runtime_id}));
+        let mut worker_operation = host_generated_json(json!({
+            "type":kind,"runtimeId":runtime_id,"hostRenderRevision":revision,
+        }));
         if let Some(generation) = instance.worker_generation {
             worker_operation
                 .set_field(
@@ -4487,6 +4513,7 @@ impl ModHost {
         if kind == "pointer" || kind == "key" || kind == "runHeld" {
             let mut render_operation = host_generated_json(json!({
                 "type":"render", "runtimeId":runtime_id, "generation":instance.worker_generation,
+                "hostRenderRevision":revision,
             }));
             if let Some(action) = post_action.as_ref() {
                 if let Err(error) = render_operation.set_field("postActionId", plain_text_projection(action.action_id())) {
@@ -4897,7 +4924,7 @@ impl ModHost {
         let action = event.string_at("/action").unwrap_or("");
         let instance = {
             let mut data = lock(&self.client_ui.data);
-            let Some(instance) = data.instances.get(&runtime_id).cloned() else {
+            let Some(mut instance) = data.instances.get(&runtime_id).cloned() else {
                 return Ok(());
             };
             if ExactHookText::from_json_projection(event, "/plugin").as_ref()
@@ -4923,7 +4950,15 @@ impl ModHost {
                 {
                     return Ok(());
                 }
-            } else {
+            }
+            if matches!(action, "post" | "schedule")
+                && client_post_u64(event, "/hostRenderRevision") != Some(instance.revision)
+            {
+                return Err(ModError::Unavailable(
+                    "Client background event belongs to an earlier render revision".into(),
+                ));
+            }
+            if instance.worker_generation.is_none() {
                 if let Some(instance) = data.instances.get_mut(&runtime_id) {
                     let pending = client_pending_event(event, &mut post_ack, worker_epoch)?;
                     instance.pending_events.push(pending);
@@ -4931,11 +4966,23 @@ impl ModHost {
                 }
                 return Ok(());
             }
-            if !data.parents.get(&instance.key.site).is_some_and(|parent| {
-                parent.revision == instance.revision
-                    && parent.clients.contains_key(&instance.key.identity)
-            }) {
-                return Ok(());
+            let current_parent = data.parents.get(&instance.key.site)
+                .filter(|parent| parent.clients.contains_key(&instance.key.identity));
+            let Some(current_parent) = current_parent else {
+                return if matches!(action, "post" | "schedule") {
+                    Err(ModError::Unavailable("Client background event has no current parent".into()))
+                } else { Ok(()) };
+            };
+            if action == "fault" {
+                // A VM fault remains relevant if the parent moved forward
+                // before this runtime processed its next operation. Publish
+                // its snapshot against the current parent when it still owns
+                // this exact client identity.
+                instance.revision = current_parent.revision;
+            } else if current_parent.revision != instance.revision {
+                return Err(ModError::Unavailable(
+                    "Client parent changed before its background event completed".into(),
+                ));
             }
             let drawn = self.client_ui.fault_registry.is_drawn(
                 &crate::mod_ui_fault::ClientUiFaultAddress::new(
@@ -4944,7 +4991,9 @@ impl ModHost {
                 ),
             );
             if from_pending_queue && !drawn {
-                return Ok(());
+                return if matches!(action, "post" | "schedule") {
+                    Err(ModError::Unavailable("Client background event owner is no longer drawn".into()))
+                } else { Ok(()) };
             }
             if !drawn || (!from_pending_queue && instance.draining_pending_events) {
                 if let Some(instance) = data.instances.get_mut(&runtime_id) {
@@ -4966,6 +5015,7 @@ impl ModHost {
             "schedule" => {
                 let mut operation = host_generated_json(json!({
                     "type":"render","runtimeId":runtime_id,"generation":instance.worker_generation,
+                    "hostRenderRevision":instance.revision,
                 }));
                 if let Some(action_id) = post_ack.as_ref().and_then(|ack| ack.action_id.as_deref()) {
                     operation.set_field("postActionId", plain_text_projection(action_id))
@@ -6798,6 +6848,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn real_host_rejects_old_revision_event_before_dispatch() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("card.tsx");
+        let entry = directory.path().join("register.tsx");
+        std::fs::write(&child, r#"
+          import { Text, h } from 'claude:surface-runtime';
+          export function Card(props) { return h(Text, {children:props.title}); }
+        "#).unwrap();
+        std::fs::write(&entry, r#"
+          export function register(on) {
+            on('ui.render', {surface:'desktop', component:'Pane'}, ($, event) => {
+              const {Client, h} = $.ui.resolve(event);
+              return h(Client, {key:'card', module:'./card.tsx', props:{title:'initial'}});
+            });
+            on('ui.message', async ($, event) => {
+              await $.session.model();
+              return {handled:true, props:{title:event.data.title}};
+            });
+          }
+        "#).unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        let observation = Arc::new(ReceiptTestSession {
+            root:directory.path().to_path_buf(), models:std::sync::atomic::AtomicUsize::new(0),
+        });
+        let accepting = Arc::new(ReceiptAcceptedSession {
+            inner:observation.clone(), frames:StdMutex::new(Vec::new()),
+            refuse_fault:std::sync::atomic::AtomicBool::new(false),
+        });
+        let session: Arc<dyn ModSessionContext> = accepting.clone();
+        host.attach_background_context(Arc::downgrade(&session));
+        let prepared = host.prepare_module(directory.path(), &entry).await.unwrap();
+        host.load_with_tier_order_storage_prepared("review", "review@user", directory.path(), &entry,
+            Utf16JsonProjection::parse("{}").unwrap(), "user", None, Some(&prepared)).await.unwrap();
+        let render_control = || host_generated_json(json!({
+            "subtype":"ui_render", "surface":"desktop", "component":"Pane", "instance_id":"revision-test",
+            "props":{}, "viewport":{"columns":80,"rows":24},
+        }));
+        let old_revision = host.dispatch_client_ui_control(render_control(), session.as_ref())
+            .await.unwrap().render_revision.unwrap();
+        let mounted = host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"mount", "surface":"desktop", "component":"Pane", "instance_id":"revision-test",
+            "plugin":"review", "client":"card", "module":"card.tsx", "render_revision":old_revision,
+            "columns":80, "rows":24,
+        })), session.as_ref()).await.unwrap();
+        let runtime_id = test_value(&mounted)["runtimeId"].as_str().unwrap().to_owned();
+        let new_revision = host.dispatch_client_ui_control(render_control(), session.as_ref())
+            .await.unwrap().render_revision.unwrap();
+        assert!(new_revision > old_revision);
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"draw_commit", "surface":"desktop", "component":"Pane", "instance_id":"revision-test",
+            "render_revision":new_revision, "clients":[{"plugin":"review","key":"card","module":"card.tsx"}],
+        })), session.as_ref()).await.unwrap();
+        let generation = lock(&host.client_ui.data).instances[&runtime_id].worker_generation.unwrap();
+        let event = |revision, generation| host_generated_json(json!({
+            "kind":"ui.client.event", "runtimeId":runtime_id, "generation":generation,
+            "plugin":"review", "element":"card", "module":"card.tsx", "action":"post",
+            "hostRenderRevision":revision, "json":"{\"title\":\"revision-frame\"}",
+        }));
+        let before_runtime_advances = host.handle_client_ui_background_event(
+            &event(old_revision, generation), session.as_ref()).await.unwrap_err();
+        assert!(before_runtime_advances.to_string().contains("parent changed"));
+        assert_eq!(observation.models.load(std::sync::atomic::Ordering::SeqCst), 0);
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"render", "runtimeId":runtime_id, "render_revision":new_revision,
+        })), session.as_ref()).await.unwrap();
+        // A packet from another generation must be ignored before checking its
+        // revision; it must not quarantine the currently active environment.
+        host.handle_client_ui_background_event(&event(old_revision, generation + 1), session.as_ref())
+            .await.unwrap();
+        let stale = host.handle_client_ui_background_event(&event(old_revision, generation), session.as_ref())
+            .await.unwrap_err();
+        assert!(stale.to_string().contains("earlier render revision"));
+        assert_eq!(observation.models.load(std::sync::atomic::Ordering::SeqCst), 0,
+            "neither old event may enter ui.message");
+        assert!(accepting.frames.lock().unwrap().is_empty());
+        host.handle_client_ui_background_event(&event(new_revision, generation), session.as_ref())
+            .await.unwrap();
+        assert_eq!(observation.models.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(accepting.frames.lock().unwrap().iter().any(|(id, frame)| id == &runtime_id
+            && projection_tree_contains_text(frame, "revision-frame")));
+        let fault_revision = host.dispatch_client_ui_control(render_control(), session.as_ref())
+            .await.unwrap().render_revision.unwrap();
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"draw_commit", "surface":"desktop", "component":"Pane", "instance_id":"revision-test",
+            "render_revision":fault_revision, "clients":[{"plugin":"review","key":"card","module":"card.tsx"}],
+        })), session.as_ref()).await.unwrap();
+        let fault = host_generated_json(json!({
+            "kind":"ui.client.event", "runtimeId":runtime_id, "generation":generation,
+            "plugin":"review", "element":"card", "module":"card.tsx", "action":"fault",
+            "hostRenderRevision":new_revision, "phase":"run", "reason":"background failed",
+        }));
+        host.handle_client_ui_background_event(&fault, session.as_ref()).await.unwrap();
+        assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_some(),
+            "a VM fault must fence the Host even if the parent advanced first");
+        assert!(accepting.frames.lock().unwrap().iter().any(|(id, frame)| id == &runtime_id
+            && frame.number_at("/renderRevision") == Some(fault_revision as f64)
+            && frame.at_pointer("/fault").is_some()),
+            "the fault snapshot is admitted against the current parent revision");
+    }
+
+    #[tokio::test]
     async fn real_worker_pointer_and_key_wait_for_async_post_delivery() {
         let directory = tempfile::tempdir().unwrap();
         let child = directory.path().join("card.tsx");
@@ -7173,9 +7324,13 @@ mod tests {
                 "type":"draw_commit","surface":"desktop","component":"Pane","instance_id":"background-test",
                 "render_revision":new_revision,"clients":[{"plugin":"review","key":"card","module":"card.tsx"}],
             })),session.as_ref()).await.unwrap();
-            let busy=host.dispatch_client_ui_operation(host_generated_json(json!({"type":"render",
-                "runtimeId":runtime_id,"render_revision":new_revision})),session.as_ref()).await.unwrap_err();
-            assert!(busy.to_string().contains("operation was not executed"));
+            let raced=host.dispatch_client_ui_operation(host_generated_json(json!({"type":"render",
+                "runtimeId":runtime_id,"render_revision":new_revision})),session.as_ref()).await;
+            match raced {
+                Err(error) => assert!(error.to_string().contains("operation was not executed")),
+                Ok(noop) => assert_eq!(test_value(&noop)["handled"], false,
+                    "if fencing wins the race, the old runtime must return a no-op"),
+            }
             timer_release.notify_one();
             tokio::time::timeout(Duration::from_secs(5),async {
                 loop {
