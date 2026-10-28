@@ -494,6 +494,81 @@ mod integration_tests {
         );
     }
 
+    // This diagnostic records the current shutdown behavior; it is not a
+    // regression acceptance test for a production fix.
+    #[tokio::test]
+    async fn real_supervisor_diagnostic_inherited_writer_blocks_shutdown() {
+        let fixture = tempfile::tempdir().unwrap();
+        let command = ProcessCommand {
+            command: std::env::current_exe()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                DETACHED_HELPER.into(),
+                "--exact".into(),
+                "--nocapture".into(),
+            ],
+            cwd: Some(fixture.path().to_path_buf()),
+            env: std::collections::HashMap::from([
+                (
+                    test_env("DETACHED_JOB_TEST_DIR"),
+                    fixture.path().to_string_lossy().into_owned(),
+                ),
+                (test_env("DETACHED_JOB_HOLD_PIPE"), "1".into()),
+            ]),
+            timeout: Some(Duration::from_secs(5)),
+            stdin: None,
+        };
+        let (mut supervisor, mut stream, _, _, _, _cleanup) =
+            start(command, None, false, fixture.path().join("release")).await;
+        wait_file(&fixture.path().join("started")).await;
+        let descendant: u32 = std::fs::read_to_string(fixture.path().join("descendant.pid"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let descendant = native::hold_process_handle_for_test(descendant).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(12), receive(&mut stream))
+            .await
+            .expect("supervisor did not return the foreground result after its deadline");
+        assert_eq!(response["response"], "Started", "{response}");
+        let result: ForegroundRunResult =
+            serde_json::from_value(response["result"].clone()).unwrap();
+        assert!(
+            matches!(result.outcome, ForegroundOutcome::Completed(output) if !output.timed_out && output.exit_code == 0)
+        );
+        assert_eq!(
+            native::process_handle_is_alive_for_test(&descendant),
+            Some(true)
+        );
+        let shutdown = tokio::time::timeout(Duration::from_secs(3), supervisor.wait()).await;
+        assert!(
+            shutdown.is_err(),
+            "supervisor already exited while its descendant held stdout"
+        );
+        eprintln!("detached-probe: result returned; live writer blocks supervisor shutdown");
+        std::fs::write(fixture.path().join("release"), "release").unwrap();
+        wait_file(&fixture.path().join("finished")).await;
+        assert!(
+            tokio::time::timeout(Duration::from_secs(10), supervisor.wait())
+                .await
+                .expect("supervisor did not exit after the writer closed")
+                .unwrap()
+                .success()
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match native::process_handle_is_alive_for_test(&descendant) {
+                    Some(false) => break,
+                    Some(true) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    None => panic!("could not inspect held descendant process"),
+                }
+            }
+        })
+        .await
+        .expect("detached process did not exit after release");
+    }
+
     #[tokio::test]
     async fn real_supervisor_strict_cancel_reaps_the_payload_tree() {
         let fixture = tempfile::tempdir().unwrap();

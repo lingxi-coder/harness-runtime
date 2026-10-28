@@ -54,7 +54,9 @@ jobs:
           $ErrorActionPreference = 'Continue'
           $tests = @(
             'process::supervisor::integration_tests::real_supervisor_preserves_detached_child_after_normal_foreground',
-            'process::supervisor::integration_tests::real_supervisor_drains_a_deliberately_inherited_descendant_pipe'
+            'process::supervisor::integration_tests::real_supervisor_drains_a_deliberately_inherited_descendant_pipe',
+            'process::supervisor_gate::tests::normal_foreground_completion_preserves_detached_descendants',
+            'process::supervisor::integration_tests::real_supervisor_diagnostic_inherited_writer_blocks_shutdown'
           )
           foreach ($test in $tests) {
             $log = Join-Path $env:RUNNER_TEMP (($test -replace '::','-') + '.log')
@@ -70,5 +72,5 @@ jobs:
           name: windows-detached-diagnostic
           path: |
             ${{ runner.temp }}/unsafe-inheritance.log
-            ${{ runner.temp }}/process-supervisor-integration_tests-*.log
+            ${{ runner.temp }}/process-supervisor*-*.log
           if-no-files-found: ignore
