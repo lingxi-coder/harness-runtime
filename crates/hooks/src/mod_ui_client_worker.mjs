@@ -715,7 +715,6 @@ export class ClientSurfaceManager {
       kind: 'ui.client.event',
       runtimeId: instance.runtimeId,
       generation: instance.generation,
-      hostRenderRevision: instance.hostRenderRevision,
       parent: instance.identity.parent,
       plugin: instance.identity.plugin,
       element: instance.identity.key,
@@ -724,6 +723,8 @@ export class ClientSurfaceManager {
       ...fields,
       // Correlation is host-private metadata, appended after the opaque post
       // payload so authors cannot replace the action or sequence identity.
+      environmentInstanceId: instance.environment.instanceId,
+      hostRenderRevision: instance.hostRenderRevision,
       ...(postCorrelation ?? {}),
     });
   }

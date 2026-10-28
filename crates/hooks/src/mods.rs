@@ -3964,6 +3964,7 @@ async fn background_api_loop(
         mpsc::channel::<(Utf16JsonProjection, Weak<dyn ModSessionContext>)>(CLIENT_EVENT_QUEUE_LIMIT);
     let client_host = host.clone();
     let client_epoch = epoch.clone();
+    let mut client_fault_tasks = tokio::task::JoinSet::new();
     let client_event_task = tokio::spawn(async move {
         while let Some((message, context)) = queued_client_events.recv().await {
             process_background_client_ui_event(&client_host, &client_epoch, &message, &context).await;
@@ -4186,10 +4187,25 @@ async fn background_api_loop(
                         if std::env::var_os("LINGXI_ASYNC_TRACE").is_some() {
                             eprintln!("TRACE background Client event: {}", message.to_json_string().unwrap_or_default());
                         }
+                        let is_fault = message.string_at("/action") == Some("fault");
+                        if is_fault {
+                            // Synchronously fence the exact Worker VM even if
+                            // the session disappeared or its sink stalls.
+                            worker.preempt_client_ui_fault(&message);
+                        }
                         if let Some(session) = worker.background_session() {
                             let context = Arc::downgrade(&session);
-                            if message.string_at("/action") == Some("fault") {
-                                process_background_client_ui_event(&host, &epoch, &message, &context).await;
+                            if is_fault {
+                                let fault_host = host.clone();
+                                let fault_epoch = epoch.clone();
+                                client_fault_tasks.spawn(async move {
+                                    if tokio::time::timeout(Duration::from_secs(20),
+                                        process_background_client_ui_event(&fault_host, &fault_epoch, &message, &context))
+                                        .await.is_err()
+                                    {
+                                        tracing::warn!("Client fault handling timed out; snapshot remains pending if not admitted");
+                                    }
+                                });
                             } else if let Err(error) = client_events.try_send((message, context)) {
                                 let (message, _) = error.into_inner();
                                 worker.client_ui.fail_post_event(
@@ -4226,6 +4242,11 @@ async fn background_api_loop(
                     }
                     Some("progress") => {},
                     _ => tracing::warn!(message = %message.to_json_string().unwrap_or_default(), "unexpected background Mod reply"),
+                }
+            }
+            completed = client_fault_tasks.join_next(), if !client_fault_tasks.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    tracing::warn!(%error, "background Client fault task failed");
                 }
             }
             completed = calls.next(), if !calls.is_empty() => {
@@ -4284,6 +4305,7 @@ async fn background_api_loop(
         }
     }
     client_event_task.abort();
+    client_fault_tasks.abort_all();
     if let (Some(worker), Some(worker_epoch_id)) = (host.upgrade(), worker_epoch_id) {
         worker.client_ui.fail_post_actions_for_epoch(
             worker_epoch_id,

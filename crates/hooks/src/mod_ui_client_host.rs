@@ -3621,6 +3621,34 @@ impl ModHost {
         }
     }
 
+    pub(super) fn preempt_client_ui_fault(&self, event: &Utf16JsonProjection) -> bool {
+        if event.string_at("/kind") != Some("ui.client.event") || event.string_at("/action") != Some("fault") {
+            return false;
+        }
+        let Some(runtime_id) = event.string_at("/runtimeId") else { return false; };
+        let owner = {
+            let data = lock(&self.client_ui.data);
+            let Some(instance) = data.instances.get(runtime_id) else { return false; };
+            let Some(generation) = instance.worker_generation else { return false; };
+            let Some(environment) = instance.worker_environment_id.as_deref() else { return false; };
+            if client_post_u64(event, "/generation") != Some(generation)
+                || event.string_at("/environmentInstanceId") != Some(environment)
+                || ExactHookText::from_json_projection(event, "/plugin").as_ref() != Some(instance.key.identity.plugin())
+                || event.string_units("/element").as_deref() != Some(instance.key.identity.key_units())
+                || ExactHookText::from_json_projection(event, "/module").as_ref() != Some(instance.key.identity.module())
+            {
+                return false;
+            }
+            instance.clone()
+        };
+        let phase = event.string_at("/phase").filter(|phase| matches!(*phase, "load" | "render" | "run"))
+            .unwrap_or("run");
+        let reason = ExactHookText::from_json_projection(event, "/reason")
+            .unwrap_or_else(|| ExactHookText::from_text("Client surface failed"));
+        self.record_client_environment_fault(&owner, phase, &reason);
+        true
+    }
+
     fn unknown_held_response(
         &self, owner: &ClientUiInstance, revision: u64, phase: &str, reason: &ExactHookText,
     ) -> Utf16JsonProjection {
@@ -4977,7 +5005,9 @@ impl ModHost {
         let (instance, drawn) = {
             let mut data = lock(&self.client_ui.data);
             let Some(mut instance) = data.instances.get(&runtime_id).cloned() else {
-                return Ok(());
+                return if matches!(action, "post" | "schedule") {
+                    Err(ModError::Unavailable("Client event owner is unavailable".into()))
+                } else { Ok(()) };
             };
             if ExactHookText::from_json_projection(event, "/plugin").as_ref()
                 != Some(instance.key.identity.plugin())
@@ -4986,7 +5016,9 @@ impl ModHost {
                 || ExactHookText::from_json_projection(event, "/module").as_ref()
                     != Some(instance.key.identity.module())
             {
-                return Ok(());
+                return if matches!(action, "post" | "schedule") {
+                    Err(ModError::Unavailable("Client event identity does not match its owner".into()))
+                } else { Ok(()) };
             }
             if let Some(generation) = instance.worker_generation {
                 if event
@@ -5000,8 +5032,17 @@ impl ModHost {
                     .map(|value| value as u64)
                     != Some(generation)
                 {
-                    return Ok(());
+                    return if matches!(action, "post" | "schedule") {
+                        Err(ModError::Unavailable("Client event belongs to another Worker generation".into()))
+                    } else { Ok(()) };
                 }
+            }
+            if instance.worker_environment_id.as_deref().is_some_and(|environment|
+                event.string_at("/environmentInstanceId") != Some(environment))
+            {
+                return if matches!(action, "post" | "schedule") {
+                    Err(ModError::Unavailable("Client event belongs to another Worker environment".into()))
+                } else { Ok(()) };
             }
             if matches!(action, "post" | "schedule")
                 && client_post_u64(event, "/hostRenderRevision") != Some(instance.revision)
@@ -5517,6 +5558,7 @@ mod tests {
         raw_frames: StdMutex<Vec<(String, Utf16JsonProjection)>>,
         frame_gate: StdMutex<Option<UiLifecycleFrameGate>>,
         model_gate: StdMutex<Option<UiLifecycleModelGate>>,
+        model_calls: std::sync::atomic::AtomicUsize,
         logs: StdMutex<Vec<String>>,
         allow_non_scalar_frames: bool,
         invalidations: StdMutex<Vec<Value>>,
@@ -5547,6 +5589,7 @@ mod tests {
         }
 
         async fn model(&self) -> String {
+            self.model_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let gate = lock(&self.model_gate).take();
             if let Some(gate) = gate {
                 gate.entered.notify_one();
@@ -6873,9 +6916,14 @@ mod tests {
             // A refused fault snapshot must remain retryable even though the
             // distinct ui.fault hook may already have been dispatched.
             accepting.refuse_fault.store(true, std::sync::atomic::Ordering::SeqCst);
-            let generation = lock(&host.client_ui.data).instances[&runtime_id].worker_generation.unwrap();
+            let (generation, environment_id) = {
+                let data = lock(&host.client_ui.data);
+                let instance = &data.instances[&runtime_id];
+                (instance.worker_generation.unwrap(), instance.worker_environment_id.clone().unwrap())
+            };
             let fault = host_generated_json(json!({
                 "kind":"ui.client.event", "runtimeId":runtime_id, "generation":generation,
+                "environmentInstanceId":environment_id,
                 "plugin":"review", "element":"card", "module":"card.tsx",
                 "action":"fault", "phase":"run", "reason":"injected fault",
             }));
@@ -6986,9 +7034,14 @@ mod tests {
             "type":"draw_commit", "surface":"desktop", "component":"Pane", "instance_id":"revision-test",
             "render_revision":new_revision, "clients":[{"plugin":"review","key":"card","module":"card.tsx"}],
         })), session.as_ref()).await.unwrap();
-        let generation = lock(&host.client_ui.data).instances[&runtime_id].worker_generation.unwrap();
+        let (generation, environment_id) = {
+            let data = lock(&host.client_ui.data);
+            let instance = &data.instances[&runtime_id];
+            (instance.worker_generation.unwrap(), instance.worker_environment_id.clone().unwrap())
+        };
         let event = |revision, generation| host_generated_json(json!({
             "kind":"ui.client.event", "runtimeId":runtime_id, "generation":generation,
+            "environmentInstanceId":environment_id,
             "plugin":"review", "element":"card", "module":"card.tsx", "action":"post",
             "hostRenderRevision":revision, "json":"{\"title\":\"revision-frame\"}",
         }));
@@ -6999,10 +7052,10 @@ mod tests {
         host.dispatch_client_ui_operation(host_generated_json(json!({
             "type":"render", "runtimeId":runtime_id, "render_revision":new_revision,
         })), session.as_ref()).await.unwrap();
-        // A packet from another generation must be ignored before checking its
-        // revision; it must not quarantine the currently active environment.
-        host.handle_client_ui_background_event(&event(old_revision, generation + 1), session.as_ref())
-            .await.unwrap();
+        // A packet from another generation is refused before checking its
+        // revision and must not quarantine the currently active environment.
+        assert!(host.handle_client_ui_background_event(&event(old_revision, generation + 1), session.as_ref())
+            .await.unwrap_err().to_string().contains("another Worker generation"));
         let stale = host.handle_client_ui_background_event(&event(old_revision, generation), session.as_ref())
             .await.unwrap_err();
         assert!(stale.to_string().contains("earlier render revision"));
@@ -7022,9 +7075,17 @@ mod tests {
         })), session.as_ref()).await.unwrap();
         let fault = host_generated_json(json!({
             "kind":"ui.client.event", "runtimeId":runtime_id, "generation":generation,
+            "environmentInstanceId":environment_id,
             "plugin":"review", "element":"card", "module":"card.tsx", "action":"fault",
             "hostRenderRevision":new_revision, "phase":"run", "reason":"background failed",
         }));
+        let mut foreign = fault.clone();
+        foreign.set_field("environmentInstanceId", plain_text_projection("different-worker-vm")).unwrap();
+        assert!(!host.preempt_client_ui_fault(&foreign));
+        host.handle_client_ui_background_event(&foreign, session.as_ref()).await.unwrap();
+        assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_none(),
+            "a late fault from another VM must not fence the current runtime");
+        assert!(host.preempt_client_ui_fault(&fault));
         host.handle_client_ui_background_event(&fault, session.as_ref()).await.unwrap();
         assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_some(),
             "a VM fault must fence the Host even if the parent advanced first");
@@ -7063,8 +7124,8 @@ mod tests {
         let session = Arc::new(ReceiptTestSession {
             root:directory.path().to_path_buf(), models:std::sync::atomic::AtomicUsize::new(0),
         });
-        // Deliberately leave the weak background context unset: Worker fault
-        // events cannot reach Host or its frame sink in this test.
+        // Deliberately leave the weak background context unset: no fault
+        // snapshot can be admitted, although Host can still fence the VM.
         let prepared = host.prepare_module(directory.path(), &entry).await.unwrap();
         host.load_with_tier_order_storage_prepared("review", "review@user", directory.path(), &entry,
             Utf16JsonProjection::parse("{}").unwrap(), "user", None, Some(&prepared)).await.unwrap();
@@ -7099,11 +7160,7 @@ mod tests {
             "hostRenderRevision":revision, "props":{"fail":true},
         }))).await;
         assert!(matches!(failure, Err(ClientWorkerOperationError::Fault { .. })));
-        {
-            let data = lock(&host.client_ui.data);
-            assert!(data.instances[owner].worker_fault.is_none());
-            assert!(data.instances[sibling].worker_fault.is_none(), "no Worker fault event was delivered to Host");
-        }
+        assert!(host.background_session().is_none(), "no session can admit a Worker fault frame");
         let result = host.dispatch_client_ui_operation(host_generated_json(json!({
             "type":"runHeld", "runtimeId":sibling, "render_revision":revision, "handle":mounted[1].1,
         })), session.as_ref()).await.unwrap();
@@ -7404,8 +7461,8 @@ mod tests {
             .expect("overflow must not wait for the blocked hook").unwrap().unwrap();
         assert_eq!(test_value(&response)["outcome"], json!({"status":"unknown","runtime":"unavailable"}));
         assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_some());
-        assert!(lock(&session_impl.logs).iter().any(|line| line == "queue hook started"),
-            "the first hook had an independently observable effect");
+        assert_eq!(session_impl.model_calls.load(std::sync::atomic::Ordering::SeqCst), 1,
+            "the first model API call had an independently observable side effect");
         release.notify_one();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!lock(&session_impl.logs).iter().any(|line| line == "queue hook continued"),
@@ -9253,13 +9310,16 @@ mod tests {
             .unwrap();
         assert_eq!(test_value(&timer_stale)["handled"], false);
         assert!(test_value(&timer_stale).get("tree").is_none());
-        let timer_generation = lock(&host.client_ui.data).instances[&timer_runtime]
-            .worker_generation
-            .unwrap();
+        let (timer_generation, timer_environment_id) = {
+            let data = lock(&host.client_ui.data);
+            let instance = &data.instances[&timer_runtime];
+            (instance.worker_generation.unwrap(), instance.worker_environment_id.clone().unwrap())
+        };
         let duplicate_timer_fault = json!({
             "kind":"ui.client.event",
             "runtimeId":timer_runtime,
             "generation":timer_generation,
+            "environmentInstanceId":timer_environment_id,
             "plugin":"review",
             "element":"card",
             "module":client_module,

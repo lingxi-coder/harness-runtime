@@ -1205,6 +1205,9 @@ test('background queue overflow faults only its shared VM and drops its queued e
     {accepted:true,postIds:[]});
   for(let i=0;i<100 && events.filter(event=>event.action==='fault').length<2;i++)await delay(5);
   assert.equal(events.filter(event=>event.action==='fault').length,2);
+  assert(events.filter(event=>event.action==='fault').every(event =>
+    event.environmentInstanceId === first.result.environmentInstanceId),
+    'each shared fault identifies the exact Worker VM');
   assert.equal(events.some(event=>event.action==='post'),false,'overflow never silently releases a partial queue');
   const stale=await request(5,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'overflow-sibling',generation:sibling.result.generation}});
   assert.deepEqual(stale.result,{stale:true});
