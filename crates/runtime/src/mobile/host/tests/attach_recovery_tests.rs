@@ -1246,8 +1246,9 @@ fn attach_distinguishes_pending_missing_corrupt_and_terminal_turns() {
         let attach = |turn_id| ClientCommand::AttachTurn {
             session_id: session_id.clone(), turn_id, after_sequence: None, request_id: format!("attach-{turn_id}"),
         };
-        let shared = handle.durable_turns.register_pending_admission(&session_id, 290).unwrap();
-        let pending = Arc::new(super::super::PendingSubmission::new(session_id.clone(), 290, shared));
+        let pending = handle.durable_turns.register_pending_admission(&session_id, 290, |shared| {
+            Arc::new(super::super::PendingSubmission::new(session_id.clone(), 290, shared, handle.self_weak.clone()))
+        }).unwrap();
         handle.pending_submissions.lock().unwrap().push(pending.clone());
         assert!(matches!(handle.submit(attach(290)).await, Err(ClientError::Rejected { .. })));
         handle.pending_submissions.lock().unwrap().retain(|entry| !Arc::ptr_eq(entry, &pending));
@@ -1272,7 +1273,8 @@ fn attach_distinguishes_pending_missing_corrupt_and_terminal_turns() {
 }
 
 #[test]
-fn another_handle_cannot_report_absent_or_cancel_a_received_submission() {
+fn another_handle_cannot_report_absent_and_can_cancel_a_received_submission() {
+    for cancel_write_fails in [false, true] {
     let tmp = tempfile::tempdir().unwrap();
     let (entered_tx, _entered_rx) = tokio::sync::oneshot::channel();
     let provider = Arc::new(PendingPromptStreamClient::new(entered_tx));
@@ -1286,6 +1288,7 @@ fn another_handle_cannot_report_absent_or_cancel_a_received_submission() {
     .unwrap();
     let second = engine(tmp.path(), Arc::new(AttachBarrierListener::default()));
     first.runtime().block_on(async {
+        assert!(Arc::ptr_eq(&first.durable_turns, &second.durable_turns));
         let session_id = first.active_session_id();
         first
             .inner
@@ -1353,16 +1356,8 @@ fn another_handle_cannot_report_absent_or_cancel_a_received_submission() {
                 .await,
             Err(ClientError::Rejected { .. })
         ));
-        assert!(matches!(
-            second
-                .submit(ClientCommand::Cancel {
-                    session_id: Some(session_id.clone()),
-                    turn_id: Some(297),
-                })
-                .await,
-            Err(ClientError::Rejected { .. })
-        ));
-        let cancelling = first.clone();
+        let owner_lock = first.active_cancel.lock().await;
+        let cancelling = second.clone();
         let origin = session_id.clone();
         let cancel = tokio::spawn(async move {
             cancelling
@@ -1388,27 +1383,112 @@ fn another_handle_cannot_report_absent_or_cancel_a_received_submission() {
         })
         .await
         .unwrap();
+        if cancel_write_fails {
+            first.durable_turns.fail_after_next_metadata_publish();
+        }
+        assert!(!cancel.is_finished());
+        drop(owner_lock);
         drop(transition);
-        tokio::time::timeout(std::time::Duration::from_secs(5), send)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5), cancel)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
+        let sent = tokio::time::timeout(std::time::Duration::from_secs(5), send)
+            .await.unwrap().unwrap();
+        let stopped = tokio::time::timeout(std::time::Duration::from_secs(5), cancel)
+            .await.unwrap().unwrap();
         assert!(provider.captured_calls().is_empty());
-        assert_eq!(
-            first.durable_turns.load(&session_id, 297).unwrap().state,
-            Some(TurnRecoveryStateDto::Cancelled)
-        );
+        if cancel_write_fails {
+            assert!(sent.is_err());
+            assert!(stopped.is_err());
+            assert!(matches!(second.durable_turns.with_no_pending_admission(&session_id, 297, || Ok(())), Err(DurableTurnStoreError::PendingAdmission { .. })));
+        } else {
+            sent.unwrap();
+            stopped.unwrap();
+            assert_eq!(
+                first.durable_turns.load(&session_id, 297).unwrap().state,
+                Some(TurnRecoveryStateDto::Cancelled)
+            );
+        }
+    });
+    }
+}
+
+#[test]
+fn stale_admission_cannot_cancel_a_reused_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let handle = engine(tmp.path(), Arc::new(AttachBarrierListener::default()));
+    handle.runtime().block_on(async {
+        let session = handle.active_session_id();
+        let make = |lease| Arc::new(super::super::PendingSubmission::new(
+            session.clone(), 303, lease, handle.self_weak.clone(),
+        ));
+        let old = handle.durable_turns.register_pending_admission(&session, 303, make).unwrap();
+        old.complete(Ok(()));
+        let make = |lease| Arc::new(super::super::PendingSubmission::new(
+            session.clone(), 303, lease, handle.self_weak.clone(),
+        ));
+        let current = handle.durable_turns.register_pending_admission(&session, 303, make).unwrap();
+        {
+            let current_lease = current.shared_lease.lock().unwrap();
+            assert!(matches!(
+                handle.durable_turns.cancel_unclaimed_admission(
+                    &session, 303, current_lease.as_ref().unwrap(), &old,
+                ),
+                Err(DurableTurnStoreError::PendingAdmission { .. })
+            ));
+        }
+        assert!(matches!(
+            handle.cancel_registered_submission(&session, 303, old).await,
+            Err(ClientError::Rejected { .. })
+        ));
+        assert!(!current.cancel_requested.load(Ordering::Acquire));
+        assert!(Arc::ptr_eq(
+            &current,
+            &handle.durable_turns.pending_admission(&session, 303).unwrap()
+        ));
     });
 }
 
 #[test]
-fn queued_prompt_and_slash_cancel_before_dispatch_after_recording_blocks() {
+fn received_submission_without_stop_reaches_the_real_turn_driver() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let provider = Arc::new(PendingPromptStreamClient::new(started_tx));
+    let handle = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        Arc::new(FakeListener::default()),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(provider.clone()),
+    ).unwrap();
+    handle.runtime().block_on(async {
+        let session = handle.active_session_id();
+        let transition = handle.loop_transition.lock().await;
+        let sender = handle.clone();
+        let origin = session.clone();
+        let submission = tokio::spawn(async move {
+            sender.submit(ClientCommand::SendPrompt {
+                session_id: Some(origin), text: "uncancelled control".into(),
+                prompt_mode: None, images: vec![], turn_id: Some(302),
+                visualization_context: None,
+            }).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while handle.durable_turns.pending_admission(&session, 302).is_none() {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        drop(transition);
+        tokio::time::timeout(std::time::Duration::from_secs(5), submission)
+            .await.unwrap().unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+            .await.unwrap().unwrap();
+        assert_eq!(provider.captured_calls().len(), 1);
+        handle.submit(ClientCommand::Cancel {
+            session_id: Some(session), turn_id: Some(302),
+        }).await.unwrap();
+    });
+}
+
+#[test]
+fn queued_prompt_slash_and_bash_cancel_before_dispatch_after_recording_blocks() {
     struct BlockingEnqueue {
         target: String,
         entered: Notify,
@@ -1424,7 +1504,10 @@ fn queued_prompt_and_slash_cancel_before_dispatch_after_recording_blocks() {
             }
         }
     }
-    for slash in [false, true] {
+    for (slash, bash, cancel_write_fails) in [
+        (false, false, false), (true, false, false), (false, true, false),
+        (false, false, true), (true, false, true), (false, true, true),
+    ] {
         let tmp = tempfile::tempdir().unwrap();
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let provider = Arc::new(PendingPromptStreamClient::new(started_tx));
@@ -1449,30 +1532,446 @@ fn queued_prompt_and_slash_cancel_before_dispatch_after_recording_blocks() {
                 if slash {
                     sender.submit(ClientCommand::RunSlashCommand { session_id: Some(origin), raw: "/context".into(), images: vec![], turn_id: Some(301) }).await
                 } else {
-                    sender.submit(ClientCommand::SendPrompt { session_id: Some(origin), text: "queued".into(), prompt_mode: None, images: vec![], turn_id: Some(301), visualization_context: None }).await
+                    sender.submit(ClientCommand::SendPrompt { session_id: Some(origin), text: "queued".into(), prompt_mode: bash.then_some(client::protocol::commands::PromptModeDto::Bash), images: vec![], turn_id: Some(301), visualization_context: None }).await
                 }
             });
             tokio::time::timeout(std::time::Duration::from_secs(5), recorder.entered.notified()).await.unwrap();
             assert!(matches!(handle.durable_turns.with_no_pending_admission(&session, 301, || Ok(())), Err(DurableTurnStoreError::PendingAdmission { .. })));
+            let pending = handle.pending_submissions.lock().unwrap().iter().find(|item| item.turn_id == 301).cloned().expect("queued submission is registered while its recorder is blocked");
             if !slash {
                 use orchestrator::prompt::mid_turn_input::MidTurnInputSource;
                 let source = super::super::MobileMsgQueueInput { queue: handle.message_queue.clone(), loop_state: Arc::new(tool_cron::LoopRuntime::default()), durable_turns: handle.durable_turns.clone(), active_session_uuid: handle.inner.active_session_uuid.clone(), active_turn: Some(handle.active_cancel.clone()) };
                 assert!(source.take_mid_turn_batch().await.unwrap().is_none());
             }
+            // Even if an unrelated owner operation holds the owner lock, a
+            // received Stop must reach this submission before the recorder is
+            // released. The result itself still waits for durable cancellation.
+            let owner_lock = handle.active_cancel.lock().await;
             let cancelling = handle.clone(); let origin = session.clone();
             let cancel = tokio::spawn(async move { cancelling.submit(ClientCommand::Cancel { session_id: Some(origin), turn_id: Some(301) }).await });
-            tokio::time::timeout(std::time::Duration::from_secs(5), async { loop {
-                if handle.pending_submissions.lock().unwrap().iter().any(|p| p.turn_id == 301 && p.cancel_requested.load(Ordering::Acquire)) { break; }
-                tokio::task::yield_now().await;
-            }}).await.unwrap();
+            // Wait without repeatedly acquiring the registry mutex needed by
+            // Cancel itself; the notification is registered before rechecking
+            // the flag, so a cancellation cannot be missed.
+            if tokio::time::timeout(std::time::Duration::from_secs(5), pending.wait_for_cancel_request()).await.is_err() {
+                let active = handle.active_cancel.try_lock().map(|guard| guard.as_ref().map(|owner| owner.turn_id)).ok();
+                let result = pending.result.lock().unwrap().clone();
+                let cancel_status = if cancel.is_finished() { format!("{:?}", cancel.await) } else { "still pending".into() };
+                panic!("queued Stop was not recorded: active={active:?}, admission={result:?}, cancel={cancel_status}");
+            }
+            assert!(pending.cancel_requested.load(Ordering::Acquire));
+            assert!(!cancel.is_finished());
+            if cancel_write_fails {
+                handle.durable_turns.fail_after_next_metadata_publish();
+            }
+            drop(owner_lock);
             recorder.release.notify_one();
-            tokio::time::timeout(std::time::Duration::from_secs(5), submission).await.unwrap().unwrap().unwrap();
-            tokio::time::timeout(std::time::Duration::from_secs(5), cancel).await.unwrap().unwrap().unwrap();
-            assert_eq!(handle.durable_turns.queued_turn_status(&session, 301).unwrap(), client::protocol::events::QueuedTurnStatusDto::Cancelled);
+            let submitted = tokio::time::timeout(std::time::Duration::from_secs(5), submission).await.unwrap().unwrap();
+            let stopped = tokio::time::timeout(std::time::Duration::from_secs(5), cancel).await.unwrap().unwrap();
+            if cancel_write_fails {
+                assert!(submitted.is_err());
+                assert!(stopped.is_err());
+                assert!(matches!(handle.durable_turns.with_no_pending_admission(&session, 301, || Ok(())), Err(DurableTurnStoreError::PendingAdmission { .. })));
+                assert!(!listener.received.lock().await.iter().any(|event| matches!(event, ClientEvent::TurnRecoveryState { snapshot } if snapshot.session_id == session && snapshot.turn_id == 301 && snapshot.state == TurnRecoveryStateDto::Cancelled)));
+            } else {
+                submitted.unwrap();
+                stopped.unwrap();
+                assert_eq!(handle.durable_turns.queued_turn_status(&session, 301).unwrap(), client::protocol::events::QueuedTurnStatusDto::Cancelled);
+                assert!(listener.received.lock().await.iter().any(|event| matches!(event, ClientEvent::TurnRecoveryState { snapshot } if snapshot.session_id == session && snapshot.turn_id == 301 && snapshot.state == TurnRecoveryStateDto::Cancelled)));
+            }
             assert!(!handle.active_cancel.lock().await.as_ref().unwrap().cancel.is_cancelled());
             assert_eq!(provider.captured_calls().len(), 1);
-            assert!(listener.received.lock().await.iter().any(|event| matches!(event, ClientEvent::TurnRecoveryState { snapshot } if snapshot.session_id == session && snapshot.turn_id == 301 && snapshot.state == TurnRecoveryStateDto::Cancelled)));
             handle.submit(ClientCommand::Cancel { session_id: Some(session), turn_id: Some(300) }).await.unwrap();
+        });
+    }
+}
+
+#[test]
+fn unclaimed_admission_cancel_checks_exact_lease_and_rejects_claimed_batches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let handle = engine(tmp.path(), Arc::new(AttachBarrierListener::default()));
+    let session = handle.active_session_id();
+    let store = &handle.durable_turns;
+    let register = |turn_id| {
+        store
+            .register_pending_admission(&session, turn_id, |lease| {
+                Arc::new(super::super::PendingSubmission::new(
+                    session.clone(),
+                    turn_id,
+                    lease,
+                    handle.self_weak.clone(),
+                ))
+            })
+            .unwrap()
+    };
+    let pending = register(451);
+    let other = register(452);
+    let foreign_store = Arc::new(crate::mobile::turn_durability::DurableTurnStore::new(
+        tmp.path().join("other-store"),
+    ));
+    let foreign = foreign_store
+        .register_pending_admission(&session, 451, |lease| {
+            Arc::new(super::super::PendingSubmission::new(
+                session.clone(),
+                451,
+                lease,
+                handle.self_weak.clone(),
+            ))
+        })
+        .unwrap();
+    store
+        .admit_queued_prompt(
+            &session,
+            Some(451),
+            Some(451),
+            "target".into(),
+            None,
+            vec![],
+        )
+        .unwrap();
+    let owner = store.reserve_live_owner(&session, Some(450)).unwrap();
+    {
+        let foreign_lease = foreign.shared_lease.lock().unwrap();
+        assert!(matches!(
+            store.cancel_unclaimed_admission(
+                &session,
+                451,
+                foreign_lease.as_ref().unwrap(),
+                &foreign
+            ),
+            Err(DurableTurnStoreError::PendingAdmission { .. })
+        ));
+    }
+    {
+        let lease = pending.shared_lease.lock().unwrap();
+        let lease = lease.as_ref().unwrap();
+        assert!(matches!(
+            store.cancel_unclaimed_admission(&session, 451, lease, &other),
+            Err(DurableTurnStoreError::PendingAdmission { .. })
+        ));
+        let snapshot = store
+            .cancel_unclaimed_admission(&session, 451, lease, &pending)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.state, TurnRecoveryStateDto::Cancelled);
+    }
+    assert!(matches!(
+        store.with_no_live_owner(&session, Some(451), || Ok(())),
+        Err(DurableTurnStoreError::LiveOwner { .. })
+    ));
+    assert_eq!(
+        store.load(&session, 451).unwrap().state,
+        Some(TurnRecoveryStateDto::Cancelled)
+    );
+    drop(owner);
+
+    let batched = register(453);
+    for id in [453, 454] {
+        store
+            .admit_queued_prompt(&session, Some(id), Some(id), "batch".into(), None, vec![])
+            .unwrap();
+    }
+    // Construct the prohibited state directly to test the store boundary.
+    store.prepare_mid_turn_batch(&session, &[453, 454]).unwrap();
+    {
+        let lease = batched.shared_lease.lock().unwrap();
+        assert!(store
+            .cancel_unclaimed_admission(&session, 453, lease.as_ref().unwrap(), &batched)
+            .unwrap()
+            .is_none());
+    }
+    assert_ne!(
+        store.load(&session, 453).unwrap().state,
+        Some(TurnRecoveryStateDto::Cancelled)
+    );
+
+    let claimed = register(455);
+    store
+        .admit_queued_prompt(
+            &session,
+            Some(455),
+            Some(455),
+            "bash".into(),
+            Some(client::protocol::commands::PromptModeDto::Bash),
+            vec![],
+        )
+        .unwrap();
+    store.claim_queued_bash(&session, 455, false).unwrap();
+    {
+        let lease = claimed.shared_lease.lock().unwrap();
+        assert!(store
+            .cancel_unclaimed_admission(&session, 455, lease.as_ref().unwrap(), &claimed)
+            .unwrap()
+            .is_none());
+    }
+    assert_eq!(
+        store.load(&session, 455).unwrap().state,
+        Some(TurnRecoveryStateDto::Running)
+    );
+}
+
+#[test]
+fn queued_cancel_with_retained_old_owner_waits_for_removal_and_preserves_owner() {
+    #[derive(Default)]
+    struct CountProcessStarts(AtomicUsize);
+    #[async_trait]
+    impl lingxi_core::host::ProcessRunner for CountProcessStarts {
+        async fn run(
+            &self,
+            _: &lingxi_core::host::SandboxedCommand,
+        ) -> Result<mobile_linux_api::ProcessOutput, mobile_linux_api::ProcessError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(mobile_linux_api::ProcessError::Unsupported)
+        }
+        async fn spawn_background(
+            &self,
+            _: &lingxi_core::host::SandboxedCommand,
+        ) -> Result<lingxi_core::host::ProcessHandle, mobile_linux_api::ProcessError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(mobile_linux_api::ProcessError::Unsupported)
+        }
+        async fn kill(
+            &self,
+            _: &lingxi_core::host::ProcessHandle,
+        ) -> Result<(), mobile_linux_api::ProcessError> {
+            Ok(())
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+    }
+    struct BlockingQueueRecord {
+        target: String,
+        enqueued: Notify,
+        release_enqueue: Notify,
+        removing: Notify,
+        release_remove: Notify,
+    }
+    #[async_trait]
+    impl msgqueue::QueueOperationRecorder for BlockingQueueRecord {
+        async fn record(&self, operation: msgqueue::QueueOperation) {
+            match operation {
+                msgqueue::QueueOperation::Enqueue { uuid, .. } if uuid == self.target => {
+                    self.enqueued.notify_one();
+                    self.release_enqueue.notified().await;
+                }
+                msgqueue::QueueOperation::Remove { uuid, .. } if uuid == self.target => {
+                    self.removing.notify_one();
+                    self.release_remove.notified().await;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for (slash, bash) in [(false, false), (true, false), (false, true)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let provider = Arc::new(PendingPromptStreamClient::new(started_tx));
+        let listener = Arc::new(FakeListener::default());
+        let process = Arc::new(CountProcessStarts::default());
+        let handle = new_engine_with_streaming(
+            test_config(tmp.path()),
+            Arc::new(
+                HostFakePlatform::new(tmp.path().to_path_buf())
+                    .with_process_runner(process.clone()),
+            ),
+            listener.clone(),
+            Arc::new(RecordingPermissionSink::default()),
+            Some(provider.clone()),
+        )
+        .unwrap();
+        let root = handle.lingxi_home.join("mobile-turns");
+        let session = handle.runtime().block_on(async {
+            let session = handle.active_session_id();
+            handle.submit(ClientCommand::SendPrompt {
+                session_id: Some(session.clone()), text: "active".into(), prompt_mode: None,
+                images: vec![], turn_id: Some(460), visualization_context: None,
+            }).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), started_rx).await.unwrap().unwrap();
+            let old_owner = handle.active_cancel.lock().await.as_ref().unwrap().clone();
+            let target = if slash { format!("mobile-slash:{session}:461") } else { format!("mobile-prompt:{session}:461") };
+            let recorder = Arc::new(BlockingQueueRecord {
+                target: target.clone(), enqueued: Notify::new(), release_enqueue: Notify::new(),
+                removing: Notify::new(), release_remove: Notify::new(),
+            });
+            handle.message_queue.set_recorder(recorder.clone()).await;
+            let sender = handle.clone();
+            let origin = session.clone();
+            let submission = tokio::spawn(async move {
+                if slash {
+                    sender.submit(ClientCommand::RunSlashCommand {
+                        session_id: Some(origin), raw: "/context".into(), images: vec![], turn_id: Some(461),
+                    }).await
+                } else {
+                    sender.submit(ClientCommand::SendPrompt {
+                        session_id: Some(origin), text: "queued".into(),
+                        prompt_mode: bash.then_some(client::protocol::commands::PromptModeDto::Bash),
+                        images: vec![], turn_id: Some(461), visualization_context: None,
+                    }).await
+                }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), recorder.enqueued.notified()).await.unwrap();
+            let pending = handle.durable_turns.pending_admission(&session, 461).unwrap();
+            let cancelling = handle.clone();
+            let origin = session.clone();
+            let stop = tokio::spawn(async move {
+                cancelling.submit(ClientCommand::Cancel { session_id: Some(origin), turn_id: Some(461) }).await
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(5), pending.wait_for_cancel_request()).await.unwrap();
+            assert!(!old_owner.cancel.is_cancelled(), "queued Stop must not cancel the active owner");
+            handle.submit(ClientCommand::Cancel { session_id: Some(session.clone()), turn_id: Some(460) }).await.unwrap();
+            assert!(handle.active_cancel.lock().await.is_none());
+            assert!(matches!(handle.durable_turns.with_no_live_owner(&session, Some(461), || Ok(())), Err(DurableTurnStoreError::LiveOwner { .. })));
+            assert!(matches!(handle.durable_turns.with_no_pending_admission(&session, 461, || Ok(())), Err(DurableTurnStoreError::PendingAdmission { .. })));
+            let process_starts_before_release = process.0.load(Ordering::SeqCst);
+            recorder.release_enqueue.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(5), recorder.removing.notified()).await.unwrap();
+            assert_eq!(handle.durable_turns.load(&session, 461).unwrap().state, Some(TurnRecoveryStateDto::Cancelled));
+            assert!(!stop.is_finished(), "Stop must wait for the queue removal recorder");
+            assert!(matches!(handle.durable_turns.with_no_pending_admission(&session, 461, || Ok(())), Err(DurableTurnStoreError::PendingAdmission { .. })));
+            recorder.release_remove.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(5), submission).await.unwrap().unwrap().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), stop).await.unwrap().unwrap().unwrap();
+            assert!(!handle.message_queue.snapshot().await.iter().any(|command| command.uuid == target));
+            assert_eq!(provider.captured_calls().len(), 1);
+            assert_eq!(process.0.load(Ordering::SeqCst), process_starts_before_release, "cancelled queue entry must not start a process");
+            assert!(listener.received.lock().await.iter().any(|event| matches!(event,
+                ClientEvent::TurnRecoveryState { snapshot } if snapshot.session_id == session
+                    && snapshot.turn_id == 461 && snapshot.state == TurnRecoveryStateDto::Cancelled)));
+            drop(old_owner);
+            session
+        });
+        drop(handle);
+        let cold = crate::mobile::turn_durability::DurableTurnStore::new(root);
+        assert_eq!(
+            cold.load(&session, 461).unwrap().state,
+            Some(TurnRecoveryStateDto::Cancelled)
+        );
+        assert!(!cold
+            .scan_pending(&session)
+            .unwrap()
+            .iter()
+            .any(|checkpoint| checkpoint.turn_id == 461));
+    }
+}
+
+#[test]
+fn queued_recording_does_not_retain_the_finished_owner() {
+    struct BlockingEnqueue {
+        target: String,
+        entered: Notify,
+        release: Notify,
+    }
+
+    #[async_trait]
+    impl msgqueue::QueueOperationRecorder for BlockingEnqueue {
+        async fn record(&self, operation: msgqueue::QueueOperation) {
+            if matches!(operation, msgqueue::QueueOperation::Enqueue { uuid, .. } if uuid == self.target)
+            {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+        }
+    }
+
+    for slash in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let provider = Arc::new(PendingPromptStreamClient::new(started_tx));
+        let handle = new_engine_with_streaming(
+            test_config(tmp.path()),
+            Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+            Arc::new(FakeListener::default()),
+            Arc::new(RecordingPermissionSink::default()),
+            Some(provider),
+        )
+        .unwrap();
+        handle.runtime().block_on(async {
+            let session = handle.active_session_id();
+            handle
+                .submit(ClientCommand::SendPrompt {
+                    session_id: Some(session.clone()),
+                    text: "active".into(),
+                    prompt_mode: None,
+                    images: vec![],
+                    turn_id: Some(400),
+                    visualization_context: None,
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            let old_owner = {
+                let active = handle.active_cancel.lock().await;
+                Arc::downgrade(active.as_ref().unwrap())
+            };
+            let target = if slash {
+                format!("mobile-slash:{session}:401")
+            } else {
+                format!("mobile-prompt:{session}:401")
+            };
+            let recorder = Arc::new(BlockingEnqueue {
+                target,
+                entered: Notify::new(),
+                release: Notify::new(),
+            });
+            handle.message_queue.set_recorder(recorder.clone()).await;
+            let sender = handle.clone();
+            let origin = session.clone();
+            let submission = tokio::spawn(async move {
+                if slash {
+                    sender
+                        .submit(ClientCommand::RunSlashCommand {
+                            session_id: Some(origin),
+                            raw: "/context".into(),
+                            images: vec![],
+                            turn_id: Some(401),
+                        })
+                        .await
+                } else {
+                    sender
+                        .submit(ClientCommand::SendPrompt {
+                            session_id: Some(origin),
+                            text: "queued".into(),
+                            prompt_mode: Some(client::protocol::commands::PromptModeDto::Bash),
+                            images: vec![],
+                            turn_id: Some(401),
+                            visualization_context: None,
+                        })
+                        .await
+                }
+            });
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                recorder.entered.notified(),
+            )
+            .await
+            .unwrap();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                handle.submit(ClientCommand::Cancel {
+                    session_id: Some(session.clone()),
+                    turn_id: Some(400),
+                }),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while old_owner.upgrade().is_some() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("blocked queue recording must not retain the finished owner");
+            recorder.release.notify_one();
+            tokio::time::timeout(std::time::Duration::from_secs(5), submission)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
         });
     }
 }
@@ -1802,7 +2301,26 @@ fn stop_between_real_midturn_append_and_ack_reports_cancelled_not_internal() {
         let canceller = handle.clone();
         let cancel_session = session.clone();
         let cancelling = tokio::spawn(async move { canceller.submit(ClientCommand::Cancel { session_id: Some(cancel_session), turn_id: Some(351) }).await });
-        tokio::time::timeout(std::time::Duration::from_secs(5), owner.cancel.cancelled()).await.unwrap();
+        if tokio::time::timeout(std::time::Duration::from_secs(5), owner.cancel.cancelled()).await.is_err() {
+            use futures_util::FutureExt as _;
+            let active = handle.active_cancel.try_lock().map(|guard| guard.as_ref().map(|turn| (turn.turn_id, Arc::ptr_eq(turn, &owner)))).ok();
+            let gate = handle.durable_turns.delivery_gate(&session, owner.turn_id.unwrap()).unwrap();
+            let delivery = match gate.lock().now_or_never() {
+                Some(Ok(guard)) => { guard.complete(); "free" },
+                Some(Err(_)) => "poisoned",
+                None => "held",
+            };
+            let member_gate = handle.durable_turns.delivery_gate(&session, 351).unwrap();
+            let member_delivery = match member_gate.lock().now_or_never() {
+                Some(Ok(guard)) => { guard.complete(); "free" },
+                Some(Err(_)) => "poisoned",
+                None => "held",
+            };
+            let member_bound = owner.mid_turn_members.try_lock().map(|members| members.contains(&351)).ok();
+            let cancel_status = if cancelling.is_finished() { format!("{:?}", cancelling.await) } else { "still pending".into() };
+            let terminal = owner.terminal_emitted.load(Ordering::Acquire);
+            panic!("active Stop did not signal its owner: active={active:?}, delivery={delivery}, member_delivery={member_delivery}, member_bound={member_bound:?}, terminal={terminal}, cancel={cancel_status}");
+        }
         release.notify_one();
         tokio::time::timeout(std::time::Duration::from_secs(10), cancelling).await.unwrap().unwrap().unwrap();
         let events = listener.received.lock().await;

@@ -124,6 +124,7 @@ fn rewake_metrics_include_the_terminal_reason_from_the_outer_turn_boundary() {
             message_delta_stop("tool_use"),
             message_stop(),
         ];
+        let output = Arc::new(MockOutputStream::new());
         let orch =
             ConversationOrchestrator::into_shared(ConversationOrchestrator::new_with_streaming(
                 OrchestratorConfig {
@@ -135,7 +136,7 @@ fn rewake_metrics_include_the_terminal_reason_from_the_outer_turn_boundary() {
                 Arc::new(ToolRegistry::new()),
                 noop_hook_executor(),
                 Arc::new(NoOpPermissionGate),
-                Arc::new(MockOutputStream::new()),
+                output.clone(),
                 Arc::new(StaticMemoryProvider::empty()),
                 PathBuf::from("/tmp"),
             ));
@@ -146,8 +147,22 @@ fn rewake_metrics_include_the_terminal_reason_from_the_outer_turn_boundary() {
         );
         let metrics = orch.completed_turn_metrics().expect("completed rewake");
         assert_eq!(metrics.num_turns, 1);
-        assert_eq!(metrics.stop_reason.as_deref(), Some("max_tokens"));
+        assert_eq!(metrics.stop_reason.as_deref(), Some("max_turns"));
         assert_eq!(metrics.api_error_status, None);
+        let reasons = output
+            .snapshot()
+            .await
+            .into_iter()
+            .filter_map(|event| match event {
+                lingxi_core::host::OutputEvent::EndTurn { stop_reason, .. } => Some(stop_reason),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reasons,
+            ["max_turns"],
+            "the rewake publishes exactly one terminal"
+        );
     });
 }
 
