@@ -7582,6 +7582,99 @@ mod tests {
     }
 
 
+    #[tokio::test]
+    async fn real_worker_cross_surface_post_settles_before_originating_action() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("card.tsx");
+        let entry = directory.path().join("register.tsx");
+        std::fs::write(&child, r#"
+          import { Box, Text, Button, h } from 'claude:surface-runtime';
+          let target;
+          export function Card(props, surface) {
+            if (props.role === 'target') target = surface;
+            return h(Box, {}, h(Text, {}, props.text || props.role), h(Button, {key:'send', label:props.role, onPress:()=>{
+              if (props.role === 'owner') target.post({text:'cross post delivered'});
+            }}));
+          }
+        "#).unwrap();
+        std::fs::write(&entry, r#"
+          export function register(on) {
+            on('ui.render', {surface:'desktop', component:'Pane'}, ($, event) => {
+              const {Box, Client, h} = $.ui.resolve(event);
+              return h(Box, {}, h(Client, {key:'owner', module:'./card.tsx', props:{role:'owner'}}),
+                h(Client, {key:'target', module:'./card.tsx', props:{role:'target'}}));
+            });
+            on('ui.message', async ($, event) => {
+              await $.session.model();
+              return {handled:true, props:{role:'target', text:event.data.text}};
+            });
+          }
+        "#).unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let completed = Arc::new(tokio::sync::Notify::new());
+        let session_impl = Arc::new(UiLifecycleSession {
+            root:directory.path().to_path_buf(),
+            model_gate:StdMutex::new(Some(UiLifecycleModelGate {
+                entered:entered.clone(), release:release.clone(), completed:completed.clone(),
+            })), ..Default::default()
+        });
+        let session: Arc<dyn ModSessionContext> = session_impl.clone();
+        host.attach_background_context(Arc::downgrade(&session));
+        let prepared = host.prepare_module(directory.path(), &entry).await.unwrap();
+        host.load_with_tier_order_storage_prepared("review", "review@user", directory.path(), &entry,
+            Utf16JsonProjection::parse("{}").unwrap(), "user", None, Some(&prepared)).await.unwrap();
+        let render = host.dispatch_client_ui_control(host_generated_json(json!({
+            "subtype":"ui_render", "surface":"desktop", "component":"Pane", "instance_id":"cross-post",
+            "props":{}, "viewport":{"columns":80,"rows":24},
+        })), session.as_ref()).await.unwrap();
+        let revision = render.render_revision.unwrap();
+        let mut mounts = Vec::new();
+        for name in ["owner", "target"] {
+            let result = host.dispatch_client_ui_operation(host_generated_json(json!({
+                "type":"mount", "surface":"desktop", "component":"Pane", "instance_id":"cross-post",
+                "plugin":"review", "client":name, "module":"card.tsx", "render_revision":revision,
+                "columns":80, "rows":24,
+            })), session.as_ref()).await.unwrap();
+            mounts.push(test_value(&result));
+        }
+        let owner = mounts[0]["runtimeId"].as_str().unwrap().to_owned();
+        let target = mounts[1]["runtimeId"].as_str().unwrap().to_owned();
+        let handle = tree_press_handle_for_key(&mounts[0]["tree"], "send").unwrap();
+        {
+            let data = lock(&host.client_ui.data);
+            assert_eq!(data.instances[&owner].worker_environment_id, data.instances[&target].worker_environment_id);
+            assert!(data.instances[&owner].worker_environment_id.is_some());
+        }
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"draw_commit", "surface":"desktop", "component":"Pane", "instance_id":"cross-post",
+            "render_revision":revision, "clients":[{"plugin":"review","key":"owner","module":"card.tsx"},
+              {"plugin":"review","key":"target","module":"card.tsx"}],
+        })), session.as_ref()).await.unwrap();
+        let action_host = host.clone();
+        let action_session = session.clone();
+        let mut task = tokio::spawn(async move {
+            action_host.dispatch_client_ui_operation(host_generated_json(json!({
+                "type":"runHeld", "runtimeId":owner, "render_revision":revision, "handle":handle,
+            })), action_session.as_ref()).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified()).await
+            .expect("the target's real ui.message must reach its observable model call");
+        assert_eq!(session_impl.model_calls.load(Ordering::SeqCst), 1);
+        let settled_before_target = task.is_finished();
+        let early = if settled_before_target { Some(test_value(&(&mut task).await.unwrap().unwrap())) } else { None };
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), completed.notified()).await.unwrap();
+        wait_for_client_frame(&session_impl, &target, "cross-surface post frame", |frame| {
+            tree_contains_text(&frame["tree"], "cross post delivered")
+        }).await;
+        assert!(!settled_before_target,
+            "the originating action completed before its target's post, early result={early:?}");
+        let result = tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap().unwrap();
+        assert!(test_value(&result).get("tree").is_some());
+    }
+
     async fn real_worker_async_input_waits_for_post_and_fences_rejection(reject: bool) {
         let directory = tempfile::tempdir().unwrap();
         let child = directory.path().join("card.tsx");
