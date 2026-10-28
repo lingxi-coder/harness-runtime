@@ -146,6 +146,12 @@ impl Processor {
         })
     }
 
+    /// An already-admitted first capture may precede processor construction.
+    /// Later reset/unmute operations still establish their own current cutoff.
+    pub(super) fn set_initial_capture_cutoff(&mut self, at: Instant) {
+        self.cutoff = at;
+    }
+
     pub(super) fn reset(&mut self) -> Result<()> {
         *self = Self::new(self.capture.rate, self.render.rate)?;
         Ok(())

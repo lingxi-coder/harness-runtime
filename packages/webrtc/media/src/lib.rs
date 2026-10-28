@@ -34,6 +34,19 @@ impl AudioProcessor {
             inner: processing::Processor::new(capture_rate, render_rate)?,
         })
     }
+    /// Create a processor for an already-admitted first capture. Its first
+    /// sample may precede processor construction, for example across IPC.
+    /// Later resets continue to discard capture from before the reset.
+    pub fn new_with_capture_start(
+        capture_rate: u32,
+        render_rate: u32,
+        first_sample_at: Instant,
+    ) -> Result<Self, &'static str> {
+        let mut processor = Self::new(capture_rate, render_rate)?;
+        processor.inner.set_initial_capture_cutoff(first_sample_at);
+        Ok(processor)
+    }
+
     pub fn reset(&mut self) -> Result<(), &'static str> {
         self.inner.reset()
     }
@@ -133,19 +146,46 @@ pub mod video_ports;
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;
 
-/// Resolve the host-selected plugin directory for an isolated codec child.
+/// Static plugin builds have no dynamic plugin directory requirement.
 #[cfg(feature = "gstreamer-media")]
-pub fn configured_codec_plugin_directory() -> Result<std::path::PathBuf, &'static str> {
+pub const fn codec_uses_static_plugins() -> bool {
+    cfg!(feature = "static-plugins")
+}
+
+/// Resolve the host-selected dynamic plugin directory, if one is required.
+#[cfg(feature = "gstreamer-media")]
+pub fn configured_codec_plugin_directory() -> Result<Option<std::path::PathBuf>, &'static str> {
+    if codec_uses_static_plugins() {
+        return Ok(None);
+    }
     match std::env::var_os("LINGXI_GSTREAMER_PLUGIN_DIR") {
-        Some(value) if !value.is_empty() => Ok(value.into()),
+        Some(value) if !value.is_empty() => Ok(Some(value.into())),
         Some(_) => Err("configured media plugin directory is empty"),
         None => {
             let path = env!("LINGXI_DEV_GST_PLUGIN_DIR");
             if path.is_empty() {
                 Err("the host must configure its media plugin directory")
             } else {
-                Ok(path.into())
+                Ok(Some(path.into()))
             }
         }
     }
+}
+
+/// Resolve a host SDK library directory separately from plugin registration.
+/// Even static-plugin builds may link the shared GStreamer core dynamically.
+#[cfg(feature = "gstreamer-media")]
+pub fn configured_codec_loader_directory() -> Option<std::path::PathBuf> {
+    let plugin_dir = std::env::var_os("LINGXI_GSTREAMER_PLUGIN_DIR")
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            let path = env!("LINGXI_DEV_GST_PLUGIN_DIR");
+            (!path.is_empty()).then(|| path.into())
+        })?;
+    let plugin_dir = std::path::PathBuf::from(plugin_dir);
+    #[cfg(windows)]
+    let loader = plugin_dir.parent()?.parent()?.join("bin");
+    #[cfg(not(windows))]
+    let loader = plugin_dir.parent()?.to_path_buf();
+    loader.is_dir().then_some(loader)
 }
