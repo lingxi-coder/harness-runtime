@@ -7301,9 +7301,25 @@ mod tests {
         release.notify_one();
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!lock(&session_impl.logs).iter().any(|line| line == "shared hook continued after VM fault"));
+        let sibling_before_release = tokio::time::timeout(Duration::from_millis(300), async {
+            loop {
+                if lock(&session_impl.frames).iter().any(|(id, frame)|
+                    id == &mounted[1].0 && frame.get("fault").is_some()) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.is_ok();
         fault_release.notify_one();
         tokio::time::timeout(Duration::from_secs(2), fault_delivered.notified()).await
             .expect("the first fault frame is actually admitted after release");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if lock(&session_impl.frames).iter().any(|(id, frame)|
+                    id == &mounted[1].0 && frame.get("fault").is_some()) { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the sibling fault must be admitted once the first gate is released");
+        assert!(sibling_before_release,
+            "a blocked fault sink for one surface must not delay another surface's fault admission");
     }
 
     #[tokio::test]
