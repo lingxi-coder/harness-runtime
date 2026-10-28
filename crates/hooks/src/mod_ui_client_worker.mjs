@@ -703,11 +703,13 @@ export class ClientSurfaceManager {
   emit(instance, action, fields = {}) {
     if (instance.destroyed || this.disposed || (instance.failure && action !== 'fault')) return;
     const held = this.heldContext.getStore();
-    if (action !== 'fault' && held?.instance === instance && held.cancelled) return;
-    const postAction = ['post', 'schedule'].includes(action) && held?.instance === instance && held.active
+    const sameHeldEnvironment = held?.instance?.environment === instance.environment;
+    if (action !== 'fault' && sameHeldEnvironment && held.cancelled) return;
+    const postAction = ['post', 'schedule'].includes(action) && sameHeldEnvironment && held.active
       && typeof held.id === 'string' ? held : undefined;
     const postCorrelation = postAction
-      ? { postActionId: postAction.id, postId: postAction.postIds.length }
+      ? { postActionId: postAction.id, postId: postAction.postIds.length,
+          ...(postAction.instance === instance ? {} : { postActionRuntimeId: postAction.instance.runtimeId }) }
       : undefined;
     if (postCorrelation) postAction.postIds.push(postCorrelation.postId);
     this.send({

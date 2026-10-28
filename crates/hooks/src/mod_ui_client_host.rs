@@ -445,7 +445,11 @@ impl ClientPostEventGuard {
         }
         let action_id = event.string_at("/postActionId").map(str::to_owned);
         action_id.as_ref()?;
-        let runtime_id = event.string_at("/runtimeId").unwrap_or_default().to_owned();
+        // The frame target can be another surface in the same VM. Settlement
+        // and cancellation belong to the originating held action, not the
+        // target whose ui.message is being processed.
+        let runtime_id = event.string_at("/postActionRuntimeId")
+            .or_else(|| event.string_at("/runtimeId")).unwrap_or_default().to_owned();
         let worker_epoch = worker_epoch.or_else(|| client_post_u64(event, "/hostPostWorkerEpoch"));
         let cancellation = registry.cancellation_for(
             action_id.as_deref().expect("action id checked above"),
@@ -5048,6 +5052,23 @@ impl ModHost {
                     Err(ModError::Unavailable("Client event belongs to another Worker environment".into()))
                 } else { Ok(()) };
             }
+            if event.get_property("postActionRuntimeId").is_some() {
+                let origin = event.string_at("/postActionRuntimeId")
+                    .filter(|_| post_ack.is_some())
+                    .and_then(|id| data.instances.get(id));
+                let valid = origin.is_some_and(|origin| {
+                    origin.worker_generation.is_some()
+                        && origin.worker_environment_id.is_some()
+                        && origin.worker_environment_id == instance.worker_environment_id
+                        && self.client_instance_is_current(&data, origin)
+                        && !origin.background_cancellation.is_cancelled()
+                });
+                if !valid {
+                    return Err(ModError::Unavailable(
+                        "Client post action origin does not own the target environment".into(),
+                    ));
+                }
+            }
             if matches!(action, "post" | "schedule")
                 && client_post_u64(event, "/hostRenderRevision") != Some(instance.revision)
             {
@@ -5563,6 +5584,7 @@ mod tests {
         frame_gate: StdMutex<Option<UiLifecycleFrameGate>>,
         model_gate: StdMutex<Option<UiLifecycleModelGate>>,
         model_calls: std::sync::atomic::AtomicUsize,
+        refuse_client_frame: std::sync::atomic::AtomicBool,
         logs: StdMutex<Vec<String>>,
         allow_non_scalar_frames: bool,
         invalidations: StdMutex<Vec<Value>>,
@@ -5622,6 +5644,9 @@ mod tests {
             runtime_id: &str,
             frame: &Utf16JsonProjection,
         ) -> Result<(), ModError> {
+            if self.refuse_client_frame.load(Ordering::SeqCst) && frame.at_pointer("/fault").is_none() {
+                return Err(ModError::Unavailable("injected target frame rejection".into()));
+            }
             let gate = {
                 let mut gate = lock(&self.frame_gate);
                 if gate.as_ref().is_some_and(|gate| {
@@ -7066,6 +7091,26 @@ mod tests {
         assert_eq!(observation.models.load(std::sync::atomic::Ordering::SeqCst), 0,
             "neither old event may enter ui.message");
         assert!(accepting.frames.lock().unwrap().is_empty());
+        let mut forged = event(new_revision, generation);
+        forged.set_field("postActionId", plain_text_projection("forged-action")).unwrap();
+        forged.set_field("postId", host_generated_json(json!(0))).unwrap();
+        forged.set_field("postActionRuntimeId", plain_text_projection("foreign-owner")).unwrap();
+        assert!(host.handle_client_ui_background_event(&forged, session.as_ref()).await
+            .unwrap_err().to_string().contains("origin does not own the target environment"));
+        {
+            // Model a different live Worker environment; a target must not
+            // accept a post merely because its action ID names another owner.
+            let mut data = lock(&host.client_ui.data);
+            let mut foreign = data.instances[&runtime_id].clone();
+            foreign.runtime_id = "foreign-owner".into();
+            foreign.worker_environment_id = Some("different-vm".into());
+            data.instances.insert(foreign.runtime_id.clone(), foreign);
+        }
+        assert!(host.handle_client_ui_background_event(&forged, session.as_ref()).await
+            .unwrap_err().to_string().contains("origin does not own the target environment"));
+        lock(&host.client_ui.data).instances.remove("foreign-owner");
+        assert_eq!(observation.models.load(std::sync::atomic::Ordering::SeqCst), 0,
+            "a missing or foreign-VM action origin must never enter ui.message");
         host.handle_client_ui_background_event(&event(new_revision, generation), session.as_ref())
             .await.unwrap();
         assert_eq!(observation.models.load(std::sync::atomic::Ordering::SeqCst), 1);
@@ -7584,6 +7629,25 @@ mod tests {
 
     #[tokio::test]
     async fn real_worker_cross_surface_post_settles_before_originating_action() {
+        real_worker_cross_surface_post_settlement("normal").await;
+    }
+
+    #[tokio::test]
+    async fn real_worker_cross_surface_target_unmount_returns_unknown() {
+        real_worker_cross_surface_post_settlement("target-unmount").await;
+    }
+
+    #[tokio::test]
+    async fn real_worker_cross_surface_origin_cancel_fences_pending_target() {
+        real_worker_cross_surface_post_settlement("origin-cancel").await;
+    }
+
+    #[tokio::test]
+    async fn real_worker_cross_surface_target_sink_rejection_returns_unknown() {
+        real_worker_cross_surface_post_settlement("target-reject").await;
+    }
+
+    async fn real_worker_cross_surface_post_settlement(mode: &str) {
         let directory = tempfile::tempdir().unwrap();
         let child = directory.path().join("card.tsx");
         let entry = directory.path().join("register.tsx");
@@ -7654,25 +7718,65 @@ mod tests {
         })), session.as_ref()).await.unwrap();
         let action_host = host.clone();
         let action_session = session.clone();
+        let action_owner = owner.clone();
         let mut task = tokio::spawn(async move {
             action_host.dispatch_client_ui_operation(host_generated_json(json!({
-                "type":"runHeld", "runtimeId":owner, "render_revision":revision, "handle":handle,
+                "type":"runHeld", "runtimeId":action_owner, "render_revision":revision, "handle":handle,
             })), action_session.as_ref()).await
         });
         tokio::time::timeout(Duration::from_secs(5), entered.notified()).await
             .expect("the target's real ui.message must reach its observable model call");
         assert_eq!(session_impl.model_calls.load(Ordering::SeqCst), 1);
+        if mode == "origin-cancel" {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while host.client_ui.held_result_received.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("the Worker callback has returned while its target is blocked");
+            assert!(!task.is_finished(), "the target post must keep the originating action open");
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            {
+                let data = lock(&host.client_ui.data);
+                assert!(data.instances[&owner].worker_fault.is_some());
+                assert!(data.instances[&target].worker_fault.is_some());
+            }
+            release.notify_one();
+            assert!(tokio::time::timeout(Duration::from_millis(100), completed.notified()).await.is_err(),
+                "cancelling the owner must cancel the target's in-flight message");
+            assert!(!lock(&session_impl.frames).iter().any(|(id, frame)| id == &target
+                && tree_contains_text(&frame["tree"], "cross post delivered")));
+            return;
+        }
         let settled_before_target = task.is_finished();
         let early = if settled_before_target { Some(test_value(&(&mut task).await.unwrap().unwrap())) } else { None };
+        if mode == "target-unmount" && !settled_before_target {
+            let removed = host.dispatch_client_ui_operation(host_generated_json(json!({
+                "type":"unmount", "runtimeId":target, "render_revision":revision,
+            })), session.as_ref()).await.unwrap();
+            assert_eq!(test_value(&removed)["handled"], true);
+        }
+        if mode == "target-reject" {
+            session_impl.refuse_client_frame.store(true, Ordering::SeqCst);
+        }
         release.notify_one();
         tokio::time::timeout(Duration::from_secs(5), completed.notified()).await.unwrap();
-        wait_for_client_frame(&session_impl, &target, "cross-surface post frame", |frame| {
-            tree_contains_text(&frame["tree"], "cross post delivered")
-        }).await;
+        if mode == "normal" || settled_before_target {
+            wait_for_client_frame(&session_impl, &target, "cross-surface post frame", |frame| {
+                tree_contains_text(&frame["tree"], "cross post delivered")
+            }).await;
+        }
         assert!(!settled_before_target,
             "the originating action completed before its target's post, early result={early:?}");
         let result = tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap().unwrap();
-        assert!(test_value(&result).get("tree").is_some());
+        if mode == "target-unmount" || mode == "target-reject" {
+            assert_eq!(test_value(&result)["outcome"], json!({"status":"unknown","runtime":"unavailable"}));
+            assert!(lock(&host.client_ui.data).instances[&owner].worker_fault.is_some());
+            assert!(!lock(&session_impl.frames).iter().any(|(id, frame)| id == &target
+                && tree_contains_text(&frame["tree"], "cross post delivered")));
+        } else {
+            assert!(test_value(&result).get("tree").is_some());
+        }
     }
 
     async fn real_worker_async_input_waits_for_post_and_fences_rejection(reject: bool) {

@@ -135,6 +135,38 @@ test('mounts a module graph into a bounded VM tree and routes held, pointer, key
   manager.dispose();
 });
 
+test('held callback attributes a sibling surface post and schedule to its originating action', async () => {
+  const events = [];
+  const manager = new ClientSurfaceManager({send: event => events.push(event)});
+  const source = `
+    import { Button, h } from 'claude:surface-runtime';
+    let target;
+    export function Board(props, surface) {
+      if (props.role === 'target') target = surface;
+      return h(Button, { key:'send', label:props.role, onPress:async () => {
+        if (props.role !== 'owner') return;
+        await new Promise(resolve => { const stop=surface.every(5, () => { stop(); resolve(); }); });
+        target.post({from:'owner'});
+        target.setState({changed:true});
+      }});
+    }
+  `;
+  const owner = await manager.mount({...mountOptions({runtimeId:'cross-owner', source}), props:{role:'owner'}});
+  const target = await manager.mount({...mountOptions({runtimeId:'cross-target', source}), props:{role:'target'}});
+  assert.equal(owner.environmentInstanceId, target.environmentInstanceId);
+  const result = await manager.runHeldWithPostIds(owner.runtimeId, owner.tree.held, {}, 'cross-action');
+  assert.deepEqual(result, {accepted:true, postIds:[0,1]});
+  const emitted = events.filter(event => event.runtimeId === target.runtimeId);
+  assert.deepEqual(emitted.map(event => event.action), ['post','schedule']);
+  for (const [index,event] of emitted.entries()) {
+    assert.equal(event.postActionId, 'cross-action');
+    assert.equal(event.postActionRuntimeId, owner.runtimeId);
+    assert.equal(event.postId, index);
+    assert.equal(event.environmentInstanceId, owner.environmentInstanceId);
+  }
+  manager.dispose();
+});
+
 test('Client worker mirrors Native Button, Input and Select adapters and keeps Markdown unheld', async () => {
   const events = [];
   const manager = new ClientSurfaceManager({ send: message => events.push(message) });

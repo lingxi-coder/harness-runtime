@@ -321,7 +321,7 @@ function isBackgroundMessage(message, owner) {
 }
 
 function isHeldPostMessage(message, owner) {
-  return owner && clientSurfaceManager.runtimeInstances.get(owner.runtimeId) === owner.target
+  return owner && owner.target.environment === owner.held.environment
     && message.clientPostActionId === owner.held.actionId;
 }
 
@@ -339,7 +339,8 @@ async function processQueuedDispatch(message) {
 
 function allowedHeldClientOperation(operation, owner) {
   if (operation?.type === 'unmount') return true;
-  return operation?.runtimeId === owner.runtimeId && operation.generation === owner.held.generation
+  const target = clientSurfaceManager.runtimeInstances.get(operation?.runtimeId);
+  return target && target.environment === owner.held.environment && operation.generation === target.generation
     && ['setProps', 'render'].includes(operation.type) && operation.postActionId === owner.held.actionId;
 }
 
