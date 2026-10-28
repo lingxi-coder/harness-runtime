@@ -276,23 +276,40 @@ impl NativeVideo {
             let Some(packet) = session.take_video_packet().map_err(str::to_owned)? else {
                 break;
             };
-            let bytes = packet.as_ref();
-            let ssrc = u32::from_be_bytes(
-                bytes
-                    .get(8..12)
-                    .ok_or("invalid video RTP header")?
-                    .try_into()
-                    .unwrap(),
-            );
-            if !self.receivers.contains_key(&ssrc) {
-                if self.receivers.len() >= 2 {
-                    return Err("too many video sources".into());
-                }
-                self.receivers
-                    .insert(ssrc, VideoPlayout::new_at(packet.at)?);
-            }
-            self.receivers[&ssrc].push(packet)?;
+            let at = packet.at;
+            self.receive_owned(packet, at)?;
         }
+        self.take_remote_frames()
+    }
+
+    /// Feed an independently owned RTP packet to the receive-only video path.
+    pub fn receive_owned<T: AsRef<[u8]> + Send + 'static>(
+        &mut self,
+        packet: T,
+        at: Instant,
+    ) -> Result<(), String> {
+        if !self.receiving {
+            return Ok(());
+        }
+        let ssrc = u32::from_be_bytes(
+            packet
+                .as_ref()
+                .get(8..12)
+                .ok_or("invalid video RTP header")?
+                .try_into()
+                .unwrap(),
+        );
+        if !self.receivers.contains_key(&ssrc) {
+            if self.receivers.len() >= 2 {
+                return Err("too many video sources".into());
+            }
+            self.receivers.insert(ssrc, VideoPlayout::new_at(at)?);
+        }
+        self.receivers[&ssrc].push_owned(packet, at)
+    }
+
+    /// Take the same bounded batch produced by `service` without owning an RTC peer.
+    pub fn take_remote_frames(&self) -> Result<Vec<RemoteVideoFrame>, String> {
         let mut frames = Vec::with_capacity(4);
         for (&ssrc, decoder) in &self.receivers {
             for _ in 0..2 {

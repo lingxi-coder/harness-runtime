@@ -132,3 +132,20 @@ pub mod video_ports;
 
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;
+
+/// Resolve the host-selected plugin directory for an isolated codec child.
+#[cfg(feature = "gstreamer-media")]
+pub fn configured_codec_plugin_directory() -> Result<std::path::PathBuf, &'static str> {
+    match std::env::var_os("LINGXI_GSTREAMER_PLUGIN_DIR") {
+        Some(value) if !value.is_empty() => Ok(value.into()),
+        Some(_) => Err("configured media plugin directory is empty"),
+        None => {
+            let path = env!("LINGXI_DEV_GST_PLUGIN_DIR");
+            if path.is_empty() {
+                Err("the host must configure its media plugin directory")
+            } else {
+                Ok(path.into())
+            }
+        }
+    }
+}

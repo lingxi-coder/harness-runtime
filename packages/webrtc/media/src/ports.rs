@@ -210,6 +210,21 @@ impl DecodedAudioPlayout {
         self.playout.push(packet)
     }
 
+    /// Push an owned RTP buffer while retaining its owner until GStreamer releases it.
+    pub fn push_owned<T: AsRef<[u8]> + Send + 'static>(
+        &mut self,
+        packet: T,
+        at: Instant,
+    ) -> Result<(), &'static str> {
+        if self.interrupted {
+            return Err("decoded audio playout was interrupted");
+        }
+        if self.input_finished {
+            return Err("decoded audio playout input is finished");
+        }
+        self.playout.push_owned(packet, at)
+    }
+
     /// Take one decoded frame if available; `None` means no frame is ready yet.
     pub fn try_read(&mut self) -> Result<Option<DecodedAudioFrame>, &'static str> {
         if self.interrupted {

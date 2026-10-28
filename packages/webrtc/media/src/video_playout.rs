@@ -88,7 +88,17 @@ impl VideoPlayout {
     }
 
     pub fn push(&self, packet: lingxi_webrtc_core::ReceivedRtp) -> Result<(), String> {
-        let Some(elapsed) = packet.at.checked_duration_since(self.anchor) else {
+        let at = packet.at;
+        self.push_owned(packet, at)
+    }
+
+    /// Retain an owned RTP buffer until GStreamer's final reference is released.
+    pub fn push_owned<T: AsRef<[u8]> + Send + 'static>(
+        &self,
+        packet: T,
+        at: Instant,
+    ) -> Result<(), String> {
+        let Some(elapsed) = at.checked_duration_since(self.anchor) else {
             return Ok(());
         };
         if self.source.current_level_buffers() >= 64

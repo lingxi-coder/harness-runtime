@@ -152,7 +152,16 @@ impl Playout {
     }
 
     pub(super) fn push(&self, packet: ReceivedRtp) -> Result<(), &'static str> {
-        let Some(elapsed) = packet.at.checked_duration_since(self.anchor.0) else {
+        let at = packet.at;
+        self.push_owned(packet, at)
+    }
+
+    pub(super) fn push_owned<T: AsRef<[u8]> + Send + 'static>(
+        &self,
+        packet: T,
+        at: Instant,
+    ) -> Result<(), &'static str> {
+        let Some(elapsed) = at.checked_duration_since(self.anchor.0) else {
             return Ok(());
         };
         let time = self
