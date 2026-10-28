@@ -184,6 +184,15 @@ async fn desktop_typed_bash_entry_rejects_windows_before_spawn() {
 #[tokio::test]
 async fn real_typed_bash_stop_preserves_foreground_contract_and_signals_job() {
     let fixture = Fixture(tempfile::tempdir().unwrap());
+    // The pipe-inheritance negative control acquires our process handle before
+    // allowing this test to start. Normal test runs do not set these paths.
+    if let (Some(pid_file), Some(release_file)) = (
+        std::env::var_os("LINGXI_TEST_PID_FILE"),
+        std::env::var_os("LINGXI_TEST_PID_RELEASE"),
+    ) {
+        std::fs::write(pid_file, std::process::id().to_string()).unwrap();
+        wait_for_file(Path::new(&release_file)).await;
+    }
     eprintln!("typed-stop-stage: enabling supervisor");
     platform_windows::process::supervisor::enable_supervisor(driver());
     let token = tokio_util::sync::CancellationToken::new();

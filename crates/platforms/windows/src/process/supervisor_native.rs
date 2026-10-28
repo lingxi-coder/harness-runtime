@@ -75,6 +75,116 @@ impl Drop for Local {
 fn last_error() -> std::io::Error {
     std::io::Error::last_os_error()
 }
+
+/// An exact supervisor process object, retained independently of its PID.
+pub(super) struct DetachedSupervisor {
+    pub(super) process: std::os::windows::io::OwnedHandle,
+    pub(super) pid: u32,
+}
+
+// Use Windows argv quoting on UTF-16 units so paths are neither lossy nor
+// ambiguous when they contain spaces, quotes, or trailing backslashes.
+fn quote_windows_argument(value: &std::ffi::OsStr) -> std::io::Result<Vec<u16>> {
+    let units: Vec<u16> = value.encode_wide().collect();
+    if units.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "NUL in process argument",
+        ));
+    }
+    let mut out = vec![b'"' as u16];
+    let mut slashes = 0usize;
+    for unit in units {
+        if unit == b'\\' as u16 {
+            slashes += 1;
+        } else if unit == b'"' as u16 {
+            out.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2 + 1));
+            out.push(unit);
+            slashes = 0;
+        } else {
+            out.extend(std::iter::repeat_n(b'\\' as u16, slashes));
+            out.push(unit);
+            slashes = 0;
+        }
+    }
+    out.extend(std::iter::repeat_n(b'\\' as u16, slashes * 2));
+    out.push(b'"' as u16);
+    Ok(out)
+}
+
+pub(super) fn spawn_detached_supervisor(
+    executable: &Path,
+    flag: &str,
+    directory: &Path,
+) -> std::io::Result<DetachedSupervisor> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS, PROCESS_INFORMATION,
+        STARTUPINFOW,
+    };
+    if !executable.is_absolute() || !directory.is_absolute() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "supervisor paths must be absolute",
+        ));
+    }
+    let mut application: Vec<u16> = executable.as_os_str().encode_wide().collect();
+    if application.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "NUL in executable path",
+        ));
+    }
+    application.push(0);
+    let mut command = quote_windows_argument(executable.as_os_str())?;
+    command.push(b' ' as u16);
+    command.extend(quote_windows_argument(std::ffi::OsStr::new(flag))?);
+    command.push(b' ' as u16);
+    command.extend(quote_windows_argument(directory.as_os_str())?);
+    command.push(0);
+    let mut startup = STARTUPINFOW::default();
+    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    let mut info = PROCESS_INFORMATION::default();
+    // SAFETY: application and the writable command line are NUL-terminated,
+    // the initialized structures remain valid through this synchronous call,
+    // and both returned handles are uniquely owned on success. With no
+    // inherited handles or STARTF_USESTDHANDLES the detached supervisor has
+    // no access to the caller's output pipes or unrelated inheritable handles.
+    let created = unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+            DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            std::ptr::null(),
+            std::ptr::null(),
+            &startup,
+            &mut info,
+        )
+    };
+    if created == 0 {
+        return Err(last_error());
+    }
+    // SAFETY: CreateProcessW returned a unique process and thread handle.
+    let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess.cast()) };
+    let thread = unsafe { OwnedHandle::from_raw_handle(info.hThread.cast()) };
+    drop(thread);
+    Ok(DetachedSupervisor {
+        process,
+        pid: info.dwProcessId,
+    })
+}
+
+pub(super) fn supervisor_has_exited(child: &DetachedSupervisor) -> std::io::Result<bool> {
+    // SAFETY: the owned process handle remains open during the nonblocking wait.
+    match unsafe { WaitForSingleObject(child.process.as_raw_handle(), 0) } {
+        0 => Ok(true),
+        258 => Ok(false),
+        _ => Err(last_error()),
+    }
+}
 struct Token(Handle);
 impl Drop for Token {
     fn drop(&mut self) {
@@ -319,6 +429,19 @@ pub(super) fn verify_server(pipe: RawHandle, expected: u32) -> std::io::Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supervisor_command_arguments_escape_quotes_and_trailing_backslashes() {
+        let quote = |value: &str| {
+            String::from_utf16(&quote_windows_argument(std::ffi::OsStr::new(value)).unwrap())
+                .unwrap()
+        };
+        assert_eq!(quote("plain"), "\"plain\"");
+        assert_eq!(quote("a b"), "\"a b\"");
+        assert_eq!(quote("a\"b"), "\"a\\\"b\"");
+        assert_eq!(quote("C:\\folder space\\"), "\"C:\\folder space\\\\\"");
+        assert!(quote_windows_argument(std::ffi::OsStr::new("a\0b")).is_err());
+    }
 
     #[link(name = "advapi32")]
     extern "system" {

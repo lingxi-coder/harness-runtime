@@ -31,6 +31,9 @@ mod windows {
 
     pub async fn run() {
         if platform_windows::process::supervisor::is_supervisor_invocation() {
+            if let Some(path) = std::env::var_os("LINGXI_TEST_SUPERVISOR_PID_FILE") {
+                std::fs::write(path, std::process::id().to_string()).unwrap();
+            }
             platform_windows::process::supervisor::run_supervisor(sink)
                 .await
                 .unwrap();

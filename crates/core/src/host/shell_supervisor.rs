@@ -24,6 +24,55 @@ pub type BoxStream = Box<dyn Stream>;
 pub trait Listener: Send + Sync {
     async fn accept(&self) -> Result<BoxStream, ProcessError>;
 }
+
+/// Exact supervisor process identity held during bootstrap and observation.
+#[async_trait::async_trait]
+pub trait SupervisorChild: Send {
+    /// Process identifier associated with the held process object.
+    fn id(&self) -> u32;
+    /// Observe actual exit without releasing the held process object.
+    fn has_exited(&mut self) -> Result<bool, ProcessError>;
+    /// Wait until the held process object reports exit.
+    async fn wait(&mut self) -> Result<(), ProcessError>;
+}
+
+struct TokioSupervisorChild(tokio::process::Child);
+#[async_trait::async_trait]
+impl SupervisorChild for TokioSupervisorChild {
+    fn id(&self) -> u32 {
+        self.0.id().unwrap_or(0)
+    }
+    fn has_exited(&mut self) -> Result<bool, ProcessError> {
+        self.0
+            .try_wait()
+            .map(|status| status.is_some())
+            .map_err(error)
+    }
+    async fn wait(&mut self) -> Result<(), ProcessError> {
+        self.0.wait().await.map(|_| ()).map_err(error)
+    }
+}
+
+/// Existing platform spawn behavior, also used by the diagnostic negative control.
+pub fn spawn_tokio_supervisor<P: Platform + ?Sized>(
+    platform: &P,
+    executable: &Path,
+    flag: &str,
+    directory: &Path,
+) -> Result<Box<dyn SupervisorChild>, ProcessError> {
+    let mut command = tokio::process::Command::new(executable);
+    command
+        .arg(flag)
+        .arg(directory)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    platform.detach(&mut command);
+    Ok(Box::new(TokioSupervisorChild(
+        command.spawn().map_err(error)?,
+    )))
+}
+
 #[async_trait::async_trait]
 pub trait Platform: Send + Sync + 'static {
     /// None means the OS could not conclusively determine liveness.
@@ -38,6 +87,15 @@ pub trait Platform: Send + Sync + 'static {
     fn validate_directory(&self, path: &Path) -> Result<(), ProcessError>;
     fn endpoint(&self, directory: &Path) -> String;
     fn detach(&self, command: &mut tokio::process::Command);
+    /// Launch a detached supervisor while retaining its exact process identity.
+    fn spawn_supervisor(
+        &self,
+        executable: &Path,
+        flag: &str,
+        directory: &Path,
+    ) -> Result<Box<dyn SupervisorChild>, ProcessError> {
+        spawn_tokio_supervisor(self, executable, flag, directory)
+    }
     fn cancel_active_processes(&self);
     /// Release supervisor-wide cancellation ownership after a foreground
     /// result has been selected. Strict host runners must already have
@@ -1221,25 +1279,17 @@ pub async fn execute(
     drop(output_file);
 
     let socket = platform().endpoint(&directory);
-    let mut process =
-        tokio::process::Command::new(EXECUTABLE.get().ok_or(ProcessError::Unsupported)?);
-    process
-        .arg(FLAG)
-        .arg(&directory)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    platform().detach(&mut process);
-    let mut supervisor = process.spawn().map_err(error)?;
+    let mut supervisor = platform().spawn_supervisor(
+        EXECUTABLE.get().ok_or(ProcessError::Unsupported)?,
+        FLAG,
+        &directory,
+    )?;
     let mut stream = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            match platform()
-                .connect(&socket, supervisor.id().unwrap_or(0))
-                .await
-            {
+            match platform().connect(&socket, supervisor.id()).await {
                 Ok(stream) => return Ok(stream),
                 Err(_) => {
-                    if supervisor.try_wait().map_err(error)?.is_some() {
+                    if supervisor.has_exited()? {
                         return Err(error("shell supervisor exited during bootstrap"));
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1276,7 +1326,7 @@ pub async fn execute(
         output_file_identity: Some(output_file_identity),
         task_id: binding.task_id.clone(),
         pid: 0,
-        supervisor_pid: supervisor.id().unwrap_or(0),
+        supervisor_pid: supervisor.id(),
         supervisor_start_identity: None,
         process_start_identity: None,
         owner: command.process_owner().map(str::to_owned),

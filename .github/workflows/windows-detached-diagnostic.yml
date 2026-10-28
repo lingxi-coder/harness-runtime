@@ -58,6 +58,7 @@ jobs:
             'process::supervisor::integration_tests::real_supervisor_preserves_detached_child_after_normal_foreground',
             'process::supervisor::integration_tests::real_supervisor_drains_a_deliberately_inherited_descendant_pipe',
             'process::supervisor_gate::tests::normal_foreground_completion_preserves_detached_descendants',
+            'process::supervisor_native::tests::supervisor_command_arguments_escape_quotes_and_trailing_backslashes',
             'process::supervisor::integration_tests::real_supervisor_retains_output_and_job_until_explicit_stop',
             'process::supervisor::integration_tests::foreground_only_stop_or_deadline_keeps_output_and_reports_unknown',
             'process::supervisor::integration_tests::unaccepted_or_stopped_output_handoff_retains_job_and_reports_unknown',
@@ -155,7 +156,11 @@ jobs:
         run: |
           cargo build --locked -p platform-windows --features test-support --example typed_bash_fixture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "HARNESS_WINDOWS_TYPED_FIXTURE=$env:GITHUB_WORKSPACE\target\debug\examples\typed_bash_fixture.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $fixtureDir = Join-Path $env:RUNNER_TEMP 'typed fixture 空格'
+          New-Item -ItemType Directory -Force -Path $fixtureDir | Out-Null
+          $fixture = Join-Path $fixtureDir 'typed_bash_fixture.exe'
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'target\debug\examples\typed_bash_fixture.exe') $fixture
+          "HARNESS_WINDOWS_TYPED_FIXTURE=$fixture" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Build the desktop typed Bash tests
         run: cargo test --locked -p harness-runtime --no-default-features --features desktop,test-support --test typed_bash_windows --no-run
       - name: Real typed Bash Stop with a retained Windows process handle
@@ -168,6 +173,73 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           if (-not (Select-String -Path $log -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { throw 'typed Bash Stop did not execute exactly once' }
           exit 0
+      - name: Verify legacy supervisor retains the caller output pipe
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          $script = Join-Path $env:RUNNER_TEMP 'legacy-spawn-probe.ps1'
+          $inner = Join-Path $env:RUNNER_TEMP 'typed-legacy-spawn-inner.log'
+          $outer = Join-Path $env:RUNNER_TEMP 'typed-legacy-spawn-outer.log'
+          $outerError = Join-Path $env:RUNNER_TEMP 'typed-legacy-spawn-error.log'
+          $testPidFile = Join-Path $env:RUNNER_TEMP 'typed-legacy-test.pid'
+          $testRelease = Join-Path $env:RUNNER_TEMP 'typed-legacy-test.release'
+          $supervisorPidFile = Join-Path $env:RUNNER_TEMP 'typed-legacy-supervisor.pid'
+          @'
+          $ErrorActionPreference = 'Continue'
+          $env:LINGXI_SUPERVISOR_LEGACY_SPAWN = '1'
+          $env:LINGXI_TEST_PID_FILE = Join-Path $env:RUNNER_TEMP 'typed-legacy-test.pid'
+          $env:LINGXI_TEST_PID_RELEASE = Join-Path $env:RUNNER_TEMP 'typed-legacy-test.release'
+          $env:LINGXI_TEST_SUPERVISOR_PID_FILE = Join-Path $env:RUNNER_TEMP 'typed-legacy-supervisor.pid'
+          $log = Join-Path $env:RUNNER_TEMP 'typed-legacy-spawn-inner.log'
+          cargo test --locked -p harness-runtime --no-default-features --features desktop,test-support --test typed_bash_windows real_typed_bash_stop_preserves_foreground_contract_and_signals_job -- --exact --nocapture --test-threads=1 2>&1 | Tee-Object -FilePath $log
+          exit $LASTEXITCODE
+          '@ | Set-Content -Path $script -Encoding utf8
+          $probe = Start-Process -FilePath 'pwsh.exe' -ArgumentList @('-NoLogo','-NoProfile','-File',('"' + $script + '"')) -WorkingDirectory $env:GITHUB_WORKSPACE -RedirectStandardOutput $outer -RedirectStandardError $outerError -PassThru
+          $supervisor = $null
+          function Read-ProbeId($path) {
+            $deadline = [DateTime]::UtcNow.AddSeconds(20)
+            while ([DateTime]::UtcNow -lt $deadline) {
+              if (Test-Path $path) {
+                $value = Get-Content -Raw $path
+                if ($value -match '^\d+$') { return [int]$value }
+              }
+              Start-Sleep -Milliseconds 50
+            }
+            throw "fixture did not publish a process ID: $path"
+          }
+          try {
+            $test = Get-Process -Id (Read-ProbeId $testPidFile)
+            $null = $test.Handle
+            Set-Content -Path $testRelease -Value 'release'
+            $supervisor = Get-Process -Id (Read-ProbeId $supervisorPidFile)
+            $null = $supervisor.Handle
+            $until = [DateTime]::UtcNow.AddSeconds(40)
+            $passed = $false
+            while ([DateTime]::UtcNow -lt $until) {
+              if ((Test-Path $inner) -and (Select-String -Path $inner -Quiet -SimpleMatch 'test result: ok. 1 passed; 0 failed; 0 ignored')) { $passed = $true; break }
+              $probe.Refresh()
+              if ($probe.HasExited) { throw 'legacy process exited before the expected proof' }
+              Start-Sleep -Milliseconds 200
+            }
+            if (-not $passed) { throw 'legacy control did not complete the actual Stop test' }
+            if (-not (Select-String -Path $inner -Quiet -SimpleMatch 'held_signaled=true')) { throw 'legacy control did not observe the held descendant exit' }
+            if (-not $test.WaitForExit(20000)) { throw 'test process did not exit after reporting its result' }
+            $supervisor.Refresh()
+            if ($supervisor.HasExited) { throw 'legacy supervisor was not held while checking the pipe' }
+            if ($probe.WaitForExit(2000)) { throw 'legacy pipeline did not retain the caller output pipe' }
+            $supervisor.Kill()
+            if (-not $supervisor.WaitForExit(5000)) { throw 'legacy supervisor did not terminate' }
+            if (-not $probe.WaitForExit(10000)) { throw 'pipeline stayed open after the legacy supervisor exited' }
+            if ($probe.ExitCode -ne 0) { throw "legacy test pipeline failed: $($probe.ExitCode)" }
+            Write-Output 'legacy-spawn-probe: test process exited, pipe stayed open until the held supervisor exited'
+          } finally {
+            if ($supervisor) {
+              $supervisor.Refresh()
+              if (-not $supervisor.HasExited) { $supervisor.Kill(); $supervisor.WaitForExit() }
+            }
+            $probe.Refresh()
+            if (-not $probe.HasExited) { $probe.Kill(); $probe.WaitForExit() }
+          }
       - name: Real typed Bash timeout retains output and stops the held descendant
         timeout-minutes: 2
         shell: pwsh

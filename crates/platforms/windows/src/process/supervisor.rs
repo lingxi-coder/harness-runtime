@@ -1,7 +1,9 @@
 //! Windows named-pipe adapter for the shared acknowledged shell supervisor.
 use super::{runner::WindowsProcess, supervisor_native as native};
 use lingxi_core::host::process::ShellProcessHandoff;
-use lingxi_core::host::shell_supervisor::{self as shared, BoxStream, Listener, Platform};
+use lingxi_core::host::shell_supervisor::{
+    self as shared, BoxStream, Listener, Platform, SupervisorChild,
+};
 use lingxi_core::host::{
     BackgroundExitSink, ForegroundRunResult, ProcessHandle, ProcessRunner, SandboxedCommand,
 };
@@ -14,6 +16,26 @@ fn error(error: impl std::fmt::Display) -> ProcessError {
     ProcessError::Io(error.to_string())
 }
 struct WindowsPlatform;
+struct HeldSupervisor(native::DetachedSupervisor);
+#[async_trait::async_trait]
+impl SupervisorChild for HeldSupervisor {
+    fn id(&self) -> u32 {
+        self.0.pid
+    }
+    fn has_exited(&mut self) -> Result<bool, ProcessError> {
+        native::supervisor_has_exited(&self.0).map_err(error)
+    }
+    async fn wait(&mut self) -> Result<(), ProcessError> {
+        loop {
+            if self.has_exited()? {
+                return Ok(());
+            }
+            // Poll the same held process object. Elapsed time is never an
+            // exit receipt; the handle itself must become signaled.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+}
 struct PipeListener {
     endpoint: String,
     next: tokio::sync::Mutex<NamedPipeServer>,
@@ -53,6 +75,20 @@ impl Platform for WindowsPlatform {
         // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: host console exit does
         // not terminate the supervisor; its child/output remain held there.
         command.creation_flags(0x0000_0008 | 0x0000_0200);
+    }
+    fn spawn_supervisor(
+        &self,
+        executable: &Path,
+        flag: &str,
+        directory: &Path,
+    ) -> Result<Box<dyn SupervisorChild>, ProcessError> {
+        #[cfg(feature = "test-support")]
+        if std::env::var_os("LINGXI_SUPERVISOR_LEGACY_SPAWN").is_some() {
+            return shared::spawn_tokio_supervisor(self, executable, flag, directory);
+        }
+        let child =
+            native::spawn_detached_supervisor(executable, flag, directory).map_err(error)?;
+        Ok(Box::new(HeldSupervisor(child)))
     }
     fn cancel_active_processes(&self) {
         // Windows driver's held-child StreamingProcessTreeGuard synchronously
