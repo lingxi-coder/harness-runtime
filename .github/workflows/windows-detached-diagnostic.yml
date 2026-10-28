@@ -33,6 +33,8 @@ jobs:
           }
       - name: Build the Windows test executable
         run: cargo test --locked -p platform-windows --lib --no-run
+      - name: Check the production library
+        run: cargo check --locked -p platform-windows --lib
       - name: Verify unsafe handle inheritance reproduces the blocked case
         shell: pwsh
         run: |
@@ -58,7 +60,8 @@ jobs:
             'process::supervisor_gate::tests::normal_foreground_completion_preserves_detached_descendants',
             'process::supervisor::integration_tests::real_supervisor_diagnostic_inherited_writer_blocks_shutdown',
             'process::owned_job::tests::job_unknown_and_suspended_start_are_proven_in_dedicated_helpers',
-            'process::background::native_background_stop_tests::stopped_resumed_job_reports_unknown_without_cleanup_receipt'
+            'process::background::native_background_stop_tests::stopped_resumed_job_reports_unknown_without_cleanup_receipt',
+            'process::background::native_background_stop_tests::strict_foreground_eof_does_not_manufacture_group_cleanup_proof'
           )
           foreach ($test in $tests) {
             $log = Join-Path $env:RUNNER_TEMP (($test -replace '::','-') + '.log')

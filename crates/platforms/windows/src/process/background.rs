@@ -790,17 +790,10 @@ async fn finish_foreground(
     }
     #[cfg(windows)]
     {
-        // A managed host completion is also a verified cleanup boundary. A
-        // shell can exit after detaching descendants with redirected output;
-        // pipe EOF and the leader's exit alone do not prove the Job is empty.
-        let active = deadline
-            .job
-            .as_ref()
-            .ok_or_else(|| ProcessError::Io("host shell has no held payload job".into()))?
-            .active_processes()?;
-        if active != 0 {
-            terminate_and_reap(deadline, child, guard).await?;
-        }
+        // EOF and the leader's exit are not a descendant-lifetime proof,
+        // even when Job accounting has already reached zero. Attempt the
+        // requested group termination and propagate its unverified result.
+        terminate_and_reap(deadline, child, guard).await?;
     }
     deadline.completed_foreground()
 }
@@ -2053,6 +2046,33 @@ mod native_background_stop_tests {
         held_exited(&held).await;
         // This test happens to hold one descendant, but production still has
         // no proof that all possible descendants were captured.
+        assert_eq!(sink.cleanups.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn strict_foreground_eof_does_not_manufacture_group_cleanup_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = Arc::new(Sink::default());
+        let command = command_with_script(
+            dir.path(),
+            sink.clone(),
+            std::time::Duration::from_secs(30),
+            "[Console]::Out.Write('completed'); exit 0",
+        );
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            run(&command, None, false),
+        )
+        .await
+        .expect("strict foreground did not settle")
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("no complete descendant handle proof"),
+            "{error}"
+        );
+        assert!(sink.exits.lock().unwrap().is_empty());
+        assert!(sink.proofs.lock().unwrap().is_empty());
         assert_eq!(sink.cleanups.load(Ordering::SeqCst), 0);
     }
 
