@@ -1151,6 +1151,7 @@ async fn dispatch(
                     command,
                     body,
                     hook_messages,
+                    skill,
                 } => {
                     if cancel.is_cancelled() {
                         emit_cancelled_slash_result(side, turn_id).await;
@@ -1181,7 +1182,7 @@ async fn dispatch(
                     }
                     side.replay.emit(ClientEvent::TurnStarted { turn_id }).await;
                     let mut inputs =
-                        orchestrator::skill_prompt_inputs(command, body, hook_messages);
+                        orchestrator::skill_prompt_inputs(command, body, hook_messages, skill);
                     if let Some(input) = inputs.iter_mut().find(|input| !input.is_meta) {
                         input.images = image_sources;
                     }

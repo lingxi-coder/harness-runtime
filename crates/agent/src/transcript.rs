@@ -1692,8 +1692,37 @@ impl AgentTranscriptWriter {
         message: &mut ConversationMessage,
         prior_history: &[ConversationMessage],
     ) -> Result<(), lingxi_core::host::FsError> {
+        self.record_retained_if(message, prior_history, None, |_| true).await.map(|_| ())
+    }
+
+    /// Commit a retained row only if it remains admissible after the append
+    /// hook has produced its accepted body and the journal lock is held. The
+    /// successful check grants a commit permit: later cancellation does not
+    /// revoke a started append, whose caller must publish the accepted row.
+    pub(crate) async fn record_retained_if(
+        &self,
+        message: &mut ConversationMessage,
+        prior_history: &[ConversationMessage],
+        publication_gate: Option<Arc<tokio::sync::Mutex<()>>>,
+        admissible: impl FnOnce(&ConversationMessage) -> bool,
+    ) -> Result<(bool, Option<tokio::sync::OwnedMutexGuard<()>>), lingxi_core::host::FsError> {
         let row_id = message.id();
         let entry = self.resolve_retained_row(message, prior_history).await?;
+        // Acquiring the journal precedes the admission check. Once the check
+        // succeeds this append owns an irrevocable commit permit: cancellation
+        // observed while waiting for the lock wins, while cancellation after
+        // this point leaves this write and its in-memory publication to finish.
+        let _journal = self.journal_lock.lock().await;
+        // The pool takes this same gate after requesting cancellation and
+        // before hard-aborting the runner. Return the permit to the caller so
+        // it remains held until durable and in-memory publication both finish.
+        let publication_permit = match publication_gate {
+            Some(gate) => Some(gate.lock_owned().await),
+            None => None,
+        };
+        if !admissible(&entry.message) {
+            return Ok((false, None));
+        }
         *message = entry.message.clone();
         let selection = self.model_selection();
         let transcript_entry = TranscriptEntry {
@@ -1718,8 +1747,9 @@ impl AgentTranscriptWriter {
                 .as_ref()
                 .map(|attachment| attachment.uuid.clone()),
         };
-        self.append_transcript_entry(&transcript_entry, entry.source_attachment.as_ref())
-            .await?;
+        let projection = transcript_entry_projection(&transcript_entry, entry.source_attachment.as_ref())
+            .map_err(|_| attachment_io("transcript exact UTF-16 projection is invalid"))?;
+        self.append_projection_locked(projection).await?;
         if transcript_entry.source_attachment.is_some() {
             if let Some(entry) = self
                 .appended_rows
@@ -1738,7 +1768,12 @@ impl AgentTranscriptWriter {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&row_id);
         }
-        Ok(())
+        Ok((true, publication_permit))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn journal_lock_for_test(&self) -> &tokio::sync::Mutex<()> {
+        &self.journal_lock
     }
 
     async fn resolve_retained_row(
@@ -3026,6 +3061,42 @@ mod tests {
             "attachment and row dispatch once each"
         );
         assert_eq!(entry.agent_id, agent_id);
+    }
+
+    #[tokio::test]
+    async fn retained_row_condition_runs_after_mod_rewrite_before_durable_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("guarded-append.js");
+        std::fs::write(&module, r#"export function register(on) {
+  on('session.append', ($, e, next) => next({ ...e, message: { ...e.message,
+    content: [{ type: 'text', text: 'accepted rewrite' }] } }));
+}"#).unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        host.load("guarded-append", dir.path(), &module,
+            Utf16JsonProjection::from_serde_value(&serde_json::json!({})).unwrap()).await.unwrap();
+        let mut registry = hooks::HookRegistry::new();
+        registry.set_mod_host(host);
+        let executor = Arc::new(hooks::HookExecutorImpl::new(
+            Arc::new(tokio::sync::RwLock::new(registry)),
+            Arc::new(test_harness::mocks::MockHttpTransport::new()),
+            Arc::new(test_harness::mocks::MockRuntimeSpawner::default()),
+        ));
+        let path = dir.path().join("guarded.jsonl");
+        let writer = AgentTranscriptWriter::new(path.clone(), AgentId::new(),
+            Arc::new(platform_posix::PosixFileSystem::new(dir.path().to_path_buf())))
+            .with_mod_append(Some(executor), dir.path().to_path_buf(), Some("test-model".into()));
+        let mut message = ConversationMessage::user(MessageId::new(), "original".into());
+        let accepted = writer.record_retained_if(&mut message, &[], None, |rewritten| {
+            assert_eq!(rewritten.text_content(), "accepted rewrite");
+            false
+        }).await.unwrap().0;
+        assert!(!accepted);
+        assert!(!path.exists());
+        assert!(writer.record_retained_if(&mut message, &[], None, |_| true).await.unwrap().0);
+        assert_eq!(message.text_content(), "accepted rewrite");
+        let raw = std::fs::read_to_string(path).unwrap();
+        assert_eq!(raw.lines().count(), 1);
+        assert!(raw.contains("accepted rewrite"));
     }
 
     #[tokio::test]

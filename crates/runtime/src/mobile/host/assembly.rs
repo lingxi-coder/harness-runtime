@@ -4080,6 +4080,7 @@ fn build_mobile_engine_on_worker(
                                         images: Vec::new(),
                                         is_meta: true,
                                         turn_companion: false,
+                                        skill_identity: None,
                                         trailing_history_rows: Vec::new(),
                                         message_id: None,
                                         pending_prompt_identity: None,
@@ -4194,6 +4195,7 @@ fn build_mobile_engine_on_worker(
         settings_write_lock,
         session_lifecycle_tx,
         fs,
+        initialized_session_anchor: Mutex::new(None),
         firer_cfg,
         firer_platform,
     });

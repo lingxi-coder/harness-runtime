@@ -460,12 +460,16 @@ pub(super) fn process_visible_response<'a>(
                     Arc::new(publication_fence.clone());
                 let injected_ids = result_injected
                     .iter()
+                    .filter(|(message, _)| !compaction::invoked_skills::is_individual_skill_activation(message))
                     .map(|(message, _)| message.id())
                     .collect::<Vec<_>>();
                 let append_rows = async {
                     let mut s = orch.session.lock().await;
                     s.history.push(tool_result_msg.clone());
                     for (message, source_id) in &result_injected {
+                        if compaction::invoked_skills::is_individual_skill_activation(message) {
+                            continue;
+                        }
                         s.history.push(message.clone());
                         s.injected_message_sources
                             .insert(message.id(), source_id.clone());
@@ -503,7 +507,8 @@ pub(super) fn process_visible_response<'a>(
                 // by compaction or retry cleanup.
                 orch.note_query_user_event();
                 for (message, _) in &result_injected {
-                    if matches!(message, ConversationMessage::User { .. }) {
+                    if matches!(message, ConversationMessage::User { .. })
+                        && !compaction::invoked_skills::is_individual_skill_activation(message) {
                         orch.note_query_user_event();
                     }
                 }
@@ -552,8 +557,18 @@ pub(super) fn process_visible_response<'a>(
                     // Wrapping the whole flush would re-enter the same lease.
                     orch.flush_hook_attachments(id).await;
                 }
-                for (message, _) in &result_injected {
-                    if !message.is_meta() {
+                for (message, source_id) in &result_injected {
+                    if compaction::invoked_skills::is_individual_skill_activation(message) {
+                        if !orch.append_committed_tool_skill(message, source_id.clone(), Some(Arc::new(publication_fence.clone()))).await {
+                            return Ok(TurnStepOutcome::Ended {
+                                final_message_id: assistant_id,
+                                stop_reason: "end_turn".into(),
+                                allow_budget_continuation: false,
+                                tool_requested_end: false,
+                            });
+                        }
+                        orch.note_query_user_event();
+                    } else if !message.is_meta() {
                         boxed_turn_future(|| {
                             orch.persist_guarded_message_to_jsonl_with_parent(
                                 message,

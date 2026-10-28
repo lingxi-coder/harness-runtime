@@ -896,6 +896,9 @@ pub struct ResumeRuntimeSnapshot {
     /// Resume consumers must adopt it as-is and never create one while
     /// replaying a session.
     pub prompt_snapshot: Option<PromptSnapshot>,
+    /// Admitted profile epoch of the captured prompt state. This is runtime
+    /// resume metadata, not a persisted or client-facing wire field.
+    pub prompt_snapshot_epoch: Option<u64>,
     /// Routing hint from the latest raw prompt-snapshot attachment. This is
     /// independent of the last valid static-prefix snapshot: an invalid latest
     /// attachment cannot resurrect an older inline context hint.

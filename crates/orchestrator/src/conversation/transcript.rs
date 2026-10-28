@@ -3139,6 +3139,9 @@ impl ConversationOrchestrator {
         source_id: lingxi_core::types::ToolUseId,
         publication_guard: Arc<dyn HookPublicationGuard>,
     ) -> bool {
+        if compaction::invoked_skills::is_individual_skill_activation(message) {
+            return self.append_committed_tool_skill(message, source_id, Some(publication_guard)).await;
+        }
         if !publication_guard.is_current() {
             return false;
         }
@@ -3192,6 +3195,44 @@ impl ConversationOrchestrator {
             .await;
         };
         publication_guard.commit_if_current(Box::pin(commit)).await
+    }
+
+    /// Accept a trusted Skill tool row and make its activation effective in
+    /// the same generation lease as its durable write and history publication.
+    pub(crate) async fn append_committed_tool_skill(
+        &self,
+        message: &ConversationMessage,
+        source_id: lingxi_core::types::ToolUseId,
+        guard: Option<Arc<dyn HookPublicationGuard>>,
+    ) -> bool {
+        if guard.as_ref().is_some_and(|guard| !guard.is_current()) { return false; }
+        let accepted = self.mod_session_append_row(message, None, false, guard.clone()).await;
+        if guard.as_ref().is_some_and(|guard| !guard.is_current()) { return false; }
+        let mut committed = false;
+        let remember_guard = guard.clone();
+        let commit = async {
+            let session_id = self.session.lock().await.session_id.to_string();
+            let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
+            if !compaction::invoked_skills::is_current_individual_skill_activation(&accepted, scope) { return; }
+            if self.persist_message_to_jsonl_inner_with_pending_prompt_identity(
+                &accepted, None, None, false, None, None, true, None,
+            ).await.is_err() { return; }
+            {
+                let mut session = self.session.lock().await;
+                session.history.push(accepted.clone());
+                session.injected_message_sources.insert(accepted.id(), source_id);
+            }
+            if let Some(guard) = remember_guard {
+                self.prompt_runtime.remember_guarded_prompt_message(accepted.id(), guard).await;
+            }
+            committed = compaction::invoked_skills::register_accepted_skill_message(&accepted, scope);
+        };
+        if let Some(guard) = guard {
+            guard.commit_if_current(Box::pin(commit)).await;
+        } else {
+            commit.await;
+        }
+        committed
     }
 
     /// Run the stream append bridge and return the accepted row that Native's
@@ -3263,8 +3304,39 @@ impl ConversationOrchestrator {
         parent_override: Option<String>,
         timestamp: &str,
         publication_guard: Option<std::sync::Arc<dyn HookPublicationGuard>>,
-    ) {
+        source_id: Option<lingxi_core::types::ToolUseId>,
+    ) -> bool {
         let sanitized = redact_ephemeral_tool_result_images(stored);
+        if compaction::invoked_skills::is_individual_skill_activation(&sanitized) {
+            let mut committed = false;
+            let remember_guard = publication_guard.clone();
+            let commit = async {
+                let session_id = self.session.lock().await.session_id.to_string();
+                let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
+                if !compaction::invoked_skills::is_current_individual_skill_activation(&sanitized, scope) { return; }
+                if self.persist_message_to_jsonl_inner_with_pending_prompt_identity(
+                    &sanitized, parent_override, None, false, None,
+                    Some(PreappendedRowMetadata { timestamp, api_error: None }), false, None,
+                ).await.is_err() { return; }
+                {
+                    let mut session = self.session.lock().await;
+                    session.history.push(sanitized.clone());
+                    if let Some(source_id) = source_id {
+                        session.injected_message_sources.insert(sanitized.id(), source_id);
+                    }
+                }
+                if let Some(guard) = remember_guard {
+                    self.prompt_runtime.remember_guarded_prompt_message(sanitized.id(), guard).await;
+                }
+                committed = compaction::invoked_skills::register_accepted_skill_message(&sanitized, scope);
+            };
+            if let Some(guard) = publication_guard {
+                guard.commit_if_current(Box::pin(commit)).await;
+            } else {
+                commit.await;
+            }
+            return committed;
+        }
         let persist = self.persist_message_to_jsonl_inner_with_queue_metadata(
             &sanitized,
             parent_override,
@@ -3278,9 +3350,10 @@ impl ConversationOrchestrator {
             false,
         );
         if let Some(guard) = publication_guard {
-            guard.commit_if_current(Box::pin(persist)).await;
+            guard.commit_if_current(Box::pin(persist)).await
         } else {
             persist.await;
+            true
         }
     }
 
@@ -3324,6 +3397,22 @@ impl ConversationOrchestrator {
             false,
         )
         .await;
+    }
+
+    /// Persist a Skill companion before activating it, and return the body
+    /// accepted by `session.append`. A configured writer failure aborts this
+    /// admission rather than making an uncommitted body effective.
+    pub(super) async fn persist_admitted_skill_prompt(
+        &self,
+        msg: &ConversationMessage,
+        input: &QueuedPromptInput,
+    ) -> Result<ConversationMessage, OrchestratorError> {
+        let sanitized = redact_ephemeral_tool_result_images(msg);
+        self.persist_message_to_jsonl_inner_with_pending_prompt_identity(
+            &sanitized, None, None, false, Some(input), None, false, None,
+        )
+        .await?
+        .ok_or_else(|| OrchestratorError::Internal("Skill admission produced no accepted row".into()))
     }
 
     /// Append a checkpointed user row by its stable pending-prompt identity.
@@ -4260,7 +4349,11 @@ impl ConversationOrchestrator {
         let rewritten = if preappended.is_some() || session_append_preaccepted {
             msg.clone()
         } else {
-            self.mod_session_append_row(msg, None, true, None).await
+            // Skill companions are published only after their append succeeds.
+            // In particular, a pending retry must not rewrite an already-live
+            // row before its idempotent durable append has been accepted.
+            let update_history = !queued_input.is_some_and(|input| input.skill_identity.is_some());
+            self.mod_session_append_row(msg, None, update_history, None).await
         };
         let compact_summary_content =
             compact_summary_content_source_if_unmodified(msg, &rewritten, compact_summary);
@@ -4305,7 +4398,7 @@ impl ConversationOrchestrator {
                     "pending prompt append requires a durable transcript writer".into(),
                 ))
             } else {
-                Ok(None)
+                Ok(Some(rewritten))
             };
         };
         let (session_id_str, plan_mode, parent_uuid) = {
@@ -4645,6 +4738,14 @@ impl ConversationOrchestrator {
                 if pending_prompt_id.is_some() {
                     return Err(OrchestratorError::Internal(format!(
                         "pending prompt transcript append failed: {error}"
+                    )));
+                }
+                if queued_input.is_some_and(|input| input.skill_identity.is_some())
+                    || compaction::invoked_skills::is_individual_skill_activation(msg) {
+                    self.record_transcript_append_failure(&session_id_str, "message", &error)
+                        .await;
+                    return Err(OrchestratorError::Internal(format!(
+                        "Skill prompt transcript append failed: {error}"
                     )));
                 }
                 self.record_transcript_append_failure(&session_id_str, "message", &error)

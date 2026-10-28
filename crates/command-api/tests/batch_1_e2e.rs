@@ -137,6 +137,7 @@ async fn init_dispatch_preserves_native_prompt_envelope_and_locked_template() {
             command,
             body,
             hook_messages,
+            ..
         } => {
             assert_eq!(
                 command.string_at(""),

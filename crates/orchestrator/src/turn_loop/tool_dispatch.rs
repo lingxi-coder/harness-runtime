@@ -7024,7 +7024,12 @@ async fn dispatch_tool_uses_tracked_deferred_core_impl(
                     result
                         .new_messages
                         .into_iter()
-                        .map(|m| (m, tool_use_id.clone())),
+                        .map(|mut m| {
+                            if name != "Skill" {
+                                compaction::invoked_skills::clear_untrusted_skill_origin(&mut m);
+                            }
+                            (m, tool_use_id.clone())
+                        }),
                 );
                 // SKILLEXEC.3 (model scope): stash any one-shot `context_modifier`
                 // for the caller to fold POST-BATCH. NOT applied to the per-tool

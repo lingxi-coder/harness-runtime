@@ -343,6 +343,7 @@ async fn doctor_dispatch() {
         command,
         body,
         hook_messages,
+            ..
     } = r
     else {
         panic!("Native /doctor is a bundled prompt, got {r:?}");

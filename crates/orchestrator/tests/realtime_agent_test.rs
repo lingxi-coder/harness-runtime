@@ -263,6 +263,7 @@ async fn fixture_with_completion(
         Arc::new(StaticMemoryProvider::empty()),
         std::path::PathBuf::from("/work/realtime"),
     ));
+    ConversationOrchestrator::bind_streaming_tool_dispatch_owner(&orch);
     orch.session().lock().await.model_profile = Some("exact-profile".into());
     (orch, calls)
 }

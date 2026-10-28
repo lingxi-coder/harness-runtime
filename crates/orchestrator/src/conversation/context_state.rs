@@ -12,6 +12,11 @@ use lingxi_core::host::session_context::{
 use lingxi_core::types::ConversationMessage;
 use sha2::{Digest, Sha256};
 
+/// A query and its detached profile-admission transaction jointly own this
+/// lease. Dropping the caller cannot release the turn gate before admission
+/// has finished durable and live publication.
+pub(crate) type ProfileTurnGuard = std::sync::Arc<tokio::sync::OwnedMutexGuard<()>>;
+
 #[derive(Default)]
 pub(crate) struct ConversationContextRuntime {
     state: SessionModeSnapshot,
@@ -158,10 +163,10 @@ mod tests {
             compaction::Autocompactor::with_forked_runner(runner, slot.clone()),
             u64::MAX,
         ));
-        let orch = orchestrator()
+        let orch = ConversationOrchestrator::into_shared(orchestrator()
             .with_conversation_mode(ConversationMode::Code)
             .with_cache_safe_slot(slot.clone())
-            .with_compaction(compactor);
+            .with_compaction(compactor));
         let retired = ConversationMessage::user_meta(MessageId::new(), "old skill body".into())
             .with_origin(compaction::invoked_skills::skill_activation_origin(0));
         let answer = |text: &str| ConversationMessage::Assistant {
@@ -241,10 +246,10 @@ mod tests {
         use lingxi_llm_client::providers::anthropic::system_prompt::SystemPromptInput;
 
         let captured = Arc::new(CaptureForkRequests::default());
-        let orch = orchestrator()
+        let orch = ConversationOrchestrator::into_shared(orchestrator()
             .with_conversation_mode(ConversationMode::Code)
             .with_fork_spawner(captured.clone())
-            .with_fork_budget(Arc::new(ForkBudget));
+            .with_fork_budget(Arc::new(ForkBudget)));
         let retired = ConversationMessage::user_meta(MessageId::new(), "old skill body".into())
             .with_origin(compaction::invoked_skills::skill_activation_origin(0));
         let user = ConversationMessage::user(MessageId::new(), "question".into());
@@ -582,7 +587,7 @@ mod tests {
             .unwrap();
         assert_eq!(compaction::invoked_skills::filter_for_scope(scope).len(), 1);
         let turn = recovered.turn_gate.lock().await;
-        recovered.admit_conversation_profile().await.unwrap();
+        recovered.admit_conversation_profile_inner().await.unwrap();
         drop(turn);
         assert!(compaction::invoked_skills::filter_for_scope(scope).is_empty());
         assert!(!recovered
@@ -644,6 +649,7 @@ mod tests {
             "/keep".into(),
             "keep".into(),
             Vec::new(),
+            Some(lingxi_core::host::SlashSkillIdentity { name: "keep".into(), path: "/skills/keep".into() }),
         )
         .remove(1);
         let skill_id = MessageId::new();
@@ -658,7 +664,7 @@ mod tests {
         std::fs::rename(&path, &backup).unwrap();
         std::fs::create_dir(&path).unwrap();
         let turn = orch.turn_gate.lock().await;
-        assert!(orch.admit_conversation_profile().await.is_err());
+        assert!(orch.admit_conversation_profile_inner().await.is_err());
         let current = orch.conversation_profile().await;
         assert_eq!(
             (current.active, current.selected, current.pending),
@@ -680,7 +686,7 @@ mod tests {
         );
         std::fs::remove_dir(&path).unwrap();
         std::fs::rename(&backup, &path).unwrap();
-        orch.admit_conversation_profile().await.unwrap();
+        orch.admit_conversation_profile_inner().await.unwrap();
         drop(turn);
         assert!(
             !writer
@@ -741,7 +747,7 @@ mod tests {
         assert_eq!(orch.profile_epoch().await, 0);
         drop(turn);
         let _turn = orch.turn_gate.lock().await;
-        orch.admit_conversation_profile().await.unwrap();
+        orch.admit_conversation_profile_inner().await.unwrap();
         assert_eq!(orch.profile_epoch().await, 0);
         assert_eq!(
             orch.conversation_profile().await.active,
@@ -784,6 +790,7 @@ mod tests {
             false,
             permission::PermissionMode::Default,
             profile,
+            &source,
         )
         .await
         .unwrap();
@@ -812,7 +819,7 @@ mod tests {
             .any(|skill| skill.name.string_at("") == Some("current")));
 
         let _turn = orch.turn_gate.lock().await;
-        orch.admit_conversation_profile().await.unwrap();
+        orch.admit_conversation_profile_inner().await.unwrap();
         assert_eq!(
             orch.conversation_profile().await.active,
             ConversationMode::Code
@@ -1025,7 +1032,7 @@ impl ConversationOrchestrator {
         context.state.revision = revision;
         context.state.pending = transition_record.pending;
         if apply_now {
-            self.reset_profile_projection(&session_id, selected_epoch, true)
+            self.reset_profile_projection(&session_id, selected_epoch, true, false)
                 .await;
             context.active_epoch = selected_epoch;
             context.state.active = mode;
@@ -1122,7 +1129,7 @@ impl ConversationOrchestrator {
             || (!compaction::invoked_skills::filter_for_scope(registry_scope).is_empty()
                 && compaction::invoked_skills::context_epoch(registry_scope)
                     != profile.active_epoch);
-        self.reset_profile_projection(&session_id, profile.active_epoch, retire)
+        self.reset_profile_projection(&session_id, profile.active_epoch, retire, true)
             .await;
         self.restore_effective_skill_activations(profile.active_epoch)
             .await;
@@ -1143,7 +1150,50 @@ impl ConversationOrchestrator {
     }
 
     /// Called once per admitted outer query, before any prompt is assembled.
-    pub(crate) async fn admit_conversation_profile(&self) -> Result<(), HandleError> {
+    pub(crate) async fn admit_conversation_profile(
+        &self,
+        turn_guard: &ProfileTurnGuard,
+    ) -> Result<(), HandleError> {
+        let Some(owner) = self.upgrade_streaming_tool_dispatch_owner() else {
+            // An unshared value may run an unchanged profile, but cannot
+            // start a durable transition that would outlive a dropped caller.
+            let _transition = self.conversation_transition.lock().await;
+            let mut context = self.conversation_context.lock().await;
+            let session_id = self.current_session_id().await;
+            context.bind(session_id.as_uuid().to_string());
+            if context.state.pending {
+                return Err(HandleError::ActionFailed(
+                    "conversation profile admission requires a shared orchestrator owner".into(),
+                ));
+            }
+            let scope_id = session_id.to_string();
+            compaction::invoked_skills::set_context_epoch(
+                compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&scope_id), None),
+                context.active_epoch,
+            );
+            return Ok(());
+        };
+        let claim = self.lifecycle_runtime.session_switch_supervisor.claim()
+            .map_err(HandleError::ActionFailed)?;
+        let turn_guard = turn_guard.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _turn_guard = turn_guard;
+            let result = owner.admit_conversation_profile_inner().await;
+            match tx.send(result) {
+                Ok(()) => claim.complete(None),
+                Err(result) => claim.complete(result.err().map(|error| {
+                    format!("detached conversation profile admission failed: {error}")
+                })),
+            }
+        });
+        rx.await.map_err(|_| HandleError::ActionFailed(
+            "conversation profile admission task failed".into(),
+        ))?
+    }
+
+    /// Called only with the turn gate held by the admission owner.
+    pub(crate) async fn admit_conversation_profile_inner(&self) -> Result<(), HandleError> {
         let transition = self.conversation_transition.lock().await;
         let session_id = self.current_session_id().await.as_uuid().to_string();
         let mut context = self.conversation_context.lock().await;
@@ -1219,7 +1269,7 @@ impl ConversationOrchestrator {
                         ))
                     })?;
             }
-            self.reset_profile_projection(&session_id, context.selected_epoch, true)
+            self.reset_profile_projection(&session_id, context.selected_epoch, true, false)
                 .await;
             context.active_epoch = context.selected_epoch;
             context.state.active = context.state.selected;
@@ -1235,7 +1285,13 @@ impl ConversationOrchestrator {
 
     /// The caller owns turn_gate. Permission grants and existing background
     /// owners are independent of this model-context transition.
-    async fn reset_profile_projection(&self, _session_id: &str, epoch: u64, retire: bool) {
+    async fn reset_profile_projection(
+        &self,
+        _session_id: &str,
+        epoch: u64,
+        retire: bool,
+        preserve_matching_prompt: bool,
+    ) {
         // The cached prefix contains both profile instructions and skill
         // messages. Side queries can consume it without rebuilding history, so
         // it must not outlive the profile that produced it.
@@ -1311,16 +1367,23 @@ impl ConversationOrchestrator {
                 .collect::<Vec<_>>();
             session.model_context_excluded_messages.extend(obsolete);
         }
-        *self.prompt_runtime.prompt_snapshot.lock().await = None;
+        let snapshot_epoch = *self.prompt_runtime.prompt_snapshot_epoch.lock().await;
+        if !preserve_matching_prompt || snapshot_epoch.unwrap_or(0) != epoch {
+            *self.prompt_runtime.prompt_snapshot.lock().await = None;
+            *self.prompt_runtime.context_rendering_hint.lock().await = None;
+            *self.prompt_runtime.prompt_snapshot_epoch.lock().await = None;
+        }
         *self.prompt_runtime.current_turn_system_prompt.lock().await = None;
         *self
             .prompt_runtime
             .pending_prompt_source_vector
             .lock()
             .await = None;
-        self.prompt_runtime
-            .prompt_snapshot_resume
-            .store(false, std::sync::atomic::Ordering::Release);
+        if !preserve_matching_prompt {
+            self.prompt_runtime
+                .prompt_snapshot_resume
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
         let mut cache = self.prompt_runtime.mod_prompt_sections.lock().await;
         cache.generation = cache.generation.wrapping_add(1);
         cache.context = None;
@@ -1347,36 +1410,13 @@ impl ConversationOrchestrator {
         input: &super::QueuedPromptInput,
         message: &mut ConversationMessage,
     ) {
-        if !input.turn_companion {
-            return;
-        }
+        let Some(skill) = input.skill_identity.as_ref() else { return; };
         let session_id = self.current_session_id().await.to_string();
         let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
         let epoch = compaction::invoked_skills::context_epoch(scope);
-        let mut activation = input
-            .message_origin
-            .clone()
-            .filter(|source| source.string_at("/type") == Some("skill_activation"))
-            .unwrap_or_else(|| compaction::invoked_skills::skill_activation_origin(epoch));
-        activation
-            .set_field(
-                "context_epoch",
-                lingxi_core::types::utf16_json::Utf16JsonProjection::from_serde_value(
-                    &serde_json::json!(epoch),
-                )
-                .expect("epoch is exact source JSON"),
-            )
-            .expect("host metadata is an object");
-        if let Ok(name) = activation.subprojection("/skill_name") {
-            compaction::invoked_skills::register_activation_with_message(
-                &name,
-                std::path::Path::new(""),
-                &input.text,
-                Some(&input.text),
-                scope,
-                message.id(),
-            );
-        }
+        let activation = compaction::invoked_skills::skill_activation_origin_with_skill(
+            epoch, &skill.name, &skill.path,
+        );
         if let ConversationMessage::User { origin, .. } = message {
             *origin = Some(activation);
         }
@@ -1396,6 +1436,7 @@ impl ConversationOrchestrator {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         for message in history {
+            let accepted_message = message.clone();
             let ConversationMessage::User {
                 id,
                 content,
@@ -1421,6 +1462,9 @@ impl ConversationOrchestrator {
                 continue;
             }
             if let Ok(name) = origin.subprojection("/skill_name") {
+                if compaction::invoked_skills::register_accepted_skill_message(&accepted_message, scope) {
+                    continue;
+                }
                 let units = content
                     .iter()
                     .flat_map(|block| match block {
@@ -1448,11 +1492,11 @@ impl ConversationOrchestrator {
                         let path = origin
                             .string_at(&format!("/skills/{index}/path"))
                             .unwrap_or("");
-                        compaction::invoked_skills::register_activation_with_message(
+                        compaction::invoked_skills::register_restored_skill(
                             &name,
                             std::path::Path::new(path),
                             body,
-                            None,
+                            origin.string_at(&format!("/skills/{index}/definition_sha256")),
                             scope,
                             id,
                         );

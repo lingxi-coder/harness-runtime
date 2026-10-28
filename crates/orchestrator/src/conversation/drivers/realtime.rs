@@ -698,10 +698,10 @@ impl ConversationOrchestrator {
     /// Prepare current Agent history and tool policy for an SDK native connector.
     pub async fn prepare_realtime_agent(&self) -> Result<RealtimeAgentContext, OrchestratorError> {
         self.cancel_idle_compaction();
-        let _gate = self.turn_gate.lock().await;
+        let gate = Arc::new(self.turn_gate.clone().lock_owned().await);
         // Realtime preparation is a query boundary: a profile chosen during a
         // previous turn must be admitted before capturing history or prompts.
-        self.admit_conversation_profile().await?;
+        self.admit_conversation_profile(&gate).await?;
         self.refresh_effective_skill_projection().await?;
         let conversation_mode = self.conversation_profile().await;
         let conversation_profile_epoch = self.profile_epoch().await;
@@ -950,11 +950,11 @@ impl ConversationOrchestrator {
             return Err(failure("native realtime resource limits must be positive"));
         }
         self.cancel_idle_compaction();
-        let _gate = tokio::select! {biased;_ = session_cancel.cancelled()=>return Ok(RealtimeAgentEnd::Cancelled),gate=self.turn_gate.lock()=>gate};
+        let gate = tokio::select! {biased;_ = session_cancel.cancelled()=>return Ok(RealtimeAgentEnd::Cancelled),gate=self.turn_gate.clone().lock_owned()=>Arc::new(gate)};
         // Connector creation happens outside the gate. Admit any queued mode
         // selection first, then reject a context captured for another profile.
         // The guard closes already-opened realtime IO on this error path.
-        self.admit_conversation_profile().await?;
+        self.admit_conversation_profile(&gate).await?;
         self.refresh_effective_skill_projection().await?;
         if self.conversation_profile().await != prepared.conversation_mode
             || self.profile_epoch().await != prepared.conversation_profile_epoch

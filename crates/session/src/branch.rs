@@ -99,6 +99,31 @@ pub async fn create_branch(
         source_session_id,
         custom_title,
         None,
+        None,
+        fs,
+    )
+    .await
+}
+
+/// Branch the exact transcript already selected by the caller, while placing
+/// the new branch in the current workspace. The caller validates the path and
+/// protects the source session against concurrent writers.
+pub async fn create_branch_from_path(
+    lingxi_home: &Path,
+    cwd: &str,
+    source_session_id: Uuid,
+    source_path: &Path,
+    custom_title: Option<&str>,
+    fs: Arc<dyn FileSystem>,
+) -> Result<BranchResult, BranchError> {
+    create_branch_in(
+        lingxi_home,
+        cwd,
+        cwd,
+        source_session_id,
+        custom_title,
+        None,
+        Some(source_path),
         fs,
     )
     .await
@@ -127,6 +152,7 @@ pub async fn create_branch_with_mode(
         source_session_id,
         custom_title,
         Some(mode),
+        None,
         fs,
     )
     .await
@@ -167,6 +193,7 @@ pub async fn create_branch_to_cwd(
         source_session_id,
         custom_title,
         None,
+        None,
         fs,
     )
     .await
@@ -179,11 +206,14 @@ async fn create_branch_in(
     source_session_id: Uuid,
     custom_title: Option<&str>,
     mode: Option<crate::jsonl::SessionMode>,
+    source_path: Option<&Path>,
     fs: Arc<dyn FileSystem>,
 ) -> Result<BranchResult, BranchError> {
     let cwd = source_cwd;
     // 1. Read the current transcript. Missing / empty ⇒ nothing to branch.
-    let src_path = session_path(lingxi_home, cwd, &source_session_id.to_string());
+    let src_path = source_path.map(Path::to_path_buf).unwrap_or_else(|| {
+        session_path(lingxi_home, cwd, &source_session_id.to_string())
+    });
     let content = match tokio::fs::read_to_string(&src_path).await {
         Ok(c) if !c.trim().is_empty() => c,
         Ok(_) => return Err(BranchError::NoConversation),
@@ -359,7 +389,7 @@ async fn create_branch_in(
     //    dir already exists (it holds the source we just read). Cross-cwd:
     //    a fresh app workspace has no catalog dir yet — create it.
     let dst_path = session_path(lingxi_home, target_cwd, &new_sid);
-    if target_cwd != source_cwd {
+    if target_cwd != source_cwd || src_path.parent() != dst_path.parent() {
         if let Some(parent_dir) = dst_path.parent() {
             tokio::fs::create_dir_all(parent_dir)
                 .await

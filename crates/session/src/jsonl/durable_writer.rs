@@ -309,9 +309,9 @@ impl<R: Read> Read for MetadataReader<'_, R> {
 }
 
 impl DurableTranscriptWriter {
-    /// Revert an unacknowledged profile selection while the transaction owns
+    /// Revert an unacknowledged durable append while the transaction owns
     /// the transcript lock. Failure stays explicit if rollback cannot sync.
-    fn rollback_mode_selection(
+    fn rollback_undurable_append(
         &self,
         file: &mut std::fs::File,
         previous_len: u64,
@@ -325,7 +325,7 @@ impl DurableTranscriptWriter {
         let message = match rollback {
             Ok(()) => error,
             Err(rollback) => {
-                format!("{error}; restoring the previous mode record failed: {rollback}")
+                format!("{error}; restoring the previous transcript failed: {rollback}")
             }
         };
         TranscriptWriterError::WrittenButNotDurable(FsError::Io(message))
@@ -611,9 +611,16 @@ impl DurableTranscriptWriter {
         // only after the UUID duplicate check, while the same transaction is
         // held, so a retry can keep the original parent even after later
         // messages were appended.
-        let needs_parent = payload
-            .at_pointer("/parentUuid")
-            .is_none_or(|parent| parent.is_null());
+        let exact_boundary = payload.string_at("/type") == Some("system")
+            && payload.string_at("/subtype") == Some("compact_boundary")
+            && payload
+                .at_pointer("/compactMetadata/nativeExactPreserved")
+                .and_then(|value| value.as_bool())
+                == Some(true);
+        let needs_parent = !exact_boundary
+            && payload
+                .at_pointer("/parentUuid")
+                .is_none_or(|parent| parent.is_null());
         if needs_parent {
             let parent = last_uuid.map_or_else(
                 || Utf16JsonProjection::parse("null").expect("null is valid JSON"),
@@ -650,21 +657,46 @@ impl DurableTranscriptWriter {
             transcript_relative,
             Some(transcript_identity),
         )?;
+        let exact_previous_len = if exact_boundary {
+            Some(
+                file.metadata()
+                    .map_err(|error| FsError::Io(error.to_string()))?
+                    .len(),
+            )
+        } else {
+            None
+        };
         self.append_complete_line(&mut file, &line)?;
         #[cfg(test)]
         if self
             .fail_next_append_sync
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
+            if let Some(previous_len) = exact_previous_len {
+                return Err(self.rollback_undurable_append(
+                    &mut file,
+                    previous_len,
+                    "synthetic written transcript sync failure".into(),
+                ));
+            }
             return Err(TranscriptWriterError::WrittenButNotDurable(FsError::Io(
                 "synthetic written transcript sync failure".into(),
             )));
         }
         #[cfg(test)]
         self.syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        file.sync_all().map_err(|error| {
-            TranscriptWriterError::WrittenButNotDurable(FsError::Io(error.to_string()))
-        })?;
+        if let Err(error) = file.sync_all() {
+            if let Some(previous_len) = exact_previous_len {
+                return Err(self.rollback_undurable_append(
+                    &mut file,
+                    previous_len,
+                    error.to_string(),
+                ));
+            }
+            return Err(TranscriptWriterError::WrittenButNotDurable(FsError::Io(
+                error.to_string(),
+            )));
+        }
         if !file_present {
             #[cfg(test)]
             self.syncs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -673,7 +705,12 @@ impl DurableTranscriptWriter {
                 transcript_relative,
                 Some(transcript_identity),
             )
-            .map_err(TranscriptWriterError::WrittenButNotDurable)?;
+            .map_err(|error| match exact_previous_len {
+                Some(previous_len) => {
+                    self.rollback_undurable_append(&mut file, previous_len, error.to_string())
+                }
+                None => TranscriptWriterError::WrittenButNotDurable(error),
+            })?;
         }
         Ok((TranscriptAppendOutcome::Appended, Some(message_uuid)))
     }
@@ -1039,7 +1076,7 @@ impl DurableTranscriptTransaction<'_> {
                 // The selection was not acknowledged. While still holding the
                 // transcript transaction, remove its complete line so a failed
                 // selection does not become visible on the next resume.
-                return Err(self.writer.rollback_mode_selection(
+                return Err(self.writer.rollback_undurable_append(
                     &mut file,
                     previous_len,
                     error.to_string(),
@@ -1057,7 +1094,7 @@ impl DurableTranscriptTransaction<'_> {
                 Some(transcript_identity),
             ) {
                 if let Some(previous_len) = previous_len {
-                    return Err(self.writer.rollback_mode_selection(
+                    return Err(self.writer.rollback_undurable_append(
                         &mut file,
                         previous_len,
                         error.to_string(),
@@ -1375,6 +1412,99 @@ fn transcript_line_has_uuid(line: &[u8], expected_uuid: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exact_boundary_write_or_sync_failure_keeps_uncommitted_stage_out_of_cold_chain() {
+        use crate::jsonl::{loader::build_conversation_chain, reader::JsonlReader};
+        use platform_posix::fs::PosixFileSystem;
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        for fail_sync in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let writer = DurableTranscriptWriter::open(dir.path()).unwrap();
+            let path = Path::new("history.jsonl");
+            let owner = Uuid::new_v4().to_string();
+            let old = Uuid::new_v4().to_string();
+            let summary = Uuid::new_v4().to_string();
+            let boundary = Uuid::new_v4().to_string();
+            let after = Uuid::new_v4().to_string();
+            let base = |id: &str, parent: Option<&str>, sidechain: bool, timestamp: &str| {
+                json!({"type":"user", "uuid":id, "parentUuid":parent, "sessionId":owner,
+                    "timestamp":timestamp, "cwd":"/", "version":"test", "isSidechain":sidechain,
+                    "message":{"role":"user", "content":id}})
+            };
+            writer
+                .append_json_once(
+                    path,
+                    &old,
+                    source_payload(base(&old, None, false, "2025-01-01T00:00:00Z")),
+                )
+                .unwrap();
+            let mut stage = base(&summary, Some(&boundary), true, "2025-01-01T00:00:01Z");
+            stage["nativeCompactStage"] = json!(boundary);
+            stage["isCompactSummary"] = json!(true);
+            writer
+                .append_json_once(path, &summary, source_payload(stage))
+                .unwrap();
+            let before_boundary = std::fs::read(dir.path().join(path)).unwrap();
+            let boundary_row = json!({"type":"system", "subtype":"compact_boundary", "uuid":boundary,
+                "parentUuid":null, "sessionId":owner, "timestamp":"2025-01-01T00:00:02Z", "cwd":"/", "version":"test",
+                "isSidechain":false, "compactMetadata":{"nativeExactPreserved":true,
+                    "preservedSegment":{"headUuid":old,"tailUuid":old,"anchorUuid":summary},
+                    "preservedMessages":{"anchorUuid":summary,"uuids":[old],"allUuids":[old]}}});
+            if fail_sync {
+                writer
+                    .fail_next_append_sync
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            } else {
+                writer
+                    .fail_next_append_write
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            assert!(writer
+                .append_json_once(path, &boundary, source_payload(boundary_row))
+                .is_err());
+            assert_eq!(
+                std::fs::read(dir.path().join(path)).unwrap(),
+                before_boundary
+            );
+
+            let read = || {
+                JsonlReader::new(
+                    dir.path().join(path),
+                    Arc::new(PosixFileSystem::new(dir.path().to_path_buf())),
+                )
+            };
+            let staged_only = read().read_routed().await.unwrap();
+            assert_eq!(
+                build_conversation_chain(&staged_only, &owner)
+                    .0
+                    .iter()
+                    .map(|row| row.uuid.as_str())
+                    .collect::<Vec<_>>(),
+                vec![old.as_str()]
+            );
+
+            writer
+                .append_json_once(
+                    path,
+                    &after,
+                    source_payload(base(&after, Some(&old), false, "2025-01-01T00:00:03Z")),
+                )
+                .unwrap();
+            drop(writer);
+            let cold = read().read_routed().await.unwrap();
+            assert_eq!(
+                build_conversation_chain(&cold, &owner)
+                    .0
+                    .iter()
+                    .map(|row| row.uuid.as_str())
+                    .collect::<Vec<_>>(),
+                vec![old.as_str(), after.as_str()]
+            );
+        }
+    }
 
     #[test]
     fn disk_full_partial_append_preserves_committed_history_and_allows_retry() {

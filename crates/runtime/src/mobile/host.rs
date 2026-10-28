@@ -1204,6 +1204,9 @@ pub struct MobileEngineHandle {
     /// `fs` the orchestrator's tools use — captured from the `Platform` so the
     /// session listing reads through the device's real backend.
     fs: Arc<dyn lingxi_core::host::FileSystem>,
+    /// The active target whose initial transcript anchor has been established.
+    /// Retargeting and failed initialization are retried under this guard.
+    initialized_session_anchor: Mutex<Option<std::path::PathBuf>>,
     /// The deterministic build recipe, captured so the cron firing path
     /// (the per-task `run_cron_task_if_due`) can rebuild a FRESH, throwaway
     /// [`MobileRuntime`] per fired job (an isolated session that never pollutes
@@ -4296,18 +4299,31 @@ impl MobileEngineHandle {
     /// before a mode selection or first turn so its initial profile survives
     /// closing and reopening the conversation.
     async fn ensure_mobile_session_anchor(&self) -> Result<(), ClientError> {
+        let mut initialized = self.initialized_session_anchor.lock().await;
         let path = self.inner.session_writer.active_path();
-        session_identity_snapshot_for_path(&self.inner.session_writer, &path)
+        let session_id = self.inner.orchestrator.current_session_id().await;
+        let session_uuid = session_id.as_uuid().to_string();
+        // This checks that both paths are regular files and that the writer is
+        // still bound to the reserved session. It imports only a missing
+        // identity sidecar, rather than replaying both files on every command.
+        self.ensure_reserved_session_identity(&session_uuid).await?;
+        let nonempty = tokio::fs::symlink_metadata(&path)
             .await
-            .map_err(|error| ClientError::Internal {
-                message: format!("session transcript identity import failed: {error}"),
-            })?;
-        if std::fs::metadata(&path).map_or(true, |metadata| metadata.len() == 0) {
-            let session_id = self.inner.orchestrator.current_session_id().await;
+            .is_ok_and(|metadata| metadata.file_type().is_file() && metadata.len() > 0);
+        if initialized.as_ref() == Some(&path) {
+            if nonempty {
+                return Ok(());
+            }
+            *initialized = None;
+            return Err(ClientError::Internal {
+                message: "initialized session transcript is missing or empty".into(),
+            });
+        }
+        if !nonempty {
             self.inner
                 .session_writer
                 .append_mobile_empty_session(
-                    &session_id.as_uuid().to_string(),
+                    &session_uuid,
                     "新对话",
                     &self.session_cwd(),
                 )
@@ -4343,6 +4359,7 @@ impl MobileEngineHandle {
                     message: format!("persist initial conversation mode failed: {error}"),
                 })?;
         }
+        *initialized = Some(path);
         Ok(())
     }
 
@@ -5625,8 +5642,9 @@ impl MobileEngineHandle {
                 command,
                 body,
                 hook_messages,
+                skill,
             } => {
-                let skill_prompt = DurableSkillPrompt::new(command.clone(), body, hook_messages);
+                let skill_prompt = DurableSkillPrompt::new(command.clone(), body, hook_messages, skill);
                 let checkpoint = match self.durable_turns.prepare_claimed_slash_turn(
                     &owner.session_id,
                     checkpoint.turn_id,
@@ -6698,6 +6716,7 @@ impl MobileEngineHandle {
     /// Poll engine commands on the owned runtime. Foreign executors, including
     /// Swift's cooperative pool, can have much smaller stacks than our workers.
     pub async fn submit(&self, command: ClientCommand) -> Result<(), ClientError> {
+        let owned_selection = matches!(&command, ClientCommand::SetSessionMode { .. });
         let handle = self
             .self_weak
             .upgrade()
@@ -6714,7 +6733,10 @@ impl MobileEngineHandle {
                 self.0.abort();
             }
         }
-        let _abort = AbortCommand(task.abort_handle());
+        // A selection includes durable writes and projection publication. It
+        // owns the handle until that transaction settles even if the foreign
+        // caller or account closes while awaiting it.
+        let _abort = (!owned_selection).then(|| AbortCommand(task.abort_handle()));
         task.await.map_err(|error| ClientError::Internal {
             message: format!("mobile command task failed: {error}"),
         })?
@@ -6895,14 +6917,20 @@ impl MobileEngineHandle {
                         last_sequence = checkpoint.last_sequence,
                         "mobile: attach cursor fell behind retained durable turn history"
                     );
-                    if checkpoint
+                    let live_owner = self.active_cancel.lock().await.as_ref().is_some_and(|turn| {
+                        turn.session_id == session_id
+                            && turn.turn_id == Some(turn_id)
+                            && !turn.cancel.is_cancelled()
+                            && !turn.completed.load(Ordering::SeqCst)
+                    });
+                    if live_owner || checkpoint
                         .state
                         .as_ref()
                         .is_some_and(TurnRecoveryStateDto::is_terminal)
                     {
-                        // A replay gap is not permission to resurrect a
-                        // completed/failed/cancelled turn. Preserve the
-                        // terminal state and explain why no suffix was sent.
+                        // Attaching a viewer cannot change a running owner's
+                        // lifecycle, or resurrect a terminal turn. Explain the
+                        // missing suffix without mutating either checkpoint.
                         checkpoint
                             .snapshot_with_reason(Some("replay_history_truncated".to_string()))
                     } else {

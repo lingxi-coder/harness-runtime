@@ -1034,6 +1034,7 @@ fn user_message_from_source(
     context_epoch: u64,
     skill_name: &Utf16JsonProjection,
     skill_path: &std::path::Path,
+    definition: &Utf16JsonProjection,
 ) -> lingxi_core::types::ConversationMessage {
     let units = source
         .string_units("")
@@ -1054,10 +1055,11 @@ fn user_message_from_source(
         turn_companion: None,
         usage_limit_note: None,
         origin: Some(
-            compaction::invoked_skills::skill_activation_origin_with_skill(
+            compaction::invoked_skills::skill_activation_origin_with_definition(
                 context_epoch,
                 skill_name,
                 skill_path,
+                definition,
             ),
         ),
         turn_origin: None,
@@ -1726,20 +1728,15 @@ present this turn, the skill is loaded — follow it directly rather than callin
             }
         }
 
-        // P2-12 / `zSr(e.name,u,d,r.agentId??null)`: record this invocation in
-        // the process-global invoked-skill registry so its content can be
-        // re-injected after a compaction (`rRg`) — the model regains the full
-        // skill instructions across the compact boundary even though the
-        // boundary summary drops the verbatim body. The content is the expanded
-        // prompt the model receives (the binary's `d`); the path is the skill's
-        // base dir (`u`). LingXi additionally scopes the registry row by the
-        // live session + agent identity so concurrent orchestrators/subagents
-        // invoking the same skill name do not overwrite each other.
+        // Carry the canonical source identity with the generated row. The host
+        // activates it only after its generation fence, append hook and durable
+        // write have accepted this exact row; an abandoned tool result must not
+        // replace the currently effective Skill.
         let skill_path = desc.skill_root.clone().unwrap_or_default();
         let session_id = if let Some(session) = ctx.session.as_ref() {
             Some(session.lock().await.session_id.to_string())
         } else {
-            self.ctx.session_id.map(|id| id.to_string())
+            ctx.origin_session_id.or(self.ctx.session_id).map(|id| id.to_string())
         };
         let agent_id = ctx.agent_id.as_ref().map(ToString::to_string);
         let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(
@@ -1749,18 +1746,10 @@ present this turn, the skill is loaded — follow it directly rather than callin
         let skill_message = user_message_from_source(
             &expanded_prompt,
             compaction::invoked_skills::context_epoch(scope),
-            &command_name,
+            &desc.name,
             &skill_path,
+            &desc.body,
         );
-        compaction::invoked_skills::register_activation_with_message(
-            &command_name,
-            &skill_path,
-            &expanded_prompt,
-            Some(&desc.body),
-            scope,
-            skill_message.id(),
-        );
-
         let new_messages = vec![skill_message];
 
         let mut md: LogEventMetadata = HashMap::new();

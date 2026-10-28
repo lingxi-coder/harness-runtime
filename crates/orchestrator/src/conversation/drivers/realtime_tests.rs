@@ -210,7 +210,7 @@ async fn media_handoff_commit_matches_successful_json_tool_result_text() {
 async fn realtime_preparation_admits_pending_behavior_before_capturing_context() {
     use lingxi_core::host::session_context::ConversationMode;
 
-    let orchestrator = ConversationOrchestrator::new(
+    let orchestrator = ConversationOrchestrator::into_shared(ConversationOrchestrator::new(
         OrchestratorConfig::default(),
         Arc::new(MockApiClient::new(Vec::new())),
         Arc::new(ToolRegistry::new()),
@@ -219,7 +219,7 @@ async fn realtime_preparation_admits_pending_behavior_before_capturing_context()
         Arc::new(MockOutputStream::new()),
         Arc::new(StaticMemoryProvider::empty()),
         std::env::temp_dir(),
-    );
+    ));
     let old_id = MessageId::new();
     let user_id = MessageId::new();
     let empty_id = MessageId::new();

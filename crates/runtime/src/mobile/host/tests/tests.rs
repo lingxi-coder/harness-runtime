@@ -3781,6 +3781,58 @@ fn submit_attach_turn_blocks_truncated_replay_history() {
 }
 
 #[test]
+fn submit_attach_turn_keeps_live_owner_running_when_replay_history_is_truncated() {
+    use crate::mobile::test_support::new_engine_with_streaming;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let listener = Arc::new(FakeListener::default());
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let handle = new_engine_with_streaming(
+        test_config(tmp.path()),
+        Arc::new(HostFakePlatform::new(tmp.path().to_path_buf())),
+        listener.clone(),
+        Arc::new(RecordingPermissionSink::default()),
+        Some(Arc::new(PendingPromptStreamClient::new(entered_tx))),
+    )
+    .unwrap();
+    handle.runtime().block_on(async {
+        let turn_id = 7878;
+        handle.submit(ClientCommand::SendPrompt {
+            text: "keep running".into(), prompt_mode: None, images: Vec::new(),
+            turn_id: Some(turn_id), visualization_context: None,
+        }).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+            .await.unwrap().unwrap();
+        let session_id = handle.active_session_id();
+        for _ in 0..2 {
+            handle.durable_turns.append_event(&session_id, turn_id,
+                r#"{"type":"text_delta","text":"retained"}"#.into()).unwrap();
+        }
+        let before = handle.durable_turns.load(&session_id, turn_id).unwrap();
+        assert_eq!(before.state, Some(TurnRecoveryStateDto::Running));
+        handle.durable_turns.retain_events_from_for_test(
+            &session_id, turn_id, before.last_sequence,
+        ).unwrap();
+        let before = handle.durable_turns.load(&session_id, turn_id).unwrap();
+        handle.submit(ClientCommand::AttachTurn {
+            turn_id, after_sequence: Some(0),
+        }).await.unwrap();
+        let events = drained(&listener).await;
+        assert!(events.iter().any(|event| matches!(event,
+            Ev::TurnRecoveryState { snapshot }
+                if snapshot.turn_id == turn_id
+                    && snapshot.state == TurnRecoveryStateDto::Running
+                    && snapshot.reason.as_deref() == Some("replay_history_truncated")
+        )));
+        let after = handle.durable_turns.load(&session_id, turn_id).unwrap();
+        assert_eq!(after.state, before.state);
+        assert_eq!(after.revision, before.revision);
+        assert!(!handle.active_turn_is_cancelled().await);
+        handle.submit(ClientCommand::Cancel { turn_id: Some(turn_id) }).await.unwrap();
+    });
+}
+
+#[test]
 fn mobile_mcp_blocked_a_to_b_to_a_keeps_latest_a_owner() {
     let runtime = tokio::runtime::Runtime::new().expect("test runtime");
     runtime.block_on(async {
@@ -11893,6 +11945,97 @@ fn mode_selection_anchors_a_zero_length_draft() {
 }
 
 #[test]
+fn mobile_profile_cancellation_keeps_the_owned_handle_until_durable_commit() {
+    let root = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle(root.path());
+    let foreign = tokio::runtime::Runtime::new().unwrap();
+    foreign.block_on(async move {
+        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.unwrap();
+        let id = handle.inner().orchestrator.current_session_id().await;
+        let transcript = handle.inner().session_writer.active_path();
+        let state_root = handle.lingxi_home.join("session-state").join(id.as_uuid().to_string());
+        let durable = session::jsonl::DurableTranscriptWriter::open(state_root).unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let blocking = tokio::task::spawn_blocking(move || durable.with_transaction(|_| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        }));
+        entered_rx.await.unwrap();
+        let weak = Arc::downgrade(&handle);
+        let caller_handle = handle.clone();
+        let caller = tokio::spawn(async move {
+            caller_handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Chat }).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while handle.loop_transition.try_lock().is_ok() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        caller.abort();
+        let _ = caller.await;
+        drop(handle);
+        assert!(weak.upgrade().is_some(), "the selection owns the handle after the foreign caller drops");
+        release_tx.send(()).unwrap();
+        blocking.await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while weak.upgrade().is_some() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let source = std::fs::read_to_string(transcript).unwrap();
+        let profile = session::JsonlWriter::session_mode_transition_from_source(&source, &id.as_uuid().to_string()).unwrap();
+        assert_eq!((profile.active, profile.selected, profile.revision, profile.pending),
+            (session::jsonl::SessionMode::Chat, session::jsonl::SessionMode::Chat, 1, false));
+    });
+}
+
+#[test]
+fn mobile_initialized_long_session_does_not_reread_identity_on_commands() {
+    use std::io::Write;
+    let root = tempfile::tempdir().unwrap();
+    let (handle, _) = build_submit_handle(root.path());
+    handle.runtime().block_on(async {
+        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.unwrap();
+        let id = handle.inner().orchestrator.current_session_id().await;
+        let path = handle.inner().session_writer.active_path();
+        let mut file = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let row = format!("{}\n", serde_json::json!({"type":"custom-title", "sessionId":id.as_uuid(), "customTitle":"x".repeat(512)}));
+        for _ in 0..5000 { file.write_all(row.as_bytes()).unwrap(); }
+        drop(file);
+        // A missing sidecar is imported exactly once; later commands check its
+        // type and identity without reading the ever-growing log again.
+        let sidecar = path.with_file_name(format!("{}{}", path.file_name().unwrap().to_string_lossy(), branding::SESSION_MESSAGE_IDENTITY_LOG_SUFFIX));
+        if let Err(error) = std::fs::remove_file(&sidecar) {
+            assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        }
+        let before = crate::session_agent_transcript::identity_snapshot_read_count(&path);
+        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.unwrap();
+        let imported = crate::session_agent_transcript::identity_snapshot_read_count(&path);
+        assert_eq!(imported, before + 1);
+        for _ in 0..5 {
+            handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.unwrap();
+            handle.ensure_mobile_session_anchor().await.unwrap();
+        }
+        assert_eq!(crate::session_agent_transcript::identity_snapshot_read_count(&path), imported);
+        #[cfg(unix)]
+        {
+            let real = sidecar.with_extension("saved");
+            std::fs::rename(&sidecar, &real).unwrap();
+            std::os::unix::fs::symlink(&real, &sidecar).unwrap();
+            assert!(handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.is_err());
+            std::fs::remove_file(&sidecar).unwrap();
+            std::fs::rename(&real, &sidecar).unwrap();
+            handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.unwrap();
+        }
+        handle.submit(ClientCommand::NewSession { cwd: None, model: None }).await.unwrap();
+        let next = handle.inner().session_writer.active_path();
+        assert_ne!(next, path);
+        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.unwrap();
+        let next_reads = crate::session_agent_transcript::identity_snapshot_read_count(&next);
+        handle.submit(ClientCommand::SetSessionMode { mode: SessionModeDto::Code }).await.unwrap();
+        assert_eq!(crate::session_agent_transcript::identity_snapshot_read_count(&next), next_reads);
+    });
+}
+
+#[test]
 fn mobile_initial_and_new_session_modes_use_versioned_records() {
     let tmp = tempfile::tempdir().unwrap();
     let mut config = test_config(tmp.path());
@@ -12340,10 +12483,10 @@ fn mobile_mode_switch_retires_slash_skill_body_and_keeps_conversation_on_resume(
     }
 
     let tmp = tempfile::tempdir().unwrap();
-    let commands = tmp.path().join(".lingxi/commands");
-    std::fs::create_dir_all(&commands).unwrap();
+    let skill_dir = tmp.path().join(".lingxi/skills/research");
+    std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(
-        commands.join("research.md"),
+        skill_dir.join("SKILL.md"),
         "---\ndescription: Test research\n---\nOBSOLETE-SKILL-BODY-2381\n",
     )
     .unwrap();

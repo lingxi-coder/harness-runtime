@@ -27,6 +27,8 @@ pub struct ComputerRequestProjection {
     /// Project completed native computer rows through their ordinary tool
     /// transcript when a profile boundary requires a fresh provider request.
     pub ordinary_history: bool,
+    /// Profile epoch that owns native bindings and receipts in this request.
+    pub context_epoch: u64,
 }
 
 pub struct ComputerReceiptSubmission {
@@ -164,7 +166,7 @@ pub(crate) fn uses_auxiliary_history_projection() -> bool {
     COMPUTER_REQUEST
         .try_with(|scope| match scope {
             ComputerRequestScope::Auxiliary => true,
-            ComputerRequestScope::Main(Some(projection)) => projection.ordinary_history,
+            ComputerRequestScope::Main(Some(_)) => false,
             ComputerRequestScope::Main(None) => false,
         })
         .unwrap_or(false)
@@ -174,6 +176,15 @@ pub(crate) fn uses_ordinary_computer_history() -> bool {
     COMPUTER_REQUEST
         .try_with(|scope| matches!(scope, ComputerRequestScope::Main(Some(projection)) if projection.ordinary_history))
         .unwrap_or(false)
+}
+
+pub(crate) fn current_computer_context_epoch() -> u64 {
+    COMPUTER_REQUEST
+        .try_with(|scope| match scope {
+            ComputerRequestScope::Main(Some(projection)) => projection.context_epoch,
+            _ => 0,
+        })
+        .unwrap_or(0)
 }
 
 pub(crate) fn apply_request_projection(request: &mut crate::LlmRequest) -> Result<(), LlmError> {
@@ -596,6 +607,7 @@ mod tests {
                 binding: None,
                 submission: None,
                 ordinary_history: false,
+                context_epoch: 0,
             }),
             async {
                 apply_request_projection(&mut request).unwrap();
@@ -899,6 +911,7 @@ mod tests {
             binding: None,
             submission: None,
             ordinary_history: false,
+            context_epoch: 0,
         }
     }
 
@@ -961,6 +974,7 @@ mod tests {
                 binding: None,
                 submission: None,
                 ordinary_history: false,
+                context_epoch: 0,
             }),
             async {
                 apply_request_projection(&mut request).unwrap();

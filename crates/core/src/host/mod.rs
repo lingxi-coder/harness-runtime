@@ -251,7 +251,7 @@ pub use calendar::{CalendarError, CalendarEvent, CalendarProvider, CalendarQuery
 pub use camera::{CameraControl, CameraError, CameraPosition, CapturePhotoOpts, CapturedImage};
 pub use clipboard::{Clipboard, ClipboardError};
 pub use clock::Clock;
-pub use commands::{SlashCommandDispatcher, SlashDispatchResult};
+pub use commands::{SlashCommandDispatcher, SlashDispatchResult, SlashSkillIdentity};
 pub use computer_control::{ComputerControl, ComputerError, Screenshot};
 pub use contacts::{Contact, ContactsError, ContactsProvider, ContactsQuery};
 pub use deep_link::{DeepLinkError, DeepLinkOpener};
@@ -440,6 +440,7 @@ pub mod refusal_server;
 pub mod refusal_server_control;
 pub mod refusal_state;
 
+pub mod invoked_skills;
 pub mod instruction_announcements;
 pub mod instruction_context_cache;
 pub mod instruction_memory_sanitize;

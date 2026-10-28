@@ -49,6 +49,8 @@ struct StoredReceipt {
     utf16_overrides: session::jsonl::exact_json::Utf16Overrides,
     call: NativeComputerCall,
     frame: ComputerFrame,
+    #[serde(default)]
+    context_epoch: u64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -58,6 +60,8 @@ struct StoredExecutionBinding {
     frame: ComputerFrame,
     binding: NativeContinuationBinding,
     provider_response_id: String,
+    #[serde(default)]
+    context_epoch: u64,
 }
 
 #[derive(Serialize)]
@@ -70,6 +74,7 @@ struct NativeBindingPayload<'a> {
     frame: &'a ComputerFrame,
     binding: &'a NativeContinuationBinding,
     provider_response_id: &'a str,
+    context_epoch: u64,
 }
 
 #[derive(Serialize)]
@@ -97,6 +102,7 @@ struct NativeReceiptPayload<'a> {
     provider_response_id: &'a str,
     receipt_id: &'a str,
     block: &'a wire::ContentBlock,
+    context_epoch: u64,
 }
 
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -145,6 +151,7 @@ pub(crate) struct Work {
     pub(crate) frame: ComputerFrame,
     pub(crate) tool: Arc<dyn Tool>,
     pub(crate) binding: NativeContinuationBinding,
+    pub(crate) context_epoch: u64,
 }
 
 #[derive(Default)]
@@ -413,8 +420,72 @@ pub(crate) async fn recover_before_request(
 pub(crate) async fn preserve_pending_compaction_tail(
     orch: &ConversationOrchestrator,
     preserved: &[ConversationMessage],
-) -> Result<Vec<ConversationMessage>, OrchestratorError> {
+) -> Result<(Vec<ConversationMessage>, bool), OrchestratorError> {
     recovery::preserve_pending_compaction_tail(orch, preserved).await
+}
+
+/// Fsync a compact prelude without exposing it as a main-thread tip before its
+/// exact boundary is committed. Its parent can point to that future boundary.
+pub(crate) async fn stage_exact_compaction_row(
+    orch: &ConversationOrchestrator,
+    original: &ConversationMessage,
+    accepted: &ConversationMessage,
+    boundary: MessageId,
+    parent: MessageId,
+    summary: bool,
+) -> Result<(), OrchestratorError> {
+    if original.id() != accepted.id() {
+        return Err(internal("compaction hook changed staged row identity"));
+    }
+    let writer = orch
+        .tool_execution_journal
+        .as_ref()
+        .and(orch.transcript.jsonl_writer.as_ref())
+        .ok_or_else(|| internal("native compaction staging requires a durable transcript"))?;
+    let mut row = prepare_stored_row(orch, accepted).await?;
+    row.parent_uuid = Some(parent.as_uuid().to_string());
+    row.is_sidechain = true;
+    row.extra
+        .set_field(
+            "nativeCompactStage",
+            source_payload(&boundary.as_uuid().to_string())?,
+        )
+        .map_err(internal)?;
+    if summary {
+        row.extra
+            .set_field("isVisibleInTranscriptOnly", source_payload(&true)?)
+            .map_err(internal)?;
+        row.extra
+            .set_field("isCompactSummary", source_payload(&true)?)
+            .map_err(internal)?;
+        if original == accepted && original.is_compact_summary() {
+            if let ConversationMessage::User { content, .. } = original {
+                let units = match content.as_slice() {
+                    [ContentBlock::Text {
+                        text,
+                        citations: None,
+                    }] => Some(text.encode_utf16().collect()),
+                    [ContentBlock::TextJsUtf16 {
+                        utf16_code_units,
+                        citations: None,
+                        ..
+                    }] => Some(utf16_code_units.clone()),
+                    _ => None,
+                };
+                if let Some(units) = units {
+                    let source =
+                        Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+                            .map_err(internal)?;
+                    row.message.set_field("content", source).map_err(internal)?;
+                }
+            }
+        }
+    }
+    writer
+        .append_native_message_once(&row)
+        .await
+        .map_err(internal)?;
+    Ok(())
 }
 
 /// Select from the prepared catalog without appending rows to its history snapshot.
@@ -449,7 +520,10 @@ pub(crate) async fn prepare_projection(
         })
         .filter_map(|block| match block {
             ContentBlock::ProviderContent { value, .. }
-                if value.string_at("/type") == Some("lingxi_computer_continuation") =>
+                if matches!(
+                    value.string_at("/type"),
+                    Some("lingxi_computer_continuation" | "lingxi_computer_binding")
+                ) =>
             {
                 Some(value.clone())
             }
@@ -457,11 +531,12 @@ pub(crate) async fn prepare_projection(
         })
         .collect::<Vec<_>>();
     let mut retained_continuations = Vec::new();
-    let mut has_older_continuation = false;
+    let mut has_older_history = false;
     for marker in &retained_markers {
-        let reference = marker.subprojection("/continuation").map_err(internal)?;
-        has_older_continuation |= continuation_context_epoch(marker)? != active_epoch;
-        retained_continuations.push(reference);
+        has_older_history |= continuation_context_epoch(marker)? != active_epoch;
+        if marker.string_at("/type") == Some("lingxi_computer_continuation") {
+            retained_continuations.push(marker.subprojection("/continuation").map_err(internal)?);
+        }
     }
     let mut state = orch.computer_runtime.state.lock().await;
     if state.continuation.is_some() && state.continuation_epoch != active_epoch {
@@ -489,7 +564,7 @@ pub(crate) async fn prepare_projection(
         state.continuation_binding = None;
         state.next_native = false;
     }
-    if state.continuation.is_none() && has_older_continuation {
+    if state.continuation.is_none() && has_older_history {
         state.ordinary_history_fallback = true;
     }
     // A submitted receipt is never recreated after an uncertain provider response.
@@ -527,6 +602,7 @@ pub(crate) async fn prepare_projection(
                 binding: None,
                 submission: None,
                 ordinary_history: true,
+                context_epoch: active_epoch,
             }));
         }
         return Ok(None);
@@ -646,6 +722,7 @@ pub(crate) async fn prepare_projection(
             .or_else(|| state.continuation_binding.clone()),
         submission,
         ordinary_history: state.ordinary_history_fallback,
+        context_epoch: active_epoch,
     }))
 }
 
@@ -714,6 +791,7 @@ pub(crate) async fn bind_response(
         let call_ids: std::collections::HashSet<_> =
             calls.iter().map(|c| c.context.call_id.clone()).collect();
         let session_id = orch.session.lock().await.session_id;
+        let context_epoch = orch.profile_epoch().await;
         let execution_binding = llm_runtime::computer::response_execution_binding(response)
             .ok_or_else(|| internal("native response has no trusted route/account binding"))?;
         let mut pending = Vec::new();
@@ -764,6 +842,7 @@ pub(crate) async fn bind_response(
                         frame: binding.frame.clone(),
                         tool: binding.tool.clone(),
                         binding: execution_binding.clone(),
+                        context_epoch,
                     },
                 ));
             }
@@ -778,6 +857,7 @@ pub(crate) async fn bind_response(
                     frame: &binding.frame,
                     binding: &execution_binding,
                     provider_response_id: &response.id,
+                    context_epoch,
                 })?,
             });
             replacements.insert(call_id, replacement);
@@ -1382,6 +1462,7 @@ async fn store_execution_binding(
         frame: work.frame.clone(),
         binding: work.binding.clone(),
         provider_response_id: work.identity.provider_response_id.clone(),
+        context_epoch: work.context_epoch,
     };
     store_payload(
         orch,
@@ -1601,6 +1682,7 @@ pub(crate) async fn persist_native_assistant(
                 || !saved_call_matches
                 || saved_frame != member.frame
                 || saved_binding != member.binding
+                || continuation_context_epoch(binding)? != member.context_epoch
                 || binding.string_at("/provider_response_id") != Some(response.id.as_str())
                 || !saved_originals_match
             {
@@ -1948,6 +2030,7 @@ pub(crate) async fn prepare_receipts(
             provider_response_id: &members[0].1.identity.provider_response_id,
             receipt_id: &receipt_id,
             block: &block,
+            context_epoch: members[0].1.context_epoch,
         })?;
         let message = ConversationMessage::User {
             api_message_override: None,
@@ -1974,6 +2057,7 @@ pub(crate) async fn prepare_receipts(
             message: message.clone(),
             call: call.as_ref().clone(),
             frame: members[0].1.frame.clone(),
+            context_epoch: members[0].1.context_epoch,
         };
         let payload = store_payload(orch, &receipt_id, &stored).await?;
         let record = NativeReceiptRecord {

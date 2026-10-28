@@ -109,30 +109,8 @@ pub struct FileRestoreCandidate {
     pub timestamp_ms: i64,
 }
 
-/// A skill eligible for post-compact restoration.
-///
-/// Mirrors the `[key, {skillName, skillPath, content, invokedAt}]` entries `rRg`
-/// iterates from the invoked-skill registry (`bin/claude.exe` v2.1.207 `rRg`).
-/// The `key` is the registry key (`"{agentId}:{name}"`) so `rRg`'s `n_n`
-/// write-backs can target the row this candidate came from.
-#[derive(Debug, Clone)]
-pub struct SkillRestoreCandidate {
-    /// The registry key (`"{agentId}:{name}"`) this candidate came from — the
-    /// target of the `n_n` write-back when the content is truncated or the
-    /// budget overflows.
-    pub key: Vec<u16>,
-    /// Skill name.
-    pub name: Utf16JsonProjection,
-    /// Skill source path.
-    pub path: std::path::PathBuf,
-    /// Full skill content (truncated per [`POST_COMPACT_MAX_TOKENS_PER_SKILL`]).
-    pub content: Utf16JsonProjection,
-    /// When the skill was last invoked; restoration sorts descending on this.
-    pub invoked_at_ms: i64,
-    /// Registry activation that produced this snapshot. `None` is for callers
-    /// providing standalone candidates without a live registry entry.
-    pub activation_id: Option<u64>,
-}
+/// A Skill snapshot shared with the host registry.
+pub use lingxi_core::host::invoked_skills::SkillRestoreCandidate;
 
 fn skill_activation_is_current(skill: &SkillRestoreCandidate) -> bool {
     skill
@@ -391,11 +369,54 @@ pub fn restore_post_compact_skills(
     candidates: Vec<SkillRestoreCandidate>,
     already_attached: &[AttachedSkillContent],
 ) -> Vec<RestoredSkill> {
+    restore_skills_impl(candidates, already_attached, false).0
+}
+
+/// A registry write-back prepared for an exact compaction commit.
+#[derive(Debug, Clone)]
+pub struct StagedSkillWriteBack {
+    pub key: Vec<u16>,
+    pub activation_id: u64,
+    pub original: Utf16JsonProjection,
+    pub replacement: Utf16JsonProjection,
+}
+
+/// Prepare restored skills without changing the registry before the boundary
+/// is durable. The caller conditionally applies the returned write-backs.
+#[must_use]
+pub fn stage_post_compact_skills(
+    candidates: Vec<SkillRestoreCandidate>,
+    already_attached: &[AttachedSkillContent],
+) -> (Vec<RestoredSkill>, Vec<StagedSkillWriteBack>) {
+    restore_skills_impl(candidates, already_attached, true)
+}
+
+fn restore_skills_impl(
+    candidates: Vec<SkillRestoreCandidate>,
+    already_attached: &[AttachedSkillContent],
+    staged: bool,
+) -> (Vec<RestoredSkill>, Vec<StagedSkillWriteBack>) {
     let mut sorted = candidates;
     sorted.sort_by(|a, b| b.invoked_at_ms.cmp(&a.invoked_at_ms));
 
     let mut running = 0u64;
     let mut out = Vec::new();
+    let mut writes = Vec::new();
+    let mut apply_or_stage = |skill: &SkillRestoreCandidate, replacement: &Utf16JsonProjection| {
+        if staged {
+            if let Some(activation_id) = skill.activation_id {
+                writes.push(StagedSkillWriteBack {
+                    key: skill.key.clone(),
+                    activation_id,
+                    original: skill.content.clone(),
+                    replacement: replacement.clone(),
+                });
+            }
+            skill_activation_is_current(skill)
+        } else {
+            write_back_skill_candidate(skill, replacement)
+        }
+    };
     for skill in sorted {
         if !skill_activation_is_current(&skill) {
             continue;
@@ -424,13 +445,13 @@ pub fn restore_post_compact_skills(
         // registry content (unless a body match) and DROP (do not truncate-to-fit).
         if running.saturating_add(cost) > POST_COMPACT_SKILLS_TOKEN_BUDGET {
             if !is_body {
-                write_back_skill_candidate(&skill, &root_string_from_units(Vec::new()));
+                apply_or_stage(&skill, &root_string_from_units(Vec::new()));
             }
             continue;
         }
         // `n+=d;` then `if(!c&&u!==a.content)n_n(s,u)` — persist truncation.
         if !is_body && !truncated.semantically_eq(&skill.content) {
-            if !write_back_skill_candidate(&skill, &truncated) {
+            if !apply_or_stage(&skill, &truncated) {
                 continue;
             }
         }
@@ -444,7 +465,7 @@ pub fn restore_post_compact_skills(
             content: truncated,
         });
     }
-    out
+    (out, writes)
 }
 
 /// Whether a compaction with this query source is a **main-thread** compact —

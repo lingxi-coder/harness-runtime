@@ -884,6 +884,10 @@ pub struct CompactBoundaryMetadata {
     /// Complete re-splice list for a preserved tail.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preserved_messages: Option<PreservedMessages>,
+    /// Native abandonment recovery requires an exact, potentially noncontiguous
+    /// preserved-message list rather than a physical parent-chain segment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_exact_preserved: Option<bool>,
     /// Active `/goal` snapshot at compaction time.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_goal: Option<CompactActiveGoalState>,

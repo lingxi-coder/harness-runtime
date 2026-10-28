@@ -4074,6 +4074,7 @@ impl StreamingTurnDriver<'_> {
         } else {
             match queued_inputs {
                 Some(inputs) => {
+                    let requires_skill_header = inputs.iter().any(|input| input.skill_identity.is_some());
                     let mut admitted = Vec::with_capacity(inputs.len());
                     let image_owner = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
                     for (index, mut input) in inputs.into_iter().enumerate() {
@@ -4112,7 +4113,7 @@ impl StreamingTurnDriver<'_> {
                             }
                         }
                     }
-                    if admitted.is_empty() {
+                    if admitted.is_empty() || (requires_skill_header && !admitted.iter().any(|input| !input.is_meta)) {
                         return Ok(ConversationOutcome::StopHookPrevented {
                             turn_count: 0,
                             final_message_id: message_id.unwrap_or_else(MessageId::new),
@@ -4321,7 +4322,9 @@ impl StreamingTurnDriver<'_> {
                 // rows durable first; then attach request context and the
                 // body's ordered hook history rows.
                 for (input, message) in &submissions {
-                    if let Some(identity) = &input.pending_prompt_identity {
+                    if input.skill_identity.is_some() {
+                        orch.admit_skill_prompt_message(input, message).await?;
+                    } else if let Some(identity) = &input.pending_prompt_identity {
                         let persisted_message = orch
                             .persist_pending_prompt_queued_message_once(
                                 message,

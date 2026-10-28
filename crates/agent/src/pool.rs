@@ -79,13 +79,18 @@ pub struct StateMachinePool {
 struct AllocateCancelGuard {
     runtime: Arc<dyn RuntimeSpawner>,
     task: Option<BackgroundTaskHandle>,
+    cancellation_token: CancellationToken,
+    publication_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AllocateCancelGuard {
-    fn new(runtime: Arc<dyn RuntimeSpawner>, task: BackgroundTaskHandle) -> Self {
+    fn new(runtime: Arc<dyn RuntimeSpawner>, task: BackgroundTaskHandle,
+        cancellation_token: CancellationToken, publication_gate: Arc<tokio::sync::Mutex<()>>) -> Self {
         Self {
             runtime,
             task: Some(task),
+            cancellation_token,
+            publication_gate,
         }
     }
 
@@ -99,9 +104,12 @@ impl Drop for AllocateCancelGuard {
         let Some(task) = self.task.take() else {
             return;
         };
+        self.cancellation_token.cancel();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             let runtime = self.runtime.clone();
+            let publication_gate = self.publication_gate.clone();
             handle.spawn(async move {
+                let _publication = publication_gate.lock_owned().await;
                 let _ = runtime.cancel(&task).await;
             });
         }
@@ -196,6 +204,7 @@ struct DeallocateCancelGuard {
     event_tx: mpsc::Sender<lingxi_core::Event>,
     runner_done: watch::Receiver<bool>,
     wait_for_preload: bool,
+    publication_gate: Arc<tokio::sync::Mutex<()>>,
     armed: bool,
 }
 
@@ -208,6 +217,7 @@ impl DeallocateCancelGuard {
         event_tx: mpsc::Sender<lingxi_core::Event>,
         runner_done: watch::Receiver<bool>,
         wait_for_preload: bool,
+        publication_gate: Arc<tokio::sync::Mutex<()>>,
     ) -> Self {
         Self {
             slots,
@@ -217,6 +227,7 @@ impl DeallocateCancelGuard {
             event_tx,
             runner_done,
             wait_for_preload,
+            publication_gate,
             armed: true,
         }
     }
@@ -241,6 +252,7 @@ impl Drop for DeallocateCancelGuard {
         let event_tx = self.event_tx.clone();
         let runner_done = self.runner_done.clone();
         let wait_for_preload = self.wait_for_preload;
+        let publication_gate = self.publication_gate.clone();
         handle.spawn(async move {
             if wait_for_preload {
                 if !*runner_done.borrow() {
@@ -248,6 +260,7 @@ impl Drop for DeallocateCancelGuard {
                 }
                 wait_for_runner_done(runner_done).await;
             }
+            let _publication = publication_gate.lock_owned().await;
             let removed = remove_slot_if_owner(&slots, &agent_id, &task).await;
             let _ = runtime.cancel(&task).await;
             drop(removed);
@@ -472,7 +485,10 @@ impl StateMachinePool {
                 }),
             )
             .await?;
-        let mut cancel_guard = AllocateCancelGuard::new(self.runtime.clone(), task.clone());
+        let mut cancel_guard = AllocateCancelGuard::new(
+            self.runtime.clone(), task.clone(), cancellation_token.clone(),
+            preload_lifecycle.skill_publication_gate(),
+        );
 
         // The runtime has accepted and started the child task. Publish this
         // fact before any subsequent await; if the caller is cancelled while
@@ -566,7 +582,7 @@ impl StateMachinePool {
 
     /// Remove the slot owned by `agent_id` and cancel its background task.
     pub async fn deallocate(&self, agent_id: &AgentId) -> Result<(), PoolError> {
-        let (task, event_tx, runner_done, wait_for_preload, already_deallocating) = {
+        let (task, event_tx, runner_done, wait_for_preload, already_deallocating, publication_gate) = {
             let slots = self.slots.read().await;
             let Some(slot) = slots.get(agent_id) else {
                 return Ok(());
@@ -581,6 +597,7 @@ impl StateMachinePool {
                     slot.runner_done.clone(),
                     false,
                     true,
+                    slot.preload_lifecycle.skill_publication_gate(),
                 )
             } else {
                 let wait_for_preload = slot.preload_lifecycle.request_deallocate();
@@ -591,6 +608,7 @@ impl StateMachinePool {
                     slot.runner_done.clone(),
                     wait_for_preload,
                     false,
+                    slot.preload_lifecycle.skill_publication_gate(),
                 )
             }
         };
@@ -606,6 +624,7 @@ impl StateMachinePool {
             event_tx.clone(),
             runner_done.clone(),
             wait_for_preload,
+            publication_gate.clone(),
         );
         if wait_for_preload {
             // The terminal event releases the preload cancellation drain. It is
@@ -614,6 +633,10 @@ impl StateMachinePool {
             wait_for_runner_done(runner_done).await;
         }
         drop(event_tx);
+        // Cancellation has been requested; any publication already holding
+        // its permit must finish before the runner is aborted. A writer still
+        // waiting for its journal lock cannot acquire a fresh valid permit.
+        let _publication = publication_gate.lock_owned().await;
         let slot = remove_slot_if_owner(&self.slots, agent_id, &task).await;
         if slot.is_some() {
             self.runtime.cancel(&task).await?;
@@ -1686,6 +1709,7 @@ mod tests {
             event_tx,
             runner_done,
             false,
+            Arc::new(tokio::sync::Mutex::new(())),
         );
         drop(stale_rescue);
         tokio::time::timeout(std::time::Duration::from_secs(2), cancel_started.acquire())

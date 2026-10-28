@@ -4326,10 +4326,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
         reasoning: lingxi_core::host::ReasoningSelection,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, String> {
-        let turn_guard = self
+        let turn_guard = Arc::new(self
             .turn_gate
-            .try_lock()
-            .map_err(|_| "busy:Target session is running".to_string())?;
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| "busy:Target session is running".to_string())?);
         let settings = self.scheduled_turn_settings(model, reasoning)?;
         self.run_scheduled_turn_locked(&turn_guard, prompt, settings, cancel)
             .await
@@ -4349,10 +4350,11 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
     where
         F: std::future::Future<Output = Result<(), String>> + Send,
     {
-        let turn_guard = self
+        let turn_guard = Arc::new(self
             .turn_gate
-            .try_lock()
-            .map_err(|_| "busy:Target session is running".to_string())?;
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| "busy:Target session is running".to_string())?);
         if self.session.lock().await.session_id != expected_session {
             return Err("busy:Target session changed before execution".into());
         }
@@ -4410,7 +4412,7 @@ Send feedback with /feedback or learn more: https://support.claude.com/en/articl
 
     async fn run_scheduled_turn_locked(
         &self,
-        turn_guard: &tokio::sync::MutexGuard<'_, ()>,
+        turn_guard: &super::context_state_impl::ProfileTurnGuard,
         prompt: Utf16JsonProjection,
         settings: crate::scheduled_turn::ScheduledSettings,
         cancel: CancellationToken,

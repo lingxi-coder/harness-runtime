@@ -28,6 +28,238 @@ use tokio::sync::{mpsc, watch, Mutex as AsyncMutex, Notify};
 
 const COST_QUEUE_CAPACITY: usize = 64;
 
+/// An unprompted desktop draft may contain profile metadata and host lifecycle
+/// hook attachments. Reject malformed, message-bearing, foreign-session or
+/// unrecognized rows rather than treating a damaged conversation as a draft.
+#[must_use]
+pub fn is_mode_only_draft(source: &str, session_id: &str) -> bool {
+    if source.is_empty() || !source.ends_with('\n') {
+        return false;
+    }
+    let Ok(target_id) = uuid::Uuid::parse_str(session_id) else {
+        return false;
+    };
+    let mut hook_rows = std::collections::HashSet::new();
+    let mut saw_row = false;
+    let valid_rows = source
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .all(|line| {
+            let Ok(row) = lingxi_core::types::utf16_json::Utf16JsonProjection::parse(line) else {
+                return false;
+            };
+            if !row
+                .string_at("/sessionId")
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                .is_some_and(|value| value == target_id)
+            {
+                return false;
+            }
+            saw_row = true;
+            // These fields can carry user, assistant or tool conversation even if
+            // the row's outer type was changed or its message chain is damaged.
+            if ["message", "rendered", "renderedRole", "toolUseResult"]
+                .iter()
+                .any(|field| row.contains_property(field))
+            {
+                return false;
+            }
+            if row.string_at("/type") == Some("attachment") {
+                let Some(id) = row
+                    .string_at("/uuid")
+                    .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                else {
+                    return false;
+                };
+                let parent_valid = row.at_pointer("/parentUuid").is_some_and(|parent| {
+                    parent.is_null()
+                        || parent
+                            .as_str()
+                            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+                            .is_some_and(|id| hook_rows.contains(&id))
+                });
+                if !parent_valid
+                    || hook_rows.contains(&id)
+                    || row
+                        .at_pointer("/isSidechain")
+                        .and_then(|value| value.as_bool())
+                        != Some(false)
+                    || row.string_at("/timestamp").is_none_or(str::is_empty)
+                    || row.string_at("/cwd").is_none_or(str::is_empty)
+                    || row.string_at("/version").is_none_or(str::is_empty)
+                    || !is_draft_lifecycle_hook_attachment(&row)
+                {
+                    return false;
+                }
+                hook_rows.insert(id);
+                return true;
+            }
+            if row.contains_property("attachment") {
+                return false;
+            }
+            if row.string_at("/type") == Some("session-mode") {
+                // A valid later (or earlier) record cannot hide a damaged
+                // transition. Validate each complete source row separately.
+                return is_complete_draft_mode_row(&row, line, session_id);
+            }
+            is_draft_metadata_row(&row)
+        });
+    // Code at revision zero does not write a mode transition. Metadata or
+    // lifecycle hooks may nevertheless create the transcript before a turn.
+    valid_rows && saw_row
+}
+
+/// Require the complete, valid transition carried by this exact record.
+fn is_complete_draft_mode_row(
+    row: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+    source: &str,
+    session_id: &str,
+) -> bool {
+    if session::JsonlWriter::session_mode_transition_from_source(source, session_id).is_none() {
+        return false;
+    }
+    let Some(value) = row
+        .to_json_string()
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    else {
+        return false;
+    };
+    value
+        .get("contextRevision")
+        .and_then(serde_json::Value::as_u64)
+        .is_some()
+        && value
+            .get("profileEpoch")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+        && value
+            .get("admittedMode")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        && value
+            .get("admittedEpoch")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+        && value
+            .get("pending")
+            .and_then(serde_json::Value::as_bool)
+            .is_some()
+}
+
+/// Only recognize the known, typed metadata records emitted for a draft.
+fn is_draft_metadata_row(row: &lingxi_core::types::utf16_json::Utf16JsonProjection) -> bool {
+    let text = |pointer: &str| row.string_at(pointer).is_some();
+    let text_or_null = |pointer: &str| {
+        row.at_pointer(pointer)
+            .is_some_and(|value| value.is_null() || value.as_str().is_some())
+    };
+    let object_or_null = |pointer: &str| {
+        row.at_pointer(pointer)
+            .is_some_and(|value| value.is_null() || value.object_entries().is_some())
+    };
+    match row.string_at("/type") {
+        Some("permission-mode") => text("/permissionMode"),
+        Some("mode") => text("/mode"),
+        Some("custom-title") => text_or_null("/customTitle"),
+        Some("ai-title") => text_or_null("/aiTitle"),
+        Some("tag") => text_or_null("/tag"),
+        Some("relocated") => row
+            .string_at("/relocatedCwd")
+            .is_some_and(|value| !value.is_empty()),
+        Some("agent-name") => text("/agentName"),
+        Some("agent-color") => text("/agentColor"),
+        Some("agent-setting") => text("/agentSetting") || object_or_null("/agentSetting"),
+        Some("isolation-latch") => text("/side"),
+        Some("atis-latch") => text("/atis"),
+        Some("worktree-state") => object_or_null("/worktreeSession"),
+        Some("pr-link") => {
+            row.at_pointer("/prNumber")
+                .and_then(|value| value.as_number())
+                .is_some()
+                && text("/prUrl")
+                && text("/prRepository")
+        }
+        Some("bridge-session") => {
+            text("/bridgeSessionId")
+                && row
+                    .at_pointer("/lastSequenceNum")
+                    .and_then(|value| value.as_number())
+                    .is_some()
+        }
+        _ => false,
+    }
+}
+
+/// Accept only the host lifecycle hook records that can precede a first turn.
+/// In particular, never admit deferred tools or prompt/tool hook attachments.
+fn is_draft_lifecycle_hook_attachment(
+    row: &lingxi_core::types::utf16_json::Utf16JsonProjection,
+) -> bool {
+    let event = row.string_at("/attachment/hookEvent");
+    let name = row.string_at("/attachment/hookName");
+    let kind = row.string_at("/attachment/type");
+    if kind == Some("hook_additional_context") {
+        let content = row.at_pointer("/attachment/content");
+        return event == Some("SessionStart")
+            && name == Some("SessionStart")
+            && row.string_at("/attachment/toolUseID") == Some("SessionStart")
+            && content
+                .and_then(|value| value.array_len())
+                .is_some_and(|length| {
+                    length > 0
+                        && (0..length).all(|index| {
+                            content
+                                .and_then(|value| value.get_index(index))
+                                .and_then(|value| value.as_str())
+                                .is_some()
+                        })
+                });
+    }
+    let valid_event = match event {
+        Some("SessionStart") => {
+            matches!(name, Some("SessionStart:startup" | "SessionStart:resume"))
+        }
+        Some(
+            "SessionEnd" | "InstructionsLoaded" | "PreModelSwitch" | "PostModelSwitch"
+            | "ConfigChange" | "FileChanged",
+        ) => name == event,
+        _ => false,
+    };
+    if !valid_event
+        || row
+            .string_at("/attachment/toolUseID")
+            .and_then(|id| uuid::Uuid::parse_str(id).ok())
+            .is_none()
+    {
+        return false;
+    }
+    let string = |field: &str| row.string_at(field).is_some();
+    let number = |field: &str| {
+        row.at_pointer(field)
+            .and_then(|value| value.as_number())
+            .is_some()
+    };
+    match kind {
+        Some("hook_success") => {
+            string("/attachment/content")
+                && string("/attachment/stdout")
+                && string("/attachment/stderr")
+                && number("/attachment/exitCode")
+                && string("/attachment/command")
+                && number("/attachment/durationMs")
+        }
+        Some("hook_non_blocking_error") => {
+            string("/attachment/stdout")
+                && string("/attachment/stderr")
+                && number("/attachment/exitCode")
+        }
+        Some("hook_cancelled") => true,
+        Some("hook_system_message") => string("/attachment/content"),
+        _ => false,
+    }
+}
+
 mod attempts;
 mod resume;
 mod retention;

@@ -83,6 +83,19 @@ fn object_payload(fields: Vec<(&str, wire::JsonPayload)>) -> Result<wire::JsonPa
     Ok(object)
 }
 
+/// Bindings and receipts persist their owning profile epoch. Unversioned rows
+/// belong to the initial epoch, just like unversioned continuations.
+fn ordinary_computer_marker(value: &wire::JsonPayload) -> Result<bool, LlmError> {
+    if !crate::computer::uses_ordinary_computer_history() {
+        return Ok(false);
+    }
+    let epoch = match value.payload_at("/context_epoch") {
+        Some(epoch) => parse_payload::<u64>(&epoch)?,
+        None => 0,
+    };
+    Ok(epoch != crate::computer::current_computer_context_epoch())
+}
+
 fn computer_tool_ids(messages: &[Message]) -> Result<BTreeSet<String>, LlmError> {
     let mut ids = BTreeSet::new();
     let ordinary = crate::computer::uses_ordinary_computer_history();
@@ -96,7 +109,7 @@ fn computer_tool_ids(messages: &[Message]) -> Result<BTreeSet<String>, LlmError>
     };
     for item in messages.iter().flat_map(|message| &message.content) {
         if let Some(("lingxi_computer_binding", value, _)) = computer_marker(item) {
-            if ordinary {
+            if ordinary && ordinary_computer_marker(value)? {
                 let response = value.string_at("/provider_response_id");
                 let call = value.string_at("/call/context/call_id");
                 if !response.zip(call).is_some_and(|(response, call)| {
@@ -476,9 +489,20 @@ fn project_message(
     let mut mapped = Vec::new();
     for (index, item) in message.content.iter().enumerate() {
         if let Some((kind, value, source)) = computer_marker(item) {
-            // Independent forks consume the ordinary tool transcript. Native
-            // companions carry the main request's receipt/route authority.
+            // Independent forks consume ordinary tool history. Main requests
+            // retain native companions belonging to their active profile epoch.
             if crate::computer::uses_auxiliary_history_projection() {
+                continue;
+            }
+            if crate::computer::uses_ordinary_computer_history()
+                && matches!(
+                    kind,
+                    "lingxi_computer_receipt_ack" | "lingxi_computer_abandoned"
+                )
+            {
+                continue;
+            }
+            if ordinary_computer_marker(value)? {
                 continue;
             }
             let source: wire::ProtocolFamily =
@@ -501,10 +525,10 @@ fn project_message(
                 }
                 continue;
             }
-            if kind == "lingxi_computer_receipt_ack" {
-                continue;
-            }
-            if kind == "lingxi_computer_abandoned" {
+            if matches!(
+                kind,
+                "lingxi_computer_receipt_ack" | "lingxi_computer_abandoned"
+            ) {
                 continue;
             }
             if kind == "lingxi_computer_binding" {
@@ -1294,6 +1318,7 @@ mod tests {
                         binding: None,
                         submission: None,
                         ordinary_history: false,
+                        context_epoch: 0,
                     }),
                     async {
                         let (request, _) = crate::computer::without_computer_request(|| {
@@ -1350,6 +1375,7 @@ mod tests {
                     binding: None,
                     submission: None,
                     ordinary_history: true,
+                    context_epoch: 1,
                 }),
                 async {
                     let (request, _) = history_input(model, &[call, receipt], &[], &[], protocol)
@@ -1367,6 +1393,154 @@ mod tests {
                 "reused-call",
             ] {
                 assert!(!body.contains(forbidden), "{body}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn retired_provider_history_does_not_hide_current_anthropic_native_receipt() {
+        for old_protocol in [
+            wire::ProtocolFamily::OpenAiResponses,
+            wire::ProtocolFamily::GeminiInteractions,
+        ] {
+            let (old_call, old_receipt, _) =
+                native_round(old_protocol, "old-response", "old observation");
+            let (mut fresh_call, mut fresh_receipt, _) = native_round(
+                wire::ProtocolFamily::AnthropicMessages,
+                "fresh-response",
+                "new observation",
+            );
+            for item in fresh_call
+                .content
+                .iter_mut()
+                .chain(&mut fresh_receipt.content)
+            {
+                if let ContentBlock::ProviderContent { value, .. } = item {
+                    *value = value
+                        .with_object_field("context_epoch", &wire::JsonPayload::parse("1").unwrap())
+                        .unwrap();
+                }
+            }
+            let expected: wire::ContentBlock = fresh_receipt
+                .content
+                .iter()
+                .find_map(|item| {
+                    let (_, value, _) = computer_marker(item)?;
+                    Some(payload_field(value, "/block", "receipt").unwrap())
+                })
+                .unwrap();
+            let (request, body) = crate::computer::scope_computer_request(
+                Some(crate::computer::ComputerRequestProjection {
+                    native: None,
+                    continuation: None,
+                    binding: None,
+                    submission: None,
+                    ordinary_history: true,
+                    context_epoch: 1,
+                }),
+                async {
+                    let (request, _) = history_input(
+                        "claude-opus-4-8",
+                        &[old_call, old_receipt, fresh_call, fresh_receipt],
+                        &[],
+                        &[],
+                        wire::ProtocolFamily::AnthropicMessages,
+                    )
+                    .unwrap();
+                    let body = encoded_body(&request, wire::ProtocolFamily::AnthropicMessages);
+                    (request, body.to_string())
+                },
+            )
+            .await;
+            assert!(request
+                .messages
+                .iter()
+                .flat_map(|message| &message.content)
+                .any(|block| block == &expected));
+            assert!(
+                body.contains("synthetic-old-response"),
+                "{old_protocol:?}: {body}"
+            );
+            assert!(
+                !body.contains("synthetic-fresh-response"),
+                "{old_protocol:?}: {body}"
+            );
+            assert!(body.contains("reused-call"), "{old_protocol:?}: {body}");
+            assert!(
+                body.contains(&base64::engine::general_purpose::STANDARD.encode("new observation")),
+                "{old_protocol:?}: {body}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn current_epoch_receipt_survives_older_history_for_every_native_provider() {
+        for old_protocol in [
+            wire::ProtocolFamily::OpenAiResponses,
+            wire::ProtocolFamily::GeminiInteractions,
+            wire::ProtocolFamily::AnthropicMessages,
+        ] {
+            for current_protocol in [
+                wire::ProtocolFamily::OpenAiResponses,
+                wire::ProtocolFamily::GeminiInteractions,
+                wire::ProtocolFamily::AnthropicMessages,
+            ] {
+                let (old_call, old_receipt, _) =
+                    native_round(old_protocol, "old-response", "old observation");
+                let (mut current_call, mut current_receipt, continuation) =
+                    native_round(current_protocol, "current-response", "current observation");
+                for item in current_call
+                    .content
+                    .iter_mut()
+                    .chain(&mut current_receipt.content)
+                {
+                    if let ContentBlock::ProviderContent { value, .. } = item {
+                        *value = value
+                            .with_object_field(
+                                "context_epoch",
+                                &wire::JsonPayload::parse("1").unwrap(),
+                            )
+                            .unwrap();
+                    }
+                }
+                let expected: wire::ContentBlock = current_receipt
+                    .content
+                    .iter()
+                    .find_map(|item| {
+                        let (_, value, _) = computer_marker(item)?;
+                        Some(payload_field(value, "/block", "receipt").unwrap())
+                    })
+                    .unwrap();
+                let request = crate::computer::scope_computer_request(
+                    Some(crate::computer::ComputerRequestProjection {
+                        native: None,
+                        continuation,
+                        binding: None,
+                        submission: None,
+                        ordinary_history: true,
+                        context_epoch: 1,
+                    }),
+                    async {
+                        history_input(
+                            "model",
+                            &[old_call, old_receipt, current_call, current_receipt],
+                            &[],
+                            &[],
+                            current_protocol,
+                        )
+                        .unwrap()
+                        .0
+                    },
+                )
+                .await;
+                assert!(
+                    request
+                        .messages
+                        .iter()
+                        .flat_map(|message| &message.content)
+                        .any(|block| block == &expected),
+                    "{old_protocol:?} -> {current_protocol:?}"
+                );
             }
         }
     }
@@ -1402,6 +1576,7 @@ mod tests {
                 binding: None,
                 submission: None,
                 ordinary_history: true,
+                context_epoch: 1,
             }),
             async {
                 let (request, _) =
@@ -1510,6 +1685,7 @@ mod tests {
                     binding: None,
                     submission: None,
                     ordinary_history: false,
+                    context_epoch: 0,
                 }),
                 async { history_input(&model, &messages, &[], &[], protocol).unwrap() },
             )
@@ -1573,6 +1749,7 @@ mod tests {
                     binding: None,
                     submission: None,
                     ordinary_history: false,
+                    context_epoch: 0,
                 }),
                 async { history_input(model, &messages, &[], &[], protocol).unwrap() },
             )
@@ -2050,6 +2227,7 @@ mod tests {
                 binding: None,
                 submission: None,
                 ordinary_history: false,
+                context_epoch: 0,
             }),
             async {
                 history_input(
@@ -2134,6 +2312,7 @@ mod tests {
                 binding: None,
                 submission: None,
                 ordinary_history: false,
+                context_epoch: 0,
             }),
             async {
                 history_input(

@@ -30,6 +30,7 @@ pub use realtime::{
 };
 
 use super::hooks_impl::ModPromptScreen;
+use super::context_state_impl::ProfileTurnGuard;
 use super::*;
 use lingxi_core::types::{utf16_json::Utf16JsonProjection, ContentBlock};
 use loop_state::{StepExit, TurnEndVerdict};
@@ -49,6 +50,8 @@ pub struct QueuedPromptInput {
     pub is_meta: bool,
     /// Native `turnCompanion:true` marker for a paired meta message.
     pub turn_companion: bool,
+    /// Trusted producer identity, present only for a directory Skill body.
+    pub skill_identity: Option<lingxi_core::host::SlashSkillIdentity>,
     /// Ordered Native history rows to append after this input's message. Skill
     /// dispatch puts its UserPromptExpansion rows on the body companion only.
     pub trailing_history_rows: Vec<Utf16JsonProjection>,
@@ -95,6 +98,7 @@ impl Default for QueuedPromptInput {
             images: Vec::new(),
             is_meta: false,
             turn_companion: false,
+            skill_identity: None,
             trailing_history_rows: Vec::new(),
             mod_origin: None,
             message_origin: None,
@@ -133,27 +137,16 @@ pub struct PendingPromptIdentity {
     pub trailing_history_row_ids: Vec<MessageId>,
 }
 
-/// Build the exact queued input pair for an inline directory Skill. Hook rows
-/// stay source projections and remain ordered after the expanded body.
+/// Build the exact queued input pair for a Native prompt expansion. Hook rows
+/// stay source projections and remain ordered after the expanded body. Only a
+/// producer-supplied Skill identity marks the body as a Skill activation.
 #[must_use]
 pub fn skill_prompt_inputs(
     command: Utf16JsonProjection,
     body: Utf16JsonProjection,
     hook_messages: Vec<Utf16JsonProjection>,
+    skill: Option<lingxi_core::host::SlashSkillIdentity>,
 ) -> Vec<QueuedPromptInput> {
-    let command_units = command.string_units("").expect("skill command is text");
-    let name_units = command_units
-        .iter()
-        .copied()
-        .skip_while(|unit| *unit == b'/' as u16 || *unit == b' ' as u16)
-        .take_while(|unit| !matches!(*unit, 9 | 10 | 13 | 32))
-        .collect::<Vec<_>>();
-    let name = Utf16JsonProjection::root_string(String::from_utf16_lossy(&name_units), name_units)
-        .expect("skill name is source text");
-    let mut activation = compaction::invoked_skills::skill_activation_origin(0);
-    activation
-        .set_field("skill_name", name)
-        .expect("host skill metadata is an object");
     vec![
         QueuedPromptInput {
             text: command,
@@ -163,7 +156,7 @@ pub fn skill_prompt_inputs(
             text: body,
             is_meta: true,
             turn_companion: true,
-            message_origin: Some(activation),
+            skill_identity: skill,
             trailing_history_rows: hook_messages,
             ..Default::default()
         },
@@ -414,6 +407,47 @@ fn token_aborted(token: &Option<CancellationToken>) -> bool {
 }
 
 impl ConversationOrchestrator {
+    /// Publish only the accepted, successfully persisted Skill body as the
+    /// current activation. The same exact body and UUID are used for live
+    /// compaction and for passive reconstruction after restart.
+    pub(super) async fn admit_skill_prompt_message(
+        &self,
+        input: &QueuedPromptInput,
+        message: &ConversationMessage,
+    ) -> Result<(), OrchestratorError> {
+        let skill = input.skill_identity.as_ref().expect("Skill companion identity");
+        let accepted = if let Some(identity) = &input.pending_prompt_identity {
+            let accepted = self
+                .persist_pending_prompt_queued_message_once(message, input, &identity.prompt_id)
+                .await?;
+            self.append_pending_prompt_message_to_history_once(&accepted).await?;
+            accepted
+        } else {
+            let accepted = self.persist_admitted_skill_prompt(message, input).await?;
+            self.session.lock().await.history.push(accepted.clone());
+            accepted
+        };
+        // The cold transcript reconstruction concatenates all text blocks in
+        // source order without inventing separators. Match it here, including
+        // exact UTF-16 units from a multi-block session.append rewrite.
+        let units = match &accepted {
+            ConversationMessage::User { content, .. } => content.iter().flat_map(|block| match block {
+                ContentBlock::Text { text, .. } => text.encode_utf16().collect::<Vec<_>>(),
+                ContentBlock::TextJsUtf16 { utf16_code_units, .. } => utf16_code_units.clone(),
+                _ => Vec::new(),
+            }).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let body = Utf16JsonProjection::root_string(String::from_utf16_lossy(&units), units)
+            .expect("accepted Skill text retains exact UTF-16");
+        let session_id = self.session.lock().await.session_id.to_string();
+        let scope = compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_id), None);
+        compaction::invoked_skills::register_activation_with_message(
+            &skill.name, &skill.path, &body, None, scope, accepted.id(),
+        );
+        Ok(())
+    }
+
     /// Read the active turn's [`crate::prompt::mid_turn_input::CancelReason`] from
     /// the wired flag, defaulting to `UserInterrupt` when no flag is wired (so an
     /// un-wired turn always takes the user-interrupt branch — today's behavior).
@@ -952,7 +986,7 @@ impl ConversationOrchestrator {
     ) -> Result<ConversationOutcome, OrchestratorError> {
         let prompt = prompt.into();
         self.cancel_idle_compaction();
-        let _turn_guard = self.turn_gate.lock().await;
+        let turn_guard = Arc::new(self.turn_gate.clone().lock_owned().await);
         self.begin_turn_metrics();
         let _activity_guard = self.main_loop_activity(true);
         tracing::info!(
@@ -966,7 +1000,7 @@ impl ConversationOrchestrator {
                 telemetry::otel::with_turn_span("lingxi.orchestrator.turn", async {
                     self.scope_api_session(
                         !self.prompt_is_interactive(),
-                        crate::turn_loop::boxed_turn_future(|| self.try_run_turn(&prompt)),
+                        crate::turn_loop::boxed_turn_future(|| self.try_run_turn(&prompt, &turn_guard)),
                     )
                     .await
                 }),
@@ -1004,9 +1038,10 @@ impl ConversationOrchestrator {
     async fn try_run_turn(
         &self,
         prompt: &Utf16JsonProjection,
+        turn_guard: &ProfileTurnGuard,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         self.recover_session_storage().await?;
-        self.admit_conversation_profile().await?;
+        self.admit_conversation_profile(turn_guard).await?;
         self.prompt_runtime.begin_native_query();
         // 0. Build the system prompt for THIS turn.
         // claude-code `nre` precedence: `--system-prompt` (override) wins; else
@@ -1176,7 +1211,7 @@ impl ConversationOrchestrator {
             .is_some()
             .then_some(ambient_origin);
         self.cancel_idle_compaction();
-        let _turn_guard = self.turn_gate.lock().await;
+        let turn_guard = Arc::new(self.turn_gate.clone().lock_owned().await);
         let _activity_guard = self.main_loop_activity(true);
         tracing::info!(
             event = orch_events::TURN_STREAMING_STARTED,
@@ -1203,6 +1238,7 @@ impl ConversationOrchestrator {
                     }]),
                     None,
                     None,
+                    &turn_guard,
                 )),
             )
             .await
@@ -1244,12 +1280,12 @@ impl ConversationOrchestrator {
         let turn_guard = if let Some(cancel) = generation_cancel.as_ref() {
             self.lock_turn_unless_cancelled(cancel).await
         } else {
-            Some(self.turn_gate.lock().await)
+            Some(Arc::new(self.turn_gate.clone().lock_owned().await))
         };
-        let Some(_turn_guard) = turn_guard else {
+        let Some(turn_guard) = turn_guard else {
             return Ok(TurnOutcome::Cancelled);
         };
-        self.run_meta_rewake_under_gate_with_cancel(generation_cancel)
+        self.run_meta_rewake_under_gate_with_cancel(generation_cancel, &turn_guard)
             .await
     }
 
@@ -1261,7 +1297,7 @@ impl ConversationOrchestrator {
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
         self.cancel_idle_compaction();
-        let _turn_guard = self.turn_gate.lock().await;
+        let turn_guard = Arc::new(self.turn_gate.clone().lock_owned().await);
         // The caller may have observed a pending task notification before a
         // different owner consumed it. Keep that no-work recheck from exposing
         // the preceding query's yielded-user count to headless publication.
@@ -1277,7 +1313,7 @@ impl ConversationOrchestrator {
                 TurnOutcome::EndTurn
             });
         }
-        self.run_meta_rewake_under_gate_with_cancel(Some(cancel))
+        self.run_meta_rewake_under_gate_with_cancel(Some(cancel), &turn_guard)
             .await
     }
 
@@ -1289,7 +1325,7 @@ impl ConversationOrchestrator {
         scope: lingxi_core::host::handback::HandbackSessionScope,
         cancel: CancellationToken,
     ) -> Result<TurnOutcome, OrchestratorError> {
-        let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+        let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
             return Ok(TurnOutcome::Cancelled);
         };
         if !self.has_pending_main_reports(scope).await {
@@ -1297,7 +1333,7 @@ impl ConversationOrchestrator {
             // the report. No turn was opened, so it has no UI lifecycle to end.
             return Ok(TurnOutcome::EndTurn);
         }
-        self.run_meta_rewake_under_gate_with_cancel(Some(cancel))
+        self.run_meta_rewake_under_gate_with_cancel(Some(cancel), &turn_guard)
             .await
     }
 
@@ -1317,6 +1353,7 @@ impl ConversationOrchestrator {
     async fn run_meta_rewake_under_gate_with_cancel(
         &self,
         cancel: Option<CancellationToken>,
+        turn_guard: &ProfileTurnGuard,
     ) -> Result<TurnOutcome, OrchestratorError> {
         // A gate-admitted notification/report wake is a new query. Internal
         // transient rewakes inside its driver continue sharing these metrics.
@@ -1327,7 +1364,7 @@ impl ConversationOrchestrator {
         let result = self
             .scope_api_session(
                 !self.prompt_is_interactive(),
-                Box::pin(self.try_run_turn_streaming("", Vec::new(), cancel, None, true, false)),
+                Box::pin(self.try_run_turn_streaming("", Vec::new(), cancel, None, true, false, turn_guard)),
             )
             .await;
         // The outer boundary emits the MaxTurns/error terminal after the inner
@@ -1700,16 +1737,21 @@ impl ConversationOrchestrator {
                     parent_uuid,
                     persist,
                     timestamp,
-                    ..
+                    tool_completion_id,
                 } => {
                     if *persist {
-                        self.persist_preappended_stream_row(
+                        let accepted = self.persist_preappended_stream_row(
                             stored,
                             parent_uuid.clone(),
                             timestamp,
                             settlement.publication_guard.clone(),
+                            tool_completion_id.clone(),
                         )
                         .await;
+                        if !accepted && compaction::invoked_skills::is_individual_skill_activation(stored) {
+                            let rejected_id = stored.id();
+                            settlement.query_rows.retain(|(row, _)| row.id() != rejected_id);
+                        }
                     }
                 }
                 crate::streaming_loop::StreamEventJournalEntry::FlushHookAttachments(id) => {
@@ -1732,6 +1774,13 @@ impl ConversationOrchestrator {
         let append_guard = publication_guard.clone();
         let append = async {
             let mut session = self.session.lock().await;
+            // Skill rows were durably accepted and activated under their
+            // publication lease. Put them back in JE order after K without
+            // publishing a second copy.
+            let skill_ids = rows.iter().filter_map(|(message, _)|
+                compaction::invoked_skills::is_individual_skill_activation(message).then_some(message.id())
+            ).collect::<std::collections::HashSet<_>>();
+            session.history.retain(|message| !skill_ids.contains(&message.id()));
             for (message, source_tool_use_id) in rows {
                 if let Some(tool_use_id) = source_tool_use_id {
                     session
@@ -3073,6 +3122,7 @@ impl ConversationOrchestrator {
         message_id: Option<MessageId>,
         transient_rewake: bool,
         in_human_turn: bool,
+        turn_guard: &ProfileTurnGuard,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         self.try_run_turn_streaming_inputs(
             prompt,
@@ -3084,6 +3134,7 @@ impl ConversationOrchestrator {
             None,
             None,
             None,
+            turn_guard,
         )
         .await
     }
@@ -3100,6 +3151,7 @@ impl ConversationOrchestrator {
         queued_inputs: Option<Vec<QueuedPromptInput>>,
         row_token: Option<String>,
         projected_content: Option<ProjectedUserContent>,
+        turn_guard: &ProfileTurnGuard,
     ) -> Result<ConversationOutcome, OrchestratorError> {
         if in_human_turn {
             self.recover_session_storage().await?;
@@ -3109,7 +3161,7 @@ impl ConversationOrchestrator {
         // Each call admits one fresh query, including a metadata re-wake. The
         // StreamingTurnDriver retains these IDs through internal retries and
         // tool continuations without re-entering this wrapper.
-        self.admit_conversation_profile().await?;
+        self.admit_conversation_profile(turn_guard).await?;
         self.prompt_runtime.begin_native_query();
         let suggestion_origin = queued_inputs
             .as_ref()
@@ -3175,12 +3227,12 @@ impl ConversationOrchestrator {
     async fn lock_turn_unless_cancelled(
         &self,
         cancel: &CancellationToken,
-    ) -> Option<tokio::sync::MutexGuard<'_, ()>> {
+    ) -> Option<ProfileTurnGuard> {
         self.cancel_idle_compaction();
         tokio::select! {
             biased;
             () = cancel.cancelled() => None,
-            guard = self.turn_gate.lock() => Some(guard),
+            guard = self.turn_gate.clone().lock_owned() => Some(Arc::new(guard)),
         }
     }
 
@@ -3267,7 +3319,7 @@ impl ConversationOrchestrator {
     ) -> futures::future::BoxFuture<'a, Result<TurnOutcome, OrchestratorError>> {
         let prompt = prompt.into();
         Box::pin(async move {
-            let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+            let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
                 self.record_pre_admission_shutdown_interruption().await;
                 return Ok(TurnOutcome::Cancelled);
             };
@@ -3291,6 +3343,7 @@ impl ConversationOrchestrator {
                                     message_id,
                                     cancel.clone(),
                                     None,
+                                    &turn_guard,
                                 )
                             }),
                         )
@@ -3331,7 +3384,7 @@ impl ConversationOrchestrator {
         if inputs.iter().any(|input| !input.is_meta) {
             self.reset_goal_interruption();
         }
-        let Some(_turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
+        let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
             return Ok(TurnOutcome::Cancelled);
         };
         let primary = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
@@ -3358,6 +3411,7 @@ impl ConversationOrchestrator {
                                     None,
                                     cancel.clone(),
                                     Some(inputs),
+                                    &turn_guard,
                                 )
                             }),
                         )
@@ -3390,8 +3444,9 @@ impl ConversationOrchestrator {
         message_id: Option<MessageId>,
         cancel: CancellationToken,
         queued_inputs: Option<Vec<QueuedPromptInput>>,
+        turn_guard: &ProfileTurnGuard,
     ) -> Result<TurnOutcome, OrchestratorError> {
-        self.admit_conversation_profile().await?;
+        self.admit_conversation_profile(turn_guard).await?;
         self.prompt_runtime.begin_native_query();
         // 0. Build the system prompt (same as non-cancelable path).
         // claude-code `nre` precedence: `--system-prompt` (override) wins; else the
@@ -3409,6 +3464,7 @@ impl ConversationOrchestrator {
         // `RUe`'s cap closed ("idle check-ins paused until your next message").
         // Only the deferral's idle counter is reset; the stretch itself lives on.
         let (screened_text, _user_msg) = if let Some(inputs) = queued_inputs {
+            let requires_skill_header = inputs.iter().any(|input| input.skill_identity.is_some());
             let image_owner = inputs.iter().position(|input| !input.is_meta).unwrap_or(0);
             let mut admitted = Vec::with_capacity(inputs.len());
             for (index, mut input) in inputs.into_iter().enumerate() {
@@ -3440,7 +3496,7 @@ impl ConversationOrchestrator {
                     ModPromptScreen::Drop(reason) => self.emit_mod_prompt_drop(&reason).await,
                 }
             }
-            if admitted.is_empty() {
+            if admitted.is_empty() || (requires_skill_header && !admitted.iter().any(|(_, input, _)| !input.is_meta)) {
                 return Ok(TurnOutcome::EndTurn);
             }
             let primary = admitted
@@ -3487,8 +3543,12 @@ impl ConversationOrchestrator {
                     .clear_idle_checkins();
             }
             for (input, message, _) in &submissions {
-                self.session.lock().await.history.push(message.clone());
-                self.persist_queued_message_to_jsonl(message, input).await;
+                if input.skill_identity.is_some() {
+                    self.admit_skill_prompt_message(input, message).await?;
+                } else {
+                    self.session.lock().await.history.push(message.clone());
+                    self.persist_queued_message_to_jsonl(message, input).await;
+                }
             }
             // Keep request sidecars and hook-generated history after the whole
             // command/body pair, preserving their Native transcript position.
@@ -4052,7 +4112,7 @@ impl ConversationOrchestrator {
                 // user cancels before this queued turn acquires the gate, finish
                 // appending the Native rows; the cancellation token still
                 // suppresses the model request.
-                self.turn_gate.lock().await
+                Arc::new(self.turn_gate.clone().lock_owned().await)
             } else {
                 let Some(turn_guard) = self.lock_turn_unless_cancelled(&cancel).await else {
                     return Ok(TurnOutcome::Cancelled);
@@ -4085,7 +4145,7 @@ impl ConversationOrchestrator {
 
     pub(super) async fn run_turn_streaming_source_with_origin_locked(
         &self,
-        turn_guard: &tokio::sync::MutexGuard<'_, ()>,
+        turn_guard: &ProfileTurnGuard,
         prompt: Utf16JsonProjection,
         images: Vec<lingxi_core::types::ImageSource>,
         cancel: CancellationToken,
@@ -4128,7 +4188,7 @@ impl ConversationOrchestrator {
     #[allow(clippy::too_many_arguments)]
     async fn run_turn_streaming_inputs_locked(
         &self,
-        _turn_guard: &tokio::sync::MutexGuard<'_, ()>,
+        turn_guard: &ProfileTurnGuard,
         prompt: &str,
         images: Vec<lingxi_core::types::ImageSource>,
         cancel: CancellationToken,
@@ -4236,6 +4296,7 @@ impl ConversationOrchestrator {
                         queued_inputs,
                         row_token,
                         projected_content,
+                        turn_guard,
                     )),
                 )
                 .await

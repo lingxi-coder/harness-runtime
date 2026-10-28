@@ -780,7 +780,19 @@ pub async fn rewind_from_disk(
     message_id: Uuid,
 ) -> Result<RewindOutcome, String> {
     let path = crate::jsonl::session_path(home, cwd, &session_id.to_string());
-    let content = tokio::fs::read_to_string(&path)
+    rewind_from_transcript(home, cwd, session_id, &path, message_id).await
+}
+
+/// Rebuild checkpoints from the selected transcript while restoring files in
+/// `cwd`. The caller owns path validation and the session writer claim.
+pub async fn rewind_from_transcript(
+    home: &Path,
+    cwd: &str,
+    session_id: Uuid,
+    transcript_path: &Path,
+    message_id: Uuid,
+) -> Result<RewindOutcome, String> {
+    let content = tokio::fs::read_to_string(transcript_path)
         .await
         .map_err(|e| format!("read transcript: {e}"))?;
     let records = parse_snapshot_records(&content);

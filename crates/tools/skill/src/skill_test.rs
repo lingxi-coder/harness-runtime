@@ -35,7 +35,7 @@ mod tests {
         checked_source(source).0
     }
 
-    use lingxi_core::types::{AgentId, SessionId};
+    use lingxi_core::types::{AgentId, ConversationMessage, SessionId};
     use mobile_linux_api::ProcessOutput;
     use tool_api::test_support::{fresh_ctx, fresh_tx, shell_test_ctx, StubProcess};
 
@@ -1562,11 +1562,9 @@ this turn, the skill is loaded — follow it directly rather than calling again.
         );
     }
 
-    // P2-12 / `zSr`: a successful skill invocation records the skill in the
-    // process-global invoked-skill registry (main thread → key `":{name}"`), so
-    // its content can be re-injected after a compaction (`rRg`).
+    // The tool produces provenance; its host owns actual activation.
     #[tokio::test]
-    async fn invocation_registers_skill_in_invoked_registry() {
+    async fn invocation_does_not_register_before_host_admission() {
         let _g = compaction::invoked_skills::TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1580,7 +1578,7 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             shell_test_ctx(dummy_out()),
             Arc::new(FixedLoader(Some(desc))),
         );
-        tool.call(source_json!({"skill": "regtest"}), fresh_ctx(), fresh_tx())
+        let result = tool.call(source_json!({"skill": "regtest"}), fresh_ctx(), fresh_tx())
             .await
             .expect("ok");
 
@@ -1591,14 +1589,8 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             compaction::invoked_skills::InvokedSkillScopeRef::new(None, None),
             &skill_name,
         );
-        let content = compaction::invoked_skills::content_for_test(&main_thread_key)
-            .expect("skill registered under main-thread key");
-        assert!(
-            content
-                .string_at("")
-                .is_some_and(|text| text.contains("body here")),
-            "registered content must carry the expanded skill body; got: {content:?}"
-        );
+        assert!(compaction::invoked_skills::content_for_test(&main_thread_key).is_none());
+        assert!(compaction::invoked_skills::is_individual_skill_activation(&result.new_messages[0]));
         // A skill NOT invoked leaves no row.
         let other_key = compaction::invoked_skills::registry_key(
             compaction::invoked_skills::InvokedSkillScopeRef::new(None, None),
@@ -1640,7 +1632,6 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             .call(source_json!({"skill": "once"}), fresh_ctx(), fresh_tx())
             .await
             .expect("skill invocation");
-        let injected_id = result.new_messages[0].id();
         let serialized =
             serde_json::to_string(&result.new_messages[0]).expect("serialize skill message");
         let decoded: lingxi_core::types::ConversationMessage =
@@ -1661,31 +1652,9 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             calls_after_invocation, 2,
             "snapshot plus the one-time action"
         );
-        let metadata = compaction::invoked_skills::activation_metadata_for_scope(scope);
-        assert_eq!(metadata.len(), 1);
-        assert_ne!(
-            metadata[0].definition_sha256, metadata[0].content_sha256,
-            "the definition retains the unexpanded command while the activation carries its output"
-        );
-
-        let restored = compaction::restore_post_compact_skills(
-            compaction::invoked_skills::filter_for_scope(scope),
-            &[],
-        );
-        let rendered = compaction::render_invoked_skills_attachment(&restored)
-            .expect("effective skill restored");
-        let rendered = rendered.string_at("").unwrap();
-        assert!(rendered
-            .contains("Do NOT re-execute these skills or perform their one-time setup actions"));
-        assert!(rendered.contains("Ongoing guideline"));
-        assert!(rendered.contains("Create the requested file."));
-        assert_eq!(capture.seen.lock().unwrap().len(), calls_after_invocation);
-
-        compaction::invoked_skills::expire_for_mode_change(&session_text);
+        assert_eq!(origin.string_at("/skill_definition_sha256").unwrap().len(), 64);
         assert!(compaction::invoked_skills::filter_for_scope(scope).is_empty());
-        assert!(
-            compaction::invoked_skills::expired_message_ids_for_scope(scope).contains(&injected_id)
-        );
+        assert_eq!(capture.seen.lock().unwrap().len(), calls_after_invocation);
         compaction::invoked_skills::reset_for_test();
     }
 
@@ -1703,6 +1672,10 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             name_units.clone(),
         )
         .expect("raw UTF-16 skill name");
+        let alias_units = vec![0xd801];
+        let alias_name = Utf16JsonProjection::root_string(
+            String::from_utf16_lossy(&alias_units), alias_units.clone(),
+        ).expect("raw UTF-16 alias");
         let prompt_units = vec![u16::from(b'R'), 0xdfff, u16::from(b'!')];
         let args = Utf16JsonProjection::root_string(
             String::from_utf16_lossy(&prompt_units),
@@ -1710,11 +1683,12 @@ this turn, the skill is loaded — follow it directly rather than calling again.
         )
         .expect("raw UTF-16 skill argument");
         let input = Utf16JsonProjection::object(vec![
-            ("skill".to_owned(), skill_name.clone()),
+            ("skill".to_owned(), alias_name),
             ("args".to_owned(), args),
         ])
         .expect("raw skill input");
         let descriptor = SkillDescriptor {
+            name: skill_name.clone(),
             body: "$ARGUMENTS".into(),
             ..prompt_desc("raw-name")
         };
@@ -1739,16 +1713,27 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             compaction::invoked_skills::InvokedSkillScopeRef::new(None, None),
             &skill_name,
         );
-        let registered = compaction::invoked_skills::content_for_test(&key)
-            .expect("raw skill invocation is registered");
-        assert_eq!(registered.string_units(""), Some(prompt_units));
+        assert!(compaction::invoked_skills::content_for_test(&key).is_none());
+        let check_units = |message: &lingxi_core::types::ConversationMessage| {
+            let lingxi_core::types::ConversationMessage::User { content, .. } = message else {
+                panic!("skill prompt must remain a user message");
+            };
+            let [lingxi_core::types::ContentBlock::TextJsUtf16 { utf16_code_units, .. }] = content.as_slice() else {
+                panic!("skill prompt must retain its exact UTF-16 carrier");
+            };
+            assert_eq!(utf16_code_units, &prompt_units);
+        };
+        check_units(&result.new_messages[0]);
+        let encoded = serde_json::to_string(&result.new_messages[0]).unwrap();
+        let decoded = serde_json::from_str(&encoded).unwrap();
+        check_units(&decoded);
         assert_eq!(
             result
                 .data
                 .at_pointer("/commandName")
                 .and_then(|value| value.code_units())
                 .map(|units| units.to_vec()),
-            Some(name_units)
+            Some(alias_units)
         );
 
         compaction::invoked_skills::reset_for_test();
@@ -1768,13 +1753,16 @@ this turn, the skill is loaded — follow it directly rather than calling again.
         };
         let session_id = SessionId::nil();
         let agent_id = AgentId::nil();
+        let session_text = session_id.to_string();
+        let agent_text = agent_id.to_string();
+        compaction::invoked_skills::set_context_epoch(compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_text), Some(&agent_text)), 11);
         let mut builtin_ctx = shell_test_ctx(dummy_out());
         builtin_ctx.session_id = Some(session_id);
         let tool = SkillTool::with_loader(builtin_ctx, Arc::new(FixedLoader(Some(desc))));
         let mut call_ctx = fresh_ctx();
         call_ctx.agent_id = Some(agent_id);
 
-        tool.call(source_json!({"skill": "regtest"}), call_ctx, fresh_tx())
+        let result = tool.call(source_json!({"skill": "regtest"}), call_ctx, fresh_tx())
             .await
             .expect("ok");
 
@@ -1785,14 +1773,9 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             ),
             &Utf16JsonProjection::from("regtest"),
         );
-        let content = compaction::invoked_skills::content_for_test(&scoped_key)
-            .expect("skill registered under scoped key");
-        assert!(
-            content
-                .string_at("")
-                .is_some_and(|text| text.contains("body here")),
-            "registered content must carry the expanded skill body; got: {content:?}"
-        );
+        assert!(compaction::invoked_skills::content_for_test(&scoped_key).is_none());
+        let ConversationMessage::User { origin: Some(origin), .. } = &result.new_messages[0] else { panic!("skill origin") };
+        assert_eq!(origin.number_at("/context_epoch"), Some(11.0));
         let main_thread_key = compaction::invoked_skills::registry_key(
             compaction::invoked_skills::InvokedSkillScopeRef::new(None, None),
             &Utf16JsonProjection::from("regtest"),
@@ -1819,6 +1802,10 @@ this turn, the skill is loaded — follow it directly rather than calling again.
         };
         let stale_session_id = SessionId::new();
         let live_session_id = SessionId::new();
+        let stale_text = stale_session_id.to_string();
+        let live_text = live_session_id.to_string();
+        compaction::invoked_skills::set_context_epoch(compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&stale_text), None), 3);
+        compaction::invoked_skills::set_context_epoch(compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&live_text), None), 42);
         let mut builtin_ctx = shell_test_ctx(dummy_out());
         builtin_ctx.session_id = Some(stale_session_id);
         let tool = SkillTool::with_loader(builtin_ctx, Arc::new(FixedLoader(Some(desc))));
@@ -1827,7 +1814,7 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             lingxi_core::SessionState::empty(live_session_id, "model".into()),
         )));
 
-        tool.call(source_json!({"skill": "regtest"}), call_ctx, fresh_tx())
+        let result = tool.call(source_json!({"skill": "regtest"}), call_ctx, fresh_tx())
             .await
             .expect("ok");
 
@@ -1845,8 +1832,10 @@ this turn, the skill is loaded — follow it directly rather than calling again.
             ),
             &Utf16JsonProjection::from("regtest"),
         );
-        assert!(compaction::invoked_skills::content_for_test(&live_key).is_some());
+        assert!(compaction::invoked_skills::content_for_test(&live_key).is_none());
         assert!(compaction::invoked_skills::content_for_test(&stale_key).is_none());
+        let ConversationMessage::User { origin: Some(origin), .. } = &result.new_messages[0] else { panic!("skill origin") };
+        assert_eq!(origin.number_at("/context_epoch"), Some(42.0));
 
         compaction::invoked_skills::reset_for_test();
     }

@@ -605,6 +605,9 @@ pub struct DesktopConfig {
     /// Canonical transcript selected by cold resume, or the new fork target.
     /// The writer must append to the same file that supplied resumed history.
     pub session_transcript_path: Option<std::path::PathBuf>,
+    /// Bridge boot should restore an existing, metadata-only draft for this
+    /// session ID after claiming its writer lease.
+    pub restore_draft: bool,
     /// Session prompt roots retained through a host remount. Unlike `add_dir`,
     /// these load extensions without granting additional filesystem access.
     pub initial_prompt_directories: Vec<std::path::PathBuf>,
@@ -1145,6 +1148,7 @@ impl std::fmt::Debug for DesktopConfig {
             )
             .field("session_id_override", &self.session_id_override)
             .field("session_transcript_path", &self.session_transcript_path)
+            .field("restore_draft", &self.restore_draft)
             .field(
                 "session_resume_snapshot",
                 &self.session_resume_snapshot.as_ref().map(|_| "<captured>"),
@@ -1308,6 +1312,7 @@ impl Default for DesktopConfig {
             session_id_override: None,
             session_writer_lease: None,
             session_transcript_path: None,
+            restore_draft: false,
             initial_prompt_directories: Vec::new(),
             session_resume_snapshot: None,
             session_resume_cost: None,

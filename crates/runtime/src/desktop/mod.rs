@@ -1395,6 +1395,7 @@ async fn hydrate_captured_session_before_start(
         && !loaded
             .mobile_empty_sessions
             .contains(&session_id.to_string())
+        && !session_state::is_mode_only_draft(&snapshot.content, &session_id.to_string())
     {
         return Err(BuildError::Orchestrator(
             "cold resume snapshot contains no conversation".into(),
@@ -1425,6 +1426,7 @@ async fn hydrate_captured_session_before_start(
                 &snapshot.content,
                 &session_id.to_string(),
             ),
+            &snapshot.content,
         )
         .await
         .map_err(BuildError::Orchestrator)?;

@@ -626,7 +626,7 @@ impl Tool for Other {
 }
 
 struct Api {
-    provider: NativeComputerProvider,
+    provider: SyncMutex<NativeComputerProvider>,
     inner: MockApiClient,
     submission_probe: SyncMutex<Option<Arc<llm_runtime::computer::ComputerReceiptSubmission>>>,
     provider_inputs: SyncMutex<Vec<wire::ChatRequest>>,
@@ -634,7 +634,7 @@ struct Api {
 #[async_trait]
 impl OrchestratorApiClient for Api {
     fn native_computer_provider(&self, _: &str, _: Option<&str>) -> Option<NativeComputerProvider> {
-        Some(self.provider)
+        Some(*self.provider.lock().unwrap())
     }
     async fn messages_create(
         &self,
@@ -654,7 +654,7 @@ impl OrchestratorApiClient for Api {
                 &messages,
                 &[],
                 &tools,
-                protocol(self.provider),
+                protocol(*self.provider.lock().unwrap()),
             )?;
             // Capture the SDK projection before admitting the simulated transport.
             self.provider_inputs.lock().unwrap().push(input);
@@ -769,7 +769,7 @@ impl Fixture {
             remove_images,
         }));
         let api = Arc::new(Api {
-            provider,
+            provider: SyncMutex::new(provider),
             inner: MockApiClient::new(responses),
             submission_probe: SyncMutex::new(None),
             provider_inputs: SyncMutex::new(Vec::new()),
@@ -2263,7 +2263,11 @@ async fn profile_change_keeps_pending_receipt_recoverable_then_retires_old_conti
                 .unwrap();
         }
         let turn = fixture.orch.turn_gate.lock().await;
-        let error = fixture.orch.admit_conversation_profile().await.unwrap_err();
+        let error = fixture
+            .orch
+            .admit_conversation_profile_inner()
+            .await
+            .unwrap_err();
         drop(turn);
         assert!(error.to_string().contains("computer receipt"));
         let profile = fixture.orch.conversation_profile().await;
@@ -2373,7 +2377,11 @@ async fn profile_epoch_fences_openai_and_gemini_continuations_after_cold_recover
             pending.continuation.is_some(),
             "old admitted query retains its continuation"
         );
-        fixture.orch.admit_conversation_profile().await.unwrap();
+        fixture
+            .orch
+            .admit_conversation_profile_inner()
+            .await
+            .unwrap();
         drop(turn);
         assert!(!fixture
             .orch
@@ -2395,6 +2403,170 @@ async fn profile_epoch_fences_openai_and_gemini_continuations_after_cold_recover
             .unwrap();
         assert!(fresh.continuation.is_none());
         assert!(fresh.ordinary_history);
+    }
+}
+
+#[tokio::test]
+async fn retired_continuation_keeps_new_anthropic_receipt_in_the_actual_request() {
+    use lingxi_core::host::session_context::ConversationMode;
+
+    for old_provider in [
+        NativeComputerProvider::OpenAi,
+        NativeComputerProvider::Gemini,
+    ] {
+        for cold in [false, true] {
+            let mut successor = mock_message_response(vec![], Some("end_turn"));
+            successor.id = "anthropic-successor".into();
+            successor.model = MODEL.into();
+            let fixture =
+                Fixture::with_responses(old_provider, false, false, vec![successor]).await;
+            fixture.native().await;
+            let mut old = match old_provider {
+                NativeComputerProvider::OpenAi => openai(json!([{"type":"screenshot"}])),
+                NativeComputerProvider::Gemini => {
+                    let block = wire::ContentBlock::Native { value: wire::NativeExtension::new(
+                        lingxi_llm_client::providers::google::computer::CALL_FORMAT,
+                        sdk_source!({"type":"function_call","id":"call-1","name":"take_screenshot","arguments":{}}),
+                    ).unwrap() };
+                    let mut response = response(
+                        old_provider,
+                        vec![llm_runtime::ContentBlock::ProviderContent {
+                            protocol: protocol_name(old_provider),
+                            value: sdk_source!({"type":"lingxi_native_content","block":block}),
+                        }],
+                    );
+                    let mut metadata: Value =
+                        serde_json::from_str(response.provider_metadata.as_json_source()).unwrap();
+                    metadata["llm_client"]["continuation"] = json!({
+                        "response_id":response.id,"protocol":"gemini_interactions","provider_id":"gemini",
+                        "profile_name":"fixture-profile","endpoint_fingerprint":"fixture-endpoint",
+                        "account_scope":"fixture-account","request_model":MODEL
+                    });
+                    response.provider_metadata = sdk_json(&metadata);
+                    response
+                }
+                _ => unreachable!(),
+            };
+            old.id = "old-provider-response".into();
+            set_continuation_response_id(&mut old);
+            let old_blocks = fixture.bind(&old).await.unwrap();
+            let old_result = fixture.dispatch(old_blocks).await;
+            fixture.publish(&old_result.results).await;
+            prepare_receipts(&fixture.orch, &result_ids(&old_result.results))
+                .await
+                .unwrap();
+            let (catalog, _) = fixture.orch.build_wire_tools().await.unwrap();
+            prepare_projection(&fixture.orch, MODEL, None, &catalog)
+                .await
+                .unwrap()
+                .unwrap()
+                .submission
+                .unwrap()
+                .before_submit()
+                .await
+                .unwrap();
+            let mut old_successor = response(old_provider, vec![]);
+            old_successor.id = "old-provider-successor".into();
+            if old_provider == NativeComputerProvider::Gemini {
+                let mut metadata: Value =
+                    serde_json::from_str(old_successor.provider_metadata.as_json_source()).unwrap();
+                metadata["llm_client"]["continuation"] = json!({
+                    "response_id":old_successor.id,"protocol":"gemini_interactions","provider_id":"gemini",
+                    "profile_name":"fixture-profile","endpoint_fingerprint":"fixture-endpoint",
+                    "account_scope":"fixture-account","request_model":MODEL
+                });
+                old_successor.provider_metadata = sdk_json(&metadata);
+            } else {
+                set_continuation_response_id(&mut old_successor);
+            }
+            fixture.accept_response(&old_successor).await.unwrap();
+            fixture
+                .orch
+                .select_conversation_mode(ConversationMode::Chat)
+                .await
+                .unwrap();
+
+            *fixture.api.provider.lock().unwrap() = NativeComputerProvider::Anthropic;
+            fixture
+                .orch
+                .computer_runtime
+                .verified
+                .write()
+                .unwrap()
+                .push(VerifiedComputerProfile {
+                    model: MODEL.into(),
+                    profile: None,
+                    provider: NativeComputerProvider::Anthropic,
+                    evidence: "fixture acceptance only".into(),
+                });
+            fixture.native().await;
+            let mut fresh = claude_screenshot();
+            fresh.id = "fresh-anthropic-response".into();
+            let blocks = fixture.bind(&fresh).await.unwrap();
+            let dispatched = fixture.dispatch(blocks).await;
+            fixture.publish(&dispatched.results).await;
+            prepare_receipts(&fixture.orch, &result_ids(&dispatched.results))
+                .await
+                .unwrap();
+            let saved = fixture
+                .journal
+                .receipts
+                .lock()
+                .unwrap()
+                .values()
+                .find(|record| record.binding.protocol == "anthropic_messages")
+                .unwrap()
+                .clone();
+            let expected = load_receipt(&saved.receipt).await.unwrap().block;
+            if cold {
+                fixture.forget_runtime().await;
+                fixture
+                    .orch
+                    .restore_conversation_profile(ConversationMode::Code)
+                    .await
+                    .unwrap();
+            }
+            let projection = prepare_projection(&fixture.orch, MODEL, None, &catalog)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(projection.ordinary_history);
+            assert!(projection.continuation.is_none());
+            let submission = projection.submission.unwrap();
+            assert_eq!(submission.receipts[0].receipt_id, saved.receipt_id);
+            *fixture.api.submission_probe.lock().unwrap() = Some(submission);
+            crate::turn_loop::execute_one_turn_with_recovery_tracked(
+                &fixture.orch,
+                None,
+                &mut crate::turn_loop::RecoveryState::default(),
+                None,
+                0,
+            )
+            .await
+            .unwrap();
+            let inputs = fixture.api.provider_inputs.lock().unwrap();
+            assert_eq!(inputs.len(), 1);
+            assert!(
+                inputs[0]
+                    .messages
+                    .iter()
+                    .flat_map(|message| &message.content)
+                    .any(|block| block == &expected),
+                "{old_provider:?}, cold={cold}: submitted receipt differs from request input"
+            );
+            drop(inputs);
+            assert_eq!(
+                fixture
+                    .journal
+                    .receipt(&saved.receipt_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .stage,
+                NativeReceiptStage::ResponseReceived
+            );
+            assert_eq!(fixture.computer.calls.lock().unwrap().len(), 2);
+        }
     }
 }
 
@@ -2740,6 +2912,494 @@ async fn compacted_unknown_input_uses_its_durable_binding_without_replaying_or_r
         .native
         .is_some());
     assert_eq!(fixture.computer.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn full_compaction_preserves_abandonment_authority_but_not_pending_receipt_clearance() {
+    use lingxi_core::host::session_context::ConversationMode;
+
+    for unresolved in [false, true] {
+        for cold in [false, true] {
+            let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+            if unresolved {
+                fixture.prepared_receipt().await;
+            } else {
+                fixture.native().await;
+                let blocks = fixture
+                    .bind(&openai(json!([{"type":"screenshot"}])))
+                    .await
+                    .unwrap();
+                fixture
+                    .journal
+                    .duplicate_started
+                    .store(true, Ordering::SeqCst);
+                let result = fixture.dispatch(blocks).await;
+                fixture.publish(&result.results).await;
+                prepare_receipts(&fixture.orch, &result_ids(&result.results))
+                    .await
+                    .unwrap();
+                assert!(!has_unsettled_profile_receipts(&fixture.orch).await.unwrap());
+            }
+            let compacted = fixture
+                .orch
+                .apply_post_compact(
+                    compaction::IterationCompactionResult {
+                        messages: vec![ConversationMessage::user(
+                            MessageId::new(),
+                            "summary".into(),
+                        )],
+                        raw_summary_text: "summary".into(),
+                        layers_applied: vec![],
+                        total_tokens_freed: 1,
+                        cache_hit: false,
+                        consecutive_failures: 0,
+                        was_compacted: true,
+                        rapid_refill_breaker_tripped: false,
+                        consecutive_rapid_refills: 0,
+                        messages_to_preserve: vec![],
+                        media_analysis_to_preserve: vec![],
+                        compaction_usage: None,
+                        compaction_model: None,
+                        compaction_profile: None,
+                    },
+                    compaction::CompactTrigger::Auto,
+                    100,
+                    4,
+                    100,
+                    std::time::Instant::now(),
+                    None,
+                )
+                .await;
+            assert!(compacted.is_some());
+            if cold {
+                let session_id = fixture.orch.session.lock().await.session_id;
+                let loaded = session::jsonl::load_session(
+                    fixture._root.path(),
+                    &fixture._root.path().to_string_lossy(),
+                    session_id.as_uuid(),
+                    Arc::new(platform_posix::fs::PosixFileSystem::new(
+                        fixture._root.path().to_path_buf(),
+                    )),
+                )
+                .await
+                .unwrap();
+                let restored = crate::resume::state_from_messages(session_id.as_uuid(), &loaded);
+                let mut session = fixture.orch.session.lock().await;
+                session.history = restored.history;
+                session.model_context_excluded_messages = restored.model_context_excluded_messages;
+                drop(session);
+                fixture.forget_runtime().await;
+            }
+            assert_eq!(
+                has_unsettled_profile_receipts(&fixture.orch).await.unwrap(),
+                unresolved,
+                "unresolved={unresolved}, cold={cold}"
+            );
+            let turn = fixture.orch.turn_gate.lock().await;
+            let queued = fixture
+                .orch
+                .select_conversation_mode(ConversationMode::Chat)
+                .await
+                .unwrap();
+            assert!(queued.pending);
+            let admission = fixture.orch.admit_conversation_profile_inner().await;
+            drop(turn);
+            if unresolved {
+                assert!(admission
+                    .unwrap_err()
+                    .to_string()
+                    .contains("computer receipt"));
+                let state = fixture.orch.conversation_profile().await;
+                assert_eq!(
+                    (state.active, state.selected, state.pending),
+                    (ConversationMode::Code, ConversationMode::Code, false)
+                );
+            } else {
+                admission.unwrap();
+                let state = fixture.orch.conversation_profile().await;
+                assert_eq!(
+                    (state.active, state.selected, state.pending),
+                    (ConversationMode::Chat, ConversationMode::Chat, false)
+                );
+                fixture
+                    .orch
+                    .select_conversation_mode(ConversationMode::Code)
+                    .await
+                    .unwrap();
+            }
+            let selection = fixture
+                .orch
+                .select_conversation_mode(ConversationMode::Chat)
+                .await;
+            if unresolved {
+                assert!(selection
+                    .unwrap_err()
+                    .to_string()
+                    .contains("computer receipt"));
+                assert_eq!(fixture.computer.calls.lock().unwrap().len(), 1);
+            } else {
+                assert!(!selection.unwrap().pending);
+                assert_eq!(fixture.computer.calls.lock().unwrap().len(), 0);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn full_compaction_relinks_noncontiguous_abandonment_rows_on_cold_resume() {
+    use lingxi_core::host::session_context::ConversationMode;
+
+    for marker_already_persisted in [false, true] {
+        let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+        fixture.native().await;
+        let blocks = fixture
+            .bind(&openai(json!([{"type":"screenshot"}])))
+            .await
+            .unwrap();
+        fixture
+            .journal
+            .duplicate_started
+            .store(true, Ordering::SeqCst);
+        let dispatched = fixture.dispatch(blocks).await;
+        fixture.publish(&dispatched.results).await;
+        prepare_receipts(&fixture.orch, &result_ids(&dispatched.results))
+            .await
+            .unwrap();
+        let marker = fixture.orch.session.lock().await.history.iter().find(|message| {
+            matches!(message, ConversationMessage::User {content,..} if content.iter().any(|block|
+                matches!(block, ContentBlock::ProviderContent {value,..} if value.string_at("/type") == Some("lingxi_computer_abandoned"))))
+        }).unwrap().clone();
+        let marker_id = marker.id();
+        if marker_already_persisted {
+            let row = prepare_stored_row(&fixture.orch, &marker).await.unwrap();
+            persist_stored_row(&fixture.orch, &row, "test-abandonment-before-compaction")
+                .await
+                .unwrap();
+        }
+        let removed = ConversationMessage::user(MessageId::new(), "old context to discard".into());
+        let kept = ConversationMessage::user(MessageId::new(), "kept tail".into());
+        for row in [&removed, &kept] {
+            fixture.orch.persist_message_to_jsonl(row).await;
+            fixture.orch.session.lock().await.history.push(row.clone());
+        }
+        let summary = ConversationMessage::user(MessageId::new(), "new compact summary".into());
+        let compacted = fixture
+            .orch
+            .apply_post_compact(
+                compaction::IterationCompactionResult {
+                    messages: vec![summary.clone()],
+                    raw_summary_text: "new compact summary".into(),
+                    layers_applied: vec![],
+                    total_tokens_freed: 1,
+                    cache_hit: false,
+                    consecutive_failures: 0,
+                    was_compacted: true,
+                    rapid_refill_breaker_tripped: false,
+                    consecutive_rapid_refills: 0,
+                    messages_to_preserve: vec![kept.clone()],
+                    media_analysis_to_preserve: vec![],
+                    compaction_usage: None,
+                    compaction_model: None,
+                    compaction_profile: None,
+                },
+                compaction::CompactTrigger::Auto,
+                100,
+                4,
+                100,
+                std::time::Instant::now(),
+                None,
+            )
+            .await;
+        assert!(compacted.is_some());
+
+        let appended = ConversationMessage::user(MessageId::new(), "after compact".into());
+        fixture.orch.persist_message_to_jsonl(&appended).await;
+        fixture
+            .orch
+            .session
+            .lock()
+            .await
+            .history
+            .push(appended.clone());
+        let raw = std::fs::read_to_string(&fixture.transcript_path).unwrap();
+        let rows = raw
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect::<Vec<_>>();
+        let raw_row = |id: MessageId| {
+            rows.iter()
+                .find(|row| row["uuid"] == id.as_uuid().to_string())
+                .unwrap()
+        };
+        let staged = raw_row(summary.id());
+        let boundary_id = staged["nativeCompactStage"].as_str().unwrap();
+        let boundary_index = rows
+            .iter()
+            .position(|row| row["uuid"] == boundary_id)
+            .unwrap();
+        let summary_index = rows
+            .iter()
+            .position(|row| row["uuid"] == summary.id().as_uuid().to_string())
+            .unwrap();
+        assert!(
+            summary_index < boundary_index,
+            "the durable boundary publishes only after the staged summary"
+        );
+        assert_eq!(staged["isSidechain"], true);
+        assert!(rows[boundary_index]["parentUuid"].is_null());
+        assert_eq!(
+            raw_row(appended.id())["parentUuid"],
+            kept.id().as_uuid().to_string(),
+            "post-compact pointer must be the selected tail"
+        );
+        assert_eq!(
+            raw_row(kept.id())["parentUuid"],
+            removed.id().as_uuid().to_string()
+        );
+        if marker_already_persisted {
+            assert_eq!(
+                raw_row(removed.id())["parentUuid"],
+                marker_id.as_uuid().to_string()
+            );
+        } else {
+            assert_eq!(
+                raw_row(marker_id)["parentUuid"],
+                kept.id().as_uuid().to_string()
+            );
+        }
+        let session_id = fixture.orch.session.lock().await.session_id;
+        let loaded = session::jsonl::load_session(
+            fixture._root.path(),
+            &fixture._root.path().to_string_lossy(),
+            session_id.as_uuid(),
+            Arc::new(platform_posix::fs::PosixFileSystem::new(
+                fixture._root.path().to_path_buf(),
+            )),
+        )
+        .await
+        .unwrap();
+        let ids = loaded
+            .iter()
+            .map(|row| row.uuid.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !loaded
+                .iter()
+                .find(|row| row.uuid == summary.id().as_uuid().to_string())
+                .unwrap()
+                .is_sidechain
+        );
+        let id = |row: &ConversationMessage| row.id().as_uuid().to_string();
+        let wanted = [
+            id(&summary),
+            marker_id.as_uuid().to_string(),
+            id(&kept),
+            id(&appended),
+        ];
+        let positions = wanted
+            .iter()
+            .map(|id| {
+                ids.iter()
+                    .position(|actual| *actual == id.as_str())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            !ids.contains(&id(&removed).as_str()),
+            "discarded intermediate row must not be resurrected"
+        );
+        let restored = crate::resume::state_from_messages(session_id.as_uuid(), &loaded);
+        let mut session = fixture.orch.session.lock().await;
+        session.history = restored.history;
+        session.model_context_excluded_messages = restored.model_context_excluded_messages;
+        drop(session);
+        fixture.forget_runtime().await;
+        assert!(!has_unsettled_profile_receipts(&fixture.orch).await.unwrap());
+        assert!(
+            !fixture
+                .orch
+                .select_conversation_mode(ConversationMode::Chat)
+                .await
+                .unwrap()
+                .pending
+        );
+    }
+}
+
+#[tokio::test]
+async fn failed_native_compaction_stage_keeps_history_and_tip_on_cold_append() {
+    use lingxi_core::host::session_context::ConversationMode;
+
+    let _registry_guard = compaction::invoked_skills::TEST_LOCK.lock().unwrap();
+    let fixture = Fixture::new(NativeComputerProvider::OpenAi, false, false).await;
+    fixture.native().await;
+    let blocks = fixture
+        .bind(&openai(json!([{"type":"screenshot"}])))
+        .await
+        .unwrap();
+    fixture
+        .journal
+        .duplicate_started
+        .store(true, Ordering::SeqCst);
+    let dispatched = fixture.dispatch(blocks).await;
+    fixture.publish(&dispatched.results).await;
+    prepare_receipts(&fixture.orch, &result_ids(&dispatched.results))
+        .await
+        .unwrap();
+    let marker = fixture.orch.session.lock().await.history.iter().find(|message| {
+        matches!(message, ConversationMessage::User {content,..} if content.iter().any(|block|
+            matches!(block, ContentBlock::ProviderContent {value,..} if value.string_at("/type") == Some("lingxi_computer_abandoned"))))
+    }).unwrap().clone();
+    let marker_row = prepare_stored_row(&fixture.orch, &marker).await.unwrap();
+    persist_stored_row(&fixture.orch, &marker_row, "fault-test-abandonment")
+        .await
+        .unwrap();
+    // The file restore arm keeps only five entries, and a long Skill body is
+    // truncated by its restore budget. A failed commit must undo both while
+    // leaving a parallel subagent's scope untouched.
+    let read_map = &fixture.orch.prompt_runtime.read_state_map;
+    for index in 0..6 {
+        let path = fixture._root.path().join(format!("read-{index}.txt"));
+        let content = format!("file {index}");
+        std::fs::write(&path, &content).unwrap();
+        tool_api::read_file_state::set(
+            read_map,
+            path,
+            tool_api::read_file_state::ReadFileEntry {
+                content,
+                mtime_ms: index,
+                offset: None,
+                limit: None,
+                from_read: true,
+                seeded_from_context: false,
+                is_partial_view: false,
+            },
+        );
+    }
+    let reads_before = read_map.lock().unwrap().clone();
+    let session_string = fixture.orch.session.lock().await.session_id.to_string();
+    let main_scope =
+        compaction::invoked_skills::InvokedSkillScopeRef::new(Some(&session_string), None);
+    let child_scope = compaction::invoked_skills::InvokedSkillScopeRef::new(
+        Some(&session_string),
+        Some("parallel-agent"),
+    );
+    let name = Utf16JsonProjection::from("fault-skill");
+    let body = Utf16JsonProjection::from("long skill content ".repeat(2000));
+    let child_body = Utf16JsonProjection::from("parallel agent instructions");
+    compaction::invoked_skills::register_scoped(
+        &name,
+        std::path::Path::new("/skill"),
+        &body,
+        main_scope,
+    );
+    compaction::invoked_skills::register_scoped(
+        &name,
+        std::path::Path::new("/skill"),
+        &child_body,
+        child_scope,
+    );
+    let before_history = fixture.orch.session.lock().await.history.clone();
+    let before_tip = fixture.orch.transcript.last_jsonl_uuid.lock().await.clone();
+
+    // The first summary is durably staged, but reusing its UUID for different
+    // contents makes the second append fail under the real writer transaction.
+    let duplicate = MessageId::new();
+    let result = fixture
+        .orch
+        .apply_post_compact(
+            compaction::IterationCompactionResult {
+                messages: vec![
+                    ConversationMessage::user(duplicate, "staged summary".into()),
+                    ConversationMessage::user(duplicate, "conflicting summary".into()),
+                ],
+                raw_summary_text: "summary".into(),
+                layers_applied: vec![],
+                total_tokens_freed: 1,
+                cache_hit: false,
+                consecutive_failures: 0,
+                was_compacted: true,
+                rapid_refill_breaker_tripped: false,
+                consecutive_rapid_refills: 0,
+                messages_to_preserve: vec![],
+                media_analysis_to_preserve: vec![],
+                compaction_usage: None,
+                compaction_model: None,
+                compaction_profile: None,
+            },
+            compaction::CompactTrigger::Manual,
+            100,
+            4,
+            100,
+            std::time::Instant::now(),
+            None,
+        )
+        .await;
+    assert!(result.is_none());
+    assert_eq!(fixture.orch.session.lock().await.history, before_history);
+    assert_eq!(
+        *fixture.orch.transcript.last_jsonl_uuid.lock().await,
+        before_tip
+    );
+    assert_eq!(*read_map.lock().unwrap(), reads_before);
+    let main_after = compaction::invoked_skills::filter_for_scope(main_scope);
+    let child_after = compaction::invoked_skills::filter_for_scope(child_scope);
+    assert_eq!(main_after.len(), 1);
+    assert_eq!(child_after.len(), 1);
+    assert!(main_after[0].content.semantically_eq(&body));
+    assert!(child_after[0].content.semantically_eq(&child_body));
+
+    let raw = std::fs::read_to_string(&fixture.transcript_path).unwrap();
+    let rows = raw
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .collect::<Vec<_>>();
+    let stage = rows
+        .iter()
+        .find(|row| row["uuid"] == duplicate.as_uuid().to_string())
+        .unwrap();
+    assert_eq!(stage["isSidechain"], true);
+    let unpublished_boundary = stage["nativeCompactStage"].as_str().unwrap();
+    assert!(!rows.iter().any(|row| row["uuid"] == unpublished_boundary));
+
+    let appended = ConversationMessage::user(MessageId::new(), "after failed compact".into());
+    fixture.orch.persist_message_to_jsonl(&appended).await;
+    let session_id = fixture.orch.session.lock().await.session_id;
+    let loaded = session::jsonl::load_session(
+        fixture._root.path(),
+        &fixture._root.path().to_string_lossy(),
+        session_id.as_uuid(),
+        Arc::new(platform_posix::fs::PosixFileSystem::new(
+            fixture._root.path().to_path_buf(),
+        )),
+    )
+    .await
+    .unwrap();
+    assert!(loaded
+        .iter()
+        .any(|row| row.uuid == appended.id().as_uuid().to_string()));
+    assert!(loaded
+        .iter()
+        .any(|row| row.uuid == marker.id().as_uuid().to_string()));
+    assert!(!loaded
+        .iter()
+        .any(|row| row.uuid == duplicate.as_uuid().to_string()));
+    let restored = crate::resume::state_from_messages(session_id.as_uuid(), &loaded);
+    let mut session = fixture.orch.session.lock().await;
+    session.history = restored.history;
+    session.model_context_excluded_messages = restored.model_context_excluded_messages;
+    drop(session);
+    fixture.forget_runtime().await;
+    assert!(!has_unsettled_profile_receipts(&fixture.orch).await.unwrap());
+    assert!(
+        !fixture
+            .orch
+            .select_conversation_mode(ConversationMode::Chat)
+            .await
+            .unwrap()
+            .pending
+    );
 }
 
 #[tokio::test]
@@ -3375,6 +4035,7 @@ async fn full_compaction_preserves_unsubmitted_native_round_and_receipt_for_fres
                     super::preserve_pending_compaction_tail(&fixture.orch, &[])
                         .await
                         .unwrap()
+                        .0
                         .is_empty(),
                     "completed receipts must no longer pin history"
                 );

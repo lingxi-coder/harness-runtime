@@ -101,6 +101,7 @@ pub fn create_compact_boundary(
         pre_compact_discovered_tools: tools,
         preserved_segment: None,
         preserved_messages: None,
+        native_exact_preserved: None,
         active_goal: None,
         // Bare 8-4-4-4-12 uuid (NOT the `msg:`-prefixed Display form) — this
         // value must match on-disk JSONL line uuids, which are raw.

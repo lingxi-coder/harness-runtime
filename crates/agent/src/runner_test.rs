@@ -1487,6 +1487,8 @@ async fn accepted_fallback_prunes_discarded_k_without_clearing_je() {
 
     let mut history = Vec::new();
     let mut transcript_written = 0;
+    let ctx = fresh_subagent_ctx();
+    let (out_tx, _out_rx) = mpsc::channel(8);
     append_live_stream_rows(
         ordered_rows,
         &je_rows,
@@ -1495,6 +1497,8 @@ async fn accepted_fallback_prunes_discarded_k_without_clearing_je() {
         &mut history,
         &mut transcript_written,
         None,
+        &ctx,
+        &out_tx,
     )
     .await;
 
@@ -14104,4 +14108,269 @@ async fn concurrency_safe_skill_override_updates_the_next_query_after_same_turn_
         .messages
         .iter()
         .any(|message| message.text_content() == "nested injected second"));
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn accepted_agent_skill_publication_preserves_scope_and_rejects_failed_or_cancelled_rows() {
+    let _guard = lingxi_core::host::invoked_skills::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    lingxi_core::host::invoked_skills::reset_for_test();
+    let mut ctx = fresh_subagent_ctx();
+    let session = lingxi_core::types::SessionId::new();
+    ctx.origin_session_id = Some(session);
+    let session_text = session.to_string();
+    let agent_text = ctx.agent_id.to_string();
+    let scope = lingxi_core::host::invoked_skills::InvokedSkillScopeRef::new(Some(&session_text), Some(&agent_text));
+    let old_id = MessageId::new();
+    lingxi_core::host::invoked_skills::register_activation_with_message(&"review".into(), std::path::Path::new("/skills/review"), &"old".into(), None, scope, old_id);
+    let message = ConversationMessage::user(MessageId::new(), "accepted".into()).with_origin(
+        lingxi_core::host::invoked_skills::skill_activation_origin_with_definition(0, &"review".into(), std::path::Path::new("/skills/review"), &"definition".into()),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unwritable.jsonl");
+    std::fs::create_dir(&path).unwrap();
+    let writer = crate::transcript::AgentTranscriptWriter::new(path, ctx.agent_id, Arc::new(platform_posix::fs::PosixFileSystem::new(dir.path().to_path_buf())));
+    let mut history = Vec::new();
+    let mut written = 0;
+    let (out_tx, mut out_rx) = mpsc::channel(8);
+    append_live_stream_rows(vec![message.clone()], &[message.clone()], &mut [], Some(&writer), &mut history, &mut written, None, &ctx, &out_tx).await;
+    assert!(history.is_empty());
+    assert_eq!(lingxi_core::host::invoked_skills::filter_for_scope(scope)[0].content.string_at(""), Some("old"));
+    assert!(!lingxi_core::host::invoked_skills::expired_message_ids_for_scope(scope).contains(&old_id));
+    ctx.cancellation_token.cancel();
+    append_live_stream_rows(vec![message.clone()], &[message.clone()], &mut [], None, &mut history, &mut written, None, &ctx, &out_tx).await;
+    assert!(history.is_empty());
+    assert_eq!(lingxi_core::host::invoked_skills::filter_for_scope(scope)[0].content.string_at(""), Some("old"));
+    ctx.cancellation_token = lingxi_core::host::CancellationToken::new();
+    append_live_stream_rows(vec![message.clone()], &[message.clone()], &mut [], None, &mut history, &mut written, None, &ctx, &out_tx).await;
+    assert_eq!(history, vec![message]);
+    assert!(matches!(out_rx.try_recv(), Ok(SubagentEvent::Message { .. })));
+    assert!(out_rx.try_recv().is_err());
+    assert_eq!(lingxi_core::host::invoked_skills::filter_for_scope(scope)[0].content.string_at(""), Some("accepted"));
+    assert!(lingxi_core::host::invoked_skills::expired_message_ids_for_scope(scope).contains(&old_id));
+    lingxi_core::host::invoked_skills::reset_for_test();
+}
+
+#[derive(Default)]
+struct CommitBoundaryFs {
+    entered_append: AtomicBool,
+    append_started: tokio::sync::Notify,
+    resume_append: tokio::sync::Notify,
+    body: Mutex<String>,
+}
+
+#[async_trait]
+impl lingxi_core::host::FileSystem for CommitBoundaryFs {
+    async fn read_file(
+        &self,
+        path: &str,
+        _: Option<u64>,
+        _: Option<u64>,
+    ) -> Result<lingxi_core::host::filesystem::FileContent, lingxi_core::host::FsError> {
+        Err(lingxi_core::host::FsError::NotFound(path.into()))
+    }
+
+    async fn write_file(&self, _: &str, _: &str) -> Result<(), lingxi_core::host::FsError> {
+        Ok(())
+    }
+
+    fn is_within_workspace(&self, _: &str) -> bool { true }
+
+    async fn watch(
+        &self,
+        _: &str,
+    ) -> Result<
+        std::pin::Pin<Box<dyn futures::Stream<Item = lingxi_core::host::filesystem::FileEvent> + Send>>,
+        lingxi_core::host::FsError,
+    > {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    async fn append_file(&self, _: &str, content: &str) -> Result<(), lingxi_core::host::FsError> {
+        self.body.lock().unwrap().push_str(content);
+        self.entered_append.store(true, Ordering::SeqCst);
+        self.append_started.notify_one();
+        self.resume_append.notified().await;
+        Ok(())
+    }
+
+    async fn truncate(&self, _: &str, _: u64) -> Result<(), lingxi_core::host::FsError> { unreachable!() }
+    async fn file_mtime(&self, _: &str) -> Result<std::time::SystemTime, lingxi_core::host::FsError> { unreachable!() }
+    async fn file_size(&self, _: &str) -> Result<u64, lingxi_core::host::FsError> { unreachable!() }
+    async fn delete_file(&self, _: &str) -> Result<(), lingxi_core::host::FsError> { unreachable!() }
+    async fn symlink(&self, _: &str, _: &str) -> Result<(), lingxi_core::host::FsError> { unreachable!() }
+    async fn flock_exclusive(&self, _: &str) -> Result<Box<dyn lingxi_core::host::filesystem::FlockGuard>, lingxi_core::host::FsError> { unreachable!() }
+    async fn fsync(&self, _: &str) -> Result<(), lingxi_core::host::FsError> { unreachable!() }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn agent_skill_cancellation_and_commit_are_ordered_at_journal_permit() {
+    use lingxi_core::host::invoked_skills as skills;
+    let _guard = skills::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    skills::reset_for_test();
+    let dir = tempfile::tempdir().unwrap();
+    let fs = Arc::new(CommitBoundaryFs::default());
+    let mut ctx = fresh_subagent_ctx();
+    let session = lingxi_core::types::SessionId::new();
+    ctx.origin_session_id = Some(session);
+    let session_text = session.to_string();
+    let agent_text = ctx.agent_id.to_string();
+    let scope = skills::InvokedSkillScopeRef::new(Some(&session_text), Some(&agent_text));
+    let old_id = MessageId::new();
+    skills::register_activation_with_message(
+        &"review".into(), std::path::Path::new("/skills/review"), &"old".into(),
+        None, scope, old_id,
+    );
+    let message = ConversationMessage::user(MessageId::new(), "accepted".into()).with_origin(
+        skills::skill_activation_origin_with_definition(
+            0, &"review".into(), std::path::Path::new("/skills/review"), &"definition".into(),
+        ),
+    );
+    let writer = crate::transcript::AgentTranscriptWriter::new(
+        dir.path().join("agent.jsonl"), ctx.agent_id, fs.clone(),
+    );
+    let mut history = Vec::new();
+    let mut written = 0;
+    let (out_tx, mut out_rx) = mpsc::channel(8);
+    let rows = vec![message.clone()];
+    let mut assistant_rows = Vec::new();
+
+    // The operation has run the early check but is queued on the journal.
+    // Cancellation before the permit must win without a durable or live row.
+    let journal = writer.journal_lock_for_test().lock().await;
+    let mut pending = Box::pin(append_live_stream_rows(
+        rows.clone(), &rows, &mut assistant_rows, Some(&writer), &mut history, &mut written, None, &ctx, &out_tx,
+    ));
+    assert!(futures::poll!(pending.as_mut()).is_pending());
+    assert!(!fs.entered_append.load(Ordering::SeqCst));
+    ctx.cancellation_token.cancel();
+    drop(journal);
+    pending.await;
+    assert!(history.is_empty());
+    assert!(fs.body.lock().unwrap().is_empty());
+    assert!(out_rx.try_recv().is_err());
+    assert_eq!(skills::filter_for_scope(scope)[0].content.string_at(""), Some("old"));
+    assert!(!skills::expired_message_ids_for_scope(scope).contains(&old_id));
+
+    // This append has passed the permit and entered I/O. Later cancellation
+    // cannot roll it back: durable and in-memory projections commit together.
+    ctx.cancellation_token = lingxi_core::host::CancellationToken::new();
+    let mut committed = Box::pin(append_live_stream_rows(
+        rows.clone(), &rows, &mut assistant_rows, Some(&writer), &mut history, &mut written, None, &ctx, &out_tx,
+    ));
+    assert!(futures::poll!(committed.as_mut()).is_pending());
+    assert!(fs.entered_append.load(Ordering::SeqCst));
+    ctx.cancellation_token.cancel();
+    fs.resume_append.notify_one();
+    committed.await;
+    assert_eq!(history, rows);
+    assert!(fs.body.lock().unwrap().contains("accepted"));
+    assert!(matches!(out_rx.try_recv(), Ok(SubagentEvent::Message { .. })));
+    assert_eq!(skills::filter_for_scope(scope)[0].content.string_at(""), Some("accepted"));
+    assert!(skills::expired_message_ids_for_scope(scope).contains(&old_id));
+    skills::reset_for_test();
+}
+
+/// Runs a controlled publication future in the pool's real abort slot.
+struct PublicationTestRuntime {
+    job: Mutex<Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>>>,
+    task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    cancelled: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl lingxi_core::host::RuntimeSpawner for PublicationTestRuntime {
+    async fn spawn(
+        &self,
+        name: &str,
+        original: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> Result<lingxi_core::host::BackgroundTaskHandle, lingxi_core::host::RuntimeError> {
+        drop(original);
+        let job = self.job.lock().unwrap().take().expect("one runner");
+        *self.task.lock().unwrap() = Some(tokio::spawn(job));
+        Ok(lingxi_core::host::BackgroundTaskHandle { task_name: name.into(), task_id: 1 })
+    }
+
+    async fn sleep(&self, duration: std::time::Duration) { tokio::time::sleep(duration).await; }
+
+    async fn cancel(&self, _: &lingxi_core::host::BackgroundTaskHandle) -> Result<(), lingxi_core::host::RuntimeError> {
+        if let Some(task) = self.task.lock().unwrap().take() { task.abort(); }
+        self.cancelled.notify_one();
+        Ok(())
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn pool_hard_abort_drains_skill_publication_after_disk_write() {
+    use lingxi_core::host::invoked_skills as skills;
+    let _guard = skills::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for drop_deallocator in [false, true] {
+        skills::reset_for_test();
+        let dir = tempfile::tempdir().unwrap();
+        let fs = Arc::new(CommitBoundaryFs::default());
+        let mut ctx = fresh_subagent_ctx();
+        let session = lingxi_core::types::SessionId::new();
+        ctx.origin_session_id = Some(session);
+        let session_text = session.to_string();
+        let agent_text = ctx.agent_id.to_string();
+        let scope = skills::InvokedSkillScopeRef::new(Some(&session_text), Some(&agent_text));
+        let old_id = MessageId::new();
+        skills::register_activation_with_message(
+            &"review".into(), std::path::Path::new("/skills/review"), &"old".into(),
+            None, scope, old_id,
+        );
+        let message = ConversationMessage::user(MessageId::new(), "accepted".into()).with_origin(
+            skills::skill_activation_origin_with_definition(
+                0, &"review".into(), std::path::Path::new("/skills/review"), &"definition".into(),
+            ),
+        );
+        let writer = crate::transcript::AgentTranscriptWriter::new(
+            dir.path().join("agent.jsonl"), ctx.agent_id, fs.clone(),
+        );
+        let runner_ctx = ctx.clone();
+        let (out_tx, _out_rx) = mpsc::channel(8);
+        let job = Box::pin(async move {
+            let rows = vec![message];
+            let mut history = Vec::new();
+            let mut written = 0;
+            append_live_stream_rows(
+                rows.clone(), &rows, &mut [], Some(&writer), &mut history, &mut written,
+                None, &runner_ctx, &out_tx,
+            ).await;
+        });
+        let runtime = Arc::new(PublicationTestRuntime {
+            job: Mutex::new(Some(job)), task: Mutex::new(None), cancelled: tokio::sync::Notify::new(),
+        });
+        let pool = Arc::new(crate::pool::StateMachinePool::new(runtime.clone(), 1));
+        let agent_id = ctx.agent_id;
+        let token = ctx.cancellation_token.clone();
+        let (_id, _events) = pool.allocate(ctx).await.unwrap();
+        fs.append_started.notified().await;
+        assert!(fs.body.lock().unwrap().contains("accepted"), "fixture has already written the row");
+        assert_eq!(skills::filter_for_scope(scope)[0].content.string_at(""), Some("old"));
+
+        let mut deallocate = Box::pin(pool.deallocate(&agent_id));
+        assert!(futures::poll!(deallocate.as_mut()).is_pending(), "abort must wait for publication");
+        assert!(token.is_cancelled());
+        if drop_deallocator {
+            drop(deallocate);
+            fs.resume_append.notify_one();
+            runtime.cancelled.notified().await;
+        } else {
+            fs.resume_append.notify_one();
+            deallocate.await.unwrap();
+            runtime.cancelled.notified().await;
+        }
+        assert_eq!(skills::filter_for_scope(scope)[0].content.string_at(""), Some("accepted"));
+        assert!(skills::expired_message_ids_for_scope(scope).contains(&old_id));
+
+        let raw = fs.body.lock().unwrap().clone();
+        let entry: crate::transcript::TranscriptEntry = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        skills::reset_for_test();
+        assert!(skills::register_accepted_skill_message(&entry.message, scope));
+        assert_eq!(skills::filter_for_scope(scope)[0].content.string_at(""), Some("accepted"), "cold transcript and live registry must agree");
+    }
+    skills::reset_for_test();
 }

@@ -1719,7 +1719,7 @@ fn persisted_model_ref(
     let mut profile = None;
     let mut profile_seen = false;
     let mut seen: HashSet<String> = HashSet::new();
-    let preserved = preserved_tail_state(loaded);
+    let preserved = preserved_tail_state(loaded, tip.map(|row| row.session_id.as_str()));
     let reparent = &preserved.parents;
     let mut current = tip;
     while let Some(message) = current {
@@ -2438,6 +2438,15 @@ async fn read_routed_session(
         arg: arg.clone(),
         source: std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()),
     })?;
+    if !native_exact_preserved_valid_for(&loaded, &arg) {
+        return Err(LoaderError::Io {
+            arg,
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid native preserved compaction members",
+            ),
+        });
+    }
     Ok(loaded)
 }
 
@@ -2563,6 +2572,15 @@ pub async fn load_routed_session_from_path_with_source(
         })?
         .content;
     let loaded = route_lines(&content);
+    if !native_exact_preserved_valid_for(&loaded, &expected_id.to_string()) {
+        return Err(LoaderError::Io {
+            arg: path.display().to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid native preserved compaction members",
+            ),
+        });
+    }
     if loaded.messages_in_order.is_empty()
         && !stem.is_some_and(|stem| loaded.mobile_empty_sessions.contains(stem))
     {
@@ -2704,6 +2722,15 @@ async fn read_cli_transcript_source(
         }
     };
     let loaded = route_lines(&content);
+    if !native_exact_preserved_valid_for(&loaded, session_id) {
+        return Err(LoaderError::Io {
+            arg: path.display().to_string(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid native preserved compaction members",
+            ),
+        });
+    }
     // Mui first requires at least one parsed message; a cleared transcript
     // can then represent an empty continuation. Local selection uses the full
     // parser, so spaces around a JSON type colon remain valid here.
@@ -3601,7 +3628,15 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
         return None;
     }
 
-    let preserved = preserved_tail_state(loaded);
+    let preserved = preserved_tail_state(loaded, Some(arg));
+    if preserved.invalid_exact
+        || preserved
+            .exact_owner
+            .as_deref()
+            .is_some_and(|owner| Uuid::parse_str(arg).is_ok() && owner != arg)
+    {
+        return None;
+    }
 
     if loaded.cleared_to_empty {
         return None;
@@ -3695,6 +3730,7 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
         if let Some(lp_uuid) = &loaded.last_prompt_leaf_uuid {
             if let Some(lp_msg) = by_uuid.get(lp_uuid.as_str()) {
                 if !preserved.pruned.contains(lp_uuid)
+                    && preserved.permits_owner(lp_msg)
                     && !lp_msg.is_sidechain
                     && (lp_msg.message_type == "user" || lp_msg.message_type == "assistant")
                 {
@@ -3729,7 +3765,7 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
     for m in ordered
         .iter()
         .copied()
-        .filter(|m| !preserved.pruned.contains(&m.uuid))
+        .filter(|m| !preserved.pruned.contains(&m.uuid) && preserved.permits_owner(m))
     {
         if let Some(p) = reparent
             .get(m.uuid.as_str())
@@ -3746,7 +3782,7 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
     for m in ordered
         .iter()
         .copied()
-        .filter(|m| !preserved.pruned.contains(&m.uuid))
+        .filter(|m| !preserved.pruned.contains(&m.uuid) && preserved.permits_owner(m))
     {
         if parent_uuids.contains(m.uuid.as_str()) {
             continue; // not a terminal
@@ -3772,7 +3808,7 @@ pub fn find_tip<'a>(loaded: &'a LoadedTranscript, arg: &str) -> Option<&'a Jsonl
                 .map(String::as_str)
                 .or(node.parent_uuid.as_deref())
                 .and_then(|p| by_uuid.get(p))
-                .filter(|m| !preserved.pruned.contains(&m.uuid));
+                .filter(|m| !preserved.pruned.contains(&m.uuid) && preserved.permits_owner(m));
         }
     }
 
@@ -3852,7 +3888,7 @@ pub fn build_conversation_chain(
     // summary ← preserved tail ← …] — instead of following the tail's on-disk
     // parents back into the FULL pre-compact history. Empty on transcripts
     // without preserved-tail compactions (zero-cost common path).
-    let preserved = preserved_tail_state(loaded);
+    let preserved = preserved_tail_state(loaded, Some(arg));
     let reparent = &preserved.parents;
 
     // (5) Walk tip → root, cycle-guarded. A null parent is a real root and
@@ -3878,6 +3914,9 @@ pub fn build_conversation_chain(
         if let Some(p) = reparent.get(node.uuid.as_str()) {
             entry.parent_uuid = Some(p.clone());
         }
+        if preserved.staged_anchors.contains(&entry.uuid) {
+            entry.is_sidechain = false;
+        }
         let parent = entry.parent_uuid.clone();
         chain.push(entry);
         current = match parent.as_deref() {
@@ -3885,8 +3924,15 @@ pub fn build_conversation_chain(
                 let parent = by_uuid
                     .get(parent_uuid)
                     .filter(|message| !preserved.pruned.contains(&message.uuid))
+                    .filter(|message| preserved.permits_owner(message))
                     .filter(|message| !seen.contains(&message.uuid));
-                parent.or_else(|| timestamp_parent_fallback(loaded, node, &seen))
+                parent.or_else(|| {
+                    timestamp_parent_fallback(loaded, node, &seen).filter(|message| {
+                        preserved.exact_owner.is_none()
+                            || (!preserved.pruned.contains(&message.uuid)
+                                && preserved.permits_owner(message))
+                    })
+                })
             }
             None => None, // reached a root or an intentional compact boundary
         };
@@ -3898,12 +3944,12 @@ pub fn build_conversation_chain(
     // main chain. `seen` is exactly the set of on-chain uuids (the cycle guard
     // breaks BEFORE pushing, so no extra entries).
     let filtered;
-    let recovery_messages = if preserved.pruned.is_empty() {
+    let recovery_messages = if preserved.pruned.is_empty() && preserved.exact_owner.is_none() {
         by_uuid
     } else {
         filtered = by_uuid
             .iter()
-            .filter(|(uuid, _)| !preserved.pruned.contains(*uuid))
+            .filter(|(uuid, row)| !preserved.pruned.contains(*uuid) && preserved.permits_owner(row))
             .map(|(uuid, message)| (uuid.clone(), message.clone()))
             .collect();
         &filtered
@@ -3961,6 +4007,7 @@ pub fn build_conversation_chain(
         .collect();
     for (position, marker) in loaded.messages_in_order.iter().enumerate() {
         if preserved.pruned.contains(&marker.uuid)
+            || !preserved.permits_owner(marker)
             || marker.message_type != "attachment"
             || marker
                 .attachment_projection
@@ -4021,13 +4068,187 @@ struct PreservedTailState {
     parents: HashMap<String, String>,
     usage_to_clear: HashSet<String>,
     pruned: HashSet<String>,
+    invalid_exact: bool,
+    exact_owner: Option<String>,
+    staged_anchors: HashSet<String>,
+}
+
+impl PreservedTailState {
+    fn permits_owner(&self, row: &JsonlMessage) -> bool {
+        self.exact_owner.as_ref().is_none_or(|owner| {
+            session_uuid(&row.session_id).is_some_and(|id| id.to_string() == *owner)
+                && (!row.is_sidechain || self.staged_anchors.contains(&row.uuid))
+        })
+    }
+}
+
+// Existing compact boundary rows use the host's `sess:` spelling while
+// ordinary transcript rows carry the same session UUID without the prefix.
+fn session_uuid(value: &str) -> Option<Uuid> {
+    Uuid::parse_str(value.strip_prefix("sess:").unwrap_or(value)).ok()
+}
+
+fn native_exact_preserved_valid_for(loaded: &LoadedTranscript, arg: &str) -> bool {
+    let state = preserved_tail_state(loaded, Some(arg));
+    !state.invalid_exact
+        && state
+            .exact_owner
+            .as_deref()
+            .is_none_or(|owner| Uuid::parse_str(arg).is_err() || owner == arg)
+}
+
+/// An exact native list can be noncontiguous on disk. Validate its complete
+/// authoritative membership before relinking; never recover an old chain if
+/// any named row is missing, duplicated, foreign or a sidechain.
+fn exact_native_tail_state(
+    loaded: &LoadedTranscript,
+    boundary_index: usize,
+    boundary: &JsonlMessage,
+) -> Option<PreservedTailState> {
+    let metadata = boundary.extra.get_property("compactMetadata")?;
+    let segment = metadata.get_property("preservedSegment")?;
+    let messages = metadata.get_property("preservedMessages")?;
+    let anchor = segment.get_property("anchorUuid")?.as_str()?;
+    let head = segment.get_property("headUuid")?.as_str()?;
+    let tail = segment.get_property("tailUuid")?.as_str()?;
+    let owner = session_uuid(&boundary.session_id)?;
+    if messages.get_property("anchorUuid")?.as_str()? != anchor {
+        return None;
+    }
+    let ids = messages.get_property("uuids")?;
+    let all_ids = messages.get_property("allUuids")?;
+    let count = ids.array_len()?;
+    if count == 0 || all_ids.array_len()? != count {
+        return None;
+    }
+    let mut rows = HashMap::with_capacity(loaded.messages_in_order.len());
+    let mut duplicate_rows = HashSet::new();
+    for (position, row) in loaded.messages_in_order.iter().enumerate() {
+        if rows.insert(row.uuid.as_str(), (position, row)).is_some() {
+            duplicate_rows.insert(row.uuid.as_str());
+        }
+    }
+    let mut seen = HashSet::new();
+    let mut members = Vec::with_capacity(count);
+    for index in 0..count {
+        let id = ids.get_index(index)?.as_str()?;
+        if all_ids.get_index(index)?.as_str()? != id
+            || Uuid::parse_str(id).ok()?.to_string() != id
+            || !seen.insert(id)
+        {
+            return None;
+        }
+        let &(position, row) = rows.get(id)?;
+        if duplicate_rows.contains(id)
+            || position >= boundary_index
+            || row.is_sidechain
+            || session_uuid(&row.session_id) != Some(owner)
+            || !loaded.by_uuid.contains_key(id)
+        {
+            return None;
+        }
+        members.push(id.to_string());
+    }
+    if members.first()?.as_str() != head
+        || members.last()?.as_str() != tail
+        || seen.contains(anchor)
+    {
+        return None;
+    }
+    let mut current = anchor;
+    let mut anchor_seen = HashSet::new();
+    let mut staged_anchors = HashSet::new();
+    loop {
+        if !anchor_seen.insert(current) {
+            return None;
+        }
+        let &(position, row) = rows.get(current)?;
+        if duplicate_rows.contains(current) || session_uuid(&row.session_id) != Some(owner) {
+            return None;
+        }
+        if current == boundary.uuid.as_str() {
+            if position != boundary_index || row.is_sidechain {
+                return None;
+            }
+            break;
+        }
+        if position < boundary_index {
+            if !row.is_sidechain
+                || row.extra.string_at("/nativeCompactStage") != Some(boundary.uuid.as_str())
+                || seen.contains(row.uuid.as_str())
+            {
+                return None;
+            }
+            staged_anchors.insert(row.uuid.clone());
+        } else if row.is_sidechain {
+            return None;
+        }
+        current = row.parent_uuid.as_deref()?;
+    }
+    let mut state = PreservedTailState {
+        exact_owner: Some(owner.to_string()),
+        staged_anchors,
+        ..Default::default()
+    };
+    let mut parent = anchor.to_string();
+    for id in members {
+        state.usage_to_clear.insert(id.clone());
+        state.parents.insert(id.clone(), parent);
+        parent = id;
+    }
+    state
+        .usage_to_clear
+        .extend(state.staged_anchors.iter().cloned());
+    for row in &loaded.messages_in_order[boundary_index + 1..] {
+        if row.parent_uuid.as_deref() == Some(anchor)
+            && row.uuid != head
+            && state.permits_owner(row)
+        {
+            state.parents.insert(row.uuid.clone(), tail.to_string());
+        }
+    }
+    state.pruned = loaded.messages_in_order[..boundary_index]
+        .iter()
+        .filter(|row| !state.usage_to_clear.contains(&row.uuid))
+        .map(|row| row.uuid.clone())
+        .collect();
+    Some(state)
+}
+
+/// The local transcript GC must retain the same validated stage chain that
+/// cold loading promotes when an exact boundary is committed.
+pub(super) fn exact_native_staged_anchors(
+    loaded: &LoadedTranscript,
+    boundary_uuid: &str,
+) -> Option<HashSet<String>> {
+    let mut boundaries = loaded
+        .messages_in_order
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.uuid == boundary_uuid);
+    let (index, boundary) = boundaries.next()?;
+    if boundaries.next().is_some()
+        || boundary.message_type != "system"
+        || boundary.extra.string_at("/subtype") != Some("compact_boundary")
+        || boundary
+            .extra
+            .at_pointer("/compactMetadata/nativeExactPreserved")
+            .and_then(|value| value.as_bool())
+            != Some(true)
+    {
+        return None;
+    }
+    exact_native_tail_state(loaded, index, boundary).map(|state| state.staged_anchors)
 }
 
 /// Claude's applyPreservedSegmentRelinks: only the latest boundary can keep
 /// a segment live. Validate the original tail-to-head chain before applying
 /// any relinks or pruning, so malformed transcripts remain recoverable.
-fn preserved_tail_state(loaded: &LoadedTranscript) -> PreservedTailState {
-    let boundaries: Vec<_> = loaded
+fn preserved_tail_state(
+    loaded: &LoadedTranscript,
+    requested_owner: Option<&str>,
+) -> PreservedTailState {
+    let mut boundaries: Vec<_> = loaded
         .messages_in_order
         .iter()
         .enumerate()
@@ -4036,6 +4257,48 @@ fn preserved_tail_state(loaded: &LoadedTranscript) -> PreservedTailState {
                 && line.extra.string_at("/subtype") == Some("compact_boundary")
         })
         .collect();
+    // A routed transcript can contain sidechain or foreign-session rows. In
+    // the presence of exact native authority, only this owner's main-thread
+    // boundaries may supersede it. Preserve the legacy selection for files
+    // with no exact metadata and for unresolvable/ancestor-only owners.
+    if boundaries.iter().any(|(_, row)| {
+        row.extra
+            .get_property("compactMetadata")
+            .and_then(|metadata| metadata.get_property("nativeExactPreserved"))
+            .is_some()
+    }) {
+        if let Some(owner) = requested_owner.and_then(session_uuid) {
+            if boundaries
+                .iter()
+                .any(|(_, row)| !row.is_sidechain && session_uuid(&row.session_id) == Some(owner))
+            {
+                boundaries.retain(|(_, row)| {
+                    !row.is_sidechain && session_uuid(&row.session_id) == Some(owner)
+                });
+            }
+        }
+    }
+    if let Some((index, boundary)) = boundaries.last() {
+        if let Some(flag) = boundary
+            .extra
+            .get_property("compactMetadata")
+            .and_then(|metadata| metadata.get_property("nativeExactPreserved"))
+        {
+            return if flag.as_bool() == Some(true) {
+                exact_native_tail_state(loaded, *index, boundary).unwrap_or_else(|| {
+                    PreservedTailState {
+                        invalid_exact: true,
+                        ..Default::default()
+                    }
+                })
+            } else {
+                PreservedTailState {
+                    invalid_exact: true,
+                    ..Default::default()
+                }
+            };
+        }
+    }
     let latest_segment = boundaries.iter().rev().find(|(_, line)| {
         line.extra
             .get_property("compactMetadata")
@@ -4048,6 +4311,7 @@ fn preserved_tail_state(loaded: &LoadedTranscript) -> PreservedTailState {
             usage_to_clear: parents.keys().cloned().collect(),
             parents,
             pruned: HashSet::new(),
+            ..Default::default()
         };
     };
     let mut state = PreservedTailState::default();
@@ -4386,6 +4650,158 @@ mod tests {
             loaded.messages_in_order.push(row);
         }
         loaded
+    }
+
+    fn native_exact_fixture() -> (Vec<JsonlMessage>, Vec<String>) {
+        let ids = (0..6)
+            .map(|_| Uuid::new_v4().to_string())
+            .collect::<Vec<_>>();
+        let (a, omitted, b, boundary_id, summary_id, after) =
+            (&ids[0], &ids[1], &ids[2], &ids[3], &ids[4], &ids[5]);
+        let mut marker = user_line(a);
+        marker.parent_uuid = Some(b.clone());
+        let mut old = user_line(omitted);
+        old.parent_uuid = Some(a.clone());
+        let mut kept = user_line(b);
+        kept.parent_uuid = Some(omitted.clone());
+        let mut boundary = boundary_line(boundary_id, None);
+        boundary
+            .extra
+            .set_field(
+                "compactMetadata",
+                projection(json!({
+                    "nativeExactPreserved":true,
+                    "preservedSegment":{"headUuid":a,"tailUuid":b,"anchorUuid":summary_id},
+                    "preservedMessages":{"anchorUuid":summary_id,"uuids":[a,b],"allUuids":[a,b]}
+                })),
+            )
+            .unwrap();
+        let mut summary = user_line(summary_id);
+        summary.parent_uuid = Some(boundary_id.clone());
+        let mut appended = user_line(after);
+        appended.parent_uuid = Some(b.clone());
+        (vec![marker, old, kept, boundary, summary, appended], ids)
+    }
+
+    #[test]
+    fn exact_native_members_relink_only_listed_rows_and_reject_invalid_authority() {
+        let (rows, ids) = native_exact_fixture();
+        let session_id = rows[0].session_id.clone();
+        let valid = loaded_transcript(rows.clone());
+        let chain = build_conversation_chain(&valid, &session_id).0;
+        assert_eq!(
+            chain
+                .iter()
+                .map(|row| row.uuid.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                ids[3].as_str(),
+                ids[4].as_str(),
+                ids[0].as_str(),
+                ids[2].as_str(),
+                ids[5].as_str()
+            ]
+        );
+
+        let mut missing = rows.clone();
+        missing.remove(0);
+        let mut duplicate = rows.clone();
+        duplicate.push(rows[0].clone());
+        let mut foreign = rows.clone();
+        foreign[0].session_id = Uuid::new_v4().to_string();
+        let mut sidechain = rows.clone();
+        sidechain[0].is_sidechain = true;
+        let mut broken_anchor = rows.clone();
+        broken_anchor[4].parent_uuid = Some(ids[1].clone());
+        let mut reordered = rows.clone();
+        reordered[3].extra.set_field("compactMetadata", projection(json!({
+            "nativeExactPreserved":true,
+            "preservedSegment":{"headUuid":ids[0],"tailUuid":ids[2],"anchorUuid":ids[4]},
+            "preservedMessages":{"anchorUuid":ids[4],"uuids":[ids[2],ids[0]],"allUuids":[ids[2],ids[0]]}
+        }))).unwrap();
+        for invalid in [
+            missing,
+            duplicate,
+            foreign,
+            sidechain,
+            broken_anchor,
+            reordered,
+        ] {
+            let loaded = loaded_transcript(invalid);
+            assert!(find_tip(&loaded, &session_id).is_none());
+            assert!(build_conversation_chain(&loaded, &session_id).0.is_empty());
+            assert!(!native_exact_preserved_valid_for(&loaded, &session_id));
+        }
+        assert!(!native_exact_preserved_valid_for(
+            &valid,
+            &Uuid::new_v4().to_string()
+        ));
+    }
+
+    #[tokio::test]
+    async fn exact_native_missing_member_rejects_the_transcript_load() {
+        let (mut rows, _) = native_exact_fixture();
+        let session_id = rows[0].session_id.clone();
+        rows.remove(0);
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(format!("{session_id}.jsonl"));
+        let content = rows
+            .iter()
+            .map(|row| serde_json::to_string(row).unwrap() + "\n")
+            .collect::<String>();
+        std::fs::write(&path, content).unwrap();
+        let fs = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
+        let error = read_routed_session(path, session_id, fs).await.unwrap_err();
+        assert!(
+            matches!(error, LoaderError::Io { source, .. } if source.kind() == std::io::ErrorKind::InvalidData)
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_native_boundary_ignores_later_foreign_and_sidechain_boundaries() {
+        for (foreign, invalid_exact) in [(true, false), (true, true), (false, true)] {
+            let (mut rows, ids) = native_exact_fixture();
+            let owner = rows[0].session_id.clone();
+            let mut unrelated = boundary_line(&Uuid::new_v4().to_string(), None);
+            if foreign {
+                unrelated.session_id = Uuid::new_v4().to_string();
+            } else {
+                unrelated.is_sidechain = true;
+            }
+            if invalid_exact {
+                unrelated
+                    .extra
+                    .set_field(
+                        "compactMetadata",
+                        projection(json!({"nativeExactPreserved": true})),
+                    )
+                    .unwrap();
+            }
+            rows.push(unrelated);
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join(format!("{owner}.jsonl"));
+            let content = rows
+                .iter()
+                .map(|row| serde_json::to_string(row).unwrap() + "\n")
+                .collect::<String>();
+            std::fs::write(&path, content).unwrap();
+            let fs = Arc::new(PosixFileSystem::new(dir.path().to_path_buf()));
+            let loaded = read_routed_session(path, owner.clone(), fs).await.unwrap();
+            let chain = build_conversation_chain(&loaded, &owner).0;
+            assert_eq!(
+                chain
+                    .iter()
+                    .map(|row| row.uuid.as_str())
+                    .collect::<Vec<_>>(),
+                vec![
+                    ids[3].as_str(),
+                    ids[4].as_str(),
+                    ids[0].as_str(),
+                    ids[2].as_str(),
+                    ids[5].as_str()
+                ]
+            );
+        }
     }
 
     fn user_with_content(uuid: &str, content: Value) -> JsonlMessage {

@@ -197,6 +197,9 @@ mod mod_model_fork_tests;
 #[path = "conversation/tests/prompt_snapshot_tests.rs"]
 mod prompt_snapshot_tests;
 
+#[path = "conversation/tests/context_profile_recovery_tests.rs"]
+mod context_profile_recovery_tests;
+
 #[path = "conversation/tests/bounded_post_compact_read_tests.rs"]
 mod bounded_post_compact_read_tests;
 

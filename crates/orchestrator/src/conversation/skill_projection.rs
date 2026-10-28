@@ -29,11 +29,14 @@ fn skill_names(origin: &Utf16JsonProjection) -> Option<Vec<Vec<u16>>> {
         .collect()
 }
 
-fn aggregate_origin(epoch: u64, skills: &[compaction::RestoredSkill]) -> Utf16JsonProjection {
+fn aggregate_origin(epoch: u64, skills: &[compaction::RestoredSkill], scope: Option<compaction::invoked_skills::InvokedSkillScopeRef<'_>>) -> Utf16JsonProjection {
     let mut origin = compaction::invoked_skills::skill_activation_origin(epoch);
     let sources = skills
         .iter()
         .map(|skill| {
+            if let Some(scope) = scope {
+                return compaction::invoked_skills::skill_source_metadata(&skill.name, &skill.path, scope);
+            }
             Utf16JsonProjection::object(vec![
                 ("name".into(), skill.name.clone()),
                 (
@@ -221,7 +224,7 @@ impl ConversationOrchestrator {
                 .expect("rendered skill attachment is text"),
         );
         if let ConversationMessage::User { origin, .. } = &mut replacement {
-            *origin = Some(aggregate_origin(epoch, &restored));
+            *origin = Some(aggregate_origin(epoch, &restored, Some(scope)));
         }
         // Give session.append its normal host admission, but never accept a
         // rewrite that breaks the metadata/body correspondence of this passive
@@ -362,7 +365,7 @@ mod tests {
             body.string_at("").unwrap().to_string(),
             body.string_units("").unwrap(),
         )
-        .with_origin(aggregate_origin(0, skills))
+        .with_origin(aggregate_origin(0, skills, None))
     }
 
     #[tokio::test]

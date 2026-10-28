@@ -15,6 +15,8 @@ struct SavedBinding {
     frame: ComputerFrame,
     binding: NativeContinuationBinding,
     provider_response_id: String,
+    #[serde(default)]
+    context_epoch: u64,
 }
 
 fn blocks(message: &ConversationMessage) -> &[ContentBlock] {
@@ -25,15 +27,14 @@ fn blocks(message: &ConversationMessage) -> &[ContentBlock] {
     }
 }
 
-/// Keep an unsent native round's complete accepted origin and subsequent rows
-/// in the ordinary compaction tail. Its boundary cannot be reconstructed from
-/// receipt artifacts, and submitted/completed rounds must not be resurrected.
+/// Keep an unsent native round's complete accepted origin and subsequent rows,
+/// together with ledger-backed abandonment markers, through compaction.
 pub(super) async fn preserve_pending_compaction_tail(
     orch: &ConversationOrchestrator,
     preserved: &[ConversationMessage],
-) -> Result<Vec<ConversationMessage>, OrchestratorError> {
+) -> Result<(Vec<ConversationMessage>, bool), OrchestratorError> {
     let Some(journal) = &orch.tool_execution_journal else {
-        return Ok(preserved.to_vec());
+        return Ok((preserved.to_vec(), false));
     };
     let session_id = orch.session.lock().await.session_id;
     let recovered = journal
@@ -50,14 +51,35 @@ pub(super) async fn preserve_pending_compaction_tail(
             )
         })
         .collect();
-    if pending.is_empty() {
-        return Ok(preserved.to_vec());
-    }
     let session = orch.session.lock().await;
     if session.session_id != session_id {
         return Err(internal("compaction changed the pending receipt owner"));
     }
     let history = &session.history;
+    let uncertain_calls: HashSet<_> = recovered
+        .executions
+        .iter()
+        .filter(|record| needs_fresh_observation(record))
+        .map(|record| record.identity.call_identity())
+        .collect();
+    let mut abandoned_markers = HashSet::new();
+    for message in history {
+        for block in blocks(message) {
+            if let ContentBlock::ProviderContent { value, .. } = block {
+                if value.string_at("/type") == Some("lingxi_computer_abandoned") {
+                    let calls: Vec<(String, String)> =
+                        decode_payload_field(value, "/call_identities")?;
+                    if calls.iter().any(|call| uncertain_calls.contains(call)) {
+                        abandoned_markers.insert(message.id());
+                    }
+                }
+            }
+        }
+    }
+    if pending.is_empty() && abandoned_markers.is_empty() {
+        return Ok((preserved.to_vec(), false));
+    }
+    let exact_members = !abandoned_markers.is_empty();
     let mut first_origin = history.len();
     for receipt in pending {
         if receipt.execution_ids.is_empty() {
@@ -92,7 +114,7 @@ pub(super) async fn preserve_pending_compaction_tail(
         .collect();
     let mut result = Vec::new();
     for (index, message) in history.iter().enumerate() {
-        if index >= first_origin {
+        if index >= first_origin || abandoned_markers.contains(&message.id()) {
             // Pending protocol evidence remains the exact accepted row, even
             // if a summarizer Mod rewrote its supplied preservation list.
             selected.remove(&message.id());
@@ -112,10 +134,10 @@ pub(super) async fn preserve_pending_compaction_tail(
         .transcript
         .jsonl_writer
         .as_ref()
-        .ok_or_else(|| internal("pending compaction tail has no transcript writer"))?;
+        .ok_or_else(|| internal("native compaction tail has no transcript writer"))?;
     let path = writer
         .session_target_path(session_id)
-        .ok_or_else(|| internal("pending compaction tail has no session transcript"))?;
+        .ok_or_else(|| internal("native compaction tail has no session transcript"))?;
     // This existing API intersects the identity log with complete physical
     // JSONL rows, so registration before a failed append is not publication.
     let persisted = writer
@@ -130,15 +152,25 @@ pub(super) async fn preserve_pending_compaction_tail(
             // Recovery can derive notices only in memory. A preserved tail's
             // UUIDs must all exist on disk before the compact boundary names it.
             let row = prepare_stored_row(orch, message).await?;
-            persist_stored_row(
-                orch,
-                &row,
-                &format!("native-compact-tail:{session_id}:{}", message.id()),
-            )
-            .await?;
+            let delivery = format!("native-compact-tail:{session_id}:{}", message.id());
+            if exact_members {
+                // The exact boundary is the commit point. A failed staging or
+                // boundary append must leave the live chain pointer untouched,
+                // including when this notice existed only in memory.
+                writer
+                    .append_native_json_once_durable_for_session_with_tip(
+                        session_id,
+                        &delivery,
+                        transcript_row_source(&row)?,
+                    )
+                    .await
+                    .map_err(internal)?;
+            } else {
+                persist_stored_row(orch, &row, &delivery).await?;
+            }
         }
     }
-    Ok(result)
+    Ok((result, exact_members))
 }
 
 fn member_id(identity: &ToolExecutionIdentity) -> ToolUseId {
@@ -178,11 +210,13 @@ async fn restore_execution_bindings(
             frame: saved.frame,
             tool: tool.clone(),
             binding: saved.binding.clone(),
+            context_epoch: saved.context_epoch,
         };
         if let Some(previous) = work.get(&id) {
             if previous.binding != restored.binding
                 || previous.frame != restored.frame
                 || previous.call != restored.call
+                || previous.context_epoch != restored.context_epoch
             {
                 return Err(internal(
                     "execution recovery binding contradicts retained history",
@@ -384,9 +418,13 @@ fn add_binding(
             frame: saved.frame.clone(),
             tool: tool.clone(),
             binding: saved.binding.clone(),
+            context_epoch: saved.context_epoch,
         };
         if let Some(previous) = work.get(&expected) {
-            if previous.identity != member.identity || previous.binding != member.binding {
+            if previous.identity != member.identity
+                || previous.binding != member.binding
+                || previous.context_epoch != member.context_epoch
+            {
                 return Err(internal("conflicting saved computer bindings"));
             }
         } else {
@@ -424,9 +462,13 @@ fn restore_receipt_work(
             frame: stored.frame.clone(),
             tool: tool.clone(),
             binding: receipt.binding.clone(),
+            context_epoch: stored.context_epoch,
         };
         if let Some(previous) = work.get(&id) {
-            if previous.identity != restored.identity || previous.binding != restored.binding {
+            if previous.identity != restored.identity
+                || previous.binding != restored.binding
+                || previous.context_epoch != restored.context_epoch
+            {
                 return Err(internal("receipt contradicts its durable native binding"));
             }
         } else {
@@ -653,6 +695,7 @@ fn validate_receipt_row(
             ContentBlock::ProviderContent { value, .. } if value.string_at("/type") == Some("lingxi_computer_receipt")
                 && value.string_at("/receipt_id") == Some(record.receipt_id.as_str())
                 && value.string_at("/call_id") == Some(stored.call.context.call_id.as_str())
+                && continuation_context_epoch(value).ok() == Some(stored.context_epoch)
                 && value.subprojection("/block").ok().and_then(|block| block.to_json_string().ok()).as_deref() == Some(expected_block.as_str())))
     {
         return Err(internal("saved receipt row does not match its durable association"));
@@ -1083,6 +1126,11 @@ pub(super) async fn rehydrate(
         match value.string_at("/type") {
             Some("lingxi_computer_binding") => {
                 let saved: SavedBinding = decode_payload(value)?;
+                // Anthropic bindings carry no continuation. A later epoch's
+                // binding must not inherit an older provider's continuation.
+                if continuation.is_some() && continuation_epoch != saved.context_epoch {
+                    continuation = None;
+                }
                 continuation_binding = Some(saved.binding.clone());
                 add_binding(
                     saved,

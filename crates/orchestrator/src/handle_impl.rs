@@ -1592,6 +1592,8 @@ impl ConversationOrchestrator {
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot.lock().await = runtime.prompt_snapshot.clone();
+        *self.prompt_runtime.prompt_snapshot_epoch.lock().await =
+            Some(runtime.prompt_snapshot_epoch.unwrap_or(0));
         *self.prompt_runtime.context_rendering_hint.lock().await = runtime.context_rendering_hint;
         let mut reports = self.main_reports.state.lock().await;
         let mut s = self.session.lock().await;
@@ -1916,7 +1918,30 @@ impl OrchestratorHandle for ConversationOrchestrator {
         &self,
         mode: lingxi_core::host::session_context::ConversationMode,
     ) -> Result<lingxi_core::host::session_context::SessionModeSnapshot, HandleError> {
-        self.select_conversation_mode(mode).await
+        // A durable append runs on a blocking worker and cannot be cancelled
+        // with its waiter. Keep the complete selection transaction alive until
+        // its in-memory projection and notification have also settled.
+        if let Some(owner) = self.upgrade_streaming_tool_dispatch_owner() {
+            let claim = self.lifecycle_runtime.session_switch_supervisor.claim()
+                .map_err(HandleError::ActionFailed)?;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let result = owner.select_conversation_mode(mode).await;
+                match tx.send(result) {
+                    Ok(()) => claim.complete(None),
+                    Err(result) => claim.complete(result.err().map(|error| {
+                        format!("detached conversation profile selection failed: {error}")
+                    })),
+                }
+            });
+            rx.await.map_err(|_| HandleError::ActionFailed(
+                "conversation profile task failed".into(),
+            ))?
+        } else {
+            Err(HandleError::ActionFailed(
+                "conversation profile selection requires a shared orchestrator owner".into(),
+            ))
+        }
     }
 
     async fn restore_conversation_mode(
@@ -2204,8 +2229,9 @@ impl OrchestratorHandle for ConversationOrchestrator {
         // A fork started between turns is itself the next query boundary. If
         // the main turn owns the gate, its detached child instead inherits
         // that already-admitted turn's profile.
-        if let Ok(turn) = self.turn_gate.try_lock() {
-            self.admit_conversation_profile().await?;
+        if let Ok(turn) = self.turn_gate.clone().try_lock_owned() {
+            let turn = Arc::new(turn);
+            self.admit_conversation_profile(&turn).await?;
             drop(turn);
         }
 
@@ -6355,6 +6381,7 @@ mod tests {
                 consecutive_rapid_refills: 1,
                 deferred_tools: Vec::new(),
                 prompt_snapshot: None,
+                prompt_snapshot_epoch: None,
                 context_rendering_hint: None,
                 native_request_history: lingxi_core::host::NativeRequestHistoryMetadata::default(),
             },
@@ -7896,7 +7923,7 @@ mod background_context_tests {
             Some("captured chat instructions")
         );
 
-        orch.admit_conversation_profile().await.unwrap();
+        orch.admit_conversation_profile_inner().await.unwrap();
         assert_eq!(
             orch.conversation_profile().await.active,
             ConversationMode::Code

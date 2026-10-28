@@ -1109,11 +1109,13 @@ impl ConversationOrchestrator {
             tools: prompt_tool_descriptions(wire_tools),
             context_rendering: Some(self.current_context_rendering().await),
         };
+        let epoch = self.profile_epoch().await;
         let mut slot = self.prompt_runtime.prompt_snapshot.lock().await;
         if slot.is_some() {
             return;
         }
         *slot = Some(snapshot.clone());
+        *self.prompt_runtime.prompt_snapshot_epoch.lock().await = Some(epoch);
         drop(slot);
         self.persist_prompt_snapshot_attachment(&snapshot).await;
     }

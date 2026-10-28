@@ -60,6 +60,9 @@ pub enum ResumeError {
     /// Deferred-tool replay failed after the transcript loaded.
     #[error("deferred replay: {0}")]
     DeferredReplay(String),
+    /// The captured conversation profile could not be restored.
+    #[error("conversation profile restore: {0}")]
+    Profile(String),
 }
 
 // Shared by the two unconditional test modules below. Keep this helper under
@@ -619,6 +622,7 @@ impl ReplayedSession {
             consecutive_rapid_refills: tracking.consecutive_rapid_refills,
             deferred_tools: self.runtime_metadata.deferred_tools.clone(),
             prompt_snapshot: self.runtime_metadata.prompt_snapshot.clone(),
+            prompt_snapshot_epoch: self.runtime_metadata.prompt_snapshot_epoch,
             context_rendering_hint: self.runtime_metadata.context_rendering_hint,
         }
     }
@@ -669,6 +673,8 @@ pub struct ResumeRuntimeMetadata {
     pub deferred_tools: Vec<lingxi_core::host::DeferredToolReplay>,
     /// Last valid static prompt snapshot recovered from the transcript.
     pub prompt_snapshot: Option<lingxi_core::host::PromptSnapshot>,
+    /// Admitted epoch for the recovered static prefix and routing hint.
+    pub prompt_snapshot_epoch: Option<u64>,
     /// Hint from the latest raw prompt_snapshot, with no older-row fallback.
     pub context_rendering_hint: Option<lingxi_core::host::instructions::InstructionRendering>,
 }
@@ -742,9 +748,12 @@ pub fn replay_captured_session(
     // `load_session` returns only the resumable chain; prompt snapshots are
     // generic attachments and may be off-chain when a transcript ended before
     // the assistant response. Recover from the full routed entry stream.
-    runtime_metadata.prompt_snapshot = prompt_snapshot_from_messages(&transcript_entries);
-    runtime_metadata.context_rendering_hint =
-        context_rendering_hint_from_messages(&transcript_entries);
+    let profile_epoch = JsonlWriter::session_mode_transition_from_source(&source, &sid_str)
+        .map_or(0, |profile| profile.active_epoch);
+    let (snapshot, rendering) = prompt_state_for_epoch_from_source(&source, &sid_str, profile_epoch);
+    runtime_metadata.prompt_snapshot = snapshot;
+    runtime_metadata.prompt_snapshot_epoch = Some(profile_epoch);
+    runtime_metadata.context_rendering_hint = rendering;
     // claude emits a SINGLE `tengu_session_resumed` on resume (no started/
     // completed pair — those names have 0 hits in the 2.1.195 binary).
     tracing::info!(
@@ -884,6 +893,56 @@ pub fn context_rendering_hint_from_messages(
         .filter_map(|message| message.attachment_projection.clone())
         .collect::<Vec<_>>();
     lingxi_core::host::instruction_announcements::latest_snapshot_context_rendering(&attachments)
+}
+
+/// Recover prompt attachments only from the admitted epoch in the captured
+/// source. Session-mode metadata is absent from `messages_in_order`, so its
+/// original position must be considered before the message stream is routed.
+/// Transcripts predating profile revisions begin in epoch zero.
+#[must_use]
+pub fn prompt_state_for_epoch_from_source(
+    source: &str,
+    session_id: &str,
+    expected_epoch: u64,
+) -> (
+    Option<lingxi_core::host::PromptSnapshot>,
+    Option<lingxi_core::host::instructions::InstructionRendering>,
+) {
+    let Ok(target_id) = Uuid::parse_str(session_id) else {
+        return (None, None);
+    };
+    let mut active_epoch = 0;
+    let mut matching = String::new();
+    for line in source.lines() {
+        let Ok(row) = Utf16JsonProjection::parse(line) else {
+            continue;
+        };
+        if !row.string_at("/sessionId")
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .is_some_and(|value| value == target_id)
+        {
+            continue;
+        }
+        match row.string_at("/type") {
+            Some("session-mode") => {
+                if let Some(profile) = JsonlWriter::session_mode_transition_from_source(line, session_id) {
+                    active_epoch = profile.active_epoch;
+                }
+            }
+            Some("attachment") if active_epoch == expected_epoch => {
+                if row.string_at("/attachment/type") == Some("prompt_snapshot") {
+                    matching.push_str(line);
+                    matching.push('\n');
+                }
+            }
+            _ => {}
+        }
+    }
+    let entries = session::jsonl::route_lines(&matching).messages_in_order;
+    (
+        prompt_snapshot_from_messages(&entries),
+        context_rendering_hint_from_messages(&entries),
+    )
 }
 
 fn projection_value<T: DeserializeOwned>(
@@ -2791,6 +2850,7 @@ fn resume_runtime_metadata(messages: &[JsonlMessage]) -> ResumeRuntimeMetadata {
         compaction_tracking: tracking,
         deferred_tools: Vec::new(),
         prompt_snapshot: prompt_snapshot_from_messages(messages),
+        prompt_snapshot_epoch: Some(0),
         context_rendering_hint: context_rendering_hint_from_messages(messages),
     }
 }
@@ -3301,6 +3361,7 @@ impl ConversationOrchestrator {
         preserve_boot_model: bool,
         permission_mode: permission::PermissionMode,
         profile: Option<lingxi_core::host::session_context::SessionModeTransition>,
+        source: &str,
     ) -> Result<(), String> {
         let (replayed, last_uuid, metadata) = build_state_from_jsonl(session_id, messages);
         let model_recovered = messages.iter().any(|message| {
@@ -3334,6 +3395,12 @@ impl ConversationOrchestrator {
         self.sync_active_goal_stop_hook_for_current_state().await;
         self.restore_resume_runtime_metadata(messages).await;
         self.restore_resume_prompt_metadata(entries).await;
+        self.restore_resume_prompt_state_from_source(
+            source,
+            &session_id.to_string(),
+            profile.as_ref().map_or(0, |profile| profile.active_epoch),
+        )
+        .await;
         // A captured resume is mounted before SessionStart and instruction
         // hooks run. Restore the admitted profile and epoch at that boundary,
         // including its model-only exclusions, before any hook observes it.
@@ -3377,6 +3444,7 @@ impl ConversationOrchestrator {
             .prompt_snapshot_resume
             .store(true, std::sync::atomic::Ordering::Release);
         *self.prompt_runtime.prompt_snapshot.lock().await = metadata.prompt_snapshot;
+        *self.prompt_runtime.prompt_snapshot_epoch.lock().await = Some(0);
         *self.prompt_runtime.context_rendering_hint.lock().await = metadata.context_rendering_hint;
         self.compaction_runtime
             .compaction_cumulative_dropped_tokens
@@ -3429,6 +3497,24 @@ impl ConversationOrchestrator {
         self.restore_prompt_ingress_sent_sets(messages).await;
         self.restore_mod_attachment_provenance_from_messages(messages)
             .await;
+    }
+
+    /// Bind restored prompt state to the admitted profile in the same raw
+    /// transcript that supplied the mounted history and metadata.
+    pub async fn restore_resume_prompt_state_from_source(
+        &self,
+        source: &str,
+        session_id: &str,
+        active_epoch: u64,
+    ) {
+        let (snapshot, rendering) =
+            prompt_state_for_epoch_from_source(source, session_id, active_epoch);
+        *self.prompt_runtime.prompt_snapshot.lock().await = snapshot;
+        *self.prompt_runtime.prompt_snapshot_epoch.lock().await = Some(active_epoch);
+        *self.prompt_runtime.context_rendering_hint.lock().await = rendering;
+        self.prompt_runtime
+            .prompt_snapshot_resume
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     async fn restore_prompt_ingress_sent_sets(&self, messages: &[JsonlMessage]) {
@@ -3633,6 +3719,8 @@ impl ConversationOrchestrator {
             .store(true, std::sync::atomic::Ordering::Release);
         *orch.prompt_runtime.prompt_snapshot.lock().await =
             replayed.runtime_metadata.prompt_snapshot.clone();
+        *orch.prompt_runtime.prompt_snapshot_epoch.lock().await =
+            replayed.runtime_metadata.prompt_snapshot_epoch;
         *orch.prompt_runtime.context_rendering_hint.lock().await =
             replayed.runtime_metadata.context_rendering_hint;
         orch.restore_mod_attachment_provenance_from_messages(&replayed.messages)
@@ -3640,6 +3728,20 @@ impl ConversationOrchestrator {
         if let Some(writer) = jsonl_writer {
             orch.transcript.jsonl_writer = Some(writer);
         }
+        // The metadata was captured with the same source that supplied the
+        // history and prompt snapshot, even when no writer is attached.
+        let metadata_source = replayed.transcript_metadata.iter()
+            .filter_map(|row| row.to_json_string().ok())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let profile = JsonlWriter::session_mode_transition_from_source(
+            &metadata_source,
+            &session_id.to_string(),
+        );
+        orch.restore_captured_conversation_profile(
+            lingxi_core::host::session_context::ConversationMode::Code,
+            profile,
+        ).await.map_err(|error| ResumeError::Profile(error.to_string()))?;
         orch.sync_active_goal_stop_hook_for_current_state().await;
         orch.restore_file_read_state().await;
         if !replayed.runtime_metadata.deferred_tools.is_empty() {

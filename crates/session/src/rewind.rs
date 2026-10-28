@@ -26,7 +26,16 @@ pub async fn rewind_conversation(
     target_message: Uuid,
 ) -> Result<(), String> {
     let path = session_path(lingxi_home, cwd, &session_id.to_string());
-    let content = tokio::fs::read_to_string(&path)
+    rewind_conversation_from_path(&path, target_message).await
+}
+
+/// Rewind the transcript already selected by the caller, without resolving the
+/// session UUID again. The caller owns path validation and the writer claim.
+pub async fn rewind_conversation_from_path(
+    path: &Path,
+    target_message: Uuid,
+) -> Result<(), String> {
+    let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| format!("read transcript: {e}"))?;
 
@@ -51,7 +60,7 @@ pub async fn rewind_conversation(
     if !body.is_empty() {
         body.push('\n');
     }
-    tokio::fs::write(&path, body)
+    tokio::fs::write(path, body)
         .await
         .map_err(|e| format!("write truncated transcript: {e}"))?;
     Ok(())
