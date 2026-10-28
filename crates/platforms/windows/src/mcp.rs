@@ -134,7 +134,7 @@ impl McpTransport for WindowsMcpTransport {
             | McpTransportSpec::Http { .. }
             | McpTransportSpec::SseIde { .. }
             | McpTransportSpec::WsIde { .. } => return self.remote.connect(spec).await,
-            other => return Err(McpError::UnsupportedTransport(map_kind(other))),
+            other => return Err(McpError::UnsupportedTransport(other.transport_kind())),
         }
         Ok(McpRawConnection { connection_id: id })
     }
@@ -411,19 +411,6 @@ impl McpTransport for WindowsMcpTransport {
 impl mcp::RawConnectionProvider for WindowsMcpTransport {
     fn connection_for(&self, id: McpConnectionId) -> Option<Arc<Connection>> {
         self.remote.connection_for(id)
-    }
-}
-
-fn map_kind(spec: &McpTransportSpec) -> McpTransportKind {
-    match spec {
-        McpTransportSpec::Stdio { .. } => McpTransportKind::Stdio,
-        McpTransportSpec::Sse { .. } => McpTransportKind::Sse,
-        McpTransportSpec::Http { .. } => McpTransportKind::Http,
-        McpTransportSpec::WebSocket { .. } => McpTransportKind::WebSocket,
-        McpTransportSpec::InProcess { .. } => McpTransportKind::InProcess,
-        McpTransportSpec::SseIde { .. } => McpTransportKind::SseIde,
-        McpTransportSpec::WsIde { .. } => McpTransportKind::WsIde,
-        McpTransportSpec::SdkControl { .. } => McpTransportKind::SdkControl,
     }
 }
 

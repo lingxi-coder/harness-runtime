@@ -10,7 +10,7 @@
 //! `src/utils/skills/skillChangeDetector.ts:110-131`,
 //! `src/utils/hooks/fileChangedWatcher.ts:69-77`.
 
-use futures_core::stream::Stream;
+use futures::Stream;
 use lingxi_core::host::{FileEvent, FileEventKind, FsError};
 use notify::RecursiveMode;
 use notify_debouncer_mini::{new_debouncer, DebouncedEvent, DebouncedEventKind, Debouncer};
@@ -413,6 +413,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nonexistent_watch_root_fails_before_returning_a_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        let result = watch_dir_with_debounce(missing.to_str().unwrap(), 80, 40).await;
+        assert!(matches!(result, Err(FsError::Io(_))));
+    }
+
+    #[tokio::test]
     async fn blocking_task_exits_after_consumer_drop_on_quiet_dir() {
         // The leak regression: on a directory that never emits a settled event,
         // dropping the stream must still release the blocking watch thread. We
@@ -426,16 +434,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Wait for the blocking closure to actually start (probe > baseline).
-        let mut started = false;
-        for _ in 0..200 {
-            if test_probe::LIVE.load(Ordering::SeqCst) > baseline {
-                started = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-        assert!(started, "blocking watch thread should have started");
+        // A returned stream must already have an armed, live watcher. The
+        // initialization handshake occurs after the blocking task starts.
+        assert!(
+            test_probe::LIVE.load(Ordering::SeqCst) > baseline,
+            "watch must not return before the blocking watcher starts"
+        );
 
         // Drop the stream with ZERO events delivered — the quiet-dir case.
         drop(stream);

@@ -5,17 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
-# M8-P10: the iOS platform skeleton. Portable Rust today — the filesystem /
-# clock / process / sandbox / worktree handles are reused from
-# platform-posix-minimal (std::fs / std::time / Unsupported stubs, all valid on
-# iOS). The http handle uses the shared real client
-# (platform_common::http::ReqwestHttp, reqwest + rustls-tls) so a keyed
-# conversation streams against the real provider. The iOS-specific capabilities
-# (camera/voice/share) are injected as `Arc<dyn …>` trait objects implemented
-# natively in Swift via UniFFI (P12). M9 swaps the remaining reused handles for
-# App-Sandbox-aware impls. Not cfg-gated: the skeleton is portable, so it
-# compiles + is verified on the host build.
-
+# Mobile host composition uses portable filesystem and clock primitives,
+# native device services, real HTTP, and a separately supplied Linux runtime.
 [dependencies]
 mobile-linux-api.workspace = true
 core = { path = "../../core" }

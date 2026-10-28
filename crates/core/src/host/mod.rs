@@ -355,7 +355,7 @@ pub use permission_gate::{
     ClassifierOnlyReviewRequest, NativeMcpDenyContext, NativeMcpDenyRule, PermissionDecision,
     PermissionDenial, PermissionGate, PermissionRequestSource,
 };
-pub use platform::Platform;
+pub use platform::{DeviceServices, Platform};
 pub use process::{
     BackgroundExitSink, BackgroundTaskBinding, ForegroundOutcome, ForegroundRunResult,
     HookOutputObserver, HookRunOutcome, ProcessHandle, ProcessOutputFile, ProcessRunner,

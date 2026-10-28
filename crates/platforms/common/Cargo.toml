@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# Native desktop watcher and child-process LSP transport. POSIX and Windows
+# opt in directly; other dependency paths may also enable this feature.
+desktop = ["dep:lsp", "dep:notify", "dep:notify-debouncer-mini", "dep:tokio-stream"]
+
 [dependencies]
 mobile-linux-api.workspace = true
 core = { path = "../../core" }
@@ -12,6 +17,7 @@ mobile-linux-core.workspace = true
 branding.workspace = true
 base64 = "0.22"
 jsonrpc = { path = "../../jsonrpc" }
+lsp = { path = "../../lsp", optional = true }
 llm-runtime = { path = "../../llm-runtime" }
 mcp = { path = "../../mcp" }
 lingxi-llm-client.workspace = true
@@ -32,6 +38,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 url = "2"
 http = "1"
+notify = { version = "8", optional = true }
+notify-debouncer-mini = { version = "0.6", optional = true }
+tokio-stream = { version = "0.1", optional = true }
 sha2 = "0.10"
 
 [dev-dependencies]

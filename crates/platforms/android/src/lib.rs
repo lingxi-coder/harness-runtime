@@ -1,18 +1,12 @@
-//! `platform-android` (M8-P10) — the Android platform skeleton.
+//! Android platform composition.
 //!
-//! [`AndroidPlatform`] implements the [`lingxi_core::host::Platform`] aggregate. The core
-//! OS handles (filesystem/clock/process/sandbox/worktree) are currently reused
-//! from `platform-posix-minimal` (portable Rust, valid on Android). The `http`
-//! handle is the shared real client ([`http_client::ReqwestHttp`],
-//! `reqwest` + `rustls-tls`), so a keyed conversation streams against the real
-//! provider rather than the posix-minimal stub. The Android-specific device
-//! capabilities (camera, voice, share) are injected as `Arc<dyn …>` trait
-//! objects implemented natively in Kotlin via `UniFFI` (P12).
-//!
-//! M9 replaces the reused posix handles with scoped-storage-aware Android
-//! impls. The crate is intentionally **not** `#[cfg(target_os = "android")]`-
-//! gated: the skeleton is portable, so it compiles + is verified on the host
-//! build and cross-compiles to `aarch64-linux-android` unchanged.
+//! Real filesystem I/O and the shared clock are reused from
+//! `platform-posix-minimal`; its workspace root is a predicate, not a filesystem
+//! confinement boundary. HTTP uses the real shared client. The injected PRoot
+//! runtime supplies process and sandbox services, subject to validated workspace
+//! mounts; invalid mounts produce an unavailable runtime. Native device and
+//! Keystore capabilities are injected by the Kotlin host. The worktree
+//! implementation remains unavailable on this path.
 
 #![forbid(unsafe_code)]
 // Documentation debt, not a decision that docs do not matter: this crate had
@@ -28,9 +22,9 @@ pub use mobile_linux::{AndroidProotRuntime, AndroidProotRuntimeConfig};
 
 use lingxi_core::host::{
     AndroidUiAutomation, AudioService, CalendarProvider, CameraControl, Clipboard, Clock,
-    ContactsProvider, DeepLinkOpener, DeviceStatusProvider, FileSystem, HapticService,
-    HttpTransport, LocationProvider, NotificationService, Platform, ProcessRunner, Sandbox,
-    SandboxError, SecureStorage, SharingService, WorktreeManager,
+    ContactsProvider, DeepLinkOpener, DeviceServices, DeviceStatusProvider, FileSystem,
+    HapticService, HttpTransport, LocationProvider, NotificationService, Platform, ProcessRunner,
+    Sandbox, SandboxError, SecureStorage, SharingService, WorktreeManager,
 };
 use mobile_linux_api::{
     MobileLinuxRuntime, MobileLinuxRuntimeMode, MountPurpose, MountSpec, SandboxBackend,
@@ -43,8 +37,7 @@ use std::sync::Arc;
 /// Construction inputs for [`AndroidPlatform`].
 ///
 /// The native capabilities are supplied by the Kotlin layer (via `UniFFI` in
-/// P12); `app_files_root` is the app-private files directory the filesystem is
-/// confined to.
+/// P12); `app_files_root` is the app-private files directory used as the workspace root.
 pub struct AndroidPlatformInputs {
     /// Authoritative Linux account and guest-path profile.
     pub brand_profile: mobile_linux_api::BrandRuntimeProfile,
@@ -99,20 +92,7 @@ pub struct AndroidPlatform {
     process: Arc<dyn ProcessRunner>,
     sandbox: Arc<dyn Sandbox>,
     worktree: Arc<dyn WorktreeManager>,
-    camera: Arc<dyn CameraControl>,
-    audio: Arc<dyn AudioService>,
-    location: Option<Arc<dyn LocationProvider>>,
-    share: Arc<dyn SharingService>,
-    notifications: Option<Arc<dyn NotificationService>>,
-    clipboard: Option<Arc<dyn Clipboard>>,
-    device_status: Option<Arc<dyn DeviceStatusProvider>>,
-    haptics: Option<Arc<dyn HapticService>>,
-    deep_link: Option<Arc<dyn DeepLinkOpener>>,
-    calendar: Option<Arc<dyn CalendarProvider>>,
-    contacts: Option<Arc<dyn ContactsProvider>>,
-    secure_storage: Option<Arc<dyn SecureStorage>>,
-    android_ui_automation: Option<Arc<dyn AndroidUiAutomation>>,
-    mobile_linux: Arc<dyn MobileLinuxRuntime>,
+    device_services: DeviceServices,
 }
 
 impl AndroidPlatform {
@@ -186,20 +166,23 @@ impl AndroidPlatform {
             process,
             sandbox,
             worktree: Arc::new(PosixWorktree::new()),
-            camera: inputs.camera,
-            audio: inputs.audio,
-            location: inputs.location,
-            share: inputs.share,
-            notifications: inputs.notifications,
-            clipboard: inputs.clipboard,
-            device_status: inputs.device_status,
-            haptics: inputs.haptics,
-            deep_link: inputs.deep_link,
-            calendar: inputs.calendar,
-            contacts: inputs.contacts,
-            secure_storage: inputs.secure_storage,
-            android_ui_automation: inputs.android_ui_automation,
-            mobile_linux: runtime,
+            device_services: DeviceServices {
+                camera: Some(inputs.camera),
+                audio: Some(inputs.audio),
+                location: inputs.location,
+                share: Some(inputs.share),
+                notifications: inputs.notifications,
+                clipboard: inputs.clipboard,
+                device_status: inputs.device_status,
+                haptics: inputs.haptics,
+                deep_link: inputs.deep_link,
+                calendar: inputs.calendar,
+                contacts: inputs.contacts,
+                computer_control: None,
+                android_ui_automation: inputs.android_ui_automation,
+                secure_storage: inputs.secure_storage,
+                mobile_linux: Some(runtime),
+            },
         }
     }
 }
@@ -289,49 +272,9 @@ impl Platform for AndroidPlatform {
     fn worktree(&self) -> Arc<dyn WorktreeManager> {
         self.worktree.clone()
     }
-    fn camera(&self) -> Option<Arc<dyn CameraControl>> {
-        Some(self.camera.clone())
+    fn device_services(&self) -> Option<&DeviceServices> {
+        Some(&self.device_services)
     }
-    fn audio_service(&self) -> Option<Arc<dyn AudioService>> {
-        Some(self.audio.clone())
-    }
-    fn location(&self) -> Option<Arc<dyn LocationProvider>> {
-        self.location.clone()
-    }
-    fn share(&self) -> Option<Arc<dyn SharingService>> {
-        Some(self.share.clone())
-    }
-    fn notifications(&self) -> Option<Arc<dyn NotificationService>> {
-        self.notifications.clone()
-    }
-    fn clipboard(&self) -> Option<Arc<dyn Clipboard>> {
-        self.clipboard.clone()
-    }
-    fn device_status(&self) -> Option<Arc<dyn DeviceStatusProvider>> {
-        self.device_status.clone()
-    }
-    fn haptics(&self) -> Option<Arc<dyn HapticService>> {
-        self.haptics.clone()
-    }
-    fn deep_link(&self) -> Option<Arc<dyn DeepLinkOpener>> {
-        self.deep_link.clone()
-    }
-    fn calendar(&self) -> Option<Arc<dyn CalendarProvider>> {
-        self.calendar.clone()
-    }
-    fn contacts(&self) -> Option<Arc<dyn ContactsProvider>> {
-        self.contacts.clone()
-    }
-    fn secure_storage(&self) -> Option<Arc<dyn SecureStorage>> {
-        self.secure_storage.clone()
-    }
-    fn android_ui_automation(&self) -> Option<Arc<dyn AndroidUiAutomation>> {
-        self.android_ui_automation.clone()
-    }
-    fn mobile_linux(&self) -> Option<Arc<dyn MobileLinuxRuntime>> {
-        Some(self.mobile_linux.clone())
-    }
-    // computer_control() defaults to None.
 }
 
 #[cfg(test)]
@@ -426,6 +369,47 @@ mod tests {
             mobile_linux_workspace_id: None,
             mobile_linux_managed_root: None,
         }
+    }
+
+    #[test]
+    fn device_services_preserve_injected_handles_and_unavailable_options() {
+        let mut inputs = inputs();
+        inputs.location = Some(Arc::new(NoLocation));
+        inputs.secure_storage = Some(Arc::new(lingxi_core::host::InMemorySecureStorage::new()));
+        let camera = inputs.camera.clone();
+        let audio = inputs.audio.clone();
+        let share = inputs.share.clone();
+        let location = inputs.location.clone().unwrap();
+        let secure_storage = inputs.secure_storage.clone().unwrap();
+        let platform = AndroidPlatform::new(inputs);
+        let platform: &dyn Platform = &platform;
+
+        assert!(Arc::ptr_eq(&camera, &platform.camera().unwrap()));
+        assert!(Arc::ptr_eq(&audio, &platform.audio_service().unwrap()));
+        assert!(Arc::ptr_eq(&share, &platform.share().unwrap()));
+        assert!(Arc::ptr_eq(&location, &platform.location().unwrap()));
+        assert!(Arc::ptr_eq(
+            &secure_storage,
+            &platform.secure_storage().unwrap()
+        ));
+        assert!(Arc::ptr_eq(
+            platform
+                .device_services()
+                .unwrap()
+                .mobile_linux
+                .as_ref()
+                .unwrap(),
+            &platform.mobile_linux().unwrap(),
+        ));
+        assert!(platform.notifications().is_none());
+        assert!(platform.clipboard().is_none());
+        assert!(platform.device_status().is_none());
+        assert!(platform.haptics().is_none());
+        assert!(platform.deep_link().is_none());
+        assert!(platform.calendar().is_none());
+        assert!(platform.contacts().is_none());
+        assert!(platform.computer_control().is_none());
+        assert!(platform.android_ui_automation().is_none());
     }
 
     #[test]
