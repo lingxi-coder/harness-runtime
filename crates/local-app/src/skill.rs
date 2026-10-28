@@ -100,4 +100,38 @@ mod tests {
             assert!(!markdown.contains("!`"));
         }
     }
+
+    #[test]
+    fn all_host_variants_keep_ios_recovery_guidance_scoped_and_read_only() {
+        for shell in [Some("Bash"), Some("Shell"), None] {
+            let markdown = skill_markdown(shell);
+            let lifecycle = markdown
+                .split_once("## Mobile service lifecycle and recovery\n")
+                .and_then(|(_, rest)| rest.split_once("\n## Page tools with WebMCP"))
+                .map(|(section, _)| section)
+                .expect("mobile lifecycle guidance must be part of the loaded skill");
+            for requirement in [
+                "On iOS, opening an App prepares its runtime in the foreground",
+                "suspend the host",
+                "terminate it and its processes",
+                "finite continued-processing lease",
+                "force quit",
+                "device restart",
+                "obtain fresh service URLs",
+                "LOCAL_APP_DATA_DIR",
+                "same task read-only",
+                "unfinished runs interrupted",
+                "Never automatically replay a request or tool action",
+                "explicitly choose a new attempt",
+            ] {
+                assert!(lifecycle.contains(requirement), "missing: {requirement}");
+            }
+            assert!(!markdown.contains("named processes stay alive until stopped"));
+            assert!(markdown.contains("serviceUrl(serviceName)"));
+            assert!(markdown.contains("serviceSocketUrl(serviceName)"));
+            assert!(markdown.contains("For a Mobile independent Agent task"));
+            assert!(markdown.contains("persist those IDs before submission"));
+            assert!(markdown.contains("Chat handle instead of `tasks.start`"));
+        }
+    }
 }

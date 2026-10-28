@@ -358,6 +358,13 @@ pub struct AgentStore {
     protocol_commit: Mutex<()>,
     ledger: Mutex<Ledger>,
 }
+/// Result of an atomic native grant update. An explicit revoke is always a
+/// change, including when no grant is currently stored for the release.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ConfigureResult {
+    pub changed: bool,
+    pub affected_run_ids: Vec<String>,
+}
 /// Newly accepted tasks execute exactly once; duplicates only return a snapshot.
 pub struct Admission {
     pub task: Task,
@@ -861,6 +868,18 @@ impl AgentStore {
         owner: Owner,
         settings: Option<Settings>,
     ) -> Result<Vec<String>, AppError> {
+        Ok(self
+            .configure_with_change(owner, settings)?
+            .affected_run_ids)
+    }
+
+    /// Return whether the grant was changed as part of the same locked update.
+    /// Explicit revocation always counts as a change.
+    pub fn configure_with_change(
+        &self,
+        owner: Owner,
+        settings: Option<Settings>,
+    ) -> Result<ConfigureResult, AppError> {
         let _commit = self
             .protocol_commit
             .lock()
@@ -869,33 +888,53 @@ impl AgentStore {
         if let Some(s) = &settings {
             s.validate()?;
         }
-        self.change(|ledger| {
-            ledger.epoch = ledger
-                .epoch
-                .checked_add(1)
-                .ok_or_else(|| invalid("Agent grant generation exhausted"))?;
-            let epoch = ledger.epoch;
-            match settings {
-                Some(settings) => {
-                    ledger.grants.insert(
-                        owner.app_id.clone(),
-                        Grant {
-                            owner: owner.clone(),
-                            settings,
-                            epoch,
-                        },
-                    );
-                }
-                None => {
-                    ledger.grants.remove(&owner.app_id);
-                }
+        let mut ledger = self
+            .ledger
+            .lock()
+            .map_err(|_| invalid("Agent storage unavailable"))?;
+        if let Some(requested) = &settings {
+            if ledger.grants.get(&owner.app_id).is_some_and(|grant| {
+                grant.owner.release_digest == owner.release_digest && grant.settings == *requested
+            }) {
+                return Ok(ConfigureResult {
+                    changed: false,
+                    affected_run_ids: Vec::new(),
+                });
             }
-            Ok(ledger
-                .runs
-                .values()
-                .filter(|r| r.owner.app_id == owner.app_id && !r.task.state.terminal())
-                .map(|r| r.task.run_id.clone())
-                .collect())
+        }
+
+        let mut next = ledger.clone();
+        next.epoch = next
+            .epoch
+            .checked_add(1)
+            .ok_or_else(|| invalid("Agent grant generation exhausted"))?;
+        let epoch = next.epoch;
+        match settings {
+            Some(settings) => {
+                next.grants.insert(
+                    owner.app_id.clone(),
+                    Grant {
+                        owner: owner.clone(),
+                        settings,
+                        epoch,
+                    },
+                );
+            }
+            None => {
+                next.grants.remove(&owner.app_id);
+            }
+        }
+        let affected = next
+            .runs
+            .values()
+            .filter(|r| r.owner.app_id == owner.app_id && !r.task.state.terminal())
+            .map(|r| r.task.run_id.clone())
+            .collect();
+        self.persist(&next)?;
+        *ledger = next;
+        Ok(ConfigureResult {
+            changed: true,
+            affected_run_ids: affected,
         })
     }
     pub fn settings(&self, owner: &Owner) -> Result<Option<Settings>, AppError> {
@@ -1718,3 +1757,227 @@ fn read_protocol_events(path: &Path) -> Result<Vec<SequencedEvent>, AppError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod configure_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    fn owner(app_digit: char) -> Owner {
+        Owner {
+            app_id: format!("a{}", app_digit.to_string().repeat(32)),
+            release_digest: "a".repeat(64),
+            invocation_id: "original-invocation".into(),
+        }
+    }
+
+    fn settings() -> Settings {
+        Settings {
+            model: Model {
+                provider_id: "provider".into(),
+                model_id: "model".into(),
+            },
+            tools: BTreeMap::from([(
+                "tool-id".into(),
+                ToolGrant::Builtin {
+                    name: "tool".into(),
+                },
+            )]),
+            skills: vec!["review".into()],
+            background: false,
+            max_turns: 10,
+            timeout_ms: 60_000,
+        }
+    }
+
+    fn input() -> Input {
+        Input {
+            request_id: "request".into(),
+            protocol_thread_id: None,
+            protocol_parent_run_id: None,
+            protocol_input_digest: None,
+            protocol_message_sha256: None,
+            prompt: "Review this".into(),
+            attachments: vec![],
+            content_parts: vec![],
+            output_schema: None,
+            tools: vec![],
+            skills: vec![],
+            max_turns: None,
+            timeout_ms: None,
+        }
+    }
+
+    #[test]
+    fn unchanged_grant_keeps_the_existing_run_and_ledger_unchanged() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = AgentStore::open(directory.path()).unwrap();
+        let run_owner = owner('1');
+        let grant = settings();
+        assert_eq!(
+            store
+                .configure_with_change(run_owner.clone(), Some(grant.clone()))
+                .unwrap(),
+            ConfigureResult {
+                changed: true,
+                affected_run_ids: vec![],
+            }
+        );
+        let run = store.admit(&run_owner, &input(), &[]).unwrap().task;
+        let (epoch, grant_epoch) = {
+            let ledger = store.ledger.lock().unwrap();
+            (ledger.epoch, ledger.grants[&run_owner.app_id].epoch)
+        };
+        let persisted = fs::read(&store.path).unwrap();
+
+        // The invocation identifies the caller, not a different release grant.
+        let settings_owner = Owner {
+            invocation_id: "native-settings".into(),
+            ..run_owner.clone()
+        };
+        assert_eq!(
+            store
+                .configure_with_change(settings_owner, Some(grant))
+                .unwrap(),
+            ConfigureResult {
+                changed: false,
+                affected_run_ids: vec![],
+            }
+        );
+        assert!(store.lease_valid(&run_owner, &run.run_id));
+        let ledger = store.ledger.lock().unwrap();
+        assert_eq!(ledger.epoch, epoch);
+        assert_eq!(ledger.grants[&run_owner.app_id].epoch, grant_epoch);
+        assert_eq!(fs::read(&store.path).unwrap(), persisted);
+    }
+
+    #[test]
+    fn changed_settings_and_release_revoke_only_the_matching_app() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = AgentStore::open(directory.path()).unwrap();
+        let first = owner('1');
+        let second = owner('2');
+        let grant = settings();
+        store.configure(first.clone(), Some(grant.clone())).unwrap();
+        store
+            .configure(second.clone(), Some(grant.clone()))
+            .unwrap();
+        let first_run = store.admit(&first, &input(), &[]).unwrap().task;
+        let second_run = store.admit(&second, &input(), &[]).unwrap().task;
+        let initial_epoch = store.ledger.lock().unwrap().epoch;
+
+        let mut changed = grant.clone();
+        changed.timeout_ms -= 1;
+        assert_eq!(
+            store
+                .configure_with_change(first.clone(), Some(changed))
+                .unwrap(),
+            ConfigureResult {
+                changed: true,
+                affected_run_ids: vec![first_run.run_id.clone()],
+            }
+        );
+        assert!(!store.lease_valid(&first, &first_run.run_id));
+        assert!(store.lease_valid(&second, &second_run.run_id));
+        assert_eq!(store.ledger.lock().unwrap().epoch, initial_epoch + 1);
+
+        let new_release = Owner {
+            release_digest: "b".repeat(64),
+            ..second.clone()
+        };
+        assert_eq!(
+            store
+                .configure_with_change(new_release.clone(), Some(grant))
+                .unwrap(),
+            ConfigureResult {
+                changed: true,
+                affected_run_ids: vec![second_run.run_id.clone()],
+            }
+        );
+        assert!(!store.lease_valid(&second, &second_run.run_id));
+        assert!(store.settings(&second).unwrap().is_none());
+        assert!(store.settings(&new_release).unwrap().is_some());
+        assert_eq!(store.ledger.lock().unwrap().epoch, initial_epoch + 2);
+    }
+
+    #[test]
+    fn explicit_revoke_and_regrant_do_not_revive_a_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = AgentStore::open(directory.path()).unwrap();
+        let run_owner = owner('1');
+        let grant = settings();
+        store
+            .configure(run_owner.clone(), Some(grant.clone()))
+            .unwrap();
+        let run = store.admit(&run_owner, &input(), &[]).unwrap().task;
+        assert_eq!(
+            store
+                .configure_with_change(run_owner.clone(), None)
+                .unwrap(),
+            ConfigureResult {
+                changed: true,
+                affected_run_ids: vec![run.run_id.clone()],
+            }
+        );
+        assert!(!store.lease_valid(&run_owner, &run.run_id));
+        assert!(
+            store
+                .configure_with_change(run_owner.clone(), None)
+                .unwrap()
+                .changed
+        );
+        store.configure(run_owner.clone(), Some(grant)).unwrap();
+        assert!(!store.lease_valid(&run_owner, &run.run_id));
+    }
+
+    #[test]
+    fn unchanged_configure_and_revoke_are_serialized_against_the_same_grant() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Arc::new(AgentStore::open(directory.path()).unwrap());
+        let run_owner = owner('1');
+        let grant = settings();
+        store
+            .configure(run_owner.clone(), Some(grant.clone()))
+            .unwrap();
+        let run = store.admit(&run_owner, &input(), &[]).unwrap().task;
+        let initial_epoch = store.ledger.lock().unwrap().epoch;
+        let barrier = Arc::new(Barrier::new(3));
+
+        let keep_store = store.clone();
+        let keep_owner = run_owner.clone();
+        let keep_grant = grant.clone();
+        let keep_barrier = barrier.clone();
+        let keep = std::thread::spawn(move || {
+            keep_barrier.wait();
+            keep_store
+                .configure_with_change(keep_owner, Some(keep_grant))
+                .unwrap()
+        });
+        let revoke_store = store.clone();
+        let revoke_owner = run_owner.clone();
+        let revoke_barrier = barrier.clone();
+        let revoke = std::thread::spawn(move || {
+            revoke_barrier.wait();
+            revoke_store
+                .configure_with_change(revoke_owner, None)
+                .unwrap()
+        });
+        barrier.wait();
+        let kept = keep.join().unwrap();
+        let revoked = revoke.join().unwrap();
+
+        assert!(revoked.changed);
+        assert_eq!(revoked.affected_run_ids, vec![run.run_id.clone()]);
+        assert!(!store.lease_valid(&run_owner, &run.run_id));
+        let ledger = store.ledger.lock().unwrap();
+        if ledger.grants.contains_key(&run_owner.app_id) {
+            assert!(kept.changed);
+            assert_eq!(kept.affected_run_ids, vec![run.run_id]);
+            assert_eq!(ledger.epoch, initial_epoch + 2);
+        } else {
+            assert!(!kept.changed);
+            assert!(kept.affected_run_ids.is_empty());
+            assert_eq!(ledger.epoch, initial_epoch + 1);
+        }
+    }
+}

@@ -44,7 +44,15 @@ Use the current schema only. A minimal project looks like:
 
 Static apps do not require Linux processes. A Node/Python app needs a compatible execution target and the user's exact-release consent in the native Apps page. On mobile, require an available Mobile Linux runtime rather than assuming Desktop commands or arbitrary native executables will run. Check architecture, runtime/channel and capability support. Do not modify the shared Linux toolchain. Package only declared source/build outputs and lockfiles; exclude credentials, local grants, user data, browser stores and dependency caches.
 
-For services, `venv` and step `cwd` are app-relative. Install/build commands terminate; named processes stay alive until stopped. `dependsOn` sets startup order and readiness uses an HTTP `path` or exact `output`. Use `window.localApp.serviceUrl()` and `serviceSocketUrl()` rather than hardcoded ports or saved run URLs; restart revokes the old run's service access. Declare only needed native capabilities and handle denial visibly. An `agent.tools` declaration is a capability requirement, not a grant. App pages never receive general host tools or provider credentials. App processes run with this device user's access; they are not isolated by a per-app Linux security sandbox.
+For services, `venv` and step `cwd` are app-relative. Install/build commands terminate; named processes can run until stopped, fail, or their host ends, subject to the platform's lifecycle. `dependsOn` sets startup order and readiness uses an HTTP `path` or exact `output`. Obtain URLs with `await window.localApp.serviceUrl(serviceName)` and `await window.localApp.serviceSocketUrl(serviceName)` rather than hardcoded ports or saved run URLs; use the manifest's service name, and restart revokes the old run's service access. Declare only needed native capabilities and handle denial visibly. An `agent.tools` declaration is a capability requirement, not a grant. App pages never receive general host tools or provider credentials. App processes run with this device user's access; they are not isolated by a per-app Linux security sandbox.
+
+## Mobile service lifecycle and recovery
+
+On iOS, opening an App prepares its runtime in the foreground; it does not make an idle service permanently runnable. The system can suspend the host, leaving its process unable to serve requests, or terminate it and its processes. User-initiated Agent work may receive a finite continued-processing lease that the system can cancel. A user force quit generally prevents background relaunch until the user opens the host again. After termination or device restart, do not promise an immediate relaunch or that any in-flight work continues. Do not use idle timers, audio, location or another unrelated background mode as a keepalive.
+
+Design a visible unavailable/reopen state. When the native host is available again, obtain fresh service URLs from its current App session; a previous process, port or URL may no longer be valid. Store durable backend records in `LOCAL_APP_DATA_DIR` and browser records in localStorage/IndexedDB as appropriate, validate them on read, and preserve user data when recovery fails. Browser storage belongs to its browser context and may be unavailable or cleared. Do not claim every browser can reach a suspended host or that reopening automatically restores an in-flight task.
+
+For an existing Agent task, keep its `threadId` and `runId` and inspect that same task read-only with `tasks.get`, events or `connectAgent` when the host is reachable. A host restart marks unfinished runs interrupted; it does not resume their execution. Surface the actual terminal or unavailable state, including uncertain side effects. Never automatically replay a request or tool action; let the user explicitly choose a new attempt after reviewing the input and any effects. The SDK's initial delivery during an authorized iOS handoff is part of starting the original request, not permission to submit it again during recovery. Restore or reconnect only within the existing App and authorization boundaries.
 
 ## Page tools with WebMCP
 
@@ -104,8 +112,11 @@ host-injected `window.localApp.agent` and the official AG-UI 1.0 message/event
 contract, backed by the bundled official SDK 1.0.3. Never embed a provider key,
 reuse the creating conversation, or expose a Remote Control chat endpoint.
 
-For an independent request, construct one standard user message and fresh run
-and thread IDs. The File helper creates the standard image/document content part:
+For a short-lived independent request where losing the browser session is
+acceptable, construct one standard user message and fresh run and thread IDs.
+For an independent Mobile run or any independent request that needs recovery,
+prefer the durable `tasks.start` flow below and save those IDs before submission.
+The File helper creates the standard image/document content part:
 
 ```js
 const content = [{type: "text", text: "Describe the selected file."}];
@@ -138,9 +149,14 @@ as `threadId`, and send a fresh `runId` for each turn. Chat history is paged as
 `{messages: Message[], nextCursor?}`. The host owns the real Harness transcript;
 client-provided history must match canonical messages.
 
-For durable recovery use `tasks.start` with the same official input, then
+For a Mobile independent Agent task or any independent request that needs
+recovery, use `tasks.start` with the same official input, then
 `tasks.get/list/events/subscribe/cancel`. Task metadata includes `threadId` and
-`runId`. Persist those IDs, then reconnect read-only with
+`runId`; persist those IDs before submission, so they remain available if the
+page switches or the response is lost. For a persistent Chat, send through its
+Chat handle instead of `tasks.start`; persist the handle ID (`threadId`) and
+the fresh `runId` before sending, and use `chats.open(threadId)` on return.
+Then reconnect read-only with
 `createClient({threadId}).connectAgent({runId})`; a reload never submits another
 model request. Identical input with the same `runId` is idempotent; changed input
 under that ID is rejected. Do not use the retired prompt/attachments/requestId
@@ -176,11 +192,12 @@ Mobile pages open in the operating system's resolved external browser, including
 OEM/third-party browsers. Do not choose a browser package or embed WebView.
 Android uses its user-visible foreground runtime. iOS26 uses an explicit native
 foreground handoff and a finite continued-processing lease; iOS27 user-invoked
-Intents require complete standard input. The SDK handles handoff/recovery; App
-code keeps the standard run contract. No path promises indefinite execution or
-automatic replay. Stop/revocation/release replacement cancel work; default limits
-are one active task per App, 20 turns and ten minutes, and an App may only lower
-native limits. Background Agent permission is separate from process permission.
+Intents require complete standard input. The SDK handles supported handoff and
+read-only reconnection; App code keeps the standard run contract. No path
+promises indefinite execution or automatic replay. Stop/revocation/release
+replacement cancel work; default limits are one active task per App, 20 turns and
+ten minutes, and an App may only lower native limits. Background Agent
+permission is separate from process permission.
 Listen for `localApp:agent-handoff-error`. When `detail.code` is
 `pending_request_missing`, use its `runId` to explain that this browser storage
 context cannot access the saved input; direct the user to the original tab or a

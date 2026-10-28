@@ -32,6 +32,8 @@ pub struct AppAgentHost {
     active: AsyncMutex<HashMap<String, Arc<Control>>>,
     admission: AsyncMutex<()>,
     shutdown: AtomicBool,
+    #[cfg(test)]
+    force_wake_policy: AtomicBool,
 }
 struct AppAgentState {
     store: Arc<AgentStore>,
@@ -45,21 +47,32 @@ struct WakeKey {
     request_id: String,
 }
 struct WakeReservation {
+    reservation_id: String,
     expires_at_ms: u64,
     run_id: Option<String>,
     claimed: bool,
+}
+#[derive(Debug, PartialEq, Eq)]
+struct WakeReceipt {
+    reservation_id: String,
+    expires_at_ms: u64,
+    created: bool,
 }
 #[derive(Default)]
 struct WakeRegistry {
     reservations: HashMap<WakeKey, WakeReservation>,
 }
 impl WakeRegistry {
-    fn reserve(&mut self, key: WakeKey, now: u64, timeout_ms: u64) -> Result<u64, String> {
+    fn reserve(&mut self, key: WakeKey, now: u64, timeout_ms: u64) -> Result<WakeReceipt, String> {
         self.reservations.retain(|_, reservation| {
             reservation.run_id.is_some() || reservation.expires_at_ms > now
         });
         if let Some(existing) = self.reservations.get(&key) {
-            return Ok(existing.expires_at_ms);
+            return Ok(WakeReceipt {
+                reservation_id: existing.reservation_id.clone(),
+                expires_at_ms: existing.expires_at_ms,
+                created: false,
+            });
         }
         if self
             .reservations
@@ -72,15 +85,21 @@ impl WakeRegistry {
             return Err("wake_reservations_full".into());
         }
         let expires_at_ms = now.saturating_add(timeout_ms);
+        let reservation_id = uuid::Uuid::new_v4().to_string();
         self.reservations.insert(
             key,
             WakeReservation {
+                reservation_id: reservation_id.clone(),
                 expires_at_ms,
                 run_id: None,
                 claimed: false,
             },
         );
-        Ok(expires_at_ms)
+        Ok(WakeReceipt {
+            reservation_id,
+            expires_at_ms,
+            created: true,
+        })
     }
 
     fn available(&mut self, key: &WakeKey, now: u64) -> bool {
@@ -124,7 +143,14 @@ impl WakeRegistry {
         true
     }
 
-    fn clear(&mut self, key: &WakeKey) -> Option<String> {
+    fn clear(&mut self, key: &WakeKey, reservation_id: &str) -> Option<String> {
+        if !self
+            .reservations
+            .get(key)
+            .is_some_and(|reservation| reservation.reservation_id == reservation_id)
+        {
+            return None;
+        }
         self.reservations
             .remove(key)
             .and_then(|reservation| reservation.run_id)
@@ -819,6 +845,8 @@ impl AppAgentHost {
             active: AsyncMutex::new(HashMap::new()),
             admission: AsyncMutex::new(()),
             shutdown: AtomicBool::new(false),
+            #[cfg(test)]
+            force_wake_policy: AtomicBool::new(false),
         }))
     }
     fn app_state(&self, app: &str) -> Result<Arc<AppAgentState>, String> {
@@ -1192,6 +1220,11 @@ impl AppAgentHost {
         if self.shutdown.load(Ordering::Acquire) {
             return Err("agent_host_replaced".into());
         }
+        // Stop cancels the page invocation before taking this admission lock.
+        // A request queued before Stop cannot consume a later wake afterward.
+        if !native_detached && owner_cancel.is_cancelled() {
+            return Err("app_invocation_closed".into());
+        }
         let state = self.app_state(&owner.app_id)?;
         if let Some(chat_id) = chat_id.as_deref() {
             let summary = state.chats.get(chat_id).map_err(|_| "chat_not_found")?;
@@ -1199,10 +1232,14 @@ impl AppAgentHost {
                 return Err("chat_archived".into());
             }
         }
-        let claimed_wake = cfg!(target_os = "ios")
-            && !native_detached
-            && self.claim_wake(&owner.app_id, revision, &input.request_id);
-        let allow_new = if cfg!(target_os = "ios") && !native_detached {
+        #[cfg(test)]
+        let is_ios = cfg!(target_os = "ios") || self.force_wake_policy.load(Ordering::Acquire);
+        #[cfg(not(test))]
+        let is_ios = cfg!(target_os = "ios");
+        let wake_required = is_ios && !native_detached;
+        let claimed_wake =
+            wake_required && self.claim_wake(&owner.app_id, revision, &input.request_id);
+        let allow_new = if wake_required {
             claimed_wake
         } else {
             allow_new
@@ -1341,7 +1378,7 @@ impl AppAgentHost {
         } else {
             false
         };
-        if cfg!(target_os = "ios") && !native_detached && !wake_detached {
+        if wake_required && !wake_detached {
             if let Some(chat_id) = &chat_id {
                 if let Some(message_id) = &user_message_id {
                     let _ = state
@@ -1426,6 +1463,9 @@ impl AppAgentHost {
                     let _ = control.chats.finish_turn(chat_id, &id);
                 }
                 let _ = state.store.rollback_queued_admission(&owner, &id);
+                if wake_detached {
+                    self.clear_wake_run(&id);
+                }
                 return Err("agent_storage_unavailable".into());
             }
         }
@@ -2045,6 +2085,13 @@ impl AppAgentHost {
                     return Err("invalid_receive_timeout".into());
                 }
                 let receive_timeout = receive_timeout.min(120_000);
+                // Configuration updates use this same admission lock. Read
+                // release and authorization only after it is held so a
+                // revoked grant cannot create a new wake reservation.
+                let _serial = self.admission.lock().await;
+                if self.shutdown.load(Ordering::Acquire) {
+                    return Err("agent_host_replaced".into());
+                }
                 let (owner, _, _) = self.current_release(app, revision, "native-wake").await?;
                 let state = self.app_state(app)?;
                 if state
@@ -2055,26 +2102,30 @@ impl AppAgentHost {
                 {
                     return Err("agent_not_authorized".into());
                 }
-                let _serial = self.admission.lock().await;
                 let key = WakeKey {
                     app_id: app.to_owned(),
                     revision,
                     request_id: run_id.to_owned(),
                 };
-                let expires_at_ms = self
+                let receipt = self
                     .wake_reservations
                     .lock()
                     .map_err(|_| "agent_storage_unavailable")?
                     .reserve(key, now_millis(), receive_timeout)?;
-                Ok(
-                    json!({"appId":app,"revision":revision,"runId":run_id,"expiresAtMs":expires_at_ms}),
-                )
+                Ok(json!({"appId":app,"revision":revision,"runId":run_id,
+                        "expiresAtMs":receipt.expires_at_ms,"created":receipt.created,
+                        "reservationId":receipt.reservation_id}))
             }
             "wake.clear" => {
-                reject_unknown(&request, &["op", "appId", "revision", "runId"])?;
+                reject_unknown(
+                    &request,
+                    &["op", "appId", "revision", "runId", "reservationId"],
+                )?;
                 let app = required_string(&request, "appId")?;
                 let revision = request["revision"].as_u64().ok_or("invalid_revision")?;
                 let run_id_request = required_string(&request, "runId")?;
+                let reservation_id = required_string(&request, "reservationId")?;
+                uuid::Uuid::parse_str(reservation_id).map_err(|_| "invalid_reservation_id")?;
                 validate_request_id(run_id_request)?;
                 let _serial = self.admission.lock().await;
                 let key = WakeKey {
@@ -2086,9 +2137,11 @@ impl AppAgentHost {
                     .wake_reservations
                     .lock()
                     .map_err(|_| "agent_storage_unavailable")?
-                    .clear(&key);
+                    .clear(&key, reservation_id);
                 if let Some(run_id) = run_id {
-                    if let Some(control) = self.active.lock().await.get(&run_id).cloned() {
+                    // Drop the active-map guard before cancel_ids acquires it.
+                    let control = { self.active.lock().await.get(&run_id).cloned() };
+                    if let Some(control) = control {
                         if control.owner.app_id == app
                             && control.revision == revision
                             && control.request_id == run_id_request
@@ -2339,12 +2392,18 @@ impl AppAgentHost {
                         return Err("skill_not_declared".into());
                     }
                 }
-                let ids = state
+                let result = state
                     .store
-                    .configure(owner, settings)
+                    .configure_with_change(owner, settings)
                     .map_err(|_| "agent_storage_unavailable")?;
-                self.cancel_ids(&ids).await;
-                Ok(Value::Null)
+                if result.changed {
+                    self.wake_reservations
+                        .lock()
+                        .map_err(|_| "agent_storage_unavailable")?
+                        .clear_app(app);
+                }
+                self.cancel_ids(&result.affected_run_ids).await;
+                Ok(json!({"changed": result.changed}))
             }
             "interactions" => {
                 let controls = self
@@ -3119,6 +3178,313 @@ mod progress_tests {
             ).unwrap();
         }
         control
+    }
+
+    async fn test_wake_host(root: &Path) -> (Arc<AppAgentHost>, Arc<MobileLocalAppServiceHandle>) {
+        use crate::mobile::test_support::{
+            test_config, CollectingPermissionSink, FakeListener, HostFakePlatform,
+        };
+        let cfg = test_config(root);
+        let runtime = crate::mobile::host::build_mobile(
+            cfg.clone(),
+            Arc::new(HostFakePlatform::new(root.to_path_buf())),
+            Arc::new(FakeListener::default()),
+            Arc::new(CollectingPermissionSink::default()),
+        )
+        .await
+        .unwrap();
+        // The service requires an ordinary Linux user directory name.
+        let service_home = root.join("user").join(branding::DOT_DIR);
+        let service = MobileLocalAppServiceHandle::new(service_home, None, "ios".into()).unwrap();
+        let host = AppAgentHost::new(
+            &service,
+            runtime.app_agent_factory.clone(),
+            &cfg.lingxi_home,
+        )
+        .unwrap();
+        (host, service)
+    }
+
+    fn configured_wake_fixture(host: &AppAgentHost) -> (Owner, Input, WakeKey, Arc<AppAgentState>) {
+        let app_id = format!("a{}", "8".repeat(32));
+        std::fs::create_dir_all(host.apps_root.join(&app_id)).unwrap();
+        let state = host.app_state(&app_id).unwrap();
+        let owner = Owner {
+            app_id,
+            release_digest: "2".repeat(64),
+            invocation_id: "fixture-page".into(),
+        };
+        let settings: Settings = serde_json::from_value(json!({
+            "model":{"providerId":"provider","modelId":"model"},"tools":{},"skills":[],
+            "background":false,"maxTurns":4,"timeoutMs":30000
+        }))
+        .unwrap();
+        state
+            .store
+            .configure(owner.clone(), Some(settings))
+            .unwrap();
+        let mut input: Input =
+            serde_json::from_value(json!({"requestId":"wake-a", "prompt":"fixture"})).unwrap();
+        input.protocol_thread_id = Some("fixture-thread".into());
+        let key = WakeKey {
+            app_id: owner.app_id.clone(),
+            revision: 1,
+            request_id: input.request_id.clone(),
+        };
+        host.wake_reservations
+            .lock()
+            .unwrap()
+            .reserve(key.clone(), now_millis(), 120_000)
+            .unwrap();
+        host.force_wake_policy.store(true, Ordering::Release);
+        (owner, input, key, state)
+    }
+
+    #[tokio::test]
+    async fn stopped_page_waiting_for_admission_cannot_consume_a_later_wake() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, _service) = test_wake_host(root.path()).await;
+        let (owner, input, key, state) = configured_wake_fixture(&host);
+        let cancellation = CancellationToken::new();
+        let gate = host.admission.lock().await;
+        let mut stop = Box::pin(host.stop_app(&owner.app_id));
+        let mut start = Box::pin(host.start_task(
+            owner.clone(),
+            1,
+            &[],
+            &[],
+            input,
+            None,
+            None,
+            cancellation.clone(),
+            true,
+            false,
+        ));
+        assert!(matches!(
+            futures::poll!(stop.as_mut()),
+            std::task::Poll::Pending
+        ));
+        assert!(matches!(
+            futures::poll!(start.as_mut()),
+            std::task::Poll::Pending
+        ));
+        cancellation.cancel(); // stop cancels the invocation before entering admission
+        drop(gate);
+        stop.await.unwrap();
+        // Simulate a new handoff for the same tuple after Stop, before the
+        // previously queued page request is polled again.
+        host.wake_reservations
+            .lock()
+            .unwrap()
+            .reserve(key.clone(), now_millis(), 120_000)
+            .unwrap();
+        assert_eq!(start.await.unwrap_err(), "app_invocation_closed");
+        let mut registry = host.wake_reservations.lock().unwrap();
+        assert!(registry.available(&key, now_millis()));
+        drop(registry);
+        assert!(state
+            .store
+            .task_id_for_request(&owner, &key.request_id)
+            .is_err());
+        assert!(host.active.lock().await.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_started_event_write_clears_the_consumed_wake() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let (host, _service) = test_wake_host(root.path()).await;
+        let (owner, input, key, state) = configured_wake_fixture(&host);
+        let events = state.root.join("tasks/protocol-events");
+        // The ledger remains writable; the actual RUN_STARTED event file does not.
+        std::fs::set_permissions(&events, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let result = host
+            .start_task(
+                owner.clone(),
+                1,
+                &[],
+                &[],
+                input,
+                None,
+                None,
+                CancellationToken::new(),
+                true,
+                false,
+            )
+            .await;
+        std::fs::set_permissions(&events, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(result.unwrap_err(), "agent_storage_unavailable");
+        assert!(!host
+            .wake_reservations
+            .lock()
+            .unwrap()
+            .reservations
+            .contains_key(&key));
+        assert!(state
+            .store
+            .task_id_for_request(&owner, &key.request_id)
+            .is_err());
+        assert!(host.active.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_wake_clear_fences_generations_and_reaps_running_task() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, service) = test_wake_host(root.path()).await;
+        let control = Arc::new(running_control(root.path()));
+        let key = WakeKey {
+            app_id: control.owner.app_id.clone(),
+            revision: control.revision,
+            request_id: control.request_id.clone(),
+        };
+        let (old, current) = {
+            let mut registry = host.wake_reservations.lock().unwrap();
+            let old = registry.reserve(key.clone(), 100, 10).unwrap();
+            let current = registry.reserve(key.clone(), 110, 100).unwrap();
+            assert!(registry.claim(&key, 111));
+            assert!(registry.consume(&key, 111, &control.id));
+            (old, current)
+        };
+        host.active
+            .lock()
+            .await
+            .insert(control.id.clone(), control.clone());
+        let clear = |id: &str| {
+            json!({"op":"wake.clear", "appId":key.app_id,
+            "revision":key.revision, "runId":key.request_id, "reservationId":id})
+        };
+        host.host(clear(&old.reservation_id)).await.unwrap();
+        assert!(
+            !control.cancel.is_cancelled(),
+            "A stale receipt must not cancel the current run"
+        );
+        assert!(host
+            .wake_reservations
+            .lock()
+            .unwrap()
+            .reservations
+            .contains_key(&key));
+
+        // Simulate the production executor's terminal path after cancellation.
+        let worker_host = host.clone();
+        let worker_control = control.clone();
+        let worker = tokio::spawn(async move {
+            worker_control.cancel.cancelled().await;
+            worker_host.active.lock().await.remove(&worker_control.id);
+            worker_control.finished.store(true, Ordering::Release);
+            worker_control.done.notify_waiters();
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            host.host(clear(&current.reservation_id)),
+        )
+        .await
+        .expect("wake.clear must release active-map lock before cancel_ids")
+        .unwrap();
+        worker.await.unwrap();
+        assert!(control.cancel.is_cancelled());
+        assert!(host.active.lock().await.is_empty());
+        host.host(clear(&current.reservation_id)).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), host.stop_all())
+            .await
+            .expect("stopped host must not retain a locked active map")
+            .unwrap();
+        // Replacement construction still succeeds after the real clear/reap path.
+        let replacement = AppAgentHost::new(&service, host.factory.clone(), root.path()).unwrap();
+        assert!(!replacement.shutdown.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn revoke_serializes_before_waiting_wake_reservation() {
+        let root = tempfile::tempdir().unwrap();
+        let (host, service) = test_wake_host(root.path()).await;
+        let source = root.path().join("agent-app");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("index.html"), "fixture").unwrap();
+        std::fs::write(
+            source.join("lingxi-app.json"),
+            json!({
+                "schema":2,"name":"Agent fixture","entry":{"type":"static","path":"index.html"},
+                "targets":[{"platform":"ios","environment":"web"}],
+                "capabilities":["agent"],"agent":{"tools":[]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let published = service
+            .request_value(json!({"op":"publish", "expectedRevision":0,
+            "sourcePath":source}))
+            .await
+            .unwrap();
+        let app = published["record"]["appId"].as_str().unwrap();
+        let revision = published["record"]["currentRevision"].as_u64().unwrap();
+        let (owner, _, _) = host.current_release(app, revision, "test").await.unwrap();
+        let state = host.app_state(app).unwrap();
+        let settings: Settings = serde_json::from_value(json!({
+            "model":{"providerId":"provider","modelId":"model"},"tools":{},"skills":[],
+            "background":false,"maxTurns":4,"timeoutMs":30000
+        }))
+        .unwrap();
+        state.store.configure(owner, Some(settings)).unwrap();
+        let reserve = json!({"op":"wake.reserve", "appId":app, "revision":revision,
+            "runId":"wake-a", "receiveTimeoutMs":120000});
+        let receipt = host.host(reserve.clone()).await.unwrap();
+        assert_eq!(receipt["created"], true);
+        let duplicate = host.host(reserve.clone()).await.unwrap();
+        assert_eq!(duplicate["created"], false);
+        assert_eq!(duplicate["reservationId"], receipt["reservationId"]);
+
+        // Queue real operations in order while holding the common admission gate.
+        let gate = host.admission.lock().await;
+        let mut revoke =
+            Box::pin(host.host(json!({"op":"configure", "appId":app, "settings":null})));
+        let mut waiting_reserve = Box::pin(host.host(reserve));
+        assert!(matches!(
+            futures::poll!(revoke.as_mut()),
+            std::task::Poll::Pending
+        ));
+        assert!(matches!(
+            futures::poll!(waiting_reserve.as_mut()),
+            std::task::Poll::Pending
+        ));
+        drop(gate);
+        tokio::time::timeout(std::time::Duration::from_secs(3), revoke)
+            .await
+            .unwrap()
+            .unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), waiting_reserve)
+            .await
+            .unwrap();
+        assert_eq!(result.unwrap_err(), "agent_not_authorized");
+        assert!(host
+            .wake_reservations
+            .lock()
+            .unwrap()
+            .reservations
+            .is_empty());
+
+        // A revoke must also clear a stale earlier-release reservation when
+        // settings(current release) already reports None.
+        let stale = WakeKey {
+            app_id: app.into(),
+            revision: revision.saturating_sub(1),
+            request_id: "old-wake".into(),
+        };
+        host.wake_reservations
+            .lock()
+            .unwrap()
+            .reserve(stale, now_millis(), 120_000)
+            .unwrap();
+        host.host(json!({"op":"configure", "appId":app, "settings":null}))
+            .await
+            .unwrap();
+        assert!(host
+            .wake_reservations
+            .lock()
+            .unwrap()
+            .reservations
+            .is_empty());
     }
 
     #[test]
@@ -3973,7 +4339,7 @@ mod wake_tests {
         let app_a = key("app-a", 7, "wake-a");
         let app_b = key("app-b", 9, "wake-b");
         let mut registry = WakeRegistry::default();
-        registry.reserve(app_a.clone(), 100, 50).unwrap();
+        let receipt = registry.reserve(app_a.clone(), 100, 50).unwrap();
         registry.reserve(app_b.clone(), 100, 50).unwrap();
 
         assert!(registry.claim(&app_a, 101));
@@ -3981,11 +4347,18 @@ mod wake_tests {
         assert!(registry.consume(&app_a, 101, "run-a"));
         assert!(!registry.available(&app_a, 102));
         assert!(!registry.claim(&app_a, 102));
-        assert_eq!(registry.reserve(app_a.clone(), 102, 50).unwrap(), 150);
+        let duplicate = registry.reserve(app_a.clone(), 102, 50).unwrap();
+        assert_eq!(duplicate.expires_at_ms, 150);
+        assert!(!duplicate.created);
+        assert_eq!(duplicate.reservation_id, receipt.reservation_id);
         assert!(!registry.claim(&app_a, 102));
         assert!(!registry.available(&app_a, 151));
         assert!(registry.reservations.contains_key(&app_a));
-        assert_eq!(registry.clear(&app_a).as_deref(), Some("run-a"));
+        assert_eq!(
+            registry.clear(&app_a, &receipt.reservation_id).as_deref(),
+            Some("run-a")
+        );
+        assert!(registry.clear(&app_a, &receipt.reservation_id).is_none());
         assert!(registry.available(&app_b, 103));
         assert_eq!(registry.reservations.len(), 1);
     }
@@ -3994,12 +4367,12 @@ mod wake_tests {
     fn terminal_cleanup_removes_a_consumed_wake_link() {
         let key = key("app-a", 7, "wake-a");
         let mut registry = WakeRegistry::default();
-        registry.reserve(key.clone(), 100, 50).unwrap();
+        let receipt = registry.reserve(key.clone(), 100, 50).unwrap();
         assert!(registry.claim(&key, 101));
         assert!(registry.consume(&key, 101, "run-a"));
         registry.clear_run("run-a");
         assert!(registry.reservations.is_empty());
-        assert!(registry.clear(&key).is_none());
+        assert!(registry.clear(&key, &receipt.reservation_id).is_none());
     }
 
     #[test]
@@ -4008,13 +4381,13 @@ mod wake_tests {
         let second = key("app-a", 7, "wake-b");
         let other_app = key("app-b", 3, "wake-other");
         let mut registry = WakeRegistry::default();
-        registry.reserve(first.clone(), 100, 50).unwrap();
+        let receipt = registry.reserve(first.clone(), 100, 50).unwrap();
         assert_eq!(
             registry.reserve(second.clone(), 101, 50),
             Err("busy".into())
         );
         registry.reserve(other_app, 101, 50).unwrap();
-        registry.clear(&first);
+        registry.clear(&first, &receipt.reservation_id);
         registry.reserve(second.clone(), 102, 50).unwrap();
         registry.claim(&second, 103);
         registry.consume(&second, 103, "run-b");
@@ -4034,6 +4407,33 @@ mod wake_tests {
         assert_eq!(registry.reservations.len(), 1);
         assert!(!registry.available(&app_a, 101));
         assert!(registry.available(&app_b, 101));
+    }
+
+    #[test]
+    fn stale_and_duplicate_clears_cannot_remove_a_new_reservation_generation() {
+        let key = key("app-a", 7, "wake-a");
+        let mut registry = WakeRegistry::default();
+        let old = registry.reserve(key.clone(), 100, 10).unwrap();
+        assert!(old.created);
+        let reused = registry.reserve(key.clone(), 101, 10).unwrap();
+        assert!(!reused.created);
+        assert_eq!(reused.reservation_id, old.reservation_id);
+        // A later reservation for the same tuple has an independent owner.
+        let new = registry.reserve(key.clone(), 110, 50).unwrap();
+        assert!(new.created);
+        assert_ne!(new.reservation_id, old.reservation_id);
+        assert!(registry.claim(&key, 111));
+        assert!(registry.consume(&key, 111, "new-run"));
+        assert!(registry.clear(&key, &old.reservation_id).is_none());
+        assert_eq!(
+            registry.reservations[&key].run_id.as_deref(),
+            Some("new-run")
+        );
+        assert_eq!(
+            registry.clear(&key, &new.reservation_id).as_deref(),
+            Some("new-run")
+        );
+        assert!(registry.clear(&key, &new.reservation_id).is_none());
     }
 
     #[test]
