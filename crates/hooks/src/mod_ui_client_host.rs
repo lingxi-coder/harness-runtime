@@ -257,6 +257,14 @@ pub(super) struct ClientUiHostState {
     next_post_action_id: AtomicU64,
     #[cfg(test)]
     held_result_received: AtomicU64,
+    #[cfg(test)]
+    finalize_gate: StdMutex<Option<ClientHeldFinalizeGate>>,
+}
+
+#[cfg(test)]
+struct ClientHeldFinalizeGate {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Default)]
@@ -817,6 +825,18 @@ impl ClientHeldLease<'_> {
             "id":self.request.id, "kind":"ui.client.finalize", "postActionId":action_id,
         })).await?;
         let reply = self.host.receive(&mut self.request).await?;
+        #[cfg(test)]
+        {
+            let gate = { lock(&self.host.client_ui.finalize_gate).take() };
+            if let Some(gate) = gate {
+                // Model cancellation after the Worker sends its ACK but
+                // before the Host future can consume that acknowledgement.
+                self.request.completed = false;
+                gate.entered.notify_one();
+                gate.release.notified().await;
+                self.request.completed = true;
+            }
+        }
         if reply.string_at("/kind") != Some("ui.client.finalized") {
             self.request.completed = false;
             return Err(ModError::Unavailable("Client held action finalization failed with outcome unknown".into()));
@@ -2472,7 +2492,7 @@ impl ModHost {
                 )
             }
             "ui_message" => (
-                self.dispatch_client_message(&request, session).await?,
+                self.dispatch_client_message(&request, session, None).await?,
                 None,
                 BTreeMap::new(),
                 None,
@@ -2931,6 +2951,7 @@ impl ModHost {
                 input,
                 session,
                 Some(client_action_context),
+                None,
                 move |forwarded| {
                     *lock(&reached_core) = forwarded.clone();
                     let mut response = host_generated_json(json!({"handled":true}));
@@ -3166,6 +3187,7 @@ impl ModHost {
                 input,
                 session,
                 Some(press_token),
+                None,
                 move |forwarded| {
                     *lock(&reached_core) = forwarded.clone();
                     let mut response = host_generated_json(json!({"handled":true}));
@@ -3246,6 +3268,7 @@ impl ModHost {
         &self,
         request: &Utf16JsonProjection,
         session: &dyn ModSessionContext,
+        post_action_id: Option<&str>,
     ) -> Result<Utf16JsonProjection, ModError> {
         let site = client_site_from_projection(request)?;
         let identity = client_identity_from_control(request)?;
@@ -3285,6 +3308,7 @@ impl ModHost {
                 input,
                 session,
                 None,
+                post_action_id,
                 |_| async { Ok(Some(host_generated_json(json!({"handled":true})))) },
             )
             .await?;
@@ -3309,6 +3333,10 @@ impl ModHost {
             operation
                 .set_field("props", props.clone())
                 .map_err(|error| ModError::Protocol(error.to_string()))?;
+            if let Some(post_action_id) = post_action_id {
+                operation.set_field("postActionId", plain_text_projection(post_action_id))
+                    .map_err(|error| ModError::Protocol(error.to_string()))?;
+            }
             let frame = self.run_client_worker_operation(operation).await?;
             self.update_instance_props(&instance.runtime_id, props.clone());
             let frame = self
@@ -3574,6 +3602,7 @@ impl ModHost {
         input: Utf16JsonProjection,
         session: &dyn ModSessionContext,
         press_token: Option<Utf16JsonProjection>,
+        post_action_id: Option<&str>,
         core: F,
     ) -> Result<Utf16JsonProjection, ModError>
     where
@@ -3585,6 +3614,7 @@ impl ModHost {
             plugin_scope: Some(plugin.to_owned()),
             press_token,
             ui_render_host_revision: None,
+            client_post_action: post_action_id.map(str::to_owned),
         };
         let outcome = self
             .dispatch_with_utf16_at_context_scope(
@@ -3717,6 +3747,11 @@ impl ModHost {
         match reply.string_at("/kind") {
             Some("ui.client.result") => {
                 if reply.get_property("error").is_some() {
+                    if reply.at_pointer("/error/busy").and_then(|value| value.as_bool()) == Some(true) {
+                        return Err(ClientWorkerOperationError::Host(ModError::Unavailable(
+                            "Client shared environment is busy; operation was not executed".into(),
+                        )));
+                    }
                     let phase = reply
                         .string_at("/error/phase")
                         .filter(|phase| matches!(*phase, "load" | "render" | "run"))
@@ -4315,8 +4350,9 @@ impl ModHost {
             }
             Err(error) => return Err(error.into()),
         };
-        let mut held_lease = pending_held_request.map(|request| ClientHeldLease {
-            host: self, owner: instance.clone(), request, committed: false,
+        let mut held_lease = pending_held_request.map(|mut request| {
+            request.cancel_client_environment_id = instance.worker_environment_id.clone();
+            ClientHeldLease { host: self, owner: instance.clone(), request, committed: false }
         });
         if let Some(post_action) = post_action.as_mut() {
             match client_run_held_result(&result)? {
@@ -4825,10 +4861,10 @@ impl ModHost {
                     tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => return Ok(()),
-                        response = self.dispatch_client_message(&request, session) => response,
+                        response = self.dispatch_client_message(&request, session, post_ack.action_id.as_deref()) => response,
                     }
                 } else {
-                    self.dispatch_client_message(&request, session).await
+                    self.dispatch_client_message(&request, session, None).await
                 };
                 let response = match response {
                     Ok(response) => response,
@@ -4965,6 +5001,7 @@ impl ClientUiFaultHost for ClientFaultHostAdapter<'_> {
                 &plugin,
                 event.to_projection(),
                 self.session,
+                None,
                 None,
                 |_| async { Ok(Some(host_generated_json(json!({"handled":true})))) },
             )
@@ -6730,6 +6767,15 @@ mod tests {
 
     #[tokio::test]
     async fn real_worker_held_drop_after_callback_result_fences_before_next_action() {
+        real_worker_held_drop_fences_before_next_action(false).await;
+    }
+
+    #[tokio::test]
+    async fn real_worker_held_drop_after_finalize_ack_revokes_worker_environment() {
+        real_worker_held_drop_fences_before_next_action(true).await;
+    }
+
+    async fn real_worker_held_drop_fences_before_next_action(after_finalize_ack: bool) {
         let directory = tempfile::tempdir().unwrap();
         let child = directory.path().join("card.tsx");
         let entry = directory.path().join("register.tsx");
@@ -6771,6 +6817,11 @@ mod tests {
         })), session.as_ref()).await.unwrap();
         let mounted = test_value(&mount);
         let runtime_id = mounted["runtimeId"].as_str().unwrap().to_owned();
+        let (old_environment, generation) = {
+            let data = lock(&host.client_ui.data);
+            let instance = &data.instances[&runtime_id];
+            (instance.worker_environment_id.clone().unwrap(), instance.worker_generation.unwrap())
+        };
         let handle = tree_press_handle_for_key(&mounted["tree"], "send").unwrap();
         host.dispatch_client_ui_operation(host_generated_json(json!({
             "type":"draw_commit", "surface":"desktop", "component":"Pane", "instance_id":"drop-test",
@@ -6778,11 +6829,17 @@ mod tests {
         })), session.as_ref()).await.unwrap();
         let entered = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
-        let delivered = Arc::new(tokio::sync::Notify::new());
-        *lock(&session_impl.frame_gate) = Some(UiLifecycleFrameGate {
-            runtime_id:runtime_id.clone(), expected_text:"after effect",
-            entered:entered.clone(), release:release.clone(), delivered,
-        });
+        if after_finalize_ack {
+            *lock(&host.client_ui.finalize_gate) = Some(ClientHeldFinalizeGate {
+                entered: entered.clone(), release: release.clone(),
+            });
+        } else {
+            let delivered = Arc::new(tokio::sync::Notify::new());
+            *lock(&session_impl.frame_gate) = Some(UiLifecycleFrameGate {
+                runtime_id:runtime_id.clone(), expected_text:"after effect",
+                entered:entered.clone(), release:release.clone(), delivered,
+            });
+        }
         let host_task = host.clone();
         let session_task = session.clone();
         let operation = host_generated_json(json!({"type":"runHeld", "runtimeId":runtime_id,
@@ -6796,7 +6853,7 @@ mod tests {
                 tokio::task::yield_now().await;
             }
         }).await.expect("the Worker callback result was already received before dropping the Host future");
-        assert!(!task.is_finished(), "frame queue admission is still held");
+        assert!(!task.is_finished(), "the selected Host completion boundary is held");
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_some(),
@@ -6809,9 +6866,26 @@ mod tests {
         let _fault = wait_for_client_frame(&session_impl, &runtime_id, "cancelled lease fault", |frame| {
             frame.get("fault").is_some()
         }).await;
-        assert!(!lock(&session_impl.frames).iter().any(|(id, frame)| {
-            id == &runtime_id && tree_contains_text(&frame["tree"], "after effect")
-        }), "a dropped frame admission cannot later appear as an acknowledged frame");
+        if after_finalize_ack {
+            let worker_result = host.run_client_worker_operation(host_generated_json(json!({
+                "type":"render", "runtimeId":runtime_id, "generation":generation,
+            }))).await.unwrap();
+            assert_eq!(test_value(&worker_result), json!({"stale":true}),
+                "the late cancellation revoked the actual Worker VM, not only the Host state");
+            let remount = host.dispatch_client_ui_operation(host_generated_json(json!({
+                "type":"mount", "surface":"desktop", "component":"Pane", "instance_id":"drop-test",
+                "plugin":"review", "client":"card", "module":"card.tsx", "render_revision":revision,
+                "columns":80, "rows":24,
+            })), session.as_ref()).await.unwrap();
+            let new_runtime = test_value(&remount)["runtimeId"].as_str().unwrap().to_owned();
+            let data = lock(&host.client_ui.data);
+            assert_ne!(data.instances[&new_runtime].worker_environment_id.as_deref(), Some(old_environment.as_str()),
+                "remount must create a fresh VM after a lost finalize acknowledgement");
+        } else {
+            assert!(!lock(&session_impl.frames).iter().any(|(id, frame)| {
+                id == &runtime_id && tree_contains_text(&frame["tree"], "after effect")
+            }), "a dropped frame admission cannot later appear as an acknowledged frame");
+        }
     }
 
     #[tokio::test]

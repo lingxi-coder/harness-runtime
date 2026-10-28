@@ -743,7 +743,10 @@ export class ClientSurfaceManager {
   }
 
   invalidateHeldEnvironment(instance, error) {
-    const environment = instance.environment;
+    this.invalidateEnvironment(instance.environment, error);
+  }
+
+  invalidateEnvironment(environment, error) {
     if (environment.disposed) return;
     // Modules and module-level variables are shared by every surface in this
     // environment. A non-cancellable continuation could still mutate them, so

@@ -846,7 +846,7 @@ test('mods worker admits matching setProps while an async held action waits for 
   await posted;
   assert.equal(done, false);
   const updated = await request(3, {kind:'ui.client.operation', operation:{type:'setProps',
-    runtimeId:'held-waits-for-props', generation:mounted.result.generation, props:{value:'typed'}}});
+    runtimeId:'held-waits-for-props', generation:mounted.result.generation, postActionId:'held-action', props:{value:'typed'}}});
   assert.equal(updated.result.tree.props.value, 'typed');
   assert.deepEqual((await held).result, {accepted:true, postIds:[0,1]});
   assert.deepEqual(events.filter(event => event.action === 'post').map(event => event.postActionId),
@@ -867,6 +867,7 @@ test('held post permits its nested Host API dispatch while unrelated dispatch re
   const worker = spawn(process.execPath, ['--experimental-vm-modules', workerPath], {stdio:['pipe','pipe','pipe']});
   t.after(() => { if (!worker.killed) worker.kill(); });
   const pending = new Map();
+  let modelCalls = 0;
   let postResolve;
   const posted = new Promise(resolve => { postResolve = resolve; });
   const request = (id, message) => new Promise((resolve,reject) => {
@@ -879,6 +880,7 @@ test('held post permits its nested Host API dispatch while unrelated dispatch re
     if (frame.kind === 'api.callers') {
       worker.stdin.write(`${encodeModsIpcFrame({id:frame.id, kind:'api.callers.result', callId:frame.callId})}\n`);
     } else if (frame.kind === 'api' && frame.method === 'session.model') {
+      modelCalls++;
       // Simulate the Host API middleware re-entry; logRouteId is the actual
       // parent dispatch ID that Rust supplies in dispatch_host_api_inner.
       request(5, {kind:'dispatch', event:'session.model', logRouteId:frame.id, input:{}}).then(() => {
@@ -905,17 +907,28 @@ test('held post permits its nested Host API dispatch while unrelated dispatch re
   const mounted=await request(2,{kind:'ui.client.operation',operation:{type:'mount',...options}});
   const held=request(3,{kind:'ui.client.operation',operation:{type:'runHeld',runtimeId:'nested-held',
     generation:mounted.result.generation,handle:mounted.result.tree.held,payload:{kind:'change',value:'typed'},postActionId:'nested-action'}});
+  const messageInput={surface:'desktop',component:'panel',requestId:'render-7',element:'board',module:'board.mjs',data:{value:'typed'}};
+  const previouslyQueued=request(11,{kind:'dispatch',event:'ui.message',pluginScope:'example',input:messageInput});
   await posted;
   let unrelatedDone=false;
   const unrelated=request(8,{kind:'dispatch',event:'session.model',logRouteId:999,input:{}}).then(result=>{unrelatedDone=true;return result;});
+  const unowned=await request(9,{kind:'dispatch',event:'ui.message',pluginScope:'example',input:messageInput});
+  assert.equal(unowned.kind,'error');
+  const wrongAction=await request(10,{kind:'dispatch',event:'ui.message',pluginScope:'example',
+    clientPostActionId:'different-action',input:messageInput});
+  assert.equal(wrongAction.kind,'error');
+  assert.equal(modelCalls,0,'unrelated messages are rejected before executing the hook');
   const response=await request(4,{kind:'dispatch',event:'ui.message',pluginScope:'example',
-    input:{surface:'desktop',component:'panel',requestId:'render-7',element:'board',module:'board.mjs',data:{value:'typed'}}});
+    clientPostActionId:'nested-action',input:messageInput});
   assert.equal(response.kind,'result');
   assert.equal(response.result.props.value,'typed');
+  assert.equal(modelCalls,1);
   assert.equal(unrelatedDone,false,'an unrelated nested request cannot bypass the held queue');
   await request(6,{kind:'ui.client.operation',operation:{type:'setProps',runtimeId:'nested-held',
-    generation:mounted.result.generation,props:{value:'typed'}}});
+    generation:mounted.result.generation,postActionId:'nested-action',props:{value:'typed'}}});
   assert.deepEqual((await held).result,{accepted:true,postIds:[0]});
+  assert.equal((await previouslyQueued).kind,'error','queued messages recheck the held environment');
+  assert.equal(modelCalls,1,'the queued unrelated message did not execute the hook');
   assert.equal((await request(3,{kind:'ui.client.finalize',postActionId:'nested-action'})).kind,'ui.client.finalized');
   assert.equal((await unrelated).kind,'result');
 });
@@ -949,14 +962,29 @@ test('held action remains revocable after callback result until Host finalizes i
     runtimeId:'lease-one', generation:first.result.generation, handle:first.result.tree.held,
     payload:{kind:'change',value:'unconfirmed'}, postActionId:'abandoned'}});
   assert.deepEqual(outcome.result, {accepted:true, postIds:[]});
-  let queuedDone = false;
-  const queuedRender = request(4, {kind:'ui.client.operation', operation:{type:'render',
-    runtimeId:'lease-sibling', generation:sibling.result.generation}}).then(value => {queuedDone=true; return value;});
-  await delay(20);
-  assert.equal(queuedDone, false, 'an unrelated operation cannot observe a result awaiting Host finalization');
+  const busy = await request(4, {kind:'ui.client.operation', operation:{type:'render',
+    runtimeId:'lease-sibling', generation:sibling.result.generation}});
+  assert.equal(busy.error.busy, true, 'the sibling is refused before it can observe unconfirmed VM state');
+  const unownedSetProps = await request(20, {kind:'ui.client.operation', operation:{type:'setProps',
+    runtimeId:'lease-one', generation:first.result.generation, props:{value:'intruder'}}});
+  assert.equal(unownedSetProps.error.busy, true, 'a same-runtime props update needs the Host action ID');
+  const otherOptions = mountOptions({runtimeId:'other-runtime', source});
+  otherOptions.plugin = 'other-plugin';
+  otherOptions.environmentId = 'other-environment';
+  const other = await request(21, {kind:'ui.client.operation', operation:{type:'mount', ...otherOptions}});
+  const otherRender = await request(22, {kind:'ui.client.operation', operation:{type:'render',
+    runtimeId:'other-runtime', generation:other.result.generation}});
+  assert.equal(otherRender.result.tree.props.value, '', 'another VM is not blocked by the pending lease');
   worker.stdin.write(`${encodeModsIpcFrame({id:3,kind:'cancel'})}\n`);
-  assert.deepEqual((await queuedRender).result, {stale:true});
+  const immediate = await request(23, {kind:'ui.client.operation', operation:{type:'render',
+    runtimeId:'lease-sibling', generation:sibling.result.generation}});
+  assert(immediate.error?.busy === true || immediate.result?.stale === true,
+    'a request racing cancellation cannot see the unconfirmed VM');
+  for (let i=0; i<100 && events.filter(event=>event.action==='fault').length<2; i+=1) await delay(5);
   assert.equal(events.filter(event => event.action === 'fault').length, 2);
+  const siblingAfterCancel = await request(24, {kind:'ui.client.operation', operation:{type:'render',
+    runtimeId:'lease-sibling', generation:sibling.result.generation}});
+  assert.deepEqual(siblingAfterCancel.result, {stale:true});
 
   const fresh = await mount(5, 'lease-fresh');
   assert.notEqual(fresh.result.environmentInstanceId, first.result.environmentInstanceId);
@@ -981,6 +1009,8 @@ test('held action remains revocable after callback result until Host finalizes i
   const unmounted = await request(11, {kind:'ui.client.operation', operation:{type:'unmount',
     runtimeId:'lease-fresh', generation:fresh.result.generation}});
   assert.deepEqual(unmounted.result, {unmounted:true});
+  for (let i=0; i<100 && events.filter(event=>event.action==='fault').length<3; i+=1) await delay(5);
+  assert.equal(events.filter(event=>event.action==='fault').length, 3);
   const siblingAfter = await request(12, {kind:'ui.client.operation', operation:{type:'render',
     runtimeId:'lease-fresh-sibling', generation:freshSibling.result.generation}});
   assert.deepEqual(siblingAfter.result, {stale:true}, 'unmount revokes the pending action and shared VM');
@@ -1018,16 +1048,69 @@ test('unmount interrupts a suspended held callback with an unknown result', asyn
   assert.equal(result.error.outcomeUnknown,true,'an invoked callback is never reported as a safe no-op');
 });
 
+test('a lost finalize acknowledgement revokes only the identified VM', async t => {
+  const workerPath = fileURLToPath(new URL('./mods_worker.mjs', import.meta.url));
+  const worker = spawn(process.execPath, ['--experimental-vm-modules', workerPath], {stdio:['pipe','pipe','pipe']});
+  t.after(() => { if (!worker.killed) worker.kill(); });
+  const pending = new Map();
+  const events = [];
+  createInterface({input:worker.stdout, crlfDelay:Infinity}).on('line', line => {
+    const frame = decodeModsIpcFrame(line);
+    if (frame.id === 0) events.push(frame);
+    else { pending.get(frame.id)?.(frame); pending.delete(frame.id); }
+  });
+  const request = (id, message) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`request ${id} timed out`)); }, 2_000);
+    pending.set(id, frame => { clearTimeout(timer); resolve(frame); });
+    worker.stdin.write(`${encodeModsIpcFrame({id, ...message})}\n`);
+  });
+  const source = `let hidden=''; export function Board(_props, surface) {
+    return surface.elements.Input({value:hidden, onSubmit(){}, onInput:value => {
+      hidden=value; surface.every(5, () => {hidden='old timer';});
+    }});
+  }`;
+  const mount = (id, runtimeId) => request(id, {kind:'ui.client.operation', operation:{type:'mount',
+    ...mountOptions({runtimeId, source})}});
+  const first = await mount(1, 'lost-ack-owner');
+  const sibling = await mount(2, 'lost-ack-sibling');
+  assert.equal(first.result.environmentInstanceId, sibling.result.environmentInstanceId);
+  assert.deepEqual((await request(3, {kind:'ui.client.operation', operation:{type:'runHeld',
+    runtimeId:'lost-ack-owner', generation:first.result.generation, handle:first.result.tree.held,
+    payload:{kind:'change', value:'effect'}, postActionId:'lost-ack-action'}})).result,
+    {accepted:true, postIds:[]});
+  // The Worker has sent this acknowledgement, but the Host may be dropped
+  // before it consumes it and therefore sends cancellation for the old VM.
+  assert.equal((await request(3, {kind:'ui.client.finalize', postActionId:'lost-ack-action'})).kind,
+    'ui.client.finalized');
+  const oldEnvironment = first.result.environmentInstanceId;
+  worker.stdin.write(`${encodeModsIpcFrame({id:3, kind:'cancel', clientEnvironmentInstanceId:oldEnvironment})}\n`);
+  for (let i=0; i<100 && events.filter(event => event.action === 'fault').length<2; i+=1) await delay(5);
+  assert.equal(events.filter(event => event.action === 'fault').length, 2);
+  const oldRender = await request(4, {kind:'ui.client.operation', operation:{type:'render',
+    runtimeId:'lost-ack-sibling', generation:sibling.result.generation}});
+  assert.deepEqual(oldRender.result, {stale:true});
+  const fresh = await mount(5, 'lost-ack-fresh');
+  assert.notEqual(fresh.result.environmentInstanceId, oldEnvironment);
+  assert.equal(fresh.result.tree.props.value, '');
+  // Replaying a delayed cancel for the old UUID must not affect the new VM.
+  worker.stdin.write(`${encodeModsIpcFrame({id:3, kind:'cancel', clientEnvironmentInstanceId:oldEnvironment})}\n`);
+  await delay(30);
+  const freshRender = await request(6, {kind:'ui.client.operation', operation:{type:'render',
+    runtimeId:'lost-ack-fresh', generation:fresh.result.generation}});
+  assert.equal(freshRender.result.tree.props.value, '');
+});
+
 test('an unfinalized held action expires and quarantines its VM',
   {skip:Boolean(process.versions.bun), timeout:36_000}, async t => {
   const workerPath=fileURLToPath(new URL('./mods_worker.mjs',import.meta.url));
   const worker=spawn(process.execPath,['--experimental-vm-modules',workerPath],{stdio:['pipe','pipe','pipe']});
   t.after(()=>{if(!worker.killed) worker.kill();});
   const pending=new Map();
-  const events=[];
+  const events=[]; let faultResolve;
+  const fault=new Promise(resolve=>{faultResolve=resolve;});
   createInterface({input:worker.stdout,crlfDelay:Infinity}).on('line',line=>{
     const frame=decodeModsIpcFrame(line);
-    if(frame.id===0) events.push(frame);
+    if(frame.id===0) {events.push(frame);if(frame.action==='fault') faultResolve();}
     else {pending.get(frame.id)?.(frame);pending.delete(frame.id);}
   });
   const request=(id,message)=>new Promise((resolve,reject)=>{
@@ -1044,9 +1127,12 @@ test('an unfinalized held action expires and quarantines its VM',
     generation:mounted.result.generation,handle:mounted.result.tree.held,payload:{kind:'press'},postActionId:'never-finalized'}});
   assert.deepEqual(result.result,{accepted:true,postIds:[]});
   const start=Date.now();
-  const stale=await request(3,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'lease-expiry',generation:mounted.result.generation}});
+  const busy=await request(3,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'lease-expiry',generation:mounted.result.generation}});
+  assert.equal(busy.error.busy,true);
+  await fault;
+  assert(Date.now()-start >= 29_000,'the real lease deadline, not an immediate no-op, quarantined the VM');
+  const stale=await request(4,{kind:'ui.client.operation',operation:{type:'render',runtimeId:'lease-expiry',generation:mounted.result.generation}});
   assert.deepEqual(stale.result,{stale:true});
-  assert(Date.now()-start >= 29_000,'the real lease deadline, not an immediate no-op, released the queue');
   assert.equal(events.filter(event=>event.action==='fault').length,1);
 });
 

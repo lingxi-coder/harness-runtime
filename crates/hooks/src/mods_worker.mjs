@@ -173,6 +173,73 @@ function materializeSkillPromptIpcResult(result, originalText) {
 
 const clientSurfaceManager = new ClientSurfaceManager({ send });
 
+function heldForClientOperation(operation) {
+  const target = clientSurfaceManager.runtimeInstances.get(operation?.runtimeId);
+  for (const [runtimeId, held] of runningHeldByRuntime) {
+    const environment = held.environment;
+    if (!environment) continue;
+    if (target?.environment === environment ||
+        operation?.type === 'mount' && operation.plugin === environment.plugin ||
+        operation?.type === 'disposeEnvironment' && operation.plugin === environment.plugin
+          && operation.environmentId === environment.environmentId) return {runtimeId, held};
+  }
+  return undefined;
+}
+
+function heldForUiMessage(message) {
+  if (message.kind !== 'dispatch' || message.event !== 'ui.message') return undefined;
+  const input = message.input;
+  if (!input || typeof input.requestId !== 'string') return undefined;
+  for (const target of clientSurfaceManager.runtimeInstances.values()) {
+    const identity = target.identity;
+    if (!identity || message.pluginScope !== identity.plugin
+        || input.surface !== identity.parent.surface || input.component !== identity.parent.component
+        || `${input.requestId}\u0000client\u0000${identity.key}` !== identity.parent.requestId
+        || input.element !== identity.key || input.module !== identity.module) continue;
+    for (const [runtimeId, held] of runningHeldByRuntime) {
+      if (held.environment && target.environment === held.environment) {
+        return {runtimeId, held, target};
+      }
+    }
+  }
+  return undefined;
+}
+
+function isHeldPostMessage(message, owner) {
+  return owner && clientSurfaceManager.runtimeInstances.get(owner.runtimeId) === owner.target
+    && message.clientPostActionId === owner.held.actionId;
+}
+
+async function processQueuedDispatch(message) {
+  const owner = heldForUiMessage(message);
+  if (owner && !isHeldPostMessage(message, owner) && !cancelledRequests.has(message.id)) {
+    pendingDispatch.delete(message.id);
+    send({id:message.id, kind:'error', message:'Client shared environment is busy; operation was not executed'});
+    return;
+  }
+  await processMessage(message);
+}
+
+function allowedHeldClientOperation(operation, owner) {
+  if (operation?.type === 'unmount') return true;
+  return operation?.runtimeId === owner.runtimeId && operation.generation === owner.held.generation
+    && ['setProps', 'render'].includes(operation.type) && operation.postActionId === owner.held.actionId;
+}
+
+async function processQueuedClientOperation(message) {
+  const request = activeClientOperations.get(message.id);
+  if (!request) return;
+  const owner = heldForClientOperation(message.operation);
+  if (owner && !allowedHeldClientOperation(message.operation, owner)) {
+    activeClientOperations.delete(message.id);
+    if (!request.controller.signal.aborted) send({id:message.id, kind:'ui.client.result', error:{
+      phase:'run', reason:'Client shared environment is busy; operation was not executed', busy:true,
+    }});
+    return;
+  }
+  await processMessage(message);
+}
+
 function freeze(value) {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
     for (const child of Object.values(value)) freeze(child);
@@ -4551,8 +4618,14 @@ async function processMessage(message) {
       const operation = message.operation;
       const held = operation?.type === 'runHeld' ? {
         id: message.id, generation: operation.generation, actionId: operation.postActionId,
+        environment: clientSurfaceManager.runtimeInstances.get(operation.runtimeId)?.environment,
       } : undefined;
       if (held) runningHeldByRuntime.set(operation.runtimeId, held);
+      let finalizationPending = false;
+      const release = () => {
+        if (held && runningHeldByRuntime.get(operation.runtimeId) === held) runningHeldByRuntime.delete(operation.runtimeId);
+        if (activeClientOperations.get(message.id) === request) activeClientOperations.delete(message.id);
+      };
       try {
         const result = await clientSurfaceManager.operation(operation, { signal: request.controller.signal });
         if (request.controller.signal.aborted) return;
@@ -4569,20 +4642,26 @@ async function processMessage(message) {
           request.finalize = actionId => {
             if (actionId !== held.actionId) return false;
             resolve(true);
+            release();
             return true;
           };
           onAbort = () => resolve(false);
           request.controller.signal.addEventListener('abort', onAbort, { once: true });
           timer = setTimeout(() => resolve(false), 30_000);
         });
+        // Keep only this environment fenced while the Host settles its posts.
+        // Other environments and unrelated dispatches must not wait 30 s
+        // behind a global queue whose Host watchdog is only 20 s.
+        finalizationPending = true;
+        void decision.then(committed => {
+          clearTimeout(timer);
+          request.controller.signal.removeEventListener('abort', onAbort);
+          request.finalize = undefined;
+          if (!committed && instance) {
+            clientSurfaceManager.invalidateHeldEnvironment(instance, new Error('Client held action was not finalized'));
+          }
+        }).finally(release);
         send({ id: message.id, kind: 'ui.client.result', result });
-        const committed = await decision;
-        clearTimeout(timer);
-        request.controller.signal.removeEventListener('abort', onAbort);
-        request.finalize = undefined;
-        if (!committed && instance) {
-          clientSurfaceManager.invalidateHeldEnvironment(instance, new Error('Client held action was not finalized'));
-        }
       } catch (error) {
         if (!request.controller.signal.aborted || request.abortedByUnmount) send({ id: message.id, kind: 'ui.client.result', error: {
           phase: ['load', 'render', 'run'].includes(error?.phase) ? error.phase : 'load',
@@ -4590,13 +4669,15 @@ async function processMessage(message) {
           ...(error?.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
         } });
       } finally {
-        if (held && runningHeldByRuntime.get(operation.runtimeId) === held) {
-          runningHeldByRuntime.delete(operation.runtimeId);
-        }
-        if (activeClientOperations.get(message.id) === request) activeClientOperations.delete(message.id);
+        if (!finalizationPending) release();
       }
     }
     else if (message.kind === 'unload') {
+      for (const held of runningHeldByRuntime.values()) {
+        if (held.environment?.plugin === (message.plugin ?? message.storageId)) {
+          activeClientOperations.get(held.id)?.controller.abort();
+        }
+      }
       cancelTimers(message.storageId);
       revokeUiPressActionsForStorage(message.storageId);
       uiStorageEpochs.delete(message.storageId);
@@ -4686,6 +4767,17 @@ input.on('line', line => {
     }
   } else if (message.kind === 'cancel') {
     activeClientOperations.get(message.id)?.controller.abort();
+    // The Host may cancel after this Worker has acknowledged finalization but
+    // before the acknowledgement reached the Host. An immutable VM identity
+    // still identifies exactly the environment that must be quarantined.
+    if (typeof message.clientEnvironmentInstanceId === 'string') {
+      for (const environment of clientSurfaceManager.environments.values()) {
+        if (environment.instanceId === message.clientEnvironmentInstanceId) {
+          clientSurfaceManager.invalidateEnvironment(environment, new Error('Client held action was not finalized'));
+          break;
+        }
+      }
+    }
     for (const [callId, pending] of pendingApiCallerRegistrations) {
       if (pending.requestId === message.id) {
         pendingApiCallerRegistrations.delete(callId);
@@ -4727,16 +4819,8 @@ input.on('line', line => {
     // A Client handler can await the props update caused by its own post.
     // ui.message dispatch must not wait behind that same held operation.
     pendingDispatch.add(message.id);
-    const belongsToHeldSurface = message.kind === 'dispatch' && message.event === 'ui.message'
-      && [...runningHeldByRuntime.keys()].some(runtimeId => {
-        const identity = clientSurfaceManager.runtimeInstances.get(runtimeId)?.identity;
-        const input = message.input;
-        return identity && input && message.pluginScope === identity.plugin
-          && input.surface === identity.parent.surface && input.component === identity.parent.component
-          && typeof input.requestId === 'string'
-          && `${input.requestId}\u0000client\u0000${identity.key}` === identity.parent.requestId
-          && input.element === identity.key && input.module === identity.module;
-      });
+    const heldUiMessage = heldForUiMessage(message);
+    const belongsToHeldSurface = isHeldPostMessage(message, heldUiMessage);
     if (process.env.LINGXI_ASYNC_TRACE === '1' && message.event === 'ui.message') {
       console.error('TRACE dispatch', JSON.stringify({ input: message.input, pluginScope: message.pluginScope,
         active: [...runningHeldByRuntime.keys()].map(id => clientSurfaceManager.runtimeInstances.get(id)?.identity),
@@ -4744,32 +4828,48 @@ input.on('line', line => {
     }
     const nestedHeldDispatch = message.kind === 'dispatch'
       && heldRelatedDispatches.has(message.logRouteId);
-    if (belongsToHeldSurface || nestedHeldDispatch) {
+    if (belongsToHeldSurface || nestedHeldDispatch && !heldUiMessage) {
       heldRelatedDispatches.add(message.id);
       void processMessage(message).finally(() => heldRelatedDispatches.delete(message.id));
+    } else if (heldUiMessage) {
+      // Only the Host-validated post belonging to the action may run a hook
+      // inside a VM whose held action has not yet been finalized.
+      pendingDispatch.delete(message.id);
+      send({id:message.id, kind:'error', message:'Client shared environment is busy; operation was not executed'});
     } else {
-      void queue.then(() => processMessage(message));
+      // An action can become held after this message was read but before it
+      // leaves the queue. Recheck before invoking any hook.
+      void queue.then(() => processQueuedDispatch(message));
     }
   } else if (message.kind === 'ui.client.operation') {
     const request = { controller: new AbortController() };
     activeClientOperations.set(message.id, request);
     const operation = message.operation;
-    const active = ['setProps', 'render', 'unmount'].includes(operation?.type)
-      ? runningHeldByRuntime.get(operation.runtimeId) : undefined;
-    const sameHeldGeneration = active && active.generation === operation.generation;
-    if (sameHeldGeneration && operation.type === 'unmount') {
-      // Unmount is a revocation, not work to queue behind the action it ends.
-      const heldRequest = activeClientOperations.get(active.id);
-      if (heldRequest) {
-        heldRequest.abortedByUnmount = true;
-        heldRequest.controller.abort();
+    const owner = heldForClientOperation(operation);
+    if (owner && operation?.type === 'unmount') {
+      // Unmount of the owning surface revokes the held action immediately;
+      // unmounting a sibling is also safe and must not wait behind the lease.
+      if (operation.runtimeId === owner.runtimeId && operation.generation === owner.held.generation) {
+        const heldRequest = activeClientOperations.get(owner.held.id);
+        if (heldRequest) {
+          heldRequest.abortedByUnmount = true;
+          heldRequest.controller.abort();
+        }
       }
+      void processQueuedClientOperation(message);
+    } else if (owner && operation?.type === 'disposeEnvironment') {
+      activeClientOperations.get(owner.held.id)?.controller.abort();
       void processMessage(message);
-    } else if (sameHeldGeneration && (operation.type === 'setProps'
-        || operation.type === 'render' && operation.postActionId === active.actionId)) {
-      void processMessage(message);
+    } else if (owner && allowedHeldClientOperation(operation, owner)) {
+      void processQueuedClientOperation(message);
+    } else if (owner) {
+      // This request has not executed. Refuse promptly rather than letting a
+      // 30-second lease trip the Host's shorter worker watchdog.
+      void processQueuedClientOperation(message);
     } else {
-      queue = queue.then(() => processMessage(message));
+      // Recheck at execution time: another request may become held while this
+      // operation is already queued.
+      queue = queue.then(() => processQueuedClientOperation(message));
     }
   } else {
     queue = queue.then(() => processMessage(message));
