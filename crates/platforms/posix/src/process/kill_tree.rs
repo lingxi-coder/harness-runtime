@@ -96,8 +96,15 @@ fn pgid_from(pid: u32) -> Result<Pid, ProcessError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{kill_tree_force, kill_tree_unix};
+    use super::{group_already_gone, kill_tree_force, kill_tree_unix};
     use mobile_linux_api::ProcessError;
+
+    #[test]
+    fn only_esrch_means_no_matching_group() {
+        assert!(group_already_gone(nix::errno::Errno::ESRCH));
+        assert!(!group_already_gone(nix::errno::Errno::EPERM));
+        assert!(!group_already_gone(nix::errno::Errno::EINVAL));
+    }
 
     /// Killing a non-existent PGID returns `Ok(())` — `ESRCH` on the first
     /// signal is treated as success because the caller's only goal is "the

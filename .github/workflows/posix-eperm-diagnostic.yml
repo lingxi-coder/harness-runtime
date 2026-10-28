@@ -21,8 +21,16 @@ jobs:
         run: |
           test "$(id -u)" -ne 0
           sudo -n true
-      - name: Build actual platform test
-        run: cargo test --locked -p platform-posix --test process_kill_permission_test --no-run
+      - name: Build actual platform tests
+        run: |
+          cargo test --locked -p platform-posix --test process_kill_permission_test --no-run
+          cargo test --locked -p platform-posix --lib --no-run
+      - name: Test errno classification without privilege
+        shell: bash
+        run: |
+          set -euo pipefail
+          timeout 45s cargo test --locked -p platform-posix --lib process::kill_tree::tests::only_esrch_means_no_matching_group -- --exact --nocapture --test-threads=1 2>&1 | tee "$RUNNER_TEMP/posix-eperm-unit.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored' "$RUNNER_TEMP/posix-eperm-unit.log"
       - name: Test protected and permitted groups and absent group
         shell: bash
         run: |

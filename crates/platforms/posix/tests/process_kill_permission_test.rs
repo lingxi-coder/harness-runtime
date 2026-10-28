@@ -10,18 +10,23 @@ use nix::sys::signal::killpg;
 use nix::unistd::Pid;
 use platform_posix::process::kill_tree::{kill_tree_force, kill_tree_with_grace};
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
 
 // The root helper creates one session leader with the requested identity. It
 // is the exact child's parent, polls its status, and kills and waits on that
 // child in its finally block if the test fails or the control pipe closes.
 const HELPER: &str = r#"
-import os, subprocess, sys
+import os, signal, subprocess, sys
 uid, gid = map(int, sys.argv[1:3])
 child = None
+def deadline(_signal, _frame):
+    raise TimeoutError('fixture deadline exceeded')
+signal.signal(signal.SIGALRM, deadline)
+signal.alarm(15)
 try:
-    code = ('import os,signal; '
+    code = ('import os,signal; signal.alarm(20); '
             'print(f"READY {os.getpid()} {os.getpgrp()} {os.getuid()}",flush=True); '
             'signal.pause()')
     child = subprocess.Popen([sys.executable, '-u', '-c', code],
@@ -39,16 +44,17 @@ try:
         else:
             raise RuntimeError('invalid fixture command')
 finally:
+    signal.alarm(0)
     if child is not None:
         if child.poll() is None:
             child.kill()
-        child.wait(timeout=10)
+        child.wait(timeout=5)
 "#;
 
 struct Fixture {
     helper: Child,
-    input: ChildStdin,
-    output: BufReader<ChildStdout>,
+    input: Option<ChildStdin>,
+    output: Receiver<Result<String, String>>,
     pid: u32,
 }
 
@@ -69,46 +75,88 @@ impl Fixture {
             .spawn()
             .expect("start fixture helper with passwordless sudo");
         let input = helper.stdin.take().expect("fixture stdin");
-        let mut output = BufReader::new(helper.stdout.take().expect("fixture stdout"));
-        let mut ready = String::new();
-        output.read_line(&mut ready).expect("fixture ready line");
+        let stdout = helper.stdout.take().expect("fixture stdout");
+        let (sender, output) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                if sender
+                    .send(line.map_err(|error| error.to_string()))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        // Install the cleanup guard before waiting for or parsing readiness.
+        let mut fixture = Self {
+            helper,
+            input: Some(input),
+            output,
+            pid: 0,
+        };
+        let ready = fixture.read_reply();
         let fields: Vec<_> = ready.split_whitespace().collect();
         assert_eq!(fields.len(), 4, "fixture did not start: {ready:?}");
         assert_eq!(fields[0], "READY");
-        let pid: u32 = fields[1].parse().unwrap();
+        fixture.pid = fields[1].parse().unwrap();
         assert_eq!(fields[2], fields[1], "fixture must own its session/group");
         assert_eq!(fields[3].parse::<u32>().unwrap(), uid);
-        Self {
-            helper,
-            input,
-            output,
-            pid,
-        }
+        fixture
+    }
+
+    fn read_reply(&self) -> String {
+        self.output
+            .recv_timeout(Duration::from_secs(18))
+            .expect("fixture response missing or timed out")
+            .expect("fixture stdout read failed")
     }
 
     fn request(&mut self, command: &str) -> String {
-        writeln!(self.input, "{command}").unwrap();
-        self.input.flush().unwrap();
-        let mut reply = String::new();
-        self.output.read_line(&mut reply).unwrap();
-        reply.trim().to_owned()
+        let input = self.input.as_mut().expect("fixture input open");
+        writeln!(input, "{command}").unwrap();
+        input.flush().unwrap();
+        self.read_reply()
+    }
+
+    fn wait_bounded(&mut self, timeout: Duration) -> Option<ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.helper.try_wait() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn stop_and_wait(&mut self) -> bool {
+        if let Some(mut input) = self.input.take() {
+            let _ = writeln!(input, "STOP");
+            let _ = input.flush();
+            // Closing the pipe also triggers helper cleanup on EOF.
+        }
+        if let Some(status) = self.wait_bounded(Duration::from_secs(6)) {
+            return status.success();
+        }
+        // The privileged helper and its child have independent deadlines, so
+        // killing a stuck sudo monitor does not leave a permanent fixture.
+        let _ = self.helper.kill();
+        let _ = self.wait_bounded(Duration::from_secs(2));
+        false
     }
 
     fn finish(mut self) {
-        writeln!(self.input, "STOP").unwrap();
-        self.input.flush().unwrap();
-        assert!(
-            self.helper.wait().unwrap().success(),
-            "fixture must reap its exact child"
-        );
+        assert!(self.stop_and_wait(), "fixture must reap its exact child");
     }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = writeln!(self.input, "STOP");
-        let _ = self.input.flush();
-        let _ = self.helper.wait();
+        if !self.stop_and_wait() {
+            eprintln!("fixture cleanup did not finish within its bounded wait");
+        }
     }
 }
 
