@@ -4969,7 +4969,7 @@ impl ModHost {
             .and_then(|units| String::from_utf16(&units).ok())
             .ok_or_else(|| ModError::Protocol("Client event has no runtime id".into()))?;
         let action = event.string_at("/action").unwrap_or("");
-        let instance = {
+        let (instance, drawn) = {
             let mut data = lock(&self.client_ui.data);
             let Some(mut instance) = data.instances.get(&runtime_id).cloned() else {
                 return Ok(());
@@ -5037,12 +5037,12 @@ impl ModHost {
                     instance.key.identity.clone(),
                 ),
             );
-            if from_pending_queue && !drawn {
+            if action != "fault" && from_pending_queue && !drawn {
                 return if matches!(action, "post" | "schedule") {
                     Err(ModError::Unavailable("Client background event owner is no longer drawn".into()))
                 } else { Ok(()) };
             }
-            if !drawn || (!from_pending_queue && instance.draining_pending_events) {
+            if action != "fault" && (!drawn || (!from_pending_queue && instance.draining_pending_events)) {
                 if let Some(instance) = data.instances.get_mut(&runtime_id) {
                     let pending = client_pending_event(event, &mut post_ack, worker_epoch)?;
                     instance.pending_events.push(pending);
@@ -5050,13 +5050,13 @@ impl ModHost {
                 }
                 return Ok(());
             }
-            instance
+            (instance, drawn)
         };
         let plugin = host_plugin_name(instance.key.identity.plugin()).ok_or_else(|| {
             ModError::Hook("Client plugin identity is not valid host text".into())
         })?;
         if instance.worker_fault.is_some() && action != "fault" {
-            return Ok(());
+            return Err(ModError::Unavailable("Client shared environment is unavailable".into()));
         }
         match action {
             "schedule" => {
@@ -5182,7 +5182,23 @@ impl ModHost {
                     .unwrap_or("run");
                 let event_reason = ExactHookText::from_json_projection(event, "/reason")
                     .unwrap_or_else(|| ExactHookText::from_text("Client surface failed"));
-                self.record_client_worker_fault(&runtime_id, event_phase, &event_reason);
+                // A Worker fault invalidates all surfaces in the shared VM.
+                // Cancel their in-flight work before waiting for fault frame
+                // admission, even if this particular surface is not drawn.
+                self.record_client_environment_fault(&instance, event_phase, &event_reason);
+                if !drawn {
+                    if !from_pending_queue {
+                        let mut data = lock(&self.client_ui.data);
+                        if let Some(current) = data.instances.get_mut(&runtime_id) {
+                            if current.key == instance.key && current.worker_generation == instance.worker_generation {
+                                let pending = client_pending_event(event, &mut post_ack, worker_epoch)?;
+                                current.pending_events.push(pending);
+                                *buffered = true;
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
                 let Some(fault) = self.client_worker_fault(&runtime_id) else {
                     return Ok(());
                 };
@@ -5558,7 +5574,8 @@ mod tests {
                 let mut gate = lock(&self.frame_gate);
                 if gate.as_ref().is_some_and(|gate| {
                     gate.runtime_id == runtime_id
-                        && projection_tree_contains_text(frame, gate.expected_text)
+                        && ((gate.expected_text == "<fault>" && frame.at_pointer("/fault").is_some())
+                            || projection_tree_contains_text(frame, gate.expected_text))
                 }) {
                     gate.take()
                 } else {
@@ -7187,6 +7204,191 @@ mod tests {
         assert!(host_fenced, "Worker fault must fence Host before the blocked hook is released");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(!lock(&session_impl.logs).iter().any(|line| line == "blocked hook continued after VM fault"));
+    }
+
+    #[tokio::test]
+    async fn real_worker_shared_fault_fences_before_first_fault_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("card.tsx");
+        let entry = directory.path().join("register.tsx");
+        std::fs::write(&child, r#"
+          import { Button, h } from 'claude:surface-runtime';
+          export function Card(_props, surface) {
+            return h(Button, {key:'send', label:'Send', onPress:()=>{
+              const stopPost=surface.every(20,()=>{stopPost();surface.post({kind:'blocked'});});
+              const stopFault=surface.every(1000,()=>{stopFault();throw new Error('shared timer failed');});
+            }});
+          }
+        "#).unwrap();
+        std::fs::write(&entry, r#"
+          export function register(on) {
+            on('ui.render', {surface:'desktop', component:'Pane'}, ($, event) => {
+              const {Box, Client, h} = $.ui.resolve(event);
+              return h(Box, {}, h(Client, {key:'first', module:'./card.tsx', props:{}}),
+                h(Client, {key:'second', module:'./card.tsx', props:{}}));
+            });
+            on('ui.message', async ($, event) => {
+              await $.session.model(); $.ui.log('shared hook continued after VM fault');
+              return {handled:true, props:{}};
+            });
+          }
+        "#).unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let fault_entered = Arc::new(tokio::sync::Notify::new());
+        let fault_release = Arc::new(tokio::sync::Notify::new());
+        let fault_delivered = Arc::new(tokio::sync::Notify::new());
+        let session_impl = Arc::new(UiLifecycleSession {
+            root:directory.path().to_path_buf(),
+            model_gate:StdMutex::new(Some(UiLifecycleModelGate {
+                entered:entered.clone(), release:release.clone(), completed:Arc::new(tokio::sync::Notify::new()),
+            })), ..Default::default()
+        });
+        let session: Arc<dyn ModSessionContext> = session_impl.clone();
+        host.attach_background_context(Arc::downgrade(&session));
+        let prepared = host.prepare_module(directory.path(), &entry).await.unwrap();
+        host.load_with_tier_order_storage_prepared("review", "review@user", directory.path(), &entry,
+            Utf16JsonProjection::parse("{}").unwrap(), "user", None, Some(&prepared)).await.unwrap();
+        let revision = host.dispatch_client_ui_control(host_generated_json(json!({
+            "subtype":"ui_render", "surface":"desktop", "component":"Pane", "instance_id":"shared-fault-priority",
+            "props":{}, "viewport":{"columns":80,"rows":24},
+        })), session.as_ref()).await.unwrap().render_revision.unwrap();
+        let mut mounted = Vec::new();
+        for client in ["first", "second"] {
+            let frame = host.dispatch_client_ui_operation(host_generated_json(json!({
+                "type":"mount", "surface":"desktop", "component":"Pane", "instance_id":"shared-fault-priority",
+                "plugin":"review", "client":client, "module":"card.tsx", "render_revision":revision,
+                "columns":80, "rows":24,
+            })), session.as_ref()).await.unwrap();
+            let frame = test_value(&frame);
+            mounted.push((frame["runtimeId"].as_str().unwrap().to_owned(),
+                tree_press_handle_for_key(&frame["tree"], "send").unwrap()));
+        }
+        {
+            let data = lock(&host.client_ui.data);
+            assert_eq!(data.instances[&mounted[0].0].worker_environment_id,
+                data.instances[&mounted[1].0].worker_environment_id);
+        }
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"draw_commit", "surface":"desktop", "component":"Pane", "instance_id":"shared-fault-priority",
+            "render_revision":revision, "clients":[{"plugin":"review","key":"first","module":"card.tsx"},
+                {"plugin":"review","key":"second","module":"card.tsx"}],
+        })), session.as_ref()).await.unwrap();
+        *lock(&session_impl.frame_gate) = Some(UiLifecycleFrameGate {
+            runtime_id:mounted[0].0.clone(), expected_text:"<fault>", entered:fault_entered.clone(),
+            release:fault_release.clone(), delivered:fault_delivered.clone(),
+        });
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"runHeld", "runtimeId":mounted[1].0, "render_revision":revision, "handle":mounted[1].1,
+        })), session.as_ref()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), entered.notified()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), fault_entered.notified()).await
+            .expect("the first sibling fault must reach the admission gate");
+        assert!(tokio::time::timeout(Duration::from_millis(60), fault_delivered.notified()).await.is_err(),
+            "entering the gate proves only an admission attempt");
+        {
+            let data = lock(&host.client_ui.data);
+            assert!(data.instances[&mounted[0].0].worker_fault.is_some());
+            assert!(data.instances[&mounted[1].0].worker_fault.is_some(),
+                "the other surface is fenced before the first fault is admitted");
+        }
+        release.notify_one();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!lock(&session_impl.logs).iter().any(|line| line == "shared hook continued after VM fault"));
+        fault_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), fault_delivered.notified()).await
+            .expect("the first fault frame is actually admitted after release");
+    }
+
+    #[tokio::test]
+    async fn real_worker_full_client_event_queue_fences_with_unknown_outcome() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("card.tsx");
+        let entry = directory.path().join("register.tsx");
+        std::fs::write(&child, r#"
+          import { Button, h } from 'claude:surface-runtime';
+          let armed = false;
+          export function Card(props, surface) {
+            if (props.arm) armed = true;
+            return h(Button, {key:'send', label:'Send', onPress:async()=>{
+              surface.post({index:-1});
+              await new Promise(resolve=>{
+                const stop=surface.every(5,()=>{if(armed){stop();resolve();}});
+              });
+              for(let index=0;index<300;index++) surface.post({index});
+            }});
+          }
+        "#).unwrap();
+        std::fs::write(&entry, r#"
+          export function register(on) {
+            on('ui.render', {surface:'desktop', component:'Pane'}, ($, event) => {
+              const {Client, h} = $.ui.resolve(event);
+              return h(Client, {key:'card', module:'./card.tsx', props:{}});
+            });
+            on('ui.message', async ($, event) => {
+              $.ui.log('queue hook started'); await $.session.model();
+              $.ui.log('queue hook continued'); return {handled:true, props:{}};
+            });
+          }
+        "#).unwrap();
+        let host = ModHost::start(None).await.unwrap();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let session_impl = Arc::new(UiLifecycleSession {
+            root:directory.path().to_path_buf(),
+            model_gate:StdMutex::new(Some(UiLifecycleModelGate {
+                entered:entered.clone(), release:release.clone(), completed:Arc::new(tokio::sync::Notify::new()),
+            })), ..Default::default()
+        });
+        let session: Arc<dyn ModSessionContext> = session_impl.clone();
+        host.attach_background_context(Arc::downgrade(&session));
+        let prepared = host.prepare_module(directory.path(), &entry).await.unwrap();
+        host.load_with_tier_order_storage_prepared("review", "review@user", directory.path(), &entry,
+            Utf16JsonProjection::parse("{}").unwrap(), "user", None, Some(&prepared)).await.unwrap();
+        let revision = host.dispatch_client_ui_control(host_generated_json(json!({
+            "subtype":"ui_render", "surface":"desktop", "component":"Pane", "instance_id":"queue-bound",
+            "props":{}, "viewport":{"columns":80,"rows":24},
+        })), session.as_ref()).await.unwrap().render_revision.unwrap();
+        let frame = host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"mount", "surface":"desktop", "component":"Pane", "instance_id":"queue-bound",
+            "plugin":"review", "client":"card", "module":"card.tsx", "render_revision":revision,
+            "columns":80, "rows":24,
+        })), session.as_ref()).await.unwrap();
+        let frame = test_value(&frame);
+        let runtime_id = frame["runtimeId"].as_str().unwrap().to_owned();
+        let handle = tree_press_handle_for_key(&frame["tree"], "send").unwrap();
+        host.dispatch_client_ui_operation(host_generated_json(json!({
+            "type":"draw_commit", "surface":"desktop", "component":"Pane", "instance_id":"queue-bound",
+            "render_revision":revision, "clients":[{"plugin":"review","key":"card","module":"card.tsx"}],
+        })), session.as_ref()).await.unwrap();
+        let task_host = host.clone(); let task_session = session.clone();
+        let task_runtime = runtime_id.clone();
+        let task = tokio::spawn(async move {
+            task_host.dispatch_client_ui_operation(host_generated_json(json!({
+                "type":"runHeld", "runtimeId":task_runtime, "render_revision":revision, "handle":handle,
+            })), task_session.as_ref()).await
+        });
+        tokio::time::timeout(Duration::from_secs(5), entered.notified()).await
+            .expect("the first real post must reach the blocked hook");
+        let action_id = lock(&host.client_ui.post_actions.actions).iter()
+            .find_map(|(id, action)| (action.runtime_id == runtime_id).then(|| id.clone()))
+            .expect("the blocked callback must own a post action");
+        let generation = lock(&host.client_ui.data).instances[&runtime_id].worker_generation.unwrap();
+        host.run_client_worker_operation(host_generated_json(json!({
+            "type":"setProps", "runtimeId":runtime_id, "generation":generation,
+            "hostRenderRevision":revision, "postActionId":action_id, "props":{"arm":true},
+        }))).await.map_err(ModError::from).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), task).await
+            .expect("overflow must not wait for the blocked hook").unwrap().unwrap();
+        assert_eq!(test_value(&response)["outcome"], json!({"status":"unknown","runtime":"unavailable"}));
+        assert!(lock(&host.client_ui.data).instances[&runtime_id].worker_fault.is_some());
+        assert!(lock(&session_impl.logs).iter().any(|line| line == "queue hook started"),
+            "the first hook had an independently observable effect");
+        release.notify_one();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!lock(&session_impl.logs).iter().any(|line| line == "queue hook continued"),
+            "the overflow fence cancels the suspended hook");
     }
 
     #[tokio::test]

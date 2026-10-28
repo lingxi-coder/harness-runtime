@@ -3912,6 +3912,29 @@ fn background_output_context(
     }
 }
 
+async fn process_background_client_ui_event(
+    host: &Weak<ModHost>,
+    epoch: &Weak<ModWorkerEpoch>,
+    message: &Utf16JsonProjection,
+    context: &Weak<dyn ModSessionContext>,
+) {
+    let Some(worker) = host.upgrade() else { return; };
+    let Some(source_epoch) = epoch.upgrade() else { return; };
+    if let Some(session) = context.upgrade() {
+        if let Err(error) = worker
+            .handle_client_ui_background_event_in_epoch(message, session.as_ref(), source_epoch.id)
+            .await
+        {
+            tracing::warn!(%error, "background Mod Client UI event failed");
+        }
+    } else {
+        worker.client_ui.fail_post_event(
+            message, source_epoch.id, "Mod session ended before Client post handling",
+        );
+        let _ = worker.acknowledge_client_background_event(message, Some(source_epoch.id), false).await;
+    }
+}
+
 async fn background_api_loop(
     host: Weak<ModHost>,
     epoch: Weak<ModWorkerEpoch>,
@@ -3934,6 +3957,18 @@ async fn background_api_loop(
     let mut aborts = HashMap::<u64, ApiCallControl>::new();
     let mut bound_sessions = HashMap::<u64, Weak<dyn ModSessionContext>>::new();
     let mut sweep = tokio::time::interval(Duration::from_secs(1));
+    // Keep ordinary Client events ordered while allowing a VM fault to fence
+    // and cancel an in-flight background hook without waiting for that hook.
+    const CLIENT_EVENT_QUEUE_LIMIT: usize = 256;
+    let (client_events, mut queued_client_events) =
+        mpsc::channel::<(Utf16JsonProjection, Weak<dyn ModSessionContext>)>(CLIENT_EVENT_QUEUE_LIMIT);
+    let client_host = host.clone();
+    let client_epoch = epoch.clone();
+    let client_event_task = tokio::spawn(async move {
+        while let Some((message, context)) = queued_client_events.recv().await {
+            process_background_client_ui_event(&client_host, &client_epoch, &message, &context).await;
+        }
+    });
     loop {
         tokio::select! {
             message = replies.recv() => {
@@ -4152,15 +4187,17 @@ async fn background_api_loop(
                             eprintln!("TRACE background Client event: {}", message.to_json_string().unwrap_or_default());
                         }
                         if let Some(session) = worker.background_session() {
-                            if let Err(error) = worker
-                                .handle_client_ui_background_event_in_epoch(
-                                    &message,
-                                    session.as_ref(),
-                                    source_epoch.id,
-                                )
-                                .await
-                            {
-                                tracing::warn!(%error, "background Mod Client UI event failed");
+                            let context = Arc::downgrade(&session);
+                            if message.string_at("/action") == Some("fault") {
+                                process_background_client_ui_event(&host, &epoch, &message, &context).await;
+                            } else if let Err(error) = client_events.try_send((message, context)) {
+                                let (message, _) = error.into_inner();
+                                worker.client_ui.fail_post_event(
+                                    &message, source_epoch.id, "Client event queue is unavailable or full",
+                                );
+                                let _ = worker.acknowledge_client_background_event(
+                                    &message, Some(source_epoch.id), false,
+                                ).await;
                             }
                         } else {
                             worker.client_ui.fail_post_event(
@@ -4246,6 +4283,7 @@ async fn background_api_loop(
             }
         }
     }
+    client_event_task.abort();
     if let (Some(worker), Some(worker_epoch_id)) = (host.upgrade(), worker_epoch_id) {
         worker.client_ui.fail_post_actions_for_epoch(
             worker_epoch_id,
